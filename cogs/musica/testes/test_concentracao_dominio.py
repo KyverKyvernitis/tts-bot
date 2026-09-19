@@ -169,11 +169,17 @@ def test_runtime_musical_do_phone_worker_tem_fonte_canonica_na_cog() -> None:
     assert (ROOT / "cogs/musica/runtime_telefone/agente/resolucao.py").is_file()
     assert (ROOT / "cogs/musica/runtime_telefone/agente/reproducao.py").is_file()
     assert (ROOT / "cogs/musica/runtime_telefone/agente/tts.py").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/agente/servidor.py").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/termux/integracao-worker.sh").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/termux/musica.env.example").is_file()
     legado = ROOT / "deploy/termux/phone-worker/music_agent_runtime"
     assert not (legado / "__init__.py").exists()
     assert not (legado / "lifecycle.py").exists()
 
-    agente = _texto("deploy/termux/phone-worker/music_agent.py")
+    assert not (ROOT / "deploy/termux/phone-worker/music_agent.py").exists()
+    assert not (ROOT / "deploy/termux/phone-worker/start-phone-music-agent.sh").exists()
+    agente = _texto("cogs/musica/runtime_telefone/agente/servidor.py")
     assert "cogs.musica.runtime_telefone.agente.configuracao" in agente
     assert "cogs.musica.runtime_telefone.agente.ciclo_vida" in agente
     assert "cogs.musica.runtime_telefone.agente.reproducao" in agente
@@ -187,11 +193,15 @@ def test_publisher_do_worker_distribui_runtime_musical_a_partir_da_cog() -> None
     assert '"cogs/musica/runtime_telefone/agente/ciclo_vida.py"' in texto
     assert '"cogs/musica/runtime_telefone/agente/reproducao.py"' in texto
     assert '"cogs/musica/runtime_telefone/agente/tts.py"' in texto
+    assert '"cogs/musica/runtime_telefone/agente/servidor.py"' in texto
+    assert '"cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh"' in texto
     assert '"music_agent_runtime/lifecycle.py"' not in texto
+    assert '("music_agent.py",' not in texto
+    assert '("start-phone-music-agent.sh",' not in texto
 
 
 def test_entrypoint_music_agent_nao_reimplementa_estado_mixer_e_utilitarios() -> None:
-    texto = _texto("deploy/termux/phone-worker/music_agent.py")
+    texto = _texto("cogs/musica/runtime_telefone/agente/servidor.py")
     assert "class AgentTrack:" not in texto
     assert "class GuildMusicState:" not in texto
     assert "class AgentMixedAudioSource" not in texto
@@ -208,6 +218,22 @@ def test_entrypoint_music_agent_nao_reimplementa_estado_mixer_e_utilitarios() ->
     assert "async def _play_next(" not in texto
     assert "async def cmd_voice_tts(" not in texto
     assert "async def _recover_current_stream(" not in texto
+
+
+def test_termux_generico_so_carrega_hooks_do_dominio_musical() -> None:
+    supervisor = _texto("deploy/termux/phone-worker/start-phone-worker.sh")
+    env_generico = _texto("deploy/termux/phone-worker/phone-worker.env.example")
+    integracao = _texto("cogs/musica/runtime_telefone/termux/integracao-worker.sh")
+    supervisor_musica = _texto("cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh")
+
+    assert "load_music_runtime_hooks()" in supervisor
+    assert "musica_ensure_agent_if_needed" in supervisor
+    assert "MUSIC_AGENT_TOKEN=" not in env_generico
+    assert "PHONE_WORKER_MUSIC_YTDLP" not in env_generico
+    assert "musica_active_agent_start_command()" in integracao
+    assert "cogs.musica.runtime_telefone.agente.servidor" in supervisor_musica
+    assert not (ROOT / "deploy/termux/phone-worker/music_agent.py").exists()
+    assert not (ROOT / "deploy/termux/phone-worker/start-phone-music-agent.sh").exists()
 
 
 def test_phone_worker_nao_reimplementa_dominio_musical() -> None:

@@ -2334,7 +2334,7 @@ def _worker_turbo_cache_snapshot() -> dict[str, Any]:
 
 
 def _read_music_agent_version_from_path(path: Path | None = None) -> str:
-    target = path or (_phone_worker_dir() / "music_agent.py")
+    target = path or (_phone_worker_dir() / "cogs/musica/runtime_telefone/agente/servidor.py")
     return _phone_worker_music_bridge_module("telemetria").read_music_agent_version(target)
 
 
@@ -2644,6 +2644,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
         ensure_token=_ensure_music_agent_token_env,
         safe_mode_enabled=_phone_worker_safe_mode_enabled,
         phone_worker_dir=_phone_worker_dir,
+        active_release_dir=_active_release_dir,
         phone_worker_version=PHONE_WORKER_VERSION,
         env_float=_env_float,
         version_lt=_version_lt_loose,
@@ -6337,7 +6338,7 @@ def _repair_runtime_entrypoint_wrappers() -> dict[str, Any]:
     changed: list[str] = []
     errors: list[str] = []
     root.mkdir(parents=True, exist_ok=True)
-    for name in ("start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh"):
+    for name in ("start-phone-worker.sh", "watch-phone-worker.sh"):
         if not (active / name).is_file():
             errors.append(f"{name}: ausente na release ativa")
             continue
@@ -9251,7 +9252,6 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "apk_identity.py": ("worker", "apk_identity.py", 0o644),
     "tts_transport.py": ("worker", "tts_transport.py", 0o644),
     "phone_worker_bootstrap.py": ("worker", "phone_worker_bootstrap.py", 0o755),
-    "music_agent.py": ("worker", "music_agent.py", 0o755),
     "cogs/__init__.py": ("worker", "cogs/__init__.py", 0o644),
     "cogs/musica/__init__.py": ("worker", "cogs/musica/__init__.py", 0o644),
     "cogs/musica/runtime_telefone/__init__.py": ("worker", "cogs/musica/runtime_telefone/__init__.py", 0o644),
@@ -9264,6 +9264,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "cogs/musica/runtime_telefone/agente/resolucao.py": ("worker", "cogs/musica/runtime_telefone/agente/resolucao.py", 0o644),
     "cogs/musica/runtime_telefone/agente/reproducao.py": ("worker", "cogs/musica/runtime_telefone/agente/reproducao.py", 0o644),
     "cogs/musica/runtime_telefone/agente/tts.py": ("worker", "cogs/musica/runtime_telefone/agente/tts.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/servidor.py": ("worker", "cogs/musica/runtime_telefone/agente/servidor.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/__init__.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/__init__.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/configuracao.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/configuracao.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/streams.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/streams.py", 0o644),
@@ -9271,8 +9272,11 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "cogs/musica/runtime_telefone/ponte_worker/proxy.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/proxy.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/telemetria.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/telemetria.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/servico.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/servico.py", 0o644),
+    "cogs/musica/runtime_telefone/termux/__init__.py": ("worker", "cogs/musica/runtime_telefone/termux/__init__.py", 0o644),
+    "cogs/musica/runtime_telefone/termux/integracao-worker.sh": ("worker", "cogs/musica/runtime_telefone/termux/integracao-worker.sh", 0o755),
+    "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh": ("worker", "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh", 0o755),
+    "cogs/musica/runtime_telefone/termux/musica.env.example": ("worker", "cogs/musica/runtime_telefone/termux/musica.env.example", 0o600),
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
-    "start-phone-music-agent.sh": ("worker", "start-phone-music-agent.sh", 0o755),
     "watch-phone-worker.sh": ("worker", "watch-phone-worker.sh", 0o755),
     "pair-phone-worker.sh": ("worker", "pair-phone-worker.sh", 0o755),
     "repair-phone-worker.sh": ("worker", "repair-phone-worker.sh", 0o755),
@@ -9290,7 +9294,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "teto_renderer/renderer.py": ("worker", "teto_renderer/renderer.py", 0o644),
     "scripts/validate-teto-assets.py": ("worker", "scripts/validate-teto-assets.py", 0o755),
 }
-_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example"})
+_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example"})
 _PHONE_WORKER_SOURCE_HASH_CACHE: dict[str, Any] = {"signature": None, "value": ""}
 _PHONE_WORKER_SOURCE_HASH_LOCK = threading.Lock()
 
@@ -9550,7 +9554,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
             os.chmod(tmp, int(item.get("mode") or mode))
             tmp.replace(path)
             applied_paths = [path]
-            if path.name in {"start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh", "pair-phone-worker.sh", "bootstrap-phone-worker.sh"}:
+            if path.name in {"start-phone-worker.sh", "watch-phone-worker.sh", "pair-phone-worker.sh", "bootstrap-phone-worker.sh"}:
                 # Espelhar scripts em ~/ também para instalações antigas e atalhos existentes.
                 home_copy = _home_script(path.name)
                 try:
@@ -9578,17 +9582,28 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
             "total_bytes": total,
         }
 
+    canonical_music_server = _phone_worker_dir() / "cogs/musica/runtime_telefone/agente/servidor.py"
+    canonical_music_start = _phone_worker_dir() / "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh"
+    if canonical_music_server.is_file() and canonical_music_start.is_file():
+        for legacy in (
+            _phone_worker_dir() / "music_agent.py",
+            _phone_worker_dir() / "start-phone-music-agent.sh",
+            _home_script("start-phone-music-agent.sh"),
+        ):
+            with contextlib.suppress(Exception):
+                legacy.unlink()
+
     target_version = _short_text(payload.get("version"), limit=48, default="desconhecida")
     applied_version = _read_phone_worker_version_from_path(_phone_worker_dir() / "phone_worker.py") or target_version
     updated_names = {str(item.get("target") or "") for item in updated}
-    applied_music_agent_version = _read_music_agent_version_from_path(_phone_worker_dir() / "music_agent.py")
+    applied_music_agent_version = _read_music_agent_version_from_path(_phone_worker_dir() / "cogs/musica/runtime_telefone/agente/servidor.py")
     music_agent_restart: dict[str, Any] | None = None
-    if {"music_agent.py", "tts_transport.py", "start-phone-music-agent.sh"} & updated_names:
+    if {"cogs/musica/runtime_telefone/agente/servidor.py", "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh", "cogs/musica/runtime_telefone/termux/integracao-worker.sh", "tts_transport.py"} & updated_names:
         try:
             music_agent_restart = _run_service_action("music-agent", "restart")
         except Exception as exc:
             errors.append(f"music-agent restart: {type(exc).__name__}: {_short_text(exc, limit=100)}")
-    boot_status = _repair_termux_boot_script() if any(item.get("target") in {"start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh", "bootstrap-phone-worker.sh", "install.sh"} for item in updated) else _termux_boot_status_snapshot()
+    boot_status = _repair_termux_boot_script() if any(item.get("target") in {"start-phone-worker.sh", "watch-phone-worker.sh", "bootstrap-phone-worker.sh", "install.sh"} for item in updated) else _termux_boot_status_snapshot()
     shell_status = _repair_termux_shell_autostart()
     update_status = {
         "ok": True,

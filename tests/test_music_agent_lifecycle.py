@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-MUSIC = ROOT / "deploy/termux/phone-worker/music_agent.py"
+MUSIC = ROOT / "cogs/musica/runtime_telefone/agente/servidor.py"
 
 
 def _load_music_agent(monkeypatch):
@@ -45,7 +45,7 @@ def _load_music_agent(monkeypatch):
     web.json_response=lambda data, status=200: (data, status)
     aiohttp.web=web
 
-    monkeypatch.syspath_prepend(str(MUSIC.parent))
+    monkeypatch.syspath_prepend(str(ROOT))
     monkeypatch.setitem(sys.modules, "discord", discord)
     monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
     monkeypatch.setitem(sys.modules, "aiohttp.web", web)
@@ -271,45 +271,46 @@ def test_phone_worker_music_health_treats_tts_providers_as_optional():
 
 
 def test_music_agent_safe_installer_uses_lightweight_ytdlp_package():
-    source = (ROOT / "deploy/termux/phone-worker/start-phone-music-agent.sh").read_text(encoding="utf-8")
+    source = (ROOT / "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh").read_text(encoding="utf-8")
     assert 'safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light' in source
     assert 'yt-dlp[default]' not in source
 
 
 def test_music_agent_autostart_is_not_turbo_only():
     source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
-    assert "ensure_music_agent_for_turbo_if_needed" not in source
-    assert "ensure_music_agent_if_needed()" in source
+    integration = (ROOT / "cogs/musica/runtime_telefone/termux/integracao-worker.sh").read_text(encoding="utf-8")
+    assert "ensure_music_agent_for_turbo_if_needed" not in source + integration
+    assert "musica_ensure_agent_if_needed()" in integration
     maintenance = source.split("run_post_start_maintenance_async()", 1)[1].split("\n}\n", 1)[0]
-    assert "ensure_music_agent_if_needed" in maintenance
-    assert "is_turbo_profile || return 0" not in maintenance
-
+    assert "musica_ensure_agent_if_needed" in maintenance
+    assert "is_turbo_profile || return 0" not in integration.split("musica_ensure_agent_if_needed()", 1)[1].split("\n}\n", 1)[0]
 
 def test_music_agent_supervisor_runs_agent_from_active_release():
-    source = (ROOT / "deploy/termux/phone-worker/start-phone-music-agent.sh").read_text(encoding="utf-8")
+    source = (ROOT / "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh").read_text(encoding="utf-8")
     assert 'RUNTIME_DIR="${PHONE_WORKER_RELEASE_DIR:-$WORKER_DIR}"' in source
-    assert 'AGENT_FILE="$RUNTIME_DIR/music_agent.py"' in source
+    assert 'AGENT_FILE="$RUNTIME_DIR/$AGENT_RELATIVE"' in source
     assert 'cd "$RUNTIME_DIR" || exit 1' in source
-    assert 'exec "$PYTHON_BIN" music_agent.py' in source
+    assert 'exec "$PYTHON_BIN" -m "$AGENT_MODULE"' in source
 
 
 def test_phone_worker_autostart_prefers_active_release_music_supervisor():
     source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
-    assert "active_music_agent_start_command()" in source
-    assert '$release/start-phone-music-agent.sh' in source
-    assert 'PHONE_WORKER_RELEASE_DIR="$release"' in source
-    assert 'MUSIC_AGENT_ENV="$MUSIC_AGENT_ENV_FILE"' in source
+    integration = (ROOT / "cogs/musica/runtime_telefone/termux/integracao-worker.sh").read_text(encoding="utf-8")
+    assert "load_music_runtime_hooks()" in source
+    assert "musica_active_agent_start_command()" in integration
+    assert '$release/cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh' in integration
+    assert 'PHONE_WORKER_RELEASE_DIR="$release"' in integration
+    assert 'MUSIC_AGENT_ENV="$MUSIC_AGENT_ENV_FILE"' in integration
 
 
 def test_phone_worker_music_dependency_bootstrap_is_profile_independent_and_lightweight():
-    source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
-    ytdlp = source.split("ensure_music_ytdlp_deps_if_needed()", 1)[1].split("\n}\n", 1)[0]
-    music_deps = source.split("ensure_music_agent_deps_if_needed()", 1)[1].split("\n}\n", 1)[0]
+    source = (ROOT / "cogs/musica/runtime_telefone/termux/integracao-worker.sh").read_text(encoding="utf-8")
+    ytdlp = source.split("musica_ensure_ytdlp_deps_if_needed()", 1)[1].split("\n}\n", 1)[0]
+    music_deps = source.split("musica_ensure_agent_deps_if_needed()", 1)[1].split("\n}\n", 1)[0]
     assert "is_turbo_profile || return 0" not in ytdlp
     assert "is_turbo_profile || return 0" not in music_deps
     assert '"yt-dlp" "yt_dlp" "yt-dlp" light' in ytdlp
     assert 'yt-dlp[default]' not in ytdlp + music_deps
-
 
 def test_phone_worker_duplicate_detection_has_proc_cwd_fallback():
     source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")

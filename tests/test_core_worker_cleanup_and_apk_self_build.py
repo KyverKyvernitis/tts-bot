@@ -239,7 +239,7 @@ def test_phone_worker_repairs_persistent_launchers_to_active_release(tmp_path: P
     active.mkdir(parents=True)
     worker_dir.mkdir(parents=True)
     (active / "phone_worker.py").write_text('PHONE_WORKER_VERSION = "1.11.11"\n', encoding="utf-8")
-    for name in ("start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh"):
+    for name in ("start-phone-worker.sh", "watch-phone-worker.sh"):
         path = active / name
         path.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
         path.chmod(0o755)
@@ -254,7 +254,7 @@ def test_phone_worker_repairs_persistent_launchers_to_active_release(tmp_path: P
 
     result = module._repair_runtime_entrypoint_wrappers()
     assert result["ok"] is True
-    assert set(result["changed"]) == {"start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh"}
+    assert set(result["changed"]) == {"start-phone-worker.sh", "watch-phone-worker.sh"}
     assert module._best_script("start-phone-worker.sh") == active / "start-phone-worker.sh"
     for name in result["changed"]:
         wrapper = (worker_dir / name).read_text(encoding="utf-8")

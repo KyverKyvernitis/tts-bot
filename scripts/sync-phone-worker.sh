@@ -58,10 +58,6 @@ log "copiando arquivos do phone-worker"
 "${SCP_BASE[@]}" \
   "$SRC_DIR/tts_transport.py" \
   "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/tts_transport.py"
-"${SCP_BASE[@]}" \
-  "$SRC_DIR/music_agent.py" \
-  "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/music_agent.py"
-
 log "copiando runtime canônico de música"
 "${SSH_BASE[@]}" "mkdir -p '$REMOTE_DIR/cogs/musica'"
 "${SCP_BASE[@]}" "$ROOT_DIR/cogs/__init__.py" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/cogs/__init__.py"
@@ -70,7 +66,7 @@ log "copiando runtime canônico de música"
 
 # Scripts reais ficam apenas em ~/phone-worker. Em ~/ ficam wrappers pequenos
 # para não preservar cópias antigas que possam disparar pip/clang pesado.
-for f in phone_worker_bootstrap.py repair-phone-worker.sh accept-core-worker-on-device.sh start-phone-worker.sh start-phone-music-agent.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
+for f in phone_worker_bootstrap.py repair-phone-worker.sh accept-core-worker-on-device.sh start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [ -f "$SRC_DIR/$f" ]; then
     "${SCP_BASE[@]}" "$SRC_DIR/$f" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/$f"
   fi
@@ -78,8 +74,10 @@ done
 
 log "ajustando permissões no celular"
 "${SSH_BASE[@]}" "
-chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/phone_worker_bootstrap.py' '$REMOTE_DIR/repair-phone-worker.sh' '$REMOTE_DIR/accept-core-worker-on-device.sh' '$REMOTE_DIR/music_agent.py' '$REMOTE_DIR/start-phone-worker.sh' '$REMOTE_DIR/start-phone-music-agent.sh' '$REMOTE_DIR/watch-phone-worker.sh' '$REMOTE_DIR/pair-phone-worker.sh' '$REMOTE_DIR/bootstrap-phone-worker.sh' 2>/dev/null || true
-for f in start-phone-worker.sh start-phone-music-agent.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
+chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/phone_worker_bootstrap.py' '$REMOTE_DIR/repair-phone-worker.sh' '$REMOTE_DIR/accept-core-worker-on-device.sh' '$REMOTE_DIR/start-phone-worker.sh' '$REMOTE_DIR/watch-phone-worker.sh' '$REMOTE_DIR/pair-phone-worker.sh' '$REMOTE_DIR/bootstrap-phone-worker.sh' 2>/dev/null || true
+chmod +x '$REMOTE_DIR/cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh' '$REMOTE_DIR/cogs/musica/runtime_telefone/termux/integracao-worker.sh' 2>/dev/null || true
+rm -f '$REMOTE_DIR/music_agent.py' '$REMOTE_DIR/start-phone-music-agent.sh' '$REMOTE_HOME/start-phone-music-agent.sh' 2>/dev/null || true
+for f in start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
   cat > '$REMOTE_HOME/'\$f <<EOF_WRAPPER
 #!/data/data/com.termux/files/usr/bin/bash
 # Wrapper de compatibilidade gerenciado pelo Core Worker.

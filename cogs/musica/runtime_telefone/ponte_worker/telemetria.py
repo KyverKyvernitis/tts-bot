@@ -90,7 +90,8 @@ def music_agent_snapshot(hooks: Any) -> dict[str, Any]:
     configured = bool(str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip())
     safe_mode = hooks.safe_mode_enabled()
     deps = music_voice_dependencies_snapshot(hooks)
-    file_version = read_music_agent_version(hooks.phone_worker_dir() / "music_agent.py")
+    runtime_root = hooks.active_release_dir() or hooks.phone_worker_dir()
+    file_version = read_music_agent_version(runtime_root / "cogs/musica/runtime_telefone/agente/servidor.py")
     url = f"http://{host}:{port}/health"
     headers = {"Accept": "application/json", "User-Agent": f"CorePhoneWorker/{hooks.phone_worker_version}"}
     if token:

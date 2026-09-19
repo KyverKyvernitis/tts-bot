@@ -30,13 +30,18 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/agente/resolucao.py",
              "cogs/musica/runtime_telefone/agente/reproducao.py",
              "cogs/musica/runtime_telefone/agente/tts.py",
+             "cogs/musica/runtime_telefone/agente/servidor.py",
              "cogs/musica/runtime_telefone/ponte_worker/__init__.py",
              "cogs/musica/runtime_telefone/ponte_worker/configuracao.py",
              "cogs/musica/runtime_telefone/ponte_worker/streams.py",
              "cogs/musica/runtime_telefone/ponte_worker/resolucao.py",
              "cogs/musica/runtime_telefone/ponte_worker/proxy.py",
              "cogs/musica/runtime_telefone/ponte_worker/telemetria.py",
-             "cogs/musica/runtime_telefone/ponte_worker/servico.py"}
+             "cogs/musica/runtime_telefone/ponte_worker/servico.py",
+             "cogs/musica/runtime_telefone/termux/__init__.py",
+             "cogs/musica/runtime_telefone/termux/integracao-worker.sh",
+             "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh",
+             "cogs/musica/runtime_telefone/termux/musica.env.example"}
 
 
 def load(name, path):
@@ -164,7 +169,10 @@ def test_missing_new_module_prevents_release(publisher, tmp_path, monkeypatch, m
     phone = source_copy(tmp_path, monkeypatch, publisher)
     source_path = publisher._phone_worker_source_path(phone, missing)
     source_path.unlink()
-    assert publisher._hash_phone_worker_files(phone) == ""
+    if missing in publisher.PHONE_WORKER_SOURCE_HASH_EXCLUDED:
+        assert publisher._hash_phone_worker_files(phone)
+    else:
+        assert publisher._hash_phone_worker_files(phone) == ""
     with pytest.raises(RuntimeError, match="arquivos obrigatórios"):
         publisher._build_worker_update_payload()
     assert not publisher.AGENT_RELEASE_ROOT.exists()

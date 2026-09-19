@@ -11,7 +11,9 @@ from typing import Any
 
 def start_script(*, best_script) -> Path:
     explicit = str(os.getenv("MUSIC_AGENT_START_COMMAND") or "").strip()
-    return Path(explicit).expanduser() if explicit else best_script("start-phone-music-agent.sh")
+    return Path(explicit).expanduser() if explicit else best_script(
+        "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh"
+    )
 
 
 def pid_file(*, phone_worker_dir) -> Path:
@@ -28,7 +30,7 @@ def service_status(hooks: Any) -> dict[str, Any]:
     snapshot = hooks.safe_telemetry(
         "music_agent", hooks.snapshot, {"ok": False, "available": False, "configured": False}
     )
-    running = bool(snapshot.get("available") or hooks.pid_alive(pid) or hooks.pgrep_count("music_agent.py") > 0)
+    running = bool(snapshot.get("available") or hooks.pid_alive(pid) or hooks.pgrep_count("cogs.musica.runtime_telefone.agente.servidor") > 0)
     return {
         "ok": True,
         "service": "music-agent",
@@ -42,7 +44,7 @@ def service_status(hooks: Any) -> dict[str, Any]:
         "pid_file": str(pid_path),
         "pid_file_pid": pid,
         "pid_file_alive": hooks.pid_alive(pid),
-        "processes": hooks.pgrep_count("music_agent.py"),
+        "processes": hooks.pgrep_count("cogs.musica.runtime_telefone.agente.servidor"),
         "script": str(start_script(best_script=hooks.best_script)),
         "log_file": str(log_file(phone_worker_dir=hooks.phone_worker_dir)),
         "health": snapshot,
@@ -65,12 +67,12 @@ def run_service_action(action: str, hooks: Any) -> dict[str, Any]:
         with contextlib.suppress(Exception):
             pid_path.unlink()
         for _ in range(4):
-            if hooks.pgrep_count("music_agent.py") <= 0:
+            if hooks.pgrep_count("cogs.musica.runtime_telefone.agente.servidor") <= 0:
                 break
             time.sleep(0.25)
-        if hooks.pgrep_count("music_agent.py") > 0:
+        if hooks.pgrep_count("cogs.musica.runtime_telefone.agente.servidor") > 0:
             with contextlib.suppress(Exception):
-                hooks.run_text_command(["pkill", "-f", "music_agent.py"], timeout=2.0, max_bytes=4096)
+                hooks.run_text_command(["pkill", "-f", "cogs.musica.runtime_telefone.agente.servidor"], timeout=2.0, max_bytes=4096)
             time.sleep(0.5)
     result_extra: dict[str, Any] = {}
     if action in {"start", "restart"}:

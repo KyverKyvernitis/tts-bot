@@ -12,10 +12,12 @@ fi
 
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 RUNTIME_DIR="${PHONE_WORKER_RELEASE_DIR:-$WORKER_DIR}"
-if [[ ! -f "$RUNTIME_DIR/music_agent.py" ]]; then
+AGENT_RELATIVE="cogs/musica/runtime_telefone/agente/servidor.py"
+AGENT_MODULE="cogs.musica.runtime_telefone.agente.servidor"
+if [[ ! -f "$RUNTIME_DIR/$AGENT_RELATIVE" ]]; then
   RUNTIME_DIR="$WORKER_DIR"
 fi
-AGENT_FILE="$RUNTIME_DIR/music_agent.py"
+AGENT_FILE="$RUNTIME_DIR/$AGENT_RELATIVE"
 MUSIC_AGENT_ENV_FILE="${MUSIC_AGENT_ENV:-$WORKER_DIR/secrets/music-agent.env}"
 if [[ -f "$MUSIC_AGENT_ENV_FILE" ]]; then
   set -a
@@ -177,7 +179,7 @@ cleanup_stale_heavy_dependency_builds() {
   local pattern='pyb/temp\.android|pip/_vendor|pyproject_hooks|build_wheel|python -m pip install|pip install|aarch64-linux-android-clang|clang\+\+'
   local round pid
   for round in 1 2 3; do
-    ps -ef 2>/dev/null | grep -Ei "$pattern" | grep -v grep | grep -v 'music_agent.py' | awk '{print $2}' | while read -r pid; do
+    ps -ef 2>/dev/null | grep -Ei "$pattern" | grep -v grep | grep -Ev 'music_agent\.py|cogs\.musica\.runtime_telefone\.agente\.servidor' | awk '{print $2}' | while read -r pid; do
       case "$pid" in ''|*[!0-9]*) continue ;; esac
       [[ "$pid" == "$$" ]] && continue
       log "encerrando build pesado opcional preso; pid=$pid"
@@ -190,12 +192,13 @@ cleanup_stale_heavy_dependency_builds() {
 cleanup_agent_for_safe_mode() {
   agent_safe_mode_enabled || return 0
   log "modo seguro ativo; encerrando Music Agent se estiver rodando"
+  pkill -f '[c]ogs\.musica\.runtime_telefone\.agente\.servidor' 2>/dev/null || true
   pkill -f '[m]usic_agent.py' 2>/dev/null || true
 }
 
 
 if [[ ! -f "$AGENT_FILE" ]]; then
-  log "music_agent.py não encontrado em $RUNTIME_DIR"
+  log "servidor do Music Agent não encontrado em $AGENT_FILE"
   exit 1
 fi
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
@@ -249,7 +252,7 @@ PYVERCMP
 }
 
 list_pids() {
-  pgrep -f 'music_agent.py' 2>/dev/null || true
+  pgrep -f 'cogs\.musica\.runtime_telefone\.agente\.servidor|/agente/servidor\.py|music_agent\.py' 2>/dev/null || true
 }
 
 kill_agent() {
@@ -341,7 +344,7 @@ log "iniciando Music Agent em $HOST:$PORT"
 (
   cd "$RUNTIME_DIR" || exit 1
   export PHONE_WORKER_RELEASE_DIR="$RUNTIME_DIR"
-  exec "$PYTHON_BIN" music_agent.py
+  exec "$PYTHON_BIN" -m "$AGENT_MODULE"
 ) >> "$LOG_FILE" 2>&1 &
 pid=$!
 printf '%s\n' "$pid" > "$PID_FILE" 2>/dev/null || true

@@ -103,17 +103,32 @@ pkg install termux-api -y || true
 
 log "copiando/reparando scripts em $WORKER_DIR"
 mkdir -p "$WORKER_DIR"
-for f in phone_worker.py phone_worker_bootstrap.py repair-phone-worker.sh accept-core-worker-on-device.sh apk_identity.py tts_transport.py music_agent.py start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
+for f in phone_worker.py phone_worker_bootstrap.py repair-phone-worker.sh accept-core-worker-on-device.sh apk_identity.py tts_transport.py start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [[ -f "$SCRIPT_DIR/$f" ]]; then
     cp "$SCRIPT_DIR/$f" "$WORKER_DIR/$f"
   fi
 done
-for f in start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
+MUSIC_PROJECT_ROOT=""
+if [[ -d "$SCRIPT_DIR/cogs/musica/runtime_telefone" ]]; then
+  MUSIC_PROJECT_ROOT="$SCRIPT_DIR"
+elif [[ -d "$SCRIPT_DIR/../../../cogs/musica/runtime_telefone" ]]; then
+  MUSIC_PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+fi
+if [[ -n "$MUSIC_PROJECT_ROOT" ]]; then
+  mkdir -p "$WORKER_DIR/cogs/musica"
+  cp "$MUSIC_PROJECT_ROOT/cogs/__init__.py" "$WORKER_DIR/cogs/__init__.py"
+  cp "$MUSIC_PROJECT_ROOT/cogs/musica/__init__.py" "$WORKER_DIR/cogs/musica/__init__.py"
+  rm -rf "$WORKER_DIR/cogs/musica/runtime_telefone"
+  cp -R "$MUSIC_PROJECT_ROOT/cogs/musica/runtime_telefone" "$WORKER_DIR/cogs/musica/runtime_telefone"
+fi
+rm -f "$WORKER_DIR/music_agent.py" "$WORKER_DIR/start-phone-music-agent.sh" "$HOME/start-phone-music-agent.sh" 2>/dev/null || true
+for f in start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
   if [[ -f "$WORKER_DIR/$f" ]]; then
     write_compat_wrapper "$f"
   fi
 done
-chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/repair-phone-worker.sh" "$WORKER_DIR/accept-core-worker-on-device.sh" "$WORKER_DIR/music_agent.py" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/start-phone-music-agent.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true
+chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/repair-phone-worker.sh" "$WORKER_DIR/accept-core-worker-on-device.sh" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true
+chmod +x "$WORKER_DIR/cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh" "$WORKER_DIR/cogs/musica/runtime_telefone/termux/integracao-worker.sh" 2>/dev/null || true
 
 log "criando/reparando inicialização automática do Termux:Boot"
 install_core_worker_boot || true

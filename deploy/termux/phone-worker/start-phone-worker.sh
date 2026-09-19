@@ -16,13 +16,6 @@ RUNTIME_ROOT="${PHONE_WORKER_RUNTIME_ROOT:-$HOME/.core-worker-runtime}"
 ACTIVE_RELEASE_LINK="$RUNTIME_ROOT/current"
 RUNTIME_STATE_DIR="${PHONE_WORKER_STATE_DIR:-$HOME/.local/state/core-worker-phone-worker}"
 RUNTIME_STATUS_JSON="$RUNTIME_STATE_DIR/runtime-status.json"
-MUSIC_AGENT_ENV_FILE="${MUSIC_AGENT_ENV:-$WORKER_DIR/secrets/music-agent.env}"
-if [[ -f "$MUSIC_AGENT_ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$MUSIC_AGENT_ENV_FILE"
-  set +a
-fi
 PORT="${PHONE_WORKER_PORT:-8766}"
 HOST="${PHONE_WORKER_HOST:-0.0.0.0}"
 TOKEN="${PHONE_WORKER_TOKEN:-}"
@@ -39,14 +32,6 @@ SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
 # Serviços pesados do perfil turbo respeitam modo seguro explícito. Auto-install
 # agora é seguro/condicional: só tenta pacote ausente, com cooldown/timeout.
 # Para bloquear serviços, use PHONE_WORKER_SAFE_MODE=true ou START_* = off.
-# Lavalink/NodeLink não fazem mais parte do worker; música usa Music Agent + yt-dlp/ffmpeg.
-MUSIC_AGENT_AUTO_START="${PHONE_WORKER_START_MUSIC_AGENT:-${MUSIC_AGENT_ENABLED:-auto}}"
-MUSIC_AGENT_START_COMMAND_EXPLICIT=0
-if [[ -n "${MUSIC_AGENT_START_COMMAND:-}" ]]; then
-  MUSIC_AGENT_START_COMMAND_EXPLICIT=1
-else
-  MUSIC_AGENT_START_COMMAND="$WORKER_DIR/start-phone-music-agent.sh"
-fi
 MAINT_LOCK_DIR="${PHONE_WORKER_MAINT_LOCK_DIR:-$WORKER_DIR/.phone-worker-maintenance.lock}"
 MAINT_LOG_FILE="${PHONE_WORKER_MAINT_LOG_FILE:-$WORKER_DIR/phone-worker-maintenance.log}"
 DEPS_STATE_DIR="${PHONE_WORKER_DEPS_STATE_DIR:-$WORKER_DIR/.dependency-install}"
@@ -400,32 +385,6 @@ ensure_apk_builder_env_if_ready() {
   log "toolchain Android validado; capacidade apk-builder reparada sem trocar o perfil atual"
 }
 
-ensure_music_worker_env_if_needed() {
-  is_turbo_profile || return 0
-  for role in music music-ytdlp music-agent; do
-    append_csv_env_value CORE_WORKER_ROLES "$role"
-  done
-  for capability in music music-ytdlp music-ytdlp-resolve music-agent music-agent-control music-voice; do
-    append_csv_env_value CORE_WORKER_CAPABILITIES "$capability"
-  done
-  local cookies="${PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE:-${MUSIC_WORKER_YTDLP_COOKIES_FILE:-}}"
-  if [[ -z "$cookies" ]]; then
-    cookies="$WORKER_DIR/secrets/youtube-cookies.txt"
-  fi
-  if [[ -s "$cookies" ]]; then
-    upsert_env_value PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE "$cookies"
-    upsert_env_value MUSIC_WORKER_YTDLP_COOKIES_FILE "$cookies"
-    log "perfil turbo: cookies yt-dlp do worker configurados"
-  else
-    mkdir -p "$(dirname "$cookies")" 2>/dev/null || true
-    log "perfil turbo: cookies yt-dlp do worker não encontrados em $cookies; worker tentará sem cookies"
-  fi
-  upsert_env_value PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES "${PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES:-node}"
-  upsert_env_value MUSIC_WORKER_YTDLP_JS_RUNTIMES "${MUSIC_WORKER_YTDLP_JS_RUNTIMES:-node}"
-  upsert_env_value PHONE_WORKER_MUSIC_YTDLP_DEFAULT_SEARCH "${PHONE_WORKER_MUSIC_YTDLP_DEFAULT_SEARCH:-ytsearch}"
-  upsert_env_value MUSIC_WORKER_YTDLP_DEFAULT_SEARCH "${MUSIC_WORKER_YTDLP_DEFAULT_SEARCH:-ytsearch}"
-}
-
 is_turbo_profile() {
   local profile="${CORE_WORKER_PROFILE:-${PHONE_WORKER_PROFILE:-}}"
   profile="$(printf '%s' "$profile" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
@@ -552,14 +511,6 @@ cleanup_stale_heavy_dependency_builds() {
   done
 }
 
-cleanup_heavy_services_for_safe_mode() {
-  safe_mode_enabled || return 0
-  truthy "${PHONE_WORKER_KEEP_HEAVY_SERVICES_IN_SAFE_MODE:-false}" && return 0
-  command -v pkill >/dev/null 2>&1 || return 0
-  log "modo seguro ativo; encerrando serviços pesados opcionais do worker"
-  pkill -f '[m]usic_agent.py' 2>/dev/null || true
-}
-
 
 ensure_turbo_termux_packages_if_needed() {
   is_turbo_profile || return 0
@@ -582,25 +533,6 @@ ensure_turbo_python_tts_deps_if_needed() {
   is_turbo_profile || return 0
   safe_pip_install_module "edge-tts" "edge_tts" "edge-tts==7.2.8" light || true
   safe_pip_install_module "gTTS" "gtts" "gTTS==2.5.4" light || true
-}
-
-ensure_music_ytdlp_deps_if_needed() {
-  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light || true
-  safe_pip_install_module "yt-dlp-ejs" "yt_dlp_ejs" "yt-dlp-ejs" light || true
-}
-
-ensure_music_agent_deps_if_needed() {
-  autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
-  safe_pip_install_module "aiohttp" "aiohttp" "aiohttp" light || true
-  safe_pip_install_module "discord.py" "discord" "discord.py>=2.7.1,<2.8" light || true
-  safe_pip_install_module "PyNaCl" "nacl" "PyNaCl" light || true
-  safe_pip_install_module "davey" "davey" "davey" light || true
-  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light || true
-  safe_pip_install_module "edge-tts" "edge_tts" "edge-tts==7.2.8" light || true
-  safe_pip_install_module "gTTS" "gtts" "gTTS==2.5.4" light || true
-  "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || log "perfil turbo: Music Agent ainda possui dependências ausentes; será reportado no health"
-import aiohttp, discord, nacl, yt_dlp, davey, edge_tts, gtts  # noqa: F401
-PYMUSICAGENTCHECK
 }
 
 ensure_turbo_piper_cli_if_needed() {
@@ -714,43 +646,30 @@ PIPERWRAP
 }
 
 
-active_music_agent_start_command() {
-  if [[ "$MUSIC_AGENT_START_COMMAND_EXPLICIT" == "1" && -x "$MUSIC_AGENT_START_COMMAND" ]]; then
-    printf '%s\n' "$MUSIC_AGENT_START_COMMAND"
-    return 0
-  fi
-  local release
+load_music_runtime_hooks() {
+  local release hook
   release="$(active_release_dir)"
-  if [[ -x "$release/start-phone-music-agent.sh" ]]; then
-    printf '%s\n' "$release/start-phone-music-agent.sh"
-    return 0
-  fi
-  printf '%s\n' "$MUSIC_AGENT_START_COMMAND"
+  for hook in \
+    "$release/cogs/musica/runtime_telefone/termux/integracao-worker.sh" \
+    "$WORKER_DIR/cogs/musica/runtime_telefone/termux/integracao-worker.sh"; do
+    if [[ -f "$hook" ]]; then
+      # shellcheck disable=SC1090
+      source "$hook"
+      return 0
+    fi
+  done
+  return 1
 }
 
-ensure_music_agent_if_needed() {
-  autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
-  local release start_command
-  release="$(active_release_dir)"
-  start_command="$(active_music_agent_start_command)"
-  if [[ ! -x "$start_command" ]]; then
-    log "start do Music Agent não encontrado em $start_command"
-    return 0
-  fi
-  if [[ -z "${MUSIC_AGENT_BOT_TOKEN:-${DISCORD_TOKEN:-${BOT_TOKEN:-}}}" ]]; then
-    log "Music Agent habilitado, mas token do bot não está configurado no worker"
-    return 0
-  fi
-  if [[ -z "${MUSIC_AGENT_TOKEN:-}" && -n "${PHONE_WORKER_TOKEN:-}" ]]; then
-    upsert_env_value MUSIC_AGENT_TOKEN "$PHONE_WORKER_TOKEN"
-  fi
-  log "garantindo Music Agent do worker; release=$release"
-  PHONE_WORKER_RELEASE_DIR="$release" \
-  PHONE_WORKER_DIR="$WORKER_DIR" \
-  MUSIC_AGENT_ENV="$MUSIC_AGENT_ENV_FILE" \
-    "$start_command" >/dev/null 2>&1 || \
-    log "não consegui iniciar Music Agent automaticamente; música direta no worker pode ficar indisponível"
-}
+# O worker genérico não implementa música. Quando o domínio não estiver presente
+# (por exemplo, no primeiro estágio de um bootstrap antigo), os hooks viram no-op.
+if ! load_music_runtime_hooks; then
+  musica_ensure_worker_env_if_needed() { return 0; }
+  musica_cleanup_safe_mode() { return 0; }
+  musica_ensure_ytdlp_deps_if_needed() { return 0; }
+  musica_ensure_agent_deps_if_needed() { return 0; }
+  musica_ensure_agent_if_needed() { return 0; }
+fi
 
 ensure_turbo_deps_if_needed() {
   ensure_turbo_termux_packages_if_needed
@@ -771,22 +690,22 @@ run_post_start_maintenance_async() {
     log "manutenção pós-start iniciada"
     if is_turbo_profile; then
       cleanup_stale_heavy_dependency_builds
-      cleanup_heavy_services_for_safe_mode
+      musica_cleanup_safe_mode
       ensure_turbo_deps_if_needed
     fi
     # Música é independente do perfil APK/turbo: o Termux fallback também
     # resolve via yt-dlp e hospeda o Music Agent direto.
-    ensure_music_ytdlp_deps_if_needed
-    ensure_music_agent_deps_if_needed
-    ensure_music_agent_if_needed
+    musica_ensure_ytdlp_deps_if_needed
+    musica_ensure_agent_deps_if_needed
+    musica_ensure_agent_if_needed
     log "manutenção pós-start finalizada"
   ) >> "$MAINT_LOG_FILE" 2>&1 &
 }
 
-ensure_music_worker_env_if_needed
+musica_ensure_worker_env_if_needed
 ensure_apk_builder_env_if_ready
 cleanup_stale_heavy_dependency_builds
-cleanup_heavy_services_for_safe_mode
+musica_cleanup_safe_mode
 
 count="$(worker_pid_count)"
 existing_pid="$(pid_from_file)"
