@@ -320,3 +320,12 @@ def test_music_agent_tts_missing_provider_fails_before_ffmpeg_pipe():
     assert "provider_module = {'gtts': 'gtts', 'edge': 'edge_tts'}.get(engine)" in block
     assert "provider TTS {engine} indisponível no Music Agent; envie áudio pré-sintetizado" in block
     assert block.index("importlib.import_module(provider_module)") < block.index("discord.FFmpegPCMAudio(reader, pipe=True")
+
+
+def test_phone_worker_music_status_forwards_compact_guild_query():
+    source = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
+    block = source.split("def _task_music_agent_proxy", 1)[1].split("\n    def ", 1)[0]
+    assert 'guild_id = int(body.get("guild_id") or 0)' in block
+    assert '"compact": "1" if compact else "0"' in block
+    assert 'urllib.parse.urlencode' in block
+

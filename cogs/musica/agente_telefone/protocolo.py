@@ -82,8 +82,14 @@ def montar_comando(
     return payload
 
 
-def montar_consulta_status(*, timeout_seconds: float | None = None) -> dict[str, Any]:
-    return {
+def montar_consulta_status(
+    *,
+    timeout_seconds: float | None = None,
+    guild_id: int = 0,
+    compact: bool | None = None,
+) -> dict[str, Any]:
+    guild_id = int(guild_id or 0)
+    payload: dict[str, Any] = {
         "task": "music_agent_status",
         "action": "status",
         "timeout_seconds": float(
@@ -92,3 +98,7 @@ def montar_consulta_status(*, timeout_seconds: float | None = None) -> dict[str,
             or 2.5
         ),
     }
+    if guild_id > 0:
+        payload["guild_id"] = guild_id
+        payload["compact"] = True if compact is None else bool(compact)
+    return payload

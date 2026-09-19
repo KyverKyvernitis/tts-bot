@@ -120,7 +120,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.10"
+PHONE_WORKER_VERSION = "1.11.11"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -6223,7 +6223,18 @@ class WorkerHandler(BaseHTTPRequestHandler):
         def _request_agent() -> dict[str, Any]:
             local_headers = dict(headers)
             if action in {"status", "get_state"}:
-                req = urllib.request.Request(f"{base}/health", headers=local_headers, method="GET")
+                health_url = f"{base}/health"
+                try:
+                    guild_id = int(body.get("guild_id") or 0)
+                except Exception:
+                    guild_id = 0
+                compact = _early_env_truthy(body.get("compact"), guild_id > 0)
+                if guild_id > 0:
+                    health_url += "?" + urllib.parse.urlencode({
+                        "guild_id": guild_id,
+                        "compact": "1" if compact else "0",
+                    })
+                req = urllib.request.Request(health_url, headers=local_headers, method="GET")
                 with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
                     raw = resp.read(min(self.max_output_bytes, 1024 * 1024)).decode("utf-8", "replace")
                 parsed = json.loads(raw or "{}")

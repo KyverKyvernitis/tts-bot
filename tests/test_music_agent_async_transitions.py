@@ -336,3 +336,85 @@ def test_amain_natural_agent_exit_runs_shutdown_and_collects_tasks(music, monkey
         assert events == ["run", "shutdown"]
 
     run(scenario())
+
+
+def test_compact_status_skips_dependency_probe_and_filters_guild(music, monkeypatch):
+    agent = music.MusicAgent()
+    agent.states[7] = music.GuildMusicState(guild_id=7, status="playing")
+    agent.states[8] = music.GuildMusicState(guild_id=8, status="idle")
+
+    def forbidden_probe(*args, **kwargs):
+        raise AssertionError("status compacto não deve sondar dependências")
+
+    monkeypatch.setattr(agent, "voice_dependencies_payload", forbidden_probe)
+    payload = agent.status_payload(guild_id=7, compact=True)
+
+    assert payload["ok"] is True
+    assert payload["playback_backend"] == "discord-voice-direct"
+    assert set(payload["guilds"]) == {"7"}
+    assert "voice_dependencies" not in payload
+    assert "cache" not in payload
+
+
+def test_dependency_probe_is_cached_between_full_health_calls(music, monkeypatch):
+    agent = music.MusicAgent()
+    agent._voice_dependencies_cache_ttl = 60.0
+    calls = []
+    real_import = music.importlib.import_module
+
+    def counted_import(name):
+        calls.append(name)
+        return real_import(name)
+
+    monkeypatch.setattr(music.importlib, "import_module", counted_import)
+    first = agent.voice_dependencies_payload()
+    first_calls = len(calls)
+    second = agent.voice_dependencies_payload()
+
+    assert first_calls > 0
+    assert len(calls) == first_calls
+    assert second == first
+    assert second is not first
+    assert second["checks"] is not first["checks"]
+
+
+def test_concurrent_resolve_coalesces_and_releases_lock_registry(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        calls = []
+
+        def resolve_once(query):
+            calls.append(query)
+            music.time.sleep(0.05)
+            return {
+                "title": "same",
+                "stream_url": "https://media.example/audio",
+                "webpage_url": "https://example.test/same",
+            }
+
+        agent._resolve_with_ytdlp = resolve_once
+        body = {"guild_id": 41}
+        meta = {"title": "same", "webpage_url": "https://example.test/same"}
+        one, two = await asyncio.gather(
+            agent.resolve_track("https://example.test/same", track_meta=dict(meta), body=body),
+            agent.resolve_track("https://example.test/same", track_meta=dict(meta), body=body),
+        )
+
+        assert one.stream_url == two.stream_url == "https://media.example/audio"
+        assert len(calls) == 1
+        assert agent._resolve_locks == {}
+        assert agent._resolve_lock_users == {}
+
+    run(scenario())
+
+
+def test_ephemeral_tts_lock_registry_is_released(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        async with agent._registry_lock(agent._tts_direct_locks, agent._tts_direct_lock_users, 91):
+            assert 91 in agent._tts_direct_locks
+            assert agent._tts_direct_lock_users[91] == 1
+        assert agent._tts_direct_locks == {}
+        assert agent._tts_direct_lock_users == {}
+
+    run(scenario())

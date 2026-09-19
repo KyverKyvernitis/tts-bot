@@ -37,7 +37,7 @@ def test_cleanup_release_versions_are_monotonic() -> None:
     phone = read(PHONE)
     assert 'versionCode 133' in gradle
     assert 'versionName "0.8.6"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.10"' in phone
+    assert 'PHONE_WORKER_VERSION = "1.11.11"' in phone
 
 
 def test_core_screen_hides_internal_runtime_noise_and_manual_recovery() -> None:
@@ -238,7 +238,7 @@ def test_phone_worker_repairs_persistent_launchers_to_active_release(tmp_path: P
     worker_dir = tmp_path / "phone-worker"
     active.mkdir(parents=True)
     worker_dir.mkdir(parents=True)
-    (active / "phone_worker.py").write_text('PHONE_WORKER_VERSION = "1.11.10"\n', encoding="utf-8")
+    (active / "phone_worker.py").write_text('PHONE_WORKER_VERSION = "1.11.11"\n', encoding="utf-8")
     for name in ("start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh"):
         path = active / name
         path.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")

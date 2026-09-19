@@ -76,6 +76,16 @@ def test_consulta_status_tem_contrato_minimo() -> None:
         "timeout_seconds": 1.5,
     }
 
+def test_consulta_status_de_guild_pede_payload_compacto() -> None:
+    payload = montar_consulta_status(timeout_seconds=1.5, guild_id=927, compact=True)
+    assert payload == {
+        "task": "music_agent_status",
+        "action": "status",
+        "timeout_seconds": 1.5,
+        "guild_id": 927,
+        "compact": True,
+    }
+
 
 def test_estado_remoto_decide_controles_sem_conhecer_player_local(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(estado_remoto.config, "MUSIC_AGENT_ENABLED", True, raising=False)

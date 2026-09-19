@@ -110,7 +110,11 @@ async def music_agent_status(*, timeout_seconds: float | None = None, guild_id: 
         raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
     base = destino.base
     token = destino.token
-    payload = montar_consulta_status(timeout_seconds=timeout_seconds)
+    payload = montar_consulta_status(
+        timeout_seconds=timeout_seconds,
+        guild_id=guild_id,
+        compact=bool(guild_id),
+    )
     total_timeout = max(1.0, float(payload["timeout_seconds"]) + 1.0)
     try:
         data = await post_json_worker(

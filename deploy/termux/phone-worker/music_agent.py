@@ -140,7 +140,7 @@ def _schedule_tts_prune(callback, path):
             _TTS_MAINTENANCE_PENDING = None
 
 
-AGENT_VERSION = "0.3.32"
+AGENT_VERSION = "0.3.33"
 STARTED_AT = time.time()
 
 
@@ -641,9 +641,13 @@ class MusicAgent:
         self.prefetch_timeout = max(3.0, env_float("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", 18.0))
         self._idle_disconnect_tasks: dict[int, asyncio.Task] = {}
         self._tts_direct_locks: dict[int, asyncio.Lock] = {}
+        self._tts_direct_lock_users: dict[int, int] = {}
         self._metadata_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._resolve_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._resolve_locks: dict[str, asyncio.Lock] = {}
+        self._resolve_lock_users: dict[str, int] = {}
+        self._voice_dependencies_cache: tuple[float, dict[str, Any]] | None = None
+        self._voice_dependencies_cache_ttl = max(0.0, env_float("MUSIC_AGENT_DEPENDENCY_CACHE_TTL_SECONDS", 30.0))
         self._prefetch_tasks: dict[str, asyncio.Task] = {}
         intents = discord.Intents.none()
         intents.guilds = True
@@ -670,6 +674,30 @@ class MusicAgent:
         @self.client.event
         async def on_ready() -> None:  # type: ignore[no-untyped-def]
             self.log("discord_ready", user=str(self.client.user), version=AGENT_VERSION, playback="direct")
+
+    @contextlib.asynccontextmanager
+    async def _registry_lock(self, locks: dict[Any, asyncio.Lock], users: dict[Any, int], key: Any):
+        """Serializa uma chave sem manter locks ociosos para sempre.
+
+        O contador inclui tanto o dono quanto quem está aguardando. Assim a
+        entrada só é removida quando nenhum coroutine ainda pode reutilizá-la.
+        """
+        lock = locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[key] = lock
+        users[key] = int(users.get(key, 0) or 0) + 1
+        try:
+            async with lock:
+                yield lock
+        finally:
+            remaining = max(0, int(users.get(key, 1) or 1) - 1)
+            if remaining:
+                users[key] = remaining
+            else:
+                users.pop(key, None)
+                if locks.get(key) is lock:
+                    locks.pop(key, None)
 
     def _resolve_cache_key(self, query: str, track_meta: dict[str, Any] | None = None) -> str:
         meta = track_meta or {}
@@ -917,7 +945,10 @@ class MusicAgent:
     async def handle_health(self, request: web.Request) -> web.Response:
         if not self._auth_ok(request):
             return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
-        return web.json_response(self.status_payload())
+        query = getattr(request, "query", {}) or {}
+        guild_id = safe_id(query.get("guild_id")) if hasattr(query, "get") else 0
+        compact = truthy(query.get("compact"), bool(guild_id)) if hasattr(query, "get") else False
+        return web.json_response(self.status_payload(guild_id=guild_id, compact=compact))
 
     async def handle_command(self, request: web.Request) -> web.Response:
         if not self._auth_ok(request):
@@ -933,7 +964,23 @@ class MusicAgent:
             self.log("command_error", action=body.get("action"), error=f"{type(exc).__name__}: {exc}")
             return web.json_response({"ok": False, "error": f"{type(exc).__name__}: {short_text(exc, 300)}", "status": self.status_payload()}, status=400)
 
-    def voice_dependencies_payload(self) -> dict[str, Any]:
+    def voice_dependencies_payload(self, *, force: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        cached = self._voice_dependencies_cache
+        if (
+            not force
+            and cached is not None
+            and self._voice_dependencies_cache_ttl > 0
+            and now - cached[0] <= self._voice_dependencies_cache_ttl
+        ):
+            payload = cached[1]
+            return {
+                "ok": bool(payload.get("ok")),
+                "missing": list(payload.get("missing") or []),
+                "optional_missing": list(payload.get("optional_missing") or []),
+                "checks": {name: dict(info) for name, info in dict(payload.get("checks") or {}).items()},
+            }
+
         checks: dict[str, dict[str, Any]] = {}
         modules = {
             "discord.py": "discord",
@@ -957,10 +1004,18 @@ class MusicAgent:
         missing = [name for name, info in checks.items() if not bool(info.get("ok"))]
         missing_critical = [name for name in missing if not bool(checks.get(name, {}).get("optional"))]
         optional_missing = [name for name in missing if bool(checks.get(name, {}).get("optional"))]
-        return {"ok": not missing_critical, "missing": missing_critical, "optional_missing": optional_missing, "checks": checks}
-
-    def status_payload(self) -> dict[str, Any]:
+        payload = {"ok": not missing_critical, "missing": missing_critical, "optional_missing": optional_missing, "checks": checks}
+        self._voice_dependencies_cache = (now, payload)
         return {
+            "ok": bool(payload["ok"]),
+            "missing": list(payload["missing"]),
+            "optional_missing": list(payload["optional_missing"]),
+            "checks": {name: dict(info) for name, info in payload["checks"].items()},
+        }
+
+    def status_payload(self, *, guild_id: int = 0, compact: bool = False) -> dict[str, Any]:
+        guild_id = int(guild_id or 0)
+        base = {
             "ok": True,
             "available": bool(self.client.is_ready()),
             "version": AGENT_VERSION,
@@ -969,6 +1024,13 @@ class MusicAgent:
             "user": str(self.client.user) if self.client.user else "",
             "playback_backend": "discord-voice-direct",
             "direct_audio_enabled": self.direct_audio_enabled,
+        }
+        if compact and guild_id > 0:
+            state = self.states.get(guild_id)
+            base["guilds"] = {str(guild_id): state.public()} if state is not None else {}
+            return base
+
+        base.update({
             "idle_disconnect_seconds": self.idle_disconnect_seconds,
             "cache": {
                 "metadata_entries": len(self._metadata_cache),
@@ -978,12 +1040,14 @@ class MusicAgent:
             },
             "voice_dependencies": self.voice_dependencies_payload(),
             "guilds": {str(gid): state.public() for gid, state in self.states.items()},
-        }
+        })
+        return base
 
     async def dispatch(self, body: dict[str, Any]) -> dict[str, Any]:
         action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_")
         if action in {"status", "get_state"}:
-            return self.status_payload()
+            guild_id = safe_id(body.get("guild_id"))
+            return self.status_payload(guild_id=guild_id, compact=truthy(body.get("compact"), bool(guild_id)))
         if action in {"play", "enqueue", "play_direct", "enqueue_many", "queue_many", "add_many", "playlist"}:
             body = dict(body)
             body["_agent_action"] = action
@@ -1885,13 +1949,6 @@ class MusicAgent:
         self.log("tts_overlay_done", guild_id=guild_id, elapsed_ms=round(elapsed_ms, 1))
         return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "first_frame_observed": tts_source.first_frame_ms is not None, "first_frame_ms": tts_source.first_frame_ms, "state": st.public()}
 
-    def _get_tts_direct_lock(self, guild_id: int) -> asyncio.Lock:
-        lock = self._tts_direct_locks.get(int(guild_id or 0))
-        if lock is None:
-            lock = asyncio.Lock()
-            self._tts_direct_locks[int(guild_id or 0)] = lock
-        return lock
-
     async def cmd_voice_tts(self, body: dict[str, Any]) -> dict[str, Any]:
         """Play a short TTS directly from the worker-owned Discord voice plane.
 
@@ -1906,8 +1963,7 @@ class MusicAgent:
             raise ValueError("guild_id/voice_channel_id obrigatórios para TTS direto")
         timeout = max(3.0, min(90.0, float(body.get("timeout_seconds") or 30.0)))
         started = time.monotonic()
-        lock = self._get_tts_direct_lock(guild_id)
-        async with lock:
+        async with self._registry_lock(self._tts_direct_locks, self._tts_direct_lock_users, guild_id):
             st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
             st.voice_channel_id = voice_channel_id
             st.text_channel_id = safe_id(body.get("text_channel_id") or st.text_channel_id)
@@ -2305,8 +2361,7 @@ class MusicAgent:
             merged_meta.update({k: v for k, v in track_meta.items() if v not in (None, "", [], {})})
             track_meta = merged_meta
             self.log("resolve_metadata_cache_hit", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
-        lock = self._resolve_locks.setdefault(cache_key, asyncio.Lock())
-        async with lock:
+        async with self._registry_lock(self._resolve_locks, self._resolve_lock_users, cache_key):
             cached = self._resolve_cache_get(cache_key)
             if cached:
                 self.log("resolve_stream_cache_hit_after_wait", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
