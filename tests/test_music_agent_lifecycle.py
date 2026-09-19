@@ -907,3 +907,51 @@ def test_direct_start_confirmation_cannot_overwrite_callback_transition(music):
         assert st.playback_token == 2
 
     run(scenario())
+
+
+def test_maintenance_prunes_only_expired_idle_state_and_caches(music):
+    agent = music.MusicAgent()
+    agent.maintenance_interval_seconds = 0.0
+    agent.state_idle_ttl_seconds = 10.0
+    now_wall = music.time.time()
+    now_mono = music.time.monotonic()
+
+    stale = music.GuildMusicState(guild_id=101, status="idle", updated_at=now_wall - 100.0)
+    active = music.GuildMusicState(
+        guild_id=102,
+        status="playing",
+        current=music.AgentTrack(title="active", query="active"),
+        updated_at=now_wall - 100.0,
+    )
+    agent.states = {101: stale, 102: active}
+    agent.metadata_cache_ttl = 10.0
+    agent.stream_cache_ttl = 10.0
+    agent._metadata_cache = {"old": (now_mono - 100.0, {"title": "old"}), "new": (now_mono, {"title": "new"})}
+    agent._resolve_cache = {"old": (now_mono - 100.0, {"stream_url": "old"}), "new": (now_mono, {"stream_url": "new"})}
+
+    agent._maybe_run_maintenance()
+
+    assert 101 not in agent.states
+    assert agent.states.get(102) is active
+    assert set(agent._metadata_cache) == {"new"}
+    assert set(agent._resolve_cache) == {"new"}
+
+
+def test_maintenance_preserves_idle_state_with_background_work(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.maintenance_interval_seconds = 0.0
+        agent.state_idle_ttl_seconds = 10.0
+        gid = 103
+        state = music.GuildMusicState(guild_id=gid, status="idle", updated_at=music.time.time() - 100.0)
+        agent.states[gid] = state
+        task = asyncio.create_task(asyncio.sleep(999))
+        agent._prefetch_tasks[f"{gid}:candidate"] = task
+        try:
+            agent._maybe_run_maintenance()
+            assert agent.states.get(gid) is state
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    run(scenario())

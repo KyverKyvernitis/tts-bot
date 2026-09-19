@@ -137,3 +137,24 @@ def test_roteador_importa_painel_do_modulo_interface_atual() -> None:
 def test_prefetch_especulativo_padrao_limita_a_um_resultado():
     from cogs.musica import configuracao
     assert configuracao.MUSIC_AGENT_PREFETCH_TOP_RESULTS == 1
+
+
+def test_roteador_legado_carrega_extrator_e_backends_sob_demanda() -> None:
+    texto = _texto("cogs/musica/legado/roteador_audio.py")
+    tree = ast.parse(texto)
+    imports_top_level = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            imports_top_level.append((node.module or "", {alias.name for alias in node.names}))
+    assert not any(module.endswith("extrator_local") and "MusicExtractor" in names for module, names in imports_top_level)
+    assert not any(module.endswith("motores") and "MusicBackendManager" in names for module, names in imports_top_level)
+    assert "self._extractor = None" in texto
+    assert "self._backends = None" in texto
+    assert "def extractor(self):" in texto
+    assert "def backends(self):" in texto
+
+
+def test_worker_only_nao_materializa_extrator_so_para_classificar_url() -> None:
+    texto = _texto("cogs/musica/comandos/tocar.py")
+    assert "not input_profile.is_url and len(batch.tracks) > 1" in texto
+    assert "not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1" not in texto

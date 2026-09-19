@@ -725,6 +725,12 @@ class MusicAgent:
         self._resolve_waiter_sequence = 0
         self._resolve_scheduler_lock = asyncio.Lock()
         self._resolve_thread_local = threading.local()
+        # Manutenção leve e limitada: limpa caches expirados e estados de guild
+        # realmente ociosos para o agente poder ficar dias online sem crescer
+        # indefinidamente em servidores que já não usam música.
+        self.state_idle_ttl_seconds = max(60.0, env_float("MUSIC_AGENT_STATE_IDLE_TTL_SECONDS", 3600.0))
+        self.maintenance_interval_seconds = max(30.0, env_float("MUSIC_AGENT_MAINTENANCE_INTERVAL_SECONDS", 60.0))
+        self._last_maintenance_monotonic = 0.0
         self._voice_dependencies_cache: tuple[float, dict[str, Any]] | None = None
         self._voice_dependencies_cache_ttl = max(0.0, env_float("MUSIC_AGENT_DEPENDENCY_CACHE_TTL_SECONDS", 30.0))
         self._prefetch_tasks: dict[str, asyncio.Task] = {}
@@ -1205,7 +1211,54 @@ class MusicAgent:
             "checks": {name: dict(info) for name, info in payload["checks"].items()},
         }
 
+    @staticmethod
+    def _prune_expired_cache_entries(cache: dict[str, tuple[float, dict[str, Any]]], ttl: float, now: float) -> int:
+        if ttl <= 0 or not cache:
+            return 0
+        expired = [key for key, item in cache.items() if now - float(item[0]) > ttl]
+        for key in expired:
+            cache.pop(key, None)
+        return len(expired)
+
+    def _maybe_run_maintenance(self) -> None:
+        now_mono = time.monotonic()
+        if now_mono - self._last_maintenance_monotonic < self.maintenance_interval_seconds:
+            return
+        self._last_maintenance_monotonic = now_mono
+
+        metadata_removed = self._prune_expired_cache_entries(self._metadata_cache, self.metadata_cache_ttl, now_mono)
+        stream_removed = self._prune_expired_cache_entries(self._resolve_cache, self.stream_cache_ttl, now_mono)
+
+        state_removed = 0
+        now_wall = time.time()
+        for guild_id, st in list(self.states.items()):
+            if now_wall - float(getattr(st, "updated_at", now_wall) or now_wall) <= self.state_idle_ttl_seconds:
+                continue
+            if st.current is not None or st.queue or st.player is not None:
+                continue
+            if str(getattr(st, "status", "idle") or "idle").lower() not in {"idle", "stopped", "failed", "error"}:
+                continue
+            if guild_id in self._idle_disconnect_tasks or guild_id in self._active_resolve_tasks:
+                continue
+            if int(self._tts_direct_lock_users.get(guild_id, 0) or 0) > 0:
+                continue
+            prefix = f"{int(guild_id)}:"
+            if any(str(key).startswith(prefix) and task is not None and not task.done() for key, task in self._prefetch_tasks.items()):
+                continue
+            if self.states.get(guild_id) is st:
+                self.states.pop(guild_id, None)
+                state_removed += 1
+
+        if metadata_removed or stream_removed or state_removed:
+            self.log(
+                "maintenance_pruned",
+                metadata=metadata_removed,
+                streams=stream_removed,
+                guild_states=state_removed,
+            )
+
     def status_payload(self, *, guild_id: int = 0, compact: bool = False, known_revision: str = "") -> dict[str, Any]:
+        self._maybe_run_maintenance()
         guild_id = int(guild_id or 0)
         base = {
             "ok": True,
@@ -1248,6 +1301,7 @@ class MusicAgent:
         return base
 
     async def dispatch(self, body: dict[str, Any]) -> dict[str, Any]:
+        self._maybe_run_maintenance()
         action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_")
         if action in {"status", "get_state"}:
             guild_id = safe_id(body.get("guild_id"))

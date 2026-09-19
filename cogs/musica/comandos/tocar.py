@@ -631,10 +631,13 @@ class FluxoTocar:
                 await self._reply(ctx, "`📭` Não encontrei nada tocável.")
                 return
 
+            # `input_profile` já classificou URL/texto antes da resolução.
+            # Reusar esse resultado evita materializar o extrator local legado
+            # apenas para chamar `looks_like_url()` no caminho Worker-only.
             should_open_selection = bool(
                 (self._should_use_lavalink_for_input(query, ctx.guild.id) and self._is_lavalink_search_request(query))
                 or (self._is_youtube_text_search(query) and len(batch.tracks) > 1)
-                or (not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1)
+                or (not input_profile.is_url and len(batch.tracks) > 1)
             )
             if should_open_selection:
                 logger.info("[music/timing] resultados prontos | guild=%s elapsed_ms=%.1f tracks=%s", ctx.guild.id, (time.monotonic() - command_started) * 1000.0, len(batch.tracks))

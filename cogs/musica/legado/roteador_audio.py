@@ -24,12 +24,10 @@ import aiohttp
 
 from cogs.musica import configuracao as config
 from ..metadados.provedores_api import compact_key
-from .extrator_local import MusicExtractor
 from ..nucleo.erros import MusicExtractionError, MusicPlaybackError
 from ..nucleo.modelos import LoopMode, MusicTrack
 from ..nucleo.estado import ControlVote, MusicGuildState
 from ..metadados.provedores import describe_url
-from .motores import MusicBackendManager
 from ..reproducao.sincronizacao import sincronizar_estado_agente
 from ..reproducao.fila_remota import alternar_repeticao_worker, embaralhar_fila_worker, voltar_historico_worker
 from ..reproducao.controle_remoto import ajustar_volume, buscar_momento
@@ -629,17 +627,42 @@ class AudioRouter:
 
     def __init__(self, bot) -> None:
         self.bot = bot
-        self.extractor = MusicExtractor(
-            max_playlist_items=MUSIC_MAX_PLAYLIST_ITEMS,
-            search_results=MUSIC_SEARCH_RESULTS,
-            timeout_seconds=MUSIC_YTDLP_TIMEOUT_SECONDS,
-        )
+        # Worker-only é o caminho normal. Não carregue yt-dlp local nem toda a
+        # pilha Lavalink na inicialização da cog: ambos são compatibilidade e só
+        # devem existir se algum fluxo legado realmente os solicitar.
+        self._extractor = None
+        self._backends = None
         self._states: dict[int, MusicGuildState] = {}
         self._global_prefetch_active = 0
-        self.backends = MusicBackendManager(bot, self.extractor)
         self._lavalink_shadow_tasks: dict[int, asyncio.Task] = {}
         self._phone_worker_tts_convert_disabled_until: float = 0.0
         self._phone_worker_tts_convert_last_log_at: float = 0.0
+
+    @property
+    def extractor(self):
+        extractor = self._extractor
+        if extractor is None:
+            from .extrator_local import MusicExtractor
+
+            extractor = MusicExtractor(
+                max_playlist_items=MUSIC_MAX_PLAYLIST_ITEMS,
+                search_results=MUSIC_SEARCH_RESULTS,
+                timeout_seconds=MUSIC_YTDLP_TIMEOUT_SECONDS,
+            )
+            self._extractor = extractor
+            logger.debug("[music] extrator local legado carregado sob demanda")
+        return extractor
+
+    @property
+    def backends(self):
+        backends = self._backends
+        if backends is None:
+            from .motores import MusicBackendManager
+
+            backends = MusicBackendManager(self.bot, self.extractor)
+            self._backends = backends
+            logger.debug("[music] backends legados carregados sob demanda")
+        return backends
 
     def get_state(self, guild_id: int) -> MusicGuildState:
         state = self._states.get(int(guild_id))
@@ -2248,8 +2271,10 @@ class AudioRouter:
         for guild_id in list(self._states):
             with contextlib.suppress(Exception):
                 await self.stop(guild_id, disconnect=False)
-        with contextlib.suppress(Exception):
-            await self.backends.close()
+        backends = self._backends
+        if backends is not None:
+            with contextlib.suppress(Exception):
+                await backends.close()
 
     async def backend_status(self, guild_id: int | None = None):
         return await self.backends.status(guild_id=guild_id)
