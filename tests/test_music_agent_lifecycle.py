@@ -485,3 +485,216 @@ def test_short_expected_track_end_is_not_misclassified_as_failure(music, monkeyp
         assert scheduled == [gid]
 
     run(scenario())
+
+
+def test_cmd_play_queues_metadata_without_resolving_when_already_playing(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 31
+        st = music.GuildMusicState(
+            guild_id=gid,
+            status="playing",
+            current=music.AgentTrack(title="current", query="current", stream_url="https://media.example/current"),
+        )
+        agent.states[gid] = st
+        calls = []
+
+        async def forbidden_resolve(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("faixa enfileirada não deve resolver yt-dlp imediatamente")
+
+        agent.resolve_track = forbidden_resolve
+        agent._schedule_next_queue_prefetch = lambda *args, **kwargs: None
+        result = await agent.cmd_play(
+            {
+                "guild_id": gid,
+                "voice_channel_id": 900,
+                "text_channel_id": 901,
+                "query": "https://youtu.be/next",
+                "track": {
+                    "title": "next",
+                    "webpage_url": "https://youtu.be/next",
+                    "duration": 123,
+                },
+            }
+        )
+
+        assert result["ok"] is True
+        assert result["queued"] is True
+        assert calls == []
+        assert len(st.queue) == 1
+        assert st.queue[0].title == "next"
+        assert st.queue[0].stream_url == ""
+        assert result["track"]["title"] == "next"
+
+    run(scenario())
+
+
+def test_lazy_play_overlaps_voice_preconnect_with_stream_resolution(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 32
+        st = music.GuildMusicState(guild_id=gid, voice_channel_id=902)
+        st.queue = [music.AgentTrack(title="next", query="next")]
+        agent.states[gid] = st
+        voice_started = asyncio.Event()
+        resolve_started = asyncio.Event()
+        release = asyncio.Event()
+        voice_client = object()
+        seen_prepared = []
+
+        async def ensure_voice(_guild_id):
+            voice_started.set()
+            await resolve_started.wait()
+            await release.wait()
+            return voice_client, False
+
+        async def resolve(query, **kwargs):
+            resolve_started.set()
+            await voice_started.wait()
+            await release.wait()
+            return music.AgentTrack(title="next", query=query, stream_url="https://media.example/next")
+
+        async def play_direct(_guild_id, track, *, prepared_voice=None):
+            seen_prepared.append((track.stream_url, prepared_voice))
+
+        agent._ensure_direct_voice_client = ensure_voice
+        agent.resolve_track = resolve
+        agent._play_direct_voice = play_direct
+
+        task = asyncio.create_task(agent._play_next(gid))
+        await asyncio.wait_for(voice_started.wait(), timeout=1.0)
+        await asyncio.wait_for(resolve_started.wait(), timeout=1.0)
+        assert not task.done()
+        release.set()
+        await task
+
+        assert seen_prepared == [("https://media.example/next", (voice_client, False))]
+        assert st.current is not None
+        assert st.current.stream_url == "https://media.example/next"
+
+    run(scenario())
+
+
+def test_failed_lazy_resolve_discards_new_preconnected_voice(music):
+    class VoiceClient:
+        def __init__(self):
+            self.disconnected = False
+        def is_connected(self):
+            return not self.disconnected
+        async def disconnect(self, force=False):
+            self.disconnected = True
+
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 33
+        st = music.GuildMusicState(guild_id=gid, voice_channel_id=903)
+        st.queue = [music.AgentTrack(title="broken", query="broken")]
+        agent.states[gid] = st
+        voice_client = VoiceClient()
+        voice_ready = asyncio.Event()
+
+        async def ensure_voice(_guild_id):
+            voice_ready.set()
+            return voice_client, True
+
+        async def resolve(*args, **kwargs):
+            await voice_ready.wait()
+            await asyncio.sleep(0)
+            raise RuntimeError("resolve failed")
+
+        agent._ensure_direct_voice_client = ensure_voice
+        agent.resolve_track = resolve
+        await agent._play_next(gid)
+
+        assert st.status == "failed"
+        assert voice_client.disconnected is True
+        assert st.player is None
+
+    run(scenario())
+
+
+def test_stop_cancels_active_lazy_resolution_without_marking_failure(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 34
+        st = music.GuildMusicState(guild_id=gid)
+        st.queue = [music.AgentTrack(title="pending", query="pending")]
+        agent.states[gid] = st
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def resolve(*args, **kwargs):
+            entered.set()
+            try:
+                await asyncio.sleep(999)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        agent.resolve_track = resolve
+        play_task = asyncio.create_task(agent._play_next(gid))
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        assert gid in agent._active_resolve_tasks
+
+        result = await agent.cmd_stop({"guild_id": gid})
+        await play_task
+
+        assert result["ok"] is True
+        assert cancelled.is_set()
+        assert gid not in agent._active_resolve_tasks
+        assert st.status == "idle"
+        assert st.current is None
+        assert st.queue == []
+
+    run(scenario())
+
+
+def test_mixer_records_first_frame_timestamp(music):
+    class Source:
+        def __init__(self):
+            self.frames = [b"\x01\x00" * 1920, b""]
+        def read(self):
+            return self.frames.pop(0)
+        def cleanup(self):
+            return None
+
+    async def scenario():
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(),
+            music_source=Source(),
+            music_volume=1.0,
+        )
+        assert mixer.first_frame_ms is None
+        assert mixer.first_frame_monotonic is None
+        frame = mixer.read()
+        assert frame
+        assert mixer.first_frame_ms is not None
+        assert mixer.first_frame_ms >= 0.0
+        assert mixer.first_frame_monotonic is not None
+
+    run(scenario())
+
+
+def test_direct_confirmation_returns_immediately_after_first_frame(music, monkeypatch):
+    class VoiceClient:
+        def is_connected(self): return True
+        def is_playing(self): return True
+        def is_paused(self): return False
+
+    class Source:
+        first_frame_ms = 4.0
+
+    async def scenario():
+        agent = music.MusicAgent()
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr(music.asyncio, "sleep", fake_sleep)
+        elapsed = await agent._confirm_direct_playback(VoiceClient(), Source(), max_delay=0.35)
+        assert elapsed >= 0.0
+        assert sleeps == []
+
+    run(scenario())

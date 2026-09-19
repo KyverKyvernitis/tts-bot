@@ -296,6 +296,9 @@ class AgentMixedAudioSource(discord.AudioSource):
         self._lock = threading.RLock()
         self._closed = False
         self._music_ended = False
+        self._started_monotonic = time.monotonic()
+        self.first_frame_ms: float | None = None
+        self.first_frame_monotonic: float | None = None
 
     def is_opus(self) -> bool:
         return False
@@ -386,6 +389,13 @@ class AgentMixedAudioSource(discord.AudioSource):
         for i, sample in enumerate(other):
             base[i] = self._limit(int(base[i]) + int(sample))
 
+    def _mark_first_frame(self, frame: bytes) -> bytes:
+        if frame and self.first_frame_ms is None:
+            now = time.monotonic()
+            self.first_frame_monotonic = now
+            self.first_frame_ms = (now - self._started_monotonic) * 1000.0
+        return frame
+
     def _mix_bytes(self, base: bytes, frame: bytes, volume: float) -> bytes:
         if not frame:
             return base
@@ -421,7 +431,7 @@ class AgentMixedAudioSource(discord.AudioSource):
         # Hot path: while no TTS overlay exists there is nothing to mix. Scaling
         # the whole PCM frame in C avoids ~1,920 Python iterations every 20 ms.
         if music_frame and not overlays:
-            return self._scale_frame(music_frame, music_volume)
+            return self._mark_first_frame(self._scale_frame(music_frame, music_volume))
         if music_frame:
             base = self._scale_frame(music_frame, music_volume)
         else:
@@ -448,7 +458,7 @@ class AgentMixedAudioSource(discord.AudioSource):
         if ended:
             with self._lock:
                 self._overlays = [ov for ov in self._overlays if ov not in ended]
-        return base
+        return self._mark_first_frame(base)
 
     def cleanup(self) -> None:
         if self._closed:
@@ -700,6 +710,7 @@ class MusicAgent:
         self._voice_dependencies_cache: tuple[float, dict[str, Any]] | None = None
         self._voice_dependencies_cache_ttl = max(0.0, env_float("MUSIC_AGENT_DEPENDENCY_CACHE_TTL_SECONDS", 30.0))
         self._prefetch_tasks: dict[str, asyncio.Task] = {}
+        self._active_resolve_tasks: dict[int, asyncio.Task] = {}
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
@@ -1255,10 +1266,20 @@ class MusicAgent:
             self.log("prefetch_cancelled", guild_id=int(guild_id or 0), count=cancelled)
         return cancelled
 
+    def _cancel_active_resolve(self, guild_id: int) -> bool:
+        guild_id = int(guild_id or 0)
+        task = self._active_resolve_tasks.pop(guild_id, None)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        self.log("active_resolve_cancelled", guild_id=guild_id)
+        return True
+
     def _bump_playback_generation(self, st: GuildMusicState, *, reason: str = "change") -> int:
         st.playback_token += 1
         st.updated_at = time.time()
         self._cancel_prefetch_tasks(st.guild_id)
+        self._cancel_active_resolve(st.guild_id)
         self.log("playback_generation_bumped", guild_id=st.guild_id, reason=reason, token=st.playback_token)
         return st.playback_token
 
@@ -1429,15 +1450,21 @@ class MusicAgent:
         pruned = self._cancel_prefetch_tasks(guild_id, keep_task_keys={selected_task_key})
         if pruned:
             self.log("prefetch_pruned_for_play", guild_id=guild_id, count=pruned, query=query[:90])
-        track = await self.resolve_track(query, track_meta=track_meta, body=body)
+        # Não bloqueie o comando aguardando yt-dlp quando a faixa só precisa
+        # entrar na fila. Guarde os metadados agora e resolva o stream apenas
+        # quando ela realmente chegar ao início da fila. Isso também permite
+        # que a primeira resolução seja sobreposta à conexão de voz.
+        track = self._agent_track_from_metadata(track_meta, body=body, fallback_query=query)
+        if not (track.query or track.stream_url or track.webpage_url):
+            raise ValueError("faixa sem query/url reproduzível")
         if int(getattr(st, "playback_token", 0) or 0) != command_generation or str(getattr(st, "last_action", "") or "").lower() == "stop":
-            self.log("play_resolve_ignored", guild_id=guild_id, reason="stale_or_stopped", generation=command_generation, current_generation=getattr(st, "playback_token", 0), title=getattr(track, "title", ""))
+            self.log("play_enqueue_ignored", guild_id=guild_id, reason="stale_or_stopped", generation=command_generation, current_generation=getattr(st, "playback_token", 0), title=getattr(track, "title", ""))
             return {"ok": False, "cancelled": True, "queued": False, "error": "operação cancelada", "state": st.public()}
         if st.current and st.status in {"playing", "starting", "preparing", "paused"}:
             st.queue.append(track)
             st.updated_at = time.time()
             self._schedule_next_queue_prefetch(guild_id, reason="enqueue")
-            self.log("queued", guild_id=guild_id, title=track.title, queue_size=len(st.queue))
+            self.log("queued_lazy", guild_id=guild_id, title=track.title, queue_size=len(st.queue))
             return {"ok": True, "queued": True, "track": track.public(), "state": st.public()}
         st.queue.append(track)
         await self._play_next(guild_id)
@@ -2299,8 +2326,21 @@ class MusicAgent:
         st.volume_percent = st.normal_volume_percent
         self._set_status(st, "preparing", event="play_preparing")
         self.log("track_loading", guild_id=guild_id, title=getattr(st.current, "title", ""), source=getattr(st.current, "source", ""), lazy=not bool(getattr(st.current, "stream_url", "")))
+        voice_prepare_task: asyncio.Task | None = None
+        prepared_voice: tuple[Any, bool] | None = None
         try:
             if st.current and not st.current.stream_url:
+                # A conexão do Discord e o yt-dlp são independentes. Faça os
+                # dois em paralelo para que o tempo de handshake de voz não
+                # seja somado ao tempo de resolução da faixa.
+                if self.direct_audio_enabled and st.voice_channel_id:
+                    voice_prepare_task = asyncio.create_task(
+                        asyncio.wait_for(
+                            self._ensure_direct_voice_client(guild_id),
+                            timeout=max(5.0, self.prepare_timeout),
+                        )
+                    )
+                    self.log("voice_preconnect_started", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
                 started = time.time()
                 meta = st.current.public()
                 query = self._query_from_track_meta(meta, fallback_query=st.current.query or st.current.title)
@@ -2313,20 +2353,55 @@ class MusicAgent:
                     "query": query,
                     "track": meta,
                 }
-                resolved_current = await self.resolve_track(query, track_meta=meta, body=body)
+                resolve_task = asyncio.create_task(self.resolve_track(query, track_meta=meta, body=body))
+                self._active_resolve_tasks[guild_id] = resolve_task
+                try:
+                    resolved_current = await resolve_task
+                except asyncio.CancelledError:
+                    stale = (
+                        int(getattr(st, "playback_token", 0) or 0) != request_token
+                        or st.current is not current_ref
+                        or str(getattr(st, "last_action", "") or "").lower() in {"stop", "skip", "previous"}
+                    )
+                    await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
+                    if stale:
+                        self.log("lazy_resolve_cancelled", guild_id=guild_id, title=getattr(current_ref, "title", ""), reason="playback_changed")
+                        return
+                    raise
+                finally:
+                    remove_owned_task(self._active_resolve_tasks, guild_id, resolve_task)
                 if int(getattr(st, "playback_token", 0) or 0) != request_token or st.current is not current_ref:
                     self.log("lazy_resolve_ignored", guild_id=guild_id, title=getattr(resolved_current, "title", ""), reason="stale_generation")
+                    await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                     return
                 st.current = resolved_current
                 current_ref = st.current
                 self.log("lazy_resolve_done", guild_id=guild_id, elapsed_ms=round((time.time() - started) * 1000.0, 1), title=getattr(st.current, "title", ""))
             if int(getattr(st, "playback_token", 0) or 0) != request_token or st.current is not current_ref:
                 self.log("play_start_ignored", guild_id=guild_id, reason="stale_generation")
+                await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                 return
             if not self._should_use_direct_voice(st.current):
                 raise RuntimeError("playback direto do Music Agent indisponível para a faixa resolvida")
-            await asyncio.wait_for(self._play_direct_voice(guild_id, st.current), timeout=max(5.0, self.prepare_timeout))
+            if voice_prepare_task is not None:
+                prepared_voice = await voice_prepare_task
+                voice_prepare_task = None
+            play_coro = (
+                self._play_direct_voice(guild_id, st.current, prepared_voice=prepared_voice)
+                if prepared_voice is not None
+                else self._play_direct_voice(guild_id, st.current)
+            )
+            await asyncio.wait_for(play_coro, timeout=max(5.0, self.prepare_timeout))
         except Exception as exc:
+            await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
+            if prepared_voice is not None and st.player is not prepared_voice[0]:
+                # Se o preconnect criou uma sessão que nem chegou a ser entregue
+                # ao player, não deixe uma conexão órfã após falha de resolução.
+                voice_client, created = prepared_voice
+                if created:
+                    with contextlib.suppress(Exception):
+                        if getattr(voice_client, "is_connected", lambda: False)():
+                            await voice_client.disconnect(force=True)
             self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="play_failed", error=f"{type(exc).__name__}: {short_text(exc, 260)}")
             self.log("play_failed", guild_id=guild_id, transport=st.transport or "unknown", error=st.last_error)
@@ -2346,19 +2421,81 @@ class MusicAgent:
             raise RuntimeError(f"canal de voz {voice_channel_id} não encontrado")
         return guild, channel
 
-    async def _play_direct_voice(self, guild_id: int, track: AgentTrack) -> None:
+    async def _ensure_direct_voice_client(self, guild_id: int) -> tuple[Any, bool]:
+        """Prepare a sessão de voz e diga se esta chamada criou a conexão."""
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        guild, channel = await self._resolve_guild_and_channel(guild_id, st.voice_channel_id)
+        existing = guild.voice_client
+        if existing is None or not getattr(existing, "is_connected", lambda: False)():
+            self.log("voice_connecting", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
+            voice_client = await channel.connect(self_deaf=True)
+            self.log("voice_connected", guild_id=guild_id, channel=st.voice_channel_id, transport="direct", reused=False)
+            return voice_client, True
+        voice_client = existing
+        current_channel_id = getattr(getattr(voice_client, "channel", None), "id", None)
+        if current_channel_id != st.voice_channel_id:
+            self.log("voice_moving", guild_id=guild_id, channel=st.voice_channel_id, from_channel=current_channel_id, transport="direct")
+            await voice_client.move_to(channel)
+        else:
+            self.log("voice_reused", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
+        return voice_client, False
+
+    async def _discard_prepared_voice_task(self, guild_id: int, task: asyncio.Task | None) -> None:
+        """Cancele um preconnect obsoleto e desfaça apenas conexões criadas por ele."""
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        result = await asyncio.gather(task, return_exceptions=True)
+        prepared = result[0] if result else None
+        if isinstance(prepared, tuple) and len(prepared) == 2:
+            voice_client, created = prepared
+            st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+            if created and st.player is not voice_client:
+                with contextlib.suppress(Exception):
+                    if getattr(voice_client, "is_connected", lambda: False)():
+                        await voice_client.disconnect(force=True)
+                self.log("voice_preconnect_discarded", guild_id=guild_id, transport="direct")
+
+    async def _confirm_direct_playback(self, voice_client: Any, source: Any, *, max_delay: float) -> float:
+        """Confirme playback assim que o primeiro frame sair, sem atraso fixo."""
+        max_delay = max(0.05, float(max_delay or 0.35))
+        poll = max(0.01, min(0.10, env_float("MUSIC_AGENT_DIRECT_CONFIRM_POLL_SECONDS", 0.04)))
+        started = time.monotonic()
+        deadline = started + max_delay
+        tracks_first_frame = hasattr(source, "first_frame_ms")
+        while True:
+            if not getattr(voice_client, "is_connected", lambda: False)():
+                raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
+            playing = bool(
+                getattr(voice_client, "is_playing", lambda: False)()
+                or getattr(voice_client, "is_paused", lambda: False)()
+            )
+            if playing and (not tracks_first_frame or getattr(source, "first_frame_ms", None) is not None):
+                return max(0.0, time.monotonic() - started)
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            await asyncio.sleep(min(poll, max(0.0, deadline - now)))
+        if not getattr(voice_client, "is_connected", lambda: False)():
+            raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
+        if not getattr(voice_client, "is_playing", lambda: False)() and not getattr(voice_client, "is_paused", lambda: False)():
+            raise RuntimeError("ffmpeg iniciou, mas o áudio não ficou tocando")
+        return max(0.0, time.monotonic() - started)
+
+    async def _play_direct_voice(self, guild_id: int, track: AgentTrack, *, prepared_voice: tuple[Any, bool] | None = None) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         if not track.stream_url:
             raise RuntimeError("track sem stream_url direto")
-        guild, channel = await self._resolve_guild_and_channel(guild_id, st.voice_channel_id)
-        self.log("voice_connecting", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
-        existing = guild.voice_client
-        if existing is None or not getattr(existing, "is_connected", lambda: False)():
-            voice_client = await channel.connect(self_deaf=True)
+        voice_client = prepared_voice[0] if prepared_voice is not None else None
+        if (
+            voice_client is None
+            or not getattr(voice_client, "is_connected", lambda: False)()
+            or getattr(getattr(voice_client, "channel", None), "id", None) != st.voice_channel_id
+        ):
+            voice_client, _created = await self._ensure_direct_voice_client(guild_id)
         else:
-            voice_client = existing
-            if getattr(getattr(voice_client, "channel", None), "id", None) != st.voice_channel_id:
-                await voice_client.move_to(channel)
+            self.log("voice_preconnect_reused", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
         if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
             voice_client.stop()
         source = self._build_ffmpeg_source(track.stream_url, volume_percent=st.volume_percent, start_offset_seconds=getattr(track, "start_offset_seconds", 0.0))
@@ -2375,22 +2512,27 @@ class MusicAgent:
                 return
             asyncio.run_coroutine_threadsafe(self._direct_after(guild_id, error, playback_token), loop)
 
+        play_called_monotonic = time.monotonic()
         voice_client.play(source, after=after)
-        # Confirmação curta: evita segurar a UI/reação depois que discord.py já
-        # iniciou o FFmpeg, mas ainda confirma que a voz realmente ficou tocando.
-        confirm_delay = max(0.25, min(1.2, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.35)))
-        await asyncio.sleep(confirm_delay)
-        if not getattr(voice_client, "is_connected", lambda: False)():
-            raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
-        if not getattr(voice_client, "is_playing", lambda: False)() and not getattr(voice_client, "is_paused", lambda: False)():
-            raise RuntimeError("ffmpeg iniciou, mas o áudio não ficou tocando")
-        # O relógio monotônico representa apenas o tempo efetivamente tocado
-        # nesta instância. O offset do seek é somado separadamente em public().
-        # Subtraí-lo aqui fazia a posição reportada contar o seek duas vezes.
-        st.started_monotonic = time.monotonic()
+        # Confirme assim que o primeiro frame PCM for consumido. O limite antigo
+        # continua como fallback, mas deixa de ser uma espera fixa no hot path.
+        confirm_delay = max(0.05, min(1.2, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.35)))
+        confirm_elapsed = await self._confirm_direct_playback(voice_client, source, max_delay=confirm_delay)
+        # O relógio monotônico começa no primeiro frame observado quando o source
+        # fornece essa métrica; caso contrário use o instante de voice_client.play.
+        first_frame_monotonic = getattr(source, "first_frame_monotonic", None)
+        st.started_monotonic = float(first_frame_monotonic or play_called_monotonic)
         st.paused_monotonic = 0.0
         self._set_status(st, "playing", event="direct_track_start_confirmed")
-        self.log("play_started", guild_id=guild_id, transport="direct", title=track.title, confirm_delay=confirm_delay)
+        self.log(
+            "play_started",
+            guild_id=guild_id,
+            transport="direct",
+            title=track.title,
+            confirm_delay=confirm_delay,
+            confirm_elapsed_ms=round(confirm_elapsed * 1000.0, 1),
+            first_frame_ms=getattr(source, "first_frame_ms", None),
+        )
         self._schedule_next_queue_prefetch(guild_id, reason="direct_playing")
 
     def _ffmpeg_before_options_for_offset(self, start_offset_seconds: float = 0.0) -> str:
