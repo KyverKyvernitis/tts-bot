@@ -140,7 +140,7 @@ def _schedule_tts_prune(callback, path):
             _TTS_MAINTENANCE_PENDING = None
 
 
-AGENT_VERSION = "0.3.34"
+AGENT_VERSION = "0.3.35"
 STARTED_AT = time.time()
 
 
@@ -345,6 +345,28 @@ class AgentMixedAudioSource(discord.AudioSource):
     def _limit(self, value: int) -> int:
         return max(-32768, min(32767, int(value)))
 
+    def _audioop(self) -> Any | None:
+        # discord.py installs/provides an audioop-compatible module on runtimes
+        # where CPython no longer bundles it. Keep a pure-Python fallback so the
+        # agent remains portable on stripped Termux environments.
+        cached = getattr(self, "_audioop_module", ...)
+        if cached is not ...:
+            return cached
+        try:
+            import audioop as module  # type: ignore[import-not-found]
+        except Exception:
+            module = None
+        self._audioop_module = module
+        return module
+
+    def _scale_frame(self, frame: bytes, volume: float) -> bytes:
+        if not frame or abs(volume - 1.0) <= 0.001:
+            return frame
+        module = self._audioop()
+        if module is not None:
+            return module.mul(frame, 2, volume)
+        return self._samples(frame, volume).tobytes()
+
     def _samples(self, frame: bytes, volume: float) -> array:
         samples = array("h")
         samples.frombytes(frame)
@@ -364,6 +386,22 @@ class AgentMixedAudioSource(discord.AudioSource):
         for i, sample in enumerate(other):
             base[i] = self._limit(int(base[i]) + int(sample))
 
+    def _mix_bytes(self, base: bytes, frame: bytes, volume: float) -> bytes:
+        if not frame:
+            return base
+        target_size = len(base)
+        if len(frame) < target_size:
+            frame = frame + (b"\x00" * (target_size - len(frame)))
+        elif len(frame) > target_size:
+            frame = frame[:target_size]
+        module = self._audioop()
+        if module is not None:
+            return module.add(base, self._scale_frame(frame, volume), 2)
+        base_samples = array("h")
+        base_samples.frombytes(base)
+        self._mix_into(base_samples, frame, volume)
+        return base_samples.tobytes()
+
     def read(self) -> bytes:
         if self._closed:
             return b""
@@ -380,10 +418,14 @@ class AgentMixedAudioSource(discord.AudioSource):
             self.cleanup()
             return b""
         music_volume = self.normal_music_volume * (self.duck_factor if overlays else 1.0)
+        # Hot path: while no TTS overlay exists there is nothing to mix. Scaling
+        # the whole PCM frame in C avoids ~1,920 Python iterations every 20 ms.
+        if music_frame and not overlays:
+            return self._scale_frame(music_frame, music_volume)
         if music_frame:
-            base = self._samples(music_frame, music_volume)
+            base = self._scale_frame(music_frame, music_volume)
         else:
-            base = array("h", [0] * (PCM_FRAME_BYTES // 2))
+            base = b"\x00" * PCM_FRAME_BYTES
         ended: list[dict[str, Any]] = []
         for overlay in overlays:
             source = overlay.get("source")
@@ -396,7 +438,7 @@ class AgentMixedAudioSource(discord.AudioSource):
                 ended.append(overlay)
                 continue
             if frame:
-                self._mix_into(base, frame, float(overlay.get("volume") or 1.0))
+                base = self._mix_bytes(base, frame, float(overlay.get("volume") or 1.0))
             else:
                 with contextlib.suppress(Exception):
                     source.cleanup()
@@ -406,7 +448,7 @@ class AgentMixedAudioSource(discord.AudioSource):
         if ended:
             with self._lock:
                 self._overlays = [ov for ov in self._overlays if ov not in ended]
-        return base.tobytes()
+        return base
 
     def cleanup(self) -> None:
         if self._closed:
@@ -649,6 +691,12 @@ class MusicAgent:
         self._resolve_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._resolve_locks: dict[str, asyncio.Lock] = {}
         self._resolve_lock_users: dict[str, int] = {}
+        self.resolve_max_concurrency = max(1, env_int("MUSIC_AGENT_RESOLVE_MAX_CONCURRENCY", 1))
+        self._resolve_active = 0
+        self._resolve_waiters: list[tuple[int, int, asyncio.Future]] = []
+        self._resolve_waiter_sequence = 0
+        self._resolve_scheduler_lock = asyncio.Lock()
+        self._resolve_thread_local = threading.local()
         self._voice_dependencies_cache: tuple[float, dict[str, Any]] | None = None
         self._voice_dependencies_cache_ttl = max(0.0, env_float("MUSIC_AGENT_DEPENDENCY_CACHE_TTL_SECONDS", 30.0))
         self._prefetch_tasks: dict[str, asyncio.Task] = {}
@@ -701,6 +749,102 @@ class MusicAgent:
                 users.pop(key, None)
                 if locks.get(key) is lock:
                     locks.pop(key, None)
+
+    async def _acquire_resolve_slot(self, priority: int) -> None:
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future | None = None
+        async with self._resolve_scheduler_lock:
+            if self._resolve_active < self.resolve_max_concurrency and not self._resolve_waiters:
+                self._resolve_active += 1
+                return
+            self._resolve_waiter_sequence += 1
+            waiter = loop.create_future()
+            self._resolve_waiters.append((int(priority), self._resolve_waiter_sequence, waiter))
+            self._resolve_waiters.sort(key=lambda item: (item[0], item[1]))
+        try:
+            # Shield keeps the scheduler-owned Future intact when only the
+            # caller is cancelled. That lets us distinguish queued vs. already
+            # granted slots and hand a granted slot forward without leaking it.
+            await asyncio.shield(waiter)
+        except BaseException:
+            granted = False
+            async with self._resolve_scheduler_lock:
+                queued = any(item[2] is waiter for item in self._resolve_waiters)
+                if queued:
+                    self._resolve_waiters = [item for item in self._resolve_waiters if item[2] is not waiter]
+                    if not waiter.done():
+                        waiter.cancel()
+                else:
+                    granted = waiter.done() and not waiter.cancelled()
+            if granted:
+                await self._release_resolve_slot()
+            raise
+
+    async def _release_resolve_slot(self) -> None:
+        async with self._resolve_scheduler_lock:
+            while self._resolve_waiters:
+                _priority, _sequence, waiter = self._resolve_waiters.pop(0)
+                if waiter.done():
+                    continue
+                waiter.set_result(None)
+                return
+            self._resolve_active = max(0, self._resolve_active - 1)
+
+    @contextlib.asynccontextmanager
+    async def _resolve_slot(self, priority: int = 0):
+        await self._acquire_resolve_slot(priority)
+        try:
+            yield
+        finally:
+            await self._release_resolve_slot()
+
+    def _terminate_process_tree(self, proc: subprocess.Popen) -> None:
+        if proc.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except Exception:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+        try:
+            proc.wait(timeout=0.6)
+        except Exception:
+            try:
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except Exception:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+
+    def _run_ytdlp_command(self, cmd: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+        cancel_event = getattr(self._resolve_thread_local, "cancel_event", None)
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(Path.home() / "phone-worker"),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=(os.name == "posix"),
+        )
+        deadline = time.monotonic() + max(0.5, float(timeout))
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                self._terminate_process_tree(proc)
+                raise RuntimeError("resolução yt-dlp cancelada")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._terminate_process_tree(proc)
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            try:
+                stdout, stderr = proc.communicate(timeout=min(0.2, remaining))
+                return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
 
     def _resolve_cache_key(self, query: str, track_meta: dict[str, Any] | None = None) -> str:
         meta = track_meta or {}
@@ -867,7 +1011,7 @@ class MusicAgent:
     async def _prefetch_track(self, body: dict[str, Any], track_meta: dict[str, Any], query: str, cache_key: str) -> None:
         try:
             started = time.time()
-            await asyncio.wait_for(self.resolve_track(query, track_meta=track_meta, body=body), timeout=self.prefetch_timeout)
+            await asyncio.wait_for(self.resolve_track(query, track_meta=track_meta, body=body, priority=20), timeout=self.prefetch_timeout)
             self.log("prefetch_ok", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), elapsed_ms=round((time.time() - started) * 1000.0, 1))
         except asyncio.CancelledError:
             return
@@ -1174,7 +1318,7 @@ class MusicAgent:
                     "query": query,
                     "track": current_first.public(),
                 }
-                resolved = await asyncio.wait_for(self.resolve_track(query, track_meta=current_first.public(), body=body), timeout=self.prefetch_timeout)
+                resolved = await asyncio.wait_for(self.resolve_track(query, track_meta=current_first.public(), body=body, priority=20), timeout=self.prefetch_timeout)
                 latest2 = self.states.setdefault(int(guild_id or 0), GuildMusicState(guild_id=int(guild_id or 0)))
                 if int(getattr(latest2, "playback_token", 0) or 0) == token and latest2.queue:
                     check_key = self._resolve_cache_key(
@@ -2362,7 +2506,7 @@ class MusicAgent:
         # viva e deixe o mesmo timeout AFK/idle decidir quando sair da call.
         self._schedule_idle_disconnect(guild_id)
 
-    async def resolve_track(self, query: str, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
+    async def resolve_track(self, query: str, *, track_meta: dict[str, Any], body: dict[str, Any], priority: int = 0) -> AgentTrack:
         direct = str(track_meta.get("stream_url") or body.get("stream_url") or "").strip()
         title_hint = _metadata_text(track_meta.get("title") or body.get("title"), limit=160)
         requester_id = safe_id(body.get("requester_id") or track_meta.get("requester_id"))
@@ -2407,7 +2551,28 @@ class MusicAgent:
                 self.log("resolve_stream_cache_hit_after_wait", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
                 return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
             started = time.time()
-            resolved = await asyncio.to_thread(self._resolve_with_ytdlp, query)
+            async with self._resolve_slot(priority):
+                # The blocking resolver runs in a worker thread, but cancellation
+                # propagates through this Event so an active yt-dlp process (and
+                # its JS-runtime children) is terminated instead of leaking.
+                cancel_event = threading.Event()
+
+                def _run() -> dict[str, Any]:
+                    self._resolve_thread_local.cancel_event = cancel_event
+                    try:
+                        return self._resolve_with_ytdlp(query)
+                    finally:
+                        with contextlib.suppress(Exception):
+                            del self._resolve_thread_local.cancel_event
+
+                resolver_task = asyncio.create_task(asyncio.to_thread(_run))
+                try:
+                    resolved = await asyncio.shield(resolver_task)
+                except asyncio.CancelledError:
+                    cancel_event.set()
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(asyncio.shield(resolver_task), timeout=1.5)
+                    raise
             self._resolve_cache_put(cache_key, resolved)
             self.log("resolve_ytdlp_done", guild_id=safe_id(body.get("guild_id")), elapsed_ms=round((time.time() - started) * 1000.0, 1), title=resolved.get("title"))
             return self._agent_track_from_resolved(resolved, query=query, track_meta=track_meta, body=body, cached=False)
@@ -2436,7 +2601,7 @@ class MusicAgent:
                 "-g", target,
             ]
             fast_started = time.time()
-            fast = subprocess.run(fast_cmd, cwd=str(Path.home() / "phone-worker"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=max(5, min(self.ytdlp_timeout, 18)))
+            fast = self._run_ytdlp_command(fast_cmd, timeout=max(5, min(self.ytdlp_timeout, 18)))
             lines = [line.strip() for line in (fast.stdout or "").splitlines() if line.strip()]
             urls = [line for line in lines if line.startswith(("http://", "https://")) and not line.startswith(("https://i.ytimg.com", "http://i.ytimg.com"))]
             def marker(name: str) -> str:
@@ -2469,7 +2634,7 @@ class MusicAgent:
                 }
             self.log("yt_dlp_fast_url_fallback", rc=fast.returncode, error=short_text(fast.stderr, 160))
         cmd = base_cmd + ["-f", self.ytdlp_format, "-J", target]
-        proc = subprocess.run(cmd, cwd=str(Path.home() / "phone-worker"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.ytdlp_timeout)
+        proc = self._run_ytdlp_command(cmd, timeout=self.ytdlp_timeout)
         if proc.returncode != 0 and not proc.stdout.strip():
             raise RuntimeError(short_text(proc.stderr or f"yt-dlp rc={proc.returncode}", 300))
         data = json.loads(proc.stdout or "{}")

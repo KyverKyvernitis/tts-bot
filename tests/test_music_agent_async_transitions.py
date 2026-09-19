@@ -418,3 +418,130 @@ def test_ephemeral_tts_lock_registry_is_released(music):
         assert agent._tts_direct_lock_users == {}
 
     run(scenario())
+
+
+
+def test_mixer_hot_path_uses_frame_level_scaling(music):
+    class Source:
+        def __init__(self, frame):
+            self.frame = frame
+            self.cleaned = False
+        def read(self):
+            frame, self.frame = self.frame, b""
+            return frame
+        def cleanup(self):
+            self.cleaned = True
+
+    class FastAudio:
+        def __init__(self):
+            self.mul_calls = []
+        def mul(self, frame, width, volume):
+            self.mul_calls.append((len(frame), width, volume))
+            return b"x" * len(frame)
+
+    async def scenario():
+        source = Source(b"\x01\x00" * 1920)
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(),
+            music_source=source,
+            music_volume=0.55,
+        )
+        fast = FastAudio()
+        mixer._audioop_module = fast
+        mixer._samples = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("hot path caiu no loop Python"))
+        frame = mixer.read()
+        assert frame == b"x" * 3840
+        assert fast.mul_calls == [(3840, 2, 0.55)]
+
+    run(scenario())
+
+
+def test_resolve_scheduler_prioritizes_interactive_over_prefetch(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.resolve_max_concurrency = 1
+        entered = []
+        release_holder = asyncio.Event()
+
+        async def holder():
+            async with agent._resolve_slot(0):
+                entered.append("holder")
+                await release_holder.wait()
+
+        async def waiter(name, priority):
+            async with agent._resolve_slot(priority):
+                entered.append(name)
+
+        first = asyncio.create_task(holder())
+        await asyncio.sleep(0)
+        prefetch = asyncio.create_task(waiter("prefetch", 20))
+        await asyncio.sleep(0)
+        interactive = asyncio.create_task(waiter("interactive", 0))
+        await asyncio.sleep(0)
+        release_holder.set()
+        await asyncio.gather(first, prefetch, interactive)
+
+        assert entered == ["holder", "interactive", "prefetch"]
+        assert agent._resolve_active == 0
+        assert agent._resolve_waiters == []
+
+    run(scenario())
+
+
+def test_cancelled_resolution_signals_blocking_resolver(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        started = music.threading.Event()
+        stopped = music.threading.Event()
+
+        def blocking_resolve(query):
+            cancel_event = agent._resolve_thread_local.cancel_event
+            started.set()
+            while not cancel_event.wait(0.01):
+                pass
+            stopped.set()
+            raise RuntimeError("cancelled")
+
+        agent._resolve_with_ytdlp = blocking_resolve
+        task = asyncio.create_task(
+            agent.resolve_track(
+                "https://example.test/cancel",
+                track_meta={"title": "cancel", "webpage_url": "https://example.test/cancel"},
+                body={"guild_id": 99},
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert stopped.is_set()
+        assert agent._resolve_active == 0
+
+    run(scenario())
+
+
+
+def test_cancelled_resolve_waiter_does_not_leak_scheduler_slot(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.resolve_max_concurrency = 1
+        holder_release = asyncio.Event()
+
+        async def holder():
+            async with agent._resolve_slot(0):
+                await holder_release.wait()
+
+        first = asyncio.create_task(holder())
+        await asyncio.sleep(0)
+        waiting = asyncio.create_task(agent._acquire_resolve_slot(20))
+        await asyncio.sleep(0)
+        assert len(agent._resolve_waiters) == 1
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert agent._resolve_waiters == []
+        holder_release.set()
+        await first
+        assert agent._resolve_active == 0
+
+    run(scenario())
