@@ -27,7 +27,9 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/agente/utilitarios.py",
              "cogs/musica/runtime_telefone/agente/estado.py",
              "cogs/musica/runtime_telefone/agente/mixer_pcm.py",
-             "cogs/musica/runtime_telefone/agente/resolucao.py"}
+             "cogs/musica/runtime_telefone/agente/resolucao.py",
+             "cogs/musica/runtime_telefone/agente/reproducao.py",
+             "cogs/musica/runtime_telefone/agente/tts.py"}
 
 
 def load(name, path):

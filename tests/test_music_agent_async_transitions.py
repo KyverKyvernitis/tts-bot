@@ -259,7 +259,8 @@ def test_concurrent_overlay_tts_keeps_ducked_until_last_overlay_finishes(music, 
             def has_tts(self):
                 return bool(self.futures)
 
-        monkeypatch.setattr(music, "AgentMixedAudioSource", Mixer)
+        from cogs.musica.runtime_telefone.agente import tts as tts_runtime
+        monkeypatch.setattr(tts_runtime, "AgentMixedAudioSource", Mixer)
         mixer = Mixer()
         player = types.SimpleNamespace(source=mixer)
         st = music.GuildMusicState(guild_id=gid, current=music.AgentTrack(title="music", query="music"), player=player)

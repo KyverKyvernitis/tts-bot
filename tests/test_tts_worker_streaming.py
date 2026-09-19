@@ -244,11 +244,11 @@ class ResourceTests(unittest.TestCase):
 
     def test_mixer_cancellation_removes_only_its_own_overlay(self):
         # Load only the real mixer class; this test does not need Discord login.
-        text = (ROOT / 'deploy/termux/phone-worker/music_agent.py').read_text()
+        text = (ROOT / 'cogs/musica/runtime_telefone/agente/mixer_pcm.py').read_text()
         node = next(n for n in ast.parse(text).body if isinstance(n,ast.ClassDef) and n.name=='AgentMixedAudioSource')
         from array import array
         namespace = {'discord':types.SimpleNamespace(AudioSource=object), 'asyncio':asyncio,
-                     'contextlib':contextlib,'threading':threading,'array':array,'PCM_FRAME_BYTES':3840,'Any':object}
+                     'contextlib':contextlib,'threading':threading,'time':time,'array':array,'PCM_FRAME_BYTES':3840,'Any':object}
         exec(compile(ast.Module(body=[node], type_ignores=[]),'<mixer>', 'exec'),namespace)
         class Source:
             cleaned = False
@@ -270,7 +270,7 @@ class ResourceTests(unittest.TestCase):
 
 class RemoteCancellationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        source = (ROOT / 'deploy/termux/phone-worker/music_agent.py').read_text()
+        source = (ROOT / 'cogs/musica/runtime_telefone/agente/tts.py').read_text()
         names = {'_tts_requests','_run_tts_request','cmd_cancel_tts'}
         methods = [n for n in ast.walk(ast.parse(source)) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in names]
         namespace = {'asyncio':asyncio, 'time':time, 'safe_id':int}

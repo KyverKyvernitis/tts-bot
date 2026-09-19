@@ -49,6 +49,11 @@ def _load_music_agent(monkeypatch):
     monkeypatch.setitem(sys.modules, "discord", discord)
     monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
     monkeypatch.setitem(sys.modules, "aiohttp.web", web)
+    # O runtime musical é modular; remova os módulos carregados com o stub de
+    # Discord do teste anterior antes de importar o entrypoint novamente.
+    for loaded_name in list(sys.modules):
+        if loaded_name.startswith("cogs.musica.runtime_telefone.agente"):
+            sys.modules.pop(loaded_name, None)
     name = "music_agent_lifecycle_test"
     sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(name, MUSIC)
@@ -315,7 +320,7 @@ def test_phone_worker_duplicate_detection_has_proc_cwd_fallback():
 
 
 def test_music_agent_tts_missing_provider_fails_before_ffmpeg_pipe():
-    source = MUSIC.read_text(encoding="utf-8")
+    source = (ROOT / "cogs/musica/runtime_telefone/agente/tts.py").read_text(encoding="utf-8")
     block = source.split("async def _prepare_tts_source", 1)[1].split("\n    async def cmd_tts", 1)[0]
     assert "provider_module = {'gtts': 'gtts', 'edge': 'edge_tts'}.get(engine)" in block
     assert "provider TTS {engine} indisponível no Music Agent; envie áudio pré-sintetizado" in block

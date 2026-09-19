@@ -52,6 +52,8 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("cogs/musica/runtime_telefone/agente/estado.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/mixer_pcm.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/resolucao.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/reproducao.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/tts.py", 0o644),
     ("start-phone-worker.sh", 0o755),
     ("start-phone-music-agent.sh", 0o755),
     ("watch-phone-worker.sh", 0o755),
@@ -91,6 +93,8 @@ PHONE_WORKER_DOMAIN_SOURCE_TARGETS = frozenset({
     "cogs/musica/runtime_telefone/agente/estado.py",
     "cogs/musica/runtime_telefone/agente/mixer_pcm.py",
     "cogs/musica/runtime_telefone/agente/resolucao.py",
+    "cogs/musica/runtime_telefone/agente/reproducao.py",
+    "cogs/musica/runtime_telefone/agente/tts.py",
 })
 PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example"})
 PHONE_WORKER_SOURCE_FILES = tuple(

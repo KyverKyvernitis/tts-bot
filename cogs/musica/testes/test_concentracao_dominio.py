@@ -167,6 +167,8 @@ def test_runtime_musical_do_phone_worker_tem_fonte_canonica_na_cog() -> None:
     assert (ROOT / "cogs/musica/runtime_telefone/agente/estado.py").is_file()
     assert (ROOT / "cogs/musica/runtime_telefone/agente/mixer_pcm.py").is_file()
     assert (ROOT / "cogs/musica/runtime_telefone/agente/resolucao.py").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/agente/reproducao.py").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/agente/tts.py").is_file()
     legado = ROOT / "deploy/termux/phone-worker/music_agent_runtime"
     assert not (legado / "__init__.py").exists()
     assert not (legado / "lifecycle.py").exists()
@@ -174,6 +176,8 @@ def test_runtime_musical_do_phone_worker_tem_fonte_canonica_na_cog() -> None:
     agente = _texto("deploy/termux/phone-worker/music_agent.py")
     assert "cogs.musica.runtime_telefone.agente.configuracao" in agente
     assert "cogs.musica.runtime_telefone.agente.ciclo_vida" in agente
+    assert "cogs.musica.runtime_telefone.agente.reproducao" in agente
+    assert "cogs.musica.runtime_telefone.agente.tts" in agente
     assert "from music_agent_runtime" not in agente
 
 
@@ -181,6 +185,8 @@ def test_publisher_do_worker_distribui_runtime_musical_a_partir_da_cog() -> None
     texto = _texto("scripts/core-worker-automation.py")
     assert '"cogs/musica/runtime_telefone/agente/configuracao.py"' in texto
     assert '"cogs/musica/runtime_telefone/agente/ciclo_vida.py"' in texto
+    assert '"cogs/musica/runtime_telefone/agente/reproducao.py"' in texto
+    assert '"cogs/musica/runtime_telefone/agente/tts.py"' in texto
     assert '"music_agent_runtime/lifecycle.py"' not in texto
 
 
@@ -195,5 +201,10 @@ def test_entrypoint_music_agent_nao_reimplementa_estado_mixer_e_utilitarios() ->
     assert "cogs.musica.runtime_telefone.agente.mixer_pcm" in texto
     assert "cogs.musica.runtime_telefone.agente.utilitarios" in texto
     assert "cogs.musica.runtime_telefone.agente.resolucao" in texto
+    assert "cogs.musica.runtime_telefone.agente.reproducao" in texto
+    assert "cogs.musica.runtime_telefone.agente.tts" in texto
     assert "def _resolve_with_ytdlp(" not in texto
     assert "async def resolve_track(" not in texto
+    assert "async def _play_next(" not in texto
+    assert "async def cmd_voice_tts(" not in texto
+    assert "async def _recover_current_stream(" not in texto
