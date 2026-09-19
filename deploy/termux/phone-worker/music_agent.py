@@ -140,7 +140,7 @@ def _schedule_tts_prune(callback, path):
             _TTS_MAINTENANCE_PENDING = None
 
 
-AGENT_VERSION = "0.3.35"
+AGENT_VERSION = "0.3.36"
 STARTED_AT = time.time()
 
 
@@ -538,6 +538,10 @@ class AgentTrack:
     audio_codec: str = ""
     audio_abr: int = 0
     start_offset_seconds: float = 0.0
+    # Contador interno: não faz parte do contrato público da fila/painel.
+    # Impede loops infinitos quando um stream expirado continua falhando.
+    stream_recovery_attempts: int = 0
+    stream_resolved_monotonic: float = 0.0
 
     def public(self) -> dict[str, Any]:
         return {
@@ -703,6 +707,11 @@ class MusicAgent:
         self.resolve_cache_ttl = self.stream_cache_ttl
         self.prefetch_enabled = truthy(os.getenv("MUSIC_AGENT_PREFETCH_ENABLED"), True)
         self.prefetch_timeout = max(3.0, env_float("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", 18.0))
+        self.stream_recovery_enabled = truthy(os.getenv("MUSIC_AGENT_STREAM_RECOVERY_ENABLED"), True)
+        self.stream_recovery_max_attempts = max(0, min(3, env_int("MUSIC_AGENT_STREAM_RECOVERY_MAX_ATTEMPTS", 1)))
+        self.stream_recovery_backtrack_seconds = max(0.0, min(3.0, env_float("MUSIC_AGENT_STREAM_RECOVERY_BACKTRACK_SECONDS", 0.35)))
+        default_refresh_age = min(max(self.stream_cache_ttl * 0.75, 30.0), 150.0) if self.stream_cache_ttl > 0 else 120.0
+        self.stream_refresh_before_play_seconds = max(15.0, env_float("MUSIC_AGENT_STREAM_REFRESH_BEFORE_PLAY_SECONDS", default_refresh_age))
         self._idle_disconnect_tasks: dict[int, asyncio.Task] = {}
         self._tts_direct_locks: dict[int, asyncio.Lock] = {}
         self._tts_direct_lock_users: dict[int, int] = {}
@@ -894,7 +903,7 @@ class MusicAgent:
         if self.metadata_cache_ttl <= 0 or not key or not data:
             return
         stable = dict(data)
-        for volatile_key in ("stream_url", "url", "direct_url", "http_headers"):
+        for volatile_key in ("stream_url", "url", "direct_url", "http_headers", "_stream_resolved_monotonic"):
             stable.pop(volatile_key, None)
         if len(self._metadata_cache) >= 512:
             self._cache_prune_one(self._metadata_cache)
@@ -922,7 +931,9 @@ class MusicAgent:
             return
         if len(self._resolve_cache) >= 128:
             self._cache_prune_one(self._resolve_cache)
-        self._resolve_cache[key] = (time.monotonic(), dict(data))
+        payload = dict(data)
+        payload.setdefault("_stream_resolved_monotonic", time.monotonic())
+        self._resolve_cache[key] = (time.monotonic(), payload)
 
     def _invalidate_stream_cache(self, key: str) -> None:
         if key:
@@ -934,6 +945,16 @@ class MusicAgent:
         meta = track.public()
         key = self._resolve_cache_key(track.query or track.webpage_url or track.title, meta)
         self._invalidate_stream_cache(key)
+
+    def _track_stream_needs_refresh(self, track: AgentTrack | None) -> bool:
+        if track is None or not str(track.stream_url or "").startswith(("http://", "https://")):
+            return False
+        resolved_at = max(0.0, float(getattr(track, "stream_resolved_monotonic", 0.0) or 0.0))
+        if resolved_at <= 0:
+            # URLs externas sem timestamp conhecido continuam válidas até falhar;
+            # o recovery cobre esse caso sem adivinhar a idade do link.
+            return False
+        return time.monotonic() - resolved_at >= self.stream_refresh_before_play_seconds
 
     def _agent_track_from_resolved(self, resolved: dict[str, Any], *, query: str, track_meta: dict[str, Any], body: dict[str, Any], cached: bool = False) -> AgentTrack:
         title_hint = _metadata_text(track_meta.get("title") or body.get("title"), limit=160)
@@ -962,6 +983,7 @@ class MusicAgent:
             audio_codec=short_text(resolved.get("audio_codec") or resolved.get("codec"), 40).lower(),
             audio_abr=int(float(resolved.get("audio_abr") or resolved.get("abr") or 0) or 0),
             start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
+            stream_resolved_monotonic=max(0.0, float(resolved.get("_stream_resolved_monotonic") or time.monotonic())),
         )
         return track
 
@@ -1337,7 +1359,9 @@ class MusicAgent:
                 base = max(0.0, float(getattr(current, "start_offset_seconds", 0.0) or 0.0))
                 elapsed = base + max(0.0, time.monotonic() - float(st.started_monotonic))
                 remaining = max(0.0, float(current.duration) - elapsed)
-                delay = max(2.0, remaining - env_float("MUSIC_AGENT_PREFETCH_BEFORE_END_SECONDS", 45.0))
+                # Se a faixa já está dentro da janela de prefetch, resolva agora.
+                # O mínimo antigo de 2s atrasava desnecessariamente faixas curtas.
+                delay = max(0.0, remaining - env_float("MUSIC_AGENT_PREFETCH_BEFORE_END_SECONDS", 45.0))
         except Exception:
             delay = 3.0
 
@@ -2355,6 +2379,16 @@ class MusicAgent:
         voice_prepare_task: asyncio.Task | None = None
         prepared_voice: tuple[Any, bool] | None = None
         try:
+            if st.current and self._track_stream_needs_refresh(st.current):
+                self.log(
+                    "stale_prefetch_refresh",
+                    guild_id=guild_id,
+                    title=st.current.title,
+                    age_seconds=round(time.monotonic() - float(st.current.stream_resolved_monotonic or 0.0), 1),
+                )
+                self._invalidate_track_stream_cache(st.current)
+                st.current.stream_url = ""
+                st.current.transport_hint = "metadata-lazy"
             if st.current and not st.current.stream_url:
                 # A conexão do Discord e o yt-dlp são independentes. Faça os
                 # dois em paralelo para que o tempo de handshake de voz não
@@ -2543,7 +2577,18 @@ class MusicAgent:
         # Confirme assim que o primeiro frame PCM for consumido. O limite antigo
         # continua como fallback, mas deixa de ser uma espera fixa no hot path.
         confirm_delay = max(0.05, min(1.2, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.35)))
-        confirm_elapsed = await self._confirm_direct_playback(voice_client, source, max_delay=confirm_delay)
+        try:
+            confirm_elapsed = await self._confirm_direct_playback(voice_client, source, max_delay=confirm_delay)
+        except Exception:
+            if playback_token != int(getattr(st, "playback_token", 0) or 0):
+                # O callback `after` ou uma ação do usuário já assumiu a transição.
+                # Não deixe a confirmação atrasada sobrescrever recovery/skip/stop.
+                self.log("play_start_superseded", guild_id=guild_id, transport="direct", title=track.title)
+                return
+            raise
+        if playback_token != int(getattr(st, "playback_token", 0) or 0):
+            self.log("play_start_superseded", guild_id=guild_id, transport="direct", title=track.title)
+            return
         # O relógio monotônico começa no primeiro frame observado quando o source
         # fornece essa métrica; caso contrário use o instante de voice_client.play.
         first_frame_monotonic = getattr(source, "first_frame_monotonic", None)
@@ -2600,6 +2645,98 @@ class MusicAgent:
         )
         return discord.PCMVolumeTransformer(pcm, volume=volume)
 
+    async def _recover_current_stream(self, guild_id: int, *, played_for: float, reason: str) -> bool:
+        """Re-resolve uma URL tocável quebrada e retoma a faixa uma única vez.
+
+        URLs diretas (especialmente googlevideo) são efêmeras. Em vez de pular
+        imediatamente a faixa quando FFmpeg encerra cedo/erra, invalide apenas
+        o cache de stream, preserve metadata e peça uma URL nova ao yt-dlp.
+        """
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        track = st.current
+        if not self.stream_recovery_enabled or track is None:
+            return False
+        attempts = max(0, int(getattr(track, "stream_recovery_attempts", 0) or 0))
+        if attempts >= self.stream_recovery_max_attempts:
+            self.log(
+                "stream_recovery_exhausted",
+                guild_id=guild_id,
+                reason=reason,
+                attempts=attempts,
+                title=getattr(track, "title", ""),
+            )
+            return False
+
+        # A posição autoritativa é o offset usado para iniciar esta execução +
+        # o tempo efetivamente tocado. Um pequeno backtrack reduz o risco de
+        # cortar áudio no ponto de reconexão sem reiniciar a música inteira.
+        base_offset = max(0.0, float(getattr(track, "start_offset_seconds", 0.0) or 0.0))
+        resume_offset = max(0.0, base_offset + max(0.0, float(played_for or 0.0)) - self.stream_recovery_backtrack_seconds)
+        if track.duration is not None:
+            with contextlib.suppress(Exception):
+                resume_offset = min(resume_offset, max(0.0, float(track.duration) - 0.05))
+
+        meta = track.public()
+        query = self._query_from_track_meta(meta, fallback_query=track.query or track.webpage_url or track.title)
+        if not query:
+            return False
+        body = {
+            "guild_id": guild_id,
+            "voice_channel_id": st.voice_channel_id,
+            "text_channel_id": st.text_channel_id,
+            "requester_id": track.requester_id,
+            "requester_name": track.requester_name,
+            "query": query,
+            "track": meta,
+            "position_seconds": resume_offset,
+        }
+        self._invalidate_track_stream_cache(track)
+        self._set_status(st, "preparing", event="stream_recovery")
+        started = time.monotonic()
+        self.log(
+            "stream_recovery_started",
+            guild_id=guild_id,
+            reason=reason,
+            attempt=attempts + 1,
+            resume_offset=round(resume_offset, 2),
+            title=track.title,
+        )
+        try:
+            # Recovery é interação ativa e deve passar à frente de prefetches.
+            recovered = await asyncio.wait_for(
+                self.resolve_track(query, track_meta=meta, body=body, priority=-20),
+                timeout=max(5.0, self.prepare_timeout),
+            )
+            recovered.start_offset_seconds = resume_offset
+            recovered.stream_recovery_attempts = attempts + 1
+            st.current = recovered
+            await asyncio.wait_for(
+                self._play_direct_voice(guild_id, recovered),
+                timeout=max(5.0, self.prepare_timeout),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._invalidate_track_stream_cache(st.current)
+            self.log(
+                "stream_recovery_failed",
+                guild_id=guild_id,
+                reason=reason,
+                attempt=attempts + 1,
+                error=f"{type(exc).__name__}: {short_text(exc, 220)}",
+            )
+            return False
+        self.log(
+            "stream_recovery_ok",
+            guild_id=guild_id,
+            reason=reason,
+            attempt=attempts + 1,
+            resume_offset=round(resume_offset, 2),
+            elapsed_ms=round((time.monotonic() - started) * 1000.0, 1),
+            title=recovered.title,
+        )
+        return True
+
     async def _direct_after(self, guild_id: int, error: Exception | None, playback_token: int = 0) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         if playback_token and playback_token != int(getattr(st, "playback_token", 0) or 0):
@@ -2613,6 +2750,8 @@ class MusicAgent:
         played_for = time.monotonic() - float(st.started_monotonic or 0.0) if st.started_monotonic else 0.0
         min_ok = max(0.5, env_float("MUSIC_AGENT_EARLY_END_SECONDS", 2.5))
         if error:
+            if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_error"):
+                return
             self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="direct_after_error", error=f"{type(error).__name__}: {short_text(error, 260)}")
             self.log("play_failed", guild_id=guild_id, transport="direct", error=st.last_error)
@@ -2633,6 +2772,8 @@ class MusicAgent:
             and (remaining_expected is None or remaining_expected > min_ok)
         )
         if early_unexpected:
+            if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_early_end"):
+                return
             self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="direct_after_early_end", error=f"áudio encerrou cedo demais ({played_for:.1f}s)")
             self.log("play_failed", guild_id=guild_id, transport="direct", error=st.last_error, title=getattr(st.current, "title", ""))
@@ -2656,6 +2797,7 @@ class MusicAgent:
 
         if finished is not None and loop_mode == "one":
             finished.start_offset_seconds = 0.0
+            finished.stream_recovery_attempts = 0
             st.queue.insert(0, finished)
             self.log("loop_one_requeue", guild_id=guild_id, title=getattr(finished, "title", ""))
             await self._play_next(guild_id)
@@ -2663,6 +2805,7 @@ class MusicAgent:
 
         if finished is not None and loop_mode == "all":
             finished.start_offset_seconds = 0.0
+            finished.stream_recovery_attempts = 0
             st.queue.append(finished)
             self.log("loop_all_requeue", guild_id=guild_id, title=getattr(finished, "title", ""), queue_size=len(st.queue))
 
@@ -2699,6 +2842,7 @@ class MusicAgent:
                 audio_codec=short_text(track_meta.get("resolved_audio_codec") or track_meta.get("audio_codec"), 40).lower(),
                 audio_abr=int(float(track_meta.get("resolved_audio_abr") or track_meta.get("audio_abr") or 0) or 0),
                 start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
+                stream_resolved_monotonic=time.monotonic(),
             )
         cache_key = self._resolve_cache_key(query, track_meta)
         cached = self._resolve_cache_get(cache_key)

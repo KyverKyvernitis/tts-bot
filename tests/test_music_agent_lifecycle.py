@@ -700,3 +700,210 @@ def test_direct_confirmation_returns_immediately_after_first_frame(music, monkey
         assert sleeps == []
 
     run(scenario())
+
+
+def test_stream_recovery_reresolves_and_resumes_near_last_position(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 41
+        agent.stream_recovery_enabled = True
+        agent.stream_recovery_max_attempts = 1
+        agent.stream_recovery_backtrack_seconds = 0.35
+        original = music.AgentTrack(
+            title="recover",
+            query="https://youtu.be/recover",
+            webpage_url="https://youtu.be/recover",
+            stream_url="https://expired.example/audio",
+            duration=180.0,
+            start_offset_seconds=30.0,
+        )
+        st = music.GuildMusicState(
+            guild_id=gid,
+            voice_channel_id=900,
+            text_channel_id=901,
+            current=original,
+            status="playing",
+        )
+        agent.states[gid] = st
+        resolved = []
+        played = []
+
+        async def fake_resolve(query, *, track_meta, body, priority=0):
+            resolved.append((query, body["position_seconds"], priority))
+            return music.AgentTrack(
+                title="recover",
+                query=query,
+                webpage_url="https://youtu.be/recover",
+                stream_url="https://fresh.example/audio",
+                duration=180.0,
+            )
+
+        async def fake_play(value, track, **kwargs):
+            played.append((value, track.stream_url, track.start_offset_seconds, track.stream_recovery_attempts))
+
+        agent.resolve_track = fake_resolve
+        agent._play_direct_voice = fake_play
+        assert await agent._recover_current_stream(gid, played_for=10.0, reason="test") is True
+        assert resolved == [("https://youtu.be/recover", pytest.approx(39.65), -20)]
+        assert played == [(gid, "https://fresh.example/audio", pytest.approx(39.65), 1)]
+        assert st.current is not None
+        assert st.current.stream_recovery_attempts == 1
+        assert st.current.start_offset_seconds == pytest.approx(39.65)
+
+        # Uma segunda falha na mesma execução não pode criar retry infinito.
+        assert await agent._recover_current_stream(gid, played_for=5.0, reason="again") is False
+        assert len(resolved) == 1
+
+    run(scenario())
+
+
+def test_direct_after_error_recovers_before_advancing_queue(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 42
+        token = 7
+        st = music.GuildMusicState(
+            guild_id=gid,
+            current=music.AgentTrack(title="current", query="current", duration=200.0),
+            queue=[music.AgentTrack(title="next", query="next")],
+            status="playing",
+            playback_token=token,
+            started_monotonic=music.time.monotonic() - 12.0,
+        )
+        agent.states[gid] = st
+        recovered = []
+        advanced = []
+
+        async def fake_recover(value, *, played_for, reason):
+            recovered.append((value, played_for, reason))
+            return True
+
+        async def forbidden_next(value, **kwargs):
+            advanced.append(value)
+
+        agent._recover_current_stream = fake_recover
+        agent._play_next = forbidden_next
+        await agent._direct_after(gid, RuntimeError("ffmpeg died"), token)
+        assert len(recovered) == 1
+        assert recovered[0][0] == gid
+        assert recovered[0][1] >= 11.0
+        assert recovered[0][2] == "direct_after_error"
+        assert advanced == []
+        assert st.current.title == "current"
+        assert [item.title for item in st.queue] == ["next"]
+
+    run(scenario())
+
+
+def test_direct_early_end_recovers_before_marking_failed(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 43
+        token = 9
+        st = music.GuildMusicState(
+            guild_id=gid,
+            current=music.AgentTrack(title="current", query="current", duration=180.0),
+            status="playing",
+            playback_token=token,
+            started_monotonic=music.time.monotonic() - 0.8,
+        )
+        agent.states[gid] = st
+        reasons = []
+
+        async def fake_recover(value, *, played_for, reason):
+            reasons.append(reason)
+            return True
+
+        agent._recover_current_stream = fake_recover
+        await agent._direct_after(gid, None, token)
+        assert reasons == ["direct_after_early_end"]
+        assert st.status != "failed"
+        assert st.current is not None
+
+    run(scenario())
+
+
+def test_stream_recovery_counter_is_internal_not_public_contract(music):
+    track = music.AgentTrack(title="x", query="x", stream_recovery_attempts=1)
+    assert "stream_recovery_attempts" not in track.public()
+
+
+def test_stale_prefetched_stream_is_reresolved_before_play(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 44
+        now = [300.0]
+        monkeypatch.setattr(music.time, "monotonic", lambda: now[0])
+        agent.stream_refresh_before_play_seconds = 120.0
+        stale = music.AgentTrack(
+            title="stale",
+            query="https://youtu.be/stale",
+            webpage_url="https://youtu.be/stale",
+            stream_url="https://old.example/audio",
+            duration=180.0,
+            stream_resolved_monotonic=100.0,
+        )
+        st = music.GuildMusicState(guild_id=gid, queue=[stale], status="idle")
+        agent.states[gid] = st
+        resolved_calls = []
+        played = []
+
+        async def fake_resolve(query, *, track_meta, body, priority=0):
+            resolved_calls.append((query, track_meta.get("title")))
+            return music.AgentTrack(
+                title="stale",
+                query=query,
+                webpage_url="https://youtu.be/stale",
+                stream_url="https://fresh.example/audio",
+                duration=180.0,
+                stream_resolved_monotonic=300.0,
+            )
+
+        async def fake_play(value, track, **kwargs):
+            played.append(track.stream_url)
+
+        agent.resolve_track = fake_resolve
+        agent._play_direct_voice = fake_play
+        agent._should_use_direct_voice = lambda track: True
+        await agent._play_next(gid)
+        assert resolved_calls == [("https://youtu.be/stale", "stale")]
+        assert played == ["https://fresh.example/audio"]
+        assert st.current is not None
+        assert st.current.stream_url == "https://fresh.example/audio"
+
+    run(scenario())
+
+
+def test_direct_start_confirmation_cannot_overwrite_callback_transition(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 45
+        channel_id = 904
+        track = music.AgentTrack(title="race", query="race", stream_url="https://media.example/race")
+        st = music.GuildMusicState(guild_id=gid, voice_channel_id=channel_id, current=track)
+        agent.states[gid] = st
+
+        class Voice:
+            def __init__(self):
+                self.channel = types.SimpleNamespace(id=channel_id)
+                self.playing = False
+            def is_connected(self): return True
+            def is_playing(self): return self.playing
+            def is_paused(self): return False
+            def stop(self): self.playing = False
+            def play(self, source, after=None): self.playing = True
+
+        voice = Voice()
+        agent._build_ffmpeg_source = lambda *args, **kwargs: object()
+
+        async def superseded_confirm(*args, **kwargs):
+            st.playback_token += 1
+            st.status = "preparing"
+            raise RuntimeError("old startup lost the race")
+
+        agent._confirm_direct_playback = superseded_confirm
+        await agent._play_direct_voice(gid, track, prepared_voice=(voice, False))
+        assert st.status == "preparing"
+        assert st.playback_token == 2
+
+    run(scenario())
