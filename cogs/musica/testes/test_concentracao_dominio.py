@@ -163,6 +163,10 @@ def test_worker_only_nao_materializa_extrator_so_para_classificar_url() -> None:
 def test_runtime_musical_do_phone_worker_tem_fonte_canonica_na_cog() -> None:
     assert (ROOT / "cogs/musica/runtime_telefone/agente/configuracao.py").is_file()
     assert (ROOT / "cogs/musica/runtime_telefone/agente/ciclo_vida.py").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/agente/utilitarios.py").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/agente/estado.py").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/agente/mixer_pcm.py").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/agente/resolucao.py").is_file()
     legado = ROOT / "deploy/termux/phone-worker/music_agent_runtime"
     assert not (legado / "__init__.py").exists()
     assert not (legado / "lifecycle.py").exists()
@@ -178,3 +182,18 @@ def test_publisher_do_worker_distribui_runtime_musical_a_partir_da_cog() -> None
     assert '"cogs/musica/runtime_telefone/agente/configuracao.py"' in texto
     assert '"cogs/musica/runtime_telefone/agente/ciclo_vida.py"' in texto
     assert '"music_agent_runtime/lifecycle.py"' not in texto
+
+
+def test_entrypoint_music_agent_nao_reimplementa_estado_mixer_e_utilitarios() -> None:
+    texto = _texto("deploy/termux/phone-worker/music_agent.py")
+    assert "class AgentTrack:" not in texto
+    assert "class GuildMusicState:" not in texto
+    assert "class AgentMixedAudioSource" not in texto
+    assert "def _select_stream_info(" not in texto
+    assert "def _looks_like_url(" not in texto
+    assert "cogs.musica.runtime_telefone.agente.estado" in texto
+    assert "cogs.musica.runtime_telefone.agente.mixer_pcm" in texto
+    assert "cogs.musica.runtime_telefone.agente.utilitarios" in texto
+    assert "cogs.musica.runtime_telefone.agente.resolucao" in texto
+    assert "def _resolve_with_ytdlp(" not in texto
+    assert "async def resolve_track(" not in texto

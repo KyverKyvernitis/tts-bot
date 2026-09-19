@@ -23,7 +23,11 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/__init__.py",
              "cogs/musica/runtime_telefone/agente/__init__.py",
              "cogs/musica/runtime_telefone/agente/configuracao.py",
-             "cogs/musica/runtime_telefone/agente/ciclo_vida.py"}
+             "cogs/musica/runtime_telefone/agente/ciclo_vida.py",
+             "cogs/musica/runtime_telefone/agente/utilitarios.py",
+             "cogs/musica/runtime_telefone/agente/estado.py",
+             "cogs/musica/runtime_telefone/agente/mixer_pcm.py",
+             "cogs/musica/runtime_telefone/agente/resolucao.py"}
 
 
 def load(name, path):
