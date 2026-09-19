@@ -10257,8 +10257,12 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "tts_transport.py": ("worker", "tts_transport.py", 0o644),
     "phone_worker_bootstrap.py": ("worker", "phone_worker_bootstrap.py", 0o755),
     "music_agent.py": ("worker", "music_agent.py", 0o755),
-    "music_agent_runtime/__init__.py": ("worker", "music_agent_runtime/__init__.py", 0o644),
-    "music_agent_runtime/lifecycle.py": ("worker", "music_agent_runtime/lifecycle.py", 0o644),
+    "cogs/__init__.py": ("worker", "cogs/__init__.py", 0o644),
+    "cogs/musica/__init__.py": ("worker", "cogs/musica/__init__.py", 0o644),
+    "cogs/musica/runtime_telefone/__init__.py": ("worker", "cogs/musica/runtime_telefone/__init__.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/__init__.py": ("worker", "cogs/musica/runtime_telefone/agente/__init__.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/configuracao.py": ("worker", "cogs/musica/runtime_telefone/agente/configuracao.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/ciclo_vida.py": ("worker", "cogs/musica/runtime_telefone/agente/ciclo_vida.py", 0o644),
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
     "start-phone-music-agent.sh": ("worker", "start-phone-music-agent.sh", 0o755),
     "watch-phone-worker.sh": ("worker", "watch-phone-worker.sh", 0o755),
@@ -10290,6 +10294,13 @@ def _phone_worker_source_hash() -> str:
         if target in _PHONE_WORKER_SOURCE_HASH_EXCLUDED:
             continue
         path, _mode = _safe_update_target_path(target)
+        if not path.is_file() and target.startswith("cogs/") and not str(os.getenv("PHONE_WORKER_RELEASE_DIR") or "").strip():
+            # Em checkout da VPS, a fonte autoritativa do domínio de música fica
+            # fora de deploy/termux. Releases extraídas continuam usando apenas
+            # arquivos presentes no próprio diretório instalado.
+            repo_candidate = Path(__file__).resolve().parents[3] / target
+            if repo_candidate.is_file():
+                path = repo_candidate
         try:
             stat_result = path.stat()
         except OSError:

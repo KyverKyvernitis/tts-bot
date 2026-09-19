@@ -19,7 +19,11 @@ BOOTSTRAP_SHA = "c103058fab021b591e6af384379da8183646a9a29033160c96791bebcd829aa
 NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py",
              "phone_worker_runtime/telemetry.py", "phone_worker_runtime/control_plane.py",
              "phone_worker_runtime/voice_state.py", "phone_worker_runtime/tts_policy.py", "phone_worker_runtime/tts_cache.py", "phone_worker_runtime/tts_android.py", "phone_worker_runtime/tts_providers.py", "phone_worker_runtime/pcm_io.py",
-             "music_agent_runtime/__init__.py", "music_agent_runtime/lifecycle.py"}
+             "cogs/__init__.py", "cogs/musica/__init__.py",
+             "cogs/musica/runtime_telefone/__init__.py",
+             "cogs/musica/runtime_telefone/agente/__init__.py",
+             "cogs/musica/runtime_telefone/agente/configuracao.py",
+             "cogs/musica/runtime_telefone/agente/ciclo_vida.py"}
 
 
 def load(name, path):
@@ -48,6 +52,11 @@ def source_copy(tmp_path, monkeypatch, publisher):
     root = tmp_path / "source"
     phone = root / "deploy/termux/phone-worker"
     shutil.copytree(PHONE, phone, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(ROOT / "cogs/musica/runtime_telefone", root / "cogs/musica/runtime_telefone")
+    shutil.copy2(ROOT / "cogs/__init__.py", root / "cogs/__init__.py")
+    shutil.copy2(ROOT / "cogs/musica/__init__.py", root / "cogs/musica/__init__.py")
+    # Espelha o layout instalado para o hash calculado pelo próprio worker.
+    shutil.copytree(root / "cogs", phone / "cogs")
     monkeypatch.setattr(publisher, "ROOT", root)
     monkeypatch.setattr(publisher, "PHONE_WORKER_CANONICAL_ROOT", phone.resolve())
     return phone
@@ -70,7 +79,7 @@ def test_complete_modular_release_is_accepted_by_original_bootstrap(publisher, t
     extracted = bootstrap._extract_and_validate(archive, staging, outer)
     assert extracted["members"] == len(publisher.PHONE_WORKER_FILES)
     for name, mode in publisher.PHONE_WORKER_FILES:
-        assert (staging / name).read_bytes() == (PHONE / name).read_bytes()
+        assert (staging / name).read_bytes() == publisher._phone_worker_source_path(PHONE, name).read_bytes()
         assert (staging / name).stat().st_mode & 0o777 == mode
     # Import the extracted entrypoint from an unrelated working directory,
     # with site-packages disabled: no accidental imports from the source tree.
@@ -137,7 +146,8 @@ def test_module_only_edit_changes_runtime_hash_and_immutable_release(publisher, 
 @pytest.mark.parametrize("missing", sorted(NEW_FILES))
 def test_missing_new_module_prevents_release(publisher, tmp_path, monkeypatch, missing):
     phone = source_copy(tmp_path, monkeypatch, publisher)
-    (phone / missing).unlink()
+    source_path = publisher._phone_worker_source_path(phone, missing)
+    source_path.unlink()
     assert publisher._hash_phone_worker_files(phone) == ""
     with pytest.raises(RuntimeError, match="arquivos obrigatórios"):
         publisher._build_worker_update_payload()

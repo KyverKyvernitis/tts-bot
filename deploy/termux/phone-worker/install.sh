@@ -81,6 +81,19 @@ cp "$SRC_DIR/accept-core-worker-on-device.sh" "$WORKER_DIR/accept-core-worker-on
 cp "$SRC_DIR/apk_identity.py" "$WORKER_DIR/apk_identity.py"
 cp "$SRC_DIR/tts_transport.py" "$WORKER_DIR/tts_transport.py"
 cp "$SRC_DIR/music_agent.py" "$WORKER_DIR/music_agent.py" 2>/dev/null || true
+MUSIC_PROJECT_ROOT=""
+if [[ -d "$SRC_DIR/cogs/musica/runtime_telefone" ]]; then
+  MUSIC_PROJECT_ROOT="$SRC_DIR"
+elif [[ -d "$SRC_DIR/../../../cogs/musica/runtime_telefone" ]]; then
+  MUSIC_PROJECT_ROOT="$(cd "$SRC_DIR/../../.." && pwd)"
+fi
+if [[ -n "$MUSIC_PROJECT_ROOT" ]]; then
+  mkdir -p "$WORKER_DIR/cogs/musica"
+  cp "$MUSIC_PROJECT_ROOT/cogs/__init__.py" "$WORKER_DIR/cogs/__init__.py"
+  cp "$MUSIC_PROJECT_ROOT/cogs/musica/__init__.py" "$WORKER_DIR/cogs/musica/__init__.py"
+  rm -rf "$WORKER_DIR/cogs/musica/runtime_telefone"
+  cp -R "$MUSIC_PROJECT_ROOT/cogs/musica/runtime_telefone" "$WORKER_DIR/cogs/musica/runtime_telefone"
+fi
 cp "$SRC_DIR/start-phone-worker.sh" "$WORKER_DIR/start-phone-worker.sh"
 cp "$SRC_DIR/watch-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh"
 cp "$SRC_DIR/start-phone-music-agent.sh" "$WORKER_DIR/start-phone-music-agent.sh" 2>/dev/null || true

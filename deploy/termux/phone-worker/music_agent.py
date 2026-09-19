@@ -23,8 +23,8 @@ import os
 import re
 import shutil
 import signal
+import sys
 import subprocess
-import secrets
 import tempfile
 import threading
 import time
@@ -34,7 +34,30 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from music_agent_runtime.lifecycle import cancel_tasks, remove_owned_task, stop_player_instance
+def _enable_music_domain_path() -> None:
+    """Locate the canonical cogs.musica package in repo or extracted worker release."""
+    here = Path(__file__).resolve()
+    for candidate in (here.parent, *here.parents):
+        if (candidate / "cogs" / "musica" / "runtime_telefone").is_dir():
+            value = str(candidate)
+            if value not in sys.path:
+                sys.path.insert(0, value)
+            return
+
+
+_enable_music_domain_path()
+
+from cogs.musica.runtime_telefone.agente.ciclo_vida import (  # noqa: E402
+    cancel_tasks,
+    remove_owned_task,
+    stop_player_instance,
+)
+from cogs.musica.runtime_telefone.agente.configuracao import (  # noqa: E402
+    bootstrap_env,
+    env_float,
+    env_int,
+    truthy,
+)
 
 try:
     from aiohttp import web
@@ -140,85 +163,13 @@ def _schedule_tts_prune(callback, path):
             _TTS_MAINTENANCE_PENDING = None
 
 
-AGENT_VERSION = "0.3.36"
+AGENT_VERSION = "0.3.37"
 STARTED_AT = time.time()
-
-
-def load_env_file(path: Path, *, override: bool = False) -> None:
-    try:
-        lines = path.expanduser().read_text("utf-8", errors="replace").splitlines()
-    except Exception:
-        return
-    for line in lines:
-        raw = line.strip()
-        if not raw or raw.startswith("#") or "=" not in raw:
-            continue
-        key, value = raw.split("=", 1)
-        key = key.strip()
-        if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
-            continue
-        if override or key not in os.environ:
-            os.environ[key] = value.strip().strip('"').strip("'")
-
-
-def bootstrap_env() -> None:
-    worker_dir = Path(os.getenv("PHONE_WORKER_DIR") or Path.home() / "phone-worker").expanduser()
-    load_env_file(Path(os.getenv("PHONE_WORKER_ENV") or Path.home() / ".phone-worker.env"), override=False)
-    env_file = Path(os.getenv("MUSIC_AGENT_ENV") or worker_dir / "secrets" / "music-agent.env").expanduser()
-    load_env_file(env_file, override=False)
-    if not str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip():
-        token = secrets.token_urlsafe(32)
-        os.environ["MUSIC_AGENT_TOKEN"] = token
-        try:
-            env_file.parent.mkdir(parents=True, exist_ok=True)
-            old = env_file.read_text("utf-8", errors="replace") if env_file.exists() else ""
-            lines: list[str] = []
-            replaced = False
-            for line in old.splitlines():
-                if re.match(r"^\s*MUSIC_AGENT_TOKEN\s*=", line):
-                    if not replaced:
-                        lines.append("MUSIC_AGENT_TOKEN=" + token)
-                        replaced = True
-                    continue
-                lines.append(line)
-            if not replaced:
-                lines.append("MUSIC_AGENT_TOKEN=" + token)
-            env_file.write_text("\n".join(lines).rstrip() + "\n", "utf-8")
-            with contextlib.suppress(Exception):
-                os.chmod(env_file, 0o600)
-        except Exception:
-            pass
 
 
 bootstrap_env()
 
-
 _LOCAL_SEARCH_PREFIXES = ("ytsearch", "ytmsearch")
-
-
-def truthy(value: object, default: bool = False) -> bool:
-    if value is None:
-        return default
-    text = str(value).strip().lower().strip('"\'')
-    if not text:
-        return default
-    if text in {"0", "false", "no", "n", "off", "nao", "não"}:
-        return False
-    return text in {"1", "true", "yes", "y", "on", "sim"}
-
-
-def env_int(name: str, default: int) -> int:
-    try:
-        return int(float(os.getenv(name, str(default))))
-    except Exception:
-        return default
-
-
-def env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except Exception:
-        return default
 
 
 def short_text(value: object, limit: int = 180) -> str:

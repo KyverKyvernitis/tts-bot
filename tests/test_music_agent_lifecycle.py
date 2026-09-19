@@ -241,8 +241,8 @@ def test_stop_without_player_is_idempotent(music):
 
 def test_lifecycle_module_remove_requires_same_owner():
     import importlib.util
-    path = ROOT / "deploy/termux/phone-worker/music_agent_runtime/lifecycle.py"
-    spec = importlib.util.spec_from_file_location("music_agent_runtime_lifecycle_unit", path)
+    path = ROOT / "cogs/musica/runtime_telefone/agente/ciclo_vida.py"
+    spec = importlib.util.spec_from_file_location("musica_runtime_ciclo_vida_unit", path)
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     first, replacement = object(), object(); registry={"key": replacement}
     assert mod.remove_owned_task(registry, "key", first) is False

@@ -42,8 +42,12 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("apk_identity.py", 0o644),
     ("tts_transport.py", 0o644),
     ("music_agent.py", 0o755),
-    ("music_agent_runtime/__init__.py", 0o644),
-    ("music_agent_runtime/lifecycle.py", 0o644),
+    ("cogs/__init__.py", 0o644),
+    ("cogs/musica/__init__.py", 0o644),
+    ("cogs/musica/runtime_telefone/__init__.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/__init__.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/configuracao.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/ciclo_vida.py", 0o644),
     ("start-phone-worker.sh", 0o755),
     ("start-phone-music-agent.sh", 0o755),
     ("watch-phone-worker.sh", 0o755),
@@ -72,6 +76,14 @@ PHONE_WORKER_RELEASE_MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 PHONE_WORKER_RELEASE_MAX_EXPANDED_BYTES = 32 * 1024 * 1024
 AGENT_RELEASE_ROOT = ROOT / "data" / "core_worker_agent"
 PHONE_WORKER_CANONICAL_ROOT = (ROOT / "deploy" / "termux" / "phone-worker").resolve()
+PHONE_WORKER_DOMAIN_SOURCE_TARGETS = frozenset({
+    "cogs/__init__.py",
+    "cogs/musica/__init__.py",
+    "cogs/musica/runtime_telefone/__init__.py",
+    "cogs/musica/runtime_telefone/agente/__init__.py",
+    "cogs/musica/runtime_telefone/agente/configuracao.py",
+    "cogs/musica/runtime_telefone/agente/ciclo_vida.py",
+})
 PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example"})
 PHONE_WORKER_SOURCE_FILES = tuple(
     item for item in PHONE_WORKER_FILES if item[0] not in PHONE_WORKER_SOURCE_HASH_EXCLUDED
@@ -198,6 +210,18 @@ def _phone_worker_source_path(root: Path, name: str) -> Path:
         raise ValueError("caminho fora da raiz do phone-worker")
     if root.is_symlink():
         raise ValueError("link na raiz do phone-worker recusado")
+
+    if name in PHONE_WORKER_DOMAIN_SOURCE_TARGETS:
+        project_root = ROOT.resolve()
+        path = project_root
+        for part in parts:
+            path = path / part
+            if path.is_symlink():
+                raise ValueError(f"link no fonte de domínio recusado: {name}")
+        if not path.resolve().is_relative_to(project_root):
+            raise ValueError(f"fonte de domínio fora do projeto: {name}")
+        return path
+
     root = root.resolve()
     path = root
     for part in parts:

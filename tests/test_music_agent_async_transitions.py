@@ -285,7 +285,7 @@ def test_concurrent_overlay_tts_keeps_ducked_until_last_overlay_finishes(music, 
 
 
 def test_lifecycle_playback_owned_requires_track_identity_and_generation(music):
-    from music_agent_runtime.lifecycle import playback_owned
+    from cogs.musica.runtime_telefone.agente.ciclo_vida import playback_owned
 
     current = object()
     state = types.SimpleNamespace(current=current, playback_token=7)
@@ -295,7 +295,7 @@ def test_lifecycle_playback_owned_requires_track_identity_and_generation(music):
 
 
 def test_lifecycle_cancel_tasks_deduplicates_and_collects_cancellation(music):
-    from music_agent_runtime.lifecycle import cancel_tasks
+    from cogs.musica.runtime_telefone.agente.ciclo_vida import cancel_tasks
 
     async def scenario():
         entered = asyncio.Event()

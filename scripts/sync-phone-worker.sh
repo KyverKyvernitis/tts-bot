@@ -62,6 +62,12 @@ log "copiando arquivos do phone-worker"
   "$SRC_DIR/music_agent.py" \
   "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/music_agent.py"
 
+log "copiando runtime canônico de música"
+"${SSH_BASE[@]}" "mkdir -p '$REMOTE_DIR/cogs/musica'"
+"${SCP_BASE[@]}" "$ROOT_DIR/cogs/__init__.py" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/cogs/__init__.py"
+"${SCP_BASE[@]}" "$ROOT_DIR/cogs/musica/__init__.py" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/cogs/musica/__init__.py"
+"${SCP_BASE[@]}" -r "$ROOT_DIR/cogs/musica/runtime_telefone" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/cogs/musica/"
+
 # Scripts reais ficam apenas em ~/phone-worker. Em ~/ ficam wrappers pequenos
 # para não preservar cópias antigas que possam disparar pip/clang pesado.
 for f in phone_worker_bootstrap.py repair-phone-worker.sh accept-core-worker-on-device.sh start-phone-worker.sh start-phone-music-agent.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
