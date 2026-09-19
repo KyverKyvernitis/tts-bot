@@ -347,46 +347,6 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
 
 
 
-    def test_music_agent_router_accepts_prebuilt_overlay_contract(self):
-        router_text = (ROOT / "cogs" / "musica" / "legado" / "roteador_audio.py").read_text(encoding="utf-8")
-        router_tree = ast.parse(router_text)
-        methods = [
-            node for node in ast.walk(router_tree)
-            if isinstance(node, ast.AsyncFunctionDef)
-            and node.name == "play_tts_via_music_agent"
-        ]
-        self.assertEqual(len(methods), 1)
-        accepted = {arg.arg for arg in methods[0].args.kwonlyargs}
-        self.assertIn("prebuilt_audio", accepted)
-        self.assertIn("prebuilt_audio_source", accepted)
-
-        audio_text = (ROOT / "cogs" / "tts" / "audio.py").read_text(encoding="utf-8")
-        self.assertIn("payload['prebuilt_audio'] = True", audio_text)
-        self.assertIn("payload['prebuilt_audio_source'] = 'vps-prebuilt'", audio_text)
-
-        method_source = ast.get_source_segment(router_text, methods[0]) or ""
-        self.assertIn("prebuilt_audio=bool(prebuilt_audio)", method_source)
-        self.assertIn('prebuilt_audio_source=str(prebuilt_audio_source or \"\")', method_source)
-
-    def test_music_agent_overlay_prebuilds_audio_on_vps_when_cache_is_cold(self):
-        text = (ROOT / "cogs" / "tts" / "audio.py").read_text(encoding="utf-8")
-        tree = ast.parse(text)
-        helpers = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.AsyncFunctionDef)
-            and node.name == "_maybe_attach_prebuilt_direct_tts_audio"
-        ]
-        self.assertEqual(len(helpers), 1)
-        helper_source = ast.get_source_segment(text, helpers[0]) or ""
-        self.assertIn("generate_if_missing: bool = False", helper_source)
-        self.assertIn("_resolve_or_generate_singleflight_audio", helper_source)
-        self.assertIn("WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB", helper_source)
-        self.assertIn("payload['prebuilt_audio'] = True", helper_source)
-
-        self.assertIn(
-            "generate_if_missing=True",
-            text.split("deve_rotear_tts_para_agente", 1)[1],
-        )
 
 
 if __name__ == "__main__":

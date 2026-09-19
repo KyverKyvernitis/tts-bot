@@ -35,14 +35,14 @@ from cogs.musica.integracoes.tts import (
     deve_adiar_auto_leave_tts,
     deve_rotear_tts_para_agente,
     eh_cliente_voz_lavalink,
-    erro_agente_permite_fallback_local,
     lavalink_ativo,
     musica_ativa,
     preparar_fallback_local_apos_lavalink,
     roteador_suporta_tts,
-    suporta_cache_tts_agente,
-    tocar_tts_via_agente,
     tocar_tts_via_roteador,
+    bloqueio_tts_direto_por_musica,
+    cancelar_tts_remoto,
+    rotear_item_tts_para_musica,
 )
 
 from .helpers import validate_voice
@@ -3919,18 +3919,15 @@ class TTSAudioMixin(SharedSynthesisMixin):
             return False, "edge_vps_stream_fastpath"
         if not self._tts_agent_route_available():
             return False, "worker_route_unavailable"
-        if self._is_music_active_for_guild(int(guild.id)):
-            # O caminho de música/agent já tem uma rota própria acima no worker_loop.
-            return False, "music_active_uses_music_agent_tts_route"
+        voice_agent = self._tts_agent_route_state().get("voice_agent")
+        bloqueio_musical = bloqueio_tts_direto_por_musica(self.bot, int(guild.id), voice_agent)
+        if bloqueio_musical:
+            return False, bloqueio_musical
         disabled_until = float(self._worker_voice_direct_tts_disabled_untils().get(int(guild.id), 0.0) or 0.0)
         if disabled_until > time.monotonic():
             return False, "direct_tts_failure_cooldown"
-        voice_agent = self._tts_agent_route_state().get("voice_agent")
-        if isinstance(voice_agent, dict) and voice_agent:
-            if voice_agent.get("available") is False:
-                return False, "voice_agent_unavailable"
-            if voice_agent.get("music_ready") is False:
-                return False, "music_agent_not_ready"
+        if isinstance(voice_agent, dict) and voice_agent and voice_agent.get("available") is False:
+            return False, "voice_agent_unavailable"
         return True, "allowed"
 
     def _worker_voice_direct_tts_payload(self, guild: discord.Guild, item: QueueItem) -> dict[str, Any]:
@@ -3961,14 +3958,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         }
 
     async def _cancel_remote_tts_request(self, item):
-        if not getattr(item, '_tts_remote_active', False):
-            return
-        item._tts_remote_active = False
-        with contextlib.suppress(Exception):
-            await self._request_phone_worker_json(task='music_agent_command',
-                payload={'action': 'cancel_tts', 'guild_id': item.guild_id,
-                         'tts_request_id': item.request_id, 'timeout_seconds': 2},
-                timeout_seconds=2, max_audio_mb=1, raise_on_worker_error=False)
+        await cancelar_tts_remoto(self, item)
 
     async def _maybe_attach_prebuilt_direct_tts_audio(
         self,
@@ -6367,88 +6357,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
                                     await self._maybe_await(self._disconnect_if_blocked(guild))
                                 continue
 
-                    if (
-                        not bool(getattr(item, "_skip_music_agent_tts_route", False))
-                        and deve_rotear_tts_para_agente(self.bot, guild.id, item.channel_id)
-                    ):
-                        if audio_task is not None and not audio_task.done():
-                            audio_task.cancel()
-                            with contextlib.suppress(BaseException):
-                                await audio_task
-                        elif audio_task is not None and not audio_task.cancelled():
-                            with contextlib.suppress(Exception):
-                                routed_path, routed_cleanup = audio_task.result()
-                                if routed_cleanup and routed_path:
-                                    await self._discard_edge_stream_path(routed_path)
-                        dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
-                        try:
-                            cached_payload = {}
-                            if suporta_cache_tts_agente(self.bot):
-                                await self._maybe_attach_prebuilt_direct_tts_audio(
-                                    cached_payload,
-                                    item,
-                                    generate_if_missing=True,
-                                )
-                                cached_payload.setdefault("cache_key", self._cache_key(item))
-                                cached_payload["tld"] = item.tld
-                                cached_payload["tts_request_id"] = item.request_id
-                                item._tts_remote_active = True
-                            playback_result = await tocar_tts_via_agente(
-                                self.bot,
-                                guild_id=guild.id,
-                                channel_id=item.channel_id,
-                                text=item.text,
-                                **cached_payload,
-                                engine=item.engine,
-                                voice=item.voice,
-                                language=item.language,
-                                rate=item.rate,
-                                pitch=item.pitch,
-                                timeout=self._estimate_playback_timeout(item),
-                            )
-                            item._tts_remote_active = False
-                            playback_started_at = float(playback_result.get("playback_started_at", time.monotonic()) or time.monotonic()) if isinstance(playback_result, dict) else time.monotonic()
-                            queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)
-                            dispatch_ms = max(0.0, (playback_started_at - dequeue_started_at) * 1000.0)
-                            playback_ms = max(0.0, float((playback_result or {}).get("playback_ms", 0.0) or 0.0)) if isinstance(playback_result, dict) else 0.0
-                            self._record_queue_timing(
-                                queue_wait_ms=queue_wait_ms,
-                                dispatch_ms=dispatch_ms,
-                                source_setup_ms=0.0,
-                                play_call_ms=0.0,
-                                playback_ms=playback_ms,
-                                total_to_playback_ms=max(0.0, (playback_started_at - float(getattr(item, "enqueued_at_monotonic", playback_started_at))) * 1000.0),
-                            )
-                            self._schedule_worker_voice_agent_register_session(guild, item, None, source="tts_music_agent_route")
-                            logger.info(
-                                "[tts_voice] TTS roteado pelo worker musical | guild=%s channel=%s engine=%s ok=%s",
-                                guild_id,
-                                item.channel_id,
-                                item.engine,
-                                bool(isinstance(playback_result, dict) and playback_result.get("ok", True)),
-                            )
-                        except Exception as exc:
-                            safe_to_fallback = erro_agente_permite_fallback_local(
-                                self.bot, int(guild.id), exc
-                            )
-                            if safe_to_fallback:
-                                setattr(item, "_skip_music_agent_tts_route", True)
-                                logger.warning(
-                                    "[tts_voice] TTS do worker musical falhou; seguindo fallback seguro | guild=%s channel=%s erro=%s",
-                                    guild_id,
-                                    item.channel_id,
-                                    exc,
-                                )
-                            else:
-                                logger.warning(
-                                    "[tts_voice] TTS do worker musical falhou; mantendo música ativa e descartando TTS para não interromper | guild=%s channel=%s erro=%s",
-                                    guild_id,
-                                    item.channel_id,
-                                    exc,
-                                )
-                                continue
-                        else:
-                            continue
+                    item_consumido_pela_musica, audio_task = await rotear_item_tts_para_musica(
+                        self, guild, item, audio_task
+                    )
+                    if item_consumido_pela_musica:
+                        continue
 
                     engine = str(getattr(item, "engine", "") or "gtts").strip().lower().replace("-", "_")
                     if audio_task is None and engine in {"edge", "gtts"}:

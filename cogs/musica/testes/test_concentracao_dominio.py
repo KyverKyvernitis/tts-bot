@@ -354,3 +354,34 @@ def test_updater_nao_pode_reativar_lavalink_local_da_vps() -> None:
     assert "deploy/systemd/lavalink.service" not in updater
     assert "systemctl enable lavalink.service" not in updater
     assert "systemctl restart lavalink.service" not in updater
+
+
+def test_tts_delega_protocolo_e_roteamento_do_music_agent_ao_dominio_musica() -> None:
+    audio = _texto("cogs/tts/audio.py")
+    integracao = _texto("cogs/musica/integracoes/tts.py")
+
+    assert "task='music_agent_command'" not in audio
+    assert 'task="music_agent_command"' not in audio
+    assert "async def rotear_item_tts_para_musica(" in integracao
+    assert "async def cancelar_tts_remoto(" in integracao
+    assert "await rotear_item_tts_para_musica(" in audio
+    assert "await cancelar_tts_remoto(self, item)" in audio
+
+
+def test_testes_do_pcm_musical_moram_no_dominio_musica() -> None:
+    antigo = ROOT / "tests/test_phone_worker_pcm_lifecycle.py"
+    novo = ROOT / "cogs/musica/testes/runtime_telefone/ponte_worker/test_streams_pcm.py"
+    assert not antigo.exists()
+    assert novo.is_file()
+    texto = novo.read_text(encoding="utf-8")
+    assert "cogs.musica.runtime_telefone.ponte_worker import streams" in texto
+    assert "_phone_worker_music_bridge_module" not in texto
+
+
+def test_testes_da_integracao_tts_music_agent_moram_no_dominio_musica() -> None:
+    raiz = _texto("tests/test_tts_voice_regressions.py")
+    integrado = _texto("cogs/musica/testes/integracoes/test_tts.py")
+    assert "test_music_agent_router_accepts_prebuilt_overlay_contract" not in raiz
+    assert "test_music_agent_overlay_prebuilds_audio_on_vps_when_cache_is_cold" not in raiz
+    assert "test_music_agent_router_accepts_prebuilt_overlay_contract" in integrado
+    assert "test_music_agent_overlay_prebuilds_audio_on_vps_when_cache_is_cold" in integrado

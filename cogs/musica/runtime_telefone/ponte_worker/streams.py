@@ -161,9 +161,29 @@ def _cleanup_music_pcm_cache() -> None:
             break
 
 
+_PCM_IO_MODULE = None
+
+
 def _pcm_io():
-    from phone_worker_runtime import pcm_io
-    return pcm_io
+    global _PCM_IO_MODULE
+    if _PCM_IO_MODULE is not None:
+        return _PCM_IO_MODULE
+    try:
+        from phone_worker_runtime import pcm_io as module
+    except ModuleNotFoundError:
+        # Na release Termux o pacote genérico fica no mesmo sys.path. No
+        # repositório, porém, a fonte canônica da música mora em cogs/musica e
+        # precisa localizar a dependência genérica sem importar phone_worker.py.
+        import importlib.util
+
+        path = Path(__file__).resolve().parents[4] / "deploy/termux/phone-worker/phone_worker_runtime/pcm_io.py"
+        spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_pcm_io", path)
+        if not path.is_file() or spec is None or spec.loader is None:
+            raise
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    _PCM_IO_MODULE = module
+    return module
 
 
 def _music_stream_build_ffmpeg_input_cmd(item: dict[str, Any], *, output: str) -> list[str]:

@@ -1,5 +1,4 @@
-"""PCM registry, temporary files and disconnect cleanup with local boundaries."""
-import importlib.util
+"""PCM musical do Phone Worker: registry, arquivos preparados e streaming."""
 import io
 from pathlib import Path
 import subprocess
@@ -7,15 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-PHONE = Path(__file__).resolve().parents[1] / "deploy/termux/phone-worker/phone_worker.py"
-
-
 @pytest.fixture
 def pcm(monkeypatch, tmp_path):
-    spec = importlib.util.spec_from_file_location("phone_pcm_test", PHONE)
-    worker = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(worker)
-    music = worker._phone_worker_music_bridge_module("streams")
+    from cogs.musica.runtime_telefone.ponte_worker import streams as music
+
     music._MUSIC_STREAMS.clear()
     music._MUSIC_PCM_PREPARATIONS.clear()
     clock = [1000.0]
