@@ -217,7 +217,7 @@ def test_extracted_ui_modules_remain_bounded() -> None:
         BACKEND / "src/services/singleFlight.ts": 30,
         BACKEND / "src/services/dashboardCommandsCatalog.ts": 50,
         BACKEND / "src/services/dashboardCommandsModel.ts": 100,
-        BACKEND / "src/services/dashboardMusicWorker.ts": 100,
+        BACKEND / "src/services/dashboardWorkerAvailability.ts": 140,
         BACKEND / "src/services/dashboardCommandsTypes.ts": 80,
         BACKEND / "src/config/dashboardColorRoleDefaults.ts": 60,
         BACKEND / "src/config/dashboardFormsDefaults.ts": 60,
@@ -543,14 +543,15 @@ def test_message_editor_dialog_lifecycle_is_composed_from_bounded_concerns() -> 
 
 def test_dashboard_commands_facade_keeps_worker_detection_isolated() -> None:
     service = (BACKEND / "src/services/dashboardCommandsService.ts").read_text(encoding="utf-8")
-    worker = (BACKEND / "src/services/dashboardMusicWorker.ts").read_text(encoding="utf-8")
+    worker = (BACKEND / "src/services/dashboardWorkerAvailability.ts").read_text(encoding="utf-8")
     model = (BACKEND / "src/services/dashboardCommandsModel.ts").read_text(encoding="utf-8")
-    assert "dashboardMusicWorkerAvailable" in service
+    assert "dashboardWorkerAvailable" in service
     assert "buildDashboardCommandsPayload" in service
     assert "core_workers_registry" not in service
-    assert "runtimeKind === \"apk\"" in worker
-    assert "phone-worker" in worker and "music" in worker
+    assert "requiredCapabilities" in worker
     assert "CORE_WORKERS_REGISTRY_PATH" in worker
+    assert '"music"' not in worker
+    assert 'cogs/musica/site/dashboard-worker.json' in service
     assert "sourceCategory === \"music\" && !musicAvailable" in model
 
 

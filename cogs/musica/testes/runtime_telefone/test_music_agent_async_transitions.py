@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from test_music_agent_lifecycle import _load_music_agent
+from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
 
 
 @pytest.fixture

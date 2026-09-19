@@ -42,6 +42,10 @@ dist/
 site/
 !tests/site/
 !tests/site/**
+!cogs/musica/site/
+!cogs/musica/site/**
+!cogs/musica/testes/site/
+!cogs/musica/testes/site/**
 .eggs/
 *.egg
 *.egg-info/

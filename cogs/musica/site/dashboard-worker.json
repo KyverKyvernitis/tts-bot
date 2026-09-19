@@ -1,0 +1,8 @@
+{
+  "required_capabilities": ["phone-worker", "music"],
+  "excluded_runtime_kinds": ["apk"],
+  "excluded_source_prefixes": ["core-worker-apk"],
+  "offline_after_seconds": 90,
+  "offline_after_env": "CORE_WORKER_OFFLINE_AFTER_SECONDS",
+  "cache_ms": 5000
+}

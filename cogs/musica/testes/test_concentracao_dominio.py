@@ -72,12 +72,24 @@ def test_tts_nao_acessa_audio_router_diretamente() -> None:
         assert "play_tts_via_music_agent" not in texto
 
 
-def test_ferramenta_spotify_mora_na_cog() -> None:
+def test_ferramenta_spotify_mora_exclusivamente_na_cog() -> None:
     implementacao = _texto("cogs/musica/ferramentas/gerar_token_spotify.py")
-    compat = _texto("scripts/generate_spotify_refresh_token.py")
     assert "accounts.spotify.com/api/token" in implementacao
-    assert "cogs.musica.ferramentas.gerar_token_spotify" in compat
-    assert "accounts.spotify.com/api/token" not in compat
+    assert not (ROOT / "scripts/generate_spotify_refresh_token.py").exists()
+
+
+def test_testes_puramente_musicais_nao_ficam_na_raiz_de_tests() -> None:
+    antigos = (
+        "test_music_agent_async_transitions.py",
+        "test_music_agent_lifecycle.py",
+        "test_music_diagnostics_repo_root.py",
+    )
+    for nome in antigos:
+        assert not (ROOT / "tests" / nome).exists(), nome
+
+    assert (ROOT / "cogs/musica/testes/runtime_telefone/test_music_agent_async_transitions.py").is_file()
+    assert (ROOT / "cogs/musica/testes/runtime_telefone/test_music_agent_lifecycle.py").is_file()
+    assert (ROOT / "cogs/musica/testes/diagnostico/test_repo_root.py").is_file()
 
 
 def test_stub_antigo_diagnostico_musica_foi_removido() -> None:
