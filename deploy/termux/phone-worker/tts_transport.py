@@ -26,6 +26,26 @@ _SLOTS = {}
 _END = object()
 
 
+async def _iter_with_deadline(stream, deadline):
+    """Compatível com Python 3.10: prazo total sem asyncio.timeout()."""
+    iterator = stream.__aiter__()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            try:
+                message = await asyncio.wait_for(iterator.__anext__(), timeout=max(.001, remaining))
+            except StopAsyncIteration:
+                return
+            yield message
+    finally:
+        close = getattr(iterator, 'aclose', None)
+        if callable(close):
+            with contextlib.suppress(BaseException):
+                await close()
+
+
 def _resources(engine):
     global _LOOP, _POOL
     with _LOCK:
@@ -137,11 +157,10 @@ class AudioStream:
             communicate = edge_tts.Communicate(text=self.text, voice=self.voice, rate=self.rate, pitch=self.pitch,
                                               connect_timeout=min(4, int(remaining)),
                                               receive_timeout=min(15, int(remaining)))
-            async with asyncio.timeout(remaining):
-                async for message in communicate.stream():
-                    self._check()
-                    if message.get('type') == 'audio' and message.get('data'):
-                        await asyncio.to_thread(self._put, message['data'])
+            async for message in _iter_with_deadline(communicate.stream(), self.deadline):
+                self._check()
+                if message.get('type') == 'audio' and message.get('data'):
+                    await asyncio.to_thread(self._put, message['data'])
         except BaseException as error:
             self.error = error
         finally:
@@ -169,7 +188,7 @@ class AudioStream:
                     remaining = max(.05, self.deadline - time.monotonic())
                     try:
                         response = state['session'].send(request, proxies=state['proxies'],
-                            verify=False, stream=True, timeout=(min(3.5, remaining), min(8.0, remaining)))
+                            verify=True, stream=True, timeout=(min(3.5, remaining), min(8.0, remaining)))
                         break
                     except requests.exceptions.RequestException:
                         _invalidate_session()

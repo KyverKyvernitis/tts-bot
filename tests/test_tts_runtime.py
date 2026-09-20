@@ -9,7 +9,7 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from test_tts_helpers import tts_audio, QueueItem, GuildTTSState
 from cogs.tts.runtime import MemoryBudget, PathLeases, ReplayBuffer, split_text, unlink_if_unlocked
@@ -227,6 +227,44 @@ class SharedSynthesisTests(unittest.IsolatedAsyncioTestCase):
         self.probe._worker_stream_available_for = lambda _: True
         self.patches.enter_context(patch.object(tts_audio.aiohttp, 'ClientTimeout',
                                                lambda **kwargs: SimpleNamespace(**kwargs)))
+
+    async def test_edge_stream_does_not_require_python311_asyncio_timeout(self):
+        self.tail.set()
+        utterance = item()
+        with patch.object(asyncio, "timeout", side_effect=AssertionError("asyncio.timeout não pode ser usado")):
+            path, temporary = await self.probe._shared_job_file(
+                self.probe._get_state(1),
+                utterance,
+                store_in_cache=False,
+            )
+        try:
+            self.assertTrue(temporary)
+            self.assertEqual(Path(path).read_bytes(), b'A' * 2048 + b'B' * 2048)
+        finally:
+            self.probe._audio_leases().remove(path)
+            self.probe._release_item_audio(utterance)
+
+    async def test_edge_fallback_timeout_degrades_to_gtts_without_escaping_worker(self):
+        fallback_item = item('fallback da Teto')
+        fallback_item.engine = 'teto'
+        fallback_item.piper_fallback_engine = 'edge'
+        fallback_item.piper_fallback_language = 'pt'
+        expected_path = str(Path(self.temp.name) / 'fallback.mp3')
+        Path(expected_path).write_bytes(b'gtts-ok')
+
+        edge = AsyncMock(side_effect=asyncio.TimeoutError())
+        gtts = AsyncMock(return_value=expected_path)
+        with (
+            patch.object(self.probe, '_generate_edge_file', edge),
+            patch.object(self.probe, '_generate_gtts_file', gtts),
+        ):
+            result = await self.probe._generate_piper_fallback_file(fallback_item)
+
+        self.assertEqual(result, expected_path)
+        self.assertEqual(fallback_item._tts_actual_engine, 'gtts')
+        self.assertEqual(fallback_item._tts_actual_item.engine, 'gtts')
+        self.assertEqual(edge.await_count, 1)
+        self.assertEqual(gtts.await_count, 1)
 
     async def test_worker_missing_protocol_falls_back_only_before_audio(self):
         self.worker_response(status=404)

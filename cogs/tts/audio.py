@@ -875,7 +875,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     limits = timeout if isinstance(timeout, tuple) else (timeout, timeout)
                     timeout = tuple(min(float(value or remaining), remaining) for value in limits)
                 try:
-                    response = session.send(request=request, verify=False, proxies=proxies,
+                    response = session.send(request=request, verify=True, proxies=proxies,
                                             timeout=timeout, stream=True)
                     break
                 except requests.exceptions.RequestException as error:
@@ -4443,8 +4443,57 @@ class TTSAudioMixin(SharedSynthesisMixin):
         self._snapshot_tts_item(fallback)
         item._tts_actual_engine, item._tts_actual_item = engine, fallback
         if engine == 'edge':
-            return await self._run_timed_generation('edge', lambda: self._generate_edge_file(fallback.text, fallback.voice, fallback.rate, fallback.pitch), guild_id=item.guild_id)
-        return await self._run_timed_generation('gtts', lambda: self._generate_gtts_file(fallback.text, fallback.language, tld=fallback.tld), guild_id=item.guild_id)
+            try:
+                return await self._run_timed_generation(
+                    'edge',
+                    lambda: self._generate_edge_file(
+                        fallback.text,
+                        fallback.voice,
+                        fallback.rate,
+                        fallback.pitch,
+                        foreground=not bool(getattr(item, '_tts_prefetch', False)),
+                    ),
+                    guild_id=item.guild_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "[tts_fallback] Edge fallback falhou; usando gTTS | guild=%s erro=%s",
+                    item.guild_id,
+                    exc,
+                )
+                fallback = replace(
+                    fallback,
+                    engine='gtts',
+                    voice='',
+                    rate='+0%',
+                    pitch='+0Hz',
+                    _cache_key_value=None,
+                    _dedup_signature=None,
+                )
+                self._snapshot_tts_item(fallback)
+                item._tts_actual_engine, item._tts_actual_item = 'gtts', fallback
+                return await self._run_timed_generation(
+                    'gtts',
+                    lambda: self._generate_gtts_file(
+                        fallback.text,
+                        fallback.language,
+                        tld=fallback.tld,
+                        foreground=not bool(getattr(item, '_tts_prefetch', False)),
+                    ),
+                    guild_id=item.guild_id,
+                )
+        return await self._run_timed_generation(
+            'gtts',
+            lambda: self._generate_gtts_file(
+                fallback.text,
+                fallback.language,
+                tld=fallback.tld,
+                foreground=not bool(getattr(item, '_tts_prefetch', False)),
+            ),
+            guild_id=item.guild_id,
+        )
 
     def _short_tts_benchmark_text(self, value: Any, *, limit: int = 180) -> str:
         text = str(value or "").replace("`", "'").replace("\r", " ").replace("\n", " ").strip()

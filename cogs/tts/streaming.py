@@ -10,6 +10,31 @@ from dataclasses import replace
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, await_physical_completion
 
 
+async def _iter_with_deadline(stream, deadline: float):
+    """Itera um async iterator respeitando um prazo total no Python 3.10+.
+
+    asyncio.timeout() só existe a partir do Python 3.11. O updater pode
+    construir o runtime com Python 3.10, então usamos wait_for() em cada
+    __anext__ mantendo o mesmo deadline global.
+    """
+    iterator = stream.__aiter__()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            try:
+                message = await asyncio.wait_for(iterator.__anext__(), timeout=max(.001, remaining))
+            except StopAsyncIteration:
+                return
+            yield message
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if callable(close):
+            with contextlib.suppress(BaseException):
+                await close()
+
+
 class SharedSynthesisMixin:
     def _shared_synthesis_jobs(self) -> dict[str, StreamJob]:
         jobs = getattr(self, '_tts_shared_jobs', None)
@@ -169,11 +194,10 @@ class SharedSynthesisMixin:
                         rate=self._normalize_edge_rate(job.item.rate), pitch=self._normalize_edge_pitch(job.item.pitch),
                         connect_timeout=a.TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
                         receive_timeout=a.TTS_EDGE_RECEIVE_TIMEOUT_SECONDS)
-                    async with asyncio.timeout(max(.001, job.deadline - time.monotonic())):
-                        async for message in communicate.stream():
-                            data = self._edge_stream_audio_chunk(message)
-                            if data and not await self._append_shared_audio(job, data):
-                                raise asyncio.CancelledError()
+                    async for message in _iter_with_deadline(communicate.stream(), job.deadline):
+                        data = self._edge_stream_audio_chunk(message)
+                        if data and not await self._append_shared_audio(job, data):
+                            raise asyncio.CancelledError()
                 else:
                     language = (job.item.language or a.GTTS_DEFAULT_LANGUAGE).lower().replace('_', '-')
                     if language == 'pt-br':
