@@ -173,7 +173,11 @@ class VoiceStatusController:
             if attempt + 1 >= attempts:
                 break
             self._metric(guild_id, "retries")
-            delay = min(15.0, max(base_delay * (2**attempt), retry_after if http_status == 429 else 0.0))
+            # Em 429, nunca reduza o Retry-After enviado pelo Discord. Para
+            # outros erros transitórios, mantenha o backoff local limitado.
+            delay = max(base_delay * (2**attempt), retry_after if http_status == 429 else 0.0)
+            if http_status != 429:
+                delay = min(15.0, delay)
             logger.info(
                 "[music/voice-status] retry agendado | channel=%s attempt=%s/%s http=%s delay=%.2fs",
                 getattr(channel, "id", None),

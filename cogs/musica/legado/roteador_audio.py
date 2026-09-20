@@ -3334,6 +3334,15 @@ class AudioRouter:
         state.forward_queue.clear()
 
         vc = getattr(guild, "voice_client", None)
+        channel_hint = getattr(vc, "channel", None) if vc is not None else None
+        if channel_hint is None and getattr(state, "last_voice_channel_id", None):
+            channel_hint = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
+        # Restaura efeitos temporários enquanto o bot/worker ainda está na call
+        # sempre que controlamos a desconexão. Isso evita depender de
+        # MANAGE_CHANNELS depois que a voice session já desapareceu.
+        await self._restore_music_session_side_effects(
+            guild, state, reason="music_afk", channel_hint=channel_hint
+        )
         if vc is not None and self._vc_is_connected(vc):
             with contextlib.suppress(Exception):
                 if self._vc_is_playing_or_paused(vc):
@@ -3368,8 +3377,6 @@ class AudioRouter:
             if _vote_task is not None and not _vote_task.done():
                 _vote_task.cancel()
         state.control_vote_cleanup_tasks.clear()
-        await self._restore_auto_bitrate_for_state(guild, state, reason="music_afk")
-        await self._restore_voice_status_for_state(guild, state, reason="music_afk")
         await self.update_panel(guild.id, create=bool(state.now_message))
 
     async def _maybe_disconnect_idle(self, guild: discord.Guild, state: MusicGuildState) -> None:
@@ -3382,6 +3389,15 @@ class AudioRouter:
             self._set_panel_controls_invalidation(guild.id, delay=60.0)
         vc = guild.voice_client
         if not vc or not self._vc_is_connected(vc) or getattr(vc, "channel", None) is None:
+            channel_hint = None
+            if getattr(state, "last_voice_channel_id", None):
+                channel_hint = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
+            # Se o worker já saiu da call antes do monitor local perceber o idle,
+            # ainda finalize o status/bitrate. Antes este return deixava o último
+            # título preso indefinidamente.
+            await self._restore_music_session_side_effects(
+                guild, state, reason="idle_disconnected", channel_hint=channel_hint
+            )
             state.music_session_active = False
             state.music_owns_voice = False
             state.music_afk_expired = False
@@ -3537,6 +3553,12 @@ class AudioRouter:
                             guild.id,
                             remote_event or "-",
                         )
+                        # sincronizar_estado_agente agenda esses efeitos, mas o
+                        # voice_state pode ser o último evento observado. Finalize
+                        # também aqui de forma idempotente para não depender da task.
+                        await self._restore_music_session_side_effects(
+                            guild, state, reason="agent_idle", channel_hint=before_channel
+                        )
                         return
 
         if str(getattr(state, "current_backend", "") or "").lower() == "agent" and state.current is not None:
@@ -3555,6 +3577,12 @@ class AudioRouter:
                     self._set_idle_reason(state, "queue_finished")
                     self._set_current_status(state, "idle")
                     self._mark_internal_voice_disconnect(guild.id, seconds=12.0)
+                    # Este caminho antes retornava sem restaurar o status. Como
+                    # state.current já era limpo, o monitor seguinte podia não
+                    # reconhecer mais que havia uma sessão ativa para finalizar.
+                    await self._restore_music_session_side_effects(
+                        guild, state, reason="agent_natural_end", channel_hint=before_channel
+                    )
                     await self.update_panel(guild.id, create=True)
                     logger.info(
                         "[music/agent] voice_state disconnect tratado como fim natural por tempo da faixa | guild=%s elapsed=%.1f duration=%.1f",
@@ -3599,8 +3627,9 @@ class AudioRouter:
         self._set_current_status(state, "idle")
         state.music_session_active = False
         state.music_owns_voice = False
-        await self._restore_auto_bitrate_for_state(guild, state, reason="external_disconnect", channel_hint=before_channel)
-        await self._restore_voice_status_for_state(guild, state, reason="external_disconnect", channel_hint=before_channel)
+        await self._restore_music_session_side_effects(
+            guild, state, reason="external_disconnect", channel_hint=before_channel
+        )
         state.control_votes.clear()
         self._cancel_music_idle_disconnect(state)
         self._set_idle_reason(
@@ -3756,6 +3785,26 @@ class AudioRouter:
         except RuntimeError:
             state.agent_side_effect_task = None
 
+    async def _restore_music_session_side_effects(
+        self,
+        guild: discord.Guild | None,
+        state: MusicGuildState,
+        *,
+        reason: str,
+        channel_hint=None,
+    ) -> None:
+        """Finaliza efeitos temporários da sessão musical de forma idempotente.
+
+        Centraliza bitrate e status do canal para que todos os caminhos active ->
+        idle/disconnected passem pelo mesmo encerramento.
+        """
+        await self._restore_auto_bitrate_for_state(
+            guild, state, reason=reason, channel_hint=channel_hint
+        )
+        await self._restore_voice_status_for_state(
+            guild, state, reason=reason, channel_hint=channel_hint
+        )
+
     def _schedule_agent_session_finished_effects(self, guild_id: int, reason: str) -> None:
         async def _runner() -> None:
             try:
@@ -3766,8 +3815,9 @@ class AudioRouter:
                 channel = None
                 if st.last_voice_channel_id:
                     channel = guild.get_channel(int(st.last_voice_channel_id)) or self.bot.get_channel(int(st.last_voice_channel_id))
-                await self._restore_auto_bitrate_for_state(guild, st, reason=reason, channel_hint=channel)
-                await self._restore_voice_status_for_state(guild, st, reason=reason, channel_hint=channel)
+                await self._restore_music_session_side_effects(
+                    guild, st, reason=reason, channel_hint=channel
+                )
             except Exception:
                 logger.debug("[music/agent] efeitos de fim da sessão falharam | guild=%s", guild_id, exc_info=True)
 
@@ -4948,6 +4998,9 @@ class AudioRouter:
         state.forward_queue.clear()
         guild = self.bot.get_guild(int(guild_id))
         vc = guild.voice_client if guild else None
+        channel_hint = getattr(vc, "channel", None) if vc is not None else None
+        if channel_hint is None and guild is not None and getattr(state, "last_voice_channel_id", None):
+            channel_hint = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
         if vc:
             # Stop manual precisa limpar também estados presos de TTS/Lavalink. Antes,
             # se o TTS já tinha tocado/encostado na voz, o botão não desconectava e
@@ -4955,11 +5008,16 @@ class AudioRouter:
             with contextlib.suppress(Exception):
                 if self._vc_is_playing_or_paused(vc):
                     await self._vc_stop_audio(vc)
-            if disconnect:
-                with contextlib.suppress(Exception):
-                    self._mark_internal_voice_disconnect(guild_id, seconds=8.0)
-                    await vc.disconnect(force=True)
-                state.music_owns_voice = False
+        # Restaura antes de desconectar. O endpoint de status pode exigir
+        # MANAGE_CHANNELS adicional quando o bot já não está no canal.
+        await self._restore_music_session_side_effects(
+            guild, state, reason="manual_stop", channel_hint=channel_hint
+        )
+        if vc and disconnect:
+            with contextlib.suppress(Exception):
+                self._mark_internal_voice_disconnect(guild_id, seconds=8.0)
+                await vc.disconnect(force=True)
+            state.music_owns_voice = False
         state.current = None
         state.current_started_at_monotonic = 0.0
         state.current_source = None
@@ -4982,8 +5040,6 @@ class AudioRouter:
             if _vote_task is not None and not _vote_task.done():
                 _vote_task.cancel()
         state.control_vote_cleanup_tasks.clear()
-        await self._restore_auto_bitrate_for_state(guild, state, reason="manual_stop")
-        await self._restore_voice_status_for_state(guild, state, reason="manual_stop")
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 

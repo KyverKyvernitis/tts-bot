@@ -554,3 +554,76 @@ async def test_reconcile_mesma_faixa_sem_mudanca_deduplica_put() -> None:
 
     assert [call[1] for call in router.set_calls] == ["A"]
     assert controller.metrics_snapshot(router.guild.id)["deduplicated"] >= 1
+
+@pytest.mark.asyncio
+async def test_rate_limit_429_nao_trunca_retry_after_longo(monkeypatch) -> None:
+    router = FakeRouter(fetch_results=[(False, "")], set_results=[(False, 429, 42.0), True])
+    controller = VoiceStatusController(router)
+    controller.schedule_refresh = lambda *_args, **_kwargs: None
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(float(delay))
+
+    monkeypatch.setattr("cogs.musica.integracoes.status_canal.asyncio.sleep", fake_sleep)
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=True)
+
+    assert sleeps == [pytest.approx(42.0)]
+    assert [call[1] for call in router.set_calls] == ["A", "A"]
+
+
+def _audio_router_method_source(method_name: str) -> str:
+    import ast
+    from pathlib import Path
+
+    raiz = Path(__file__).resolve().parents[4]
+    source = (raiz / "cogs" / "musica" / "legado" / "roteador_audio.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "AudioRouter":
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method_name:
+                    segment = ast.get_source_segment(source, child)
+                    assert segment is not None
+                    return segment
+    raise AssertionError(f"método AudioRouter.{method_name} não encontrado")
+
+
+def test_stop_restaura_status_antes_de_desconectar() -> None:
+    source = _audio_router_method_source("stop")
+    restore = source.index("await self._restore_music_session_side_effects")
+    disconnect = source.index("await vc.disconnect(force=True)")
+    assert restore < disconnect
+    assert 'reason="manual_stop"' in source
+
+
+def test_music_afk_restaura_status_antes_de_desconectar() -> None:
+    source = _audio_router_method_source("_disconnect_music_afk")
+    restore = source.index("await self._restore_music_session_side_effects")
+    disconnect = source.index("await vc.disconnect(force=False)")
+    assert restore < disconnect
+    assert 'reason="music_afk"' in source
+
+
+def test_disconnect_do_agent_finaliza_todos_os_caminhos_idle() -> None:
+    source = _audio_router_method_source("handle_bot_voice_disconnect")
+    assert 'reason="agent_idle"' in source
+    assert 'reason="agent_natural_end"' in source
+    assert 'reason="external_disconnect"' in source
+    natural = source.index('reason="agent_natural_end"')
+    natural_return = source.index("return", natural)
+    assert natural < natural_return
+
+
+def test_idle_sem_voice_client_nao_deixa_status_preso() -> None:
+    source = _audio_router_method_source("_maybe_disconnect_idle")
+    assert 'reason="idle_disconnected"' in source
+    restore = source.index("await self._restore_music_session_side_effects")
+    update = source.index("await self.update_panel", restore)
+    assert restore < update
+
+
+def test_finalizador_central_restaura_bitrate_e_status() -> None:
+    source = _audio_router_method_source("_restore_music_session_side_effects")
+    assert "await self._restore_auto_bitrate_for_state" in source
+    assert "await self._restore_voice_status_for_state" in source
