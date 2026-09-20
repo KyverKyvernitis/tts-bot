@@ -5,6 +5,7 @@ import time
 
 from cogs.musica import configuracao as config
 
+from ..busca import ranquear_faixas
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch
 from .cache_resolucao import (
@@ -139,6 +140,18 @@ async def resolve_music_tracks_on_worker(
         requester_id=requester_id,
         requester_name=requester_name,
     )
+    if busca_textual and len(batch.tracks) > 1:
+        batch.tracks, ranking = ranquear_faixas(clean_query, batch.tracks)
+        if ranking:
+            top = ranking[0]
+            logger.info(
+                "[music/search] ranking aplicado | query=%r tracks=%s top_score=%.4f confidence=%.4f original_index=%s",
+                clean_query,
+                len(batch.tracks),
+                top.score,
+                top.confianca,
+                top.indice_original,
+            )
     elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
     logger.info(
         "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s metadata_only=%s elapsed_ms=%.1f js=%s search=%s cli_rc=%s cli_error=%r",
