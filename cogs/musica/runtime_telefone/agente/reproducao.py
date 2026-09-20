@@ -738,6 +738,54 @@ class ReproducaoMixin:
             raise RuntimeError("ffmpeg iniciou, mas o áudio não ficou tocando")
         return max(0.0, time.monotonic() - started)
 
+    def _discord_opus_bitrate_kbps(self, voice_client: Any, track: AgentTrack | None = None) -> tuple[int, int]:
+        """Escolhe bitrate Opus sem exceder a capacidade do canal.
+
+        O source PCM é reencodado pelo discord.py. Dar um pouco de headroom em
+        relação ao abr da fonte reduz perda geracional, mas manter um teto
+        evita gastar banda/CPU sem ganho perceptível em fontes comprimidas.
+        """
+        channel = getattr(voice_client, "channel", None)
+        channel_bps = max(0, int(getattr(channel, "bitrate", 0) or 0))
+        channel_kbps = max(0, channel_bps // 1000)
+        source_abr = max(0, int(getattr(track, "audio_abr", 0) or 0)) if track is not None else 0
+
+        if source_abr > 0:
+            desired = source_abr + int(self.discord_opus_source_headroom)
+        else:
+            desired = int(self.discord_opus_default_bitrate)
+        desired = max(int(self.discord_opus_min_bitrate), desired)
+        desired = min(int(self.discord_opus_max_bitrate), desired)
+        if channel_kbps > 0:
+            desired = min(desired, channel_kbps)
+
+        # Limites aceitos pelo encoder do discord.py/Opus. O canal pode ter
+        # bitrate menor que o piso configurado; nesse caso respeite o canal.
+        return max(16, min(512, int(desired))), channel_kbps
+
+    def _play_music_source(self, voice_client: Any, source: Any, *, after: Any, opus_bitrate_kbps: int) -> None:
+        if getattr(source, "is_opus", lambda: False)():
+            # FFmpegOpusAudio já chega codificado; kwargs do encoder seriam
+            # ignorados pelo discord.py.
+            voice_client.play(source, after=after)
+            return
+        try:
+            voice_client.play(
+                source,
+                after=after,
+                application="audio",
+                bitrate=max(16, min(512, int(opus_bitrate_kbps))),
+                bandwidth="full",
+                signal_type="music",
+            )
+        except TypeError as exc:
+            # Compatibilidade defensiva com wrappers/test doubles/discord.py
+            # antigo. Não esconda TypeError real vindo de dentro do play().
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            self.log("opus_encoder_kwargs_unsupported", error=short_text(exc, 180))
+            voice_client.play(source, after=after)
+
     async def _play_direct_voice(self, guild_id: int, track: AgentTrack, *, prepared_voice: tuple[Any, bool] | None = None) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         if not track.stream_url:
@@ -753,7 +801,13 @@ class ReproducaoMixin:
             self.log("voice_preconnect_reused", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
         if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
             voice_client.stop()
-        source = self._build_ffmpeg_source(track.stream_url, volume_percent=st.volume_percent, start_offset_seconds=getattr(track, "start_offset_seconds", 0.0))
+        opus_bitrate_kbps, channel_bitrate_kbps = self._discord_opus_bitrate_kbps(voice_client, track)
+        source = self._build_ffmpeg_source(
+            track.stream_url,
+            volume_percent=st.volume_percent,
+            start_offset_seconds=getattr(track, "start_offset_seconds", 0.0),
+            opus_bitrate_kbps=opus_bitrate_kbps,
+        )
         st.player = voice_client
         st.transport = "direct"
         st.playback_token += 1
@@ -771,6 +825,9 @@ class ReproducaoMixin:
             channels=source_channels,
             output="pcm_s16le_48k_stereo" if self.direct_pcm_volume_enabled else "discord-opus",
             resample=bool(source_rate and source_rate != 48000),
+            channel_bitrate_kbps=channel_bitrate_kbps,
+            opus_bitrate_kbps=opus_bitrate_kbps,
+            opus_signal="music",
         )
         self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title, offset=round(float(getattr(track, "start_offset_seconds", 0.0) or 0.0), 2))
 
@@ -781,7 +838,7 @@ class ReproducaoMixin:
             asyncio.run_coroutine_threadsafe(self._direct_after(guild_id, error, playback_token), loop)
 
         play_called_monotonic = time.monotonic()
-        voice_client.play(source, after=after)
+        self._play_music_source(voice_client, source, after=after, opus_bitrate_kbps=opus_bitrate_kbps)
         # Confirme assim que o primeiro frame PCM for consumido. O limite antigo
         # continua como fallback, mas deixa de ser uma espera fixa no hot path.
         confirm_delay = max(0.05, min(1.2, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.35)))
@@ -824,7 +881,14 @@ class ReproducaoMixin:
         # -ss antes do input torna o seek rápido para URLs remotas.
         return f"-ss {offset:.3f} {self.ffmpeg_before_options}".strip()
 
-    def _build_ffmpeg_source(self, stream_url: str, *, volume_percent: int | None = None, start_offset_seconds: float = 0.0) -> Any:
+    def _build_ffmpeg_source(
+        self,
+        stream_url: str,
+        *,
+        volume_percent: int | None = None,
+        start_offset_seconds: float = 0.0,
+        opus_bitrate_kbps: int | None = None,
+    ) -> Any:
         volume = max(0.0, min(10.0, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
         before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
         if self.direct_pcm_volume_enabled:
@@ -843,7 +907,7 @@ class ReproducaoMixin:
                 executable=self.ffmpeg_executable,
                 before_options=before_options,
                 options=self.ffmpeg_options,
-                bitrate=self.ffmpeg_bitrate,
+                bitrate=max(16, min(512, int(opus_bitrate_kbps or self.ffmpeg_bitrate))),
             )
         pcm = discord.FFmpegPCMAudio(
             stream_url,

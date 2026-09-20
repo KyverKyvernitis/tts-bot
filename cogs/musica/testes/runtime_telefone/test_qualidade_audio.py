@@ -100,3 +100,98 @@ def test_fast_path_coleta_codec_rate_channels_sem_nova_consulta() -> None:
         assert marker in resolver
     # Continua sendo o mesmo fast path -g; apenas os campos impressos aumentaram.
     assert '"-g", target' in resolver
+
+
+def test_wave_b_bitrate_opus_respeita_fonte_teto_e_canal(monkeypatch) -> None:
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+
+    def voice(channel_bitrate: int):
+        import types
+        return types.SimpleNamespace(channel=types.SimpleNamespace(bitrate=channel_bitrate))
+
+    track = music.AgentTrack(title="opus", query="opus", audio_abr=160)
+    assert agent._discord_opus_bitrate_kbps(voice(384_000), track) == (192, 384)
+    assert agent._discord_opus_bitrate_kbps(voice(128_000), track) == (128, 128)
+
+    high = music.AgentTrack(title="high", query="high", audio_abr=320)
+    assert agent._discord_opus_bitrate_kbps(voice(384_000), high) == (256, 384)
+
+    # O limite real do canal vence inclusive o piso configurado.
+    assert agent._discord_opus_bitrate_kbps(voice(64_000), track) == (64, 64)
+
+
+def test_wave_b_pcm_sinaliza_music_e_bitrate_no_encoder_discord(monkeypatch) -> None:
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    calls = []
+
+    class Source:
+        def is_opus(self):
+            return False
+
+    class Voice:
+        def play(self, source, **kwargs):
+            calls.append((source, kwargs))
+
+    after = lambda error: None
+    source = Source()
+    agent._play_music_source(Voice(), source, after=after, opus_bitrate_kbps=192)
+    assert calls == [
+        (
+            source,
+            {
+                "after": after,
+                "application": "audio",
+                "bitrate": 192,
+                "bandwidth": "full",
+                "signal_type": "music",
+            },
+        )
+    ]
+
+
+def test_wave_b_source_opus_nao_cria_segundo_encoder(monkeypatch) -> None:
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    calls = []
+
+    class Source:
+        def is_opus(self):
+            return True
+
+    class Voice:
+        def play(self, source, **kwargs):
+            calls.append((source, kwargs))
+
+    after = lambda error: None
+    source = Source()
+    agent._play_music_source(Voice(), source, after=after, opus_bitrate_kbps=224)
+    assert calls == [(source, {"after": after})]
+
+
+def test_wave_b_ffmpeg_opus_usa_bitrate_adaptativo(monkeypatch) -> None:
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    agent.direct_pcm_volume_enabled = False
+    captured = {}
+
+    class OpusSource:
+        def __init__(self, stream_url, **kwargs):
+            captured["url"] = stream_url
+            captured.update(kwargs)
+        def is_opus(self):
+            return True
+
+    monkeypatch.setattr(music.discord, "FFmpegOpusAudio", OpusSource, raising=False)
+    source = agent._build_ffmpeg_source("https://media.example/audio", opus_bitrate_kbps=224)
+    assert source.is_opus() is True
+    assert captured["bitrate"] == 224

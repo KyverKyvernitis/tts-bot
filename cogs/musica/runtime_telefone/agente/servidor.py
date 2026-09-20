@@ -87,7 +87,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.40"
+AGENT_VERSION = "0.3.41"
 STARTED_AT = time.time()
 
 
@@ -120,7 +120,15 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_on_network_error 1 -reconnect_on_http_error 403,404,408,429,5xx -reconnect_delay_max 5 -rw_timeout 15000000",
         )
         self.ffmpeg_options = os.getenv("MUSIC_AGENT_FFMPEG_OPTIONS", "-vn -sn -dn -loglevel warning")
-        self.ffmpeg_bitrate = env_int("MUSIC_AGENT_FFMPEG_OPUS_BITRATE_KBPS", 128)
+        self.ffmpeg_bitrate = max(16, min(512, env_int("MUSIC_AGENT_FFMPEG_OPUS_BITRATE_KBPS", 128)))
+        # O encoder Opus interno do discord.py só é usado para sources PCM.
+        # Ajuste o bitrate à capacidade real do canal e à qualidade da fonte,
+        # evitando tanto o teto fixo de 128 kbps quanto desperdício em 384 kbps
+        # para uma fonte ~128-160 kbps.
+        self.discord_opus_default_bitrate = max(16, min(512, env_int("MUSIC_AGENT_DISCORD_OPUS_DEFAULT_BITRATE_KBPS", 160)))
+        self.discord_opus_min_bitrate = max(16, min(512, env_int("MUSIC_AGENT_DISCORD_OPUS_MIN_BITRATE_KBPS", 96)))
+        self.discord_opus_max_bitrate = max(self.discord_opus_min_bitrate, min(512, env_int("MUSIC_AGENT_DISCORD_OPUS_MAX_BITRATE_KBPS", 256)))
+        self.discord_opus_source_headroom = max(0, min(128, env_int("MUSIC_AGENT_DISCORD_OPUS_SOURCE_HEADROOM_KBPS", 32)))
         self.default_volume_percent = max(0, min(150, env_int("MUSIC_AGENT_DEFAULT_VOLUME_PERCENT", 55)))
         self.duck_volume_percent = max(0, min(100, env_int("MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT", 8)))
         # PCMVolumeTransformer lets the worker-owned direct voice path duck TTS and restore volume.
