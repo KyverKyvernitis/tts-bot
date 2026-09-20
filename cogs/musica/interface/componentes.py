@@ -405,7 +405,7 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
             query,
             requester_id=requester_id,
             requester_name=requester_name,
-            limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
+            limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 3) or 3))) if youtube_text_search else 1),
             metadata_only=youtube_text_search,
             guild_id=guild_id,
         )
@@ -443,7 +443,7 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
                 requester_id=requester_id,
                 requester_name=requester_name,
                 guild_id=guild_id,
-                limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+                limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 3) or 3))),
             )
             return batch, True
         batch = await backends.resolve_lavalink_direct_tracks(

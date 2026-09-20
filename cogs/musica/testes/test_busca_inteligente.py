@@ -240,7 +240,7 @@ def test_deep_pass_reformula_typo_usando_melhor_candidato_sem_trocar_ranking_fin
     assert decisao.executar is True
     assert decisao.motivo in {"score_baixo", "poucos_resultados"}
     assert "Bohemian Rhapsody" in decisao.query
-    assert decisao.limit == 10
+    assert decisao.limit == 5
 
 
 def test_deep_pass_preserva_artista_titulo_e_versao_na_reformulacao() -> None:

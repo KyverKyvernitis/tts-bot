@@ -18,11 +18,12 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
     query = str(body.get("query") or body.get("url") or body.get("q") or "").strip()
     if not query:
         raise ValueError("query vazia")
-    limit = max(1, min(10, int(float(body.get("limit") or body.get("max_results") or 5))))
+    limit = max(1, min(10, int(float(body.get("limit") or body.get("max_results") or 3))))
     timeout = max(5, min(job_timeout, int(float(body.get("timeout_seconds") or min(job_timeout, 30)))))
     fmt = str(body.get("format") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or DEFAULT_YTDLP_AUDIO_FORMAT).strip() or DEFAULT_YTDLP_AUDIO_FORMAT
     is_url = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", query) or query.lower().startswith("www."))
     metadata_only = str(body.get("metadata_only") if body.get("metadata_only") is not None else body.get("search_only") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
+    fast_search = str(body.get("fast_search") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
     allow_playlist = str(body.get("allow_playlist") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
 
     def _default_search_prefix() -> str:
@@ -115,11 +116,16 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
     if cookies_ok:
         ydl_opts["cookiefile"] = str(cookies_path)
     if metadata_only:
-        # Busca textual leve: retorna 5 candidatos sem resolver stream_url, sem
-        # ffmpeg e sem abrir endpoint de áudio. A resolução pesada acontece
-        # apenas depois que o usuário escolhe uma faixa.
+        # Busca textual leve: retorna somente metadata e nunca abre stream/ffmpeg.
+        # No fast pass eliminamos retries de extractor: se o caminho Python falhar,
+        # a busca profunda/fallback posterior cuida da recuperacao sem travar a UI.
         ydl_opts["extract_flat"] = "in_playlist"
+        ydl_opts["playlistend"] = limit
         ydl_opts.pop("format", None)
+        if fast_search:
+            ydl_opts["retries"] = 0
+            ydl_opts["fragment_retries"] = 0
+            ydl_opts["extractor_retries"] = 0
 
     # O suporte Python para js_runtimes pode variar por versão do yt-dlp.
     # A chamada via API continua rápida quando funcionar; se retornar vazio
@@ -239,7 +245,7 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
 
     cli_stderr = ""
     cli_rc: int | None = None
-    if not tracks:
+    if not tracks and not (metadata_only and fast_search):
         cmd_json = [shutil.which("python") or "python", "-m", "yt_dlp"]
         if cookies_ok:
             cmd_json += ["--cookies", str(cookies_path)]
@@ -377,6 +383,7 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
         "playlist_title": playlist_title,
         "truncated": bool(len(entries) > len(tracks)),
         "metadata_only": bool(metadata_only),
+        "fast_search": bool(fast_search),
         "allow_playlist": bool(allow_playlist),
         "elapsed_ms": round((time.time() - started) * 1000.0, 1),
         "cookies": "on" if cookies_ok else "off",

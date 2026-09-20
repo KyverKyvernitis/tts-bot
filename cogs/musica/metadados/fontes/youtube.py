@@ -63,7 +63,7 @@ class ProvedorYouTubeMixin:
             candidate.score -= 10
         return candidate
 
-    async def youtube_search(self, query: str, *, limit: int = 5) -> list[ApiTrackCandidate]:
+    async def youtube_search(self, query: str, *, limit: int = 3, include_details: bool = True) -> list[ApiTrackCandidate]:
         if not self.youtube_api_key:
             return []
         params = urlencode({
@@ -74,6 +74,8 @@ class ProvedorYouTubeMixin:
             "key": self.youtube_api_key,
             "safeSearch": "none",
             "videoEmbeddable": "true",
+            # Reduz payload e parsing no caminho de UI.
+            "fields": "items(id/videoId,snippet(title,channelTitle,thumbnails/default/url,thumbnails/medium/url,thumbnails/high/url))",
         })
         data = await self._to_thread_json(f"https://www.googleapis.com/youtube/v3/search?{params}")
         items = data.get("items") or []
@@ -98,7 +100,7 @@ class ProvedorYouTubeMixin:
             )
             video_ids.append(video_id)
             base[video_id] = candidate
-        if video_ids:
+        if include_details and video_ids:
             duration_params = urlencode({
                 "part": "contentDetails,status",
                 "id": ",".join(video_ids),

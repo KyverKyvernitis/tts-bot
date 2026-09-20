@@ -5,10 +5,10 @@ import copy
 from typing import Any, Awaitable, Callable, Mapping
 
 _Executor = Callable[..., Awaitable[dict[str, Any]]]
-_EM_VOO: dict[tuple[str, str, str, int, bool, bool], asyncio.Task[dict[str, Any]]] = {}
+_EM_VOO: dict[tuple[str, str, str, int, bool, bool, bool], asyncio.Task[dict[str, Any]]] = {}
 
 
-def _chave(base: str, payload: Mapping[str, Any]) -> tuple[str, str, str, int, bool, bool]:
+def _chave(base: str, payload: Mapping[str, Any]) -> tuple[str, str, str, int, bool, bool, bool]:
     return (
         str(base or "").rstrip("/").lower(),
         str(payload.get("task") or ""),
@@ -16,6 +16,7 @@ def _chave(base: str, payload: Mapping[str, Any]) -> tuple[str, str, str, int, b
         int(payload.get("limit") or 1),
         bool(payload.get("metadata_only")),
         bool(payload.get("allow_playlist")),
+        bool(payload.get("fast_search")),
     )
 
 
@@ -30,7 +31,7 @@ def limpar_coalescencia_resolucao() -> None:
     _EM_VOO.clear()
 
 
-def _limpar(chave: tuple[str, str, str, int, bool, bool], task: asyncio.Task[dict[str, Any]]) -> None:
+def _limpar(chave: tuple[str, str, str, int, bool, bool, bool], task: asyncio.Task[dict[str, Any]]) -> None:
     if _EM_VOO.get(chave) is task:
         _EM_VOO.pop(chave, None)
     if not task.cancelled():

@@ -105,7 +105,7 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
             return await self.soundcloud_batch_from_url(url, limit=limit)
         return None
 
-    async def search_sources(self, query: str, *, limit: int = 5, prefer_youtube: bool = True) -> list[ApiTrackCandidate]:
+    async def search_sources(self, query: str, *, limit: int = 3, prefer_youtube: bool = True, total_budget_seconds: float | None = None) -> list[ApiTrackCandidate]:
         """Retorna candidatos crus das fontes disponíveis, preservando a origem.
 
         A deduplicação cross-provider fica para a camada de busca inteligente,
@@ -117,7 +117,7 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
         limit = max(1, min(10, int(limit)))
         timeout_provider = max(
             0.2,
-            float(getattr(config, "MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS", 3.5) or 3.5),
+            float(getattr(config, "MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS", 1.5) or 1.5),
         )
         falhas_para_abrir = max(
             1,
@@ -130,9 +130,9 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
 
         tasks: list[asyncio.Task[list[ApiTrackCandidate]]] = []
 
-        def _agendar(nome: str, func, provider_limit: int) -> None:
+        def _agendar(nome: str, func, provider_limit: int, *, kwargs: dict[str, Any] | None = None) -> None:
             async def _operacao() -> list[ApiTrackCandidate]:
-                return await func(query, limit=provider_limit)
+                return await func(query, limit=provider_limit, **(kwargs or {}))
 
             tasks.append(
                 asyncio.create_task(
@@ -148,7 +148,10 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
             )
 
         if prefer_youtube and self.youtube_api_key:
-            _agendar("youtube", self.youtube_search, limit)
+            # Na lista de resultados, snippet/URL bastam. Duracao/status exatos
+            # ficam para a faixa escolhida/deep metadata e evitamos uma segunda
+            # requisicao videos.list em toda pesquisa.
+            _agendar("youtube", self.youtube_search, limit, kwargs={"include_details": False})
         if self.spotify_client_id and self.spotify_client_secret:
             _agendar("spotify", self.spotify_search, min(limit, 5))
         if self.deezer_enabled:
@@ -159,11 +162,36 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
             return []
 
         results: list[ApiTrackCandidate] = []
-        for item in await asyncio.gather(*tasks):
-            results.extend(item)
+        budget = (
+            max(0.05, float(total_budget_seconds))
+            if total_budget_seconds is not None
+            else max(0.05, float(getattr(config, "MUSIC_SEARCH_PROVIDER_FAST_BUDGET_SECONDS", 0.65) or 0.65))
+        )
+        done, pending = await asyncio.wait(tasks, timeout=budget)
+        # asyncio.wait devolve sets; iterar a lista original preserva a prioridade
+        # deterministica dos providers mesmo quando varios concluem juntos.
+        for task in tasks:
+            if task not in done:
+                continue
+            try:
+                results.extend(task.result())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("[music/search] provider descartado apos falha | erro=%s", exc)
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            logger.debug(
+                "[music/search] budget de providers atingido | budget_ms=%.0f concluidos=%s pendentes=%s",
+                budget * 1000.0,
+                len(done),
+                len(pending),
+            )
         return results
 
-    async def search(self, query: str, *, limit: int = 5, prefer_youtube: bool = True) -> list[ApiTrackCandidate]:
+    async def search(self, query: str, *, limit: int = 3, prefer_youtube: bool = True) -> list[ApiTrackCandidate]:
         results = await self.search_sources(query, limit=limit, prefer_youtube=prefer_youtube)
         if not results:
             return []

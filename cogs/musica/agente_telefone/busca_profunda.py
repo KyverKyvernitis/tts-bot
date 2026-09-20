@@ -44,6 +44,7 @@ async def executar_passagem_profunda(
         somente_metadados=True,
         permitir_playlist=False,
         busca_textual=True,
+        fast_search=False,
     )
     worker_task = asyncio.create_task(
         executar_resolucao_compartilhada(

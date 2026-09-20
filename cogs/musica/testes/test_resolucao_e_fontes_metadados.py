@@ -77,15 +77,16 @@ def test_resolucao_worker_monta_busca_e_limita_link_direto() -> None:
 
     tarefa = _montar_tarefa_resolucao(
         query="artista musica",
-        limit=5,
+        limit=3,
         timeout_seconds=12.0,
         somente_metadados=True,
         permitir_playlist=False,
         busca_textual=True,
     )
     assert tarefa["task"] == "music_ytdlp_resolve"
-    assert tarefa["default_search"] == "ytsearch5"
+    assert tarefa["default_search"] == "ytsearch3"
     assert tarefa["metadata_only"] is True
+    assert tarefa["fast_search"] is True
 
 
 def test_provedores_api_delegam_youtube_deezer_e_soundcloud_para_fontes() -> None:
@@ -216,6 +217,7 @@ def test_preparo_da_resolucao_worker_esta_em_modulo_proprio() -> None:
     )
     assert tarefa["default_search"] == "auto"
     assert tarefa["metadata_only"] is False
+    assert tarefa["fast_search"] is False
     assert timeout_resolucao(somente_metadados=True, timeout_seconds=1.0) == 5.0
 
 
@@ -229,7 +231,7 @@ def test_search_sources_preserva_candidatos_de_multiplos_provedores(monkeypatch)
     api.deezer_enabled = True
     api.soundcloud_enabled = False
 
-    async def youtube(query: str, *, limit: int = 5):
+    async def youtube(query: str, *, limit: int = 5, include_details: bool = True):
         return [ApiTrackCandidate(title="Faixa", artist="Artista", provider="youtube")]
 
     async def spotify(query: str, *, limit: int = 5):
@@ -245,6 +247,179 @@ def test_search_sources_preserva_candidatos_de_multiplos_provedores(monkeypatch)
     resultados = asyncio.run(api.search_sources("Artista Faixa", limit=5, prefer_youtube=True))
 
     assert [item.provider for item in resultados] == ["youtube", "spotify", "deezer"]
+
+
+@pytest.mark.asyncio
+async def test_search_sources_fast_youtube_nao_faz_segunda_requisicao_de_detalhes(monkeypatch) -> None:
+    monkeypatch.setattr("cogs.musica.metadados.provedores_api._env", lambda name, default="": "")
+    api = MusicApiProviders(timeout=2.0)
+    api.enabled = True
+    api.youtube_api_key = "yt-key"
+    api.spotify_client_id = ""
+    api.spotify_client_secret = ""
+    api.deezer_enabled = False
+    api.soundcloud_enabled = False
+    chamadas: list[str] = []
+
+    async def fake_json(url: str, **kwargs):
+        chamadas.append(url)
+        return {
+            "items": [
+                {
+                    "id": {"videoId": "abc123DEF"},
+                    "snippet": {
+                        "title": "Faixa",
+                        "channelTitle": "Canal",
+                        "thumbnails": {"medium": {"url": "https://img.test/capa.jpg"}},
+                    },
+                }
+            ]
+        }
+
+    api._to_thread_json = fake_json  # type: ignore[method-assign]
+    resultados = await api.search_sources(
+        "Faixa",
+        limit=3,
+        prefer_youtube=True,
+        total_budget_seconds=0.5,
+    )
+
+    assert len(resultados) == 1
+    assert resultados[0].duration is None
+    assert len(chamadas) == 1
+    assert "/youtube/v3/search?" in chamadas[0]
+    assert "fields=" in chamadas[0]
+
+
+@pytest.mark.asyncio
+async def test_search_sources_budget_total_nao_espera_provider_lento(monkeypatch) -> None:
+    import time as _time
+
+    monkeypatch.setattr("cogs.musica.metadados.provedores_api._env", lambda name, default="": "")
+    api = MusicApiProviders(timeout=2.0)
+    api.enabled = True
+    api.youtube_api_key = "yt-key"
+    api.spotify_client_id = ""
+    api.spotify_client_secret = ""
+    api.deezer_enabled = True
+    api.soundcloud_enabled = False
+
+    async def youtube(query: str, *, limit: int = 3, include_details: bool = True):
+        await asyncio.sleep(0.01)
+        return [ApiTrackCandidate(title="Rapida", artist="Canal", provider="youtube")]
+
+    async def deezer(query: str, *, limit: int = 3):
+        await asyncio.sleep(1.0)
+        return [ApiTrackCandidate(title="Lenta", artist="Canal", provider="deezer")]
+
+    api.youtube_search = youtube  # type: ignore[method-assign]
+    api.deezer_search = deezer  # type: ignore[method-assign]
+
+    inicio = _time.monotonic()
+    resultados = await api.search_sources(
+        "consulta",
+        limit=3,
+        total_budget_seconds=0.08,
+    )
+    elapsed = _time.monotonic() - inicio
+
+    assert [item.title for item in resultados] == ["Rapida"]
+    assert elapsed < 0.30
+
+
+def test_phone_worker_fast_search_usa_ytsearch3_sem_retries_nem_cli(monkeypatch) -> None:
+    import sys
+    import types
+
+    from cogs.musica.runtime_telefone.ponte_worker import resolucao as worker_resolucao
+
+    capturado: dict[str, object] = {}
+
+    class FakeYDL:
+        def __init__(self, opts):
+            capturado["opts"] = dict(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, target, download=False):
+            capturado["target"] = target
+            return {
+                "entries": [
+                    {"id": "a", "title": "A", "uploader": "Canal", "extractor": "youtube"},
+                    {"id": "b", "title": "B", "uploader": "Canal", "extractor": "youtube"},
+                    {"id": "c", "title": "C", "uploader": "Canal", "extractor": "youtube"},
+                    {"id": "d", "title": "D", "uploader": "Canal", "extractor": "youtube"},
+                ]
+            }
+
+    fake_module = types.SimpleNamespace(YoutubeDL=FakeYDL)
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake_module)
+
+    resultado = worker_resolucao.resolve_ytdlp(
+        {
+            "query": "artista faixa",
+            "limit": 3,
+            "metadata_only": True,
+            "fast_search": True,
+            "default_search": "ytsearch3",
+        },
+        job_timeout=10,
+    )
+
+    opts = capturado["opts"]
+    assert isinstance(opts, dict)
+    assert capturado["target"] == "ytsearch3:artista faixa"
+    assert opts["extract_flat"] == "in_playlist"
+    assert opts["playlistend"] == 3
+    assert opts["retries"] == 0
+    assert opts["fragment_retries"] == 0
+    assert opts["extractor_retries"] == 0
+    assert len(resultado["tracks"]) == 3
+    assert resultado["fast_search"] is True
+
+
+def test_phone_worker_fast_search_vazio_nao_dispara_fallback_cli(monkeypatch) -> None:
+    import sys
+    import types
+
+    from cogs.musica.runtime_telefone.ponte_worker import resolucao as worker_resolucao
+
+    class FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, target, download=False):
+            return None
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYDL))
+
+    def proibido(*args, **kwargs):
+        raise AssertionError("fallback CLI nao deve rodar no fast pass")
+
+    monkeypatch.setattr(worker_resolucao.subprocess, "run", proibido)
+    resultado = worker_resolucao.resolve_ytdlp(
+        {
+            "query": "consulta sem resultado",
+            "limit": 3,
+            "metadata_only": True,
+            "fast_search": True,
+            "default_search": "ytsearch3",
+        },
+        job_timeout=10,
+    )
+
+    assert resultado["tracks"] == []
+    assert resultado["fast_search"] is True
 
 
 @pytest.mark.asyncio
@@ -326,7 +501,7 @@ async def test_busca_multifonte_remove_prefixo_de_engine_antes_das_apis(monkeypa
     class FakeProviders:
         has_any_provider = True
 
-        async def search_sources(self, query: str, *, limit: int = 5, prefer_youtube: bool = True):
+        async def search_sources(self, query: str, *, limit: int = 5, prefer_youtube: bool = True, **kwargs):
             consultas.append(query)
             return []
 
@@ -354,7 +529,7 @@ async def test_resolucao_busca_profunda_so_roda_quando_fast_pass_precisa(monkeyp
     async def worker_fake(*, base, token, payload, timeout_seconds):
         limite = int(payload["limit"])
         limites.append(limite)
-        if limite <= 5:
+        if limite <= 3:
             tracks = [
                 {
                     "title": "Bohemian Like You",
@@ -393,12 +568,12 @@ async def test_resolucao_busca_profunda_so_roda_quando_fast_pass_precisa(monkeyp
         "quen bohemain rapsody",
         requester_id=1,
         requester_name="tester",
-        limit=5,
+        limit=3,
         metadata_only=True,
         guild_id=999,
     )
 
-    assert limites == [5, 10]
+    assert limites == [3, 5]
     assert lote.tracks[0].webpage_url == "https://www.youtube.com/watch?v=correct"
 
 
@@ -426,8 +601,6 @@ async def test_resolucao_fast_pass_claro_nao_paga_segunda_busca(monkeypatch) -> 
                 {"title": "The Weeknd - Blinding Lights (Official Audio)", "uploader": "The Weeknd", "webpage_url": "https://www.youtube.com/watch?v=1", "metadata_only": True, "source": "youtube"},
                 {"title": "Blinding Lights Remix", "uploader": "Random DJ", "webpage_url": "https://www.youtube.com/watch?v=2", "metadata_only": True, "source": "youtube"},
                 {"title": "Blinding Lights Cover", "uploader": "Cover Channel", "webpage_url": "https://www.youtube.com/watch?v=3", "metadata_only": True, "source": "youtube"},
-                {"title": "Save Your Tears", "uploader": "The Weeknd", "webpage_url": "https://www.youtube.com/watch?v=4", "metadata_only": True, "source": "youtube"},
-                {"title": "Starboy", "uploader": "The Weeknd", "webpage_url": "https://www.youtube.com/watch?v=5", "metadata_only": True, "source": "youtube"},
             ],
         }
 
@@ -438,7 +611,7 @@ async def test_resolucao_fast_pass_claro_nao_paga_segunda_busca(monkeypatch) -> 
         "the weeknd blinding lights",
         requester_id=1,
         requester_name="tester",
-        limit=5,
+        limit=3,
         metadata_only=True,
         guild_id=999,
     )
@@ -459,7 +632,7 @@ async def test_falha_da_busca_profunda_preserva_fast_pass(monkeypatch) -> None:
     chamadas = 0
 
     async def metadata_fake(query: str, *, limit: int = 5):
-        if limit > 5:
+        if limit > 3:
             raise RuntimeError("provider deep indisponivel")
         return []
 
@@ -483,7 +656,7 @@ async def test_falha_da_busca_profunda_preserva_fast_pass(monkeypatch) -> None:
         "misteriosa musica",
         requester_id=1,
         requester_name="tester",
-        limit=5,
+        limit=3,
         metadata_only=True,
         guild_id=999,
     )
@@ -506,7 +679,7 @@ async def test_busca_multifonte_cache_curto_e_singleflight_nao_duplicam_provider
     class FakeProviders:
         has_any_provider = True
 
-        async def search_sources(self, query: str, *, limit: int = 5, prefer_youtube: bool = True):
+        async def search_sources(self, query: str, *, limit: int = 5, prefer_youtube: bool = True, **kwargs):
             nonlocal chamadas
             chamadas += 1
             iniciou.set()
@@ -554,7 +727,7 @@ async def test_provider_circuit_breaker_para_de_repetir_falha(monkeypatch) -> No
     api.soundcloud_enabled = False
     chamadas = 0
 
-    async def youtube(query: str, *, limit: int = 5):
+    async def youtube(query: str, *, limit: int = 5, include_details: bool = True):
         nonlocal chamadas
         chamadas += 1
         raise RuntimeError("youtube temporariamente indisponivel")
@@ -591,7 +764,7 @@ async def test_provider_timeout_e_isolado_sem_atrasar_demais_a_busca(monkeypatch
     api.deezer_enabled = False
     api.soundcloud_enabled = False
 
-    async def youtube(query: str, *, limit: int = 5):
+    async def youtube(query: str, *, limit: int = 5, include_details: bool = True):
         await asyncio.sleep(1.0)
         return [ApiTrackCandidate(title="tarde", provider="youtube")]
 
@@ -603,6 +776,59 @@ async def test_provider_timeout_e_isolado_sem_atrasar_demais_a_busca(monkeypatch
     assert resultado == []
     assert elapsed < 0.6
     limpar_resiliencia_metadata()
+
+
+@pytest.mark.asyncio
+async def test_singleflight_nao_mistura_fast_search_com_deep_robusto() -> None:
+    from cogs.musica.agente_telefone.coalescencia_resolucao import (
+        executar_resolucao_compartilhada,
+        limpar_coalescencia_resolucao,
+    )
+
+    limpar_coalescencia_resolucao()
+    chamadas = 0
+    liberar = asyncio.Event()
+
+    async def executor(*, base, token, payload, timeout_seconds):
+        nonlocal chamadas
+        chamadas += 1
+        await liberar.wait()
+        return {"ok": True, "fast_search": bool(payload.get("fast_search"))}
+
+    base_payload = {
+        "task": "music_ytdlp_resolve",
+        "query": "mesma consulta",
+        "limit": 3,
+        "metadata_only": True,
+        "allow_playlist": False,
+        "default_search": "ytsearch3",
+    }
+    fast = asyncio.create_task(
+        executar_resolucao_compartilhada(
+            executor,
+            base="http://worker",
+            token="t",
+            payload={**base_payload, "fast_search": True},
+            timeout_seconds=5.0,
+        )
+    )
+    deep = asyncio.create_task(
+        executar_resolucao_compartilhada(
+            executor,
+            base="http://worker",
+            token="t",
+            payload={**base_payload, "fast_search": False},
+            timeout_seconds=5.0,
+        )
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert chamadas == 2
+    liberar.set()
+    resultado_fast, resultado_deep = await asyncio.gather(fast, deep)
+    assert resultado_fast["fast_search"] is True
+    assert resultado_deep["fast_search"] is False
+    limpar_coalescencia_resolucao()
 
 
 @pytest.mark.asyncio

@@ -8,9 +8,9 @@ from .conversao_resolucao import parece_url
 def limite_resolucao(query: str, limit: int, *, permitir_playlist: bool) -> tuple[int, bool]:
     """Normaliza limite e distingue busca textual de URL direta."""
     try:
-        max_limit = max(1, min(10, int(limit or 5)))
+        max_limit = max(1, min(10, int(limit or 3)))
     except Exception:
-        max_limit = 5
+        max_limit = 3
     busca_textual = not parece_url(query)
     if not busca_textual and not permitir_playlist:
         # Link direto de faixa deve respeitar exatamente o URL enviado.
@@ -44,6 +44,7 @@ def montar_tarefa_resolucao(
     somente_metadados: bool,
     permitir_playlist: bool,
     busca_textual: bool,
+    fast_search: bool | None = None,
 ) -> dict[str, object]:
     """Monta apenas o contrato serializável enviado ao Phone Worker."""
     return {
@@ -57,4 +58,5 @@ def montar_tarefa_resolucao(
             getattr(config, "MUSIC_WORKER_YTDLP_JS_RUNTIMES", "node") or "node"
         ),
         "default_search": f"ytsearch{limit}" if busca_textual else "auto",
+        "fast_search": bool(somente_metadados and busca_textual) if fast_search is None else bool(fast_search),
     }

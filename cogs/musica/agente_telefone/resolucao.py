@@ -112,7 +112,7 @@ async def resolve_music_tracks_on_worker(
     *,
     requester_id: int = 0,
     requester_name: str = "",
-    limit: int = 5,
+    limit: int = 3,
     timeout_seconds: float | None = None,
     metadata_only: bool | None = None,
     allow_playlist: bool = False,
@@ -185,6 +185,7 @@ async def resolve_music_tracks_on_worker(
         somente_metadados=somente_metadados,
         permitir_playlist=allow_playlist,
         busca_textual=busca_textual,
+        fast_search=bool(busca_textual and somente_metadados),
     )
 
     metadata_task: asyncio.Task | None = None
@@ -254,7 +255,7 @@ async def resolve_music_tracks_on_worker(
             requester_name=requester_name,
             limit=max_limit,
         )
-        logger.info(
+        logger.debug(
             "[music/search] fusao multi-provider | query=%r entradas=%s grupos=%s duplicatas=%s fontes=%s",
             clean_query,
             fusao.entradas,
@@ -270,7 +271,7 @@ async def resolve_music_tracks_on_worker(
         )
         if ranking:
             top = ranking[0]
-            logger.info(
+            logger.debug(
                 "[music/search] ranking aplicado | query=%r tracks=%s top_score=%.4f confidence=%.4f original_index=%s",
                 clean_query,
                 len(batch.tracks),
@@ -291,11 +292,11 @@ async def resolve_music_tracks_on_worker(
             ranking,
             requested_limit=max_limit,
             enabled=bool(getattr(config, "MUSIC_SEARCH_DEEP_ENABLED", True)),
-            deep_limit=int(getattr(config, "MUSIC_SEARCH_DEEP_LIMIT", 10) or 10),
+            deep_limit=int(getattr(config, "MUSIC_SEARCH_DEEP_LIMIT", 5) or 5),
             min_results=int(getattr(config, "MUSIC_SEARCH_DEEP_MIN_RESULTS", 3) or 3),
-            score_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_SCORE_THRESHOLD", 0.70) or 0.70),
-            confidence_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", 0.60) or 0.60),
-            margin_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", 0.045) or 0.045),
+            score_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_SCORE_THRESHOLD", 0.66) or 0.66),
+            confidence_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", 0.55) or 0.55),
+            margin_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", 0.030) or 0.030),
         )
         deep_motivo = decisao.motivo
         if decisao.executar:
@@ -326,7 +327,7 @@ async def resolve_music_tracks_on_worker(
                 try:
                     deep_timeout = min(
                         total_timeout,
-                        float(getattr(config, "MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS", 7.0) or 7.0),
+                        float(getattr(config, "MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS", 5.0) or 5.0),
                     )
                     logger.info(
                         "[music/search] deep pass iniciado | query=%r deep_query=%r motivo=%s limit=%s score=%.4f confidence=%.4f margin=%.4f",

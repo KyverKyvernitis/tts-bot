@@ -91,11 +91,11 @@ def avaliar_busca_profunda(
     *,
     requested_limit: int,
     enabled: bool = True,
-    deep_limit: int = 10,
+    deep_limit: int = 5,
     min_results: int = 3,
-    score_threshold: float = 0.70,
-    confidence_threshold: float = 0.60,
-    margin_threshold: float = 0.045,
+    score_threshold: float = 0.66,
+    confidence_threshold: float = 0.55,
+    margin_threshold: float = 0.030,
 ) -> DecisaoBuscaProfunda:
     """Decide se uma busca textual merece uma segunda passagem mais ampla.
 
@@ -103,13 +103,13 @@ def avaliar_busca_profunda(
     rede, modelo externo ou dependência pesada nesta etapa.
     """
     try:
-        limite_pedido = max(1, min(10, int(requested_limit or 5)))
+        limite_pedido = max(1, min(10, int(requested_limit or 3)))
     except Exception:
-        limite_pedido = 5
+        limite_pedido = 3
     try:
-        limite_profundo = max(limite_pedido, min(10, int(deep_limit or 10)))
+        limite_profundo = max(limite_pedido, min(10, int(deep_limit or 5)))
     except Exception:
-        limite_profundo = max(limite_pedido, 10)
+        limite_profundo = max(limite_pedido, 5)
 
     if not enabled:
         return DecisaoBuscaProfunda(False, "desativada", str(query or "").strip(), limite_profundo)
