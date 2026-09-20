@@ -1174,3 +1174,210 @@ async def test_api_first_hedge_pode_vencer_worker_depois_do_headstart(monkeypatc
     assert lote.tracks[0].title == "Numb"
     assert elapsed < 0.20
     limpar_coalescencia_resolucao()
+
+
+def test_hedge_adaptativo_reduz_vantagem_quando_api_fica_lenta_ou_instavel() -> None:
+    from cogs.musica.busca.latencia import (
+        headstart_adaptativo,
+        limpar_latencia_busca,
+        registrar_latencia_api,
+        registrar_latencia_worker,
+    )
+
+    limpar_latencia_busca()
+    registrar_latencia_worker(elapsed_ms=1500.0)
+    for _ in range(3):
+        registrar_latencia_api(elapsed_ms=85.0, suficiente=True)
+    rapido = headstart_adaptativo(0.15, min_seconds=0.03)
+    assert 0.08 <= rapido < 0.15
+
+    limpar_latencia_busca()
+    registrar_latencia_worker(elapsed_ms=500.0)
+    for _ in range(3):
+        registrar_latencia_api(elapsed_ms=420.0, suficiente=False)
+    lento = headstart_adaptativo(0.15, min_seconds=0.03)
+    assert lento == pytest.approx(0.03)
+    limpar_latencia_busca()
+
+
+@pytest.mark.asyncio
+async def test_worker_suficiente_nao_espera_metadata_pendente(monkeypatch) -> None:
+    import time as _time
+
+    from cogs.musica.agente_telefone import resolucao, roteamento
+    from cogs.musica.agente_telefone.coalescencia_resolucao import limpar_coalescencia_resolucao
+    from cogs.musica.busca.latencia import limpar_latencia_busca
+
+    limpar_coalescencia_resolucao()
+    limpar_latencia_busca()
+    destino = roteamento.DestinoWorker("worker-a", "A", "http://worker-a:8766", "token")
+    monkeypatch.setattr(resolucao, "destino_vinculado", lambda guild_id: destino)
+    monkeypatch.setattr(resolucao.config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_API_FIRST_ENABLED", False, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_ENABLED", False, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_SKIP_PENDING_METADATA_WHEN_WORKER_SUFFICIENT", True, raising=False)
+
+    metadata_cancelada = asyncio.Event()
+
+    async def metadata_lenta(query: str, *, limit: int = 3, **kwargs):
+        try:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            metadata_cancelada.set()
+            raise
+        return []
+
+    async def worker_rapido(*, base, token, payload, timeout_seconds):
+        await asyncio.sleep(0.01)
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "default_search": "ytsearch3",
+            "tracks": [
+                {"title": "Linkin Park - Numb", "uploader": "Linkin Park", "webpage_url": "https://youtube.test/1", "metadata_only": True, "source": "youtube"},
+                {"title": "Linkin Park - Numb (Official Audio)", "uploader": "Linkin Park", "webpage_url": "https://youtube.test/2", "metadata_only": True, "source": "youtube"},
+                {"title": "Linkin Park - Numb (Official Video)", "uploader": "Linkin Park", "webpage_url": "https://youtube.test/3", "metadata_only": True, "source": "youtube"},
+            ],
+        }
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", metadata_lenta)
+    monkeypatch.setattr(resolucao, "executar_tarefa_resolucao", worker_rapido)
+
+    inicio = _time.monotonic()
+    lote = await resolucao.resolve_music_tracks_on_worker(
+        "Linkin Park - Numb",
+        requester_id=7,
+        requester_name="tester",
+        limit=3,
+        metadata_only=True,
+        guild_id=999,
+    )
+    elapsed = _time.monotonic() - inicio
+
+    assert len(lote.tracks) == 3
+    assert elapsed < 0.15
+    assert metadata_cancelada.is_set()
+    limpar_coalescencia_resolucao()
+    limpar_latencia_busca()
+
+
+@pytest.mark.asyncio
+async def test_worker_fraco_espera_somente_grace_curto_dos_providers(monkeypatch) -> None:
+    import time as _time
+
+    from cogs.musica.agente_telefone import resolucao, roteamento
+    from cogs.musica.agente_telefone.coalescencia_resolucao import limpar_coalescencia_resolucao
+    from cogs.musica.busca.latencia import limpar_latencia_busca
+
+    limpar_coalescencia_resolucao()
+    limpar_latencia_busca()
+    destino = roteamento.DestinoWorker("worker-a", "A", "http://worker-a:8766", "token")
+    monkeypatch.setattr(resolucao, "destino_vinculado", lambda guild_id: destino)
+    monkeypatch.setattr(resolucao.config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_API_FIRST_ENABLED", False, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_ENABLED", False, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS", 0.02, raising=False)
+
+    async def metadata_lenta(query: str, *, limit: int = 3, **kwargs):
+        await asyncio.sleep(0.5)
+        return []
+
+    async def worker_rapido(*, base, token, payload, timeout_seconds):
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "default_search": "ytsearch3",
+            "tracks": [
+                {"title": "Resultado incerto", "uploader": "Canal", "webpage_url": "https://youtube.test/1", "metadata_only": True, "source": "youtube"},
+            ],
+        }
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", metadata_lenta)
+    monkeypatch.setattr(resolucao, "executar_tarefa_resolucao", worker_rapido)
+
+    inicio = _time.monotonic()
+    lote = await resolucao.resolve_music_tracks_on_worker(
+        "consulta obscura",
+        requester_id=7,
+        requester_name="tester",
+        limit=3,
+        metadata_only=True,
+        guild_id=999,
+    )
+    elapsed = _time.monotonic() - inicio
+
+    assert len(lote.tracks) == 1
+    assert 0.015 <= elapsed < 0.15
+    limpar_coalescencia_resolucao()
+    limpar_latencia_busca()
+
+
+@pytest.mark.asyncio
+async def test_metadata_singleflight_cancela_produtor_quando_ultimo_consumidor_desiste() -> None:
+    from cogs.musica.metadados.resiliencia import buscar_metadata_compartilhada, limpar_resiliencia_metadata
+
+    limpar_resiliencia_metadata()
+    iniciou = asyncio.Event()
+    cancelou = asyncio.Event()
+
+    async def produtor():
+        iniciou.set()
+        try:
+            await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            cancelou.set()
+            raise
+        return []
+
+    caller = asyncio.create_task(
+        buscar_metadata_compartilhada(
+            "consulta",
+            limit=3,
+            produtor=produtor,
+            ttl_seconds=0,
+            namespace="cancelavel",
+            cancelar_quando_sem_consumidores=True,
+        )
+    )
+    await iniciou.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    await asyncio.sleep(0)
+    assert cancelou.is_set()
+    limpar_resiliencia_metadata()
+
+
+@pytest.mark.asyncio
+async def test_metadata_singleflight_preserva_produtor_enquanto_outro_consumidor_espera() -> None:
+    from cogs.musica.metadados.resiliencia import buscar_metadata_compartilhada, limpar_resiliencia_metadata
+
+    limpar_resiliencia_metadata()
+    liberar = asyncio.Event()
+    chamadas = 0
+
+    async def produtor():
+        nonlocal chamadas
+        chamadas += 1
+        await liberar.wait()
+        return [ApiTrackCandidate(title="Faixa", artist="Artista", provider="youtube")]
+
+    kwargs = dict(
+        query="consulta",
+        limit=3,
+        produtor=produtor,
+        ttl_seconds=0,
+        namespace="compartilhada",
+        cancelar_quando_sem_consumidores=True,
+    )
+    primeiro = asyncio.create_task(buscar_metadata_compartilhada(**kwargs))
+    segundo = asyncio.create_task(buscar_metadata_compartilhada(**kwargs))
+    await asyncio.sleep(0)
+    primeiro.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await primeiro
+    liberar.set()
+    resultado = await asyncio.wait_for(segundo, timeout=0.2)
+    assert chamadas == 1
+    assert [item.title for item in resultado] == ["Faixa"]
+    limpar_resiliencia_metadata()

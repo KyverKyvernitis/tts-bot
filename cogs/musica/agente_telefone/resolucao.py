@@ -15,6 +15,7 @@ from ..busca import (
     registrar_busca_telemetria,
 )
 from ..busca.resiliencia import liberar_busca_profunda, tentar_reservar_busca_profunda
+from ..busca.latencia import headstart_adaptativo, registrar_latencia_api, registrar_latencia_worker
 from ..busca.fontes import buscar_candidatos_multifonte, buscar_candidatos_youtube_fast
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch
@@ -158,6 +159,30 @@ def _avaliar_api_first(
     )
 
 
+def _fast_worker_suficiente(
+    query: str,
+    tracks,
+    ranking,
+    *,
+    requested_limit: int,
+) -> bool:
+    if len(tracks) < max(1, int(getattr(config, "MUSIC_SEARCH_DEEP_MIN_RESULTS", 3) or 3)):
+        return False
+    decisao = avaliar_busca_profunda(
+        query,
+        tracks,
+        ranking,
+        requested_limit=requested_limit,
+        enabled=bool(getattr(config, "MUSIC_SEARCH_DEEP_ENABLED", True)),
+        deep_limit=int(getattr(config, "MUSIC_SEARCH_DEEP_LIMIT", 5) or 5),
+        min_results=int(getattr(config, "MUSIC_SEARCH_DEEP_MIN_RESULTS", 3) or 3),
+        score_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_SCORE_THRESHOLD", 0.66) or 0.66),
+        confidence_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", 0.55) or 0.55),
+        margin_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", 0.030) or 0.030),
+    )
+    return not decisao.executar
+
+
 async def resolve_music_tracks_on_worker(
     query: str,
     *,
@@ -241,10 +266,19 @@ async def resolve_music_tracks_on_worker(
         api_first_task = asyncio.create_task(
             buscar_candidatos_youtube_fast(clean_query, limit=max_limit)
         )
-        headstart = max(
+        headstart_base = max(
             0.0,
             float(getattr(config, "MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS", 0.15) or 0.0),
         )
+        if bool(getattr(config, "MUSIC_SEARCH_API_FIRST_ADAPTIVE_HEDGE", True)):
+            headstart = headstart_adaptativo(
+                headstart_base,
+                min_seconds=float(
+                    getattr(config, "MUSIC_SEARCH_API_FIRST_HEADSTART_MIN_SECONDS", 0.03) or 0.0
+                ),
+            )
+        else:
+            headstart = headstart_base
         # Se ja existe resolucao textual em voo, nao introduza nova janela de
         # head-start: entrar no worker imediatamente preserva o singleflight.
         if resolucoes_em_voo() > 0:
@@ -277,6 +311,11 @@ async def resolve_music_tracks_on_worker(
             guild_id=guild_id,
             limit=max_limit,
         )
+        if api_first_task is not None and api_first_task.done():
+            registrar_latencia_api(
+                elapsed_ms=(time.monotonic() - started) * 1000.0,
+                suficiente=aceite is not None,
+            )
         if aceite is not None:
             batch, api_ranking, api_fusao = aceite
             api_elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
@@ -322,6 +361,7 @@ async def resolve_music_tracks_on_worker(
             )
         )
 
+    worker_started = time.monotonic()
     worker_task = asyncio.create_task(
         executar_resolucao_compartilhada(
             executar_tarefa_resolucao,
@@ -358,6 +398,10 @@ async def resolve_music_tracks_on_worker(
                     guild_id=guild_id,
                     limit=max_limit,
                 )
+                registrar_latencia_api(
+                    elapsed_ms=(time.monotonic() - started) * 1000.0,
+                    suficiente=aceite is not None,
+                )
                 if aceite is not None:
                     batch, api_ranking, api_fusao = aceite
                     await _cancelar_tarefa_busca(worker_task)
@@ -385,6 +429,7 @@ async def resolve_music_tracks_on_worker(
                         batch, requester_id=requester_id, requester_name=requester_name
                     )
         data = await worker_task
+        registrar_latencia_worker(elapsed_ms=(time.monotonic() - worker_started) * 1000.0)
     except MusicWorkerUnavailable:
         await _cancelar_tarefa_busca(metadata_task)
         await _cancelar_tarefa_busca(api_first_task)
@@ -427,14 +472,64 @@ async def resolve_music_tracks_on_worker(
     elif api_first_task is not None and not api_first_task.done():
         await _cancelar_tarefa_busca(api_first_task)
 
+    worker_ranking_fast = []
+    worker_suficiente = False
+    if busca_textual and somente_metadados and worker_tracks_fast:
+        worker_ranked, worker_ranking_fast = ranquear_faixas(
+            clean_query,
+            list(worker_tracks_fast),
+            guild_id=guild_id,
+            requester_id=requester_id,
+        )
+        worker_suficiente = _fast_worker_suficiente(
+            clean_query,
+            worker_ranked,
+            worker_ranking_fast,
+            requested_limit=max_limit,
+        )
+
     api_candidates = list(api_first_candidates)
     if metadata_task is not None:
-        try:
-            api_candidates.extend(await metadata_task)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.debug("[music/search] provider metadata falhou | query=%r erro=%s", clean_query, exc)
+        metadata_result = None
+        if metadata_task.done():
+            try:
+                metadata_result = metadata_task.result()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("[music/search] provider metadata falhou | query=%r erro=%s", clean_query, exc)
+        elif (
+            worker_suficiente
+            and bool(getattr(config, "MUSIC_SEARCH_SKIP_PENDING_METADATA_WHEN_WORKER_SUFFICIENT", True))
+        ):
+            await _cancelar_tarefa_busca(metadata_task)
+            logger.debug(
+                "[music/search] metadata pendente descartada; worker ja suficiente | query=%r tracks=%s",
+                clean_query,
+                len(worker_tracks_fast),
+            )
+        else:
+            grace = max(
+                0.0,
+                float(getattr(config, "MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS", 0.08) or 0.0),
+            )
+            try:
+                if grace <= 0.0:
+                    raise asyncio.TimeoutError
+                metadata_result = await asyncio.wait_for(asyncio.shield(metadata_task), timeout=grace)
+            except asyncio.TimeoutError:
+                await _cancelar_tarefa_busca(metadata_task)
+                logger.debug(
+                    "[music/search] metadata excedeu grace pos-worker | query=%r grace_ms=%.0f",
+                    clean_query,
+                    grace * 1000.0,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("[music/search] provider metadata falhou | query=%r erro=%s", clean_query, exc)
+        if metadata_result:
+            api_candidates.extend(metadata_result)
 
     if busca_textual and somente_metadados and api_candidates:
         batch.tracks, fusao = fundir_resultados(

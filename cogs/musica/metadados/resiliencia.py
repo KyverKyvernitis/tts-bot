@@ -23,6 +23,7 @@ class EstadoCircuitoProvider:
 
 _CACHE_METADATA: dict[tuple[str, str, int], tuple[float, list[ApiTrackCandidate]]] = {}
 _EM_VOO_METADATA: dict[tuple[str, str, int], asyncio.Task[list[ApiTrackCandidate]]] = {}
+_CONSUMIDORES_METADATA: dict[tuple[str, str, int], int] = {}
 _CIRCUITOS: dict[str, EstadoCircuitoProvider] = {}
 _MAX_CIRCUITOS = 16
 
@@ -50,6 +51,7 @@ def limpar_resiliencia_metadata() -> None:
         if not task.done():
             task.cancel()
     _EM_VOO_METADATA.clear()
+    _CONSUMIDORES_METADATA.clear()
     _CACHE_METADATA.clear()
     _CIRCUITOS.clear()
 
@@ -79,6 +81,8 @@ def _podar_cache(*, max_itens: int) -> None:
 def _limpar_task_metadata(chave: tuple[str, str, int], task: asyncio.Task[list[ApiTrackCandidate]]) -> None:
     if _EM_VOO_METADATA.get(chave) is task:
         _EM_VOO_METADATA.pop(chave, None)
+    if task.done() and _CONSUMIDORES_METADATA.get(chave, 0) <= 0:
+        _CONSUMIDORES_METADATA.pop(chave, None)
     # Consumir excecao evita warning caso todos os callers tenham sido
     # cancelados enquanto a operacao compartilhada terminava.
     if not task.cancelled():
@@ -96,6 +100,7 @@ async def buscar_metadata_compartilhada(
     ttl_seconds: float,
     max_itens: int = 64,
     namespace: str = "all",
+    cancelar_quando_sem_consumidores: bool = False,
 ) -> list[ApiTrackCandidate]:
     """Cache curto + singleflight para a busca multi-provider.
 
@@ -126,8 +131,18 @@ async def buscar_metadata_compartilhada(
         _EM_VOO_METADATA[chave] = task
         task.add_done_callback(lambda done, key=chave: _limpar_task_metadata(key, done))
 
-    resultado = await asyncio.shield(task)
-    return _copiar_candidatos(resultado)
+    _CONSUMIDORES_METADATA[chave] = _CONSUMIDORES_METADATA.get(chave, 0) + 1
+    try:
+        resultado = await asyncio.shield(task)
+        return _copiar_candidatos(resultado)
+    finally:
+        restantes = max(0, _CONSUMIDORES_METADATA.get(chave, 1) - 1)
+        if restantes > 0:
+            _CONSUMIDORES_METADATA[chave] = restantes
+        else:
+            _CONSUMIDORES_METADATA.pop(chave, None)
+            if cancelar_quando_sem_consumidores and not task.done():
+                task.cancel()
 
 
 def _estado_mutavel(nome: str) -> EstadoCircuitoProvider:

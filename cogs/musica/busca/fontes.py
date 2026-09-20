@@ -41,6 +41,7 @@ async def buscar_candidatos_youtube_fast(query: str, *, limit: int = 3) -> list[
         ttl_seconds=float(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 90.0) or 0.0),
         max_itens=int(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 64) or 64),
         namespace="youtube-fast",
+        cancelar_quando_sem_consumidores=True,
     )
 
 
@@ -94,4 +95,5 @@ async def buscar_candidatos_multifonte(
         ttl_seconds=float(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 90.0) or 0.0),
         max_itens=int(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 64) or 64),
         namespace="all" if incluir_youtube else "sem-youtube",
+        cancelar_quando_sem_consumidores=True,
     )

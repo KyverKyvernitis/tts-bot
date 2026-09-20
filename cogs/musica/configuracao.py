@@ -304,6 +304,10 @@ MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS = max(0.15, min(1.5, _parse_float(os.gete
 # Pequena vantagem para a API. Se ela nao responder nesse intervalo, o worker
 # entra em paralelo; assim API-first nao adiciona 450 ms ao fallback frio.
 MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS = max(0.0, min(0.5, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS", "0.15"), 0.15)))
+MUSIC_SEARCH_API_FIRST_ADAPTIVE_HEDGE = _parse_bool(os.getenv("MUSIC_SEARCH_API_FIRST_ADAPTIVE_HEDGE", "true"), True)
+MUSIC_SEARCH_API_FIRST_HEADSTART_MIN_SECONDS = max(0.0, min(MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_HEADSTART_MIN_SECONDS", "0.03"), 0.03)))
+MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS = max(0.0, min(0.5, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS", "0.08"), 0.08)))
+MUSIC_SEARCH_SKIP_PENDING_METADATA_WHEN_WORKER_SUFFICIENT = _parse_bool(os.getenv("MUSIC_SEARCH_SKIP_PENDING_METADATA_WHEN_WORKER_SUFFICIENT", "true"), True)
 MUSIC_SEARCH_API_FIRST_MIN_RESULTS = max(1, min(3, _parse_int(os.getenv("MUSIC_SEARCH_API_FIRST_MIN_RESULTS", "3"), 3)))
 # Busca inteligente: segunda passagem só quando o ranking inicial não estiver
 # suficientemente claro. O custo extra é rede no Phone Worker/providers; a VPS
