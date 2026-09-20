@@ -61,6 +61,7 @@ from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin  # noqa
 from cogs.musica.runtime_telefone.agente.reproducao import ReproducaoMixin  # noqa: E402
 from cogs.musica.runtime_telefone.agente.tts import TTSMixin, _TimedTTSSource  # noqa: E402
 from cogs.musica.runtime_telefone.agente.utilitarios import (  # noqa: E402
+    DEFAULT_YTDLP_AUDIO_FORMAT,
     _float_or_none,
     _metadata_text,
     safe_id,
@@ -86,7 +87,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.39"
+AGENT_VERSION = "0.3.40"
 STARTED_AT = time.time()
 
 
@@ -106,7 +107,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.port = env_int("MUSIC_AGENT_PORT", 8780)
         self.token = os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or ""
         self.discord_token = os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or ""
-        self.ytdlp_format = os.getenv("MUSIC_AGENT_YTDLP_FORMAT") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or "bestaudio[acodec=opus]/bestaudio/best"
+        self.ytdlp_format = os.getenv("MUSIC_AGENT_YTDLP_FORMAT") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or DEFAULT_YTDLP_AUDIO_FORMAT
         self.ytdlp_timeout = env_int("MUSIC_AGENT_YTDLP_TIMEOUT_SECONDS", 35)
         self.cookies_file = os.getenv("MUSIC_AGENT_YTDLP_COOKIES_FILE") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE") or str(Path.home() / "phone-worker" / "secrets" / "youtube-cookies.txt")
         self.js_runtimes = os.getenv("MUSIC_AGENT_YTDLP_JS_RUNTIMES") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES") or "node"

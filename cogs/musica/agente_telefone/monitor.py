@@ -29,6 +29,8 @@ def _assinatura_faixa_painel(item: Any) -> tuple[Any, ...]:
             "resolved_audio_ext",
             "resolved_audio_codec",
             "resolved_audio_abr",
+            "resolved_audio_sample_rate",
+            "resolved_audio_channels",
         )
     )
 

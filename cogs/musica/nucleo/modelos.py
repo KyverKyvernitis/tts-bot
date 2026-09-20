@@ -41,6 +41,8 @@ class MusicTrack:
     resolved_audio_ext: str = ""
     resolved_audio_codec: str = ""
     resolved_audio_format_id: str = ""
+    resolved_audio_sample_rate: int = 0
+    resolved_audio_channels: int = 0
     # Dados de runtime do Lavalink/Wavelink. Usado apenas em memória para que
     # resultados já resolvidos pelo node (seleção/texto ou link direto) sejam
     # tocados exatamente como retornaram, sem refazer busca por título genérico.

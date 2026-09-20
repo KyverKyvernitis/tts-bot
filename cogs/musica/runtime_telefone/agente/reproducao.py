@@ -759,6 +759,19 @@ class ReproducaoMixin:
         st.playback_token += 1
         playback_token = st.playback_token
         self._set_status(st, "starting", event="direct_player_starting")
+        source_rate = max(0, int(getattr(track, "audio_sample_rate", 0) or 0))
+        source_channels = max(0, int(getattr(track, "audio_channels", 0) or 0))
+        self.log(
+            "audio_source_selected",
+            guild_id=guild_id,
+            format=getattr(track, "audio_format_id", ""),
+            codec=getattr(track, "audio_codec", ""),
+            abr_kbps=max(0, int(getattr(track, "audio_abr", 0) or 0)),
+            sample_rate=source_rate,
+            channels=source_channels,
+            output="pcm_s16le_48k_stereo" if self.direct_pcm_volume_enabled else "discord-opus",
+            resample=bool(source_rate and source_rate != 48000),
+        )
         self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title, offset=round(float(getattr(track, "start_offset_seconds", 0.0) or 0.0), 2))
 
         def after(error: Exception | None) -> None:

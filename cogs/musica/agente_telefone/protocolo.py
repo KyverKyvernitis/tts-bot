@@ -34,10 +34,14 @@ def faixa_para_payload(track: MusicTrack | Mapping[str, Any]) -> dict[str, Any]:
         "resolved_audio_ext": getattr(track, "resolved_audio_ext", ""),
         "resolved_audio_codec": getattr(track, "resolved_audio_codec", ""),
         "resolved_audio_abr": getattr(track, "resolved_audio_abr", 0),
+        "resolved_audio_sample_rate": getattr(track, "resolved_audio_sample_rate", 0),
+        "resolved_audio_channels": getattr(track, "resolved_audio_channels", 0),
         "audio_format_id": getattr(track, "audio_format_id", ""),
         "audio_ext": getattr(track, "audio_ext", ""),
         "audio_codec": getattr(track, "audio_codec", ""),
         "audio_abr": getattr(track, "audio_abr", 0),
+        "audio_sample_rate": getattr(track, "audio_sample_rate", 0),
+        "audio_channels": getattr(track, "audio_channels", 0),
     }
 
 

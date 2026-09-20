@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .streams import register_stream, short_text
+from ..agente.utilitarios import DEFAULT_YTDLP_AUDIO_FORMAT, select_stream_info
 
 def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
     query = str(body.get("query") or body.get("url") or body.get("q") or "").strip()
@@ -19,7 +20,7 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
         raise ValueError("query vazia")
     limit = max(1, min(10, int(float(body.get("limit") or body.get("max_results") or 5))))
     timeout = max(5, min(job_timeout, int(float(body.get("timeout_seconds") or min(job_timeout, 30)))))
-    fmt = str(body.get("format") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or "bestaudio/best").strip() or "bestaudio/best"
+    fmt = str(body.get("format") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or DEFAULT_YTDLP_AUDIO_FORMAT).strip() or DEFAULT_YTDLP_AUDIO_FORMAT
     is_url = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", query) or query.lower().startswith("www."))
     metadata_only = str(body.get("metadata_only") if body.get("metadata_only") is not None else body.get("search_only") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
     allow_playlist = str(body.get("allow_playlist") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
@@ -70,34 +71,8 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
             pass
         return short_text(value, limit=160)
 
-    def select_stream(entry: dict[str, Any]) -> str:
-        for item in entry.get("requested_downloads") or []:
-            if isinstance(item, dict):
-                url = str(item.get("url") or "").strip()
-                if url.startswith(("http://", "https://")):
-                    return url
-        url = str(entry.get("url") or "").strip()
-        if url.startswith(("http://", "https://")) and "youtube.com/watch" not in url and "youtu.be/" not in url:
-            return url
-        best_url = ""
-        best_score = -1.0
-        for fmt_item in entry.get("formats") or []:
-            if not isinstance(fmt_item, dict):
-                continue
-            candidate = str(fmt_item.get("url") or "").strip()
-            if not candidate.startswith(("http://", "https://")):
-                continue
-            acodec = str(fmt_item.get("acodec") or "").lower()
-            vcodec = str(fmt_item.get("vcodec") or "").lower()
-            if acodec in {"", "none"}:
-                continue
-            score = float(fmt_item.get("abr") or fmt_item.get("tbr") or 0)
-            if vcodec in {"", "none"}:
-                score += 10000
-            if score > best_score:
-                best_score = score
-                best_url = candidate
-        return best_url
+    def select_stream(entry: dict[str, Any]) -> dict[str, Any]:
+        return select_stream_info(entry)
 
     configured_cookies = str(
         os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE")
@@ -218,7 +193,8 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
             return False
         if metadata_only:
             return append_metadata_track(entry, source_label=source_label)
-        stream_url = select_stream(entry)
+        stream_info = select_stream(entry)
+        stream_url = str(stream_info.get("stream_url") or "")
         if not stream_url:
             return False
         webpage_url = entry_webpage_url(entry, stream_url=stream_url)
@@ -239,8 +215,12 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
             "source": short_text(source_value, limit=80, default="worker-ytdlp"),
             "extractor": "worker-ytdlp",
             "is_live": bool(entry.get("is_live")),
-            "ext": short_text(entry.get("ext") or "", limit=20),
-            "format_id": short_text(entry.get("format_id") or "", limit=80),
+            "ext": short_text(stream_info.get("audio_ext") or entry.get("ext") or "", limit=20),
+            "format_id": short_text(stream_info.get("audio_format_id") or entry.get("format_id") or "", limit=80),
+            "audio_codec": short_text(stream_info.get("audio_codec") or entry.get("acodec") or "", limit=40),
+            "audio_abr": int(stream_info.get("audio_abr") or 0),
+            "audio_sample_rate": int(stream_info.get("audio_sample_rate") or 0),
+            "audio_channels": int(stream_info.get("audio_channels") or 0),
             "http_headers": entry.get("http_headers") if isinstance(entry.get("http_headers"), dict) else {},
             "is_direct_stream": True,
         }

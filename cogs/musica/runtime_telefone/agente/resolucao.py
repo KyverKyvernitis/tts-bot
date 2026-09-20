@@ -233,6 +233,8 @@ class ResolucaoMixin:
             audio_ext=short_text(resolved.get("audio_ext") or resolved.get("ext"), 20).lower(),
             audio_codec=short_text(resolved.get("audio_codec") or resolved.get("codec"), 40).lower(),
             audio_abr=int(float(resolved.get("audio_abr") or resolved.get("abr") or 0) or 0),
+            audio_sample_rate=int(float(resolved.get("audio_sample_rate") or resolved.get("asr") or 0) or 0),
+            audio_channels=int(float(resolved.get("audio_channels") or resolved.get("channels") or 0) or 0),
             start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
             stream_resolved_monotonic=max(0.0, float(resolved.get("_stream_resolved_monotonic") or time.monotonic())),
         )
@@ -298,6 +300,8 @@ class ResolucaoMixin:
             audio_ext=short_text(track_meta.get("resolved_audio_ext") or track_meta.get("audio_ext"), 20).lower(),
             audio_codec=short_text(track_meta.get("resolved_audio_codec") or track_meta.get("audio_codec"), 40).lower(),
             audio_abr=int(float(track_meta.get("resolved_audio_abr") or track_meta.get("audio_abr") or 0) or 0),
+            audio_sample_rate=int(float(track_meta.get("resolved_audio_sample_rate") or track_meta.get("audio_sample_rate") or track_meta.get("asr") or 0) or 0),
+            audio_channels=int(float(track_meta.get("resolved_audio_channels") or track_meta.get("audio_channels") or track_meta.get("channels") or 0) or 0),
             start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
         )
 
@@ -339,6 +343,8 @@ class ResolucaoMixin:
                 audio_ext=short_text(track_meta.get("resolved_audio_ext") or track_meta.get("audio_ext"), 20).lower(),
                 audio_codec=short_text(track_meta.get("resolved_audio_codec") or track_meta.get("audio_codec"), 40).lower(),
                 audio_abr=int(float(track_meta.get("resolved_audio_abr") or track_meta.get("audio_abr") or 0) or 0),
+                audio_sample_rate=int(float(track_meta.get("resolved_audio_sample_rate") or track_meta.get("audio_sample_rate") or track_meta.get("asr") or 0) or 0),
+                audio_channels=int(float(track_meta.get("resolved_audio_channels") or track_meta.get("audio_channels") or track_meta.get("channels") or 0) or 0),
                 start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
                 stream_resolved_monotonic=time.monotonic(),
             )
@@ -408,6 +414,12 @@ class ResolucaoMixin:
                 "--print", "__duration__:%(duration)s",
                 "--print", "__thumbnail__:%(thumbnail)s",
                 "--print", "__webpage_url__:%(webpage_url,original_url)s",
+                "--print", "__format_id__:%(format_id)s",
+                "--print", "__ext__:%(ext)s",
+                "--print", "__acodec__:%(acodec)s",
+                "--print", "__abr__:%(abr)s",
+                "--print", "__asr__:%(asr)s",
+                "--print", "__audio_channels__:%(audio_channels)s",
                 "-g", target,
             ]
             fast_started = time.time()
@@ -422,6 +434,19 @@ class ResolucaoMixin:
             duration_hint = marker("duration")
             thumbnail_hint = marker("thumbnail")
             webpage_hint = marker("webpage_url")
+            format_hint = marker("format_id")
+            ext_hint = marker("ext")
+            codec_hint = marker("acodec")
+            abr_hint = marker("abr")
+            asr_hint = marker("asr")
+            channels_hint = marker("audio_channels")
+
+            def metric(value: str) -> int:
+                try:
+                    return max(0, int(float(value)))
+                except Exception:
+                    return 0
+
             if fast.returncode == 0 and urls:
                 self.log(
                     "yt_dlp_fast_url_ok",
@@ -437,10 +462,12 @@ class ResolucaoMixin:
                     "thumbnail": thumbnail_hint,
                     "webpage_url": webpage_hint or query,
                     "stream_url": urls[0],
-                    "audio_format_id": "yt-dlp-fast",
-                    "audio_ext": "",
-                    "audio_codec": "",
-                    "audio_abr": 0,
+                    "audio_format_id": format_hint or "yt-dlp-fast",
+                    "audio_ext": ext_hint.lower(),
+                    "audio_codec": codec_hint.lower(),
+                    "audio_abr": metric(abr_hint),
+                    "audio_sample_rate": metric(asr_hint),
+                    "audio_channels": metric(channels_hint),
                 }
             self.log("yt_dlp_fast_url_fallback", rc=fast.returncode, error=short_text(fast.stderr, 160))
         cmd = base_cmd + ["-f", self.ytdlp_format, "-J", target]

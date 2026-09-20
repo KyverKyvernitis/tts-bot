@@ -34,6 +34,8 @@ def test_protocolo_serializa_faixa_sem_fazer_rede() -> None:
     track.resolved_audio_ext = "opus"
     track.resolved_audio_codec = "opus"
     track.resolved_audio_abr = 160
+    track.resolved_audio_sample_rate = 48000
+    track.resolved_audio_channels = 2
 
     payload = faixa_para_payload(track)
 
@@ -41,6 +43,8 @@ def test_protocolo_serializa_faixa_sem_fazer_rede() -> None:
     assert payload["requester_id"] == 10
     assert payload["resolved_audio_ext"] == "opus"
     assert payload["resolved_audio_abr"] == 160
+    assert payload["resolved_audio_sample_rate"] == 48000
+    assert payload["resolved_audio_channels"] == 2
 
 
 def test_montar_comando_define_query_da_faixa_e_preserva_extras() -> None:

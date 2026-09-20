@@ -83,6 +83,10 @@ def faixa_do_payload(payload: dict[str, Any], fallback: MusicTrack | None = None
     track.resolved_audio_ext = str(payload.get("resolved_audio_ext") or payload.get("audio_ext") or payload.get("ext") or "").strip()
     track.resolved_audio_codec = str(payload.get("resolved_audio_codec") or payload.get("audio_codec") or payload.get("codec") or "").strip()
     track.resolved_audio_format_id = str(payload.get("resolved_audio_format_id") or payload.get("audio_format_id") or payload.get("format_id") or "").strip()
+    with contextlib.suppress(Exception):
+        track.resolved_audio_sample_rate = int(float(payload.get("resolved_audio_sample_rate") or payload.get("audio_sample_rate") or payload.get("asr") or 0))
+    with contextlib.suppress(Exception):
+        track.resolved_audio_channels = int(float(payload.get("resolved_audio_channels") or payload.get("audio_channels") or payload.get("channels") or 0))
     return track
 
 
