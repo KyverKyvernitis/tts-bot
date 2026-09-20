@@ -16,6 +16,7 @@ from .fontes.deezer import ProvedorDeezerMixin
 from .fontes.soundcloud import ProvedorSoundCloudMixin
 from .fontes.spotify import ProvedorSpotifyMixin
 from .fontes.youtube import ProvedorYouTubeMixin
+from .resiliencia import executar_provider_resiliente
 
 logger = logging.getLogger(__name__)
 
@@ -114,24 +115,51 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
         if not self.enabled or not query.strip():
             return []
         limit = max(1, min(10, int(limit)))
+        timeout_provider = max(
+            0.2,
+            float(getattr(config, "MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS", 3.5) or 3.5),
+        )
+        falhas_para_abrir = max(
+            1,
+            int(getattr(config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES", 2) or 2),
+        )
+        cooldown = max(
+            1.0,
+            float(getattr(config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS", 30.0) or 30.0),
+        )
+
         tasks: list[asyncio.Task[list[ApiTrackCandidate]]] = []
+
+        def _agendar(nome: str, func, provider_limit: int) -> None:
+            async def _operacao() -> list[ApiTrackCandidate]:
+                return await func(query, limit=provider_limit)
+
+            tasks.append(
+                asyncio.create_task(
+                    executar_provider_resiliente(
+                        nome,
+                        _operacao,
+                        timeout_seconds=timeout_provider,
+                        falhas_para_abrir=falhas_para_abrir,
+                        cooldown_seconds=cooldown,
+                        fallback=[],
+                    )
+                )
+            )
+
         if prefer_youtube and self.youtube_api_key:
-            tasks.append(asyncio.create_task(self.youtube_search(query, limit=limit)))
+            _agendar("youtube", self.youtube_search, limit)
         if self.spotify_client_id and self.spotify_client_secret:
-            tasks.append(asyncio.create_task(self.spotify_search(query, limit=min(limit, 5))))
+            _agendar("spotify", self.spotify_search, min(limit, 5))
         if self.deezer_enabled:
-            tasks.append(asyncio.create_task(self.deezer_search(query, limit=min(limit, 5))))
+            _agendar("deezer", self.deezer_search, min(limit, 5))
         if self.soundcloud_enabled and (self.soundcloud_token or self.soundcloud_client_id):
-            tasks.append(asyncio.create_task(self.soundcloud_search(query, limit=min(limit, 5))))
+            _agendar("soundcloud", self.soundcloud_search, min(limit, 5))
         if not tasks:
             return []
 
         results: list[ApiTrackCandidate] = []
-        gathered = await asyncio.gather(*tasks, return_exceptions=True)
-        for item in gathered:
-            if isinstance(item, Exception):
-                logger.debug("[music-api] provider search failed", exc_info=item)
-                continue
+        for item in await asyncio.gather(*tasks):
             results.extend(item)
         return results
 

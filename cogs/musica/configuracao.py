@@ -279,6 +279,13 @@ MUSIC_AGENT_METADATA_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_
 MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS", "180.0"), 180.0))
 MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS = max(3.0, _parse_float(os.getenv("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", "18.0"), 18.0))
 MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", "420.0"), 420.0))
+# Cache/singleflight curto apenas para metadata de busca. O cache maior do Phone
+# Worker continua separado porque guarda a resposta yt-dlp ja consolidada.
+MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS = max(0.0, min(120.0, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", "30.0"), 30.0)))
+MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS = max(8, min(256, _parse_int(os.getenv("MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", "64"), 64)))
+MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS = max(0.2, min(10.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS", "3.5"), 3.5)))
+MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES = max(1, min(5, _parse_int(os.getenv("MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES", "2"), 2)))
+MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS = max(1.0, min(300.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS", "30.0"), 30.0)))
 # Busca inteligente: segunda passagem só quando o ranking inicial não estiver
 # suficientemente claro. O custo extra é rede no Phone Worker/providers; a VPS
 # faz apenas fusão/ranking local leve.
@@ -289,6 +296,8 @@ MUSIC_SEARCH_DEEP_MIN_RESULTS = max(2, min(5, _parse_int(os.getenv("MUSIC_SEARCH
 MUSIC_SEARCH_DEEP_SCORE_THRESHOLD = max(0.0, min(1.0, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_SCORE_THRESHOLD", "0.70"), 0.70)))
 MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD = max(0.0, min(1.0, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", "0.60"), 0.60)))
 MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD = max(0.0, min(0.30, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", "0.045"), 0.045)))
+MUSIC_SEARCH_DEEP_MAX_CONCURRENT = max(0, min(4, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_MAX_CONCURRENT", "2"), 2)))
+MUSIC_SEARCH_DEEP_MAX_WORKER_INFLIGHT = max(1, min(12, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_MAX_WORKER_INFLIGHT", "4"), 4)))
 MUSIC_WORKER_DIRECT_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_WORKER_DIRECT_CACHE_TTL_SECONDS", "90.0"), 90.0))
 MUSIC_AGENT_BOOTSTRAP_ON_PLAY = _parse_bool(os.getenv("MUSIC_AGENT_BOOTSTRAP_ON_PLAY", "true"), True)
 MUSIC_AGENT_MISSING_TOKEN_MESSAGE = (

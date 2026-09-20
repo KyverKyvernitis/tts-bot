@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from cogs.musica import configuracao as config
+
 from ..metadados.modelos import ApiTrackCandidate
 from ..metadados.provedores_api import MusicApiProviders
+from ..metadados.resiliencia import buscar_metadata_compartilhada
 from .intencao import analisar_consulta
 
 _provedores_api: MusicApiProviders | None = None
@@ -23,4 +26,14 @@ async def buscar_candidatos_multifonte(query: str, *, limit: int = 5) -> list[Ap
     texto = consulta.raw or str(query or "").strip()
     if not texto:
         return []
-    return await providers.search_sources(texto, limit=limit, prefer_youtube=True)
+
+    async def _buscar() -> list[ApiTrackCandidate]:
+        return await providers.search_sources(texto, limit=limit, prefer_youtube=True)
+
+    return await buscar_metadata_compartilhada(
+        texto,
+        limit=limit,
+        produtor=_buscar,
+        ttl_seconds=float(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 30.0) or 0.0),
+        max_itens=int(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 64) or 64),
+    )

@@ -491,3 +491,230 @@ async def test_falha_da_busca_profunda_preserva_fast_pass(monkeypatch) -> None:
     assert chamadas == 2
     assert len(lote.tracks) == 1
     assert lote.tracks[0].webpage_url == "https://www.youtube.com/watch?v=first"
+
+
+@pytest.mark.asyncio
+async def test_busca_multifonte_cache_curto_e_singleflight_nao_duplicam_provider(monkeypatch) -> None:
+    from cogs.musica.busca import fontes
+    from cogs.musica.metadados.resiliencia import limpar_resiliencia_metadata
+
+    limpar_resiliencia_metadata()
+    chamadas = 0
+    iniciou = asyncio.Event()
+    liberar = asyncio.Event()
+
+    class FakeProviders:
+        has_any_provider = True
+
+        async def search_sources(self, query: str, *, limit: int = 5, prefer_youtube: bool = True):
+            nonlocal chamadas
+            chamadas += 1
+            iniciou.set()
+            await liberar.wait()
+            return [ApiTrackCandidate(title="Numb", artist="Linkin Park", provider="spotify")]
+
+    monkeypatch.setattr(fontes, "_provedores_api", FakeProviders())
+    monkeypatch.setattr(fontes.config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 30.0, raising=False)
+    monkeypatch.setattr(fontes.config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 16, raising=False)
+
+    primeira = asyncio.create_task(fontes.buscar_candidatos_multifonte("Linkin Park Numb", limit=5))
+    await iniciou.wait()
+    segunda = asyncio.create_task(fontes.buscar_candidatos_multifonte("Linkin Park Numb", limit=5))
+    await asyncio.sleep(0)
+    liberar.set()
+    a, b = await asyncio.gather(primeira, segunda)
+
+    assert chamadas == 1
+    assert a[0].title == b[0].title == "Numb"
+    a[0].title = "mutado"
+
+    terceira = await fontes.buscar_candidatos_multifonte("Linkin Park Numb", limit=5)
+    assert chamadas == 1
+    assert terceira[0].title == "Numb"
+    limpar_resiliencia_metadata()
+
+
+@pytest.mark.asyncio
+async def test_provider_circuit_breaker_para_de_repetir_falha(monkeypatch) -> None:
+    from cogs.musica.metadados import provedores_api
+    from cogs.musica.metadados.resiliencia import estado_circuito_provider, limpar_resiliencia_metadata
+
+    limpar_resiliencia_metadata()
+    monkeypatch.setattr("cogs.musica.metadados.provedores_api._env", lambda name, default="": "")
+    monkeypatch.setattr(provedores_api.config, "MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(provedores_api.config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES", 2, raising=False)
+    monkeypatch.setattr(provedores_api.config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS", 60.0, raising=False)
+
+    api = MusicApiProviders(timeout=2.0)
+    api.enabled = True
+    api.youtube_api_key = "yt-key"
+    api.spotify_client_id = ""
+    api.spotify_client_secret = ""
+    api.deezer_enabled = False
+    api.soundcloud_enabled = False
+    chamadas = 0
+
+    async def youtube(query: str, *, limit: int = 5):
+        nonlocal chamadas
+        chamadas += 1
+        raise RuntimeError("youtube temporariamente indisponivel")
+
+    api.youtube_search = youtube  # type: ignore[method-assign]
+
+    assert await api.search_sources("q1", limit=5) == []
+    assert await api.search_sources("q2", limit=5) == []
+    assert await api.search_sources("q3", limit=5) == []
+    assert chamadas == 2
+    estado = estado_circuito_provider("youtube")
+    assert estado.falhas_consecutivas == 2
+    assert estado.aberto_ate > 0
+    limpar_resiliencia_metadata()
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_e_isolado_sem_atrasar_demais_a_busca(monkeypatch) -> None:
+    import time as _time
+
+    from cogs.musica.metadados import provedores_api
+    from cogs.musica.metadados.resiliencia import limpar_resiliencia_metadata
+
+    limpar_resiliencia_metadata()
+    monkeypatch.setattr("cogs.musica.metadados.provedores_api._env", lambda name, default="": "")
+    monkeypatch.setattr(provedores_api.config, "MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(provedores_api.config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES", 3, raising=False)
+
+    api = MusicApiProviders(timeout=2.0)
+    api.enabled = True
+    api.youtube_api_key = "yt-key"
+    api.spotify_client_id = ""
+    api.spotify_client_secret = ""
+    api.deezer_enabled = False
+    api.soundcloud_enabled = False
+
+    async def youtube(query: str, *, limit: int = 5):
+        await asyncio.sleep(1.0)
+        return [ApiTrackCandidate(title="tarde", provider="youtube")]
+
+    api.youtube_search = youtube  # type: ignore[method-assign]
+    inicio = _time.monotonic()
+    resultado = await api.search_sources("consulta", limit=5)
+    elapsed = _time.monotonic() - inicio
+
+    assert resultado == []
+    assert elapsed < 0.6
+    limpar_resiliencia_metadata()
+
+
+@pytest.mark.asyncio
+async def test_resolucao_textual_singleflight_compartilha_json_cru_sem_misturar_requester(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import resolucao, roteamento
+    from cogs.musica.agente_telefone.coalescencia_resolucao import limpar_coalescencia_resolucao
+
+    limpar_coalescencia_resolucao()
+    destino = roteamento.DestinoWorker("worker-a", "A", "http://worker-a:8766", "token")
+    monkeypatch.setattr(resolucao, "destino_vinculado", lambda guild_id: destino)
+    monkeypatch.setattr(resolucao.config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_ENABLED", False, raising=False)
+
+    iniciou = asyncio.Event()
+    liberar = asyncio.Event()
+    chamadas = 0
+
+    async def metadata_fake(query: str, *, limit: int = 5):
+        return []
+
+    async def worker_fake(*, base, token, payload, timeout_seconds):
+        nonlocal chamadas
+        chamadas += 1
+        iniciou.set()
+        await liberar.wait()
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "tracks": [
+                {
+                    "title": "Numb (Official Audio)",
+                    "uploader": "Linkin Park",
+                    "webpage_url": "https://youtube.test/numb",
+                    "metadata_only": True,
+                    "source": "youtube",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", metadata_fake)
+    monkeypatch.setattr(resolucao, "executar_tarefa_resolucao", worker_fake)
+
+    t1 = asyncio.create_task(
+        resolucao.resolve_music_tracks_on_worker(
+            "Linkin Park Numb", requester_id=11, requester_name="A", metadata_only=True, guild_id=99
+        )
+    )
+    await iniciou.wait()
+    t2 = asyncio.create_task(
+        resolucao.resolve_music_tracks_on_worker(
+            "Linkin Park Numb", requester_id=22, requester_name="B", metadata_only=True, guild_id=99
+        )
+    )
+    await asyncio.sleep(0)
+    liberar.set()
+    lote_a, lote_b = await asyncio.gather(t1, t2)
+
+    assert chamadas == 1
+    assert lote_a.tracks[0].requester_id == 11
+    assert lote_b.tracks[0].requester_id == 22
+    assert lote_a.tracks[0] is not lote_b.tracks[0]
+    limpar_coalescencia_resolucao()
+
+
+@pytest.mark.asyncio
+async def test_deep_pass_e_suprimido_quando_limite_de_concorrencia_esta_ocupado(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import resolucao, roteamento
+    from cogs.musica.busca.resiliencia import (
+        liberar_busca_profunda,
+        limpar_resiliencia_busca,
+        tentar_reservar_busca_profunda,
+    )
+
+    limpar_resiliencia_busca()
+    assert tentar_reservar_busca_profunda(limite=1) is True
+    destino = roteamento.DestinoWorker("worker-a", "A", "http://worker-a:8766", "token")
+    monkeypatch.setattr(resolucao, "destino_vinculado", lambda guild_id: destino)
+    monkeypatch.setattr(resolucao.config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_ENABLED", True, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_MAX_CONCURRENT", 1, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_MAX_WORKER_INFLIGHT", 10, raising=False)
+    chamadas = 0
+
+    async def metadata_fake(query: str, *, limit: int = 5):
+        return []
+
+    async def worker_fake(*, base, token, payload, timeout_seconds):
+        nonlocal chamadas
+        chamadas += 1
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "tracks": [
+                {
+                    "title": "Musica Misteriosa",
+                    "uploader": "Canal",
+                    "webpage_url": "https://youtube.test/primeira",
+                    "metadata_only": True,
+                    "source": "youtube",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", metadata_fake)
+    monkeypatch.setattr(resolucao, "executar_tarefa_resolucao", worker_fake)
+
+    try:
+        lote = await resolucao.resolve_music_tracks_on_worker(
+            "misteriosa muzika", requester_id=1, requester_name="tester", metadata_only=True, guild_id=99
+        )
+        assert chamadas == 1
+        assert lote.tracks[0].webpage_url == "https://youtube.test/primeira"
+    finally:
+        liberar_busca_profunda()
+        limpar_resiliencia_busca()

@@ -8,6 +8,7 @@ from typing import Awaitable, Callable, Mapping, Any
 from ..busca.fontes import buscar_candidatos_multifonte
 from ..metadados.modelos import ApiTrackCandidate
 from ..nucleo.modelos import MusicTrack
+from .coalescencia_resolucao import executar_resolucao_compartilhada
 from .conversao_resolucao import converter_resposta_resolucao
 from .solicitacao_resolucao import montar_tarefa_resolucao
 from .transporte_resolucao import executar_tarefa_resolucao
@@ -45,7 +46,8 @@ async def executar_passagem_profunda(
         busca_textual=True,
     )
     worker_task = asyncio.create_task(
-        executar_worker(
+        executar_resolucao_compartilhada(
+            executar_worker,
             base=base,
             token=token,
             payload=payload,
