@@ -200,6 +200,9 @@ async def sincronizar_estado_agente(
     if remote_loop_mode in {"off", "one", "all"}:
         with contextlib.suppress(Exception):
             state.loop_mode = LoopMode(remote_loop_mode)
+    with contextlib.suppress(Exception):
+        if remote.get("volume_percent") is not None:
+            state.volume = max(0.0, min(1.5, float(remote.get("volume_percent") or 0.0) / 100.0))
     state.shuffle = False
     if state.current is not None:
         with contextlib.suppress(Exception):
@@ -212,7 +215,22 @@ async def sincronizar_estado_agente(
             state.current_quality_label = "Worker"
     state.current_lavalink_player = None
     state.current_source = None
-    state.paused = raw_status == "paused"
+    remote_position_seconds = None
+    with contextlib.suppress(Exception):
+        if remote.get("position_ms") is not None:
+            remote_position_seconds = max(0.0, float(remote.get("position_ms") or 0.0) / 1000.0)
+    if raw_status == "paused":
+        state.paused = True
+        if remote_position_seconds is not None:
+            state.voice_status_pause_position_seconds = remote_position_seconds
+    else:
+        if previous_status == "paused" and raw_status == "playing" and remote_position_seconds is not None:
+            # Rebaseia o relógio local para que {elapsed}/{position} não conte o
+            # tempo em que o Music Agent permaneceu pausado.
+            state.current_start_offset_seconds = remote_position_seconds
+            state.current_started_at_monotonic = time.monotonic()
+        state.paused = False
+        state.voice_status_pause_position_seconds = -1.0
     state.music_session_active = bool(state.current or raw_status in {"preparing", "starting", "playing", "paused", "queued"})
     if raw_status and raw_status not in {"failed", "error"}:
         state.current_status_detail = raw_status
@@ -239,7 +257,23 @@ async def sincronizar_estado_agente(
         state.agent_started_track_key = new_panel_key
         state.current_started_at_monotonic = time.monotonic()
         state.current_start_offset_seconds = 0.0
+        state.voice_status_pause_position_seconds = -1.0
         router._schedule_agent_playback_started_effects(guild_id, new_panel_key)
+
+    status_transition = previous_status != state.current_status
+    if (
+        status_transition
+        and state.current is not None
+        and previous_status in {"playing", "paused"}
+        and state.current_status in {"playing", "paused"}
+        and not just_started_agent_track
+    ):
+        router._mark_voice_status_track_change(state)
+        router._schedule_voice_status_track_sync(
+            guild_id,
+            repeat_after=0.0,
+            reason="agent_pause" if state.current_status == "paused" else "agent_resume",
+        )
 
     track_changed_for_panel = bool(new_panel_key and previous_panel_key != new_panel_key)
     repost_key = f"{guild_id}:{new_panel_key}" if new_panel_key else ""

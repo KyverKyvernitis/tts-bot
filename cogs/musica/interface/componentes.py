@@ -1689,6 +1689,11 @@ class VoiceStatusSettingsView(discord.ui.LayoutView):
         idle = str(settings.get("idle") or "")
         preview = self.router.preview_voice_status(self.guild_id)
         idle_text = idle if idle else "restaurar o status anterior do canal"
+        metrics = self.router.get_voice_status_metrics(self.guild_id) if hasattr(self.router, "get_voice_status_metrics") else {}
+        metric_line = (
+            f"-# Diagnóstico: writes={int(metrics.get('write_success', 0))} • retries={int(metrics.get('retries', 0))} • "
+            f"overrides={int(metrics.get('external_overrides', 0))} • stale={int(metrics.get('stale_generation_dropped', 0))}."
+        )
         return [
             "# 🎙️ Status automático do canal de voz",
             "Configure como o bot mostra a música atual diretamente no status do canal de voz.",
@@ -1700,8 +1705,9 @@ class VoiceStatusSettingsView(discord.ui.LayoutView):
             "**Prévia:**",
             f"> {preview or 'sem status'}",
             "",
-            "-# Variáveis: `{source_emoji}`, `{title}`, `{author}`, `{requester}`, `{elapsed}`, `{duration}`, `{remaining}`, `{queue}`, `{quality}`, `{kbps}`.",
+            "-# Variáveis: `{source_emoji}`, `{title}`, `{author}`, `{requester}`, `{elapsed}`, `{position}`, `{duration}`, `{remaining}`, `{queue}`, `{quality}`, `{kbps}`, `{state}`, `{paused}`, `{loop}`, `{volume}`.",
             "-# O bot salva o status antigo do canal e restaura depois que a música terminar, parar, mover ou após restart.",
+            metric_line,
         ]
 
     def _build(self) -> None:

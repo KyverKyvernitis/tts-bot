@@ -644,6 +644,8 @@ class AudioRouter:
         self._voice_status_write_retries = int(getattr(config, "MUSIC_VOICE_STATUS_WRITE_RETRIES", 3) or 3)
         self._voice_status_retry_base_seconds = float(getattr(config, "MUSIC_VOICE_STATUS_RETRY_BASE_SECONDS", 0.75) or 0.75)
         self._voice_status_gateway_ack_seconds = float(getattr(config, "MUSIC_VOICE_STATUS_GATEWAY_ACK_SECONDS", 8.0) or 8.0)
+        self._voice_status_last_http_status = 0
+        self._voice_status_last_retry_after_seconds = 0.0
         self._voice_status_controller = VoiceStatusController(self)
 
     @property
@@ -1283,6 +1285,9 @@ class AudioRouter:
     def get_voice_status_settings(self, guild_id: int) -> dict:
         return self._voice_status_settings_from_doc(guild_id)
 
+    def get_voice_status_metrics(self, guild_id: int) -> dict[str, int]:
+        return self._voice_status_controller.metrics_snapshot(int(guild_id))
+
     async def set_voice_status_enabled(self, guild_id: int, enabled: bool) -> dict:
         settings = self._voice_status_settings_from_doc(guild_id)
         settings["enabled"] = bool(enabled)
@@ -1408,6 +1413,17 @@ class AudioRouter:
             kbps = int(cap or MUSIC_HIGH_QUALITY_MAX_ABR)
         state.current_quality_kbps = max(1, int(kbps))
 
+    def _voice_status_elapsed_seconds(self, state: MusicGuildState, track: MusicTrack | None = None) -> float:
+        track = track or state.current
+        offset = max(0.0, float(getattr(state, "current_start_offset_seconds", 0.0) or 0.0))
+        paused_position = float(getattr(state, "voice_status_pause_position_seconds", -1.0) or 0.0)
+        if bool(getattr(state, "paused", False)) and paused_position >= 0.0:
+            return paused_position
+        started = float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0)
+        if not started:
+            return offset
+        return max(0.0, offset + (time.monotonic() - started))
+
     def render_voice_status(self, guild_id: int, track: MusicTrack | None = None, *, template: str | None = None) -> str:
         state = self.get_state(guild_id)
         track = track or state.current
@@ -1420,13 +1436,24 @@ class AudioRouter:
         duration = getattr(track, "duration_label", "desconhecida") if track is not None else "desconhecida"
         elapsed = "0:00"
         remaining = duration
+        elapsed_seconds = 0
         if track is not None and not getattr(track, "is_live", False):
-            started = float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0)
-            offset = max(0.0, float(getattr(state, "current_start_offset_seconds", 0.0) or 0.0))
-            elapsed_seconds = max(0, int(offset + (time.monotonic() - started))) if started else int(offset)
+            elapsed_seconds = max(0, int(self._voice_status_elapsed_seconds(state, track)))
             elapsed = self._format_seconds(elapsed_seconds)
             if getattr(track, "duration", None) is not None:
                 remaining = self._format_seconds(max(0, int(float(track.duration) - elapsed_seconds)))
+        raw_state = str(getattr(state, "current_status", "idle") or "idle").lower()
+        state_label = {
+            "playing": "Tocando",
+            "paused": "Pausada",
+            "starting": "Iniciando",
+            "resolving": "Carregando",
+            "queued": "Na fila",
+            "skipping": "Pulando",
+            "error": "Erro",
+            "idle": "Parada",
+        }.get(raw_state, raw_state.capitalize() or "Parada")
+        loop_mode = getattr(getattr(state, "loop_mode", None), "value", getattr(state, "loop_mode", "off"))
         values = {
             "source_emoji": self._source_emoji_for_track(track),
             "title": title,
@@ -1434,11 +1461,16 @@ class AudioRouter:
             "author": author,
             "duration": duration,
             "elapsed": elapsed,
+            "position": elapsed,
             "remaining": remaining,
             "requester": requester or "alguém",
             "queue": str(state.queue_size()),
             "quality": str(getattr(state, "current_quality_label", "Alta") or "Alta"),
             "kbps": str(int(getattr(state, "current_quality_kbps", MUSIC_HIGH_QUALITY_MAX_ABR) or MUSIC_HIGH_QUALITY_MAX_ABR)),
+            "state": state_label,
+            "paused": "⏸️" if bool(getattr(state, "paused", False)) else "",
+            "loop": str(loop_mode or "off"),
+            "volume": f"{max(0, min(150, int(round(float(getattr(state, 'volume', 1.0) or 0.0) * 100))))}%",
         }
         raw_template = self._sanitize_voice_status_template(template or self._voice_status_settings_from_doc(guild_id).get("template") or MUSIC_VOICE_STATUS_TEMPLATE)
         for key, value in values.items():
@@ -1530,6 +1562,8 @@ class AudioRouter:
         return False, ""
 
     async def _set_voice_channel_status(self, channel, status: str, *, reason: str = "") -> bool:
+        self._voice_status_last_http_status = 0
+        self._voice_status_last_retry_after_seconds = 0.0
         try:
             from discord.http import Route
             http = getattr(self.bot, "http", None)
@@ -1549,10 +1583,19 @@ class AudioRouter:
             )
             return True
         except discord.Forbidden:
+            self._voice_status_last_http_status = 403
             logger.warning("[music] não consegui alterar status do canal: permissão ausente")
             return False
         except discord.HTTPException as exc:
-            logger.warning("[music] não consegui alterar status do canal: HTTP %s", getattr(exc, "status", "?"))
+            self._voice_status_last_http_status = int(getattr(exc, "status", 0) or 0)
+            retry_after = getattr(exc, "retry_after", 0.0) or 0.0
+            with contextlib.suppress(Exception):
+                self._voice_status_last_retry_after_seconds = max(0.0, float(retry_after))
+            logger.warning(
+                "[music] não consegui alterar status do canal: HTTP %s retry_after=%.2fs",
+                self._voice_status_last_http_status or "?",
+                self._voice_status_last_retry_after_seconds,
+            )
             return False
         except Exception:
             logger.warning("[music] falha inesperada ao alterar status do canal", exc_info=True)
@@ -3315,6 +3358,7 @@ class AudioRouter:
         state.skip_transition_active = False
         state.skip_history_suppressed_once = False
         state.paused = False
+        state.voice_status_pause_position_seconds = -1.0
         state.music_session_active = False
         state.music_owns_voice = False
         state.music_afk_expired = False
@@ -3584,9 +3628,13 @@ class AudioRouter:
         current_vc = getattr(guild, "voice_client", None)
         lavalink_player = state.current_lavalink_player or current_vc
         if self._is_lavalink_voice_client(lavalink_player) and self._vc_is_connected(lavalink_player):
-            # Se o Wavelink moveu/atualizou voice state internamente, sincroniza o
-            # canal conhecido sem marcar external_move nem restaurar status.
+            # Mesmo em move interno do Wavelink o status pertence ao canal antigo:
+            # restaure-o e assuma o novo canal sem gerar aviso de move externo.
+            await self._restore_voice_status_for_state(guild, state, reason="internal_move", channel_hint=before_channel)
             state.last_voice_channel_id = int(getattr(after_channel, "id", 0) or 0) or state.last_voice_channel_id
+            if state.current is not None:
+                self._mark_voice_status_track_change(state)
+                self._schedule_voice_status_track_sync(guild.id, repeat_after=0.0, reason="internal_move")
             logger.debug(
                 "[music/lavalink] voice_state move tratado como interno | guild=%s channel=%s",
                 guild.id,
@@ -3604,7 +3652,7 @@ class AudioRouter:
         state.last_voice_channel_id = int(getattr(after_channel, "id", 0) or 0) or state.last_voice_channel_id
         await self._boost_auto_bitrate_for_music(guild, after_channel, state)
         if state.current is not None:
-            await self._apply_voice_status_for_music(guild, after_channel, state, state.current, force=True)
+            await self._apply_voice_status_for_music(guild, after_channel, state, state.current, force=True, reason="external_move")
         self._set_idle_reason(
             state,
             "external_move",
@@ -4797,8 +4845,11 @@ class AudioRouter:
             await vc.pause(True)
         else:
             vc.pause()
+        state.voice_status_pause_position_seconds = self._voice_status_elapsed_seconds(state, state.current)
         state.paused = True
         self._set_current_status(state, "paused")
+        self._mark_voice_status_track_change(state)
+        self._schedule_voice_status_track_sync(guild_id, repeat_after=0.0, reason="pause")
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
@@ -4812,8 +4863,15 @@ class AudioRouter:
             await vc.pause(False)
         else:
             vc.resume()
+        paused_position = float(getattr(state, "voice_status_pause_position_seconds", -1.0) or 0.0)
+        if paused_position >= 0.0:
+            state.current_start_offset_seconds = paused_position
+            state.current_started_at_monotonic = time.monotonic()
+        state.voice_status_pause_position_seconds = -1.0
         state.paused = False
         self._set_current_status(state, "playing")
+        self._mark_voice_status_track_change(state)
+        self._schedule_voice_status_track_sync(guild_id, repeat_after=0.0, reason="resume")
         await self.update_panel(guild_id, create=bool(state.now_message))
         return True
 
@@ -5083,6 +5141,9 @@ class AudioRouter:
                 )
         if state.current_backend == "lavalink":
             await self.backends.set_lavalink_player_volume(guild_id, int(round(volume * 100)))
+        if state.current is not None:
+            self._mark_voice_status_track_change(state)
+            self._schedule_voice_status_track_sync(guild_id, repeat_after=0.0, reason="volume")
         self._schedule_panel_update(guild_id, create=False)
         return volume
 
@@ -5182,15 +5243,20 @@ class AudioRouter:
         state = self.get_state(guild_id)
         state.control_votes.pop("loop", None)
         if usar_controles_fila_remota(self, state):
-            return await alternar_repeticao_worker(self, guild_id, state, member=member)
-        if state.loop_mode is LoopMode.OFF:
-            state.loop_mode = LoopMode.ONE
-        elif state.loop_mode is LoopMode.ONE:
-            state.loop_mode = LoopMode.ALL
+            mode = await alternar_repeticao_worker(self, guild_id, state, member=member)
         else:
-            state.loop_mode = LoopMode.OFF
+            if state.loop_mode is LoopMode.OFF:
+                state.loop_mode = LoopMode.ONE
+            elif state.loop_mode is LoopMode.ONE:
+                state.loop_mode = LoopMode.ALL
+            else:
+                state.loop_mode = LoopMode.OFF
+            mode = state.loop_mode
+        if state.current is not None:
+            self._mark_voice_status_track_change(state)
+            self._schedule_voice_status_track_sync(guild_id, repeat_after=0.0, reason="loop")
         self._schedule_panel_update(guild_id, create=False)
-        return state.loop_mode
+        return mode
 
     def snapshot_queue(self, guild_id: int) -> list[MusicTrack]:
         return snapshot_fila(self.get_state(guild_id))

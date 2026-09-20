@@ -38,6 +38,7 @@ class FakeState:
         self.voice_status_expected_until = 0.0
         self.voice_status_last_write_at = 0.0
         self.voice_status_retry_count = 0
+        self.voice_status_pause_position_seconds = -1.0
         self.voice_status_lock = asyncio.Lock()
 
 
@@ -87,6 +88,8 @@ class FakeRouter:
         self._voice_status_write_retries = 3
         self._voice_status_retry_base_seconds = 0.001
         self._voice_status_gateway_ack_seconds = 8.0
+        self._voice_status_last_http_status = 0
+        self._voice_status_last_retry_after_seconds = 0.0
 
     def get_state(self, _guild_id):
         return self.state
@@ -119,8 +122,16 @@ class FakeRouter:
 
     async def _set_voice_channel_status(self, channel, status, *, reason=""):
         self.set_calls.append((channel.id, status, reason))
+        self._voice_status_last_http_status = 0
+        self._voice_status_last_retry_after_seconds = 0.0
         if self.set_results:
-            return bool(self.set_results.pop(0))
+            result = self.set_results.pop(0)
+            if isinstance(result, tuple):
+                ok, http_status, retry_after = result
+                self._voice_status_last_http_status = int(http_status or 0)
+                self._voice_status_last_retry_after_seconds = float(retry_after or 0.0)
+                return bool(ok)
+            return bool(result)
         return True
 
     async def _save_voice_status_record(self, _guild_id, record):
@@ -377,3 +388,169 @@ def test_integracao_nao_sobrescreve_parser_nativo() -> None:
 
     assert instalar_ponte_gateway_status_canal(bot) is False
     assert bot._connection.parsers["VOICE_CHANNEL_STATUS_UPDATE"] is native
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_429_respeita_retry_after_e_registra_metricas() -> None:
+    router = FakeRouter(fetch_results=[(False, "")], set_results=[(False, 429, 0.002), True])
+    controller = VoiceStatusController(router)
+    started = asyncio.get_running_loop().time()
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=True)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert [call[1] for call in router.set_calls] == ["A", "A"]
+    assert elapsed >= 0.09
+    metrics = controller.metrics_snapshot(router.guild.id)
+    assert metrics["rate_limited"] == 1
+    assert metrics["retries"] == 1
+    assert metrics["write_success"] == 1
+
+
+@pytest.mark.asyncio
+async def test_http_403_falha_sem_retries_inuteis() -> None:
+    router = FakeRouter(fetch_results=[(False, "")], set_results=[(False, 403, 0.0), True])
+    controller = VoiceStatusController(router)
+
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=True)
+
+    assert len(router.set_calls) == 1
+    metrics = controller.metrics_snapshot(router.guild.id)
+    assert metrics["permanent_http_failures"] == 1
+    assert metrics.get("retries", 0) == 0
+
+
+def test_render_status_expoe_placeholders_de_estado_e_posicao_congelada() -> None:
+    from pathlib import Path
+
+    raiz = Path(__file__).resolve().parents[4]
+    source = (raiz / "cogs" / "musica" / "legado" / "roteador_audio.py").read_text(encoding="utf-8")
+    assert '"position": elapsed' in source
+    assert '"state": state_label' in source
+    assert '"paused": "⏸️"' in source
+    assert '"loop": str(loop_mode or "off")' in source
+    assert '"volume": f"{' in source
+    assert 'voice_status_pause_position_seconds' in source
+
+
+@pytest.mark.asyncio
+async def test_music_agent_pause_resume_dispara_status_sem_trocar_faixa() -> None:
+    from cogs.musica.nucleo.estado import MusicGuildState
+    from cogs.musica.reproducao.sincronizacao import sincronizar_estado_agente
+
+    state = MusicGuildState()
+    scheduled: list[str] = []
+
+    class Router:
+        def get_state(self, _guild_id):
+            return state
+
+        @staticmethod
+        def _panel_key_for_track(track):
+            return str(getattr(track, "title", "") or "") if track is not None else ""
+
+        @staticmethod
+        def _set_current_status(st, status):
+            st.current_status = status
+
+        @staticmethod
+        def _reactivate_panel_controls_now(_guild_id):
+            return None
+
+        @staticmethod
+        def _schedule_agent_playback_started_effects(_guild_id, _key):
+            return None
+
+        @staticmethod
+        def _mark_voice_status_track_change(_state):
+            return None
+
+        @staticmethod
+        def _schedule_voice_status_track_sync(_guild_id, *, repeat_after=0.0, reason=""):
+            scheduled.append(reason)
+
+        @staticmethod
+        def start_music_agent_monitor(*_args, **_kwargs):
+            return None
+
+        async def update_panel(self, *_args, **_kwargs):
+            return None
+
+    base = {
+        "confirmed_playing": True,
+        "voice_connected": True,
+        "player_present": True,
+        "voice_channel_id": 22,
+        "text_channel_id": 33,
+        "playback_token": 9,
+        "position_ms": 30_000,
+        "current": {
+            "title": "Faixa",
+            "webpage_url": "https://example.invalid/a",
+            "requester_id": 1,
+            "requester_name": "Core",
+            "duration": 120,
+            "source": "worker-agent",
+        },
+        "queue": [],
+        "queue_size": 0,
+    }
+
+    await sincronizar_estado_agente(Router(), 11, agent_state={**base, "status": "playing"}, create_panel=False)
+    scheduled.clear()
+    await sincronizar_estado_agente(
+        Router(), 11, agent_state={**base, "status": "paused", "confirmed_playing": False, "position_ms": 31_000}, create_panel=False
+    )
+    assert scheduled == ["agent_pause"]
+    assert state.voice_status_pause_position_seconds == pytest.approx(31.0)
+
+    scheduled.clear()
+    await sincronizar_estado_agente(
+        Router(), 11, agent_state={**base, "status": "playing", "position_ms": 31_000}, create_panel=False
+    )
+    assert scheduled == ["agent_resume"]
+    assert state.voice_status_pause_position_seconds == -1.0
+    assert state.current_start_offset_seconds == pytest.approx(31.0)
+
+
+def test_painel_documenta_placeholders_novos_e_metricas() -> None:
+    from pathlib import Path
+
+    raiz = Path(__file__).resolve().parents[4]
+    source = (raiz / "cogs" / "musica" / "interface" / "componentes.py").read_text(encoding="utf-8")
+    for token in ("{position}", "{state}", "{paused}", "{loop}", "{volume}"):
+        assert token in source
+    assert "Diagnóstico: writes=" in source
+
+@pytest.mark.asyncio
+async def test_restart_restaura_registro_persistido_e_limpa_ownership() -> None:
+    router = FakeRouter(fetch_results=[(True, "A")])
+    router.saved = {
+        "channel_id": router.channel.id,
+        "had_original_status": True,
+        "original_known_status": True,
+        "original_status": "original",
+        "owned_by_bot": True,
+        "last_bot_status": "A",
+        "last_track_key": "A",
+    }
+    controller = VoiceStatusController(router)
+    router.state.voice_status_channel_id = None
+
+    await controller.restore(router.guild, router.state, reason="restart")
+
+    assert [call[1] for call in router.set_calls] == ["original"]
+    assert router.saved is None
+    assert router.state.voice_status_channel_id is None
+    assert controller.metrics_snapshot(router.guild.id)["restores"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_mesma_faixa_sem_mudanca_deduplica_put() -> None:
+    router = FakeRouter(fetch_results=[(False, "")])
+    controller = VoiceStatusController(router)
+
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=True)
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=False)
+
+    assert [call[1] for call in router.set_calls] == ["A"]
+    assert controller.metrics_snapshot(router.guild.id)["deduplicated"] >= 1

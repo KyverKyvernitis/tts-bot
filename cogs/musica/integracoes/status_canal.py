@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import Counter
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,25 @@ class VoiceStatusController:
         # Cache best-effort do último status realmente visto no Gateway. Ele
         # também é útil antes de a música assumir ownership do canal.
         self._observed: dict[tuple[int, int], tuple[str, float]] = {}
+        # Métricas leves, fora do hot path de áudio. Servem para diagnosticar
+        # status preso/rate-limit sem aumentar o nível de log global.
+        self._metrics: dict[int, Counter[str]] = {}
+
+    def _metric(self, guild_id: int | None, key: str, amount: int = 1) -> None:
+        try:
+            gid = int(guild_id or 0)
+        except Exception:
+            gid = 0
+        if gid <= 0:
+            return
+        self._metrics.setdefault(gid, Counter())[str(key)] += int(amount)
+
+    def metrics_snapshot(self, guild_id: int) -> dict[str, int]:
+        try:
+            gid = int(guild_id or 0)
+        except Exception:
+            gid = 0
+        return dict(self._metrics.get(gid, Counter()))
 
     @staticmethod
     def _generation(state: Any) -> int:
@@ -118,6 +138,7 @@ class VoiceStatusController:
         *,
         reason: str,
         generation: int | None,
+        guild_id: int | None = None,
     ) -> bool:
         router = self.router
         attempts = max(1, min(5, int(getattr(router, "_voice_status_write_retries", 3) or 3)))
@@ -126,24 +147,39 @@ class VoiceStatusController:
 
         for attempt in range(attempts):
             if generation is not None and not self._is_current_generation(state, generation):
+                self._metric(guild_id, "stale_generation_dropped")
                 return False
             self._remember_expected_gateway(state, status)
+            self._metric(guild_id, "write_attempts")
             ok = await router._set_voice_channel_status(channel, status, reason=reason)
             if ok:
                 state.voice_status_last_write_at = time.monotonic()
                 state.voice_status_retry_count = attempt
+                self._metric(guild_id, "write_success")
                 return True
+            self._metric(guild_id, "write_failures")
             state.voice_status_expected_status = ""
             state.voice_status_expected_until = 0.0
             state.voice_status_retry_count = attempt + 1
+            http_status = int(getattr(router, "_voice_status_last_http_status", 0) or 0)
+            retry_after = max(0.0, float(getattr(router, "_voice_status_last_retry_after_seconds", 0.0) or 0.0))
+            if http_status == 429:
+                self._metric(guild_id, "rate_limited")
+            # 401/403/404 não melhoram com retry. Evita PUTs inúteis quando
+            # permissão/endpoint não está disponível.
+            if http_status in {401, 403, 404}:
+                self._metric(guild_id, "permanent_http_failures")
+                break
             if attempt + 1 >= attempts:
                 break
-            delay = min(5.0, base_delay * (2**attempt))
+            self._metric(guild_id, "retries")
+            delay = min(15.0, max(base_delay * (2**attempt), retry_after if http_status == 429 else 0.0))
             logger.info(
-                "[music/voice-status] retry agendado | channel=%s attempt=%s/%s delay=%.2fs",
+                "[music/voice-status] retry agendado | channel=%s attempt=%s/%s http=%s delay=%.2fs",
                 getattr(channel, "id", None),
                 attempt + 2,
                 attempts,
+                http_status or "-",
                 delay,
             )
             await asyncio.sleep(delay)
@@ -182,6 +218,7 @@ class VoiceStatusController:
         expected = router._trim_voice_status(getattr(state, "voice_status_expected_status", "") or "")
         expected_until = float(getattr(state, "voice_status_expected_until", 0.0) or 0.0)
         if now <= expected_until and normalized == expected:
+            self._metric(guild_id, "gateway_acks")
             state.voice_status_expected_status = ""
             state.voice_status_expected_until = 0.0
             logger.debug(
@@ -203,6 +240,7 @@ class VoiceStatusController:
 
         # Mudança externa: invalida qualquer task velha e solta ownership sem
         # tentar restaurar no fim, pois o status agora pertence ao staff/usuário.
+        self._metric(guild_id, "external_overrides")
         self._bump_generation(state, reason="external_override")
         self.cancel_tasks(state)
         state.voice_status_owned = False
@@ -332,6 +370,7 @@ class VoiceStatusController:
                 state,
                 reason=f"Restaurar status do canal após música ({reason})",
                 generation=self._generation(state),
+                guild_id=int(guild.id),
             )
             if not ok:
                 logger.warning(
@@ -341,6 +380,7 @@ class VoiceStatusController:
                     reason,
                 )
                 return
+            self._metric(guild.id, "restores")
             logger.info(
                 "[music/voice-status] restaurado | guild=%s channel=%s reason=%s target=%r",
                 guild.id,
@@ -485,8 +525,10 @@ class VoiceStatusController:
                     and str(getattr(state, "voice_status_last_bot", "") or "") == desired
                     and str(getattr(state, "voice_status_last_track_key", "") or "") == track_key
                 ):
+                    self._metric(guild.id, "deduplicated")
                     return
                 if not force and desired_key == str(getattr(state, "voice_status_last_applied_key", "") or ""):
+                    self._metric(guild.id, "deduplicated")
                     return
             if not self._is_current_generation(state, generation):
                 return
@@ -508,9 +550,11 @@ class VoiceStatusController:
                 state,
                 reason="Atualizar status do canal enquanto a música toca",
                 generation=generation,
+                guild_id=int(guild.id),
             ):
                 return
             if not self._is_current_generation(state, generation):
+                self._metric(guild.id, "stale_generation_dropped")
                 logger.info(
                     "[music/voice-status] write antigo concluído após nova geração | guild=%s channel=%s generation=%s current=%s",
                     guild.id,
@@ -541,6 +585,13 @@ class VoiceStatusController:
                     "reason": "music_player",
                 },
             )
+            self._metric(guild.id, "applied")
+            if reason in {"pause", "agent_pause"}:
+                self._metric(guild.id, "pause_updates")
+            elif reason in {"resume", "agent_resume"}:
+                self._metric(guild.id, "resume_updates")
+            elif "move" in str(reason):
+                self._metric(guild.id, "channel_move_updates")
             logger.info(
                 "[music/voice-status] applied | guild=%s channel=%s generation=%s reason=%s",
                 guild.id,
@@ -635,7 +686,7 @@ class VoiceStatusController:
             return
         settings = router._voice_status_settings_from_doc(guild_id)
         template = str(settings.get("template") or "")
-        dynamic = "{elapsed}" in template or "{remaining}" in template
+        dynamic = any(token in template for token in ("{elapsed}", "{remaining}", "{position}"))
         task = getattr(state, "voice_status_update_task", None)
         if task is not None and not task.done():
             return
@@ -680,6 +731,7 @@ class VoiceStatusController:
                         reassert = not gateway_known and age >= reassert_seconds
                         if not reassert:
                             continue
+                        self._metric(guild_id, "watchdog_reasserts")
 
                     await self.apply(
                         guild,

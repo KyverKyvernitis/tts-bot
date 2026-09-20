@@ -137,6 +137,7 @@ class MusicGuildState:
     voice_status_expected_until: float = 0.0
     voice_status_last_write_at: float = 0.0
     voice_status_retry_count: int = 0
+    voice_status_pause_position_seconds: float = -1.0
     voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     agent_playback_token: int = -1
     agent_monitor_task: Optional[asyncio.Task] = None
