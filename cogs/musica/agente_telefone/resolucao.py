@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
 from cogs.musica import configuracao as config
 
-from ..busca import ranquear_faixas
+from ..busca import fundir_resultados, ranquear_faixas
+from ..busca.fontes import buscar_candidatos_multifonte
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch
 from .cache_resolucao import (
@@ -27,6 +29,18 @@ from .transporte_resolucao import executar_tarefa_resolucao
 
 logger = logging.getLogger(__name__)
 
+
+async def _cancelar_tarefa_busca(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
 
 
 async def resolve_music_tracks_on_worker(
@@ -102,6 +116,12 @@ async def resolve_music_tracks_on_worker(
         busca_textual=busca_textual,
     )
 
+    metadata_task: asyncio.Task | None = None
+    if busca_textual and somente_metadados:
+        metadata_task = asyncio.create_task(
+            buscar_candidatos_multifonte(clean_query, limit=max_limit)
+        )
+
     started = time.monotonic()
     try:
         data = await executar_tarefa_resolucao(
@@ -111,8 +131,10 @@ async def resolve_music_tracks_on_worker(
             timeout_seconds=total_timeout,
         )
     except MusicWorkerUnavailable:
+        await _cancelar_tarefa_busca(metadata_task)
         raise
     except Exception as exc:
+        await _cancelar_tarefa_busca(metadata_task)
         logger.warning(
             "[music/worker] yt-dlp remoto falhou | worker=%s query=%r erro=%s",
             destino.worker_id or destino.name,
@@ -125,6 +147,7 @@ async def resolve_music_tracks_on_worker(
         ) from exc
 
     if data.get("ok") is False:
+        await _cancelar_tarefa_busca(metadata_task)
         message = str(
             data.get("message")
             or data.get("error")
@@ -140,6 +163,33 @@ async def resolve_music_tracks_on_worker(
         requester_id=requester_id,
         requester_name=requester_name,
     )
+    api_candidates = []
+    if metadata_task is not None:
+        try:
+            api_candidates = await metadata_task
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("[music/search] provider metadata falhou | query=%r erro=%s", clean_query, exc)
+
+    if busca_textual and somente_metadados and api_candidates:
+        batch.tracks, fusao = fundir_resultados(
+            clean_query,
+            batch.tracks,
+            api_candidates,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            limit=max_limit,
+        )
+        logger.info(
+            "[music/search] fusao multi-provider | query=%r entradas=%s grupos=%s duplicatas=%s fontes=%s",
+            clean_query,
+            fusao.entradas,
+            fusao.grupos,
+            fusao.duplicatas,
+            ",".join(fusao.fontes),
+        )
+
     if busca_textual and len(batch.tracks) > 1:
         batch.tracks, ranking = ranquear_faixas(clean_query, batch.tracks)
         if ranking:

@@ -75,3 +75,124 @@ def test_empate_preserva_ordem_original_para_estabilidade() -> None:
     ordenadas, ranking = ranquear_faixas("same artist same song", [a, b])
     assert ordenadas == [a, b]
     assert [item.indice_original for item in ranking] == [0, 1]
+
+from cogs.musica.busca import fundir_resultados
+from cogs.musica.metadados.modelos import ApiTrackCandidate
+
+
+def test_fusao_colapsa_mesma_gravacao_de_worker_spotify_e_deezer() -> None:
+    worker = _track(
+        "The Weeknd - Blinding Lights (Official Audio)",
+        "The Weeknd - Topic",
+        url="https://youtube.test/watch?v=official",
+    )
+    outro = _track(
+        "Blinding Lights (Live)",
+        "The Weeknd",
+        url="https://youtube.test/watch?v=live",
+    )
+    worker.duration = 200
+    outro.duration = 215
+    spotify = ApiTrackCandidate(
+        title="Blinding Lights",
+        artist="The Weeknd",
+        duration=200,
+        provider="spotify",
+        source="Spotify",
+        webpage_url="https://open.spotify.com/track/abc",
+        isrc="USUG11904206",
+    )
+    deezer = ApiTrackCandidate(
+        title="Blinding Lights",
+        artist="The Weeknd",
+        duration=201,
+        provider="deezer",
+        source="Deezer",
+        webpage_url="https://deezer.test/track/abc",
+        isrc="USUG11904206",
+    )
+
+    tracks, resumo = fundir_resultados(
+        "the weeknd blinding lights",
+        [outro, worker],
+        [spotify, deezer],
+        requester_id=1,
+        requester_name="tester",
+        limit=5,
+    )
+
+    assert len(tracks) == 2
+    assert tracks[0].webpage_url == worker.webpage_url
+    assert resumo.entradas == 4
+    assert resumo.grupos == 2
+    assert resumo.duplicatas == 2
+    assert {"worker-youtube", "spotify", "deezer"}.issubset(set(resumo.fontes))
+
+
+def test_fusao_preserva_remix_como_resultado_distinto() -> None:
+    original = _track("Get Lucky (Official Audio)", "Daft Punk")
+    remix = ApiTrackCandidate(
+        title="Get Lucky Remix",
+        artist="Daft Punk",
+        duration=260,
+        provider="spotify",
+        webpage_url="https://open.spotify.com/track/remix",
+        isrc="FRREMIX00001",
+    )
+    original.duration = 248
+
+    tracks, resumo = fundir_resultados(
+        "Daft Punk - Get Lucky",
+        [original],
+        [remix],
+        limit=5,
+    )
+
+    assert len(tracks) == 2
+    assert resumo.duplicatas == 0
+    assert any("remix" in track.title.lower() for track in tracks)
+
+
+def test_fusao_por_isrc_vence_pequena_variacao_de_metadata() -> None:
+    spotify = ApiTrackCandidate(
+        title="Numb",
+        artist="Linkin Park",
+        duration=185,
+        provider="spotify",
+        webpage_url="https://open.spotify.com/track/numb",
+        isrc="USWB10300474",
+    )
+    deezer = ApiTrackCandidate(
+        title="Numb - 2003 Remaster",
+        artist="Linkin Park",
+        duration=186,
+        provider="deezer",
+        webpage_url="https://deezer.test/numb",
+        isrc="USWB10300474",
+    )
+
+    tracks, resumo = fundir_resultados("Linkin Park Numb", [], [spotify, deezer], limit=5)
+
+    assert len(tracks) == 1
+    assert resumo.grupos == 1
+    assert resumo.duplicatas == 1
+
+
+def test_fusao_candidato_metadata_permanece_lazy_sem_stream() -> None:
+    spotify = ApiTrackCandidate(
+        title="Genesis",
+        artist="Grimes",
+        duration=255,
+        provider="spotify",
+        source="Spotify",
+        webpage_url="https://open.spotify.com/track/genesis",
+        isrc="CAAAA0000001",
+    )
+
+    tracks, _ = fundir_resultados("Grimes Genesis", [], [spotify], limit=5)
+
+    assert len(tracks) == 1
+    assert tracks[0].extractor == "metadata"
+    assert tracks[0].stream_url == ""
+    assert tracks[0].display_title == "Genesis"
+    assert tracks[0].display_uploader == "Grimes"

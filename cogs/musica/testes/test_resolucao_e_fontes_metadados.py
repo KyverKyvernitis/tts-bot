@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+
+import pytest
 from pathlib import Path
 
 from cogs.musica.agente_telefone.cache_resolucao import (
@@ -9,6 +11,7 @@ from cogs.musica.agente_telefone.cache_resolucao import (
 )
 from cogs.musica.agente_telefone.conversao_resolucao import converter_resposta_resolucao
 from cogs.musica.agente_telefone.resolucao import _limite_resolucao, _montar_tarefa_resolucao
+from cogs.musica.metadados.modelos import ApiTrackCandidate
 from cogs.musica.metadados.provedores_api import MusicApiProviders
 from cogs.musica.nucleo.modelos import ExtractedBatch, MusicTrack
 
@@ -214,3 +217,121 @@ def test_preparo_da_resolucao_worker_esta_em_modulo_proprio() -> None:
     assert tarefa["default_search"] == "auto"
     assert tarefa["metadata_only"] is False
     assert timeout_resolucao(somente_metadados=True, timeout_seconds=1.0) == 5.0
+
+
+def test_search_sources_preserva_candidatos_de_multiplos_provedores(monkeypatch) -> None:
+    monkeypatch.setattr("cogs.musica.metadados.provedores_api._env", lambda name, default="": "")
+    api = MusicApiProviders(timeout=2.0)
+    api.enabled = True
+    api.youtube_api_key = "yt-key"
+    api.spotify_client_id = "sp-id"
+    api.spotify_client_secret = "sp-secret"
+    api.deezer_enabled = True
+    api.soundcloud_enabled = False
+
+    async def youtube(query: str, *, limit: int = 5):
+        return [ApiTrackCandidate(title="Faixa", artist="Artista", provider="youtube")]
+
+    async def spotify(query: str, *, limit: int = 5):
+        return [ApiTrackCandidate(title="Faixa", artist="Artista", provider="spotify", isrc="BRABC1234567")]
+
+    async def deezer(query: str, *, limit: int = 5):
+        return [ApiTrackCandidate(title="Faixa", artist="Artista", provider="deezer", isrc="BRABC1234567")]
+
+    api.youtube_search = youtube  # type: ignore[method-assign]
+    api.spotify_search = spotify  # type: ignore[method-assign]
+    api.deezer_search = deezer  # type: ignore[method-assign]
+
+    resultados = asyncio.run(api.search_sources("Artista Faixa", limit=5, prefer_youtube=True))
+
+    assert [item.provider for item in resultados] == ["youtube", "spotify", "deezer"]
+
+
+@pytest.mark.asyncio
+async def test_resolucao_textual_funde_worker_e_metadata_em_paralelo(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import resolucao, roteamento
+    from cogs.musica.metadados.modelos import ApiTrackCandidate
+
+    destino = roteamento.DestinoWorker("worker-a", "A", "http://worker-a:8766", "token")
+    monkeypatch.setattr(resolucao, "destino_vinculado", lambda guild_id: destino)
+    monkeypatch.setattr(resolucao.config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 0, raising=False)
+
+    provider_iniciou = asyncio.Event()
+    worker_iniciou = asyncio.Event()
+
+    async def metadata_fake(query: str, *, limit: int = 5):
+        provider_iniciou.set()
+        await worker_iniciou.wait()
+        return [
+            ApiTrackCandidate(
+                title="Castle Vein",
+                artist="Heaven Pierce Her",
+                duration=275,
+                provider="spotify",
+                webpage_url="https://open.spotify.com/track/castle",
+                isrc="TESTCASTLE001",
+            )
+        ]
+
+    async def worker_fake(*, base, token, payload, timeout_seconds):
+        worker_iniciou.set()
+        await provider_iniciou.wait()
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "tracks": [
+                {
+                    "title": "Heaven Pierce Her - Castle Vein (Official Audio)",
+                    "uploader": "Heaven Pierce Her - Topic",
+                    "duration": 275,
+                    "webpage_url": "https://www.youtube.com/watch?v=castle",
+                    "metadata_only": True,
+                    "source": "youtube",
+                },
+                {
+                    "title": "Castle Vein Piano Cover",
+                    "uploader": "Piano Covers",
+                    "duration": 280,
+                    "webpage_url": "https://www.youtube.com/watch?v=cover",
+                    "metadata_only": True,
+                    "source": "youtube",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", metadata_fake)
+    monkeypatch.setattr(resolucao, "executar_tarefa_resolucao", worker_fake)
+
+    lote = await resolucao.resolve_music_tracks_on_worker(
+        "Heaven Pierce Her - Castle Vein",
+        requester_id=1,
+        requester_name="tester",
+        limit=5,
+        metadata_only=True,
+        guild_id=999,
+    )
+
+    assert provider_iniciou.is_set() and worker_iniciou.is_set()
+    assert len(lote.tracks) == 2
+    assert lote.tracks[0].webpage_url == "https://www.youtube.com/watch?v=castle"
+    assert "cover" in lote.tracks[1].title.lower()
+
+
+@pytest.mark.asyncio
+async def test_busca_multifonte_remove_prefixo_de_engine_antes_das_apis(monkeypatch) -> None:
+    from cogs.musica.busca import fontes
+
+    consultas: list[str] = []
+
+    class FakeProviders:
+        has_any_provider = True
+
+        async def search_sources(self, query: str, *, limit: int = 5, prefer_youtube: bool = True):
+            consultas.append(query)
+            return []
+
+    monkeypatch.setattr(fontes, "_provedores_api", FakeProviders())
+
+    await fontes.buscar_candidatos_multifonte("ytsearch: Daft Punk Get Lucky", limit=5)
+
+    assert consultas == ["Daft Punk Get Lucky"]

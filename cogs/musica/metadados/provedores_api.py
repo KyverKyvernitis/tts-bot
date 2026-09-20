@@ -104,15 +104,19 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
             return await self.soundcloud_batch_from_url(url, limit=limit)
         return None
 
-    async def search(self, query: str, *, limit: int = 5, prefer_youtube: bool = True) -> list[ApiTrackCandidate]:
+    async def search_sources(self, query: str, *, limit: int = 5, prefer_youtube: bool = True) -> list[ApiTrackCandidate]:
+        """Retorna candidatos crus das fontes disponíveis, preservando a origem.
+
+        A deduplicação cross-provider fica para a camada de busca inteligente,
+        que consegue fundir por identidade/duração/ISRC junto dos resultados do
+        Phone Worker. O método ``search`` mantém o contrato legado ranqueado.
+        """
         if not self.enabled or not query.strip():
             return []
         limit = max(1, min(10, int(limit)))
         tasks: list[asyncio.Task[list[ApiTrackCandidate]]] = []
         if prefer_youtube and self.youtube_api_key:
             tasks.append(asyncio.create_task(self.youtube_search(query, limit=limit)))
-        # Spotify/Deezer ajudam no ranking/metadata de busca textual, mesmo quando
-        # o resultado final tocável vem do YouTube.
         if self.spotify_client_id and self.spotify_client_secret:
             tasks.append(asyncio.create_task(self.spotify_search(query, limit=min(limit, 5))))
         if self.deezer_enabled:
@@ -129,6 +133,12 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
                 logger.debug("[music-api] provider search failed", exc_info=item)
                 continue
             results.extend(item)
+        return results
+
+    async def search(self, query: str, *, limit: int = 5, prefer_youtube: bool = True) -> list[ApiTrackCandidate]:
+        results = await self.search_sources(query, limit=limit, prefer_youtube=prefer_youtube)
+        if not results:
+            return []
         return self.rank_and_dedupe(results, query=query, limit=limit)
 
     def rank_and_dedupe(self, candidates: Iterable[ApiTrackCandidate], *, query: str, limit: int = 5) -> list[ApiTrackCandidate]:
