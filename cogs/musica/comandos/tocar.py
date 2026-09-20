@@ -655,7 +655,7 @@ class FluxoTocar:
                 await self._reply(
                     ctx,
                     embed=embed,
-                    view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id),
+                    view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id, query),
                 )
                 self._schedule_music_agent_prefetch(
                     ctx.guild.id,

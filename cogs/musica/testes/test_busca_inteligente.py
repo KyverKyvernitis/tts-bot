@@ -498,3 +498,128 @@ def test_by_artist_usa_ultimo_by_quando_titulo_contem_by() -> None:
 
     assert consulta.titulo == "stand by me"
     assert consulta.artista == "ben e king"
+
+
+def test_memoria_curta_estabiliza_empate_para_resultado_escolhido() -> None:
+    from cogs.musica.busca import limpar_memoria_busca, registrar_selecao_busca
+
+    limpar_memoria_busca()
+    a = _track("Same Song", "Same Artist", url="https://youtube.test/a")
+    b = _track("Same Song", "Same Artist", url="https://youtube.test/b")
+
+    registrar_selecao_busca(
+        "Same Artist - Same Song",
+        b,
+        guild_id=10,
+        requester_id=20,
+    )
+    ordenadas, ranking = ranquear_faixas(
+        "Same Artist - Same Song",
+        [a, b],
+        guild_id=10,
+        requester_id=20,
+    )
+
+    assert ordenadas[0] is b
+    assert ranking[0].indice_original == 1
+    limpar_memoria_busca()
+
+
+def test_memoria_curta_nao_vaza_entre_usuarios_ou_guilds() -> None:
+    from cogs.musica.busca import limpar_memoria_busca, registrar_selecao_busca
+
+    limpar_memoria_busca()
+    a = _track("Same Song", "Same Artist", url="https://youtube.test/a")
+    b = _track("Same Song", "Same Artist", url="https://youtube.test/b")
+    registrar_selecao_busca(
+        "Same Artist - Same Song",
+        b,
+        guild_id=10,
+        requester_id=20,
+    )
+
+    outra_pessoa, _ = ranquear_faixas(
+        "Same Artist - Same Song", [a, b], guild_id=10, requester_id=21
+    )
+    outra_guild, _ = ranquear_faixas(
+        "Same Artist - Same Song", [a, b], guild_id=11, requester_id=20
+    )
+
+    assert outra_pessoa[0] is a
+    assert outra_guild[0] is a
+    limpar_memoria_busca()
+
+
+def test_memoria_curta_expira_sem_persistencia() -> None:
+    from cogs.musica.busca import (
+        limpar_memoria_busca,
+        obter_preferencia_busca,
+        registrar_selecao_busca,
+    )
+
+    limpar_memoria_busca()
+    track = _track("Same Song", "Same Artist", url="https://youtube.test/b")
+    registrar_selecao_busca(
+        "Same Artist - Same Song",
+        track,
+        guild_id=10,
+        requester_id=20,
+        now=100.0,
+    )
+
+    assert obter_preferencia_busca(
+        "Same Artist - Same Song", guild_id=10, requester_id=20, now=1299.0
+    ) is not None
+    assert obter_preferencia_busca(
+        "Same Artist - Same Song", guild_id=10, requester_id=20, now=1301.0
+    ) is None
+    limpar_memoria_busca()
+
+
+def test_memoria_nao_supera_mudanca_explicita_de_versao() -> None:
+    from cogs.musica.busca import limpar_memoria_busca, registrar_selecao_busca
+
+    limpar_memoria_busca()
+    live = _track("Numb Live", "Linkin Park", url="https://youtube.test/live")
+    lyrics = _track("Numb Lyrics", "Linkin Park", url="https://youtube.test/lyrics")
+    registrar_selecao_busca(
+        "Linkin Park - Numb live",
+        live,
+        guild_id=10,
+        requester_id=20,
+    )
+
+    ordenadas, _ = ranquear_faixas(
+        "Linkin Park - Numb lyrics",
+        [live, lyrics],
+        guild_id=10,
+        requester_id=20,
+    )
+
+    assert ordenadas[0] is lyrics
+    limpar_memoria_busca()
+
+
+def test_memoria_nao_promove_resultado_claramente_pior() -> None:
+    from cogs.musica.busca import limpar_memoria_busca, registrar_selecao_busca
+
+    limpar_memoria_busca()
+    errado = _track("Numb Cover", "Cover Channel", url="https://youtube.test/cover")
+    certo = _track("Numb Official Audio", "Linkin Park", url="https://youtube.test/official")
+    registrar_selecao_busca(
+        "Linkin Park - Numb",
+        errado,
+        guild_id=10,
+        requester_id=20,
+    )
+
+    ordenadas, ranking = ranquear_faixas(
+        "Linkin Park - Numb",
+        [errado, certo],
+        guild_id=10,
+        requester_id=20,
+    )
+
+    assert ordenadas[0] is certo
+    assert ranking[0].score > ranking[1].score
+    limpar_memoria_busca()

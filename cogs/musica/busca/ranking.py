@@ -15,6 +15,7 @@ from .atributos import (
 )
 from .diversidade import diversificar_resultados
 from .intencao import analisar_consulta
+from .memoria import estabilizar_com_preferencia, obter_preferencia_busca
 from .modelos import ConsultaNormalizada, ResultadoRanking, SinaisCandidato
 from .normalizacao import limpar_apresentacao, tokens_texto
 from .qualidade import sinal_qualidade
@@ -217,7 +218,13 @@ def pontuar_faixa(query: str | ConsultaNormalizada, track: MusicTrack, *, indice
     )
 
 
-def ranquear_faixas(query: str, tracks: Sequence[MusicTrack]) -> tuple[list[MusicTrack], list[ResultadoRanking]]:
+def ranquear_faixas(
+    query: str,
+    tracks: Sequence[MusicTrack],
+    *,
+    guild_id: int = 0,
+    requester_id: int = 0,
+) -> tuple[list[MusicTrack], list[ResultadoRanking]]:
     if len(tracks) <= 1:
         resultados = [pontuar_faixa(query, track, indice=i) for i, track in enumerate(tracks)]
         if resultados:
@@ -232,6 +239,10 @@ def ranquear_faixas(query: str, tracks: Sequence[MusicTrack]) -> tuple[list[Musi
 
     avaliados = [pontuar_faixa(query, track, indice=i) for i, track in enumerate(tracks)]
     ordenados = sorted(avaliados, key=lambda item: (-item.score, item.indice_original))
+    preferencia = obter_preferencia_busca(
+        query, guild_id=guild_id, requester_id=requester_id
+    )
+    ordenados = estabilizar_com_preferencia(tracks, ordenados, preferencia)
     ordenados = diversificar_resultados(tracks, ordenados, analisar_consulta(query))
     enriched: list[ResultadoRanking] = []
     for pos, item in enumerate(ordenados):

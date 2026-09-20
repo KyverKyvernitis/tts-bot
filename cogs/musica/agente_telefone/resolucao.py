@@ -194,7 +194,9 @@ async def resolve_music_tracks_on_worker(
 
     ranking = []
     if busca_textual and batch.tracks:
-        batch.tracks, ranking = ranquear_faixas(clean_query, batch.tracks)
+        batch.tracks, ranking = ranquear_faixas(
+            clean_query, batch.tracks, guild_id=guild_id, requester_id=requester_id
+        )
         if ranking:
             top = ranking[0]
             logger.info(
@@ -254,7 +256,12 @@ async def resolve_music_tracks_on_worker(
                     requester_name=requester_name,
                     limit=decisao.limit,
                 )
-                batch.tracks, ranking = ranquear_faixas(clean_query, batch.tracks)
+                batch.tracks, ranking = ranquear_faixas(
+                    clean_query,
+                    batch.tracks,
+                    guild_id=guild_id,
+                    requester_id=requester_id,
+                )
                 batch.tracks = batch.tracks[:max_limit]
                 top_final = ranking[0] if ranking else None
                 logger.info(

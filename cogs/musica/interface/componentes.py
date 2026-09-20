@@ -12,6 +12,7 @@ import discord
 from cogs.musica import configuracao as config
 
 from ..nucleo.erros import MusicExtractionError
+from ..busca import registrar_selecao_busca
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 from ..metadados.provedores import describe_url
 from ..agente_telefone.comandos import music_agent_command, music_agent_status
@@ -983,13 +984,14 @@ class SeekModal(discord.ui.Modal):
 
 
 class SearchSelect(discord.ui.Select):
-    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None) -> None:
+    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None, query: str = "") -> None:
         self.router = router
         self.guild_id = int(guild_id)
         self.voice_channel_id = int(voice_channel_id)
         self.text_channel_id = int(text_channel_id)
         self.tracks = tracks
         self.requester_id = int(requester_id or 0)
+        self.query = str(query or "").strip()
         options = []
         for idx, track in enumerate(tracks[:10]):
             options.append(
@@ -1045,6 +1047,12 @@ class SearchSelect(discord.ui.Select):
             if voice_channel is None or text_channel is None:
                 await edit_original("Canal não encontrado.")
                 return
+            registrar_selecao_busca(
+                self.query,
+                track,
+                guild_id=self.guild_id,
+                requester_id=getattr(interaction.user, "id", self.requester_id),
+            )
             if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
                 try:
                     result = await music_agent_command(
@@ -1116,9 +1124,9 @@ class SearchSelect(discord.ui.Select):
 
 
 class SearchResultView(discord.ui.View):
-    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None) -> None:
+    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None, query: str = "") -> None:
         super().__init__(timeout=120)
-        self.add_item(SearchSelect(router, guild_id, voice_channel_id, text_channel_id, tracks, requester_id))
+        self.add_item(SearchSelect(router, guild_id, voice_channel_id, text_channel_id, tracks, requester_id, query))
 
 
 class AddSongModal(discord.ui.Modal):
@@ -1197,7 +1205,7 @@ class AddSongModal(discord.ui.Modal):
                 embed.add_field(name=f"{idx}. {track.short_title}", value=f"{track.uploader or track.source or 'resultado'} • `{track.duration_label}`", inline=False)
             await interaction.followup.send(
                 embed=embed,
-                view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:10], interaction.user.id),
+                view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:10], interaction.user.id, query),
                 ephemeral=True,
             )
             _schedule_agent_prefetch(
