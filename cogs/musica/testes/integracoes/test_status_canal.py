@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cogs.musica.integracoes.status_canal import VoiceStatusController
+from cogs.musica.integracoes.status_canal import VoiceStatusController, instalar_ponte_gateway_status_canal
 
 
 class FakeState:
@@ -29,6 +29,15 @@ class FakeState:
         self.voice_status_last_restore_at = 0.0
         self.voice_status_force_task = None
         self.voice_status_generation = 0
+        self.voice_status_external_override = False
+        self.voice_status_external_status = ""
+        self.voice_status_gateway_status_known = False
+        self.voice_status_gateway_status = ""
+        self.voice_status_gateway_event_at = 0.0
+        self.voice_status_expected_status = ""
+        self.voice_status_expected_until = 0.0
+        self.voice_status_last_write_at = 0.0
+        self.voice_status_retry_count = 0
         self.voice_status_lock = asyncio.Lock()
 
 
@@ -59,7 +68,7 @@ class FakeBot:
 
 
 class FakeRouter:
-    def __init__(self, *, fetch_results=None, idle=""):
+    def __init__(self, *, fetch_results=None, idle="", set_results=None):
         self.channel = FakeChannel()
         self.guild = FakeGuild(self.channel)
         self.bot = FakeBot(self.guild, self.channel)
@@ -68,9 +77,16 @@ class FakeRouter:
         self.fetch_results = list(fetch_results or [(False, "")])
         self.idle = idle
         self.set_calls = []
+        self.set_results = list(set_results or [])
         self.saved = None
         self.clears = 0
+        self._states = {self.guild.id: self.state}
         self._voice_status_update_interval_seconds = 60.0
+        self._voice_status_watchdog_interval_seconds = 45.0
+        self._voice_status_reassert_seconds = 240.0
+        self._voice_status_write_retries = 3
+        self._voice_status_retry_base_seconds = 0.001
+        self._voice_status_gateway_ack_seconds = 8.0
 
     def get_state(self, _guild_id):
         return self.state
@@ -103,6 +119,8 @@ class FakeRouter:
 
     async def _set_voice_channel_status(self, channel, status, *, reason=""):
         self.set_calls.append((channel.id, status, reason))
+        if self.set_results:
+            return bool(self.set_results.pop(0))
         return True
 
     async def _save_voice_status_record(self, _guild_id, record):
@@ -269,3 +287,93 @@ def test_music_agent_publica_playback_token_no_status() -> None:
     state = GuildMusicState(guild_id=11)
     state.playback_token = 42
     assert state.public()["playback_token"] == 42
+
+
+@pytest.mark.asyncio
+async def test_gateway_ack_do_proprio_bot_mantem_ownership() -> None:
+    router = FakeRouter(fetch_results=[(False, "")])
+    controller = VoiceStatusController(router)
+
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=True)
+    await controller.handle_gateway_update(router.guild.id, router.channel.id, "A")
+
+    assert router.state.voice_status_owned is True
+    assert router.state.voice_status_external_override is False
+    assert router.state.voice_status_gateway_status_known is True
+    assert router.state.voice_status_gateway_status == "A"
+    assert router.clears == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_override_externo_libera_ownership_e_bloqueia_trocas() -> None:
+    router = FakeRouter(fetch_results=[(False, "")])
+    controller = VoiceStatusController(router)
+
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=True)
+    await controller.handle_gateway_update(router.guild.id, router.channel.id, "status do staff")
+
+    assert router.state.voice_status_owned is False
+    assert router.state.voice_status_external_override is True
+    assert router.state.voice_status_external_status == "status do staff"
+    assert router.saved is None
+
+    router.track = SimpleNamespace(title="B")
+    router.state.current = router.track
+    generation = controller._bump_generation(router.state, reason="track:B")
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=True, generation=generation)
+
+    assert [call[1] for call in router.set_calls] == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_fim_da_sessao_apos_override_nao_apaga_status_do_staff() -> None:
+    router = FakeRouter(fetch_results=[(False, "")])
+    controller = VoiceStatusController(router)
+
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=True)
+    await controller.handle_gateway_update(router.guild.id, router.channel.id, "status do staff")
+    await controller.restore(router.guild, router.state, reason="queue_finished")
+
+    assert [call[1] for call in router.set_calls] == ["A"]
+    assert router.state.voice_status_channel_id is None
+    assert router.state.voice_status_external_override is False
+
+
+@pytest.mark.asyncio
+async def test_write_transitorio_retries_sem_perder_generation() -> None:
+    router = FakeRouter(fetch_results=[(False, "")], set_results=[False, False, True])
+    controller = VoiceStatusController(router)
+
+    await controller.apply(router.guild, router.channel, router.state, router.track, force=True)
+
+    assert [call[1] for call in router.set_calls] == ["A", "A", "A"]
+    assert router.state.voice_status_owned is True
+    assert router.state.voice_status_retry_count == 2
+
+
+
+def test_integracao_instala_parser_especifico_sem_debug_global() -> None:
+    dispatched = []
+
+    class Bot:
+        def __init__(self):
+            self._connection = SimpleNamespace(parsers={})
+
+        def dispatch(self, name, payload):
+            dispatched.append((name, payload))
+
+    bot = Bot()
+    assert instalar_ponte_gateway_status_canal(bot) is True
+
+    parser = bot._connection.parsers["VOICE_CHANNEL_STATUS_UPDATE"]
+    parser({"guild_id": "11", "id": "22", "status": "x"})
+
+    assert dispatched == [("music_voice_channel_status_update_raw", {"guild_id": "11", "id": "22", "status": "x"})]
+
+
+def test_integracao_nao_sobrescreve_parser_nativo() -> None:
+    native = lambda data: data
+    bot = SimpleNamespace(_connection=SimpleNamespace(parsers={"VOICE_CHANNEL_STATUS_UPDATE": native}))
+
+    assert instalar_ponte_gateway_status_canal(bot) is False
+    assert bot._connection.parsers["VOICE_CHANNEL_STATUS_UPDATE"] is native

@@ -8,16 +8,43 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def instalar_ponte_gateway_status_canal(bot: Any) -> bool:
+    """Registra somente o parser de VOICE_CHANNEL_STATUS_UPDATE.
+
+    Evita ``enable_debug_events=True`` e, portanto, evita redispatch/parse de
+    todo pacote recebido do Gateway. Retorna ``True`` apenas quando instalou a
+    ponte; parser nativo de versões futuras é sempre preservado.
+    """
+    connection = getattr(bot, "_connection", None)
+    parsers = getattr(connection, "parsers", None)
+    if not isinstance(parsers, dict):
+        return False
+    if "VOICE_CHANNEL_STATUS_UPDATE" in parsers:
+        return False
+
+    def _parse_voice_channel_status_update(data: dict[str, Any]) -> None:
+        try:
+            bot.dispatch("music_voice_channel_status_update_raw", dict(data or {}))
+        except Exception:
+            logger.debug("[music/voice-status] falha ao despachar evento raw", exc_info=True)
+
+    parsers["VOICE_CHANNEL_STATUS_UPDATE"] = _parse_voice_channel_status_update
+    return True
+
+
 class VoiceStatusController:
     """Controla o ciclo de vida do status temporário do canal de voz.
 
     O player só informa eventos (faixa iniciou, mudou, acabou). Este controlador
-    serializa os writes, invalida tarefas antigas por geração e restaura o
-    status original/idle quando a sessão termina.
+    serializa os writes, invalida tarefas antigas por geração, observa os eventos
+    reais do Gateway e restaura o status original/idle quando a sessão termina.
     """
 
     def __init__(self, router: Any) -> None:
         self.router = router
+        # Cache best-effort do último status realmente visto no Gateway. Ele
+        # também é útil antes de a música assumir ownership do canal.
+        self._observed: dict[tuple[int, int], tuple[str, float]] = {}
 
     @staticmethod
     def _generation(state: Any) -> int:
@@ -48,6 +75,15 @@ class VoiceStatusController:
         state.voice_status_last_sync_request_key = ""
         state.voice_status_last_sync_request_at = 0.0
         state.voice_status_last_update_at = 0.0
+        state.voice_status_external_override = False
+        state.voice_status_external_status = ""
+        state.voice_status_gateway_status_known = False
+        state.voice_status_gateway_status = ""
+        state.voice_status_gateway_event_at = 0.0
+        state.voice_status_expected_status = ""
+        state.voice_status_expected_until = 0.0
+        state.voice_status_last_write_at = 0.0
+        state.voice_status_retry_count = 0
 
     def cancel_tasks(self, state: Any) -> None:
         current = asyncio.current_task()
@@ -66,6 +102,123 @@ class VoiceStatusController:
         state.voice_status_last_sync_request_key = ""
         state.voice_status_last_sync_request_at = 0.0
 
+    def _remember_expected_gateway(self, state: Any, status: str) -> None:
+        router = self.router
+        state.voice_status_expected_status = router._trim_voice_status(status)
+        state.voice_status_expected_until = time.monotonic() + max(
+            1.0,
+            float(getattr(router, "_voice_status_gateway_ack_seconds", 8.0) or 8.0),
+        )
+
+    async def _write_with_retry(
+        self,
+        channel: Any,
+        status: str,
+        state: Any,
+        *,
+        reason: str,
+        generation: int | None,
+    ) -> bool:
+        router = self.router
+        attempts = max(1, min(5, int(getattr(router, "_voice_status_write_retries", 3) or 3)))
+        base_delay = max(0.1, float(getattr(router, "_voice_status_retry_base_seconds", 0.75) or 0.75))
+        state.voice_status_retry_count = 0
+
+        for attempt in range(attempts):
+            if generation is not None and not self._is_current_generation(state, generation):
+                return False
+            self._remember_expected_gateway(state, status)
+            ok = await router._set_voice_channel_status(channel, status, reason=reason)
+            if ok:
+                state.voice_status_last_write_at = time.monotonic()
+                state.voice_status_retry_count = attempt
+                return True
+            state.voice_status_expected_status = ""
+            state.voice_status_expected_until = 0.0
+            state.voice_status_retry_count = attempt + 1
+            if attempt + 1 >= attempts:
+                break
+            delay = min(5.0, base_delay * (2**attempt))
+            logger.info(
+                "[music/voice-status] retry agendado | channel=%s attempt=%s/%s delay=%.2fs",
+                getattr(channel, "id", None),
+                attempt + 2,
+                attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+        return False
+
+    async def handle_gateway_update(self, guild_id: int, channel_id: int, status: str | None) -> None:
+        """Consome VOICE_CHANNEL_STATUS_UPDATE do Gateway.
+
+        O evento é a fonte de verdade para ownership. Mudança que corresponde a
+        um PUT pendente do bot é tratada como ACK; qualquer texto diferente em
+        um canal que o bot possuía vira override externo e é respeitado até o
+        fim da sessão musical.
+        """
+
+        router = self.router
+        guild_id = int(guild_id or 0)
+        channel_id = int(channel_id or 0)
+        if guild_id <= 0 or channel_id <= 0:
+            return
+        normalized = router._trim_voice_status(status or "")
+        now = time.monotonic()
+        self._observed[(guild_id, channel_id)] = (normalized, now)
+
+        # Não crie MusicGuildState para status de canal sem sessão de música.
+        state = getattr(router, "_states", {}).get(guild_id)
+        if state is None:
+            return
+        if int(getattr(state, "voice_status_channel_id", 0) or 0) != channel_id:
+            return
+
+        state.voice_status_gateway_status_known = True
+        state.voice_status_gateway_status = normalized
+        state.voice_status_gateway_event_at = now
+
+        expected = router._trim_voice_status(getattr(state, "voice_status_expected_status", "") or "")
+        expected_until = float(getattr(state, "voice_status_expected_until", 0.0) or 0.0)
+        if now <= expected_until and normalized == expected:
+            state.voice_status_expected_status = ""
+            state.voice_status_expected_until = 0.0
+            logger.debug(
+                "[music/voice-status] gateway ack | guild=%s channel=%s status=%r",
+                guild_id,
+                channel_id,
+                normalized,
+            )
+            return
+
+        last_bot = router._trim_voice_status(getattr(state, "voice_status_last_bot", "") or "")
+        if bool(getattr(state, "voice_status_owned", False)) and normalized == last_bot:
+            return
+
+        if not bool(getattr(state, "voice_status_owned", False)):
+            if bool(getattr(state, "voice_status_external_override", False)):
+                state.voice_status_external_status = normalized
+            return
+
+        # Mudança externa: invalida qualquer task velha e solta ownership sem
+        # tentar restaurar no fim, pois o status agora pertence ao staff/usuário.
+        self._bump_generation(state, reason="external_override")
+        self.cancel_tasks(state)
+        state.voice_status_owned = False
+        state.voice_status_external_override = True
+        state.voice_status_external_status = normalized
+        state.voice_status_expected_status = ""
+        state.voice_status_expected_until = 0.0
+        await router._clear_voice_status_record(guild_id)
+        logger.info(
+            "[music/voice-status] external_override | guild=%s channel=%s bot=%r external=%r",
+            guild_id,
+            channel_id,
+            last_bot,
+            normalized,
+        )
+
     async def _restore_locked(
         self,
         guild: Any,
@@ -76,7 +229,7 @@ class VoiceStatusController:
     ) -> None:
         router = self.router
         record = None
-        if getattr(state, "voice_status_channel_id", None):
+        if getattr(state, "voice_status_channel_id", None) and not bool(getattr(state, "voice_status_external_override", False)):
             record = {
                 "channel_id": int(state.voice_status_channel_id),
                 "had_original_status": bool(getattr(state, "voice_status_had_original", False)),
@@ -87,7 +240,19 @@ class VoiceStatusController:
             }
         else:
             record = router._load_voice_status_record_into_state(guild.id, state)
+
         if not record:
+            # Um override externo remove o registro persistido de propósito. No
+            # fim da sessão, apenas liberamos o estado local; nunca sobrescreva o
+            # texto que o staff colocou.
+            if bool(getattr(state, "voice_status_external_override", False)):
+                logger.info(
+                    "[music/voice-status] restore pulado; ownership externo | guild=%s channel=%s reason=%s",
+                    guild.id,
+                    getattr(state, "voice_status_channel_id", None),
+                    reason,
+                )
+                self._reset_runtime_state(state)
             return
 
         try:
@@ -115,7 +280,11 @@ class VoiceStatusController:
             self._reset_runtime_state(state)
             return
 
-        known, current_status = await router._fetch_voice_channel_status(channel)
+        known = bool(getattr(state, "voice_status_gateway_status_known", False))
+        current_status = str(getattr(state, "voice_status_gateway_status", "") or "") if known else ""
+        if not known:
+            known, current_status = await router._fetch_voice_channel_status(channel)
+
         idle = str(router._voice_status_settings_from_doc(guild.id).get("idle") or "")
         target_status = original_status if original_known else idle
         target_status = router._trim_voice_status(target_status)
@@ -123,7 +292,6 @@ class VoiceStatusController:
         last_bot_status = router._trim_voice_status(last_bot_status)
 
         if known and last_bot_status and current_status != last_bot_status:
-            # Alteração externa/staff: não sobrescreva algo que já não é nosso.
             logger.info(
                 "[music/voice-status] restore ignorado por override externo | guild=%s channel=%s reason=%s",
                 guild.id,
@@ -139,9 +307,6 @@ class VoiceStatusController:
             self._reset_runtime_state(state)
             return
 
-        # O ponto crítico: se o bot aplicou o status temporário, uma leitura
-        # indisponível do GET não impede a limpeza. Status vazio é enviado como
-        # null pelo endpoint PUT, em vez de apenas esquecer o registro local.
         if owned:
             if not router._bot_can_set_voice_status(guild, channel):
                 await router._clear_voice_status_record(guild.id)
@@ -161,14 +326,14 @@ class VoiceStatusController:
                 return
             state.voice_status_last_restore_key = restore_key
             state.voice_status_last_restore_at = now
-            ok = await router._set_voice_channel_status(
+            ok = await self._write_with_retry(
                 channel,
                 target_status,
+                state,
                 reason=f"Restaurar status do canal após música ({reason})",
+                generation=self._generation(state),
             )
             if not ok:
-                # Falha de rede/API não deve apagar ownership persistido; assim o
-                # próximo reconcile ainda consegue restaurar.
                 logger.warning(
                     "[music/voice-status] restore falhou; mantendo registro | guild=%s channel=%s reason=%s",
                     guild.id,
@@ -212,6 +377,7 @@ class VoiceStatusController:
         force: bool = False,
         generation: int | None = None,
         reason: str = "track_sync",
+        reassert: bool = False,
     ) -> None:
         router = self.router
         if guild is None or channel is None or track is None:
@@ -244,14 +410,27 @@ class VoiceStatusController:
             if force and not router._voice_status_track_is_current(state, track, track_key):
                 return
 
-            if getattr(state, "voice_status_channel_id", None) and int(state.voice_status_channel_id) != channel_id:
+            current_channel_id = int(getattr(state, "voice_status_channel_id", 0) or 0)
+            if bool(getattr(state, "voice_status_external_override", False)):
+                if current_channel_id == channel_id:
+                    # Política padrão: uma alteração manual vence até a sessão
+                    # musical acabar. Troca de faixa não deve lutar com staff.
+                    return
+                self._reset_runtime_state(state)
+                current_channel_id = 0
+
+            if current_channel_id and current_channel_id != channel_id:
                 await self._restore_locked(guild, state, reason="channel_change")
                 if not self._is_current_generation(state, generation):
                     return
 
             same_channel = int(getattr(state, "voice_status_channel_id", 0) or 0) == channel_id
             if not same_channel:
-                known, current_status = await router._fetch_voice_channel_status(channel)
+                observed = self._observed.get((int(guild.id), channel_id))
+                if observed is not None:
+                    known, current_status = True, observed[0]
+                else:
+                    known, current_status = await router._fetch_voice_channel_status(channel)
                 if not self._is_current_generation(state, generation):
                     return
                 current_status = router._trim_voice_status(current_status if known else "")
@@ -275,8 +454,16 @@ class VoiceStatusController:
                 state.voice_status_owned = True
                 state.voice_status_last_bot = ""
                 state.voice_status_last_track_key = ""
+                state.voice_status_gateway_status_known = bool(known)
+                state.voice_status_gateway_status = current_status
+                state.voice_status_gateway_event_at = time.monotonic() if known else 0.0
             elif getattr(state, "voice_status_last_bot", "") and not force:
-                known, current_status = await router._fetch_voice_channel_status(channel)
+                # O Gateway é prioritário. GET fica apenas como fallback para
+                # versões/ambientes onde a ponte do evento não está disponível.
+                known = bool(getattr(state, "voice_status_gateway_status_known", False))
+                current_status = str(getattr(state, "voice_status_gateway_status", "") or "") if known else ""
+                if not known:
+                    known, current_status = await router._fetch_voice_channel_status(channel)
                 if not self._is_current_generation(state, generation):
                     return
                 current_status = router._trim_voice_status(current_status)
@@ -286,46 +473,44 @@ class VoiceStatusController:
                         guild.id,
                         channel_id,
                     )
+                    state.voice_status_owned = False
+                    state.voice_status_external_override = True
+                    state.voice_status_external_status = current_status
                     await router._clear_voice_status_record(guild.id)
-                    self._reset_runtime_state(state)
                     return
 
-            # Dedup independe de force: se o texto visível já é exatamente o
-            # desejado não há motivo para fazer outro PUT. Troca real com texto
-            # diferente continua passando imediatamente.
-            if (
-                int(getattr(state, "voice_status_channel_id", 0) or 0) == channel_id
-                and str(getattr(state, "voice_status_last_bot", "") or "") == desired
-                and str(getattr(state, "voice_status_last_track_key", "") or "") == track_key
-            ):
-                return
-            if not force and desired_key == str(getattr(state, "voice_status_last_applied_key", "") or ""):
-                return
+            if not reassert:
+                if (
+                    int(getattr(state, "voice_status_channel_id", 0) or 0) == channel_id
+                    and str(getattr(state, "voice_status_last_bot", "") or "") == desired
+                    and str(getattr(state, "voice_status_last_track_key", "") or "") == track_key
+                ):
+                    return
+                if not force and desired_key == str(getattr(state, "voice_status_last_applied_key", "") or ""):
+                    return
             if not self._is_current_generation(state, generation):
                 return
             if force and not router._voice_status_track_is_current(state, track, track_key):
                 return
 
             logger.info(
-                "[music/voice-status] desired | guild=%s channel=%s generation=%s reason=%s track=%r",
+                "[music/voice-status] desired | guild=%s channel=%s generation=%s reason=%s track=%r reassert=%s",
                 guild.id,
                 channel_id,
                 generation,
                 reason,
                 getattr(track, "title", ""),
+                reassert,
             )
-            if not await router._set_voice_channel_status(
+            if not await self._write_with_retry(
                 channel,
                 desired,
+                state,
                 reason="Atualizar status do canal enquanto a música toca",
+                generation=generation,
             ):
-                # Não perca o registro persistido em falha transitória. Ele é a
-                # garantia de restore/reconcile posterior.
                 return
             if not self._is_current_generation(state, generation):
-                # O write antigo pode ter terminado depois de uma transição. A
-                # geração nova já está agendada e vai corrigi-lo; não marque o
-                # valor antigo como autoritativo localmente.
                 logger.info(
                     "[music/voice-status] write antigo concluído após nova geração | guild=%s channel=%s generation=%s current=%s",
                     guild.id,
@@ -336,6 +521,8 @@ class VoiceStatusController:
                 return
 
             state.voice_status_owned = True
+            state.voice_status_external_override = False
+            state.voice_status_external_status = ""
             state.voice_status_last_bot = desired
             state.voice_status_last_track_key = track_key
             state.voice_status_last_applied_key = desired_key
@@ -403,6 +590,8 @@ class VoiceStatusController:
                     generation=generation,
                     reason=reason,
                 )
+                if self._is_current_generation(state, generation):
+                    self.schedule_refresh(guild_id, state)
                 if repeat_after <= 0:
                     return
                 await asyncio.sleep(max(0.0, float(repeat_after)))
@@ -414,8 +603,6 @@ class VoiceStatusController:
                 channel = guild.get_channel(int(state.last_voice_channel_id)) or router.bot.get_channel(int(state.last_voice_channel_id))
                 if channel is None:
                     return
-                # Retry/reconcile não força PUT duplicado: apply deduplica quando
-                # o primeiro write já foi concluído com sucesso.
                 await self.apply(
                     guild,
                     channel,
@@ -441,15 +628,24 @@ class VoiceStatusController:
             state.voice_status_force_task = None
 
     def schedule_refresh(self, guild_id: int, state: Any) -> None:
+        """Mantém refresh dinâmico e watchdog também para template estático."""
+
         router = self.router
+        if bool(getattr(state, "voice_status_external_override", False)):
+            return
         settings = router._voice_status_settings_from_doc(guild_id)
         template = str(settings.get("template") or "")
-        if "{elapsed}" not in template and "{remaining}" not in template:
-            return
+        dynamic = "{elapsed}" in template or "{remaining}" in template
         task = getattr(state, "voice_status_update_task", None)
         if task is not None and not task.done():
             return
         generation = self._generation(state)
+        interval = (
+            max(1.0, float(getattr(router, "_voice_status_update_interval_seconds", 60.0) or 60.0))
+            if dynamic
+            else max(1.0, float(getattr(router, "_voice_status_watchdog_interval_seconds", 45.0) or 45.0))
+        )
+        reassert_seconds = max(30.0, float(getattr(router, "_voice_status_reassert_seconds", 240.0) or 240.0))
 
         async def _runner() -> None:
             try:
@@ -457,8 +653,9 @@ class VoiceStatusController:
                     self._is_current_generation(state, generation)
                     and state.current is not None
                     and state.current_status in {"playing", "paused"}
+                    and not bool(getattr(state, "voice_status_external_override", False))
                 ):
-                    await asyncio.sleep(max(1.0, float(getattr(router, "_voice_status_update_interval_seconds", 60.0) or 60.0)))
+                    await asyncio.sleep(interval)
                     if not self._is_current_generation(state, generation):
                         return
                     guild = router.bot.get_guild(int(guild_id))
@@ -467,6 +664,23 @@ class VoiceStatusController:
                     channel = guild.get_channel(int(state.last_voice_channel_id)) or router.bot.get_channel(int(state.last_voice_channel_id))
                     if channel is None:
                         return
+
+                    reassert = False
+                    if not dynamic:
+                        # Com ACK recente do Gateway não existe motivo para PUT
+                        # periódico. Sem observação confiável, um reassert raro
+                        # recupera status perdido sem virar polling agressivo.
+                        gateway_known = bool(getattr(state, "voice_status_gateway_status_known", False))
+                        gateway_status = router._trim_voice_status(getattr(state, "voice_status_gateway_status", "") or "")
+                        last_bot = router._trim_voice_status(getattr(state, "voice_status_last_bot", "") or "")
+                        if gateway_known and last_bot and gateway_status != last_bot:
+                            await self.handle_gateway_update(guild.id, channel.id, gateway_status)
+                            return
+                        age = time.monotonic() - float(getattr(state, "voice_status_last_write_at", 0.0) or 0.0)
+                        reassert = not gateway_known and age >= reassert_seconds
+                        if not reassert:
+                            continue
+
                     await self.apply(
                         guild,
                         channel,
@@ -474,12 +688,13 @@ class VoiceStatusController:
                         state.current,
                         force=False,
                         generation=generation,
-                        reason="elapsed_refresh",
+                        reason="elapsed_refresh" if dynamic else "watchdog_reassert",
+                        reassert=reassert,
                     )
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug("[music/voice-status] refresh falhou", exc_info=True)
+                logger.debug("[music/voice-status] refresh/watchdog falhou", exc_info=True)
             finally:
                 if getattr(state, "voice_status_update_task", None) is asyncio.current_task():
                     state.voice_status_update_task = None

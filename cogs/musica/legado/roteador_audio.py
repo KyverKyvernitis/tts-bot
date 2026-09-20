@@ -639,6 +639,11 @@ class AudioRouter:
         self._phone_worker_tts_convert_disabled_until: float = 0.0
         self._phone_worker_tts_convert_last_log_at: float = 0.0
         self._voice_status_update_interval_seconds = MUSIC_VOICE_STATUS_UPDATE_INTERVAL_SECONDS
+        self._voice_status_watchdog_interval_seconds = float(getattr(config, "MUSIC_VOICE_STATUS_WATCHDOG_INTERVAL_SECONDS", 45.0) or 45.0)
+        self._voice_status_reassert_seconds = float(getattr(config, "MUSIC_VOICE_STATUS_REASSERT_SECONDS", 240.0) or 240.0)
+        self._voice_status_write_retries = int(getattr(config, "MUSIC_VOICE_STATUS_WRITE_RETRIES", 3) or 3)
+        self._voice_status_retry_base_seconds = float(getattr(config, "MUSIC_VOICE_STATUS_RETRY_BASE_SECONDS", 0.75) or 0.75)
+        self._voice_status_gateway_ack_seconds = float(getattr(config, "MUSIC_VOICE_STATUS_GATEWAY_ACK_SECONDS", 8.0) or 8.0)
         self._voice_status_controller = VoiceStatusController(self)
 
     @property
@@ -1589,6 +1594,13 @@ class AudioRouter:
 
     def _mark_voice_status_track_change(self, state: MusicGuildState) -> None:
         self._voice_status_controller.mark_track_change(state)
+
+    async def handle_voice_channel_status_gateway_update(self, guild_id: int, channel_id: int, status: str | None) -> None:
+        await self._voice_status_controller.handle_gateway_update(
+            int(guild_id),
+            int(channel_id),
+            status,
+        )
 
     async def _restore_voice_status_for_state(
         self,

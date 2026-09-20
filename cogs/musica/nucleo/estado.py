@@ -128,6 +128,15 @@ class MusicGuildState:
     voice_status_last_restore_at: float = 0.0
     voice_status_force_task: Optional[asyncio.Task] = None
     voice_status_generation: int = 0
+    voice_status_external_override: bool = False
+    voice_status_external_status: str = ""
+    voice_status_gateway_status_known: bool = False
+    voice_status_gateway_status: str = ""
+    voice_status_gateway_event_at: float = 0.0
+    voice_status_expected_status: str = ""
+    voice_status_expected_until: float = 0.0
+    voice_status_last_write_at: float = 0.0
+    voice_status_retry_count: int = 0
     voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     agent_playback_token: int = -1
     agent_monitor_task: Optional[asyncio.Task] = None

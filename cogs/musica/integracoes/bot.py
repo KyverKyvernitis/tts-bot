@@ -7,6 +7,7 @@ from typing import Any
 from cogs.musica import configuracao as config
 from cogs.musica.diagnostico.servico import cleanup_music_diagnostics_temp_artifacts
 from cogs.musica.legado.roteador_audio import AudioRouter
+from cogs.musica.integracoes.status_canal import instalar_ponte_gateway_status_canal
 from cogs.musica.agente_telefone.transporte_http import fechar_sessao_http
 from cogs.musica.agente_telefone.roteamento import limpar_vinculos_worker
 from cogs.musica.interface.tarefas import cancelar_tarefas_interface
@@ -28,9 +29,19 @@ class IntegracaoMusicaBot:
         self._bitrate_reconciliado = False
         self._status_voz_reconciliado = False
         self._tarefa_reconciliacao: asyncio.Task | None = None
+        self._voice_status_parser_installed = False
 
     def instalar_compatibilidade(self) -> None:
         setattr(self.bot, "audio_router", self.router)
+        self._instalar_ponte_gateway_status_canal()
+
+    def _instalar_ponte_gateway_status_canal(self) -> None:
+        """Expõe VOICE_CHANNEL_STATUS_UPDATE sem ligar debug global do websocket."""
+        if self._voice_status_parser_installed:
+            return
+        self._voice_status_parser_installed = instalar_ponte_gateway_status_canal(self.bot)
+        if self._voice_status_parser_installed:
+            LOG.info("ponte VOICE_CHANNEL_STATUS_UPDATE instalada")
 
     def limpar_temporarios_diagnostico(self) -> str:
         return cleanup_music_diagnostics_temp_artifacts()

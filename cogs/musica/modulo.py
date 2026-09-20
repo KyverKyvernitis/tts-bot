@@ -168,6 +168,33 @@ class Music(FluxoTocar, FluxoControle, FluxoFila, FluxoConfiguracoes, BaseComand
 
 
     @commands.Cog.listener()
+    async def on_music_voice_channel_status_update_raw(self, payload: dict):
+        try:
+            guild_id = int(payload.get("guild_id") or 0)
+            channel_id = int(payload.get("id") or payload.get("channel_id") or 0)
+        except Exception:
+            return
+        if guild_id <= 0 or channel_id <= 0:
+            return
+        await self.router.handle_voice_channel_status_gateway_update(
+            guild_id,
+            channel_id,
+            payload.get("status"),
+        )
+
+    @commands.Cog.listener()
+    async def on_voice_channel_status_update(self, channel, before, after):
+        """Compatibilidade futura caso discord.py passe a expor o evento."""
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return
+        await self.router.handle_voice_channel_status_gateway_update(
+            int(guild.id),
+            int(getattr(channel, "id", 0) or 0),
+            after,
+        )
+
+    @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         guild = getattr(member, "guild", None)
         bot_user = getattr(self.bot, "user", None)
