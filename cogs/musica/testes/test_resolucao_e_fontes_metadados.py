@@ -335,3 +335,159 @@ async def test_busca_multifonte_remove_prefixo_de_engine_antes_das_apis(monkeypa
     await fontes.buscar_candidatos_multifonte("ytsearch: Daft Punk Get Lucky", limit=5)
 
     assert consultas == ["Daft Punk Get Lucky"]
+
+
+@pytest.mark.asyncio
+async def test_resolucao_busca_profunda_so_roda_quando_fast_pass_precisa(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import resolucao, roteamento
+
+    destino = roteamento.DestinoWorker("worker-a", "A", "http://worker-a:8766", "token")
+    monkeypatch.setattr(resolucao, "destino_vinculado", lambda guild_id: destino)
+    monkeypatch.setattr(resolucao.config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_ENABLED", True, raising=False)
+
+    limites: list[int] = []
+
+    async def metadata_fake(query: str, *, limit: int = 5):
+        return []
+
+    async def worker_fake(*, base, token, payload, timeout_seconds):
+        limite = int(payload["limit"])
+        limites.append(limite)
+        if limite <= 5:
+            tracks = [
+                {
+                    "title": "Bohemian Like You",
+                    "uploader": "The Dandy Warhols",
+                    "duration": 210,
+                    "webpage_url": "https://www.youtube.com/watch?v=wrong",
+                    "metadata_only": True,
+                    "source": "youtube",
+                }
+            ]
+        else:
+            tracks = [
+                {
+                    "title": "Bohemian Like You",
+                    "uploader": "The Dandy Warhols",
+                    "duration": 210,
+                    "webpage_url": "https://www.youtube.com/watch?v=wrong",
+                    "metadata_only": True,
+                    "source": "youtube",
+                },
+                {
+                    "title": "Bohemian Rhapsody (Official Video)",
+                    "uploader": "Queen Official",
+                    "duration": 355,
+                    "webpage_url": "https://www.youtube.com/watch?v=correct",
+                    "metadata_only": True,
+                    "source": "youtube",
+                },
+            ]
+        return {"ok": True, "metadata_only": True, "tracks": tracks}
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", metadata_fake)
+    monkeypatch.setattr(resolucao, "executar_tarefa_resolucao", worker_fake)
+
+    lote = await resolucao.resolve_music_tracks_on_worker(
+        "quen bohemain rapsody",
+        requester_id=1,
+        requester_name="tester",
+        limit=5,
+        metadata_only=True,
+        guild_id=999,
+    )
+
+    assert limites == [5, 10]
+    assert lote.tracks[0].webpage_url == "https://www.youtube.com/watch?v=correct"
+
+
+@pytest.mark.asyncio
+async def test_resolucao_fast_pass_claro_nao_paga_segunda_busca(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import resolucao, roteamento
+
+    destino = roteamento.DestinoWorker("worker-a", "A", "http://worker-a:8766", "token")
+    monkeypatch.setattr(resolucao, "destino_vinculado", lambda guild_id: destino)
+    monkeypatch.setattr(resolucao.config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_ENABLED", True, raising=False)
+
+    chamadas = 0
+
+    async def metadata_fake(query: str, *, limit: int = 5):
+        return []
+
+    async def worker_fake(*, base, token, payload, timeout_seconds):
+        nonlocal chamadas
+        chamadas += 1
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "tracks": [
+                {"title": "The Weeknd - Blinding Lights (Official Audio)", "uploader": "The Weeknd", "webpage_url": "https://www.youtube.com/watch?v=1", "metadata_only": True, "source": "youtube"},
+                {"title": "Blinding Lights Remix", "uploader": "Random DJ", "webpage_url": "https://www.youtube.com/watch?v=2", "metadata_only": True, "source": "youtube"},
+                {"title": "Blinding Lights Cover", "uploader": "Cover Channel", "webpage_url": "https://www.youtube.com/watch?v=3", "metadata_only": True, "source": "youtube"},
+                {"title": "Save Your Tears", "uploader": "The Weeknd", "webpage_url": "https://www.youtube.com/watch?v=4", "metadata_only": True, "source": "youtube"},
+                {"title": "Starboy", "uploader": "The Weeknd", "webpage_url": "https://www.youtube.com/watch?v=5", "metadata_only": True, "source": "youtube"},
+            ],
+        }
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", metadata_fake)
+    monkeypatch.setattr(resolucao, "executar_tarefa_resolucao", worker_fake)
+
+    lote = await resolucao.resolve_music_tracks_on_worker(
+        "the weeknd blinding lights",
+        requester_id=1,
+        requester_name="tester",
+        limit=5,
+        metadata_only=True,
+        guild_id=999,
+    )
+
+    assert chamadas == 1
+    assert lote.tracks[0].webpage_url == "https://www.youtube.com/watch?v=1"
+
+
+@pytest.mark.asyncio
+async def test_falha_da_busca_profunda_preserva_fast_pass(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import resolucao, roteamento
+
+    destino = roteamento.DestinoWorker("worker-a", "A", "http://worker-a:8766", "token")
+    monkeypatch.setattr(resolucao, "destino_vinculado", lambda guild_id: destino)
+    monkeypatch.setattr(resolucao.config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_ENABLED", True, raising=False)
+
+    chamadas = 0
+
+    async def metadata_fake(query: str, *, limit: int = 5):
+        if limit > 5:
+            raise RuntimeError("provider deep indisponivel")
+        return []
+
+    async def worker_fake(*, base, token, payload, timeout_seconds):
+        nonlocal chamadas
+        chamadas += 1
+        if chamadas > 1:
+            raise TimeoutError("deep timeout")
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "tracks": [
+                {"title": "Misteriosa Musica", "uploader": "Canal", "webpage_url": "https://www.youtube.com/watch?v=first", "metadata_only": True, "source": "youtube"},
+            ],
+        }
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", metadata_fake)
+    monkeypatch.setattr(resolucao, "executar_tarefa_resolucao", worker_fake)
+
+    lote = await resolucao.resolve_music_tracks_on_worker(
+        "misteriosa musica",
+        requester_id=1,
+        requester_name="tester",
+        limit=5,
+        metadata_only=True,
+        guild_id=999,
+    )
+
+    assert chamadas == 2
+    assert len(lote.tracks) == 1
+    assert lote.tracks[0].webpage_url == "https://www.youtube.com/watch?v=first"

@@ -279,6 +279,16 @@ MUSIC_AGENT_METADATA_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_
 MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS", "180.0"), 180.0))
 MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS = max(3.0, _parse_float(os.getenv("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", "18.0"), 18.0))
 MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", "420.0"), 420.0))
+# Busca inteligente: segunda passagem só quando o ranking inicial não estiver
+# suficientemente claro. O custo extra é rede no Phone Worker/providers; a VPS
+# faz apenas fusão/ranking local leve.
+MUSIC_SEARCH_DEEP_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_DEEP_ENABLED", "true"), True)
+MUSIC_SEARCH_DEEP_LIMIT = max(6, min(10, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_LIMIT", "10"), 10)))
+MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS = max(3.0, min(10.0, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS", "7.0"), 7.0)))
+MUSIC_SEARCH_DEEP_MIN_RESULTS = max(2, min(5, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_MIN_RESULTS", "3"), 3)))
+MUSIC_SEARCH_DEEP_SCORE_THRESHOLD = max(0.0, min(1.0, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_SCORE_THRESHOLD", "0.70"), 0.70)))
+MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD = max(0.0, min(1.0, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", "0.60"), 0.60)))
+MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD = max(0.0, min(0.30, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", "0.045"), 0.045)))
 MUSIC_WORKER_DIRECT_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_WORKER_DIRECT_CACHE_TTL_SECONDS", "90.0"), 90.0))
 MUSIC_AGENT_BOOTSTRAP_ON_PLAY = _parse_bool(os.getenv("MUSIC_AGENT_BOOTSTRAP_ON_PLAY", "true"), True)
 MUSIC_AGENT_MISSING_TOKEN_MESSAGE = (

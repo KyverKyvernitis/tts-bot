@@ -6,10 +6,11 @@ import time
 
 from cogs.musica import configuracao as config
 
-from ..busca import fundir_resultados, ranquear_faixas
+from ..busca import avaliar_busca_profunda, fundir_resultados, ranquear_faixas
 from ..busca.fontes import buscar_candidatos_multifonte
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch
+from .busca_profunda import executar_passagem_profunda
 from .cache_resolucao import (
     armazenar_cache_resolucao,
     chave_cache_resolucao,
@@ -163,6 +164,7 @@ async def resolve_music_tracks_on_worker(
         requester_id=requester_id,
         requester_name=requester_name,
     )
+    worker_tracks_fast = list(batch.tracks)
     api_candidates = []
     if metadata_task is not None:
         try:
@@ -190,7 +192,8 @@ async def resolve_music_tracks_on_worker(
             ",".join(fusao.fontes),
         )
 
-    if busca_textual and len(batch.tracks) > 1:
+    ranking = []
+    if busca_textual and batch.tracks:
         batch.tracks, ranking = ranquear_faixas(clean_query, batch.tracks)
         if ranking:
             top = ranking[0]
@@ -202,6 +205,82 @@ async def resolve_music_tracks_on_worker(
                 top.confianca,
                 top.indice_original,
             )
+
+    if busca_textual and somente_metadados:
+        decisao = avaliar_busca_profunda(
+            clean_query,
+            batch.tracks,
+            ranking,
+            requested_limit=max_limit,
+            enabled=bool(getattr(config, "MUSIC_SEARCH_DEEP_ENABLED", True)),
+            deep_limit=int(getattr(config, "MUSIC_SEARCH_DEEP_LIMIT", 10) or 10),
+            min_results=int(getattr(config, "MUSIC_SEARCH_DEEP_MIN_RESULTS", 3) or 3),
+            score_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_SCORE_THRESHOLD", 0.70) or 0.70),
+            confidence_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", 0.60) or 0.60),
+            margin_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", 0.045) or 0.045),
+        )
+        if decisao.executar:
+            deep_timeout = min(
+                total_timeout,
+                float(getattr(config, "MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS", 7.0) or 7.0),
+            )
+            logger.info(
+                "[music/search] deep pass iniciado | query=%r deep_query=%r motivo=%s limit=%s score=%.4f confidence=%.4f margin=%.4f",
+                clean_query,
+                decisao.query,
+                decisao.motivo,
+                decisao.limit,
+                decisao.top_score,
+                decisao.top_confianca,
+                decisao.margem,
+            )
+            profundo = await executar_passagem_profunda(
+                base=base,
+                token=token,
+                query=decisao.query,
+                limit=decisao.limit,
+                timeout_seconds=max(3.0, deep_timeout),
+                requester_id=requester_id,
+                requester_name=requester_name,
+                executar_worker=executar_tarefa_resolucao,
+                buscar_metadata=buscar_candidatos_multifonte,
+            )
+            if profundo.tracks or profundo.api_candidates:
+                batch.tracks, fusao_profunda = fundir_resultados(
+                    clean_query,
+                    [*worker_tracks_fast, *profundo.tracks],
+                    [*api_candidates, *profundo.api_candidates],
+                    requester_id=requester_id,
+                    requester_name=requester_name,
+                    limit=decisao.limit,
+                )
+                batch.tracks, ranking = ranquear_faixas(clean_query, batch.tracks)
+                batch.tracks = batch.tracks[:max_limit]
+                top_final = ranking[0] if ranking else None
+                logger.info(
+                    "[music/search] deep pass aplicado | query=%r motivo=%s tracks_worker=%s tracks_api=%s grupos=%s duplicatas=%s elapsed_ms=%.1f top_score=%s confidence=%s worker_error=%r api_error=%r",
+                    clean_query,
+                    decisao.motivo,
+                    len(profundo.tracks),
+                    len(profundo.api_candidates),
+                    fusao_profunda.grupos,
+                    fusao_profunda.duplicatas,
+                    profundo.elapsed_ms,
+                    f"{top_final.score:.4f}" if top_final else "",
+                    f"{top_final.confianca:.4f}" if top_final else "",
+                    profundo.worker_error[:160],
+                    profundo.api_error[:160],
+                )
+            else:
+                logger.info(
+                    "[music/search] deep pass sem ganho | query=%r motivo=%s elapsed_ms=%.1f worker_error=%r api_error=%r",
+                    clean_query,
+                    decisao.motivo,
+                    profundo.elapsed_ms,
+                    profundo.worker_error[:160],
+                    profundo.api_error[:160],
+                )
+
     elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
     logger.info(
         "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s metadata_only=%s elapsed_ms=%.1f js=%s search=%s cli_rc=%s cli_error=%r",

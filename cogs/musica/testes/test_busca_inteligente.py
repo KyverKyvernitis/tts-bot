@@ -196,3 +196,64 @@ def test_fusao_candidato_metadata_permanece_lazy_sem_stream() -> None:
     assert tracks[0].stream_url == ""
     assert tracks[0].display_title == "Genesis"
     assert tracks[0].display_uploader == "Grimes"
+
+
+def test_deep_pass_nao_roda_quando_primeira_passagem_e_clara() -> None:
+    from cogs.musica.busca import avaliar_busca_profunda
+
+    tracks = [
+        _track("The Weeknd - Blinding Lights (Official Audio)", "The Weeknd"),
+        _track("Blinding Lights Remix", "Random DJ"),
+        _track("Blinding Lights Cover", "Cover Channel"),
+        _track("Save Your Tears", "The Weeknd"),
+        _track("Starboy", "The Weeknd"),
+    ]
+    ordenadas, ranking = ranquear_faixas("the weeknd blinding lights", tracks)
+    decisao = avaliar_busca_profunda(
+        "the weeknd blinding lights",
+        ordenadas,
+        ranking,
+        requested_limit=5,
+    )
+
+    assert decisao.executar is False
+    assert decisao.motivo == "primeira_passagem_suficiente"
+    assert decisao.top_score >= 0.9
+
+
+def test_deep_pass_reformula_typo_usando_melhor_candidato_sem_trocar_ranking_final() -> None:
+    from cogs.musica.busca import avaliar_busca_profunda
+
+    tracks = [
+        _track("Bohemian Like You", "The Dandy Warhols"),
+        _track("Bohemian Rhapsody", "Queen Official"),
+        _track("Bohemian Rhapsody Cover", "Cover Band"),
+    ]
+    ordenadas, ranking = ranquear_faixas("quen bohemain rapsody", tracks)
+    decisao = avaliar_busca_profunda(
+        "quen bohemain rapsody",
+        ordenadas,
+        ranking,
+        requested_limit=5,
+    )
+
+    assert decisao.executar is True
+    assert decisao.motivo in {"score_baixo", "poucos_resultados"}
+    assert "Bohemian Rhapsody" in decisao.query
+    assert decisao.limit == 10
+
+
+def test_deep_pass_preserva_artista_titulo_e_versao_na_reformulacao() -> None:
+    from cogs.musica.busca import avaliar_busca_profunda
+
+    tracks = [_track("Get Lucky Live", "Daft Punk")]
+    _, ranking = ranquear_faixas("Daft Punk - Get Lucky live", tracks)
+    decisao = avaliar_busca_profunda(
+        "Daft Punk - Get Lucky live",
+        tracks,
+        ranking,
+        requested_limit=5,
+    )
+
+    assert decisao.executar is True
+    assert decisao.query == "daft punk get lucky live"
