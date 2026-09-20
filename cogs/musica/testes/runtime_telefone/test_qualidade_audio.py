@@ -195,3 +195,51 @@ def test_wave_b_ffmpeg_opus_usa_bitrate_adaptativo(monkeypatch) -> None:
     source = agent._build_ffmpeg_source("https://media.example/audio", opus_bitrate_kbps=224)
     assert source.is_opus() is True
     assert captured["bitrate"] == 224
+
+
+def test_wave_d_48k_permanece_no_fast_path_sem_filtro(monkeypatch) -> None:
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    base = agent.ffmpeg_options
+    options, mode = agent._ffmpeg_options_for_source(48000)
+    assert options == base
+    assert "aresample" not in options
+    assert mode == "native_48k"
+
+
+def test_wave_d_resample_seletivo_so_para_fonte_nao_48k(monkeypatch) -> None:
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    options, mode = agent._ffmpeg_options_for_source(44100)
+    assert mode == "swr_quality"
+    assert "-af aresample=48000:resampler=swr" in options
+    assert ":filter_size=32" in options
+    assert ":phase_shift=10" in options
+    assert ":linear_interp=0" in options
+    assert ":exact_rational=1" in options
+
+    unknown_options, unknown_mode = agent._ffmpeg_options_for_source(0)
+    assert unknown_options == agent.ffmpeg_options
+    assert unknown_mode == "ffmpeg_auto_unknown"
+
+
+def test_wave_d_nao_sobrescreve_filtro_ffmpeg_customizado(monkeypatch) -> None:
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    agent.ffmpeg_options = "-vn -sn -dn -af volume=0.8 -loglevel warning"
+    options, mode = agent._ffmpeg_options_for_source(44100)
+    assert options == agent.ffmpeg_options
+    assert mode == "custom_filter"
+    assert "aresample" not in options
+
+
+def test_wave_d_source_rate_chega_ao_builder_e_telemetria() -> None:
+    playback = (ROOT / "cogs/musica/runtime_telefone/agente/reproducao.py").read_text(encoding="utf-8")
+    assert "source_sample_rate=source_rate" in playback
+    assert "resample_mode=resample_mode" in playback

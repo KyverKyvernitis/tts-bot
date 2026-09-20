@@ -87,7 +87,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.42"
+AGENT_VERSION = "0.3.43"
 STARTED_AT = time.time()
 
 
@@ -120,6 +120,12 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_on_network_error 1 -reconnect_on_http_error 403,404,408,429,5xx -reconnect_delay_max 5 -rw_timeout 15000000",
         )
         self.ffmpeg_options = os.getenv("MUSIC_AGENT_FFMPEG_OPTIONS", "-vn -sn -dn -loglevel warning")
+        # Resampling de qualidade só entra quando a fonte conhecida não é 48 kHz.
+        # Mantemos o filter_size padrão do SWR para não aumentar CPU; a melhoria
+        # vem de evitar interpolação linear entre fases e usar a razão exata.
+        self.resample_quality_enabled = truthy(os.getenv("MUSIC_AGENT_RESAMPLE_QUALITY_ENABLED"), True)
+        self.resample_filter_size = max(16, min(64, env_int("MUSIC_AGENT_RESAMPLE_FILTER_SIZE", 32)))
+        self.resample_phase_shift = max(8, min(12, env_int("MUSIC_AGENT_RESAMPLE_PHASE_SHIFT", 10)))
         self.ffmpeg_bitrate = max(16, min(512, env_int("MUSIC_AGENT_FFMPEG_OPUS_BITRATE_KBPS", 128)))
         # O encoder Opus interno do discord.py só é usado para sources PCM.
         # Ajuste o bitrate à capacidade real do canal e à qualidade da fonte,

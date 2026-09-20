@@ -802,18 +802,20 @@ class ReproducaoMixin:
         if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
             voice_client.stop()
         opus_bitrate_kbps, channel_bitrate_kbps = self._discord_opus_bitrate_kbps(voice_client, track)
+        source_rate = max(0, int(getattr(track, "audio_sample_rate", 0) or 0))
+        _audio_options, resample_mode = self._ffmpeg_options_for_source(source_rate)
         source = self._build_ffmpeg_source(
             track.stream_url,
             volume_percent=st.volume_percent,
             start_offset_seconds=getattr(track, "start_offset_seconds", 0.0),
             opus_bitrate_kbps=opus_bitrate_kbps,
+            source_sample_rate=source_rate,
         )
         st.player = voice_client
         st.transport = "direct"
         st.playback_token += 1
         playback_token = st.playback_token
         self._set_status(st, "starting", event="direct_player_starting")
-        source_rate = max(0, int(getattr(track, "audio_sample_rate", 0) or 0))
         source_channels = max(0, int(getattr(track, "audio_channels", 0) or 0))
         self.log(
             "audio_source_selected",
@@ -825,6 +827,7 @@ class ReproducaoMixin:
             channels=source_channels,
             output="pcm_s16le_48k_stereo" if self.direct_pcm_volume_enabled else "discord-opus",
             resample=bool(source_rate and source_rate != 48000),
+            resample_mode=resample_mode,
             channel_bitrate_kbps=channel_bitrate_kbps,
             opus_bitrate_kbps=opus_bitrate_kbps,
             opus_signal="music",
@@ -883,6 +886,37 @@ class ReproducaoMixin:
         # -ss antes do input torna o seek rápido para URLs remotas.
         return f"-ss {offset:.3f} {self.ffmpeg_before_options}".strip()
 
+    @staticmethod
+    def _ffmpeg_has_custom_audio_filter(options: str) -> bool:
+        padded = f" {str(options or '').strip().lower()} "
+        return any(
+            marker in padded
+            for marker in (" -af ", " -af=", " -filter:a", " -filter_complex ", " -filter_complex=")
+        )
+
+    def _ffmpeg_options_for_source(self, source_sample_rate: int = 0) -> tuple[str, str]:
+        base = str(self.ffmpeg_options or "").strip()
+        try:
+            rate = max(0, int(source_sample_rate or 0))
+        except Exception:
+            rate = 0
+        if rate == 48000:
+            return base, "native_48k"
+        if rate <= 0:
+            return base, "ffmpeg_auto_unknown"
+        if not bool(getattr(self, "resample_quality_enabled", True)):
+            return base, "ffmpeg_auto"
+        if self._ffmpeg_has_custom_audio_filter(base):
+            return base, "custom_filter"
+        filter_size = max(16, min(64, int(getattr(self, "resample_filter_size", 32) or 32)))
+        phase_shift = max(8, min(12, int(getattr(self, "resample_phase_shift", 10) or 10)))
+        resample = (
+            "aresample=48000:resampler=swr"
+            f":filter_size={filter_size}:phase_shift={phase_shift}"
+            ":linear_interp=0:exact_rational=1"
+        )
+        return f"{base} -af {resample}".strip(), "swr_quality"
+
     def _build_ffmpeg_source(
         self,
         stream_url: str,
@@ -890,15 +924,17 @@ class ReproducaoMixin:
         volume_percent: int | None = None,
         start_offset_seconds: float = 0.0,
         opus_bitrate_kbps: int | None = None,
+        source_sample_rate: int = 0,
     ) -> Any:
         volume = max(0.0, min(1.5, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
         before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
+        ffmpeg_options, _resample_mode = self._ffmpeg_options_for_source(source_sample_rate)
         if self.direct_pcm_volume_enabled:
             pcm = discord.FFmpegPCMAudio(
                 stream_url,
                 executable=self.ffmpeg_executable,
                 before_options=before_options,
-                options=self.ffmpeg_options,
+                options=ffmpeg_options,
             )
             loop = self._loop or asyncio.get_running_loop()
             return AgentMixedAudioSource(loop=loop, music_source=pcm, music_volume=volume, duck_factor=max(0.0, min(1.0, self.duck_volume_percent / 100.0)))
@@ -908,14 +944,14 @@ class ReproducaoMixin:
                 stream_url,
                 executable=self.ffmpeg_executable,
                 before_options=before_options,
-                options=self.ffmpeg_options,
+                options=ffmpeg_options,
                 bitrate=max(16, min(512, int(opus_bitrate_kbps or self.ffmpeg_bitrate))),
             )
         pcm = discord.FFmpegPCMAudio(
             stream_url,
             executable=self.ffmpeg_executable,
             before_options=before_options,
-            options=self.ffmpeg_options,
+            options=ffmpeg_options,
         )
         return discord.PCMVolumeTransformer(pcm, volume=volume)
 
