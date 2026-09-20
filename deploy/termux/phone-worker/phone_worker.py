@@ -363,7 +363,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-gtts", "tts-edge", "tts-android-native", "tts-teto", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-gtts", "tts-edge", "tts-android-native", "tts-teto", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1434,10 +1434,6 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     roles, capabilities = _current_core_worker_roles_and_capabilities()
     roles, capabilities = list(roles), list(capabilities)
     safe_mode = _phone_worker_safe_mode_enabled()
-    if safe_mode:
-        blocked_prefixes = ("music",)
-        roles = [item for item in roles if not str(item).lower().startswith(blocked_prefixes)]
-        capabilities = [item for item in capabilities if not str(item).lower().startswith(blocked_prefixes)]
     payload = {
         "worker_id": worker_id,
         "physical_worker_id": worker_id,
@@ -1488,13 +1484,16 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     }
     try:
         module = _phone_worker_control_plane_module()
-        return module.build_payload(payload,
+        payload = module.build_payload(payload,
             system=_control_plane_snapshot("system", _system_status, {"ok": False}),
-            music_node=_inactive_music_node_snapshot(),
-            music_agent=_control_plane_snapshot("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}),
             battery=_control_plane_snapshot("battery", _battery_snapshot, _empty_battery_snapshot()),
             network=_control_plane_snapshot("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}),
             updater=_bootstrap_updater_snapshot())
+        return _phone_worker_music_bridge_module("control_plane").estender_payload(
+            payload,
+            music_node=_inactive_music_node_snapshot(),
+            music_agent=_control_plane_snapshot("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}),
+        )
     except Exception as exc:
         print(f"[phone-worker] payload de recuperação: {type(exc).__name__}: {_short_text(exc, limit=100)}", flush=True)
         payload["roles"], payload["capabilities"] = roles[:16], capabilities[:24]
@@ -3428,147 +3427,25 @@ def _voice_agent_clear_session(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agent: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Shared worker voice/audio plane readiness.
-
-    This does not make the worker own the whole bot. It reports whether the
-    worker is prepared to become the direct voice/audio plane for Music + TTS
-    while the VPS remains the control plane/gateway/UI owner.
-    """
-    profile = _current_core_worker_profile()
-    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
-    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
-    enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True)
-    shared_session_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED", True)
-    direct_tts_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True)
-    direct_music_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_MUSIC_ENABLED", True)
-    safe_mode = _phone_worker_safe_mode_enabled()
-
-    if music_agent is None:
-        music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
-    if tts_agent is None:
-        tts_agent = _safe_telemetry("tts_agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False})
-
-    music_ready = bool((music_agent or {}).get("ok") or (music_agent or {}).get("available") or (music_agent or {}).get("discord_ready"))
-    tts_ready = bool((tts_agent or {}).get("ok") and (tts_agent or {}).get("synth_ready"))
-    has_voice_capability = "voice-agent" in capabilities or "worker-voice" in capabilities or ("music" in capabilities and "tts-agent" in capabilities)
-    base_ready = bool(enabled and profile == "turbo" and has_voice_capability and not safe_mode)
-    session_summary = _voice_agent_session_summary(limit=5)
-    handoff_summary = _voice_agent_handoff_summary(limit=5)
-    connection_summary = _voice_agent_connection_summary(limit=5)
-    transfer_summary = _voice_agent_transfer_summary(limit=5)
-    session_count = int(session_summary.get("session_count") or 0)
-    handoff_count = int(handoff_summary.get("handoff_count") or 0)
-    handoff_ready = bool(handoff_summary.get("handoff_ready"))
-    connection_ready = bool(connection_summary.get("connection_ready"))
-    transfer_ready = bool(transfer_summary.get("transfer_ready"))
-    transfer_count = int(transfer_summary.get("transfer_count") or 0)
-    shared_ready = bool(base_ready and shared_session_enabled and (music_ready or direct_music_enabled) and tts_ready)
-    shared_session_ready = bool(shared_ready and session_count > 0)
-    last_connection = dict(connection_summary.get("last_connection") or {})
-    direct_connection_ready = bool(connection_ready and str(last_connection.get("state") or "").startswith("worker_direct_tts"))
-    direct_tts_ready = bool(direct_tts_enabled and music_ready and tts_ready and (direct_connection_ready or (shared_session_ready and handoff_ready and connection_ready)))
-
-    missing: list[str] = []
-    if not enabled:
-        missing.append("PHONE_WORKER_VOICE_AGENT_ENABLED=false")
-    if profile != "turbo":
-        missing.append("perfil turbo")
-    if safe_mode:
-        missing.append("safe mode")
-    if not has_voice_capability:
-        missing.append("capacidade voice-agent/worker-voice")
-    if not shared_session_enabled:
-        missing.append("sessão compartilhada desativada")
-    if not tts_ready:
-        missing.append("TTS Agent pronto")
-    if not music_ready:
-        missing.append("Music Agent/voz pronta")
-    if shared_ready and session_count <= 0:
-        missing.append("sessão de voz registrada pela VPS")
-    if shared_session_ready and not handoff_ready:
-        missing.append("handoff temporário de voz")
-    if shared_session_ready and handoff_ready and transfer_count <= 0:
-        missing.append("preparação de transferência de posse")
-    if shared_session_ready and handoff_ready and transfer_count > 0 and not transfer_ready:
-        missing.append("transferência explícita de posse da voz")
-    if shared_session_ready and handoff_ready and transfer_ready and not connection_ready and not direct_connection_ready:
-        missing.append("conexão worker autorizada ainda não testada")
-
-    if direct_tts_ready:
-        state = "direct_tts_voice_ready"
-    elif shared_session_ready and handoff_ready and connection_ready:
-        state = "voice_connection_dry_run_ready"
-    elif shared_session_ready and handoff_ready and transfer_ready:
-        state = "voice_ownership_granted_waiting_connection"
-    elif shared_session_ready and handoff_ready and transfer_count > 0:
-        state = "voice_transfer_staged_waiting_vps_release"
-    elif shared_session_ready and handoff_ready:
-        state = "voice_handoff_received_waiting_transfer"
-    elif shared_session_ready:
-        state = "shared_voice_session_registered"
-    elif shared_ready:
-        state = "waiting_shared_voice_session"
-    elif base_ready:
-        state = "waiting_dependencies"
-    elif enabled:
-        state = "not_ready"
-    else:
-        state = "disabled"
-
-    return {
-        "ok": bool(shared_ready),
-        "available": bool(base_ready),
-        "state": state,
-        "enabled": bool(enabled),
-        "profile": profile,
-        "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
-        "worker_version": PHONE_WORKER_VERSION,
-        "control_plane": "vps",
-        "audio_plane": "worker",
-        "authority": "vps_control_plane_worker_audio_plane",
-        "shared_session_enabled": bool(shared_session_enabled),
-        "shared_session_ready": bool(shared_session_ready),
-        "session_count": session_count,
-        "active_guilds": list(session_summary.get("active_guilds") or [])[:12],
-        "sessions": list(session_summary.get("sessions") or [])[:5],
-        "last_session": dict(session_summary.get("last_session") or {}),
-        "handoff_count": handoff_count,
-        "handoff_complete_count": int(handoff_summary.get("handoff_complete_count") or 0),
-        "handoff_ready": bool(handoff_ready),
-        "handoff_guilds": list(handoff_summary.get("handoff_guilds") or [])[:12],
-        "handoffs": list(handoff_summary.get("handoffs") or [])[:5],
-        "last_handoff": dict(handoff_summary.get("last_handoff") or {}),
-        "connection_count": int(connection_summary.get("connection_count") or 0),
-        "connection_ready_count": int(connection_summary.get("connection_ready_count") or 0),
-        "connection_probing_count": int(connection_summary.get("connection_probing_count") or 0),
-        "connection_failed_count": int(connection_summary.get("connection_failed_count") or 0),
-        "connection_ready": bool(connection_summary.get("connection_ready")),
-        "connection_guilds": list(connection_summary.get("connection_guilds") or [])[:12],
-        "connections": list(connection_summary.get("connections") or [])[:5],
-        "last_connection": dict(connection_summary.get("last_connection") or {}),
-        "transfer_count": transfer_count,
-        "transfer_ready_count": int(transfer_summary.get("transfer_ready_count") or 0),
-        "transfer_staged_count": int(transfer_summary.get("transfer_staged_count") or 0),
-        "transfer_ready": bool(transfer_ready),
-        "transfer_state": str(transfer_summary.get("transfer_state") or "")[:80],
-        "current_voice_owner": str(transfer_summary.get("current_voice_owner") or "vps")[:40],
-        "requested_voice_owner": str(transfer_summary.get("requested_voice_owner") or "")[:40],
-        "transfer_guilds": list(transfer_summary.get("transfer_guilds") or [])[:12],
-        "transfers": list(transfer_summary.get("transfers") or [])[:5],
-        "last_transfer": dict(transfer_summary.get("last_transfer") or {}),
-        "direct_tts_enabled": bool(direct_tts_enabled),
-        "direct_tts_ready": bool(direct_tts_ready),
-        "direct_music_enabled": bool(direct_music_enabled),
-        "connection_auto_probe_enabled": bool(_env_bool("PHONE_WORKER_VOICE_AGENT_CONNECTION_AUTO_PROBE_ENABLED", False)),
-        "music_ready": bool(music_ready),
-        "tts_ready": bool(tts_ready),
-        "music_state": str((music_agent or {}).get("state") or (music_agent or {}).get("status") or "unknown")[:80],
-        "tts_state": str((tts_agent or {}).get("state") or "unknown")[:80],
-        "voice_transport": "worker_shared_voice_session" if shared_session_ready else ("music_agent_shared_session" if music_ready else "not_connected"),
-        "ducking_ready": bool(shared_session_ready and music_ready and tts_ready),
-        "missing": missing[:10],
-        "note": "Base do Worker Voice Agent: VPS segue como cérebro; worker vira plano de voz/áudio quando a etapa direta for ativada.",
-    }
+    hooks = SimpleNamespace(
+        current_profile=_current_core_worker_profile,
+        env_list=_env_list,
+        profile_capabilities=_core_worker_profile_capabilities,
+        env_bool=_env_bool,
+        safe_mode_enabled=_phone_worker_safe_mode_enabled,
+        safe_telemetry=_safe_telemetry,
+        music_agent_snapshot=_music_agent_snapshot,
+        tts_agent_snapshot=_tts_agent_snapshot,
+        session_summary=_voice_agent_session_summary,
+        handoff_summary=_voice_agent_handoff_summary,
+        connection_summary=_voice_agent_connection_summary,
+        transfer_summary=_voice_agent_transfer_summary,
+        default_worker_id=_default_worker_id,
+        phone_worker_version=PHONE_WORKER_VERSION,
+    )
+    return _phone_worker_music_bridge_module("voz_compartilhada").voice_agent_snapshot(
+        hooks, music_agent=music_agent, tts_agent=tts_agent
+    )
 
 def _system_status() -> dict[str, Any]:
     auto_boot_repair = _auto_repair_local_boot_if_needed()
@@ -9267,10 +9144,12 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "cogs/musica/runtime_telefone/agente/servidor.py": ("worker", "cogs/musica/runtime_telefone/agente/servidor.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/__init__.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/__init__.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/configuracao.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/configuracao.py", 0o644),
+    "cogs/musica/runtime_telefone/ponte_worker/control_plane.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/control_plane.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/streams.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/streams.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/resolucao.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/resolucao.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/proxy.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/proxy.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/telemetria.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/telemetria.py", 0o644),
+    "cogs/musica/runtime_telefone/ponte_worker/voz_compartilhada.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/voz_compartilhada.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/servico.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/servico.py", 0o644),
     "cogs/musica/runtime_telefone/termux/__init__.py": ("worker", "cogs/musica/runtime_telefone/termux/__init__.py", 0o644),
     "cogs/musica/runtime_telefone/termux/integracao-worker.sh": ("worker", "cogs/musica/runtime_telefone/termux/integracao-worker.sh", 0o755),

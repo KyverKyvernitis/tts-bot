@@ -20,18 +20,18 @@ from pathlib import Path
 
 from utility.apk_identity import ApkIdentityError, assert_expected_apk_identity, inspect_apk_identity
 from utility.storage_maintenance import prune_core_worker_releases
+from cogs.musica.integracoes.webserver import registrar_rotas_musica
 
 app = Flask(__name__)
+registrar_rotas_musica(app)
 
 _health_provider = None
 _update_action_provider = None
-_tts_audio_lock = threading.RLock()
 _core_worker_notification_lock = threading.RLock()
 _core_worker_fcm_tokens_lock = threading.RLock()
 _core_worker_app_heartbeat_lock = threading.RLock()
 _core_worker_app_jobs_lock = threading.RLock()
 _core_worker_apk_publish_lock = threading.RLock()
-_tts_audio_files: dict[str, tuple[str, float]] = {}
 _core_worker_pending_automation_lock = threading.RLock()
 _core_worker_pending_automation_processes = {}
 _core_worker_pending_automation_last_started = {}
@@ -3184,35 +3184,6 @@ def _is_local_request() -> bool:
     return remote in {"127.0.0.1", "::1", "localhost"}
 
 
-def _purge_expired_tts_audio(now: float | None = None) -> None:
-    now = time.time() if now is None else float(now)
-    with _tts_audio_lock:
-        expired = [token for token, (_path, expires_at) in _tts_audio_files.items() if expires_at <= now]
-        for token in expired:
-            _tts_audio_files.pop(token, None)
-
-
-def register_tts_audio_file(path: str, *, ttl_seconds: float = 240.0) -> str | None:
-    """Registra um áudio temporário para o Lavalink buscar via HTTP.
-
-    O token é aleatório e expira rápido. O arquivo não é copiado para evitar RAM/IO
-    extra; o endpoint apenas faz streaming do caminho já gerado pelo TTS. A URL
-    pode usar a extensão real do arquivo (.ogg/.opus/.m4a/.mp3) ou apenas o token.
-    """
-    try:
-        abs_path = os.path.abspath(str(path or ""))
-        if not os.path.isfile(abs_path):
-            return None
-        _purge_expired_tts_audio()
-        token = uuid.uuid4().hex
-        ttl = max(30.0, min(900.0, float(ttl_seconds or 240.0)))
-        with _tts_audio_lock:
-            _tts_audio_files[token] = (abs_path, time.time() + ttl)
-        return token
-    except Exception:
-        return None
-
-
 @app.get("/")
 def index():
     return "ok", 200
@@ -4528,42 +4499,6 @@ def core_worker_jobs_result():
         worker_id = str(body.get("worker_id") or payload.get("worker_id") or payload.get("id") or "")
         _kick_core_worker_pending_automation(worker_id)
     return jsonify(body), status
-
-
-@app.get("/tts-audio/<token>")
-@app.get("/tts-audio/<token>.<ext>")
-def tts_audio(token: str, ext: str | None = None):
-    token = str(token or "").strip()
-    # Compatibilidade com rotas antigas onde o sufixo vinha incorporado no token.
-    for suffix in (".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav"):
-        if token.lower().endswith(suffix):
-            token = token[: -len(suffix)]
-            break
-    if not token:
-        abort(404)
-    now = time.time()
-    with _tts_audio_lock:
-        record = _tts_audio_files.get(token)
-        if not record:
-            abort(404)
-        path, expires_at = record
-        if expires_at <= now:
-            _tts_audio_files.pop(token, None)
-            abort(404)
-    if not os.path.isfile(path):
-        with _tts_audio_lock:
-            _tts_audio_files.pop(token, None)
-        abort(404)
-    lowered = path.lower()
-    if lowered.endswith((".ogg", ".opus")):
-        mimetype = "audio/ogg"
-    elif lowered.endswith((".m4a", ".aac")):
-        mimetype = "audio/mp4"
-    elif lowered.endswith(".wav"):
-        mimetype = "audio/wav"
-    else:
-        mimetype = "audio/mpeg"
-    return send_file(path, mimetype=mimetype, conditional=True, max_age=0)
 
 
 def run_webserver():

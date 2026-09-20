@@ -1,0 +1,3 @@
+# Dependências Python exclusivas do domínio de música.
+yt-dlp[default]
+wavelink>=3.4,<3.6

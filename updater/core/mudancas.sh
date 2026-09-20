@@ -152,7 +152,7 @@ classify_changed_files() {
         ;;
     esac
 
-    [[ "$file" == "requirements.txt" || "$file" == "requirements.lock" ]] && REQUIREMENTS_CHANGED=1
+    [[ "$file" == "requirements.txt" || "$file" == "requirements.lock" || "$file" == "cogs/musica/requirements.txt" ]] && REQUIREMENTS_CHANGED=1
 
     case "$file" in
       deploy/systemd/tts-bot.service)

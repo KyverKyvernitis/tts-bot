@@ -70,7 +70,7 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
 
     def test_python_stdout_is_unbuffered_for_journald_ordering(self):
         start_script = (ROOT / "start.sh").read_text(encoding="utf-8")
-        self.assertIn("exec python3 -u bot.py", start_script)
+        self.assertIn('exec "$PYTHON_BIN" -u bot.py', start_script)
 
     def test_voice_owner_alerts_are_incident_based_and_components_v2(self):
         source = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")

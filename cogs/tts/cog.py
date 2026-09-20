@@ -23,7 +23,8 @@ from cogs.musica.integracoes.tts import (
     agendar_idle_musica,
     atualizar_ocupacao_ou_agendar_idle,
     deve_bloquear_voz_tts_local,
-    eh_cliente_voz_lavalink,
+    cliente_voz_pertence_musica,
+    estado_cliente_voz_musical,
     musica_ativa,
 )
 
@@ -1795,23 +1796,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         me_voice = getattr(me, "voice", None)
         return getattr(me_voice, "channel", None)
 
-    def _is_lavalink_voice_client(self, vc) -> bool:
-        return eh_cliente_voz_lavalink(vc)
+    def _voice_client_owned_by_music(self, vc) -> bool:
+        return cliente_voz_pertence_musica(vc)
 
     def _voice_client_is_connected(self, vc) -> bool:
         if vc is None:
             return False
-        if self._is_lavalink_voice_client(vc):
-            for attr in ("connected", "is_connected"):
-                value = getattr(vc, attr, None)
-                try:
-                    if callable(value):
-                        value = value()
-                    if value is not None:
-                        return bool(value)
-                except Exception:
-                    continue
-            return bool(getattr(vc, "channel", None) is not None or getattr(vc, "guild", None) is not None)
+        music_state = estado_cliente_voz_musical(vc, "connected")
+        if music_state is not None:
+            return music_state
         checker = getattr(vc, "is_connected", None)
         try:
             return bool(checker() if callable(checker) else getattr(vc, "connected", False))
@@ -1824,8 +1817,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _voice_client_is_playing(self, vc) -> bool:
         if vc is None:
             return False
-        if self._is_lavalink_voice_client(vc):
-            return bool(getattr(vc, "playing", False))
+        music_state = estado_cliente_voz_musical(vc, "playing")
+        if music_state is not None:
+            return music_state
         checker = getattr(vc, "is_playing", None)
         try:
             return bool(checker() if callable(checker) else getattr(vc, "playing", False))
@@ -1835,8 +1829,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _voice_client_is_paused(self, vc) -> bool:
         if vc is None:
             return False
-        if self._is_lavalink_voice_client(vc):
-            return bool(getattr(vc, "paused", False))
+        music_state = estado_cliente_voz_musical(vc, "paused")
+        if music_state is not None:
+            return music_state
         checker = getattr(vc, "is_paused", None)
         try:
             return bool(checker() if callable(checker) else getattr(vc, "paused", False))
@@ -1885,8 +1880,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         stale = self._is_voice_client_stale(guild, vc)
         if not stale:
             return
-        if self._is_lavalink_voice_client(vc):
-            print(f"[tts_voice] recuperação de voice state ignorada | player Lavalink ativo | guild={guild.id} reason={reason}")
+        if self._voice_client_owned_by_music(vc):
+            print(f"[tts_voice] recuperação de voice state ignorada | player de música ativo | guild={guild.id} reason={reason}")
             return
         try:
             if vc is not None:
@@ -2925,7 +2920,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _music_player_is_active(self, guild_id: int) -> bool:
         return musica_ativa(getattr(self, "bot", None), guild_id)
 
-    def _lavalink_music_should_own_voice(self, guild: discord.Guild | None) -> bool:
+    def _music_should_own_voice(self, guild: discord.Guild | None) -> bool:
         if guild is None:
             return False
         return deve_bloquear_voz_tts_local(self.bot, guild.id)
@@ -3066,8 +3061,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 )
             return None
 
-        if self._lavalink_music_should_own_voice(guild):
-            print(f"[tts_voice] conexão local do TTS ignorada | player de música via Wavelink controlando voz | guild={guild.id}")
+        if self._music_should_own_voice(guild):
+            print(f"[tts_voice] conexão local do TTS ignorada | player de música controlando voz | guild={guild.id}")
             return None
 
         async def _desired_self_deaf() -> bool:
@@ -3116,17 +3111,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             if self._is_voice_client_stale(guild, vc):
                 await self._recover_stale_voice_client(guild, reason="ensure_connected")
                 vc = self._get_voice_client_for_guild(guild)
-            if self._is_lavalink_voice_client(vc):
-                if self._lavalink_music_should_own_voice(guild):
-                    print(f"[tts_voice] conexão TTS ignorada | player Lavalink ativo | guild={guild.id}")
+            if self._voice_client_owned_by_music(vc):
+                if self._music_should_own_voice(guild):
+                    print(f"[tts_voice] conexão TTS ignorada | player de música ativo | guild={guild.id}")
                     return None
-                # Wavelink parado/órfão: force a limpeza para o TTS local não ficar
+                # Cliente musical parado/órfão: force a limpeza para o TTS local não ficar
                 # bloqueado depois de uma falha de música/TTS.
                 with contextlib.suppress(Exception):
                     await vc.disconnect(force=True)
                 vc = None
-            if self._lavalink_music_should_own_voice(guild):
-                print(f"[tts_voice] conexão local do TTS ignorada | música Lavalink aguardando conexão | guild={guild.id}")
+            if self._music_should_own_voice(guild):
+                print(f"[tts_voice] conexão local do TTS ignorada | música aguardando conexão | guild={guild.id}")
                 return None
 
             is_receive_client = bool(vc and hasattr(vc, "listen") and hasattr(vc, "is_listening"))
@@ -3267,8 +3262,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             except Exception as e:
                 msg = str(e).lower()
                 current_vc = self._get_voice_client_for_guild(guild)
-                if self._is_lavalink_voice_client(current_vc):
-                    print(f"[tts_voice] conexão TTS ignorada após already-connected | player Lavalink ativo | guild={guild.id}")
+                if self._voice_client_owned_by_music(current_vc):
+                    print(f"[tts_voice] conexão TTS ignorada após already-connected | player de música ativo | guild={guild.id}")
                     return None
 
                 if "already connected" in msg and current_vc and self._voice_client_is_connected(current_vc):

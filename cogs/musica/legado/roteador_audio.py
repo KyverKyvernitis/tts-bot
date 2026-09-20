@@ -4580,7 +4580,7 @@ class AudioRouter:
         internal_url = ""
         if (public_base or internal_base) and file_ok:
             try:
-                from webserver import register_tts_audio_file
+                from cogs.musica.integracoes.webserver import register_tts_audio_file
 
                 token = register_tts_audio_file(
                     abs_path,

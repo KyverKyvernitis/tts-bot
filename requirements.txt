@@ -1,12 +1,12 @@
 discord.py[voice]>=2.7.1,<2.8
 davey
+-r cogs/musica/requirements.txt
 flask
+waitress>=3.0,<4
 motor
 edge-tts==7.2.8
 gTTS==2.5.4
 psutil
 pillow
-yt-dlp[default]
-wavelink>=3.4,<3.6
 google-auth>=2.0.0
 requests>=2.31.0

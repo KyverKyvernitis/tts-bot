@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_phone_worker_pcm_lifecycle import Handler, pcm  # noqa: F401
+from cogs.musica.testes.runtime_telefone.ponte_worker.test_streams_pcm import Handler, pcm  # noqa: F401
 
 
 def wait_file(path, timeout=3):

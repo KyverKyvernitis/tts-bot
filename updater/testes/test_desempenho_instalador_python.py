@@ -195,7 +195,8 @@ def test_updater_pins_uv_and_keeps_safe_pip_fallback() -> None:
 def test_requirements_lock_counts_as_python_dependency_change() -> None:
     text = UPDATER.read_text(encoding="utf-8")
     assert "requirements.txt|requirements.lock" in text
-    assert '[[ "$file" == "requirements.txt" || "$file" == "requirements.lock" ]] && REQUIREMENTS_CHANGED=1' in text
+    assert 'cogs/musica/requirements.txt' in text
+    assert 'REQUIREMENTS_CHANGED=1' in text
 
 
 def test_success_card_reports_python_installer_path() -> None:

@@ -4,6 +4,23 @@ import contextlib
 from typing import Any
 
 
+_VOICE_LOG_THROTTLE: dict[tuple[int, str], float] = {}
+
+
+def _permitir_log_voz(guild_id: int, motivo: str, *, agora: float, intervalo: float = 20.0) -> bool:
+    chave = (int(guild_id), str(motivo))
+    proximo = float(_VOICE_LOG_THROTTLE.get(chave, 0.0) or 0.0)
+    if agora < proximo:
+        return False
+    _VOICE_LOG_THROTTLE[chave] = agora + max(1.0, float(intervalo))
+    # Evita crescimento indefinido em processos muito longos sem criar timer.
+    if len(_VOICE_LOG_THROTTLE) > 512:
+        expirados = [key for key, deadline in _VOICE_LOG_THROTTLE.items() if deadline <= agora]
+        for key in expirados[:256]:
+            _VOICE_LOG_THROTTLE.pop(key, None)
+    return True
+
+
 def _roteador(bot: Any):
     return getattr(bot, "audio_router", None) if bot is not None else None
 
@@ -139,7 +156,7 @@ async def tocar_tts_via_roteador(bot: Any, **kwargs):
     metodo = getattr(router, "play_tts", None)
     if not callable(metodo):
         return None
-    return await metodo(**kwargs)
+    return normalizar_resultado_rota_tts(await metodo(**kwargs))
 
 
 async def preparar_fallback_local_apos_lavalink(bot: Any, guild: Any, vc: Any, *, reason: str):
@@ -308,3 +325,121 @@ async def rotear_item_tts_para_musica(
             exc,
         )
         return True, audio_task
+
+
+def cliente_voz_pertence_musica(vc: Any) -> bool:
+    """Oculta do TTS os tipos concretos usados pelos backends musicais legados."""
+    return eh_cliente_voz_lavalink(vc)
+
+
+def estado_cliente_voz_musical(vc: Any, estado: str) -> bool | None:
+    """Retorna estado de um voice client musical ou None para cliente comum."""
+    if not cliente_voz_pertence_musica(vc):
+        return None
+    clean = str(estado or "").strip().lower()
+    if clean == "connected":
+        for attr in ("connected", "is_connected"):
+            value = getattr(vc, attr, None)
+            try:
+                if callable(value):
+                    value = value()
+                if value is not None:
+                    return bool(value)
+            except Exception:
+                continue
+        return bool(getattr(vc, "channel", None) is not None or getattr(vc, "guild", None) is not None)
+    if clean == "playing":
+        return bool(getattr(vc, "playing", False))
+    if clean == "paused":
+        return bool(getattr(vc, "paused", False))
+    return False
+
+
+def motivo_bloqueio_streaming_local(bot: Any, guild_id: int, vc: Any = None) -> str | None:
+    """Centraliza os motivos musicais que tornam FIFO/stream local inadequado."""
+    if musica_ativa(bot, guild_id):
+        return "music_active"
+    if lavalink_ativo(bot, guild_id):
+        return "music_voice_owned"
+    if cliente_voz_pertence_musica(vc):
+        return "music_voice_client"
+    return None
+
+
+def normalizar_resultado_rota_tts(result: Any) -> Any:
+    """Traduz chaves internas do backend legado para um contrato neutro ao TTS."""
+    if not isinstance(result, dict):
+        return result
+    normalized = dict(result)
+    if normalized.get("tts_lavalink_failed"):
+        normalized["music_route_failed"] = True
+        normalized["music_route_error"] = str(
+            normalized.get("tts_lavalink_error") or normalized.get("error") or "music_route_failed"
+        )
+    return normalized
+
+
+async def preparar_fallback_local_apos_rota_musical(bot: Any, guild: Any, vc: Any, *, reason: str):
+    """Pede ao domínio musical que libere/prepere voz antes do fallback local."""
+    return await preparar_fallback_local_apos_lavalink(bot, guild, vc, reason=reason)
+
+
+async def preparar_cliente_voz_tts(owner: Any, guild: Any, item: Any, state: Any, vc: Any) -> tuple[bool, Any]:
+    """Resolve posse musical da voz antes de o TTS tentar conexão local.
+
+    Retorna ``(tratado, voice_client)``. ``tratado=True`` significa que o TTS
+    não deve executar sua conexão local: a música assumiu a voz ou o item deve
+    aguardar/ser roteado pelo domínio musical.
+    """
+    import logging
+    import time
+
+    logger = logging.getLogger("cogs.musica.integracoes.tts")
+    guild_id = int(getattr(guild, "id", 0) or 0)
+    item_channel_id = int(getattr(item, "channel_id", 0) or 0)
+
+    if cliente_voz_pertence_musica(vc):
+        if not deve_bloquear_voz_tts_local(getattr(owner, "bot", None), guild_id):
+            with contextlib.suppress(Exception):
+                await vc.disconnect(force=True)
+            return False, None
+
+        channel_getter = getattr(owner, "_voice_client_channel", None)
+        music_channel = channel_getter(vc) if callable(channel_getter) else getattr(vc, "channel", None)
+        if music_channel is None:
+            me = getattr(guild, "me", None)
+            music_channel = getattr(getattr(me, "voice", None), "channel", None)
+        music_channel_id = getattr(music_channel, "id", None)
+        if music_channel_id is not None and int(music_channel_id) != item_channel_id:
+            now = time.monotonic()
+            if _permitir_log_voz(guild_id, "canal_diferente", agora=now):
+                logger.info(
+                    "[tts_voice] TTS ignorado porque a música está em outro canal | guild=%s music_channel=%s tts_channel=%s",
+                    guild_id,
+                    music_channel_id,
+                    item_channel_id,
+                )
+            return True, None
+
+        state.last_channel_id = int(music_channel_id or item_channel_id)
+        registrar = getattr(owner, "_schedule_worker_voice_agent_register_session", None)
+        if callable(registrar):
+            registrar(guild, item, vc, source="tts_music_shared")
+        logger.debug(
+            "[tts_voice] sessão musical já possui a voz; conexão local do TTS não será criada | guild=%s channel=%s",
+            guild_id,
+            state.last_channel_id,
+        )
+        return True, vc
+
+    if deve_bloquear_voz_tts_local(getattr(owner, "bot", None), guild_id):
+        now = time.monotonic()
+        if _permitir_log_voz(guild_id, "aguardando_sessao", agora=now):
+            logger.info(
+                "[tts_voice] TTS local aguardando sessão musical que possui a voz | guild=%s tts_channel=%s",
+                guild_id,
+                item_channel_id,
+            )
+        return True, None
+
+    return False, vc

@@ -257,6 +257,8 @@ def test_phone_worker_nao_reimplementa_dominio_musical() -> None:
         "proxy.py",
         "telemetria.py",
         "servico.py",
+        "control_plane.py",
+        "voz_compartilhada.py",
     ):
         assert (ponte / nome).is_file(), nome
 
@@ -276,6 +278,8 @@ def test_phone_worker_nao_reimplementa_dominio_musical() -> None:
     assert '_phone_worker_music_bridge_module("proxy")' in worker
     assert '_phone_worker_music_bridge_module("telemetria")' in worker
     assert '_phone_worker_music_bridge_module("servico")' in worker
+    assert '_phone_worker_music_bridge_module("control_plane")' in worker
+    assert '_phone_worker_music_bridge_module("voz_compartilhada")' in worker
 
     resolucao = _texto("cogs/musica/runtime_telefone/ponte_worker/resolucao.py")
     streams = _texto("cogs/musica/runtime_telefone/ponte_worker/streams.py")
@@ -385,3 +389,93 @@ def test_testes_da_integracao_tts_music_agent_moram_no_dominio_musica() -> None:
     assert "test_music_agent_overlay_prebuilds_audio_on_vps_when_cache_is_cold" not in raiz
     assert "test_music_agent_router_accepts_prebuilt_overlay_contract" in integrado
     assert "test_music_agent_overlay_prebuilds_audio_on_vps_when_cache_is_cold" in integrado
+
+
+def test_control_plane_generico_nao_implementa_politica_musical() -> None:
+    generico = _texto("deploy/termux/phone-worker/phone_worker_runtime/control_plane.py").lower()
+    dominio = _texto("cogs/musica/runtime_telefone/ponte_worker/control_plane.py")
+    worker = _texto("deploy/termux/phone-worker/phone_worker.py")
+
+    assert "music" not in generico
+    assert "lavalink" not in generico
+    assert "def estender_payload(" in dominio
+    assert '"music-ytdlp-resolve"' in dominio
+    assert '_phone_worker_music_bridge_module("control_plane").estender_payload(' in worker
+    turbo = worker.split('"turbo": {', 1)[1].split('"bedrock": {', 1)[0]
+    assert "music-ytdlp" not in turbo
+    assert "music-agent" not in turbo
+
+
+def test_tts_nao_implementa_backend_de_voz_musical() -> None:
+    for rel in ("cogs/tts/audio.py", "cogs/tts/cog.py"):
+        texto = _texto(rel).lower()
+        assert "lavalink" not in texto, rel
+        assert "wavelink" not in texto, rel
+        assert "tts_lavalink" not in texto, rel
+
+    integracao = _texto("cogs/musica/integracoes/tts.py")
+    assert "def cliente_voz_pertence_musica(" in integracao
+    assert "def motivo_bloqueio_streaming_local(" in integracao
+    assert "async def preparar_cliente_voz_tts(" in integracao
+    assert "def normalizar_resultado_rota_tts(" in integracao
+
+
+def test_endpoint_temporario_de_audio_musical_nao_mora_no_webserver_generico() -> None:
+    webserver = _texto("webserver.py")
+    integracao = _texto("cogs/musica/integracoes/webserver.py")
+    assert "_tts_audio_files" not in webserver
+    assert "def register_tts_audio_file(" not in webserver
+    assert '@app.get("/tts-audio/' not in webserver
+    assert "registrar_rotas_musica(app)" in webserver
+    assert "def register_tts_audio_file(" in integracao
+    assert "def registrar_rotas_musica(" in integracao
+    assert '"/tts-audio/<token>"' in integracao
+
+
+def test_testes_pcm_e_control_plane_musicais_moram_na_cog() -> None:
+    assert not (ROOT / "tests/test_phone_worker_pcm_io.py").exists()
+    assert (ROOT / "cogs/musica/testes/runtime_telefone/ponte_worker/test_pcm_io.py").is_file()
+    control_raiz = _texto("tests/test_phone_worker_control_plane.py")
+    control_musica = _texto("cogs/musica/testes/runtime_telefone/ponte_worker/test_control_plane.py")
+    for nome in (
+        "test_payload_music_policy_limits_and_job_state_stay_live",
+        "test_payload_never_advertises_legacy_lavalink",
+        "test_turbo_profile_keeps_music_capabilities_inside_wire_limit",
+        "test_turbo_profile_does_not_claim_playback_without_music_agent",
+    ):
+        assert nome not in control_raiz
+        assert nome in control_musica
+
+
+def test_estado_de_throttle_musical_nao_vaza_para_estado_generico_do_tts() -> None:
+    audio = _texto("cogs/tts/audio.py")
+    integracao = _texto("cogs/musica/integracoes/tts.py")
+    assert "music_voice_ignore_logged_until" not in audio
+    assert "connection_warning_logged_until" in audio
+    assert "_VOICE_LOG_THROTTLE" in integracao
+    assert "music_voice_ignore_logged_until" not in integracao
+
+
+def test_bootstrap_especifico_de_token_musical_e_testado_no_dominio() -> None:
+    raiz = _texto("tests/test_core_worker_python_boundaries.py")
+    dominio = _texto("cogs/musica/testes/runtime_telefone/ponte_worker/test_bootstrap.py")
+    nome = "test_startup_loads_configuration_and_persists_music_token"
+    assert nome not in raiz
+    assert nome in dominio
+    assert "MUSIC_AGENT_AUTO_TOKEN" in dominio
+
+
+def test_dependencias_python_exclusivas_de_musica_moram_no_dominio() -> None:
+    raiz = _texto("requirements.txt").lower()
+    musica = _texto("cogs/musica/requirements.txt").lower()
+    docker = _texto("Dockerfile")
+    detector = _texto("updater/core/mudancas.sh")
+
+    assert "yt-dlp" not in raiz
+    assert "wavelink" not in raiz
+    assert "-r cogs/musica/requirements.txt" in raiz
+    assert "yt-dlp" in musica
+    assert "wavelink" in musica
+    assert "COPY cogs/musica/requirements.txt ./cogs/musica/requirements.txt" in docker
+    assert '"cogs/musica/requirements.txt"' in detector
+    assert "REQUIREMENTS_CHANGED=1" in detector
