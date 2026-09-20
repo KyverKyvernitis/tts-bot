@@ -24,6 +24,7 @@ class SinaisCandidato:
     oficialidade: float = 0.0
     versao: float = 0.0
     apresentacao: float = 0.0
+    qualidade: float = 0.0
     penalidade: float = 0.0
 
 

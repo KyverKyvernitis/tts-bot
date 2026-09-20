@@ -353,3 +353,56 @@ def test_deep_pass_preserva_apresentacao_pedida_na_reformulacao() -> None:
 
     assert decisao.executar is True
     assert decisao.query == "daft punk get lucky official audio"
+
+
+def test_qualidade_penaliza_resultado_excessivamente_longo_em_busca_de_faixa() -> None:
+    normal = _track("Numb (Official Audio)", "Linkin Park")
+    longo = _track("Numb (Official Audio) 10 Hours", "Reupload Channel")
+    normal.duration = 185
+    longo.duration = 36000
+
+    ordenadas, ranking = ranquear_faixas("Linkin Park Numb", [longo, normal])
+
+    assert ordenadas[0] is normal
+    assert ranking[0].score > ranking[1].score
+
+
+def test_qualidade_nao_penaliza_conteudo_longo_quando_consulta_pede_full_album() -> None:
+    from cogs.musica.busca import pontuar_faixa
+
+    longo = _track("Discovery Full Album", "Daft Punk")
+    longo.duration = 3660
+    resultado = pontuar_faixa("Daft Punk Discovery full album", longo)
+
+    assert resultado.sinais.penalidade < 0.10
+
+
+def test_diversidade_evitaria_lista_dominada_por_reuploads_equivalentes() -> None:
+    primeiro = _track("Numb (Official Audio)", "Linkin Park", url="https://youtube.test/1")
+    reupload_a = _track("Numb (Official Audio)", "Mirror A", url="https://youtube.test/2")
+    reupload_b = _track("Numb - Official Audio", "Mirror B", url="https://youtube.test/3")
+    video = _track("Numb (Official Music Video)", "Linkin Park", url="https://youtube.test/4")
+    for track in (primeiro, reupload_a, reupload_b, video):
+        track.duration = 185
+
+    ordenadas, _ = ranquear_faixas(
+        "Linkin Park Numb",
+        [primeiro, reupload_a, reupload_b, video],
+    )
+
+    assert ordenadas[0] is primeiro
+    assert ordenadas.index(video) < max(ordenadas.index(reupload_a), ordenadas.index(reupload_b))
+
+
+def test_diversidade_nao_promove_live_sobre_lyrics_quando_lyrics_foi_pedido() -> None:
+    lyrics_a = _track("Numb Lyrics", "Linkin Park", url="https://youtube.test/l1")
+    lyrics_b = _track("Numb Lyric Video", "Linkin Park", url="https://youtube.test/l2")
+    live = _track("Numb Live", "Linkin Park", url="https://youtube.test/live")
+    for track in (lyrics_a, lyrics_b, live):
+        track.duration = 185
+
+    ordenadas, _ = ranquear_faixas("Linkin Park Numb lyrics", [lyrics_a, live, lyrics_b])
+
+    assert live is not ordenadas[0]
+    assert lyrics_a in ordenadas[:2]
+    assert lyrics_b in ordenadas[:2]

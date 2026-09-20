@@ -12,9 +12,11 @@ from .atributos import (
     detectar_apresentacao,
     detectar_variantes,
 )
+from .diversidade import diversificar_resultados
 from .intencao import analisar_consulta
 from .modelos import ConsultaNormalizada, ResultadoRanking, SinaisCandidato
 from .normalizacao import limpar_apresentacao, tokens_texto
+from .qualidade import sinal_qualidade
 
 _OFICIALIDADE = (
     "official audio",
@@ -146,7 +148,9 @@ def pontuar_faixa(query: str | ConsultaNormalizada, track: MusicTrack, *, indice
     oficial = _oficialidade(track)
     versao, penalidade_versao = _sinal_versao(intencao, track)
     apresentacao, penalidade_apresentacao = _sinal_apresentacao(intencao, track)
-    penalidade = penalidade_versao + penalidade_apresentacao
+    qualidade, penalidade_qualidade = sinal_qualidade(intencao, track)
+    penalidade_semantica = penalidade_versao + penalidade_apresentacao
+    penalidade = penalidade_semantica + penalidade_qualidade
 
     if intencao.artista:
         identidade = 0.54 * titulo_score + 0.20 * artista_score + 0.18 * cobertura + 0.08 * ordem
@@ -154,7 +158,17 @@ def pontuar_faixa(query: str | ConsultaNormalizada, track: MusicTrack, *, indice
         # Consultas livres não devem depender de inferir qual termo é artista.
         identidade = 0.46 * max(titulo_score, _similaridade(intencao.texto, combinado)) + 0.36 * cobertura + 0.18 * ordem
 
-    score = max(0.0, min(1.0, identidade + oficial + versao + apresentacao - penalidade))
+    score_semantico = max(
+        0.0,
+        min(1.0, identidade + oficial + versao + apresentacao - penalidade_semantica),
+    )
+    # Qualidade só usa a folga restante até 1.0. Assim um sinal auxiliar não
+    # transforma dois candidatos semanticamente diferentes em empate por
+    # saturação e nunca apaga a preferência explícita por audio/video/lyrics.
+    score = max(
+        0.0,
+        min(1.0, score_semantico + qualidade * (1.0 - score_semantico) - penalidade_qualidade),
+    )
     sinais = SinaisCandidato(
         titulo=round(titulo_score, 4),
         artista=round(artista_score, 4),
@@ -163,6 +177,7 @@ def pontuar_faixa(query: str | ConsultaNormalizada, track: MusicTrack, *, indice
         oficialidade=round(oficial, 4),
         versao=round(versao, 4),
         apresentacao=round(apresentacao, 4),
+        qualidade=round(qualidade, 4),
         penalidade=round(penalidade, 4),
     )
     return ResultadoRanking(
@@ -188,6 +203,7 @@ def ranquear_faixas(query: str, tracks: Sequence[MusicTrack]) -> tuple[list[Musi
 
     avaliados = [pontuar_faixa(query, track, indice=i) for i, track in enumerate(tracks)]
     ordenados = sorted(avaliados, key=lambda item: (-item.score, item.indice_original))
+    ordenados = diversificar_resultados(tracks, ordenados, analisar_consulta(query))
     enriched: list[ResultadoRanking] = []
     for pos, item in enumerate(ordenados):
         proximo = ordenados[pos + 1].score if pos + 1 < len(ordenados) else 0.0
