@@ -53,6 +53,7 @@ def _query_canonica(query: str, top_track: MusicTrack | None, top_score: float) 
     raw = consulta.raw or str(query or "").strip()
     if consulta.artista and consulta.titulo:
         partes = [consulta.artista, consulta.titulo]
+        partes.extend(nome for nome in consulta.colaboradores if nome)
         base = " ".join(parte for parte in partes if parte).strip()
         padded = f" {base} "
         for nome in sorted(consulta.atributos):

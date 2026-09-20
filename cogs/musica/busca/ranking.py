@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 from math import exp
+import re
 from typing import Iterable, Sequence
 
 from ..nucleo.modelos import MusicTrack
@@ -27,6 +28,19 @@ _OFICIALIDADE = (
 )
 _CANAL_OFICIAL = (" vevo", "official", " - topic", "records", "recordings")
 
+
+
+_FEAT_NO_TITULO = re.compile(r"\s+\b(?:feat(?:uring)?|ft)\.?\s+.*$", re.IGNORECASE)
+
+
+def _titulo_identidade(track: MusicTrack) -> str:
+    raw = track.display_title or track.title or ""
+    titulo = limpar_apresentacao(raw)
+    uploader = limpar_apresentacao(track.display_uploader or track.uploader or "")
+    if uploader and titulo.startswith(uploader + " "):
+        titulo = titulo[len(uploader) + 1 :].strip()
+    titulo = _FEAT_NO_TITULO.sub("", titulo).strip()
+    return titulo or limpar_apresentacao(raw)
 
 def _similaridade(a: str, b: str) -> float:
     a = limpar_apresentacao(a)
@@ -136,14 +150,20 @@ def _confidence(score: float, margin: float) -> float:
 
 def pontuar_faixa(query: str | ConsultaNormalizada, track: MusicTrack, *, indice: int = 0) -> ResultadoRanking:
     intencao = query if isinstance(query, ConsultaNormalizada) else analisar_consulta(query)
-    titulo = track.display_title or track.title
+    titulo = _titulo_identidade(track)
     artista = track.display_uploader or track.uploader
     combinado = " ".join(part for part in (artista, titulo) if part)
+    texto_completo = _texto_candidato(track)
 
     alvo_titulo = intencao.titulo or intencao.texto
     titulo_score = _similaridade(alvo_titulo, titulo)
     artista_score = _similaridade(intencao.artista, artista) if intencao.artista else 0.0
-    cobertura = _cobertura(intencao.tokens, combinado)
+    colaborador_score = 0.0
+    if intencao.colaboradores:
+        colaborador_score = max(
+            _cobertura(tokens_texto(nome), texto_completo) for nome in intencao.colaboradores
+        )
+    cobertura = _cobertura(intencao.tokens, texto_completo)
     ordem = _ordem(intencao.texto, combinado)
     oficial = _oficialidade(track)
     versao, penalidade_versao = _sinal_versao(intencao, track)
@@ -153,7 +173,16 @@ def pontuar_faixa(query: str | ConsultaNormalizada, track: MusicTrack, *, indice
     penalidade = penalidade_semantica + penalidade_qualidade
 
     if intencao.artista:
-        identidade = 0.54 * titulo_score + 0.20 * artista_score + 0.18 * cobertura + 0.08 * ordem
+        if intencao.colaboradores:
+            identidade = (
+                0.50 * titulo_score
+                + 0.19 * artista_score
+                + 0.08 * colaborador_score
+                + 0.16 * cobertura
+                + 0.07 * ordem
+            )
+        else:
+            identidade = 0.54 * titulo_score + 0.20 * artista_score + 0.18 * cobertura + 0.08 * ordem
     else:
         # Consultas livres não devem depender de inferir qual termo é artista.
         identidade = 0.46 * max(titulo_score, _similaridade(intencao.texto, combinado)) + 0.36 * cobertura + 0.18 * ordem

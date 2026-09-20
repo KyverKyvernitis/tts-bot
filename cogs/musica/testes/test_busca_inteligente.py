@@ -406,3 +406,95 @@ def test_diversidade_nao_promove_live_sobre_lyrics_quando_lyrics_foi_pedido() ->
     assert live is not ordenadas[0]
     assert lyrics_a in ordenadas[:2]
     assert lyrics_b in ordenadas[:2]
+
+
+def test_estrutura_entende_titulo_by_artista() -> None:
+    consulta = analisar_consulta("Numb by Linkin Park")
+
+    assert consulta.artista == "linkin park"
+    assert consulta.titulo == "numb"
+    assert consulta.estrutura == "by"
+
+
+def test_estrutura_entende_titulo_entre_aspas_em_ambas_as_ordens() -> None:
+    antes = analisar_consulta('Linkin Park "Numb"')
+    depois = analisar_consulta('"Numb" Linkin Park')
+
+    for consulta in (antes, depois):
+        assert consulta.artista == "linkin park"
+        assert consulta.titulo == "numb"
+        assert consulta.estrutura == "aspas"
+
+
+def test_estrutura_extrai_feat_sem_poluir_titulo() -> None:
+    consulta = analisar_consulta("The Weeknd - Save Your Tears ft. Ariana Grande")
+
+    assert consulta.artista == "the weeknd"
+    assert consulta.titulo == "save your tears"
+    assert consulta.colaboradores == ("ariana grande",)
+    assert "ft" not in consulta.tokens
+
+
+def test_estrutura_extrai_feat_no_lado_do_artista() -> None:
+    consulta = analisar_consulta("Calvin Harris feat. Rihanna - This Is What You Came For")
+
+    assert consulta.artista == "calvin harris"
+    assert consulta.titulo == "this is what you came for"
+    assert consulta.colaboradores == ("rihanna",)
+
+
+def test_banda_live_nao_vira_falso_pedido_de_versao_ao_vivo() -> None:
+    consulta = analisar_consulta("Live - Lightning Crashes")
+
+    assert consulta.artista == "live"
+    assert consulta.titulo == "lightning crashes"
+    assert "live" not in consulta.atributos
+
+
+def test_by_artist_melhora_desambiguacao_de_titulo_igual() -> None:
+    errado = _track("Numb", "Marina")
+    certo = _track("Numb", "Linkin Park - Topic")
+
+    ordenadas, ranking = ranquear_faixas("Numb by Linkin Park", [errado, certo])
+
+    assert ordenadas[0] is certo
+    assert ranking[0].sinais.artista > ranking[1].sinais.artista
+
+
+def test_feat_ajuda_a_distinguir_colaboracao_da_versao_sem_convidado() -> None:
+    sem_feat = _track("Save Your Tears", "The Weeknd")
+    com_feat = _track("The Weeknd - Save Your Tears ft. Ariana Grande", "The Weeknd")
+
+    ordenadas, ranking = ranquear_faixas(
+        "The Weeknd - Save Your Tears ft. Ariana Grande",
+        [sem_feat, com_feat],
+    )
+
+    assert ordenadas[0] is com_feat
+    assert ranking[0].score > ranking[1].score
+
+
+def test_deep_pass_preserva_colaborador_na_query_canonica() -> None:
+    from cogs.musica.busca import avaliar_busca_profunda
+
+    track = _track("Save Your Tears ft. Ariana Grande", "The Weeknd")
+    ordenadas, ranking = ranquear_faixas(
+        "The Weeknd - Save Your Tears ft. Ariana Grande",
+        [track],
+    )
+    decisao = avaliar_busca_profunda(
+        "The Weeknd - Save Your Tears ft. Ariana Grande",
+        ordenadas,
+        ranking,
+        requested_limit=5,
+    )
+
+    assert decisao.executar is True
+    assert "ariana grande" in decisao.query
+
+
+def test_by_artist_usa_ultimo_by_quando_titulo_contem_by() -> None:
+    consulta = analisar_consulta("Stand by Me by Ben E. King")
+
+    assert consulta.titulo == "stand by me"
+    assert consulta.artista == "ben e king"

@@ -10,6 +10,8 @@ class ConsultaNormalizada:
     tokens: tuple[str, ...]
     artista: str = ""
     titulo: str = ""
+    colaboradores: tuple[str, ...] = field(default_factory=tuple)
+    estrutura: str = "livre"
     atributos: frozenset[str] = field(default_factory=frozenset)
     apresentacao: frozenset[str] = field(default_factory=frozenset)
     prefixo: str = ""
