@@ -623,3 +623,108 @@ def test_memoria_nao_promove_resultado_claramente_pior() -> None:
     assert ordenadas[0] is certo
     assert ranking[0].score > ranking[1].score
     limpar_memoria_busca()
+
+
+def test_gain_gate_rejeita_deep_sem_melhoria() -> None:
+    from cogs.musica.busca import avaliar_ganho_busca_profunda
+    from cogs.musica.busca.modelos import ResultadoRanking, SinaisCandidato
+
+    a = _track("Numb", "Linkin Park", url="https://youtube.test/a")
+    b = _track("Numb Lyrics", "Linkin Park", url="https://youtube.test/b")
+    sinais = SinaisCandidato()
+    fast = [
+        ResultadoRanking(0, 0.88, 0.82, sinais),
+        ResultadoRanking(1, 0.76, 0.40, sinais),
+    ]
+    deep = [
+        ResultadoRanking(0, 0.88, 0.82, sinais),
+        ResultadoRanking(1, 0.76, 0.40, sinais),
+    ]
+
+    decisao = avaliar_ganho_busca_profunda([a, b], fast, [a, b], deep, requested_limit=5)
+
+    assert decisao.aplicar is False
+    assert decisao.motivo == "sem_ganho_relevante"
+
+
+def test_gain_gate_aceita_deep_que_preenche_resultados() -> None:
+    from cogs.musica.busca import avaliar_ganho_busca_profunda
+    from cogs.musica.busca.modelos import ResultadoRanking, SinaisCandidato
+
+    a = _track("Numb", "Linkin Park", url="https://youtube.test/a")
+    b = _track("Numb Lyrics", "Linkin Park", url="https://youtube.test/b")
+    sinais = SinaisCandidato()
+    fast = [ResultadoRanking(0, 0.88, 0.82, sinais)]
+    deep = [
+        ResultadoRanking(0, 0.88, 0.82, sinais),
+        ResultadoRanking(1, 0.74, 0.35, sinais),
+    ]
+
+    decisao = avaliar_ganho_busca_profunda([a], fast, [a, b], deep, requested_limit=5)
+
+    assert decisao.aplicar is True
+    assert decisao.motivo == "preencheu_resultados"
+    assert decisao.delta_resultados == 1
+
+
+def test_gain_gate_aceita_melhoria_clara_do_top_score() -> None:
+    from cogs.musica.busca import avaliar_ganho_busca_profunda
+    from cogs.musica.busca.modelos import ResultadoRanking, SinaisCandidato
+
+    errado = _track("Bohemian Like You", "The Dandy Warhols", url="https://youtube.test/wrong")
+    certo = _track("Bohemian Rhapsody", "Queen", url="https://youtube.test/correct")
+    sinais = SinaisCandidato()
+    fast = [ResultadoRanking(0, 0.61, 0.42, sinais)]
+    deep = [ResultadoRanking(0, 0.91, 0.88, sinais)]
+
+    decisao = avaliar_ganho_busca_profunda([errado], fast, [certo], deep, requested_limit=5)
+
+    assert decisao.aplicar is True
+    assert decisao.motivo == "top_score_melhor"
+    assert decisao.delta_score > 0.2
+
+
+def test_telemetria_agregada_nao_guarda_query_e_mede_selecao() -> None:
+    from cogs.musica.busca import (
+        limpar_memoria_busca,
+        limpar_telemetria_busca,
+        registrar_busca_telemetria,
+        registrar_selecao_busca,
+        snapshot_telemetria_busca,
+    )
+
+    limpar_memoria_busca()
+    limpar_telemetria_busca()
+    registrar_busca_telemetria(
+        cache_hit=False,
+        deep_estado="aplicado",
+        deep_motivo="score_baixo",
+        top_score=0.91,
+        top_confianca=0.84,
+        elapsed_ms=120.0,
+        fontes=("YouTube", "Spotify"),
+        resumo_cada=25,
+    )
+    track = _track("Numb", "Linkin Park")
+    registrar_selecao_busca(
+        "Linkin Park - Numb",
+        track,
+        guild_id=10,
+        requester_id=20,
+        posicao=2,
+        total=5,
+    )
+
+    snapshot = snapshot_telemetria_busca()
+    assert snapshot.buscas == 1
+    assert snapshot.deep_solicitadas == 1
+    assert snapshot.deep_aplicadas == 1
+    assert snapshot.selecoes == 1
+    assert snapshot.selecoes_primeiro == 0
+    assert snapshot.selecoes_top3 == 1
+    assert snapshot.score_medio == 0.91
+    assert dict(snapshot.fontes)["youtube"] >= 1
+    assert dict(snapshot.motivos_deep)["score_baixo"] == 1
+    assert not hasattr(snapshot, "query")
+    limpar_memoria_busca()
+    limpar_telemetria_busca()

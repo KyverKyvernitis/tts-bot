@@ -1052,6 +1052,8 @@ class SearchSelect(discord.ui.Select):
                 track,
                 guild_id=self.guild_id,
                 requester_id=getattr(interaction.user, "id", self.requester_id),
+                posicao=idx + 1,
+                total=len(self.tracks),
             )
             if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
                 try:

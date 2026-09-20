@@ -718,3 +718,57 @@ async def test_deep_pass_e_suprimido_quando_limite_de_concorrencia_esta_ocupado(
     finally:
         liberar_busca_profunda()
         limpar_resiliencia_busca()
+
+
+@pytest.mark.asyncio
+async def test_gain_gate_preserva_fast_pass_quando_deep_nao_melhora(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import resolucao, roteamento
+    from cogs.musica.busca import limpar_telemetria_busca, snapshot_telemetria_busca
+
+    limpar_telemetria_busca()
+    destino = roteamento.DestinoWorker("worker-a", "A", "http://worker-a:8766", "token")
+    monkeypatch.setattr(resolucao, "destino_vinculado", lambda guild_id: destino)
+    monkeypatch.setattr(resolucao.config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_DEEP_ENABLED", True, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_TELEMETRY_ENABLED", True, raising=False)
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_TELEMETRY_SUMMARY_EVERY", 100, raising=False)
+    chamadas = 0
+
+    async def metadata_fake(query: str, *, limit: int = 5):
+        return []
+
+    async def worker_fake(*, base, token, payload, timeout_seconds):
+        nonlocal chamadas
+        chamadas += 1
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "tracks": [
+                {
+                    "title": "Misteriosa Musica",
+                    "uploader": "Canal",
+                    "webpage_url": "https://youtube.test/primeira",
+                    "metadata_only": True,
+                    "source": "youtube",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", metadata_fake)
+    monkeypatch.setattr(resolucao, "executar_tarefa_resolucao", worker_fake)
+
+    lote = await resolucao.resolve_music_tracks_on_worker(
+        "misteriosa muzika",
+        requester_id=1,
+        requester_name="tester",
+        metadata_only=True,
+        guild_id=99,
+    )
+
+    assert chamadas == 2
+    assert len(lote.tracks) == 1
+    assert lote.tracks[0].webpage_url == "https://youtube.test/primeira"
+    snapshot = snapshot_telemetria_busca()
+    assert snapshot.deep_rejeitadas == 1
+    assert snapshot.deep_aplicadas == 0
+    limpar_telemetria_busca()

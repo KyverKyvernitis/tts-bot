@@ -11,6 +11,7 @@ from .atributos import detectar_apresentacao, detectar_variantes
 from .intencao import analisar_consulta
 from .modelos import ConsultaNormalizada, ResultadoRanking
 from .normalizacao import limpar_apresentacao, texto_basico, tokens_texto
+from .telemetria import registrar_selecao_telemetria
 
 _TTL_SECONDS = 20.0 * 60.0
 _MAX_ENTRIES = 256
@@ -102,12 +103,19 @@ def registrar_selecao_busca(
     guild_id: int,
     requester_id: int,
     now: float | None = None,
+    posicao: int = 0,
+    total: int = 0,
 ) -> bool:
     """Guarda a última escolha textual por usuário/guild em memória local.
 
     Nada é persistido em disco ou banco. O cache é pequeno, possui TTL curto e
     só serve como desempate de buscas quase idênticas feitas logo depois.
     """
+    registrar_selecao_telemetria(
+        posicao=posicao,
+        total=total,
+        fonte=(track.display_source or track.source),
+    )
     chave = _chave(guild_id, requester_id)
     clean_query = str(query or "").strip()
     if chave is None or not clean_query:

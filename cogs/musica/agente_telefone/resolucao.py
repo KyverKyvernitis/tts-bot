@@ -6,7 +6,13 @@ import time
 
 from cogs.musica import configuracao as config
 
-from ..busca import avaliar_busca_profunda, fundir_resultados, ranquear_faixas
+from ..busca import (
+    avaliar_busca_profunda,
+    avaliar_ganho_busca_profunda,
+    fundir_resultados,
+    ranquear_faixas,
+    registrar_busca_telemetria,
+)
 from ..busca.resiliencia import liberar_busca_profunda, tentar_reservar_busca_profunda
 from ..busca.fontes import buscar_candidatos_multifonte
 from ..nucleo.erros import MusicExtractionError
@@ -31,6 +37,61 @@ from .solicitacao_resolucao import (
 from .transporte_resolucao import executar_tarefa_resolucao
 
 logger = logging.getLogger(__name__)
+
+
+def _fontes_tracks(tracks) -> tuple[str, ...]:
+    fontes: list[str] = []
+    for track in tracks:
+        fonte = str(getattr(track, "display_source", "") or getattr(track, "source", "") or "").strip()
+        if fonte:
+            fontes.append(fonte)
+    return tuple(fontes)
+
+
+def _registrar_telemetria_busca(
+    *,
+    tracks,
+    ranking,
+    elapsed_ms: float,
+    cache_hit: bool = False,
+    deep_estado: str = "nao_necessario",
+    deep_motivo: str = "",
+) -> None:
+    if not bool(getattr(config, "MUSIC_SEARCH_TELEMETRY_ENABLED", True)):
+        return
+    top = ranking[0] if ranking else None
+    resumo = registrar_busca_telemetria(
+        cache_hit=cache_hit,
+        deep_estado=deep_estado,
+        deep_motivo=deep_motivo,
+        top_score=(top.score if top is not None else None),
+        top_confianca=(top.confianca if top is not None else None),
+        elapsed_ms=elapsed_ms,
+        fontes=_fontes_tracks(tracks),
+        resumo_cada=int(getattr(config, "MUSIC_SEARCH_TELEMETRY_SUMMARY_EVERY", 25) or 25),
+    )
+    if resumo is not None:
+        fontes = ",".join(f"{nome}:{quantidade}" for nome, quantidade in resumo.fontes[:6])
+        motivos = ",".join(f"{nome}:{quantidade}" for nome, quantidade in resumo.motivos_deep[:6])
+        logger.info(
+            "[music/search] telemetria agregada | buscas=%s cache_hits=%s deep=%s aplicadas=%s rejeitadas=%s suprimidas=%s sem_resultado=%s selecoes=%s primeiro=%s top3=%s lat_media_ms=%.1f lat_max_ms=%.1f score_medio=%.4f confidence_media=%.4f fontes=%s motivos=%s",
+            resumo.buscas,
+            resumo.cache_hits,
+            resumo.deep_solicitadas,
+            resumo.deep_aplicadas,
+            resumo.deep_rejeitadas,
+            resumo.deep_suprimidas,
+            resumo.deep_sem_resultado,
+            resumo.selecoes,
+            resumo.selecoes_primeiro,
+            resumo.selecoes_top3,
+            resumo.latencia_media_ms,
+            resumo.latencia_max_ms,
+            resumo.score_medio,
+            resumo.confianca_media,
+            fontes,
+            motivos,
+        )
 
 
 async def _cancelar_tarefa_busca(task: asyncio.Task | None) -> None:
@@ -108,6 +169,13 @@ async def resolve_music_tracks_on_worker(
             len(cached_batch.tracks),
             somente_metadados,
         )
+        if busca_textual and somente_metadados:
+            _registrar_telemetria_busca(
+                tracks=cached_batch.tracks,
+                ranking=(),
+                elapsed_ms=0.0,
+                cache_hit=True,
+            )
         return cached_batch
 
     payload = _montar_tarefa_resolucao(
@@ -211,6 +279,11 @@ async def resolve_music_tracks_on_worker(
                 top.indice_original,
             )
 
+    fast_tracks_ranked = list(batch.tracks)
+    fast_ranking = list(ranking)
+    deep_estado = "nao_necessario"
+    deep_motivo = ""
+
     if busca_textual and somente_metadados:
         decisao = avaliar_busca_profunda(
             clean_query,
@@ -224,6 +297,7 @@ async def resolve_music_tracks_on_worker(
             confidence_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", 0.60) or 0.60),
             margin_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", 0.045) or 0.045),
         )
+        deep_motivo = decisao.motivo
         if decisao.executar:
             max_deep = max(
                 0,
@@ -239,6 +313,7 @@ async def resolve_music_tracks_on_worker(
                 and tentar_reservar_busca_profunda(limite=max_deep)
             )
             if not reservado:
+                deep_estado = "suprimido"
                 logger.info(
                     "[music/search] deep pass suprimido por carga | query=%r motivo=%s worker_inflight=%s limite_worker=%s limite_deep=%s",
                     clean_query,
@@ -275,7 +350,7 @@ async def resolve_music_tracks_on_worker(
                         buscar_metadata=buscar_candidatos_multifonte,
                     )
                     if profundo.tracks or profundo.api_candidates:
-                        batch.tracks, fusao_profunda = fundir_resultados(
+                        candidatos_tracks, fusao_profunda = fundir_resultados(
                             clean_query,
                             [*worker_tracks_fast, *profundo.tracks],
                             [*api_candidates, *profundo.api_candidates],
@@ -283,29 +358,62 @@ async def resolve_music_tracks_on_worker(
                             requester_name=requester_name,
                             limit=decisao.limit,
                         )
-                        batch.tracks, ranking = ranquear_faixas(
+                        candidatos_tracks, ranking_profundo = ranquear_faixas(
                             clean_query,
-                            batch.tracks,
+                            candidatos_tracks,
                             guild_id=guild_id,
                             requester_id=requester_id,
                         )
-                        batch.tracks = batch.tracks[:max_limit]
-                        top_final = ranking[0] if ranking else None
-                        logger.info(
-                            "[music/search] deep pass aplicado | query=%r motivo=%s tracks_worker=%s tracks_api=%s grupos=%s duplicatas=%s elapsed_ms=%.1f top_score=%s confidence=%s worker_error=%r api_error=%r",
-                            clean_query,
-                            decisao.motivo,
-                            len(profundo.tracks),
-                            len(profundo.api_candidates),
-                            fusao_profunda.grupos,
-                            fusao_profunda.duplicatas,
-                            profundo.elapsed_ms,
-                            f"{top_final.score:.4f}" if top_final else "",
-                            f"{top_final.confianca:.4f}" if top_final else "",
-                            profundo.worker_error[:160],
-                            profundo.api_error[:160],
+                        candidatos_tracks = candidatos_tracks[:max_limit]
+                        ranking_profundo = ranking_profundo[:max_limit]
+                        ganho = avaliar_ganho_busca_profunda(
+                            fast_tracks_ranked,
+                            fast_ranking,
+                            candidatos_tracks,
+                            ranking_profundo,
+                            requested_limit=max_limit,
                         )
+                        if ganho.aplicar:
+                            batch.tracks = candidatos_tracks
+                            ranking = ranking_profundo
+                            deep_estado = "aplicado"
+                            top_final = ranking[0] if ranking else None
+                            logger.info(
+                                "[music/search] deep pass aplicado | query=%r motivo=%s ganho=%s delta_score=%.4f delta_confidence=%.4f delta_top3=%.4f delta_resultados=%s tracks_worker=%s tracks_api=%s grupos=%s duplicatas=%s elapsed_ms=%.1f top_score=%s confidence=%s worker_error=%r api_error=%r",
+                                clean_query,
+                                decisao.motivo,
+                                ganho.motivo,
+                                ganho.delta_score,
+                                ganho.delta_confianca,
+                                ganho.delta_media_top,
+                                ganho.delta_resultados,
+                                len(profundo.tracks),
+                                len(profundo.api_candidates),
+                                fusao_profunda.grupos,
+                                fusao_profunda.duplicatas,
+                                profundo.elapsed_ms,
+                                f"{top_final.score:.4f}" if top_final else "",
+                                f"{top_final.confianca:.4f}" if top_final else "",
+                                profundo.worker_error[:160],
+                                profundo.api_error[:160],
+                            )
+                        else:
+                            batch.tracks = fast_tracks_ranked
+                            ranking = fast_ranking
+                            deep_estado = "rejeitado"
+                            logger.info(
+                                "[music/search] deep pass rejeitado pelo gain gate | query=%r motivo=%s ganho=%s delta_score=%.4f delta_confidence=%.4f delta_top3=%.4f delta_resultados=%s elapsed_ms=%.1f",
+                                clean_query,
+                                decisao.motivo,
+                                ganho.motivo,
+                                ganho.delta_score,
+                                ganho.delta_confianca,
+                                ganho.delta_media_top,
+                                ganho.delta_resultados,
+                                profundo.elapsed_ms,
+                            )
                     else:
+                        deep_estado = "sem_resultado"
                         logger.info(
                             "[music/search] deep pass sem ganho | query=%r motivo=%s elapsed_ms=%.1f worker_error=%r api_error=%r",
                             clean_query,
@@ -330,6 +438,14 @@ async def resolve_music_tracks_on_worker(
         data.get("cli_rc"),
         str(data.get("cli_error") or data.get("api_error") or "")[:220],
     )
+    if busca_textual and somente_metadados:
+        _registrar_telemetria_busca(
+            tracks=batch.tracks,
+            ranking=ranking,
+            elapsed_ms=elapsed_ms,
+            deep_estado=deep_estado,
+            deep_motivo=deep_motivo,
+        )
     armazenar_cache_resolucao(
         cache_key,
         batch,
