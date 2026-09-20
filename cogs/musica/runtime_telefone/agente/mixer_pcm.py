@@ -16,13 +16,16 @@ from typing import Any
 import discord
 
 PCM_FRAME_BYTES = 3840
+MAX_MUSIC_VOLUME = 1.5
+PCM_PEAK = 32767
+PCM_BOOST_KNEE = int(PCM_PEAK * 0.95)
 
 
 class AgentMixedAudioSource(discord.AudioSource):
     def __init__(self, *, loop: asyncio.AbstractEventLoop, music_source: discord.AudioSource, music_volume: float, duck_factor: float = 0.08) -> None:
         self.loop = loop
         self.music_source = music_source
-        self.normal_music_volume = max(0.0, min(2.0, float(music_volume)))
+        self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(music_volume)))
         self.duck_factor = max(0.0, min(1.0, float(duck_factor)))
         self._overlays: list[dict[str, Any]] = []
         self._lock = threading.RLock()
@@ -36,7 +39,7 @@ class AgentMixedAudioSource(discord.AudioSource):
         return False
 
     def set_music_volume(self, volume: float) -> None:
-        self.normal_music_volume = max(0.0, min(2.0, float(volume)))
+        self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(volume)))
 
     def set_duck_factor(self, factor: float) -> None:
         self.duck_factor = max(0.0, min(1.0, float(factor)))
@@ -91,9 +94,38 @@ class AgentMixedAudioSource(discord.AudioSource):
         self._audioop_module = module
         return module
 
+    def _soft_limit_boosted_sample(self, sample: int, volume: float) -> int:
+        """Amplifica >100% sem transformar picos em hard clipping.
+
+        Até 100% este método nunca participa do hot path. Acima disso, a zona
+        linear vai até 95% do PCM máximo e só os picos que entrariam na região
+        de clipping são comprimidos suavemente.
+        """
+        scaled = int(sample * volume)
+        sign = -1 if scaled < 0 else 1
+        magnitude = abs(scaled)
+        if magnitude <= PCM_BOOST_KNEE:
+            return scaled
+        headroom = max(1, PCM_PEAK - PCM_BOOST_KNEE)
+        excess = magnitude - PCM_BOOST_KNEE
+        compressed = PCM_BOOST_KNEE + (headroom * excess) // (excess + headroom)
+        return sign * min(PCM_PEAK, int(compressed))
+
+    def _scale_boosted_frame(self, frame: bytes, volume: float) -> bytes:
+        samples = array("h")
+        samples.frombytes(frame)
+        for i, sample in enumerate(samples):
+            samples[i] = self._soft_limit_boosted_sample(int(sample), volume)
+        return samples.tobytes()
+
     def _scale_frame(self, frame: bytes, volume: float) -> bytes:
         if not frame or abs(volume - 1.0) <= 0.001:
             return frame
+        # O caminho normal (<=100%) permanece C-backed e sem limiter. O custo
+        # extra de proteção contra clipping só existe quando o usuário opta
+        # explicitamente por boost acima de 100%.
+        if volume > 1.0:
+            return self._scale_boosted_frame(frame, min(MAX_MUSIC_VOLUME, volume))
         module = self._audioop()
         if module is not None:
             return module.mul(frame, 2, volume)

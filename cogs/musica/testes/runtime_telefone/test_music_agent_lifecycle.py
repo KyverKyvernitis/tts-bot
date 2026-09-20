@@ -963,3 +963,117 @@ def test_maintenance_preserves_idle_state_with_background_work(music):
             await asyncio.gather(task, return_exceptions=True)
 
     run(scenario())
+
+
+def test_mixer_linear_volume_keeps_fast_path_without_soft_limiter(music):
+    class Source:
+        def __init__(self):
+            self.frames = [b"\x01\x00" * 1920, b""]
+        def read(self):
+            return self.frames.pop(0)
+        def cleanup(self):
+            return None
+
+    class FastAudio:
+        def __init__(self):
+            self.mul_calls = []
+        def mul(self, frame, width, volume):
+            self.mul_calls.append((len(frame), width, volume))
+            return b"z" * len(frame)
+
+    async def scenario():
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(),
+            music_source=Source(),
+            music_volume=0.8,
+        )
+        fast = FastAudio()
+        mixer._audioop_module = fast
+        mixer._scale_boosted_frame = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("limiter não pode entrar no caminho <=100%")
+        )
+        assert mixer.read() == b"z" * 3840
+        assert fast.mul_calls == [(3840, 2, 0.8)]
+
+    run(scenario())
+
+
+def test_mixer_boost_soft_limits_only_peak_region(music):
+    from array import array
+
+    class Source:
+        def read(self):
+            return b""
+        def cleanup(self):
+            return None
+
+    async def scenario():
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(),
+            music_source=Source(),
+            music_volume=1.5,
+        )
+        raw = array("h", [1000, -1000, 20000, -20000, 30000, -30000]).tobytes()
+        out = array("h")
+        out.frombytes(mixer._scale_frame(raw, 1.5))
+
+        # Sinais com folga continuam lineares mesmo em boost.
+        assert out[0] == 1500
+        assert out[1] == -1500
+        assert out[2] == 30000
+        assert out[3] == -30000
+        # Picos que clipariam em 45k são comprimidos, não achatados em 32767.
+        assert 30000 < out[4] < 32767
+        assert -32767 < out[5] < -30000
+        assert out[4] == -out[5]
+
+    run(scenario())
+
+
+def test_music_agent_volume_is_hard_capped_at_public_150_percent(music):
+    class Source:
+        def __init__(self):
+            self.values = []
+        def set_music_volume(self, value):
+            self.values.append(value)
+
+    class Player:
+        def __init__(self):
+            self.source = Source()
+
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 991
+        st = music.GuildMusicState(guild_id=gid)
+        st.player = Player()
+        agent.states[gid] = st
+
+        result = await agent.cmd_volume({"guild_id": gid, "volume": 999})
+
+        assert result["volume"] == 150
+        assert result["normal_volume"] == 150
+        assert st.volume_percent == 150
+        assert st.normal_volume_percent == 150
+        assert st.player.source.values == [1.5]
+
+    run(scenario())
+
+
+def test_mixer_constructor_caps_direct_boost_at_150_percent(music):
+    class Source:
+        def read(self):
+            return b""
+        def cleanup(self):
+            return None
+
+    async def scenario():
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(),
+            music_source=Source(),
+            music_volume=9.0,
+        )
+        assert mixer.normal_music_volume == 1.5
+        mixer.set_music_volume(8.0)
+        assert mixer.normal_music_volume == 1.5
+
+    run(scenario())

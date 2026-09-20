@@ -481,7 +481,7 @@ class ReproducaoMixin:
         return {"ok": True, "position_seconds": target, "state": st.public()}
 
     async def _apply_player_volume(self, st: GuildMusicState, volume: int) -> bool:
-        volume = max(0, min(1000, int(volume)))
+        volume = max(0, min(150, int(volume)))
         player = st.player
         if player is None:
             st.volume_percent = volume
@@ -498,11 +498,11 @@ class ReproducaoMixin:
         source = getattr(player, "source", None)
         if source is not None and hasattr(source, "set_music_volume"):
             with contextlib.suppress(Exception):
-                source.set_music_volume(max(0.0, min(10.0, volume / 100.0)))
+                source.set_music_volume(max(0.0, min(1.5, volume / 100.0)))
                 applied = True
         elif source is not None and hasattr(source, "volume"):
             with contextlib.suppress(Exception):
-                source.volume = max(0.0, min(10.0, volume / 100.0))
+                source.volume = max(0.0, min(1.5, volume / 100.0))
                 applied = True
         st.volume_percent = volume
         st.updated_at = time.time()
@@ -510,7 +510,7 @@ class ReproducaoMixin:
 
     async def cmd_volume(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
-        volume = max(0, min(1000, int(float(body.get("volume") or body.get("volume_percent") or self.default_volume_percent))))
+        volume = max(0, min(150, int(float(body.get("volume") or body.get("volume_percent") or self.default_volume_percent))))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.normal_volume_percent = volume
         if not st.ducked:
@@ -828,6 +828,8 @@ class ReproducaoMixin:
             channel_bitrate_kbps=channel_bitrate_kbps,
             opus_bitrate_kbps=opus_bitrate_kbps,
             opus_signal="music",
+            volume_percent=int(st.volume_percent),
+            volume_mode="soft_limited_boost" if int(st.volume_percent) > 100 else "linear",
         )
         self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title, offset=round(float(getattr(track, "start_offset_seconds", 0.0) or 0.0), 2))
 
@@ -889,7 +891,7 @@ class ReproducaoMixin:
         start_offset_seconds: float = 0.0,
         opus_bitrate_kbps: int | None = None,
     ) -> Any:
-        volume = max(0.0, min(10.0, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
+        volume = max(0.0, min(1.5, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
         before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
         if self.direct_pcm_volume_enabled:
             pcm = discord.FFmpegPCMAudio(
