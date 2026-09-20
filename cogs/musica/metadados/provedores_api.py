@@ -5,8 +5,11 @@ import json
 import logging
 import os
 from typing import Any, Iterable
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+import aiohttp
 
 from cogs.musica import configuracao as config
 
@@ -67,6 +70,8 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
         self._spotify_user_token_expires_at = 0.0
         self._spotify_public_token = ""
         self._spotify_public_token_expires_at = 0.0
+        self._http_session: aiohttp.ClientSession | None = None
+        self._http_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def has_any_provider(self) -> bool:
@@ -254,6 +259,8 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
         return score
 
     def _request_json(self, url: str, *, method: str = "GET", data: bytes | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
+        # Mantido como fallback/test seam para caminhos legados síncronos. A busca
+        # normal usa ``_to_thread_json`` abaixo, que agora reutiliza ClientSession.
         request = Request(url, data=data, method=method, headers={
             "User-Agent": "DiscordMusicBot/1.0",
             "Accept": "application/json",
@@ -263,7 +270,94 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
             raw = response.read(2_000_000)
         return json.loads(raw.decode("utf-8", errors="ignore") or "{}")
 
+    async def _http_session_persistente(self) -> aiohttp.ClientSession:
+        loop = asyncio.get_running_loop()
+        session = self._http_session
+        if session is not None and not session.closed and self._http_loop is loop:
+            return session
+        if session is not None and not session.closed:
+            await session.close()
+
+        pool_limit = max(2, int(getattr(config, "MUSIC_SEARCH_HTTP_POOL_LIMIT", 8) or 8))
+        per_host = max(1, min(pool_limit, int(getattr(config, "MUSIC_SEARCH_HTTP_POOL_LIMIT_PER_HOST", 4) or 4)))
+        keepalive = max(5.0, float(getattr(config, "MUSIC_SEARCH_HTTP_KEEPALIVE_SECONDS", 30.0) or 30.0))
+        dns_ttl = max(30.0, float(getattr(config, "MUSIC_SEARCH_HTTP_DNS_CACHE_SECONDS", 300.0) or 300.0))
+        connector = aiohttp.TCPConnector(
+            limit=pool_limit,
+            limit_per_host=per_host,
+            keepalive_timeout=keepalive,
+            ttl_dns_cache=int(dns_ttl),
+        )
+        timeout = aiohttp.ClientTimeout(
+            total=self.timeout,
+            connect=min(2.0, self.timeout),
+            sock_connect=min(2.0, self.timeout),
+            sock_read=self.timeout,
+        )
+        session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers={
+                "User-Agent": "DiscordMusicBot/1.0",
+                "Accept": "application/json",
+            },
+        )
+        self._http_session = session
+        self._http_loop = loop
+        return session
+
+    async def close(self) -> None:
+        session = self._http_session
+        self._http_session = None
+        self._http_loop = None
+        if session is not None and not session.closed:
+            await session.close()
+
     async def _to_thread_json(self, url: str, *, method: str = "GET", data: bytes | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
-        return await asyncio.to_thread(self._request_json, url, method=method, data=data, headers=headers)
+        # O nome é preservado por compatibilidade interna, mas o caminho quente
+        # deixou de abrir urllib em uma thread por chamada. ClientSession mantém
+        # DNS/TCP/TLS/keep-alive entre pesquisas consecutivas.
+        session = await self._http_session_persistente()
+        async with session.request(method, url, data=data, headers=headers or None) as response:
+            raw = await response.content.read(2_000_001)
+            if len(raw) > 2_000_000:
+                raise ValueError("resposta JSON do provider excedeu 2 MB")
+            if response.status >= 400:
+                raise HTTPError(
+                    url,
+                    int(response.status),
+                    str(response.reason or "HTTP error"),
+                    response.headers,
+                    None,
+                )
+        return json.loads(raw.decode("utf-8", errors="ignore") or "{}")
+
+    async def search_youtube_fast(
+        self,
+        query: str,
+        *,
+        limit: int = 3,
+        timeout_seconds: float | None = None,
+    ) -> list[ApiTrackCandidate]:
+        if not (self.enabled and self.youtube_api_key and str(query or "").strip()):
+            return []
+        timeout_provider = max(
+            0.15,
+            float(timeout_seconds if timeout_seconds is not None else getattr(config, "MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS", 0.45) or 0.45),
+        )
+        falhas_para_abrir = max(1, int(getattr(config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES", 2) or 2))
+        cooldown = max(1.0, float(getattr(config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS", 30.0) or 30.0))
+
+        async def _operacao() -> list[ApiTrackCandidate]:
+            return await self.youtube_search(query, limit=limit, include_details=False)
+
+        return await executar_provider_resiliente(
+            "youtube",
+            _operacao,
+            timeout_seconds=timeout_provider,
+            falhas_para_abrir=falhas_para_abrir,
+            cooldown_seconds=cooldown,
+            fallback=[],
+        )
 
 

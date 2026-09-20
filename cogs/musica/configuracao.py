@@ -290,6 +290,21 @@ MUSIC_SEARCH_PROVIDER_FAST_BUDGET_SECONDS = max(0.15, min(2.0, _parse_float(os.g
 MUSIC_SEARCH_PROVIDER_DEEP_BUDGET_SECONDS = max(MUSIC_SEARCH_PROVIDER_FAST_BUDGET_SECONDS, min(4.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_DEEP_BUDGET_SECONDS", "1.5"), 1.5)))
 MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES = max(1, min(5, _parse_int(os.getenv("MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES", "2"), 2)))
 MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS = max(1.0, min(300.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS", "30.0"), 30.0)))
+# HTTP persistente: os providers compartilham conexoes DNS/TCP/TLS em vez de
+# abrir uma conexao nova a cada busca. Limites pequenos preservam RAM na VPS.
+MUSIC_SEARCH_HTTP_POOL_LIMIT = max(2, min(24, _parse_int(os.getenv("MUSIC_SEARCH_HTTP_POOL_LIMIT", "8"), 8)))
+MUSIC_SEARCH_HTTP_POOL_LIMIT_PER_HOST = max(1, min(MUSIC_SEARCH_HTTP_POOL_LIMIT, _parse_int(os.getenv("MUSIC_SEARCH_HTTP_POOL_LIMIT_PER_HOST", "4"), 4)))
+MUSIC_SEARCH_HTTP_KEEPALIVE_SECONDS = max(5.0, min(120.0, _parse_float(os.getenv("MUSIC_SEARCH_HTTP_KEEPALIVE_SECONDS", "30.0"), 30.0)))
+MUSIC_SEARCH_HTTP_DNS_CACHE_SECONDS = max(30.0, min(1800.0, _parse_float(os.getenv("MUSIC_SEARCH_HTTP_DNS_CACHE_SECONDS", "300.0"), 300.0)))
+# API-first: quando a YouTube Data API retorna rapidamente 3 candidatos com
+# ranking claro, a tela pode ser respondida sem esperar yt-dlp no Phone Worker.
+# A reproducao continua sendo resolvida exclusivamente pelo yt-dlp apos a escolha.
+MUSIC_SEARCH_API_FIRST_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_API_FIRST_ENABLED", "true"), True)
+MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS = max(0.15, min(1.5, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS", "0.45"), 0.45)))
+# Pequena vantagem para a API. Se ela nao responder nesse intervalo, o worker
+# entra em paralelo; assim API-first nao adiciona 450 ms ao fallback frio.
+MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS = max(0.0, min(0.5, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS", "0.15"), 0.15)))
+MUSIC_SEARCH_API_FIRST_MIN_RESULTS = max(1, min(3, _parse_int(os.getenv("MUSIC_SEARCH_API_FIRST_MIN_RESULTS", "3"), 3)))
 # Busca inteligente: segunda passagem só quando o ranking inicial não estiver
 # suficientemente claro. O custo extra é rede no Phone Worker/providers; a VPS
 # faz apenas fusão/ranking local leve.

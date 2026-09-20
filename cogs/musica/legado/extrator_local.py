@@ -160,6 +160,9 @@ class MusicExtractor:
         self._single_cache: dict[str, tuple[float, MusicTrack]] = {}
         self._stream_cache: dict[str, tuple[float, MusicTrack]] = {}
 
+    async def close(self) -> None:
+        await self.api.close()
+
     def looks_like_url(self, query: str) -> bool:
         return looks_like_url(query)
 

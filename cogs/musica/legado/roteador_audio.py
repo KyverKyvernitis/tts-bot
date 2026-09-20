@@ -2059,6 +2059,14 @@ class AudioRouter:
         if backends is not None:
             with contextlib.suppress(Exception):
                 await backends.close()
+        extractor = self._extractor
+        if extractor is not None:
+            with contextlib.suppress(Exception):
+                await extractor.close()
+        with contextlib.suppress(Exception):
+            from ..busca.fontes import fechar_provedores_busca
+
+            await fechar_provedores_busca()
 
     async def backend_status(self, guild_id: int | None = None):
         return await self.backends.status(guild_id=guild_id)

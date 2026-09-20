@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 
@@ -14,7 +15,7 @@ from ..busca import (
     registrar_busca_telemetria,
 )
 from ..busca.resiliencia import liberar_busca_profunda, tentar_reservar_busca_profunda
-from ..busca.fontes import buscar_candidatos_multifonte
+from ..busca.fontes import buscar_candidatos_multifonte, buscar_candidatos_youtube_fast
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch
 from .busca_profunda import executar_passagem_profunda
@@ -107,6 +108,56 @@ async def _cancelar_tarefa_busca(task: asyncio.Task | None) -> None:
         pass
 
 
+def _avaliar_api_first(
+    query: str,
+    candidatos,
+    *,
+    requester_id: int,
+    requester_name: str,
+    guild_id: int,
+    limit: int,
+):
+    if not candidatos:
+        return None
+    tracks, fusao = fundir_resultados(
+        query,
+        [],
+        candidatos,
+        requester_id=requester_id,
+        requester_name=requester_name,
+        limit=limit,
+    )
+    tracks, ranking = ranquear_faixas(
+        query,
+        tracks,
+        guild_id=guild_id,
+        requester_id=requester_id,
+    )
+    min_results = min(
+        limit,
+        max(1, int(getattr(config, "MUSIC_SEARCH_API_FIRST_MIN_RESULTS", 3) or 3)),
+    )
+    decisao = avaliar_busca_profunda(
+        query,
+        tracks,
+        ranking,
+        requested_limit=limit,
+        enabled=True,
+        deep_limit=int(getattr(config, "MUSIC_SEARCH_DEEP_LIMIT", 5) or 5),
+        min_results=min_results,
+        score_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_SCORE_THRESHOLD", 0.66) or 0.66),
+        confidence_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", 0.55) or 0.55),
+        margin_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", 0.030) or 0.030),
+    )
+    if len(tracks) < min_results or decisao.executar:
+        return None
+    return (
+        ExtractedBatch(tracks=tracks[:limit], query=query, is_playlist=False),
+        ranking[:limit],
+        fusao,
+    )
+
+
 async def resolve_music_tracks_on_worker(
     query: str,
     *,
@@ -178,6 +229,79 @@ async def resolve_music_tracks_on_worker(
             )
         return cached_batch
 
+    started = time.monotonic()
+    api_first_candidates = []
+    api_first_task: asyncio.Task | None = None
+    api_first_attempted = bool(
+        busca_textual
+        and somente_metadados
+        and bool(getattr(config, "MUSIC_SEARCH_API_FIRST_ENABLED", True))
+    )
+    if api_first_attempted:
+        api_first_task = asyncio.create_task(
+            buscar_candidatos_youtube_fast(clean_query, limit=max_limit)
+        )
+        headstart = max(
+            0.0,
+            float(getattr(config, "MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS", 0.15) or 0.0),
+        )
+        # Se ja existe resolucao textual em voo, nao introduza nova janela de
+        # head-start: entrar no worker imediatamente preserva o singleflight.
+        if resolucoes_em_voo() > 0:
+            headstart = 0.0
+        if headstart > 0.0:
+            try:
+                api_first_candidates = await asyncio.wait_for(
+                    asyncio.shield(api_first_task),
+                    timeout=headstart,
+                )
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug(
+                    "[music/search] api-first falhou; seguindo para worker | query=%r erro=%s",
+                    clean_query,
+                    exc,
+                )
+        elif api_first_task.done():
+            with contextlib.suppress(Exception):
+                api_first_candidates = api_first_task.result()
+
+        aceite = _avaliar_api_first(
+            clean_query,
+            api_first_candidates,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            guild_id=guild_id,
+            limit=max_limit,
+        )
+        if aceite is not None:
+            batch, api_ranking, api_fusao = aceite
+            api_elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+            logger.info(
+                "[music/search] api-first hit | worker=%s query=%r tracks=%s elapsed_ms=%.1f grupos=%s score=%.4f confidence=%.4f",
+                destino.worker_id or destino.name,
+                clean_query,
+                len(batch.tracks),
+                api_elapsed_ms,
+                api_fusao.grupos,
+                api_ranking[0].score if api_ranking else 0.0,
+                api_ranking[0].confianca if api_ranking else 0.0,
+            )
+            _registrar_telemetria_busca(
+                tracks=batch.tracks,
+                ranking=api_ranking,
+                elapsed_ms=api_elapsed_ms,
+                deep_estado="api_first",
+                deep_motivo="primeira_passagem_suficiente",
+            )
+            armazenar_cache_resolucao(cache_key, batch, somente_metadados=somente_metadados)
+            return copiar_lote_para_requisicao(
+                batch, requester_id=requester_id, requester_name=requester_name
+            )
+
     payload = _montar_tarefa_resolucao(
         query=clean_query,
         limit=max_limit,
@@ -191,23 +315,83 @@ async def resolve_music_tracks_on_worker(
     metadata_task: asyncio.Task | None = None
     if busca_textual and somente_metadados:
         metadata_task = asyncio.create_task(
-            buscar_candidatos_multifonte(clean_query, limit=max_limit)
+            buscar_candidatos_multifonte(
+                clean_query,
+                limit=max_limit,
+                incluir_youtube=not api_first_attempted,
+            )
         )
 
-    started = time.monotonic()
-    try:
-        data = await executar_resolucao_compartilhada(
+    worker_task = asyncio.create_task(
+        executar_resolucao_compartilhada(
             executar_tarefa_resolucao,
             base=base,
             token=token,
             payload=payload,
             timeout_seconds=total_timeout,
         )
+    )
+
+    try:
+        if api_first_task is not None and not api_first_task.done():
+            done, _ = await asyncio.wait(
+                {worker_task, api_first_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if api_first_task in done:
+                try:
+                    api_first_candidates = list(api_first_task.result())
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug(
+                        "[music/search] api-first terminou com falha | query=%r erro=%s",
+                        clean_query,
+                        exc,
+                    )
+                    api_first_candidates = []
+                aceite = _avaliar_api_first(
+                    clean_query,
+                    api_first_candidates,
+                    requester_id=requester_id,
+                    requester_name=requester_name,
+                    guild_id=guild_id,
+                    limit=max_limit,
+                )
+                if aceite is not None:
+                    batch, api_ranking, api_fusao = aceite
+                    await _cancelar_tarefa_busca(worker_task)
+                    await _cancelar_tarefa_busca(metadata_task)
+                    api_elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+                    logger.info(
+                        "[music/search] api-first hedge hit | worker=%s query=%r tracks=%s elapsed_ms=%.1f grupos=%s score=%.4f confidence=%.4f",
+                        destino.worker_id or destino.name,
+                        clean_query,
+                        len(batch.tracks),
+                        api_elapsed_ms,
+                        api_fusao.grupos,
+                        api_ranking[0].score if api_ranking else 0.0,
+                        api_ranking[0].confianca if api_ranking else 0.0,
+                    )
+                    _registrar_telemetria_busca(
+                        tracks=batch.tracks,
+                        ranking=api_ranking,
+                        elapsed_ms=api_elapsed_ms,
+                        deep_estado="api_first",
+                        deep_motivo="hedge_primeira_passagem_suficiente",
+                    )
+                    armazenar_cache_resolucao(cache_key, batch, somente_metadados=somente_metadados)
+                    return copiar_lote_para_requisicao(
+                        batch, requester_id=requester_id, requester_name=requester_name
+                    )
+        data = await worker_task
     except MusicWorkerUnavailable:
         await _cancelar_tarefa_busca(metadata_task)
+        await _cancelar_tarefa_busca(api_first_task)
         raise
     except Exception as exc:
         await _cancelar_tarefa_busca(metadata_task)
+        await _cancelar_tarefa_busca(api_first_task)
         logger.warning(
             "[music/worker] yt-dlp remoto falhou | worker=%s query=%r erro=%s",
             destino.worker_id or destino.name,
@@ -237,10 +421,16 @@ async def resolve_music_tracks_on_worker(
         requester_name=requester_name,
     )
     worker_tracks_fast = list(batch.tracks)
-    api_candidates = []
+    if api_first_task is not None and api_first_task.done() and not api_first_candidates:
+        with contextlib.suppress(Exception):
+            api_first_candidates = list(api_first_task.result())
+    elif api_first_task is not None and not api_first_task.done():
+        await _cancelar_tarefa_busca(api_first_task)
+
+    api_candidates = list(api_first_candidates)
     if metadata_task is not None:
         try:
-            api_candidates = await metadata_task
+            api_candidates.extend(await metadata_task)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

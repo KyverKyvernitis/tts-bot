@@ -21,8 +21,8 @@ class EstadoCircuitoProvider:
     ultima_falha: str = ""
 
 
-_CACHE_METADATA: dict[tuple[str, int], tuple[float, list[ApiTrackCandidate]]] = {}
-_EM_VOO_METADATA: dict[tuple[str, int], asyncio.Task[list[ApiTrackCandidate]]] = {}
+_CACHE_METADATA: dict[tuple[str, str, int], tuple[float, list[ApiTrackCandidate]]] = {}
+_EM_VOO_METADATA: dict[tuple[str, str, int], asyncio.Task[list[ApiTrackCandidate]]] = {}
 _CIRCUITOS: dict[str, EstadoCircuitoProvider] = {}
 _MAX_CIRCUITOS = 16
 
@@ -31,8 +31,12 @@ def _agora() -> float:
     return time.monotonic()
 
 
-def _chave_metadata(query: str, limit: int) -> tuple[str, int]:
-    return (" ".join(str(query or "").lower().split()), max(1, min(10, int(limit or 5))))
+def _chave_metadata(query: str, limit: int, namespace: str = "all") -> tuple[str, str, int]:
+    return (
+        str(namespace or "all").strip().lower() or "all",
+        " ".join(str(query or "").lower().split()),
+        max(1, min(10, int(limit or 3))),
+    )
 
 
 def _copiar_candidatos(candidatos: list[ApiTrackCandidate]) -> list[ApiTrackCandidate]:
@@ -72,7 +76,7 @@ def _podar_cache(*, max_itens: int) -> None:
         _CACHE_METADATA.pop(chave, None)
 
 
-def _limpar_task_metadata(chave: tuple[str, int], task: asyncio.Task[list[ApiTrackCandidate]]) -> None:
+def _limpar_task_metadata(chave: tuple[str, str, int], task: asyncio.Task[list[ApiTrackCandidate]]) -> None:
     if _EM_VOO_METADATA.get(chave) is task:
         _EM_VOO_METADATA.pop(chave, None)
     # Consumir excecao evita warning caso todos os callers tenham sido
@@ -91,6 +95,7 @@ async def buscar_metadata_compartilhada(
     produtor: Callable[[], Awaitable[list[ApiTrackCandidate]]],
     ttl_seconds: float,
     max_itens: int = 64,
+    namespace: str = "all",
 ) -> list[ApiTrackCandidate]:
     """Cache curto + singleflight para a busca multi-provider.
 
@@ -98,7 +103,7 @@ async def buscar_metadata_compartilhada(
     aceita inclusive resultado vazio por um TTL curto para impedir rajadas de
     chamadas repetidas quando nenhum provider encontra a faixa.
     """
-    chave = _chave_metadata(query, limit)
+    chave = _chave_metadata(query, limit, namespace)
     ttl = max(0.0, float(ttl_seconds or 0.0))
     now = _agora()
     cached = _CACHE_METADATA.get(chave)
