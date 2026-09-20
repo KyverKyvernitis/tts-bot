@@ -105,6 +105,11 @@ async def sincronizar_estado_agente(
 
     remote_status_original = str(remote.get("status") or "").strip().lower()
     raw_status = remote_status_original
+    previous_playback_token = int(getattr(state, "agent_playback_token", -1) or -1)
+    remote_playback_token = None
+    with contextlib.suppress(Exception):
+        if remote.get("playback_token") is not None:
+            remote_playback_token = int(remote.get("playback_token"))
     current_payload = remote.get("current") if isinstance(remote.get("current"), dict) else {}
     if current_payload:
         track = faixa_do_payload(current_payload, track)
@@ -154,6 +159,8 @@ async def sincronizar_estado_agente(
                 state.paused = False
                 state.music_session_active = False
                 state.agent_started_track_key = ""
+                if remote_playback_token is not None:
+                    state.agent_playback_token = remote_playback_token
                 state.agent_last_idle_event = last_event or raw_status
                 if last_action == "stop" or last_event == "stop":
                     router._set_idle_reason(state, "manual_stop")
@@ -216,7 +223,18 @@ async def sincronizar_estado_agente(
     if state.current is not None or tem_pendentes(state) or state.current_status in active_statuses:
         router._reactivate_panel_controls_now(guild_id)
     previous_started_key = str(getattr(state, "agent_started_track_key", "") or "")
-    just_started_agent_track = bool((active_confirmed or active_started_signal) and new_panel_key and previous_started_key != new_panel_key)
+    playback_generation_changed = bool(
+        remote_playback_token is not None
+        and remote_playback_token != previous_playback_token
+    )
+    legacy_track_changed = bool(new_panel_key and previous_started_key != new_panel_key)
+    just_started_agent_track = bool(
+        (active_confirmed or active_started_signal)
+        and new_panel_key
+        and (playback_generation_changed or (remote_playback_token is None and legacy_track_changed))
+    )
+    if remote_playback_token is not None:
+        state.agent_playback_token = remote_playback_token
     if just_started_agent_track:
         state.agent_started_track_key = new_panel_key
         state.current_started_at_monotonic = time.monotonic()

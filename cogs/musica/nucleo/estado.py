@@ -108,7 +108,9 @@ class MusicGuildState:
     current_quality_kbps: int = MUSIC_HIGH_QUALITY_MAX_ABR
     voice_status_channel_id: Optional[int] = None
     voice_status_had_original: bool = False
+    voice_status_original_known: bool = False
     voice_status_original: str = ""
+    voice_status_owned: bool = False
     voice_status_last_bot: str = ""
     voice_status_update_task: Optional[asyncio.Task] = None
     voice_status_last_update_at: float = 0.0
@@ -125,7 +127,9 @@ class MusicGuildState:
     voice_status_last_restore_key: str = ""
     voice_status_last_restore_at: float = 0.0
     voice_status_force_task: Optional[asyncio.Task] = None
+    voice_status_generation: int = 0
     voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    agent_playback_token: int = -1
     agent_monitor_task: Optional[asyncio.Task] = None
     agent_side_effect_task: Optional[asyncio.Task] = None
 

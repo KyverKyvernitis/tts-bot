@@ -142,6 +142,7 @@ class GuildMusicState:
                 and (playing or position_ms > 0)
             ),
             "state_revision": self.state_revision(),
+            "playback_token": int(self.playback_token),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": len(self.queue),
