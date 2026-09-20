@@ -11,6 +11,7 @@ class ConsultaNormalizada:
     artista: str = ""
     titulo: str = ""
     atributos: frozenset[str] = field(default_factory=frozenset)
+    apresentacao: frozenset[str] = field(default_factory=frozenset)
     prefixo: str = ""
 
 
@@ -22,6 +23,7 @@ class SinaisCandidato:
     ordem: float = 0.0
     oficialidade: float = 0.0
     versao: float = 0.0
+    apresentacao: float = 0.0
     penalidade: float = 0.0
 
 

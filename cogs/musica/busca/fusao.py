@@ -6,6 +6,12 @@ from typing import Iterable, Sequence
 
 from ..metadados.modelos import ApiTrackCandidate
 from ..nucleo.modelos import MusicTrack
+from .atributos import (
+    FORMATOS_APRESENTACAO,
+    VARIANTES_INCOMPATIVEIS_ISRC,
+    detectar_apresentacao,
+    detectar_variantes,
+)
 from .normalizacao import limpar_apresentacao, tokens_texto
 from .ranking import ranquear_faixas
 
@@ -35,6 +41,8 @@ class _EntradaFusao:
     provider: str
     isrc: str = ""
     score_origem: float = 0.0
+    variantes: frozenset[str] = field(default_factory=frozenset)
+    apresentacao: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(slots=True)
@@ -135,8 +143,18 @@ def _track_de_api(
     return track
 
 
+def _texto_semantico_track(track: MusicTrack) -> str:
+    return " ".join(part for part in (track.title, track.display_title) if part)
+
+
 def _entrada_worker(track: MusicTrack) -> _EntradaFusao:
-    return _EntradaFusao(track=track, provider=_provider_track(track))
+    texto = _texto_semantico_track(track)
+    return _EntradaFusao(
+        track=track,
+        provider=_provider_track(track),
+        variantes=detectar_variantes(texto),
+        apresentacao=detectar_apresentacao(texto),
+    )
 
 
 def _entrada_api(
@@ -147,32 +165,66 @@ def _entrada_api(
     query: str,
 ) -> _EntradaFusao:
     provider = str(candidate.provider or candidate.source or "api").strip().lower() or "api"
+    track = _track_de_api(
+        candidate,
+        requester_id=requester_id,
+        requester_name=requester_name,
+        query=query,
+    )
+    texto = _texto_semantico_track(track)
     return _EntradaFusao(
-        track=_track_de_api(
-            candidate,
-            requester_id=requester_id,
-            requester_name=requester_name,
-            query=query,
-        ),
+        track=track,
         provider=provider,
         isrc=str(candidate.isrc or "").strip().upper(),
         score_origem=float(candidate.score or 0.0),
+        variantes=detectar_variantes(texto),
+        apresentacao=detectar_apresentacao(texto),
     )
 
 
-def _grupo_compativel(grupo: _GrupoFusao, entrada: _EntradaFusao) -> bool:
-    isrc = entrada.isrc
-    if isrc and isrc in grupo.isrcs:
+def _variantes_compativeis(a: _EntradaFusao, b: _EntradaFusao, *, mesmo_isrc: bool) -> bool:
+    hard_a = set(a.variantes) & set(VARIANTES_INCOMPATIVEIS_ISRC)
+    hard_b = set(b.variantes) & set(VARIANTES_INCOMPATIVEIS_ISRC)
+    if hard_a != hard_b and (hard_a or hard_b):
+        return False
+    if mesmo_isrc:
         return True
+    # Fora de um ISRC compartilhado, remaster e outros qualificadores leves
+    # também precisam coincidir para evitar colapsar edições diferentes.
+    return a.variantes == b.variantes or (not a.variantes and not b.variantes)
+
+
+def _apresentacao_compativel(a: _EntradaFusao, b: _EntradaFusao) -> bool:
+    # Metadata de catálogo não representa uma apresentação concreta. Ela pode
+    # enriquecer qualquer resultado do worker sem forçar audio/video/lyrics a
+    # virarem uma única opção.
+    if not (a.provider.startswith("worker") and b.provider.startswith("worker")):
+        return True
+    formato_a = set(a.apresentacao) & set(FORMATOS_APRESENTACAO)
+    formato_b = set(b.apresentacao) & set(FORMATOS_APRESENTACAO)
+    if formato_a and formato_b and formato_a != formato_b:
+        return False
+    return True
+
+
+def _grupo_compativel(grupo: _GrupoFusao, entrada: _EntradaFusao) -> bool:
     identidade = _identidade_track(entrada.track)
+    mesmo_isrc = bool(entrada.isrc and entrada.isrc in grupo.isrcs)
+    encontrou_identidade = False
+
     for existente in grupo.entradas:
+        if not _variantes_compativeis(entrada, existente, mesmo_isrc=mesmo_isrc):
+            return False
+        if not _apresentacao_compativel(entrada, existente):
+            return False
         if _identidade_compativel(
             identidade,
             _identidade_track(existente.track),
             duracao_ok=_duracao_compativel(entrada.track.duration, existente.track.duration),
         ):
-            return True
-    return False
+            encontrou_identidade = True
+
+    return mesmo_isrc or encontrou_identidade
 
 
 def _adicionar_grupo(grupo: _GrupoFusao, entrada: _EntradaFusao) -> None:

@@ -21,7 +21,18 @@ _ATRIBUTO_PARA_BUSCA = {
     "extended": "extended",
     "edit": "edit",
     "remaster": "remaster",
+    "clean": "clean version",
+    "explicit": "explicit",
 }
+
+_APRESENTACAO_PARA_BUSCA = {
+    "official": "official",
+    "lyrics": "lyrics",
+    "audio": "audio",
+    "video": "video",
+    "visualizer": "visualizer",
+}
+_APRESENTACAO_ORDEM = ("official", "audio", "video", "lyrics", "visualizer")
 
 _CANAL_TOPIC = re.compile(r"\s+-\s+topic\s*$", re.IGNORECASE)
 
@@ -46,6 +57,13 @@ def _query_canonica(query: str, top_track: MusicTrack | None, top_score: float) 
         padded = f" {base} "
         for nome in sorted(consulta.atributos):
             frase = _ATRIBUTO_PARA_BUSCA.get(nome, "")
+            if frase and f" {frase} " not in padded:
+                partes.append(frase)
+                padded = " " + " ".join(partes) + " "
+        for nome in _APRESENTACAO_ORDEM:
+            if nome not in consulta.apresentacao:
+                continue
+            frase = _APRESENTACAO_PARA_BUSCA.get(nome, "")
             if frase and f" {frase} " not in padded:
                 partes.append(frase)
                 padded = " " + " ".join(partes) + " "

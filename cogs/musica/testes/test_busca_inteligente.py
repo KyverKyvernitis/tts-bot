@@ -257,3 +257,99 @@ def test_deep_pass_preserva_artista_titulo_e_versao_na_reformulacao() -> None:
 
     assert decisao.executar is True
     assert decisao.query == "daft punk get lucky live"
+
+
+def test_intencao_separa_apresentacao_de_variacao_da_gravacao() -> None:
+    consulta = analisar_consulta("Daft Punk - Get Lucky official audio clean version")
+
+    assert "clean" in consulta.atributos
+    assert {"official", "audio"}.issubset(consulta.apresentacao)
+    assert "audio" not in consulta.atributos
+
+
+def test_clean_bandit_nao_vira_falso_pedido_de_clean_version() -> None:
+    consulta = analisar_consulta("Clean Bandit - Rather Be")
+
+    assert "clean" not in consulta.atributos
+
+
+def test_official_audio_prefere_audio_oficial_a_video_e_lyrics() -> None:
+    audio = _track("Bad Romance (Official Audio)", "Lady Gaga")
+    video = _track("Lady Gaga - Bad Romance (Official Music Video)", "Lady Gaga")
+    lyrics = _track("Bad Romance (Lyrics)", "Lady Gaga")
+
+    ordenadas, ranking = ranquear_faixas(
+        "Lady Gaga - Bad Romance official audio",
+        [lyrics, video, audio],
+    )
+
+    assert ordenadas[0] is audio
+    assert ranking[0].sinais.apresentacao > 0
+    assert ranking[0].score > ranking[1].score
+
+
+def test_pedido_lyrics_prefere_lyrics_mesmo_com_audio_oficial_disponivel() -> None:
+    audio = _track("Numb (Official Audio)", "Linkin Park")
+    lyrics = _track("Numb Lyrics", "Linkin Park")
+
+    ordenadas, ranking = ranquear_faixas("Linkin Park - Numb lyrics", [audio, lyrics])
+
+    assert ordenadas[0] is lyrics
+    assert ranking[0].score > ranking[1].score
+
+
+def test_clean_e_explicit_sao_intencoes_mutuamente_exclusivas() -> None:
+    clean = _track("Starboy (Clean)", "The Weeknd")
+    explicit = _track("Starboy (Explicit)", "The Weeknd")
+
+    ordenadas_clean, _ = ranquear_faixas("The Weeknd - Starboy clean", [explicit, clean])
+    ordenadas_explicit, _ = ranquear_faixas("The Weeknd - Starboy explicit", [clean, explicit])
+
+    assert ordenadas_clean[0] is clean
+    assert ordenadas_explicit[0] is explicit
+
+
+def test_fusao_nao_colapsa_clean_e_explicit_com_mesma_duracao() -> None:
+    clean = _track("Starboy (Clean)", "The Weeknd", url="https://youtube.test/clean")
+    explicit = _track("Starboy (Explicit)", "The Weeknd", url="https://youtube.test/explicit")
+    clean.duration = explicit.duration = 230
+
+    tracks, resumo = fundir_resultados("The Weeknd - Starboy", [clean, explicit], [], limit=5)
+
+    assert len(tracks) == 2
+    assert resumo.duplicatas == 0
+
+
+def test_fusao_preserva_audio_video_e_lyrics_como_opcoes_do_worker() -> None:
+    audio = _track("Blinding Lights (Official Audio)", "The Weeknd", url="https://youtube.test/audio")
+    video = _track("Blinding Lights (Official Music Video)", "The Weeknd", url="https://youtube.test/video")
+    lyrics = _track("Blinding Lights (Lyrics)", "The Weeknd", url="https://youtube.test/lyrics")
+    for track in (audio, video, lyrics):
+        track.duration = 200
+
+    tracks, resumo = fundir_resultados(
+        "The Weeknd - Blinding Lights official audio",
+        [video, lyrics, audio],
+        [],
+        limit=5,
+    )
+
+    assert len(tracks) == 3
+    assert resumo.duplicatas == 0
+    assert tracks[0].webpage_url == audio.webpage_url
+
+
+def test_deep_pass_preserva_apresentacao_pedida_na_reformulacao() -> None:
+    from cogs.musica.busca import avaliar_busca_profunda
+
+    tracks = [_track("Get Lucky (Official Audio)", "Daft Punk")]
+    _, ranking = ranquear_faixas("Daft Punk - Get Lucky official audio", tracks)
+    decisao = avaliar_busca_profunda(
+        "Daft Punk - Get Lucky official audio",
+        tracks,
+        ranking,
+        requested_limit=5,
+    )
+
+    assert decisao.executar is True
+    assert decisao.query == "daft punk get lucky official audio"

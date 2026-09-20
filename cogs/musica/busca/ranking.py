@@ -5,24 +5,16 @@ from math import exp
 from typing import Iterable, Sequence
 
 from ..nucleo.modelos import MusicTrack
+from .atributos import (
+    FORMATOS_APRESENTACAO,
+    VARIANTES_FORTES,
+    VARIANTES_LEVES,
+    detectar_apresentacao,
+    detectar_variantes,
+)
 from .intencao import analisar_consulta
 from .modelos import ConsultaNormalizada, ResultadoRanking, SinaisCandidato
-from .normalizacao import limpar_apresentacao, token_set, tokens_texto
-
-_ATRIBUTOS_CANDIDATO: dict[str, tuple[str, ...]] = {
-    "live": ("live", "ao vivo"),
-    "remix": ("remix", "remixed"),
-    "cover": ("cover",),
-    "karaoke": ("karaoke",),
-    "instrumental": ("instrumental",),
-    "slowed": ("slowed", "slow reverb", "slowed reverb"),
-    "sped_up": ("sped up", "speed up", "nightcore"),
-    "reverb": ("reverb", "reverbed"),
-    "acoustic": ("acoustic", "acustico", "acustica"),
-    "extended": ("extended",),
-    "edit": ("radio edit", "edit"),
-    "remaster": ("remaster", "remastered", "remasterizado"),
-}
+from .normalizacao import limpar_apresentacao, tokens_texto
 
 _OFICIALIDADE = (
     "official audio",
@@ -62,20 +54,14 @@ def _ordem(query: str, candidate: str) -> float:
     return _similaridade(q, c)
 
 
-def _atributos_candidato(track: MusicTrack) -> frozenset[str]:
-    haystack = " ".join(
+def _texto_candidato(track: MusicTrack) -> str:
+    return " ".join(
         part for part in (track.title, track.display_title, track.uploader, track.display_uploader) if part
     )
-    normalizado = " ".join(tokens_texto(haystack))
-    encontrados: set[str] = set()
-    for nome, frases in _ATRIBUTOS_CANDIDATO.items():
-        if any(f" {frase} " in f" {normalizado} " for frase in frases):
-            encontrados.add(nome)
-    return frozenset(encontrados)
 
 
 def _sinal_versao(intencao: ConsultaNormalizada, track: MusicTrack) -> tuple[float, float]:
-    presentes = _atributos_candidato(track)
+    presentes = set(detectar_variantes(_texto_candidato(track)))
     pedidos = set(intencao.atributos)
     bonus = 0.0
     penalidade = 0.0
@@ -87,18 +73,47 @@ def _sinal_versao(intencao: ConsultaNormalizada, track: MusicTrack) -> tuple[flo
         bonus += 0.14 * correspondentes
         penalidade += 0.08 * ausentes
         penalidade += 0.055 * conflitantes
+
+        # Clean e explicit são mutuamente exclusivos e merecem uma separação
+        # maior que um simples qualificador ausente.
+        if ("clean" in pedidos and "explicit" in presentes) or (
+            "explicit" in pedidos and "clean" in presentes
+        ):
+            penalidade += 0.10
     else:
         # Versões alteradas são úteis quando pedidas, mas costumam ser resultados
-        # piores para uma consulta neutra pela faixa original.
-        fortes = presentes & {"cover", "karaoke", "instrumental", "slowed", "sped_up", "remix"}
-        leves = presentes & {"live", "reverb", "acoustic", "extended", "edit"}
+        # piores para uma consulta neutra pela faixa original. Clean/explicit e
+        # remaster não recebem punição automática: podem ser a edição canônica.
+        fortes = presentes & set(VARIANTES_FORTES)
+        leves = presentes & set(VARIANTES_LEVES)
         penalidade += min(0.30, 0.12 * len(fortes) + 0.055 * len(leves))
 
-    return min(0.28, bonus), min(0.38, penalidade)
+    return min(0.28, bonus), min(0.42, penalidade)
+
+
+def _sinal_apresentacao(intencao: ConsultaNormalizada, track: MusicTrack) -> tuple[float, float]:
+    pedidos = set(intencao.apresentacao)
+    if not pedidos:
+        return 0.0, 0.0
+
+    presentes = set(detectar_apresentacao(_texto_candidato(track)))
+    correspondentes = len(pedidos & presentes)
+    ausentes = len(pedidos - presentes)
+    bonus = 0.055 * correspondentes
+    penalidade = 0.025 * ausentes
+
+    formato_pedido = pedidos & set(FORMATOS_APRESENTACAO)
+    formato_presente = presentes & set(FORMATOS_APRESENTACAO)
+    if formato_pedido and formato_presente and not (formato_pedido & formato_presente):
+        penalidade += 0.085
+    if "official" in pedidos and "official" not in presentes:
+        penalidade += 0.035
+
+    return min(0.16, bonus), min(0.20, penalidade)
 
 
 def _oficialidade(track: MusicTrack) -> float:
-    title = " ".join(tokens_texto(track.title))
+    title = " ".join(tokens_texto(track.title or track.display_title))
     uploader = " ".join(tokens_texto(track.uploader or track.display_uploader))
     signal = 0.0
     if any(frase in title for frase in _OFICIALIDADE):
@@ -129,7 +144,9 @@ def pontuar_faixa(query: str | ConsultaNormalizada, track: MusicTrack, *, indice
     cobertura = _cobertura(intencao.tokens, combinado)
     ordem = _ordem(intencao.texto, combinado)
     oficial = _oficialidade(track)
-    versao, penalidade = _sinal_versao(intencao, track)
+    versao, penalidade_versao = _sinal_versao(intencao, track)
+    apresentacao, penalidade_apresentacao = _sinal_apresentacao(intencao, track)
+    penalidade = penalidade_versao + penalidade_apresentacao
 
     if intencao.artista:
         identidade = 0.54 * titulo_score + 0.20 * artista_score + 0.18 * cobertura + 0.08 * ordem
@@ -137,7 +154,7 @@ def pontuar_faixa(query: str | ConsultaNormalizada, track: MusicTrack, *, indice
         # Consultas livres não devem depender de inferir qual termo é artista.
         identidade = 0.46 * max(titulo_score, _similaridade(intencao.texto, combinado)) + 0.36 * cobertura + 0.18 * ordem
 
-    score = max(0.0, min(1.0, identidade + oficial + versao - penalidade))
+    score = max(0.0, min(1.0, identidade + oficial + versao + apresentacao - penalidade))
     sinais = SinaisCandidato(
         titulo=round(titulo_score, 4),
         artista=round(artista_score, 4),
@@ -145,6 +162,7 @@ def pontuar_faixa(query: str | ConsultaNormalizada, track: MusicTrack, *, indice
         ordem=round(ordem, 4),
         oficialidade=round(oficial, 4),
         versao=round(versao, 4),
+        apresentacao=round(apresentacao, 4),
         penalidade=round(penalidade, 4),
     )
     return ResultadoRanking(
