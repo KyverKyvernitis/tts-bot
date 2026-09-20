@@ -87,7 +87,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.43"
+AGENT_VERSION = "0.3.44"
 STARTED_AT = time.time()
 
 
@@ -126,6 +126,10 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.resample_quality_enabled = truthy(os.getenv("MUSIC_AGENT_RESAMPLE_QUALITY_ENABLED"), True)
         self.resample_filter_size = max(16, min(64, env_int("MUSIC_AGENT_RESAMPLE_FILTER_SIZE", 32)))
         self.resample_phase_shift = max(8, min(12, env_int("MUSIC_AGENT_RESAMPLE_PHASE_SHIFT", 10)))
+        # Telemetria de qualidade mede apenas o tempo de leitura do source.
+        # Nenhum sample PCM é analisado, então o custo no hot path é mínimo.
+        self.audio_telemetry_enabled = truthy(os.getenv("MUSIC_AGENT_AUDIO_TELEMETRY_ENABLED"), True)
+        self.audio_stall_threshold_ms = max(20.0, min(2000.0, env_float("MUSIC_AGENT_AUDIO_STALL_THRESHOLD_MS", 80.0)))
         self.ffmpeg_bitrate = max(16, min(512, env_int("MUSIC_AGENT_FFMPEG_OPUS_BITRATE_KBPS", 128)))
         # O encoder Opus interno do discord.py só é usado para sources PCM.
         # Ajuste o bitrate à capacidade real do canal e à qualidade da fonte,

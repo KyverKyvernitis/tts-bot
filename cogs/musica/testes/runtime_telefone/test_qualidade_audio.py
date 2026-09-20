@@ -243,3 +243,114 @@ def test_wave_d_source_rate_chega_ao_builder_e_telemetria() -> None:
     playback = (ROOT / "cogs/musica/runtime_telefone/agente/reproducao.py").read_text(encoding="utf-8")
     assert "source_sample_rate=source_rate" in playback
     assert "resample_mode=resample_mode" in playback
+
+
+def test_wave_e_telemetria_detecta_stall_sem_analisar_pcm(monkeypatch) -> None:
+    import sys
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    _load_music_agent(monkeypatch)
+    mixer = sys.modules["cogs.musica.runtime_telefone.agente.mixer_pcm"]
+    frame = b"\x01\x00" * 1920
+
+    class Source:
+        def __init__(self):
+            self.frames = [frame, frame, b""]
+        def read(self):
+            return self.frames.pop(0)
+        def cleanup(self):
+            return None
+        def is_opus(self):
+            return False
+
+    # 100 ms (stall), 10 ms (normal), 1 ms (EOF).
+    ticks = iter([0, 100_000_000, 100_000_000, 110_000_000, 110_000_000, 111_000_000])
+    monkeypatch.setattr(mixer.time, "perf_counter_ns", lambda: next(ticks))
+    source = mixer.AgentTelemetryAudioSource(
+        Source(), telemetry_enabled=True, stall_threshold_ms=80, expected_frame_bytes=3840
+    )
+    assert source.read() == frame
+    assert source.read() == frame
+    assert source.read() == b""
+    telemetry = source.audio_telemetry()
+    assert telemetry["source_read_count"] == 3
+    assert telemetry["audio_frame_count"] == 2
+    assert telemetry["audio_bytes"] == 7680
+    assert telemetry["source_stall_count"] == 1
+    assert telemetry["source_read_max_ms"] == 100.0
+    assert telemetry["partial_frame_count"] == 0
+
+
+def test_wave_e_telemetria_desligada_nao_consulta_relogio_por_frame(monkeypatch) -> None:
+    import sys
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    _load_music_agent(monkeypatch)
+    mixer = sys.modules["cogs.musica.runtime_telefone.agente.mixer_pcm"]
+
+    class Source:
+        def read(self): return b"abc"
+        def cleanup(self): return None
+        def is_opus(self): return True
+
+    source = mixer.AgentTelemetryAudioSource(Source(), telemetry_enabled=False)
+    monkeypatch.setattr(
+        mixer.time,
+        "perf_counter_ns",
+        lambda: (_ for _ in ()).throw(AssertionError("telemetria desligada tocou no relógio")),
+    )
+    assert source.is_opus() is True
+    assert source.read() == b"abc"
+    assert source.audio_telemetry()["source_read_count"] == 0
+
+
+def test_wave_e_resumo_de_playback_carrega_metricas_de_qualidade(monkeypatch) -> None:
+    import asyncio
+    import time
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 991
+        st = music.GuildMusicState(guild_id=gid)
+        st.current = music.AgentTrack(title="quality", query="quality", duration=10.0)
+        st.playback_token = 7
+        st.started_monotonic = time.monotonic() - 10.0
+        agent.states[gid] = st
+        events = []
+        agent.log = lambda event, **fields: events.append((event, fields))
+        agent._schedule_idle_disconnect = lambda *args, **kwargs: None
+        await agent._direct_after(
+            gid,
+            None,
+            7,
+            audio_metrics={"source_stall_count": 2, "source_read_max_ms": 140.0},
+            quality_context={"source_codec": "opus", "resample_mode": "native_48k"},
+        )
+        summary = next(fields for event, fields in events if event == "audio_playback_summary")
+        assert summary["outcome"] == "ended"
+        assert summary["source_codec"] == "opus"
+        assert summary["resample_mode"] == "native_48k"
+        assert summary["source_stall_count"] == 2
+        assert summary["source_read_max_ms"] == 140.0
+        assert st.last_audio_end_monotonic > 0.0
+
+    asyncio.run(scenario())
+
+
+def test_wave_e_pipeline_registra_primeiro_frame_gap_e_stalls() -> None:
+    playback = (ROOT / "cogs/musica/runtime_telefone/agente/reproducao.py").read_text(encoding="utf-8")
+    mixer = (ROOT / "cogs/musica/runtime_telefone/agente/mixer_pcm.py").read_text(encoding="utf-8")
+    for marker in (
+        '"audio_pipeline_ready"',
+        '"audio_playback_summary"',
+        '"transition_gap_ms"',
+        '"source_stall_count"',
+        '"source_read_max_ms"',
+    ):
+        assert marker in playback + mixer
+    # Telemetria não introduz análise espectral, normalização ou filtros.
+    for forbidden in ("loudnorm", "astats", "ebur128", "acompressor"):
+        assert forbidden not in (playback + mixer).lower()

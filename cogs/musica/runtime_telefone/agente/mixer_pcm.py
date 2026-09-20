@@ -1,8 +1,9 @@
-"""Mixer PCM do Music Agent.
+"""Mixer PCM e telemetria leve do Music Agent.
 
 Mantém música e overlays de TTS na mesma sessão de voz do Discord. O caminho
 normal sem overlay usa audioop quando disponível para evitar loops Python por
-amostra a cada frame de 20 ms.
+amostra a cada frame de 20 ms. A telemetria de leitura mede apenas latência do
+source (FFmpeg/stream) e nunca processa/amostra o áudio.
 """
 from __future__ import annotations
 
@@ -21,8 +22,122 @@ PCM_PEAK = 32767
 PCM_BOOST_KNEE = int(PCM_PEAK * 0.95)
 
 
-class AgentMixedAudioSource(discord.AudioSource):
-    def __init__(self, *, loop: asyncio.AbstractEventLoop, music_source: discord.AudioSource, music_volume: float, duck_factor: float = 0.08) -> None:
+class _AudioReadTelemetry:
+    """Contadores baratos para detectar stalls do source sem tocar no PCM.
+
+    O custo no caminho ativo são duas chamadas de ``perf_counter_ns`` e alguns
+    inteiros por ``read``. Pode ser desligado por configuração; nesse caso o
+    método chama o source diretamente sem relógio/counters adicionais.
+    """
+
+    def _init_audio_telemetry(
+        self,
+        *,
+        telemetry_enabled: bool,
+        stall_threshold_ms: float,
+        expected_frame_bytes: int = 0,
+    ) -> None:
+        self.telemetry_enabled = bool(telemetry_enabled)
+        self.stall_threshold_ms = max(1.0, float(stall_threshold_ms or 80.0))
+        self.expected_frame_bytes = max(0, int(expected_frame_bytes or 0))
+        self._source_read_count = 0
+        self._audio_frame_count = 0
+        self._audio_bytes = 0
+        self._source_read_total_ns = 0
+        self._source_read_max_ns = 0
+        self._source_stall_count = 0
+        self._partial_frame_count = 0
+
+    def _read_source(self, source: discord.AudioSource) -> bytes:
+        if not self.telemetry_enabled:
+            return source.read()
+        started_ns = time.perf_counter_ns()
+        frame = source.read()
+        elapsed_ns = max(0, time.perf_counter_ns() - started_ns)
+        self._source_read_count += 1
+        self._source_read_total_ns += elapsed_ns
+        if elapsed_ns > self._source_read_max_ns:
+            self._source_read_max_ns = elapsed_ns
+        if elapsed_ns >= int(self.stall_threshold_ms * 1_000_000.0):
+            self._source_stall_count += 1
+        if frame:
+            self._audio_frame_count += 1
+            self._audio_bytes += len(frame)
+            if self.expected_frame_bytes and len(frame) != self.expected_frame_bytes:
+                self._partial_frame_count += 1
+        return frame
+
+    def audio_telemetry(self) -> dict[str, Any]:
+        reads = int(self._source_read_count)
+        total_ns = int(self._source_read_total_ns)
+        return {
+            "telemetry_enabled": bool(self.telemetry_enabled),
+            "first_frame_ms": round(float(getattr(self, "first_frame_ms", 0.0) or 0.0), 2),
+            "source_read_count": reads,
+            "audio_frame_count": int(self._audio_frame_count),
+            "audio_bytes": int(self._audio_bytes),
+            "source_read_avg_ms": round((total_ns / reads) / 1_000_000.0, 3) if reads else 0.0,
+            "source_read_max_ms": round(float(self._source_read_max_ns) / 1_000_000.0, 3),
+            "source_stall_count": int(self._source_stall_count),
+            "stall_threshold_ms": round(float(self.stall_threshold_ms), 1),
+            "partial_frame_count": int(self._partial_frame_count),
+        }
+
+
+class AgentTelemetryAudioSource(discord.AudioSource, _AudioReadTelemetry):
+    """Wrapper transparente para telemetria em sources PCM ou Opus."""
+
+    def __init__(
+        self,
+        source: discord.AudioSource,
+        *,
+        telemetry_enabled: bool = True,
+        stall_threshold_ms: float = 80.0,
+        expected_frame_bytes: int = 0,
+    ) -> None:
+        self.source = source
+        self._closed = False
+        self._started_monotonic = time.monotonic()
+        self.first_frame_ms: float | None = None
+        self.first_frame_monotonic: float | None = None
+        self._init_audio_telemetry(
+            telemetry_enabled=telemetry_enabled,
+            stall_threshold_ms=stall_threshold_ms,
+            expected_frame_bytes=expected_frame_bytes,
+        )
+
+    def is_opus(self) -> bool:
+        return bool(getattr(self.source, "is_opus", lambda: False)())
+
+    def read(self) -> bytes:
+        if self._closed:
+            return b""
+        frame = self._read_source(self.source)
+        if frame and self.first_frame_ms is None:
+            now = time.monotonic()
+            self.first_frame_monotonic = now
+            self.first_frame_ms = (now - self._started_monotonic) * 1000.0
+        return frame
+
+    def cleanup(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(Exception):
+            self.source.cleanup()
+
+
+class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
+    def __init__(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        music_source: discord.AudioSource,
+        music_volume: float,
+        duck_factor: float = 0.08,
+        telemetry_enabled: bool = True,
+        stall_threshold_ms: float = 80.0,
+    ) -> None:
         self.loop = loop
         self.music_source = music_source
         self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(music_volume)))
@@ -34,6 +149,11 @@ class AgentMixedAudioSource(discord.AudioSource):
         self._started_monotonic = time.monotonic()
         self.first_frame_ms: float | None = None
         self.first_frame_monotonic: float | None = None
+        self._init_audio_telemetry(
+            telemetry_enabled=telemetry_enabled,
+            stall_threshold_ms=stall_threshold_ms,
+            expected_frame_bytes=PCM_FRAME_BYTES,
+        )
 
     def is_opus(self) -> bool:
         return False
@@ -180,7 +300,7 @@ class AgentMixedAudioSource(discord.AudioSource):
             overlays = list(self._overlays)
         music_frame = b""
         if not self._music_ended:
-            music_frame = self.music_source.read()
+            music_frame = self._read_source(self.music_source)
             if not music_frame:
                 self._music_ended = True
                 with contextlib.suppress(Exception):

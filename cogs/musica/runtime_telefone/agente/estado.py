@@ -77,6 +77,7 @@ class GuildMusicState:
     playing_since: float = 0.0
     started_monotonic: float = 0.0
     paused_monotonic: float = 0.0
+    last_audio_end_monotonic: float = 0.0
     updated_at: float = field(default_factory=time.time)
     player: Any = None
     volume_percent: int = 55
