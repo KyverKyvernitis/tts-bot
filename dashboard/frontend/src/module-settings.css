@@ -3,8 +3,9 @@
 .osk-module-settings .osk-page-back { margin-bottom: 20px; min-height: 36px; font-size: 13px; }
 .osk-module-heading { display: flex; align-items: center; gap: 18px; margin-bottom: 26px; }
 .osk-module-heading h1 { flex: 1; min-width: 0; }
-.osk-module-emblem { display: grid; place-items: center; flex-shrink: 0; width: 84px; height: 70px; border: 1px solid var(--osk-line); border-radius: 18px; background: var(--osk-paper-pure); overflow: hidden; }
-.osk-root .osk-module-emblem .osk-module-artwork { width: 84px; height: 70px; transform: scale(.7); }
+.osk-module-emblem { position: relative; flex-shrink: 0; width: 84px; height: 70px; border: 1px solid var(--osk-line); border-radius: 18px; background: var(--osk-paper-pure); overflow: hidden; }
+/* Centraliza a área da arte antes de reduzi-la para caber na moldura. */
+.osk-root .osk-module-emblem .osk-module-artwork { position: absolute; top: 50%; left: 50%; width: 144px; height: 104px; transform: translate(-50%, -50%) scale(.6); transform-origin: center; }
 .osk-module-toggle { display: flex; align-items: center; justify-content: space-between; gap: 14px; font-size: 13px; font-weight: 500; min-height: 48px; padding: 8px 12px; border: 1px solid var(--osk-line); border-radius: 11px; cursor: pointer; }
 .osk-module-toggle > .osk-switch { flex-shrink: 0; }
 .osk-module-tabs { display: flex; align-items: stretch; gap: 4px; overflow-x: auto; scrollbar-width: thin; margin-bottom: 24px; padding: 4px; border: 1px solid var(--osk-line); border-radius: 12px; background: var(--osk-paper-pure); }
@@ -97,11 +98,6 @@
 .osk-module-settings .osk-range-control { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .osk-module-settings .osk-range-control input[type="range"] { flex: 1; min-width: 0; width: 0; padding: 0; box-shadow: none; background: transparent; }
 .osk-module-settings .osk-range-control output { flex: 0 0 auto; }
-.osk-economy-settings { display: grid; gap: 18px; }
-.osk-economy-table { display: flex; align-items: center; gap: 22px; padding: 28px; border: 1px solid var(--osk-line); border-radius: 16px; background: linear-gradient(120deg, var(--osk-paper-muted), var(--osk-paper-pure) 75%); }
-.osk-root .osk-economy-table .osk-module-artwork { width: 100px; height: 76px; flex-shrink: 0; transform: scale(1.15); }
-.osk-economy-table h2 { margin: 6px 0 8px; font-size: 22px; }
-.osk-economy-table p { margin: 0; color: var(--osk-muted); font-size: 12px; line-height: 1.7; }
 .osk-economy-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; }
 .osk-economy-controls .osk-settings-card:last-child { grid-column: 1 / -1; }
 .osk-economy-controls .osk-settings-card > header { margin-bottom: 12px; }
@@ -125,7 +121,7 @@
   .osk-module-heading { gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
   .osk-module-heading h1 { font-size: 25px; }
   .osk-module-emblem { width: 62px; height: 58px; border-radius: 13px; }
-  .osk-root .osk-module-emblem .osk-module-artwork { transform: scale(.55); }
+  .osk-root .osk-module-emblem .osk-module-artwork { transform: translate(-50%, -50%) scale(.5); }
   .osk-module-toggle { width: 100%; padding: 10px 13px; }
   .osk-module-tabs { margin-inline: -2px; gap: 2px; margin-bottom: 18px; }
   .osk-module-tabs > button { min-height: 42px; padding: 10px 13px; font-size: 12px; }
@@ -150,9 +146,6 @@
   .osk-birthday-time { flex-wrap: wrap; padding: 13px; }
   .osk-birthday-time input { margin-left: 33px; }
   .osk-tts-engines { grid-template-columns: minmax(0,1fr); }
-  .osk-economy-table { padding: 22px 16px; gap: 15px; }
-  .osk-root .osk-economy-table .osk-module-artwork { width: 70px; transform: scale(.85); }
-  .osk-economy-table h2 { font-size: 18px; line-height: 1.4; }
   .osk-economy-controls { grid-template-columns: minmax(0,1fr); gap: 14px; }
   .osk-economy-controls .osk-settings-card > p { min-height: 0; }
   .osk-module-advanced > summary { padding: 16px; }
