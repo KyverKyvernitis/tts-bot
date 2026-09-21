@@ -6,6 +6,7 @@ import { dashboardValuesFromDocs, planDashboardUpdates } from "../src/services/d
 
 const guildId = "123456789012345678";
 const docs = () => ({ guild: defaultGuildDoc(guildId), welcome: defaultWelcomeDoc(guildId), birthday: defaultBirthdayDoc(guildId) });
+const voices = ["pt-BR-AntonioNeural", "pt-BR-FranciscaNeural", "en-US-AriaNeural", "ja-JP-NanamiNeural"];
 
 test("catálogo de TTS oferece ajustes dos dois motores sem seletor exclusivo", () => {
   const ids = new Set(ttsSection.fields.map(field => field.id));
@@ -15,14 +16,14 @@ test("catálogo de TTS oferece ajustes dos dois motores sem seletor exclusivo", 
 
 test("salvar gTTS mantém voz, velocidade e tom do Edge e vice-versa", () => {
   const state = docs();
-  planDashboardUpdates(state, { "tts.voice": "pt-BR-AntonioNeural", "tts.rate": "+25%", "tts.pitch": "-10Hz" });
+  planDashboardUpdates(state, { "tts.voice": "pt-BR-AntonioNeural", "tts.rate": "+25%", "tts.pitch": "-10Hz" }, voices);
   planDashboardUpdates(state, { "tts.language": "en" });
   let loaded = dashboardValuesFromDocs(state);
   assert.equal(loaded["tts.voice"], "pt-BR-AntonioNeural");
   assert.equal(loaded["tts.rate"], "+25%");
   assert.equal(loaded["tts.pitch"], "-10Hz");
   assert.equal(loaded["tts.language"], "en");
-  planDashboardUpdates(state, { "tts.voice": "pt-BR-FranciscaNeural" });
+  planDashboardUpdates(state, { "tts.voice": "pt-BR-FranciscaNeural" }, voices);
   loaded = dashboardValuesFromDocs(state);
   assert.equal(loaded["tts.language"], "en");
   assert.equal(loaded["tts.voice"], "pt-BR-FranciscaNeural");
@@ -39,12 +40,43 @@ test("pedido de cliente antigo não altera a engine legada do bot", () => {
 
 test("padrões dos motores podem ser restaurados independentemente", () => {
   const state = docs();
-  planDashboardUpdates(state, { "tts.voice": "pt-BR-AntonioNeural", "tts.language": "fr" });
+  planDashboardUpdates(state, { "tts.voice": "pt-BR-AntonioNeural", "tts.language": "fr" }, voices);
   let plan = planDashboardUpdates(state, { "tts.voice": "" });
   assert.equal(plan.values["tts.voice"], "");
   assert.equal(plan.values["tts.language"], "fr");
   plan = planDashboardUpdates(state, { "tts.language": "" });
   assert.equal(plan.values["tts.language"], "");
+});
+
+test("vozes estrangeiras do catálogo são salvas sem alterar o idioma do Google", () => {
+  const state = docs();
+  planDashboardUpdates(state, { "tts.language": "pt", "tts.voice": "en-US-AriaNeural" }, voices);
+  assert.equal(dashboardValuesFromDocs(state)["tts.voice"], "en-US-AriaNeural");
+  const plan = planDashboardUpdates(state, { "tts.voice": "ja-JP-NanamiNeural" }, voices);
+  assert.equal(plan.values["tts.voice"], "ja-JP-NanamiNeural");
+  assert.equal(plan.values["tts.language"], "pt");
+});
+
+test("voz ausente é rejeitada antes de alterar valores, sem virar padrão", () => {
+  const state = docs();
+  const before = dashboardValuesFromDocs(state);
+  assert.throws(() => planDashboardUpdates(state, { "tts.rate": "+50%", "tts.voice": "en-US-InventedNeural" }, voices), /não está no catálogo/);
+  assert.deepEqual(dashboardValuesFromDocs(state), before);
+});
+
+test("falha do catálogo mantém a voz atual e permite restaurar o padrão", () => {
+  const state = docs();
+  planDashboardUpdates(state, { "tts.voice": "en-US-AriaNeural" }, voices);
+  assert.equal(planDashboardUpdates(state, { "tts.voice": "en-US-AriaNeural", "tts.edge_prefix": "!!" }).values["tts.voice"], "en-US-AriaNeural");
+  assert.equal(planDashboardUpdates(state, { "tts.voice": "" }).values["tts.voice"], "");
+});
+
+test("todos os prefixos permanecem na área de voz e mantêm validação", () => {
+  for (const field of ttsSection.fields.filter(field => field.id.endsWith("_prefix"))) assert.equal(field.group, "Voz");
+  const plan = planDashboardUpdates(docs(), { "tts.edge_prefix": "!!", "tts.gtts_prefix": "??", "tts.atts_prefix": "%%", "tts.teto_prefix": "''" });
+  assert.equal(plan.values["tts.edge_prefix"], "!!");
+  assert.equal(plan.values["tts.gtts_prefix"], "??");
+  assert.throws(() => planDashboardUpdates(docs(), { "tts.edge_prefix": "." }));
 });
 
 test("idiomas enviados pelo painel usam códigos aceitos pelo gTTS", () => {

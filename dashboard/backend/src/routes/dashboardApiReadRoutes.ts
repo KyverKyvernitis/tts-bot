@@ -1,6 +1,7 @@
 import { buildDashboardCommands } from "../services/dashboardCommandsService.js";
 import { createDashboardFullLoader } from "../services/dashboardFullLoader.js";
 import { fetchDiscordAttachmentPreview } from "../services/dashboardMediaPreviewService.js";
+import { loadDashboardEdgeVoices } from "../services/dashboardEdgeVoiceCatalog.js";
 import {
   createDashboardInviteUrl,
   getDiscordBotIdentity,
@@ -21,6 +22,16 @@ export function registerDashboardApiReadRoutes({
     configService,
     listGuildOptions: listGuildChannelsAndRoles,
     getBotIdentity: getDiscordBotIdentity,
+  });
+
+  app.get("/api/dashboard/tts/voices", async (req, res) => {
+    const session = await requireSession(req, res, sessionService);
+    if (!session) return;
+    if (!takeRateLimit(req, "tts-voices", 60, 60_000)) {
+      sendNoStoreJson(res, 429, { ok: false, error: "rate_limited" });
+      return;
+    }
+    sendNoStoreJson(res, 200, { ok: true, ...await loadDashboardEdgeVoices(firstString(req.query.refresh) === "1") });
   });
 
   app.get("/api/dashboard/servers", async (req, res) => {

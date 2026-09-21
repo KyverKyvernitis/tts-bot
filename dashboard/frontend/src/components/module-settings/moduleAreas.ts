@@ -8,7 +8,7 @@ const AREAS: Record<string, ModuleArea[]> = {
   tickets: [area("panel", "Painel", "Painel"), area("service", "Atendimento", "Atendimento", "Comportamento"), area("flows", "Fluxos", "Fluxos", "Denúncias", "Textos"), area("permissions", "Permissões", "Permissões")],
   color_roles: [area("panels", "Painéis e cores", "Painel"), area("messages", "Mensagens", "Mensagens")],
   birthday: [area("register", "Cadastro", "Geral", "Canais", "Registro de datas"), area("announcements", "Avisos", "Avisos"), area("calendar", "Calendário", "Calendário")],
-  tts: [area("voice", "Voz", "Voz"), area("behavior", "Comportamento", "Comportamento"), area("prefixes", "Prefixos", "Prefixos")],
+  tts: [area("voice", "Voz", "Voz"), area("behavior", "Comportamento", "Comportamento")],
   economy: [area("games", "Jogos do servidor", "Geral", "Permissões")],
 };
 

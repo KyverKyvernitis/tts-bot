@@ -8,6 +8,7 @@ import {
   planDashboardUpdates,
 } from "./dashboardConfigModel.js";
 import { createDashboardConfigRepository } from "./dashboardConfigRepository.js";
+import { loadDashboardEdgeVoices } from "./dashboardEdgeVoiceCatalog.js";
 
 export * from "../config/dashboardTypes.js";
 export { resolveDashboardSectionState } from "../config/dashboardSectionState.js";
@@ -29,7 +30,8 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
     },
     async updateSettings(guildId: string, updates: Record<string, unknown>) {
       const docs = await repository.readAll(guildId);
-      const plan = planDashboardUpdates(docs, updates);
+      const catalog = Object.prototype.hasOwnProperty.call(updates, "tts.voice") ? await loadDashboardEdgeVoices() : null;
+      const plan = planDashboardUpdates(docs, updates, catalog?.voices.map(voice => voice.value));
       const revision = plan.saved.length
         ? await repository.saveDocs(guildId, plan.patches, plan.changedSections)
         : undefined;

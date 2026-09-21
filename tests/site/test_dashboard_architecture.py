@@ -497,6 +497,7 @@ def test_dashboard_route_registration_order_remains_stable() -> None:
         ("GET", "/api/public/identity"),
         ("GET", "/api/auth/session"),
         ("POST", "/api/auth/logout"),
+        ("GET", "/api/dashboard/tts/voices"),
         ("GET", "/api/dashboard/servers"),
         ("GET", "/api/dashboard/guild/:guildId/invite"),
         ("GET", "/api/dashboard/bootstrap"),

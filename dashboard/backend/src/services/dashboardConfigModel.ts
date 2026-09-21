@@ -57,7 +57,14 @@ export function dashboardCommandContextFromGuild(guild: Record<string, unknown>)
   };
 }
 
-export function planDashboardUpdates(docs: DashboardDocs, updates: Record<string, unknown>): DashboardUpdatePlan {
+export function planDashboardUpdates(docs: DashboardDocs, updates: Record<string, unknown>, edgeVoices: readonly string[] = []): DashboardUpdatePlan {
+  if (Object.prototype.hasOwnProperty.call(updates, "tts.voice")) {
+    const voice = String(updates["tts.voice"] ?? "").trim();
+    const current = String(getPath(docs.guild, "tts_defaults.voice") ?? "");
+    if (voice && voice !== current && !edgeVoices.includes(voice)) {
+      throw new DashboardConfigValueError("tts.voice", "Esta voz não está no catálogo disponível. Atualize as vozes e escolha novamente.");
+    }
+  }
   const fieldsById = new Map(allDashboardFields().map((field) => [field.id, field]));
   const patches = new Map<DashboardFieldScope, Record<string, unknown>>();
   const saved: string[] = [];
@@ -65,7 +72,7 @@ export function planDashboardUpdates(docs: DashboardDocs, updates: Record<string
   for (const [fieldId, rawValue] of Object.entries(updates || {}).slice(0, 250)) {
     const field = fieldsById.get(fieldId);
     if (!field) continue;
-    const value = normalizeFieldValue(field, rawValue);
+    const value = field.id === "tts.voice" ? String(rawValue ?? "").trim() : normalizeFieldValue(field, rawValue);
     if (field.id === "economy.staff_role_id" && String(value) === String(docs.guild.guild_id)) {
       throw new DashboardConfigValueError(field.id, "O cargo @everyone não pode administrar a economia.");
     }

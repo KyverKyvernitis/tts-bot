@@ -11,7 +11,6 @@ export function RoleMultiEditor({ field, value, options, onChange }: { field: Da
   const [working, setWorking] = useState<string[]>(selected);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { if (!open) setWorking(selected); }, [open, value]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -19,7 +18,7 @@ export function RoleMultiEditor({ field, value, options, onChange }: { field: Da
     const previousOverflow = document.body.style.overflow;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : triggerRef.current;
     document.body.style.overflow = "hidden";
-    const focusTimer = window.setTimeout(() => searchRef.current?.focus(), 0);
+    const focusTimer = window.setTimeout(() => panelRef.current?.querySelector<HTMLButtonElement>("header button")?.focus({ preventScroll: true }), 0);
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -56,7 +55,7 @@ export function RoleMultiEditor({ field, value, options, onChange }: { field: Da
     <button type="button" className="osk-multi-sheet__backdrop" onClick={() => setOpen(false)} aria-label="Fechar" />
     <div className="osk-multi-sheet__panel" ref={panelRef}>
       <header><div><strong>{field.label}</strong><small>{working.length} selecionado{working.length === 1 ? "" : "s"}</small></div><button type="button" onClick={() => setOpen(false)} aria-label="Fechar"><X size={18} /></button></header>
-      <label className="osk-multi-sheet__search"><Search size={16} /><input ref={searchRef} aria-label="Buscar cargo" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar cargo" /></label>
+      <label className="osk-multi-sheet__search"><Search size={16} /><input aria-label="Buscar cargo" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar cargo" /></label>
       <div className="osk-multi-sheet__list">
         {filtered.map((option) => <button key={option.value} type="button" data-selected={working.includes(option.value) || undefined} onClick={() => toggle(option.value)}>
           <span><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span>{working.includes(option.value) && <Check size={17} />}

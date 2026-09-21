@@ -91,9 +91,25 @@
 .osk-birthday-time input { width: 124px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .osk-tts-settings { display: grid; gap: 18px; min-width: 0; }
 .osk-tts-engines { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 18px; align-items: start; }
-.osk-tts-engine > header { margin-bottom: 10px; }
-.osk-tts-prefix { display: flex; align-items: center; gap: 8px; margin: 0 0 22px; color: var(--osk-muted); font-size: 12px; }
-.osk-tts-prefix code { padding: 3px 9px; border: 1px solid var(--osk-line); border-radius: 6px; color: var(--osk-ink); font-size: 14px; }
+.osk-tts-engine > header { flex-wrap: wrap; justify-content: space-between; gap: 12px; margin-bottom: 22px; }
+.osk-tts-engine-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.osk-tts-prefix { display: flex; align-items: center; gap: 8px; color: var(--osk-muted); font-size: 12px; }
+.osk-tts-prefix .osk-field-control { width: 76px; }
+.osk-module-settings .osk-tts-prefix input { min-height: 44px; width: 100%; padding: 8px; text-align: center; font-size: 16px; }
+.osk-tts-prefix:has(.osk-field-error) { flex-basis: 100%; align-items: flex-start; }
+.osk-tts-prefix:has(.osk-field-error) .osk-field-control { flex: 1; }
+.osk-tts-prefix[data-changed] > span::after, .osk-edge-picker[data-changed] label[for="field-tts.voice"]::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 6px; border-radius: 50%; background: var(--osk-ink); vertical-align: middle; }
+.osk-edge-picker { min-width: 0; margin-bottom: 20px; padding-bottom: 18px; border-bottom: 1px solid var(--osk-line); }
+.osk-tts-voice-pair { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+.osk-tts-voice-pair > div { min-width: 0; }
+.osk-tts-voice-pair label { display: block; margin-bottom: 9px; font-size: 13px; font-weight: 500; }
+.osk-tts-resolved { display: block; margin-top: 7px; color: var(--osk-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.osk-tts-catalog-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 12px; color: var(--osk-muted); font-size: 12px; line-height: 1.5; }
+.osk-tts-catalog-note button { min-height: 36px; padding: 4px 0; color: var(--osk-ink); background: transparent; text-decoration: underline; font-size: 12px; }
+.osk-module-settings .osk-tts-engine .osk-compact-field[data-type="text"] { grid-template-columns: minmax(0,1fr); gap: 6px; padding-block: 12px; }
+.osk-module-settings .osk-tts-engine .osk-range-control output { min-width: 55px; padding: 5px 8px; border-radius: 7px; color: var(--osk-ink); background: var(--osk-paper-muted); }
+.osk-tts-extra-prefixes .osk-compact-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 22px; }
+.osk-module-settings .osk-tts-extra-prefixes .osk-compact-field { grid-template-columns: minmax(0,1fr); gap: 9px; padding: 0; border: 0; }
 .osk-module-settings .osk-tts-engine .osk-compact-field { grid-template-columns: minmax(0,1fr); gap: 10px; }
 .osk-module-settings .osk-range-control { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .osk-module-settings .osk-range-control input[type="range"] { flex: 1; min-width: 0; width: 0; padding: 0; box-shadow: none; background: transparent; }
@@ -114,6 +130,7 @@
 .osk-ticket-flow__header > .osk-field-control { flex: 0 0 auto; width: auto; }
 
 @media (max-width:1100px) {
+  .osk-tts-voice-pair { grid-template-columns: minmax(0,1fr); }
   .osk-module-settings .osk-message-group-panel { grid-template-columns: minmax(0,1fr); }
   .osk-module-settings .osk-message-group-settings .osk-compact-field { grid-template-columns: minmax(130px, .8fr) minmax(0,1fr); }
 }
@@ -146,6 +163,7 @@
   .osk-birthday-time { flex-wrap: wrap; padding: 13px; }
   .osk-birthday-time input { margin-left: 33px; }
   .osk-tts-engines { grid-template-columns: minmax(0,1fr); }
+  .osk-tts-extra-prefixes .osk-compact-fields { grid-template-columns: minmax(0,1fr); gap: 18px; }
   .osk-economy-controls { grid-template-columns: minmax(0,1fr); gap: 14px; }
   .osk-economy-controls .osk-settings-card > p { min-height: 0; }
   .osk-module-advanced > summary { padding: 16px; }

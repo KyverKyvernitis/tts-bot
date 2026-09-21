@@ -30,6 +30,7 @@ export function useSmartSelect(options: SmartSelectOption[], value: string, disa
   const popoverRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const focusedOnOpenRef = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
   const selected = options.find((option) => option.value === value) ?? null;
   const searchable = options.length > 8;
@@ -118,19 +119,21 @@ export function useSmartSelect(options: SmartSelectOption[], value: string, disa
   }, [mounted, presentation]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible) { focusedOnOpenRef.current = false; return; }
     const selectedIndex = filteredOptions.findIndex((option) => option.value === value);
     setActiveIndex(selectedIndex >= 0 && !filteredOptions[selectedIndex]?.disabled
       ? selectedIndex
       : firstEnabledSmartSelectIndex(filteredOptions));
     const focusTimer = window.setTimeout(() => {
       updatePosition();
-      if (searchable) searchRef.current?.focus({ preventScroll: true });
-      else listRef.current?.focus({ preventScroll: true });
-      listRef.current?.querySelector<HTMLElement>('[data-selected="true"]')?.scrollIntoView({ block: "nearest" });
+      if (!focusedOnOpenRef.current) {
+        focusedOnOpenRef.current = true;
+        if (document.activeElement !== searchRef.current) listRef.current?.focus({ preventScroll: true });
+        listRef.current?.querySelector<HTMLElement>('[data-selected="true"]')?.scrollIntoView({ block: "nearest" });
+      }
     }, 40);
     return () => window.clearTimeout(focusTimer);
-  }, [filteredOptions, searchable, updatePosition, value, visible]);
+  }, [filteredOptions, updatePosition, value, visible]);
 
   useEffect(() => () => {
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
@@ -144,7 +147,10 @@ export function useSmartSelect(options: SmartSelectOption[], value: string, disa
 
   const handleOptionsKeyDown = useCallback((event: KeyboardEvent<HTMLInputElement | HTMLUListElement>) => {
     if (event.key === "Tab") {
-      close(false);
+      const toSearch = event.currentTarget === listRef.current && event.shiftKey && searchable;
+      const toList = event.currentTarget === searchRef.current && !event.shiftKey;
+      if (toSearch || toList) { event.preventDefault(); (toSearch ? searchRef.current : listRef.current)?.focus({ preventScroll: true }); }
+      else close(false);
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
       setActiveIndex((index) => adjacentEnabledSmartSelectIndex(filteredOptions, index < 0 ? -1 : index, 1));
@@ -162,7 +168,7 @@ export function useSmartSelect(options: SmartSelectOption[], value: string, disa
       const option = filteredOptions[activeIndex];
       if (option && !option.disabled) commit(option.value);
     }
-  }, [activeIndex, close, commit, filteredOptions]);
+  }, [activeIndex, close, commit, filteredOptions, searchable]);
 
   const handleTransitionEnd = useCallback((event: TransitionEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget || visible) return;

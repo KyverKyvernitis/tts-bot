@@ -10,6 +10,7 @@ const fields = [
   { ...field("tts.voice", "select"), options: [{ value: "pt-BR-AntonioNeural", label: "Antônio" }] },
   { ...field("tts.language", "select"), options: [{ value: "pt", label: "Português" }, { value: "en", label: "Inglês" }] },
   field("tts.rate", "text"), field("tts.pitch", "text"), field("tts.voice_channel_id", "channel"),
+  field("tts.edge_prefix", "text"), field("tts.gtts_prefix", "text"), field("tts.atts_prefix", "text"), field("tts.teto_prefix", "text"),
   { ...field("tts.engine", "select"), options: [{ value: "edge", label: "Selecionar engine" }] },
 ];
 const render = (draft: Record<string, unknown>) => renderToStaticMarkup(React.createElement(TtsVoiceSettings, { fields, values: draft, draft, guildOptions: null, onChange() {} }));
@@ -27,7 +28,8 @@ test("ambos os motores aparecem com seus controles sem depender de engine legada
 
 test("valor vazio informa o padrão real em vez de pedir escolha de voz", () => {
   const html = render({});
-  assert.match(html, /Francisca — padrão do bot/);
+  assert.match(html, /Padrão do bot/);
+  assert.match(html, /Francisca/);
   assert.match(html, /Português — padrão do bot/);
   assert.doesNotMatch(html, /Selecione uma opção/);
 });
@@ -37,6 +39,7 @@ test("mostra idioma legado e prefixos salvos sem reescrever o rascunho", () => {
   const before = structuredClone(draft);
   const html = render(draft);
   assert.match(html, /Português — configuração atual/);
-  assert.match(html, /<code>!!<\/code>/); assert.match(html, /<code>\?\?<\/code>/);
+  assert.match(html, /aria-label="tts.edge_prefix"[^>]*value="!!"/); assert.match(html, /aria-label="tts.gtts_prefix"[^>]*value="\?\?"/);
+  assert.match(html, /data-field-id="tts.atts_prefix"/); assert.match(html, /data-field-id="tts.teto_prefix"/);
   assert.deepEqual(draft, before);
 });
