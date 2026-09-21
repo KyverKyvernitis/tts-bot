@@ -30,10 +30,13 @@ async def enviar_controle_remoto(
     """
 
     action = str(action or "").strip().lower()
-    if action in {"stop", "skip", "shuffle", "previous"}:
+    # Só STOP invalida o pipeline local inteiro. Skip/previous/shuffle são
+    # controles da sessão já ativa no Phone Worker e NÃO podem cancelar o
+    # refill da playlist virtual; isso fazia skips rápidos matarem a playlist.
+    if action == "stop":
         cancel = getattr(router, "cancel_pending_music_operations", None)
         if callable(cancel):
-            cancel(int(guild_id), reason=f"agent_{action}")
+            cancel(int(guild_id), reason="agent_stop")
 
     result = await music_agent_command(
         action,

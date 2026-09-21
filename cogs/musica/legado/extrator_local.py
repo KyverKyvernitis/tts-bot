@@ -1358,25 +1358,17 @@ class MusicExtractor:
         api_batch: ApiTrackBatch | None = None
         api_error = ""
         # Direct track nunca precisa materializar uma janela de playlist. Para
-        # coleções Spotify, peça desde a primeira leitura somente a janela que
-        # cabe no player; o cursor público continua o restante sob demanda. Isso
-        # evita baixar/converter dezenas de metadados que ainda não serão usados.
+        # coleções Spotify, leia uma janela de metadata leve já no primeiro HTML.
+        # Isso NÃO resolve áudio antecipadamente: o Phone Worker continua JIT,
+        # mas ganha um runway de próximas faixas imediatamente e não precisa
+        # fazer uma segunda requisição ao Spotify logo após começar a tocar.
         if profile.resource_type == "track":
             metadata_limit = 1
         elif profile.platform == "spotify" and profile.resource_type in {"playlist", "album"}:
-            if bool(getattr(config, "MUSIC_PLAYLIST_LAZY_LOAD", True)):
-                # Start-first: a abertura da playlist só precisa descobrir a
-                # primeira faixa e um cursor. O refill posterior materializa a
-                # janela completa sem atrasar o início do áudio.
-                metadata_limit = min(
-                    self.max_playlist_items,
-                    max(1, int(getattr(config, "MUSIC_PLAYLIST_STARTUP_SIZE", 1) or 1)),
-                )
-            else:
-                metadata_limit = min(
-                    self.max_playlist_items,
-                    max(5, int(getattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25) or 25)),
-                )
+            metadata_limit = min(
+                self.max_playlist_items,
+                max(5, int(getattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25) or 25)),
+            )
         else:
             metadata_limit = self.max_playlist_items
         try:

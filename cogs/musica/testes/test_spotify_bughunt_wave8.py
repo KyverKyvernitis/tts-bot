@@ -120,7 +120,7 @@ async def test_colecao_prefere_ordem_server_rendered_a_json_hidratado(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_continuacao_nao_paga_oembed_e_evitar_embed_depois_da_primeira_janela_grande(
+async def test_continuacao_nao_paga_oembed_e_prioriza_embed_em_qualquer_offset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     providers = MusicApiProviders()
@@ -144,7 +144,7 @@ async def test_continuacao_nao_paga_oembed_e_evitar_embed_depois_da_primeira_jan
     assert [track.title for track in batch.tracks] == [f"Faixa {idx}" for idx in range(56, 61)]
     assert batch.playlist_cursor is not None
     assert batch.playlist_cursor.next_offset == 60
-    assert seen_urls == [PLAYLIST]
+    assert seen_urls == ["https://open.spotify.com/embed/playlist/5swQ0HSpbndKvuoYXE9yjO"]
 
 
 @pytest.mark.asyncio

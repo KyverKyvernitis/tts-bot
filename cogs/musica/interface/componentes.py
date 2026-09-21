@@ -2401,9 +2401,6 @@ class MusicPlayerView(discord.ui.LayoutView):
         if not interaction.response.is_done():
             with contextlib.suppress(Exception):
                 await interaction.response.defer(ephemeral=True, thinking=True)
-        if action in {"stop", "skip", "shuffle"}:
-            with contextlib.suppress(Exception):
-                self.router.cancel_pending_music_operations(self.guild_id, reason=f"agent_{action}")
         try:
             await enviar_controle_remoto(
                 self.router,

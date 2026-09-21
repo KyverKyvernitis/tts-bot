@@ -55,20 +55,20 @@ async def test_playlist_publica_prioriza_embed_e_preserva_ordem(monkeypatch: pyt
     providers.spotify_public_fallback_max_tracks = 100
     seen_urls: list[str] = []
 
-    async def oembed(url: str):
-        return {"title": "Minha Playlist", "thumbnail": "https://img.example/cover.jpg"}
+    async def forbidden_oembed(url: str):
+        raise AssertionError("playlist não deve pagar uma requisição oEmbed separada")
 
     async def text(url: str, *, headers=None, max_bytes: int = 5_000_000):
         seen_urls.append(url)
         return """
-        <html><body>
+        <html><head><meta property="og:image" content="https://img.example/cover.jpg"></head><body>
           <h1>Minha Playlist</h1>
           <h3>Primeira</h3><h4>Artista 1</h4><span>03:00</span>
           <h3>Segunda</h3><h4>Artista 2</h4><span>02:30</span>
         </body></html>
         """
 
-    monkeypatch.setattr(providers, "_spotify_public_oembed", oembed)
+    monkeypatch.setattr(providers, "_spotify_public_oembed", forbidden_oembed)
     monkeypatch.setattr(providers, "_to_thread_text", text)
 
     batch = await providers.spotify_public_batch_from_url(

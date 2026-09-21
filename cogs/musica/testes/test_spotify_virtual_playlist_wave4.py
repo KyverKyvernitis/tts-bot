@@ -176,9 +176,12 @@ async def test_extractor_propaga_cursor_da_primeira_janela(monkeypatch: pytest.M
     )
 
     async def initial(url: str, *, limit: int = 25):
-        assert limit == 1
+        assert limit == 25
         return ApiTrackBatch(
-            tracks=[ApiTrackCandidate(title="Primeira", artist="Artista", duration=180.0, provider="spotify", source="Spotify público")],
+            tracks=[
+                ApiTrackCandidate(title=f"Faixa {idx}", artist="Artista", duration=180.0, provider="spotify", source="Spotify público")
+                for idx in range(1, 26)
+            ],
             title="Inicial",
             is_playlist=True,
             truncated=True,

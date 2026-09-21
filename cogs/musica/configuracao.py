@@ -88,13 +88,14 @@ MUSIC_MAX_PLAYLIST_ITEMS = min(100, max(1, _parse_int(os.getenv("MUSIC_MAX_PLAYL
 # Playlist virtual: limite da janela materializada, não limite lógico da coleção.
 # O objetivo é manter consumo de RAM estável mesmo para playlists enormes.
 MUSIC_PLAYLIST_WINDOW_SIZE = min(50, max(5, _parse_int(os.getenv("MUSIC_PLAYLIST_WINDOW_SIZE", "25"), 25)))
-# Start-first: ao abrir uma playlist virtual materialize só o mínimo necessário
-# para iniciar o áudio. O restante é preenchido em background depois que o
-# primeiro play já foi confirmado pelo Phone Worker.
-MUSIC_PLAYLIST_STARTUP_SIZE = min(
-    MUSIC_PLAYLIST_WINDOW_SIZE,
-    max(1, _parse_int(os.getenv("MUSIC_PLAYLIST_STARTUP_SIZE", "1"), 1)),
-)
+# Buffer inicial de metadata leve. Não é pré-resolução de áudio: as faixas
+# continuam JIT no Phone Worker. Materializar a janela inteira evita a corrida
+# em que skips rápidos alcançavam o cursor antes do primeiro refill e também
+# elimina uma segunda leitura pública do Spotify logo após o start.
+# ``MUSIC_PLAYLIST_STARTUP_SIZE`` continua exposto como constante interna para
+# compatibilidade com o restante do código, mas acompanha a janela materializada:
+# o custo aqui é só metadata leve já presente no mesmo documento HTML.
+MUSIC_PLAYLIST_STARTUP_SIZE = MUSIC_PLAYLIST_WINDOW_SIZE
 MUSIC_PLAYLIST_LOW_WATERMARK = min(
     MUSIC_PLAYLIST_WINDOW_SIZE - 1,
     max(1, _parse_int(os.getenv("MUSIC_PLAYLIST_LOW_WATERMARK", "8"), 8)),

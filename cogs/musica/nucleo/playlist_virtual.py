@@ -18,13 +18,16 @@ class PlaylistWindowPolicy:
 
     low_watermark: int
     high_watermark: int
-    startup_size: int = 1
+    startup_size: int = 25
 
     @classmethod
     def from_config(cls) -> "PlaylistWindowPolicy":
         high = max(5, min(50, int(getattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25) or 25)))
         low = max(1, min(high - 1, int(getattr(config, "MUSIC_PLAYLIST_LOW_WATERMARK", 8) or 8)))
-        startup = max(1, min(high, int(getattr(config, "MUSIC_PLAYLIST_STARTUP_SIZE", 1) or 1)))
+        # O buffer inicial é metadata leve, não áudio resolvido. Use a janela
+        # inteira para que skips imediatos encontrem próximas faixas prontas e
+        # para não precisar reler o mesmo HTML logo após iniciar a primeira.
+        startup = high
         return cls(low_watermark=low, high_watermark=high, startup_size=startup)
 
     def refill_limit(self, materialized_count: int) -> int:
@@ -45,10 +48,10 @@ def bounded_initial_window(
     """
 
     policy = policy or PlaylistWindowPolicy.from_config()
-    # A primeira janela é propositalmente minúscula: a primeira faixa deve
-    # chegar ao Phone Worker antes de gastarmos tempo convertendo/enfileirando
-    # dezenas de metadados que ainda não serão tocados. O refill assíncrono
-    # completa até ``high_watermark`` logo após o start.
+    # A janela inicial contém somente metadata leve. Nenhuma dessas faixas é
+    # resolvida por yt-dlp antecipadamente: o Phone Worker continua JIT e começa
+    # pela primeira. Manter o runway completo elimina a corrida cursor/refill em
+    # skips rápidos sem aumentar o custo de resolução de áudio.
     selected = list(tracks[: policy.startup_size])
     if cursor is None:
         return selected, None

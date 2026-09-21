@@ -31,12 +31,11 @@ class SpotifyPublicoMixin:
         if kind == "track":
             return [embed, page]
 
-        # O embed é o caminho mais leve para o começo da coleção, mas a
-        # superfície pública costuma renderizar só uma janela limitada. Depois
-        # da primeira janela grande, tente o Web Player primeiro para evitar uma
-        # requisição sabidamente inútil e permitir páginas maiores quando o
-        # HTML/JSON público as expuser. Não é um limite lógico da playlist.
-        return [page, embed] if max(0, int(offset)) >= 50 else [embed, page]
+        # O embed é substancialmente mais leve que o Web Player e já expõe a
+        # lista server-rendered em muitas playlists. Tente-o primeiro em TODAS
+        # as janelas; só caia para a página completa quando o embed não alcançar
+        # o offset solicitado. Isso reduz latência e bytes sem impor limite.
+        return [embed, page]
 
     async def _spotify_public_oembed(self, url: str) -> dict[str, str]:
         """Metadata básica oficial e pública, sem OAuth/Web API.
@@ -398,9 +397,10 @@ class SpotifyPublicoMixin:
         # Um item extra permite distinguir "janela cheia" de "fim conhecido"
         # sem manter o restante da playlist em memória.
         probe_limit = min(self.spotify_public_fallback_max_tracks, limit + 1)
-        # Refill não precisa pagar uma segunda requisição de oEmbed: título e
-        # capa já podem vir do próprio HTML, e a UI mantém o metadata anterior.
-        oembed = await self._spotify_public_oembed(original_url) if offset == 0 else {}
+        # Coleções não precisam de oEmbed: o próprio embed já traz título/capa
+        # junto das faixas. Evitar essa requisição extra deixa playlist direct
+        # play mais rápida. Track individual ainda usa oEmbed como fallback leve.
+        oembed = await self._spotify_public_oembed(original_url) if offset == 0 and kind == "track" else {}
         last_title = str(oembed.get("title") or "").strip()
         fallback_thumbnail = str(oembed.get("thumbnail") or "").strip()
 

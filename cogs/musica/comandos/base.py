@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import logging
 
 import discord
@@ -53,9 +52,6 @@ class BaseComandosMusica:
     async def _send_music_agent_control(self, ctx: commands.Context, action: str, success_message: str) -> bool:
         if not self._music_agent_default_enabled():
             return False
-        if action in {"stop", "skip", "shuffle"}:
-            with contextlib.suppress(Exception):
-                self.router.cancel_pending_music_operations(ctx.guild.id, reason=f"agent_{action}")
         try:
             voice = getattr(getattr(ctx.author, "voice", None), "channel", None)
             await enviar_controle_remoto(

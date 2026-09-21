@@ -25,13 +25,14 @@ def _track(idx: int) -> MusicTrack:
     )
 
 
-def test_policy_start_first_padrao_materializa_uma_faixa(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_policy_start_first_mantem_runway_completo_de_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25)
     monkeypatch.setattr(config, "MUSIC_PLAYLIST_LOW_WATERMARK", 8)
+    # Mesmo uma configuração antiga de 1 não deve reabrir a corrida de skip/refill.
     monkeypatch.setattr(config, "MUSIC_PLAYLIST_STARTUP_SIZE", 1)
 
     policy = PlaylistWindowPolicy.from_config()
-    assert policy.startup_size == 1
+    assert policy.startup_size == 25
     assert policy.high_watermark == 25
     assert policy.low_watermark == 8
 
@@ -44,16 +45,17 @@ def test_policy_start_first_padrao_materializa_uma_faixa(monkeypatch: pytest.Mon
     )
     first, next_cursor = bounded_initial_window(tracks, cursor, policy=policy)
 
-    assert [track.title for track in first] == ["Faixa 1"]
+    assert [track.title for track in first] == [f"Faixa {idx}" for idx in range(1, 26)]
     assert next_cursor is not None
-    assert next_cursor.next_offset == 1
+    assert next_cursor.next_offset == 25
     assert next_cursor.exhausted is False
 
 
 @pytest.mark.asyncio
-async def test_extractor_spotify_playlist_pede_so_primeira_faixa_no_start(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_extractor_spotify_playlist_pede_janela_leve_inteira_no_start(monkeypatch: pytest.MonkeyPatch) -> None:
     extractor = MusicExtractor(max_playlist_items=100)
     monkeypatch.setattr(config, "MUSIC_PLAYLIST_LAZY_LOAD", True)
+    monkeypatch.setattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25)
     monkeypatch.setattr(config, "MUSIC_PLAYLIST_STARTUP_SIZE", 1)
 
     seen_limits: list[int] = []
@@ -62,7 +64,7 @@ async def test_extractor_spotify_playlist_pede_so_primeira_faixa_no_start(monkey
         source_url=SPOTIFY_PLAYLIST,
         title="Gigante",
         resource_id="5swQ0HSpbndKvuoYXE9yjO",
-        next_offset=1,
+        next_offset=25,
         exhausted=False,
     )
 
@@ -71,12 +73,13 @@ async def test_extractor_spotify_playlist_pede_so_primeira_faixa_no_start(monkey
         return ApiTrackBatch(
             tracks=[
                 ApiTrackCandidate(
-                    title="Primeira",
+                    title=f"Faixa {idx}",
                     artist="Artista",
                     duration=180.0,
                     source="Spotify público",
                     provider="spotify",
                 )
+                for idx in range(1, 26)
             ],
             title="Gigante",
             is_playlist=True,
@@ -88,31 +91,31 @@ async def test_extractor_spotify_playlist_pede_so_primeira_faixa_no_start(monkey
     monkeypatch.setattr(extractor.api, "metadata_batch_from_url", metadata)
     batch = await extractor.extract(SPOTIFY_PLAYLIST, requester_id=1, requester_name="Core")
 
-    assert seen_limits == [1]
-    assert len(batch.tracks) == 1
+    assert seen_limits == [25]
+    assert len(batch.tracks) == 25
     assert batch.playlist_cursor is cursor
 
 
-def test_refill_inicial_e_agendado_sem_esperar_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_refill_inicial_nao_e_agendado_quando_runway_ja_esta_cheio(monkeypatch: pytest.MonkeyPatch) -> None:
     from cogs.musica.reproducao import playlist_virtual as virtual_runtime
 
     calls: list[tuple[object, int, dict]] = []
 
     def schedule(router, guild_id: int, remote: dict) -> bool:
         calls.append((router, guild_id, remote))
-        return True
+        return False
 
     monkeypatch.setattr(virtual_runtime, "schedule_playlist_refill_if_needed", schedule)
     router = SimpleNamespace()
     remote = {
         "status": "playing",
         "virtual_playlist": {
-            "cursor": {"provider": "spotify_public", "source_url": SPOTIFY_PLAYLIST, "next_offset": 1},
-            "materialized_before": 0,
+            "cursor": {"provider": "spotify_public", "source_url": SPOTIFY_PLAYLIST, "next_offset": 25},
+            "materialized_before": 24,
         },
     }
 
-    assert virtual_runtime.schedule_playlist_refill_from_result(router, 77, {"state": remote}) is True
+    assert virtual_runtime.schedule_playlist_refill_from_result(router, 77, {"state": remote}) is False
     assert calls == [(router, 77, remote)]
 
 

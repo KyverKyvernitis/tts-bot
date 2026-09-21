@@ -79,9 +79,10 @@ async def test_enviar_controle_remoto_invalida_operacao_e_sincroniza(monkeypatch
     )
 
     assert result["ok"] is True
-    assert chamadas[0] == ("cancel", 123, "agent_skip")
-    assert chamadas[1][0:2] == ("command", "skip")
-    assert chamadas[1][2]["guild_id"] == 123
-    assert chamadas[2][0:2] == ("sync", 123)
-    assert chamadas[2][4]["voice_channel_id"] == 55
-    assert chamadas[2][4]["text_channel_id"] == 66
+    # Skip não invalida mais o refill da playlist virtual.
+    assert not any(item[0] == "cancel" for item in chamadas)
+    assert chamadas[0][0:2] == ("command", "skip")
+    assert chamadas[0][2]["guild_id"] == 123
+    assert chamadas[1][0:2] == ("sync", 123)
+    assert chamadas[1][4]["voice_channel_id"] == 55
+    assert chamadas[1][4]["text_channel_id"] == 66
