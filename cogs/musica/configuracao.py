@@ -89,6 +89,9 @@ MUSIC_SEARCH_RESULTS = max(1, min(10, _parse_int(os.getenv("MUSIC_SEARCH_RESULTS
 MUSIC_SEARCH_CHOICE_MEMORY_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_ENABLED", "true"), True)
 MUSIC_SEARCH_CHOICE_MEMORY_MAX_ENTRIES = max(1, min(100000, _parse_int(os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_MAX_ENTRIES", "10000"), 10000)))
 MUSIC_SEARCH_CHOICE_MEMORY_PATH = (os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_PATH", "") or "").strip()
+MUSIC_SEARCH_CHOICE_MEMORY_APPROX_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_APPROX_ENABLED", "true"), True)
+MUSIC_SEARCH_CHOICE_MEMORY_APPROX_MAX_EDITS = max(1, min(3, _parse_int(os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_APPROX_MAX_EDITS", "2"), 2)))
+MUSIC_SEARCH_CHOICE_MEMORY_APPROX_MIN_CHARS = max(4, min(24, _parse_int(os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_APPROX_MIN_CHARS", "4"), 4)))
 MUSIC_YOUTUBE_SEARCH_API_FIRST = _parse_bool(os.getenv("MUSIC_YOUTUBE_SEARCH_API_FIRST", "true"), True)
 # Pesquisa textual do YouTube deve ser rápida: por padrão só lista metadata leve
 # (API oficial se configurada, depois yt-dlp flat). Desative para permitir fallback

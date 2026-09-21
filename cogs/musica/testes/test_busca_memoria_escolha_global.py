@@ -252,3 +252,98 @@ async def test_playing_de_link_aprende_alias_global_para_busca() -> None:
     assert hit.webpage_url == "https://youtube.test/watch?v=505"
     assert hit.stream_url == ""
     limpar_memoria_busca()
+
+@pytest.mark.asyncio
+async def test_direct_hit_aproximado_typo_pula_api_worker_e_ranking(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import resolucao
+
+    limpar_memoria_busca()
+    registrar_selecao_busca(
+        "mili compass",
+        MusicTrack(
+            title="Mili - Compass",
+            webpage_url="https://youtube.test/compass",
+            original_url="mili compass",
+            requester_id=1,
+            uploader="Mili",
+            source="youtube",
+        ),
+    )
+
+    async def proibido(*args, **kwargs):
+        raise AssertionError("fuzzy direct-hit nao deve consultar rede")
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_youtube_fast", proibido)
+    monkeypatch.setattr(resolucao, "require_music_worker_available_async", proibido)
+
+    lote = await resolucao.resolve_music_tracks_on_worker(
+        "mili compas",
+        requester_id=999,
+        requester_name="Outro",
+        metadata_only=True,
+        guild_id=555,
+    )
+
+    assert len(lote.tracks) == 1
+    assert lote.tracks[0].webpage_url == "https://youtube.test/compass"
+    assert lote.tracks[0].requester_id == 999
+    limpar_memoria_busca()
+
+
+def test_direct_hit_aproximado_aceita_ordem_de_tokens_equivalente() -> None:
+    from cogs.musica.busca import obter_escolha_busca
+
+    limpar_memoria_busca()
+    registrar_selecao_busca(
+        "Arctic Monkeys - 505",
+        MusicTrack(
+            title="Arctic Monkeys - 505",
+            webpage_url="https://youtube.test/505",
+            original_url="arctic monkeys 505",
+            requester_id=1,
+            uploader="Arctic Monkeys",
+            source="youtube",
+        ),
+    )
+
+    hit = obter_escolha_busca("505 arctic monkeys", requester_id=2)
+    assert hit is not None
+    assert hit.webpage_url == "https://youtube.test/505"
+    limpar_memoria_busca()
+
+
+def test_direct_hit_aproximado_nao_mistura_qualificador() -> None:
+    from cogs.musica.busca import obter_escolha_busca
+
+    limpar_memoria_busca()
+    registrar_selecao_busca(
+        "mili compass",
+        MusicTrack(
+            title="Mili - Compass",
+            webpage_url="https://youtube.test/compass",
+            requester_id=1,
+            source="youtube",
+        ),
+    )
+
+    assert obter_escolha_busca("mili compas live") is None
+    assert obter_escolha_busca("mili compas lyrics") is None
+    limpar_memoria_busca()
+
+
+def test_direct_hit_aproximado_nao_aproxima_consulta_so_numerica() -> None:
+    from cogs.musica.busca import obter_escolha_busca
+
+    limpar_memoria_busca()
+    registrar_selecao_busca(
+        "505",
+        MusicTrack(
+            title="Arctic Monkeys - 505",
+            webpage_url="https://youtube.test/505",
+            requester_id=1,
+            source="youtube",
+        ),
+    )
+
+    assert obter_escolha_busca("506") is None
+    limpar_memoria_busca()
