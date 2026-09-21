@@ -295,7 +295,7 @@ MUSIC_SEARCH_HTTP_DNS_CACHE_SECONDS = max(30.0, min(1800.0, _parse_float(os.gete
 # Se vier ao menos um resultado utilizavel, nao consultamos o Phone Worker.
 # A reproducao continua sendo resolvida exclusivamente pelo yt-dlp apos a escolha.
 MUSIC_SEARCH_API_FIRST_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_API_FIRST_ENABLED", "true"), True)
-MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS = max(0.15, min(1.5, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS", "0.45"), 0.45)))
+MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS = max(0.10, min(1.5, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS", "0.30"), 0.30)))
 # Guard local conservador para search.list. O valor é número de chamadas, não
 # unidades de quota; deixa margem para outros usos da mesma chave/projeto.
 MUSIC_SEARCH_YOUTUBE_API_QUOTA_GUARD_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_YOUTUBE_API_QUOTA_GUARD_ENABLED", "true"), True)

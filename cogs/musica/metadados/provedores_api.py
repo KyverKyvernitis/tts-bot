@@ -378,25 +378,25 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
         limit: int = 3,
         timeout_seconds: float | None = None,
     ) -> list[ApiTrackCandidate]:
+        """Uma unica search.list para o caminho API-first simplificado.
+
+        O circuit breaker pertence a ``busca.fontes`` para distinguir falha de
+        resposta vazia e decidir quando cair no Phone Worker. Aqui nao existe
+        retry nem fallback: uma tentativa, um timeout curto, e o erro propaga.
+        """
         if not (self.enabled and self.youtube_api_key and str(query or "").strip()):
             return []
         timeout_provider = max(
-            0.15,
-            float(timeout_seconds if timeout_seconds is not None else getattr(config, "MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS", 0.45) or 0.45),
+            0.10,
+            float(
+                timeout_seconds
+                if timeout_seconds is not None
+                else getattr(config, "MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS", 0.30) or 0.30
+            ),
         )
-        falhas_para_abrir = max(1, int(getattr(config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES", 2) or 2))
-        cooldown = max(1.0, float(getattr(config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS", 30.0) or 30.0))
-
-        async def _operacao() -> list[ApiTrackCandidate]:
-            return await self._youtube_search_com_quota(query, limit=limit, include_details=False)
-
-        return await executar_provider_resiliente(
-            "youtube",
-            _operacao,
-            timeout_seconds=timeout_provider,
-            falhas_para_abrir=falhas_para_abrir,
-            cooldown_seconds=cooldown,
-            fallback=[],
+        return await asyncio.wait_for(
+            self._youtube_search_com_quota(query, limit=limit, include_details=False),
+            timeout=timeout_provider,
         )
 
 
