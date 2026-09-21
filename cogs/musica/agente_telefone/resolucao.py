@@ -15,7 +15,16 @@ from ..busca import (
     registrar_busca_telemetria,
 )
 from ..busca.resiliencia import liberar_busca_profunda, tentar_reservar_busca_profunda
-from ..busca.latencia import headstart_adaptativo, registrar_latencia_api, registrar_latencia_worker
+from ..busca.latencia import (
+    grace_metadata_adaptativo,
+    headstart_adaptativo,
+    registrar_latencia_api,
+    registrar_latencia_deep,
+    registrar_latencia_metadata,
+    registrar_latencia_worker,
+    snapshot_latencia_busca,
+    timeout_deep_adaptativo,
+)
 from ..busca.chaves import chave_semantica_busca
 from ..busca.fontes import buscar_candidatos_multifonte, buscar_candidatos_youtube_fast
 from ..metadados.quota_youtube import snapshot_quota_youtube
@@ -80,8 +89,36 @@ def _registrar_telemetria_busca(
         quota_youtube = snapshot_quota_youtube(
             limite_diario=int(getattr(config, "MUSIC_SEARCH_YOUTUBE_API_DAILY_SOFT_CALLS", 80) or 0)
         )
+        latencia = snapshot_latencia_busca()
+        grace_base = max(
+            0.0,
+            float(getattr(config, "MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS", 0.08) or 0.0),
+        )
+        deep_base = max(
+            0.0,
+            float(getattr(config, "MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS", 5.0) or 0.0),
+        )
+        if bool(getattr(config, "MUSIC_SEARCH_ADAPTIVE_TAIL_ENABLED", True)):
+            min_samples = int(getattr(config, "MUSIC_SEARCH_ADAPTIVE_TAIL_MIN_SAMPLES", 4) or 4)
+            grace_atual = grace_metadata_adaptativo(
+                grace_base,
+                min_seconds=float(
+                    getattr(config, "MUSIC_SEARCH_METADATA_GRACE_MIN_SECONDS", 0.015) or 0.0
+                ),
+                min_samples=min_samples,
+            )
+            deep_atual = timeout_deep_adaptativo(
+                deep_base,
+                min_seconds=float(
+                    getattr(config, "MUSIC_SEARCH_DEEP_TIMEOUT_MIN_SECONDS", 3.0) or 3.0
+                ),
+                min_samples=min_samples,
+            )
+        else:
+            grace_atual = grace_base
+            deep_atual = deep_base
         logger.info(
-            "[music/search] telemetria agregada | buscas=%s cache_hits=%s deep=%s aplicadas=%s rejeitadas=%s suprimidas=%s sem_resultado=%s selecoes=%s primeiro=%s top3=%s lat_media_ms=%.1f lat_max_ms=%.1f score_medio=%.4f confidence_media=%.4f fontes=%s motivos=%s yt_api_calls=%s yt_api_blocked=%s yt_api_left=%s",
+            "[music/search] telemetria agregada | buscas=%s cache_hits=%s deep=%s aplicadas=%s rejeitadas=%s suprimidas=%s sem_resultado=%s selecoes=%s primeiro=%s top3=%s lat_media_ms=%.1f lat_max_ms=%.1f score_medio=%.4f confidence_media=%.4f fontes=%s motivos=%s yt_api_calls=%s yt_api_blocked=%s yt_api_left=%s api_ewma_ms=%.1f worker_ewma_ms=%.1f metadata_ewma_ms=%.1f metadata_util=%s/%s deep_ewma_ms=%.1f deep_sucesso=%s/%s grace_ms=%.1f deep_timeout_ms=%.0f",
             resumo.buscas,
             resumo.cache_hits,
             resumo.deep_solicitadas,
@@ -101,6 +138,16 @@ def _registrar_telemetria_busca(
             quota_youtube.chamadas,
             quota_youtube.bloqueadas,
             quota_youtube.restantes,
+            latencia.api_ewma_ms,
+            latencia.worker_ewma_ms,
+            latencia.metadata_ewma_ms,
+            latencia.metadata_uteis,
+            latencia.metadata_amostras,
+            latencia.deep_ewma_ms,
+            latencia.deep_sucessos,
+            latencia.deep_amostras,
+            grace_atual * 1000.0,
+            deep_atual * 1000.0,
         )
 
 
@@ -366,7 +413,9 @@ async def resolve_music_tracks_on_worker(
     )
 
     metadata_task: asyncio.Task | None = None
+    metadata_started: float | None = None
     if busca_textual and somente_metadados:
+        metadata_started = time.monotonic()
         metadata_task = asyncio.create_task(
             buscar_candidatos_multifonte(
                 clean_query,
@@ -512,6 +561,12 @@ async def resolve_music_tracks_on_worker(
                 raise
             except Exception as exc:
                 logger.debug("[music/search] provider metadata falhou | query=%r erro=%s", clean_query, exc)
+            finally:
+                if metadata_started is not None:
+                    registrar_latencia_metadata(
+                        elapsed_ms=(time.monotonic() - metadata_started) * 1000.0,
+                        util=bool(metadata_result),
+                    )
         elif (
             worker_suficiente
             and bool(getattr(config, "MUSIC_SEARCH_SKIP_PENDING_METADATA_WHEN_WORKER_SUFFICIENT", True))
@@ -523,20 +578,43 @@ async def resolve_music_tracks_on_worker(
                 len(worker_tracks_fast),
             )
         else:
-            grace = max(
+            grace_base = max(
                 0.0,
                 float(getattr(config, "MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS", 0.08) or 0.0),
             )
+            if bool(getattr(config, "MUSIC_SEARCH_ADAPTIVE_TAIL_ENABLED", True)):
+                grace = grace_metadata_adaptativo(
+                    grace_base,
+                    min_seconds=float(
+                        getattr(config, "MUSIC_SEARCH_METADATA_GRACE_MIN_SECONDS", 0.015) or 0.0
+                    ),
+                    min_samples=int(
+                        getattr(config, "MUSIC_SEARCH_ADAPTIVE_TAIL_MIN_SAMPLES", 4) or 4
+                    ),
+                )
+            else:
+                grace = grace_base
             try:
                 if grace <= 0.0:
                     raise asyncio.TimeoutError
                 metadata_result = await asyncio.wait_for(asyncio.shield(metadata_task), timeout=grace)
+                if metadata_started is not None:
+                    registrar_latencia_metadata(
+                        elapsed_ms=(time.monotonic() - metadata_started) * 1000.0,
+                        util=bool(metadata_result),
+                    )
             except asyncio.TimeoutError:
+                if metadata_started is not None:
+                    registrar_latencia_metadata(
+                        elapsed_ms=(time.monotonic() - metadata_started) * 1000.0,
+                        util=False,
+                    )
                 await _cancelar_tarefa_busca(metadata_task)
                 logger.debug(
-                    "[music/search] metadata excedeu grace pos-worker | query=%r grace_ms=%.0f",
+                    "[music/search] metadata excedeu grace pos-worker | query=%r grace_ms=%.0f base_ms=%.0f",
                     clean_query,
                     grace * 1000.0,
+                    grace_base * 1000.0,
                 )
             except asyncio.CancelledError:
                 raise
@@ -624,12 +702,24 @@ async def resolve_music_tracks_on_worker(
                 )
             else:
                 try:
-                    deep_timeout = min(
+                    deep_timeout_base = min(
                         total_timeout,
                         float(getattr(config, "MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS", 5.0) or 5.0),
                     )
+                    if bool(getattr(config, "MUSIC_SEARCH_ADAPTIVE_TAIL_ENABLED", True)):
+                        deep_timeout = timeout_deep_adaptativo(
+                            deep_timeout_base,
+                            min_seconds=float(
+                                getattr(config, "MUSIC_SEARCH_DEEP_TIMEOUT_MIN_SECONDS", 3.0) or 3.0
+                            ),
+                            min_samples=int(
+                                getattr(config, "MUSIC_SEARCH_ADAPTIVE_TAIL_MIN_SAMPLES", 4) or 4
+                            ),
+                        )
+                    else:
+                        deep_timeout = deep_timeout_base
                     logger.info(
-                        "[music/search] deep pass iniciado | query=%r deep_query=%r motivo=%s limit=%s score=%.4f confidence=%.4f margin=%.4f",
+                        "[music/search] deep pass iniciado | query=%r deep_query=%r motivo=%s limit=%s score=%.4f confidence=%.4f margin=%.4f timeout_ms=%.0f base_timeout_ms=%.0f",
                         clean_query,
                         decisao.query,
                         decisao.motivo,
@@ -637,6 +727,8 @@ async def resolve_music_tracks_on_worker(
                         decisao.top_score,
                         decisao.top_confianca,
                         decisao.margem,
+                        deep_timeout * 1000.0,
+                        deep_timeout_base * 1000.0,
                     )
                     avaliar_parcial = None
                     if bool(getattr(config, "MUSIC_SEARCH_DEEP_EARLY_EXIT_ENABLED", True)):
@@ -691,12 +783,16 @@ async def resolve_music_tracks_on_worker(
                         token=token,
                         query=decisao.query,
                         limit=decisao.limit,
-                        timeout_seconds=max(3.0, deep_timeout),
+                        timeout_seconds=deep_timeout,
                         requester_id=requester_id,
                         requester_name=requester_name,
                         executar_worker=executar_tarefa_resolucao,
                         buscar_metadata=buscar_candidatos_multifonte,
                         avaliar_parcial=avaliar_parcial,
+                    )
+                    registrar_latencia_deep(
+                        elapsed_ms=profundo.elapsed_ms,
+                        sucesso=bool(profundo.tracks or profundo.api_candidates),
                     )
                     if profundo.early_exit:
                         logger.info(
