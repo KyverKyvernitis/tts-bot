@@ -26,9 +26,14 @@ class SpotifyApiMixin:
 
     def _spotify_resource(self, url: str) -> tuple[str, str]:
         parsed = urlparse(url)
-        parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) >= 2 and parts[0] in {"track", "album", "playlist"}:
-            return parts[0], parts[1]
+        parts = [part.strip() for part in parsed.path.split("/") if part.strip()]
+        for index, part in enumerate(parts):
+            kind = part.lower()
+            if kind not in {"track", "album", "playlist"} or index + 1 >= len(parts):
+                continue
+            item_id = re.sub(r"[^A-Za-z0-9]", "", parts[index + 1])
+            if item_id:
+                return kind, item_id
         return "", ""
 
     async def _spotify_token_candidates(self, *, prefer_user: bool = False) -> list[tuple[str, str]]:

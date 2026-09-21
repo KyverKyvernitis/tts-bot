@@ -14,7 +14,8 @@ from .normalizacao import clean_metadata_title, unique_queries
 logger = logging.getLogger(__name__)
 
 _URL_RE = re.compile(r"https?://", re.IGNORECASE)
-_SPOTIFY_RE = re.compile(r"https?://open\.spotify\.com/(track|album|playlist|episode)/", re.IGNORECASE)
+_SPOTIFY_HOST = "open.spotify.com"
+_SPOTIFY_RESOURCE_TYPES = {"track", "album", "playlist", "episode"}
 _APPLE_RE = re.compile(r"https?://music\.apple\.com/", re.IGNORECASE)
 _DEEZER_RE = re.compile(r"https?://(?:www\.)?deezer\.com/", re.IGNORECASE)
 _YOUTUBE_HOSTS = {
@@ -37,6 +38,24 @@ _METADATA_TITLE_PATTERNS = (
 
 def looks_like_url(value: str) -> bool:
     return bool(_URL_RE.search(value or ""))
+
+
+def _spotify_resource_from_path(path: str) -> tuple[str, str]:
+    """Extrai recurso Spotify tolerando prefixos de locale/embed.
+
+    Links compartilhados podem aparecer como ``/intl-pt/playlist/...`` ou
+    ``/embed/track/...``. O direct play deve classificá-los sem I/O e gerar
+    uma URL canônica estável, sem parâmetros ``?si=`` que fragmentem caches.
+    """
+    parts = [unquote(part).strip() for part in (path or "").split("/") if part.strip()]
+    for index, part in enumerate(parts):
+        kind = part.lower()
+        if kind not in _SPOTIFY_RESOURCE_TYPES or index + 1 >= len(parts):
+            continue
+        item_id = re.sub(r"[^A-Za-z0-9]", "", parts[index + 1])
+        if item_id:
+            return kind, item_id
+    return "", ""
 
 
 def classify_play_input(value: str) -> PlayInputKind:
@@ -98,10 +117,10 @@ def describe_url(value: str) -> UrlProfile:
 
     direct_audio = any(path_lower.endswith(ext) for ext in _DIRECT_AUDIO_EXTENSIONS)
 
-    if _SPOTIFY_RE.search(raw):
-        parts = [p for p in parsed.path.split("/") if p]
-        if len(parts) >= 2:
-            resource_type, resource_id = parts[0].lower(), parts[1]
+    if host == _SPOTIFY_HOST:
+        resource_type, resource_id = _spotify_resource_from_path(parsed.path)
+        if resource_type and resource_id:
+            canonical = f"https://open.spotify.com/{resource_type}/{resource_id}"
         return UrlProfile(raw=raw, canonical=canonical, host=host, is_url=True, is_metadata_only=True,
                           is_direct_audio=direct_audio, platform="spotify", resource_type=resource_type,
                           resource_id=resource_id)

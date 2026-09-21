@@ -1318,8 +1318,27 @@ class MusicExtractor:
         # Não deduplicar aqui: repetições podem ser intencionais e o offset já
         # representa a posição da coleção.
         next_cursor = getattr(api_batch, "playlist_cursor", None)
+        raw_count = min(window_limit, len(api_batch.tracks))
         if next_cursor is None:
-            next_cursor = cursor.advanced(len(tracks), exhausted=len(api_batch.tracks) < window_limit)
+            # O offset representa itens consumidos da fonte, não só itens que
+            # passaram pelo filtro de segurança. Caso contrário uma faixa
+            # descartada faria a próxima janela voltar para a mesma posição.
+            next_cursor = cursor.advanced(raw_count, exhausted=len(api_batch.tracks) < window_limit)
+        elif not next_cursor.exhausted and int(next_cursor.next_offset or 0) <= int(cursor.next_offset or 0):
+            # Defesa contra provider público sem progresso. Um cursor estagnado
+            # criaria refill infinito/repetido. Avance pelo número bruto lido;
+            # se nada veio, encerre a fonte em vez de fazer busy-loop.
+            logger.warning(
+                "[music] cursor de playlist sem progresso; normalizando | provider=%s old=%s returned=%s raw=%s",
+                cursor.provider,
+                cursor.next_offset,
+                next_cursor.next_offset,
+                raw_count,
+            )
+            normalized = cursor.advanced(raw_count, exhausted=raw_count <= 0)
+            normalized.title = next_cursor.title or api_batch.title or cursor.title
+            normalized.total_tracks = next_cursor.total_tracks if next_cursor.total_tracks is not None else cursor.total_tracks
+            next_cursor = normalized
         return ExtractedBatch(
             tracks=tracks,
             query=cursor.source_url,

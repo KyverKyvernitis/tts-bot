@@ -102,6 +102,10 @@ def json_script_blobs(content: str) -> list[Any]:
     return blobs
 
 
+class _StopSpotifyParse(Exception):
+    """Sentinela interna para interromper o HTMLParser ao completar a janela."""
+
+
 class _SpotifyEmbedHTMLParser(HTMLParser):
     """Parser tolerante do HTML server-rendered do embed.
 
@@ -121,10 +125,12 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
         self._pending_title = ""
         self._pending_artist = ""
         self._top_headings: list[tuple[str, str]] = []
-        self._text_buffer: list[str] = []
+        self._done = False
         self.rows: list[SpotifyEmbedRow] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[override]
+        if self._done:
+            return
         tag = tag.lower()
         self._tag_stack.append(tag)
         if tag in {"h1", "h2", "h3", "h4"}:
@@ -132,13 +138,21 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
             self._heading_parts = []
 
     def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
+        if self._done:
+            return
         tag = tag.lower()
         if self._heading_tag == tag:
             value = _clean_text(" ".join(self._heading_parts))
             if value:
-                self._top_headings.append((tag, value))
+                # Só h1/h2 são necessários para o cabeçalho. Guardar todos os
+                # h3/h4 de playlists enormes faria a memória crescer com o
+                # tamanho total da página mesmo quando pedimos uma janela curta.
+                if tag in {"h1", "h2"}:
+                    self._top_headings.append((tag, value))
                 if tag == "h3" and len(self.rows) < self.limit:
                     self._flush_pending_without_duration()
+                    if self._done:
+                        return
                     self._pending_title = value
                     self._pending_artist = ""
                 elif tag == "h4" and self._pending_title and not self._pending_artist:
@@ -153,13 +167,14 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
                     break
 
     def handle_data(self, data: str) -> None:  # type: ignore[override]
+        if self._done:
+            return
         value = _clean_text(data)
         if not value:
             return
         if self._heading_tag:
             self._heading_parts.append(value)
             return
-        self._text_buffer.append(value)
         if self._pending_title and self._pending_artist and len(self.rows) < self.limit:
             duration = parse_duration_label(value)
             if duration is not None:
@@ -170,9 +185,17 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
     def _append_row(self, row: SpotifyEmbedRow) -> None:
         index = self._seen_rows
         self._seen_rows += 1
-        if index < self.row_offset or len(self.rows) >= self.limit:
-            return
-        self.rows.append(row)
+        if index >= self.row_offset and len(self.rows) < self.limit:
+            self.rows.append(row)
+        # O caller pede ``limit + 1`` quando precisa detectar continuação.
+        # Depois de alcançar offset + janela não há motivo para percorrer o
+        # restante de uma playlist potencialmente gigantesca.
+        if self._seen_rows >= self.row_offset + self.limit:
+            self._done = True
+            # ``HTMLParser.feed`` continuaria tokenizando o documento inteiro
+            # mesmo com callbacks em no-op. Abortar aqui mantém CPU proporcional
+            # à janela solicitada quando o HTML público contém milhares de faixas.
+            raise _StopSpotifyParse
 
     def _flush_pending_without_duration(self) -> None:
         if self._pending_title and self._pending_artist:
@@ -181,7 +204,8 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
         self._pending_artist = ""
 
     def finish(self) -> SpotifyEmbedDocument:
-        self._flush_pending_without_duration()
+        if not self._done:
+            self._flush_pending_without_duration()
         h1 = next((value for tag, value in self._top_headings if tag == "h1"), "")
         h2 = next((value for tag, value in self._top_headings if tag == "h2"), "")
         return SpotifyEmbedDocument(title=h1, subtitle=h2, rows=self.rows[: self.limit])
@@ -192,6 +216,9 @@ def parse_embed_document(content: str, *, limit: int = 100, offset: int = 0) -> 
     try:
         parser.feed(content or "")
         parser.close()
+    except _StopSpotifyParse:
+        # Janela completa: interrupção intencional para não tokenizar o restante.
+        pass
     except Exception:
         # HTMLParser é tolerante, mas payload truncado ainda não deve quebrar o
         # resolver; devolvemos o que já foi coletado.

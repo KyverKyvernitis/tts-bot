@@ -16,22 +16,27 @@ from .spotify_publico_parser import (
 
 from ..modelos import ApiTrackBatch, ApiTrackCandidate
 from ...nucleo.modelos import PlaylistCursor
-from ..normalizacao import compact_key, normalize_text, parse_iso8601_duration
+from ..normalizacao import normalize_text, parse_iso8601_duration
 
 logger = logging.getLogger(__name__)
 
 class SpotifyPublicoMixin:
-    def _spotify_public_urls(self, kind: str, item_id: str) -> list[str]:
+    def _spotify_public_urls(self, kind: str, item_id: str, *, offset: int = 0) -> list[str]:
         item_id = quote(item_id)
-        # O embed é menor e server-renderiza a lista de faixas; priorizá-lo reduz
-        # bytes/latência e evita depender do bundle completo do Web Player.
+        if kind not in {"track", "album", "playlist"}:
+            return []
+
+        embed = f"https://open.spotify.com/embed/{kind}/{item_id}"
+        page = f"https://open.spotify.com/{kind}/{item_id}"
         if kind == "track":
-            return [f"https://open.spotify.com/embed/track/{item_id}", f"https://open.spotify.com/track/{item_id}"]
-        if kind == "album":
-            return [f"https://open.spotify.com/embed/album/{item_id}", f"https://open.spotify.com/album/{item_id}"]
-        if kind == "playlist":
-            return [f"https://open.spotify.com/embed/playlist/{item_id}", f"https://open.spotify.com/playlist/{item_id}"]
-        return []
+            return [embed, page]
+
+        # O embed é o caminho mais leve para o começo da coleção, mas a
+        # superfície pública costuma renderizar só uma janela limitada. Depois
+        # da primeira janela grande, tente o Web Player primeiro para evitar uma
+        # requisição sabidamente inútil e permitir páginas maiores quando o
+        # HTML/JSON público as expuser. Não é um limite lógico da playlist.
+        return [page, embed] if max(0, int(offset)) >= 50 else [embed, page]
 
     async def _spotify_public_oembed(self, url: str) -> dict[str, str]:
         """Metadata básica oficial e pública, sem OAuth/Web API.
@@ -326,19 +331,24 @@ class SpotifyPublicoMixin:
         limit: int,
         offset: int = 0,
     ) -> list[ApiTrackCandidate]:
+        """Extrai uma janela preservando repetições legítimas da coleção.
+
+        O mesmo dicionário pode ser alcançado duas vezes por wrappers como
+        ``{track: {...}}`` e pela travessia recursiva. Deduplique apenas o nó
+        Python já visitado; nunca por título/URL da faixa, pois uma playlist
+        pode conter intencionalmente a mesma música mais de uma vez.
+        """
+
         results: list[ApiTrackCandidate] = []
-        seen: set[str] = set()
+        visited_nodes: set[int] = set()
         skipped = 0
         offset = max(0, int(offset))
+        limit = max(1, int(limit))
 
         def add(candidate: ApiTrackCandidate | None) -> None:
             nonlocal skipped
             if not candidate:
                 return
-            key = compact_key(f"{candidate.artist} {candidate.title}") or candidate.webpage_url.lower()
-            if not key or key in seen:
-                return
-            seen.add(key)
             if skipped < offset:
                 skipped += 1
                 return
@@ -349,14 +359,20 @@ class SpotifyPublicoMixin:
             if len(results) >= limit or depth > 18:
                 return
             if isinstance(value, dict):
-                # Muitos payloads usam wrappers {track: {...}} ou {item: {...}}.
-                for key in ("track", "item", "data"):
-                    nested = value.get(key)
-                    if isinstance(nested, dict):
-                        add(self._spotify_public_candidate_from_obj(nested, url=url))
-                add(self._spotify_public_candidate_from_obj(value, url=url))
+                node_id = id(value)
+                if node_id in visited_nodes:
+                    return
+                visited_nodes.add(node_id)
+
+                # ``_spotify_public_candidate_from_obj`` já desembrulha
+                # ``track``. Quando há esse wrapper, deixe a travessia entrar
+                # no filho e conte a faixa exatamente uma vez.
+                if not isinstance(value.get("track"), dict):
+                    add(self._spotify_public_candidate_from_obj(value, url=url))
                 for nested in value.values():
                     walk(nested, depth + 1)
+                    if len(results) >= limit:
+                        break
             elif isinstance(value, list):
                 for item in value:
                     walk(item, depth + 1)
@@ -382,11 +398,13 @@ class SpotifyPublicoMixin:
         # Um item extra permite distinguir "janela cheia" de "fim conhecido"
         # sem manter o restante da playlist em memória.
         probe_limit = min(self.spotify_public_fallback_max_tracks, limit + 1)
-        oembed = await self._spotify_public_oembed(original_url)
+        # Refill não precisa pagar uma segunda requisição de oEmbed: título e
+        # capa já podem vir do próprio HTML, e a UI mantém o metadata anterior.
+        oembed = await self._spotify_public_oembed(original_url) if offset == 0 else {}
         last_title = str(oembed.get("title") or "").strip()
         fallback_thumbnail = str(oembed.get("thumbnail") or "").strip()
 
-        for url in self._spotify_public_urls(kind, item_id):
+        for url in self._spotify_public_urls(kind, item_id, offset=offset):
             try:
                 content = await self._to_thread_text(url, max_bytes=6_000_000)
             except Exception:
@@ -403,36 +421,19 @@ class SpotifyPublicoMixin:
                 fallback_thumbnail = fallback_thumbnail or page_thumbnail
 
             tracks: list[ApiTrackCandidate] = []
-            json_blobs = json_script_blobs(content)
 
-            # Fallback genérico legado para objetos JSON pequenos embutidos em
-            # payloads RSC. Não executa JS; só aceita JSON válido.
-            for raw_match in re.finditer(r'\{[^{}]{0,2500}spotify:track:[^{}]{0,2500}\}', content):
-                raw = html.unescape(raw_match.group(0))
-                try:
-                    json_blobs.append(json.loads(raw))
-                except Exception:
-                    pass
-
-            if json_blobs:
-                tracks.extend(
-                    self._spotify_public_candidates_from_json(
-                        json_blobs,
-                        url="",
-                        limit=probe_limit,
-                        offset=offset,
-                    )
-                )
-
-            # O embed também entrega HTML server-rendered. Isso é crucial para
-            # playlists quando o payload interno muda ou deixa de expor JSON.
+            # Para coleções, a lista server-rendered é a fonte preferida: ela
+            # preserva a ordem e também repetições legítimas. Além disso, o
+            # parser para assim que alcança offset + janela, evitando varrer uma
+            # playlist enorme inteira. JSON fica como fallback para layouts em
+            # que o Spotify não entrega h3/h4.
             document = parse_embed_document(content, limit=probe_limit, offset=offset)
             if document.title:
                 last_title = last_title or document.title
             if document.thumbnail:
                 fallback_thumbnail = fallback_thumbnail or document.thumbnail
 
-            if not tracks and document.rows:
+            if kind in {"album", "playlist"} and document.rows:
                 tracks = [
                     ApiTrackCandidate(
                         title=row.title,
@@ -447,6 +448,32 @@ class SpotifyPublicoMixin:
                     )
                     for row in document.rows[:probe_limit]
                 ]
+
+            if not tracks:
+                json_blobs = json_script_blobs(content)
+
+                # Fallback genérico legado para objetos JSON pequenos embutidos
+                # em payloads RSC. Não executa JS; só aceita JSON válido.
+                for raw_match in re.finditer(r'\{[^{}]{0,2500}spotify:track:[^{}]{0,2500}\}', content):
+                    raw = html.unescape(raw_match.group(0))
+                    try:
+                        json_blobs.append(json.loads(raw))
+                    except Exception:
+                        pass
+
+                # Não junte representações diferentes do mesmo documento;
+                # JSON-LD e hydration podem repetir a coleção inteira. Use o
+                # primeiro blob que trouxer uma janela válida.
+                for blob in json_blobs:
+                    parsed_tracks = self._spotify_public_candidates_from_json(
+                        blob,
+                        url="",
+                        limit=probe_limit,
+                        offset=offset,
+                    )
+                    if parsed_tracks:
+                        tracks = parsed_tracks
+                        break
 
             # Track individual no embed usa heading principal/subtítulo em vez
             # de linhas h3/h4. oEmbed completa título/capa quando disponível.
