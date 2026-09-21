@@ -94,16 +94,16 @@ def test_assinatura_do_painel_muda_quando_cursor_virtual_avanca() -> None:
     assert _assinatura_painel_remoto(before) != _assinatura_painel_remoto(after)
 
 
-def test_preview_virtual_distingue_loading_total_e_duracao_carregada() -> None:
+def test_preview_virtual_e_compacto_e_sem_detalhes_internos() -> None:
     block = _function_source("_queue_preview_text")
     total_label = _function_source("_virtual_playlist_total_label")
 
-    assert 'return "playlist carregando…"' in total_label
-    assert 'música{\'s\' if total_int != 1 else \'\'} no total' in total_label
+    assert 'return ""' in total_label
     assert "if virtual:" in block
-    assert "Próximas músicas sendo carregadas sob demanda." in block
-    assert "duração carregada" in block
-    assert "restante da playlist carregado automaticamente conforme necessário" in block
+    assert "carregando próximas…" in block
+    assert "restante da playlist carregado automaticamente conforme necessário" not in block
+    assert "duração carregada" not in block
+    assert "já carregada" not in block
 
 
 def test_marker_virtual_sem_faixa_materializada_nao_vira_idle() -> None:
@@ -112,7 +112,7 @@ def test_marker_virtual_sem_faixa_materializada_nao_vira_idle() -> None:
 
     assert 'return "Carregando playlist", PLAYER_STATUS_ANIMATED_EMOJI' in presentation
     assert "elif virtual:" in build
-    assert "Playlist sendo carregada" in build
+    assert "Carregando próximas músicas" in build
     assert "_queue_preview_text(state, limit=4)" in build
 
 
@@ -124,8 +124,8 @@ def test_queueview_permanece_operavel_quando_so_existe_cursor_virtual() -> None:
     assert "if (items or virtual)" in refresh
     assert "if items or virtual:" in refresh
     assert "not _virtual_playlist_info(state)" in clear
-    assert "Próximas músicas sendo carregadas automaticamente sob demanda." in queue_text
-    assert "Duração das músicas carregadas" in queue_text
+    assert "Carregando próximas músicas…" in queue_text
+    assert "Duração:" in queue_text
 
 
 def test_modal_de_adicionar_preserva_direct_play_virtual_start_first() -> None:
@@ -137,7 +137,7 @@ def test_modal_de_adicionar_preserva_direct_play_virtual_start_first() -> None:
     assert "payload_cursor_playlist(" in block
     assert 'music_agent_command(\n                        "enqueue_many"' in block
     assert "schedule_playlist_refill_from_result(self.router, guild.id, result)" in block
-    assert "Playlist em direct play" in block
+    assert "Playlist iniciada" in block
 
 
 def test_render_virtual_continua_sem_io_novo() -> None:

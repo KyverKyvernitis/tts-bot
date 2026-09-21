@@ -129,6 +129,24 @@ class ResolucaoMixin:
 
     def _resolve_cache_key(self, query: str, track_meta: dict[str, Any] | None = None) -> str:
         meta = track_meta or {}
+        source_kind = self._metadata_source_kind(meta)
+        extractor = str(meta.get("extractor") or "").strip().lower()
+
+        # Metadata-only links (Spotify/Deezer/Apple) are only the origin of the
+        # request. In a playlist every item can inherit the SAME collection URL,
+        # so keying the stream cache by original_url makes every skip reuse the
+        # first resolved song. Key these items by their semantic direct-play
+        # query instead. Duplicates of the same song still share cache safely.
+        if source_kind in {"spotify", "deezer", "apple"} or extractor == "metadata":
+            semantic = str(query or meta.get("query") or "").strip().lower()
+            if not semantic:
+                artist = str(meta.get("display_uploader") or meta.get("uploader") or meta.get("artist") or "").strip().lower()
+                title = str(meta.get("display_title") or meta.get("title") or "").strip().lower()
+                semantic = " | ".join(part for part in (artist, title) if part)
+            semantic = re.sub(r"\s+", " ", semantic).strip()
+            if semantic:
+                return f"metadata:{source_kind or 'generic'}:{semantic}"
+
         raw = str(meta.get("webpage_url") or meta.get("original_url") or meta.get("stream_url") or query or "").strip().lower()
         raw = re.sub(r"[?&](utm_[^=&]+|feature|si)=[^&]+", "", raw)
         return raw or str(query or "").strip().lower()
@@ -215,9 +233,28 @@ class ResolucaoMixin:
         meta_uploader = _metadata_text(track_meta.get("uploader"), limit=120)
         meta_duration = _float_or_none(track_meta.get("duration"))
         source = short_text(track_meta.get("source") or body.get("source") or "worker-agent", 80)
+        metadata_kind = self._metadata_source_kind(track_meta)
+        query_lower = str(query or "").strip().lower()
+        # Spotify/Deezer/Apple only identify the requested song. When the
+        # playable stream came from an internal ytsearch/scsearch, expose the
+        # actual playback source instead of implying Spotify served the audio.
+        playback_source = source
+        if metadata_kind:
+            if query_lower.startswith(("ytsearch", "ytmsearch")):
+                playback_source = "YouTube"
+            elif query_lower.startswith("scsearch"):
+                playback_source = "SoundCloud"
         webpage_url = str(track_meta.get("webpage_url") or track_meta.get("original_url") or resolved.get("webpage_url") or query).strip()
         resolved_title = _metadata_text(resolved.get("title"), limit=160)
         resolved_uploader = _metadata_text(resolved.get("uploader"), limit=120)
+        meta_url = str(track_meta.get("webpage_url") or track_meta.get("original_url") or "").lower()
+        collection_metadata = metadata_kind and any(marker in meta_url for marker in ("/playlist/", "/album/"))
+        thumbnail = short_text(
+            (resolved.get("thumbnail") if collection_metadata else track_meta.get("thumbnail"))
+            or resolved.get("thumbnail")
+            or track_meta.get("thumbnail"),
+            500,
+        )
         track = AgentTrack(
             title=title_hint or resolved_title or short_text(query, 160) or "Música",
             requester_id=requester_id,
@@ -227,8 +264,8 @@ class ResolucaoMixin:
             stream_url=str(resolved.get("stream_url") or ""),
             duration=meta_duration if meta_duration is not None else _float_or_none(resolved.get("duration")),
             uploader=meta_uploader or resolved_uploader,
-            thumbnail=short_text(track_meta.get("thumbnail") or resolved.get("thumbnail"), 500),
-            source=source if source and source != "worker-agent" else "music-agent-ytdlp",
+            thumbnail=thumbnail,
+            source=playback_source if playback_source and playback_source != "worker-agent" else "music-agent-ytdlp",
             transport_hint="direct-cache" if cached else "direct",
             audio_format_id=short_text(resolved.get("audio_format_id") or resolved.get("format_id"), 40),
             audio_ext=short_text(resolved.get("audio_ext") or resolved.get("ext"), 20).lower(),

@@ -123,7 +123,7 @@ def test_textos_do_player_sao_mais_compactos_no_mobile() -> None:
 
     assert 'lines = [f"### {title}"' in source
     assert 'metadata = [duration, f"{source_emoji} {source_label}"]' in source
-    assert 'header = f"**Fila** · {total} música' in source
+    assert 'header = f"**Fila** · {total_text} {count_label}"' in source
     assert 'marker = "▶" if selected_position == position else f"{position}."' in source
     assert 'f"{position:02d}"' not in source[source.index("def _queue_preview_text"):source.index("def _idle_player_text")]
 

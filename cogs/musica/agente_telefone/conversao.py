@@ -73,6 +73,16 @@ def faixa_do_payload(payload: dict[str, Any], fallback: MusicTrack | None = None
         is_live=bool(payload.get("is_live") or (getattr(fallback, "is_live", False) if fallback is not None else False)),
     )
     track.display_source = "YouTube" if "youtube" in track.source.lower() or "ytdlp" in track.source.lower() else track.source
+    origin_probe = " ".join(
+        str(value or "").lower()
+        for value in (payload.get("webpage_url"), payload.get("original_url"), getattr(fallback, "original_url", "") if fallback is not None else "")
+    )
+    if "spotify.com" in origin_probe and "spotify" not in track.display_source.lower():
+        track.fallback_reason = "Spotify"
+    elif "deezer.com" in origin_probe and "deezer" not in track.display_source.lower():
+        track.fallback_reason = "Deezer"
+    elif "music.apple.com" in origin_probe and "apple" not in track.display_source.lower():
+        track.fallback_reason = "Apple Music"
     track.display_title = title
     track.display_uploader = uploader
     track.display_thumbnail = thumbnail

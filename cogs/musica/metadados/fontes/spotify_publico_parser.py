@@ -142,7 +142,14 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
             return
         tag = tag.lower()
         if self._heading_tag == tag:
-            value = _clean_text(" ".join(self._heading_parts))
+            parts = list(self._heading_parts)
+            # O embed pode renderizar o selo de conteúdo explícito como um
+            # fragmento textual separado ("E") dentro do h4. Ele não faz parte
+            # do nome do artista; se o juntarmos, vira "E Cavetown" e polui
+            # tanto o painel quanto a busca direct-play.
+            if tag == "h4" and len(parts) > 1:
+                parts = [part for part in parts if part.strip().casefold() not in {"e", "explicit"}]
+            value = _clean_text(" ".join(parts))
             if value:
                 # Só h1/h2 são necessários para o cabeçalho. Guardar todos os
                 # h3/h4 de playlists enormes faria a memória crescer com o

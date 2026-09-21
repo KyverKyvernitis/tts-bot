@@ -773,12 +773,10 @@ class FluxoTocar:
                     except Exception:
                         queue_total = 0
                     if virtual_active:
-                        load_line = f"`📑` **Playlist adicionada{label}.** Carregamento contínuo ativado; a fila mantém só uma janela leve em memória."
                         if bool(result.get("queued")):
-                            total_line = f"\n`🎶` Janela atual no player: `{queue_total}` música(s)." if queue_total else ""
-                            msg = await self._reply(ctx, load_line + total_line)
+                            msg = await self._reply(ctx, f"`📑` **Playlist adicionada à fila{label}.**")
                         else:
-                            msg = await self._reply(ctx, load_line + "\n`🎧` Preparando a primeira faixa...")
+                            msg = await self._reply(ctx, f"`📑` **Playlist iniciada{label}.**")
                     else:
                         count_label = "música" if added == 1 else "músicas"
                         if bool(result.get("queued")):

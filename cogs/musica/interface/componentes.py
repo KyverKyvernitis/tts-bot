@@ -627,8 +627,8 @@ def _virtual_playlist_total_label(state) -> str:
     except Exception:
         total_int = 0
     if total_int:
-        return f"{total_int} música{'s' if total_int != 1 else ''} no total"
-    return "playlist carregando…"
+        return f"{total_int} música{'s' if total_int != 1 else ''}"
+    return ""
 
 
 def _queue_duration_label(items: list[MusicTrack]) -> str:
@@ -652,21 +652,35 @@ def _queue_duration_label(items: list[MusicTrack]) -> str:
 def _source_key_for_track(track: MusicTrack | None) -> str:
     if track is None:
         return ""
-    fields: list[str] = []
-    for attr in ("source", "extractor", "original_url", "webpage_url", "display_url", "stream_url"):
-        with contextlib.suppress(Exception):
-            value = str(getattr(track, attr, "") or "").strip().lower()
-            if value:
-                fields.append(value)
-    text = " ".join(fields)
-    if "spotify" in text:
-        return "spotify"
-    if "soundcloud" in text or "sound cloud" in text:
-        return "soundcloud"
-    if "deezer" in text:
-        return "deezer"
-    if "youtube" in text or "youtu.be" in text or "ytmusic" in text or "yt-dlp" in text:
+
+    # A fonte explícita do stream vence a URL de origem. Isso importa para
+    # direct play por metadata: uma faixa pedida via Spotify pode estar sendo
+    # efetivamente reproduzida pelo YouTube/yt-dlp.
+    primary = " ".join(
+        str(getattr(track, attr, "") or "").strip().lower()
+        for attr in ("display_source", "source", "extractor")
+    )
+    if "youtube" in primary or "yt-dlp" in primary or "ytdlp" in primary:
         return "youtube"
+    if "soundcloud" in primary or "sound cloud" in primary:
+        return "soundcloud"
+    if "spotify" in primary:
+        return "spotify"
+    if "deezer" in primary:
+        return "deezer"
+
+    urls = " ".join(
+        str(getattr(track, attr, "") or "").strip().lower()
+        for attr in ("original_url", "webpage_url", "display_url", "stream_url")
+    )
+    if "youtube" in urls or "youtu.be" in urls or "ytmusic" in urls:
+        return "youtube"
+    if "soundcloud" in urls or "sound cloud" in urls:
+        return "soundcloud"
+    if "spotify" in urls:
+        return "spotify"
+    if "deezer" in urls:
+        return "deezer"
     return ""
 
 
@@ -781,7 +795,9 @@ def _player_track_text(state, track: MusicTrack) -> str:
     metadata = [duration, f"{source_emoji} {source_label}"]
     if quality:
         metadata.append(quality)
-    lines = [f"### {title}", f"-# {source}", " · ".join(metadata), f"-# Pedido por {requester}"]
+    origin = str(getattr(track, "fallback_reason", "") or "").strip()
+    requester_line = f"-# Pedido por {requester}" + (f" · via {_escape(origin, limit=32)}" if origin else "")
+    lines = [f"### {title}", f"-# {source}", " · ".join(metadata), requester_line]
 
     loop_mode = getattr(state, "loop_mode", None)
     loop_label = str(getattr(loop_mode, "label", "desligado") or "desligado")
@@ -801,10 +817,7 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
     virtual = _virtual_playlist_info(state)
     if not items:
         if virtual:
-            title = _escape(str(virtual.get("title") or "playlist"), limit=72)
-            total_label = _virtual_playlist_total_label(state)
-            detail = f" · **{title}**" if title and title.lower() != "playlist" else ""
-            return f"**Fila** · {total_label}{detail}\n-# Próximas músicas sendo carregadas sob demanda."
+            return "**Fila** · carregando próximas…"
         return "**Fila** · vazia\n-# Use `_play <nome ou link>` para adicionar músicas."
 
     page = max(0, int(page))
@@ -813,26 +826,23 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
         preview = items[start : start + QUEUE_PAGE_SIZE]
     else:
         preview = items[: max(1, int(limit))]
+
     duration = _queue_duration_label(items)
-    if virtual:
-        total_label = _virtual_playlist_total_label(state)
-        header = f"**Fila** · {total_label}"
-        title = _escape(str(virtual.get("title") or ""), limit=72)
-        if title and title.lower() != "playlist":
-            header += f" · **{title}**"
-        header += f"\n-# {total} próxima{'s' if total != 1 else ''} pronta{'s' if total != 1 else ''} · duração carregada {duration}"
-    else:
-        header = f"**Fila** · {total} música{'s' if total != 1 else ''} · {duration}"
+    total_text = f"{total}+" if virtual else str(total)
+    count_label = "música" if total == 1 and not virtual else "músicas"
+    header = f"**Fila** · {total_text} {count_label}"
+    if duration and duration != "desconhecida":
+        header += f" · {duration}{'+' if virtual and not duration.endswith('+') else ''}"
+
     lines = [header]
     for offset, item in enumerate(preview, start=1):
         position = start + offset
         marker = "▶" if selected_position == position else f"{position}."
-        lines.append(f"**{marker}** {_track_link_v2(item, title_limit=58)} · {item.duration_label}")
+        duration_label = "" if item.duration is None and not item.is_live else f" · {item.duration_label}"
+        lines.append(f"**{marker}** {_track_link_v2(item, title_limit=58)}{duration_label}")
     hidden = max(0, int(total) - len(preview) - start)
     if hidden:
-        lines.append(f"-# + {hidden} música{'s' if hidden != 1 else ''} já carregada{'s' if hidden != 1 else ''}")
-    if virtual:
-        lines.append("-# + restante da playlist carregado automaticamente conforme necessário")
+        lines.append(f"-# + {hidden} música{'s' if hidden != 1 else ''}")
     return "\n".join(lines)
 
 
@@ -1566,15 +1576,14 @@ class AddSongModal(discord.ui.Modal):
                     queue_total = 0
                 if virtual_active:
                     if bool(result.get("queued")):
-                        ready_line = f"\n`🎶` `{queue_total}` música(s) já pronta(s) no player." if queue_total else ""
                         sent = await interaction.followup.send(
-                            f"`📑` **Playlist adicionada à fila{label}.** O restante será carregado automaticamente sob demanda.{ready_line}",
+                            f"`📑` **Playlist adicionada à fila{label}.**",
                             ephemeral=True,
                             wait=True,
                         )
                     else:
                         sent = await interaction.followup.send(
-                            f"`📑` **Playlist em direct play{label}.**\n`🎧` Preparando a primeira faixa; o restante será carregado sob demanda.",
+                            f"`📑` **Playlist iniciada{label}.**",
                             ephemeral=True,
                             wait=True,
                         )
@@ -1818,23 +1827,19 @@ class QueueView(discord.ui.LayoutView):
         virtual = _virtual_playlist_info(state)
         if not items:
             if virtual:
-                title = _escape(str(virtual.get("title") or "playlist"), limit=80)
-                return (
-                    f"# 📜 Fila · {_virtual_playlist_total_label(state)}\n"
-                    f"**{title}**\n"
-                    "-# Próximas músicas sendo carregadas automaticamente sob demanda."
-                )
+                return "# 📜 Fila\nCarregando próximas músicas…"
             return "# 📜 Fila\nA fila está vazia.\n-# Use `_play <nome ou link>` para adicionar músicas."
         max_page = self._max_page(items)
         start = self.page * QUEUE_PAGE_SIZE
         chunk = items[start : start + QUEUE_PAGE_SIZE]
         page_label = f" · página {self.page + 1}/{max_page + 1}" if max_page else ""
         if virtual:
-            lines = [f"# 📜 Fila · {_virtual_playlist_total_label(state)}{page_label}"]
+            known_total = _virtual_playlist_total_label(state)
+            count = known_total or f"{total}+ música{'s' if total != 1 else ''}"
+            lines = [f"# 📜 Fila · {count}{page_label}"]
             title = _escape(str(virtual.get("title") or ""), limit=80)
             if title and title.lower() != "playlist":
                 lines.append(f"-# {title}")
-            lines.append(f"-# {total} próxima{'s' if total != 1 else ''} já carregada{'s' if total != 1 else ''}")
         else:
             lines = [f"# 📜 Fila · {total} música{'s' if total != 1 else ''}{page_label}"]
         current = getattr(state, "current", None)
@@ -1847,11 +1852,9 @@ class QueueView(discord.ui.LayoutView):
             requester = _escape(track.requester_name, limit=42) if track.requester_name else f"<@{track.requester_id}>"
             lines.append(f"-# pedido por {requester}")
         if virtual:
-            lines.extend([
-                "",
-                f"-# Duração das músicas carregadas: {_queue_duration_label(items)}",
-                "-# O restante da playlist é materializado conforme se aproxima da reprodução.",
-            ])
+            duration = _queue_duration_label(items)
+            if duration and duration != "desconhecida":
+                lines.extend(["", f"-# Duração: {duration}+"])
         else:
             lines.extend(["", f"-# Duração aproximada: {_queue_duration_label(items)}"] )
         return "\n".join(lines)
@@ -2275,12 +2278,10 @@ class MusicPlayerView(discord.ui.LayoutView):
                 container.add_item(next_text)
         elif virtual:
             title = _escape(str(virtual.get("title") or "playlist"), limit=88)
-            total_label = _virtual_playlist_total_label(state)
             container.add_item(
                 discord.ui.TextDisplay(
-                    "### Playlist sendo carregada\n"
-                    f"**{title}**\n"
-                    f"-# {total_label} · próxima janela chegando sob demanda"
+                    "### Carregando próximas músicas\n"
+                    f"**{title}**"
                 )
             )
         else:
