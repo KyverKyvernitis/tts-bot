@@ -8,6 +8,8 @@ from .memoria import (
     limpar_memoria_busca,
     obter_escolha_busca,
     obter_preferencia_busca,
+    recarregar_memoria_busca,
+    registrar_link_busca,
     registrar_selecao_busca,
 )
 from .modelos import ConsultaNormalizada, ResultadoRanking, SinaisCandidato
@@ -40,6 +42,8 @@ __all__ = [
     "limpar_memoria_busca",
     "obter_escolha_busca",
     "obter_preferencia_busca",
+    "recarregar_memoria_busca",
+    "registrar_link_busca",
     "registrar_selecao_busca",
     "avaliar_busca_profunda",
     "avaliar_ganho_busca_profunda",

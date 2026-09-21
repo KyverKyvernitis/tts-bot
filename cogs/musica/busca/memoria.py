@@ -2,41 +2,116 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import hashlib
+import json
+import logging
+from pathlib import Path
+import sqlite3
+import threading
 import time
 from typing import Sequence
 
+from cogs.musica import configuracao as config
+
 from ..nucleo.modelos import MusicTrack
 from .chaves import chave_semantica_busca
+from .intencao import analisar_consulta
 from .modelos import ResultadoRanking
+from .normalizacao import tokens_texto
 from .telemetria import registrar_selecao_telemetria
 
-_MAX_ENTRIES = 512
+logger = logging.getLogger(__name__)
+
+_ORIGEM_SELECAO = "selecao"
+_ORIGEM_LINK = "link"
+_PRIORIDADE_SELECAO = 10
+_PRIORIDADE_LINK = 100
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_PRODUCTION_ROOT = Path("/home/ubuntu/bot")
+_LOCK = threading.RLock()
+_loaded = False
+_memoria: OrderedDict[str, "EscolhaBusca"] = OrderedDict()
+
+_STOPWORDS_ALIAS = {
+    "a", "an", "the", "o", "os", "as", "um", "uma", "of", "de", "da", "do", "das", "dos",
+}
 
 
 @dataclass(frozen=True, slots=True)
 class EscolhaBusca:
-    """Escolha global já confirmada por um usuário.
-
-    A identidade é somente a consulta semântica. Guild e usuário não participam
-    da chave: depois que alguém escolheu um resultado para uma consulta, qualquer
-    pessoa pode reutilizar a mesma escolha sem repetir busca/ranking.
-    """
+    """Escolha global confirmada, reutilizável sem busca ou ranking."""
 
     chave: str
     consulta: str
     track: MusicTrack
     registrado_em: float
+    origem: str = _ORIGEM_SELECAO
+    prioridade: int = _PRIORIDADE_SELECAO
 
 
 # Alias mantido para imports antigos. A preferência antiga deixou de participar
 # do ranking; agora a memória representa apenas uma escolha direta global.
 PreferenciaBusca = EscolhaBusca
 
-_memoria: OrderedDict[str, EscolhaBusca] = OrderedDict()
+
+def _max_entries() -> int:
+    try:
+        return max(1, min(100_000, int(getattr(config, "MUSIC_SEARCH_CHOICE_MEMORY_MAX_ENTRIES", 10_000) or 10_000)))
+    except Exception:
+        return 10_000
 
 
-def limpar_memoria_busca() -> None:
-    _memoria.clear()
+def _db_path() -> Path:
+    configured = str(getattr(config, "MUSIC_SEARCH_CHOICE_MEMORY_PATH", "") or "").strip()
+    # O runtime real pode usar caminho configurável fora do Git. Worktrees do
+    # updater/testes ficam sempre isolados para nunca apagar/alterar a memória
+    # persistente da VPS durante staging/preflight.
+    if _REPO_ROOT == _PRODUCTION_ROOT:
+        return Path(configured or "/home/ubuntu/bot-data/musica/escolhas_busca.sqlite3")
+    digest = hashlib.sha1(str(_REPO_ROOT).encode("utf-8")).hexdigest()[:12]
+    return Path("/tmp") / f"osaka-musica-escolhas-{digest}.sqlite3"
+
+
+def _track_payload(track: MusicTrack) -> dict[str, object]:
+    return {
+        "title": str(track.title or ""),
+        "webpage_url": str(track.webpage_url or ""),
+        "duration": track.duration,
+        "uploader": str(track.uploader or ""),
+        "thumbnail": str(track.thumbnail or ""),
+        "source": str(track.source or ""),
+        "original_url": str(track.original_url or ""),
+        "extractor": str(track.extractor or ""),
+        "is_live": bool(track.is_live),
+        "fallback_reason": str(getattr(track, "fallback_reason", "") or ""),
+        "display_title": str(getattr(track, "display_title", "") or ""),
+        "display_uploader": str(getattr(track, "display_uploader", "") or ""),
+        "display_thumbnail": str(getattr(track, "display_thumbnail", "") or ""),
+        "display_source": str(getattr(track, "display_source", "") or ""),
+    }
+
+
+def _track_from_payload(payload: dict[str, object]) -> MusicTrack:
+    track = MusicTrack(
+        title=str(payload.get("title") or "Música"),
+        webpage_url=str(payload.get("webpage_url") or ""),
+        requester_id=0,
+        requester_name="",
+        stream_url="",
+        duration=payload.get("duration"),
+        uploader=str(payload.get("uploader") or ""),
+        thumbnail=str(payload.get("thumbnail") or ""),
+        source=str(payload.get("source") or ""),
+        original_url=str(payload.get("original_url") or ""),
+        extractor=str(payload.get("extractor") or ""),
+        is_live=bool(payload.get("is_live")),
+    )
+    track.fallback_reason = str(payload.get("fallback_reason") or "")
+    track.display_title = str(payload.get("display_title") or "")
+    track.display_uploader = str(payload.get("display_uploader") or "")
+    track.display_thumbnail = str(payload.get("display_thumbnail") or "")
+    track.display_source = str(payload.get("display_source") or "")
+    return track
 
 
 def _copiar_track_limpo(
@@ -45,32 +120,184 @@ def _copiar_track_limpo(
     requester_id: int = 0,
     requester_name: str = "",
 ) -> MusicTrack:
-    """Copia apenas metadata estável da faixa escolhida.
-
-    Stream URLs e estado de reprodução não são compartilhados globalmente porque
-    podem expirar ou pertencer a outra sessão/guild. O Music Agent resolve o
-    stream novamente somente quando a faixa realmente for tocar.
-    """
-    clone = MusicTrack(
-        title=track.title,
-        webpage_url=track.webpage_url,
-        requester_id=int(requester_id or 0),
-        requester_name=str(requester_name or ""),
-        stream_url="",
-        duration=track.duration,
-        uploader=track.uploader,
-        thumbnail=track.thumbnail,
-        source=track.source,
-        original_url=track.original_url,
-        extractor=track.extractor,
-        is_live=track.is_live,
-    )
-    clone.fallback_reason = track.fallback_reason
-    clone.display_title = track.display_title
-    clone.display_uploader = track.display_uploader
-    clone.display_thumbnail = track.display_thumbnail
-    clone.display_source = track.display_source
+    """Copia apenas metadata estável; stream temporário nunca é memorizado."""
+    payload = _track_payload(track)
+    clone = _track_from_payload(payload)
+    clone.requester_id = int(requester_id or 0)
+    clone.requester_name = str(requester_name or "")
     return clone
+
+
+def _abrir_db() -> sqlite3.Connection:
+    path = _db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=1.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS escolhas (
+            chave TEXT PRIMARY KEY,
+            consulta TEXT NOT NULL,
+            origem TEXT NOT NULL,
+            prioridade INTEGER NOT NULL,
+            track_json TEXT NOT NULL,
+            registrado_em REAL NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _ensure_loaded() -> None:
+    global _loaded
+    with _LOCK:
+        if _loaded:
+            return
+        _memoria.clear()
+        try:
+            with _abrir_db() as conn:
+                limite = _max_entries()
+                rows = conn.execute(
+                    "SELECT chave, consulta, origem, prioridade, track_json, registrado_em "
+                    "FROM escolhas ORDER BY registrado_em DESC LIMIT ?",
+                    (limite,),
+                ).fetchall()
+                for chave, consulta, origem, prioridade, track_json, registrado_em in reversed(rows):
+                    try:
+                        payload = json.loads(track_json)
+                        track = _track_from_payload(payload if isinstance(payload, dict) else {})
+                        _memoria[str(chave)] = EscolhaBusca(
+                            chave=str(chave),
+                            consulta=str(consulta),
+                            track=track,
+                            registrado_em=float(registrado_em),
+                            origem=str(origem or _ORIGEM_SELECAO),
+                            prioridade=int(prioridade or _PRIORIDADE_SELECAO),
+                        )
+                    except Exception:
+                        logger.debug("[music/search-memory] entrada persistida inválida ignorada", exc_info=True)
+                excesso = conn.execute("SELECT COUNT(*) FROM escolhas").fetchone()[0] - limite
+                if excesso > 0:
+                    conn.execute(
+                        "DELETE FROM escolhas WHERE chave IN ("
+                        "SELECT chave FROM escolhas ORDER BY registrado_em ASC LIMIT ?)",
+                        (excesso,),
+                    )
+        except Exception:
+            # Memória em RAM continua funcional mesmo que o disco esteja indisponível.
+            logger.warning("[music/search-memory] falha ao carregar memória persistente", exc_info=True)
+        _loaded = True
+
+
+def _persistir_varias(escolhas: Sequence[EscolhaBusca]) -> None:
+    if not escolhas:
+        return
+    try:
+        limite = _max_entries()
+        with _abrir_db() as conn:
+            for escolha in escolhas:
+                payload = json.dumps(_track_payload(escolha.track), ensure_ascii=False, separators=(",", ":"))
+                conn.execute(
+                    "INSERT INTO escolhas(chave, consulta, origem, prioridade, track_json, registrado_em) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(chave) DO UPDATE SET "
+                    "consulta=excluded.consulta, origem=excluded.origem, prioridade=excluded.prioridade, "
+                    "track_json=excluded.track_json, registrado_em=excluded.registrado_em",
+                    (
+                        escolha.chave,
+                        escolha.consulta,
+                        escolha.origem,
+                        escolha.prioridade,
+                        payload,
+                        escolha.registrado_em,
+                    ),
+                )
+            excesso = conn.execute("SELECT COUNT(*) FROM escolhas").fetchone()[0] - limite
+            if excesso > 0:
+                conn.execute(
+                    "DELETE FROM escolhas WHERE chave IN ("
+                    "SELECT chave FROM escolhas ORDER BY registrado_em ASC LIMIT ?)",
+                    (excesso,),
+                )
+    except Exception:
+        logger.warning("[music/search-memory] falha ao persistir escolha; mantendo RAM", exc_info=True)
+
+
+def _persistir(escolha: EscolhaBusca) -> None:
+    _persistir_varias((escolha,))
+
+
+def _registrar(
+    query: str,
+    track: MusicTrack,
+    *,
+    origem: str,
+    prioridade: int,
+    now: float | None = None,
+    persistir: bool = True,
+) -> EscolhaBusca | None:
+    clean_query = str(query or "").strip()
+    if not clean_query:
+        return None
+    chave = chave_semantica_busca(clean_query)
+    if not chave:
+        return None
+    _ensure_loaded()
+    stamp = float(time.time() if now is None else now)
+    with _LOCK:
+        anterior = _memoria.get(chave)
+        if anterior is not None and anterior.prioridade > int(prioridade):
+            # Link direto é autoridade maior e não é substituído por uma escolha
+            # posterior feita no seletor de resultados.
+            _memoria.move_to_end(chave)
+            return None
+        escolha = EscolhaBusca(
+            chave=chave,
+            consulta=clean_query,
+            track=_copiar_track_limpo(track),
+            registrado_em=stamp,
+            origem=str(origem),
+            prioridade=int(prioridade),
+        )
+        _memoria[chave] = escolha
+        _memoria.move_to_end(chave)
+        while len(_memoria) > _max_entries():
+            removida_chave, _ = _memoria.popitem(last=False)
+            try:
+                with _abrir_db() as conn:
+                    conn.execute("DELETE FROM escolhas WHERE chave = ?", (removida_chave,))
+            except Exception:
+                logger.debug("[music/search-memory] falha ao remover entrada evictada", exc_info=True)
+        if persistir:
+            _persistir(escolha)
+        return escolha
+
+
+def limpar_memoria_busca() -> None:
+    """Limpa RAM e a persistência do checkout atual.
+
+    Em worktrees/testes o banco fica em /tmp e nunca toca o banco da VPS real.
+    """
+    global _loaded
+    with _LOCK:
+        _memoria.clear()
+        _loaded = True
+        try:
+            path = _db_path()
+            for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+                candidate.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("[music/search-memory] falha ao limpar persistência", exc_info=True)
+
+
+def recarregar_memoria_busca() -> None:
+    """Descarta somente RAM e recarrega o banco, simulando restart do bot."""
+    global _loaded
+    with _LOCK:
+        _memoria.clear()
+        _loaded = False
+    _ensure_loaded()
 
 
 def registrar_selecao_busca(
@@ -83,35 +310,79 @@ def registrar_selecao_busca(
     posicao: int = 0,
     total: int = 0,
 ) -> bool:
-    """Guarda globalmente a faixa escolhida para a consulta semântica.
-
-    ``guild_id`` e ``requester_id`` permanecem na assinatura por compatibilidade,
-    mas não entram na chave. A escolha é compartilhada entre guilds e usuários.
-    """
+    """Guarda escolha do seletor; links diretos têm prioridade sobre ela."""
     registrar_selecao_telemetria(
         posicao=posicao,
         total=total,
         fonte=(track.display_source or track.source),
     )
-    clean_query = str(query or "").strip()
-    if not clean_query:
-        return False
+    return _registrar(
+        query,
+        track,
+        origem=_ORIGEM_SELECAO,
+        prioridade=_PRIORIDADE_SELECAO,
+        now=now,
+    ) is not None
 
-    chave = chave_semantica_busca(clean_query)
-    if not chave:
-        return False
-    stamp = float(time.monotonic() if now is None else now)
-    escolha = EscolhaBusca(
-        chave=chave,
-        consulta=clean_query,
-        track=_copiar_track_limpo(track),
-        registrado_em=stamp,
-    )
-    _memoria[chave] = escolha
-    _memoria.move_to_end(chave)
-    while len(_memoria) > _MAX_ENTRIES:
-        _memoria.popitem(last=False)
-    return True
+
+def _aliases_link(track: MusicTrack) -> tuple[str, ...]:
+    titulo_bruto = str(getattr(track, "display_title", "") or track.title or "").strip()
+    if not titulo_bruto:
+        return ()
+    consulta = analisar_consulta(titulo_bruto)
+    titulo_musica = str(consulta.titulo or consulta.texto or titulo_bruto).strip()
+    artista = str(consulta.artista or getattr(track, "display_uploader", "") or track.uploader or "").strip()
+
+    candidatos: list[str] = [titulo_bruto]
+    if titulo_musica:
+        candidatos.append(titulo_musica)
+        tokens = tokens_texto(titulo_musica, remover_ruido=True)
+        if tokens and tokens[0] not in _STOPWORDS_ALIAS:
+            candidatos.append(tokens[0])
+        if artista:
+            candidatos.append(f"{artista} - {titulo_musica}")
+
+    vistos: set[str] = set()
+    aliases: list[str] = []
+    for candidato in candidatos:
+        texto = str(candidato or "").strip()
+        if not texto:
+            continue
+        chave = chave_semantica_busca(texto)
+        if not chave or chave in vistos:
+            continue
+        vistos.add(chave)
+        aliases.append(texto)
+    return tuple(aliases)
+
+
+def registrar_link_busca(track: MusicTrack, *, now: float | None = None) -> tuple[str, ...]:
+    """Aprende aliases de uma faixa iniciada por link direto.
+
+    O título real resolvido pelo Music Agent gera aliases para o título completo,
+    para o título da música e para a primeira palavra útil. Essas entradas têm
+    prioridade sobre escolhas aprendidas pelo seletor de três resultados.
+    """
+    original = str(track.original_url or "").strip().lower()
+    if not original.startswith(("http://", "https://", "www.")):
+        return ()
+    aliases = _aliases_link(track)
+    gravados: list[str] = []
+    escolhas: list[EscolhaBusca] = []
+    for alias in aliases:
+        escolha = _registrar(
+            alias,
+            track,
+            origem=_ORIGEM_LINK,
+            prioridade=_PRIORIDADE_LINK,
+            now=now,
+            persistir=False,
+        )
+        if escolha is not None:
+            gravados.append(alias)
+            escolhas.append(escolha)
+    _persistir_varias(escolhas)
+    return tuple(gravados)
 
 
 def obter_escolha_busca(
@@ -124,23 +395,36 @@ def obter_escolha_busca(
     clean_query = str(query or "").strip()
     if not clean_query:
         return None
+    _ensure_loaded()
     chave = chave_semantica_busca(clean_query)
-    escolha = _memoria.get(chave)
-    if escolha is None:
-        return None
-    _memoria.move_to_end(chave)
-    return _copiar_track_limpo(
-        escolha.track,
-        requester_id=requester_id,
-        requester_name=requester_name,
-    )
+    with _LOCK:
+        escolha = _memoria.get(chave)
+        if escolha is None:
+            return None
+        _memoria.move_to_end(chave)
+        return _copiar_track_limpo(
+            escolha.track,
+            requester_id=requester_id,
+            requester_name=requester_name,
+        )
 
 
 def esquecer_escolha_busca(query: str) -> bool:
     clean_query = str(query or "").strip()
     if not clean_query:
         return False
-    return _memoria.pop(chave_semantica_busca(clean_query), None) is not None
+    _ensure_loaded()
+    chave = chave_semantica_busca(clean_query)
+    with _LOCK:
+        removida = _memoria.pop(chave, None)
+        if removida is None:
+            return False
+        try:
+            with _abrir_db() as conn:
+                conn.execute("DELETE FROM escolhas WHERE chave = ?", (chave,))
+        except Exception:
+            logger.warning("[music/search-memory] falha ao remover escolha persistida", exc_info=True)
+        return True
 
 
 def obter_preferencia_busca(
@@ -154,11 +438,13 @@ def obter_preferencia_busca(
     clean_query = str(query or "").strip()
     if not clean_query:
         return None
+    _ensure_loaded()
     chave = chave_semantica_busca(clean_query)
-    escolha = _memoria.get(chave)
-    if escolha is not None:
-        _memoria.move_to_end(chave)
-    return escolha
+    with _LOCK:
+        escolha = _memoria.get(chave)
+        if escolha is not None:
+            _memoria.move_to_end(chave)
+        return escolha
 
 
 def estabilizar_com_preferencia(

@@ -5,6 +5,7 @@ from collections import deque
 from typing import Any
 
 from ..agente_telefone.conversao import faixa_do_payload
+from ..busca import registrar_link_busca
 from ..agente_telefone.roteamento import desvincular_guild_worker
 from ..nucleo.modelos import MusicTrack
 
@@ -266,6 +267,12 @@ async def sincronizar_estado_agente(
         state.current_started_at_monotonic = time.monotonic()
         state.current_start_offset_seconds = 0.0
         state.voice_status_pause_position_seconds = -1.0
+        # Se esta faixa nasceu de um link direto, o título real só fica
+        # disponível depois que o Music Agent resolve o stream. Aprenda aqui,
+        # no primeiro `playing`, para que buscas futuras virem direct-hit.
+        if state.current is not None:
+            with contextlib.suppress(Exception):
+                registrar_link_busca(state.current)
         router._schedule_agent_playback_started_effects(guild_id, new_panel_key)
 
     status_transition = previous_status != state.current_status

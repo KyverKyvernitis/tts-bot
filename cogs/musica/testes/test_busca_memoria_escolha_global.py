@@ -94,3 +94,166 @@ async def test_direct_hit_nao_reutiliza_qualificador_diferente(monkeypatch) -> N
 
     assert chamado["worker"] == 1
     limpar_memoria_busca()
+
+
+def test_memoria_persistente_sobrevive_recarregamento() -> None:
+    from cogs.musica.busca import (
+        limpar_memoria_busca,
+        obter_escolha_busca,
+        recarregar_memoria_busca,
+        registrar_selecao_busca,
+    )
+
+    limpar_memoria_busca()
+    track = MusicTrack(
+        title="Mili - Compass",
+        webpage_url="https://youtube.test/compass",
+        original_url="mili compass",
+        requester_id=1,
+        uploader="Mili",
+        source="youtube",
+        extractor="worker-ytdlp",
+    )
+    assert registrar_selecao_busca("mili compass", track) is True
+
+    recarregar_memoria_busca()
+    hit = obter_escolha_busca("MILI COMPASS", requester_id=77, requester_name="Depois do restart")
+
+    assert hit is not None
+    assert hit.webpage_url == "https://youtube.test/compass"
+    assert hit.requester_id == 77
+    assert hit.requester_name == "Depois do restart"
+    limpar_memoria_busca()
+
+
+def test_link_cria_alias_do_titulo_e_primeira_palavra_e_sobrepoe_seletor() -> None:
+    from cogs.musica.busca import (
+        limpar_memoria_busca,
+        obter_escolha_busca,
+        registrar_link_busca,
+        registrar_selecao_busca,
+    )
+
+    limpar_memoria_busca()
+    escolha_antiga = MusicTrack(
+        title="505 - Arctic Monkeys",
+        webpage_url="https://youtube.test/resultado-antigo",
+        original_url="505",
+        requester_id=1,
+        uploader="Outro canal",
+        source="youtube",
+    )
+    registrar_selecao_busca("505", escolha_antiga)
+
+    link = MusicTrack(
+        title="Arctic Monkeys - 505 (Official Video)",
+        webpage_url="https://youtube.test/505-oficial",
+        original_url="https://youtube.test/505-oficial",
+        requester_id=2,
+        uploader="Arctic Monkeys",
+        source="YouTube",
+        extractor="worker-ytdlp",
+    )
+    aliases = registrar_link_busca(link)
+
+    assert "505" in aliases
+    hit = obter_escolha_busca("505", requester_id=9)
+    assert hit is not None
+    assert hit.webpage_url == "https://youtube.test/505-oficial"
+
+    # Uma escolha posterior do menu de três resultados não pode desfazer a
+    # autoridade aprendida por link direto.
+    posterior = MusicTrack(
+        title="Arctic Monkeys - 505 (Lyrics)",
+        webpage_url="https://youtube.test/lyrics",
+        original_url="505",
+        requester_id=3,
+        uploader="Lyrics Channel",
+        source="youtube",
+    )
+    assert registrar_selecao_busca("505", posterior) is False
+    hit2 = obter_escolha_busca("505", requester_id=10)
+    assert hit2 is not None
+    assert hit2.webpage_url == "https://youtube.test/505-oficial"
+    limpar_memoria_busca()
+
+
+def test_limite_memoria_configuravel_evicta_mais_antiga(monkeypatch) -> None:
+    from cogs.musica import configuracao as config
+    from cogs.musica.busca import limpar_memoria_busca, obter_escolha_busca, registrar_selecao_busca
+
+    monkeypatch.setattr(config, "MUSIC_SEARCH_CHOICE_MEMORY_MAX_ENTRIES", 3)
+    limpar_memoria_busca()
+    for idx in range(4):
+        registrar_selecao_busca(
+            f"faixa {idx}",
+            MusicTrack(
+                title=f"Faixa {idx}",
+                webpage_url=f"https://youtube.test/{idx}",
+                original_url=f"faixa {idx}",
+                requester_id=1,
+                source="youtube",
+            ),
+            now=float(idx + 1),
+        )
+
+    assert obter_escolha_busca("faixa 0") is None
+    assert obter_escolha_busca("faixa 1") is not None
+    assert obter_escolha_busca("faixa 3") is not None
+    limpar_memoria_busca()
+
+
+@pytest.mark.asyncio
+async def test_playing_de_link_aprende_alias_global_para_busca() -> None:
+    from cogs.musica.busca import limpar_memoria_busca, obter_escolha_busca
+    from cogs.musica.nucleo.estado import MusicGuildState
+    from cogs.musica.reproducao.sincronizacao import sincronizar_estado_agente
+
+    limpar_memoria_busca()
+    state = MusicGuildState()
+
+    class RouterFake:
+        def get_state(self, guild_id: int):
+            return state
+
+        def _panel_key_for_track(self, track):
+            return (track.webpage_url if track else "") or (track.title if track else "")
+
+        def _set_current_status(self, st, status: str):
+            st.current_status = status
+
+        def _reactivate_panel_controls_now(self, guild_id: int):
+            return None
+
+        def _schedule_agent_playback_started_effects(self, guild_id: int, key: str):
+            return None
+
+        def start_music_agent_monitor(self, guild_id: int, **kwargs):
+            return None
+
+    await sincronizar_estado_agente(
+        RouterFake(),
+        123,
+        agent_state={
+            "status": "playing",
+            "confirmed_playing": True,
+            "playback_token": 7,
+            "current": {
+                "title": "Arctic Monkeys - 505 (Official Video)",
+                "uploader": "Arctic Monkeys",
+                "webpage_url": "https://youtube.test/watch?v=505",
+                "original_url": "https://youtube.test/watch?v=505",
+                "duration": 252,
+            },
+            "queue": [],
+            "queue_size": 0,
+        },
+        create_panel=False,
+    )
+
+    hit = obter_escolha_busca("505", requester_id=999)
+    assert hit is not None
+    assert hit.title == "Arctic Monkeys - 505 (Official Video)"
+    assert hit.webpage_url == "https://youtube.test/watch?v=505"
+    assert hit.stream_url == ""
+    limpar_memoria_busca()
