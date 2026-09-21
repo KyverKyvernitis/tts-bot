@@ -1136,3 +1136,51 @@ def test_selection_prefetch_com_musica_ativa_fica_em_background(music):
         assert agent.selection_prefetch_active_priority > agent.selection_prefetch_idle_priority
 
     run(scenario())
+
+
+def test_resolve_guild_waits_for_gateway_cache_instead_of_failing_first_play(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        guild_id = 927002914449424404
+        channel_id = 1483224890398998659
+        channel = types.SimpleNamespace(id=channel_id)
+
+        class Guild:
+            voice_client = None
+
+            def get_channel(self, value):
+                return channel if int(value) == channel_id else None
+
+        guild = Guild()
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def is_ready(self):
+                return True
+
+            def get_guild(self, value):
+                assert int(value) == guild_id
+                self.calls += 1
+                return guild if self.calls >= 3 else None
+
+            def get_channel(self, _value):
+                return None
+
+        client = Client()
+        agent.client = client
+
+        async def fast_sleep(_seconds):
+            return None
+
+        monkeypatch.setenv("MUSIC_AGENT_GUILD_CACHE_WAIT_SECONDS", "1.0")
+        monkeypatch.setenv("MUSIC_AGENT_GUILD_CACHE_POLL_SECONDS", "0.02")
+        monkeypatch.setattr(music.asyncio, "sleep", fast_sleep)
+
+        resolved_guild, resolved_channel = await agent._resolve_guild_and_channel(guild_id, channel_id)
+        assert resolved_guild is guild
+        assert resolved_channel is channel
+        assert client.calls == 3
+
+    run(scenario())

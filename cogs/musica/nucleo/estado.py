@@ -116,6 +116,7 @@ class MusicGuildState:
     voice_status_last_update_at: float = 0.0
     voice_status_last_track_key: str = ""
     agent_started_track_key: str = ""
+    agent_started_playback_token: int = -1
     panel_last_repost_key: str = ""
     panel_last_repost_at: float = 0.0
     agent_last_idle_event: str = ""

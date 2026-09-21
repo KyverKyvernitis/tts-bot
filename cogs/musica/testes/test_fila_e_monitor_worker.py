@@ -193,3 +193,85 @@ def test_monitor_so_refresca_painel_sem_mudanca_no_intervalo_periodico() -> None
         painel_existe=False,
         refresh_seconds=30.0,
     ) is True
+
+
+@pytest.mark.asyncio
+async def test_painel_reposta_quando_starting_ja_atualizou_panel_key_antes_do_playing() -> None:
+    state = MusicGuildState()
+    state.now_message = object()
+    calls: list[tuple] = []
+
+    class RouterFake:
+        def get_state(self, guild_id: int):
+            assert guild_id == 321
+            return state
+
+        def _panel_key_for_track(self, track):
+            return (track.webpage_url if track else "") or (track.title if track else "")
+
+        def _set_current_status(self, st, status: str):
+            st.current_status = status
+
+        def _reactivate_panel_controls_now(self, guild_id: int):
+            calls.append(("reactivate", guild_id))
+
+        def _schedule_agent_playback_started_effects(self, guild_id: int, key: str):
+            calls.append(("started", guild_id, key))
+
+        async def update_panel(self, guild_id: int, *, create: bool, repost: bool):
+            calls.append(("panel", guild_id, create, repost))
+            # Reproduz o comportamento real: o snapshot "starting" já edita o
+            # painel existente e grava a chave da nova faixa antes de "playing".
+            state.panel_track_key = self._panel_key_for_track(state.current)
+
+        def start_music_agent_monitor(self, guild_id: int, **kwargs):
+            calls.append(("monitor", guild_id, kwargs))
+
+    router = RouterFake()
+    remote_track = {
+        "title": "Arctic Monkeys - 505",
+        "webpage_url": "https://www.youtube.com/watch?v=qU9mHegkTc4",
+        "duration": 252,
+    }
+
+    await sincronizar_estado_agente(
+        router,
+        321,
+        agent_state={
+            "status": "starting",
+            "confirmed_playing": False,
+            "playback_token": 11,
+            "current": remote_track,
+            "queue": [],
+            "queue_size": 0,
+        },
+        voice_channel_id=999,
+        text_channel_id=888,
+        create_panel=True,
+    )
+    assert state.panel_track_key == remote_track["webpage_url"]
+    assert not any(call[0] == "started" for call in calls)
+    assert calls[-2][0] == "panel" or calls[-1][0] in {"panel", "monitor"}
+
+    calls.clear()
+    await sincronizar_estado_agente(
+        router,
+        321,
+        agent_state={
+            "status": "playing",
+            "confirmed_playing": True,
+            "voice_connected": True,
+            "player_present": True,
+            "playback_token": 11,
+            "current": remote_track,
+            "queue": [],
+            "queue_size": 0,
+        },
+        voice_channel_id=999,
+        text_channel_id=888,
+        create_panel=True,
+    )
+
+    assert state.agent_started_playback_token == 11
+    assert any(call[0] == "started" for call in calls)
+    assert ("panel", 321, True, True) in calls

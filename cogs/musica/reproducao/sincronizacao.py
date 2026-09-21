@@ -83,7 +83,6 @@ async def sincronizar_estado_agente(
     guild_id = int(guild_id)
     state = router.get_state(guild_id)
     remote = agent_state if isinstance(agent_state, dict) else {}
-    previous_panel_key = getattr(state, "panel_track_key", None)
     previous_status = str(getattr(state, "current_status", "") or "")
     previous_current = getattr(state, "current", None)
     previous_current_key = router._panel_key_for_track(previous_current) if previous_current is not None else ""
@@ -159,6 +158,8 @@ async def sincronizar_estado_agente(
                 state.paused = False
                 state.music_session_active = False
                 state.agent_started_track_key = ""
+                state.agent_started_playback_token = -1
+                state.panel_last_repost_key = ""
                 if remote_playback_token is not None:
                     state.agent_playback_token = remote_playback_token
                 state.agent_last_idle_event = last_event or raw_status
@@ -241,20 +242,27 @@ async def sincronizar_estado_agente(
     if state.current is not None or tem_pendentes(state) or state.current_status in active_statuses:
         router._reactivate_panel_controls_now(guild_id)
     previous_started_key = str(getattr(state, "agent_started_track_key", "") or "")
+    previous_started_token = int(getattr(state, "agent_started_playback_token", -1) or -1)
     playback_generation_changed = bool(
         remote_playback_token is not None
         and remote_playback_token != previous_playback_token
+    )
+    started_generation_changed = bool(
+        remote_playback_token is not None
+        and remote_playback_token != previous_started_token
     )
     legacy_track_changed = bool(new_panel_key and previous_started_key != new_panel_key)
     just_started_agent_track = bool(
         (active_confirmed or active_started_signal)
         and new_panel_key
-        and (playback_generation_changed or (remote_playback_token is None and legacy_track_changed))
+        and (started_generation_changed or legacy_track_changed)
     )
     if remote_playback_token is not None:
         state.agent_playback_token = remote_playback_token
     if just_started_agent_track:
         state.agent_started_track_key = new_panel_key
+        if remote_playback_token is not None:
+            state.agent_started_playback_token = remote_playback_token
         state.current_started_at_monotonic = time.monotonic()
         state.current_start_offset_seconds = 0.0
         state.voice_status_pause_position_seconds = -1.0
@@ -275,7 +283,7 @@ async def sincronizar_estado_agente(
             reason="agent_pause" if state.current_status == "paused" else "agent_resume",
         )
 
-    track_changed_for_panel = bool(new_panel_key and previous_panel_key != new_panel_key)
+    started_track_changed_for_panel = bool(new_panel_key and previous_started_key != new_panel_key)
     repost_key = f"{guild_id}:{new_panel_key}" if new_panel_key else ""
     already_reposted = bool(repost_key and repost_key == str(getattr(state, "panel_last_repost_key", "") or ""))
     should_repost_panel = bool(
@@ -283,7 +291,7 @@ async def sincronizar_estado_agente(
         and state.now_message is not None
         and new_panel_key
         and just_started_agent_track
-        and track_changed_for_panel
+        and (started_track_changed_for_panel or playback_generation_changed or started_generation_changed)
         and not already_reposted
         and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
     )

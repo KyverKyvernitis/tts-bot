@@ -690,13 +690,53 @@ class ReproducaoMixin:
         )
 
     async def _resolve_guild_and_channel(self, guild_id: int, voice_channel_id: int) -> tuple[Any, Any]:
-        guild = self.client.get_guild(guild_id)
+        # READY pode chegar antes dos GUILD_CREATE que preenchem o cache. Na primeira
+        # reprodução após start/reconnect isso criava uma corrida: o agente já estava
+        # saudável, mas get_guild() ainda retornava None e o usuário precisava repetir
+        # o comando. Aguarde brevemente o alvo aparecer no cache em vez de falhar cedo.
+        wait_seconds = max(0.0, env_float("MUSIC_AGENT_GUILD_CACHE_WAIT_SECONDS", 3.0))
+        poll_seconds = max(0.02, min(0.25, env_float("MUSIC_AGENT_GUILD_CACHE_POLL_SECONDS", 0.08)))
+        started = time.monotonic()
+        deadline = started + wait_seconds
+        wait_until_ready = getattr(self.client, "wait_until_ready", None)
+        if callable(wait_until_ready) and not bool(getattr(self.client, "is_ready", lambda: True)()):
+            try:
+                await asyncio.wait_for(wait_until_ready(), timeout=max(0.1, min(wait_seconds or 0.1, 2.0)))
+            except (asyncio.TimeoutError, TimeoutError):
+                pass
+
+        logged_wait = False
+        guild = None
+        channel = None
+        while True:
+            guild = self.client.get_guild(guild_id)
+            if guild is not None:
+                channel = guild.get_channel(voice_channel_id) or self.client.get_channel(voice_channel_id)
+                if channel is not None:
+                    if logged_wait:
+                        self.log(
+                            "voice_target_cache_recovered",
+                            guild_id=guild_id,
+                            channel=voice_channel_id,
+                            elapsed_ms=round((time.monotonic() - started) * 1000.0, 1),
+                        )
+                    return guild, channel
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            if not logged_wait:
+                logged_wait = True
+                self.log(
+                    "voice_target_cache_wait",
+                    guild_id=guild_id,
+                    channel=voice_channel_id,
+                    guild_cached=bool(guild is not None),
+                )
+            await asyncio.sleep(min(poll_seconds, max(0.0, deadline - now)))
+
         if guild is None:
-            raise RuntimeError(f"guild {guild_id} não encontrada no player remoto")
-        channel = guild.get_channel(voice_channel_id) or self.client.get_channel(voice_channel_id)
-        if channel is None:
-            raise RuntimeError(f"canal de voz {voice_channel_id} não encontrado")
-        return guild, channel
+            raise RuntimeError(f"guild {guild_id} não encontrada no player remoto após {wait_seconds:.1f}s")
+        raise RuntimeError(f"canal de voz {voice_channel_id} não encontrado após {wait_seconds:.1f}s")
 
     async def _ensure_direct_voice_client(self, guild_id: int) -> tuple[Any, bool]:
         """Prepare a sessão de voz e diga se esta chamada criou a conexão."""
