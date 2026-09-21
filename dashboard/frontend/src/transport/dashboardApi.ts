@@ -43,8 +43,8 @@ export async function fetchDashboardSettings(guildId: string): Promise<Dashboard
   return await fetchDashboardJson<DashboardSettingsPayload>(`/dashboard/guild/${encodeURIComponent(guildId)}/settings`);
 }
 
-export async function fetchDashboardOptions(guildId: string): Promise<DashboardOptionsPayload> {
-  return await fetchDashboardJson<DashboardOptionsPayload>(`/dashboard/guild/${encodeURIComponent(guildId)}/options`);
+export async function fetchDashboardOptions(guildId: string, signal?: AbortSignal): Promise<DashboardOptionsPayload> {
+  return await fetchDashboardJson<DashboardOptionsPayload>(`/dashboard/guild/${encodeURIComponent(guildId)}/options`, { signal });
 }
 
 export async function fetchDashboardCommands(guildId: string, force = false): Promise<DashboardCommandsPayload> {

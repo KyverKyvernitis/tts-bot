@@ -11,6 +11,7 @@ import { useMessageEditorResetEffect } from "./useMessageEditorResetEffect";
 import { useMessageEditorTextEditing } from "./useMessageEditorTextEditing";
 import { useMessageEditorWorkspaceEffects } from "./useMessageEditorWorkspaceEffects";
 import { useMessageEditorViewState } from "./useMessageEditorViewState";
+import { useMessageEditorInitialField } from "./useMessageEditorInitialField";
 import { MessageEditorSurface } from "./MessageEditorSurface";
 import { messageEditorDerivedState } from "./messageEditorDerivedState";
 import { messageEditorFieldGroups, messageEditorHasFieldChanges } from "./messageEditorFields";
@@ -19,6 +20,7 @@ import {
   relatedMessageEditorContextFields,
 } from "./messageEditorModel";
 
+const EMPTY_SENDER_FIELDS: string[] = [];
 export function MessageEditor(props: MessageEditorProps) {
   const {
     editorId,
@@ -27,7 +29,7 @@ export function MessageEditor(props: MessageEditorProps) {
     groupLabel,
     description,
     fields,
-    senderFieldIds = [],
+    senderFieldIds = EMPTY_SENDER_FIELDS,
     presentation = "generic",
     baseline,
     draft,
@@ -45,8 +47,8 @@ export function MessageEditor(props: MessageEditorProps) {
   const editorKey = `${sectionId}:${editorId}`;
   const senderFieldIdSet = useMemo(() => new Set(senderFieldIds), [senderFieldIds]);
   const { jsonFields, visualFields, senderFields, messageFields } = useMemo(
-    () => messageEditorFieldGroups(fields, senderFieldIds, editorId, draft),
-    [draft, editorId, fields, senderFieldIds],
+    () => messageEditorFieldGroups(fields, senderFieldIds, editorId, draft, props.focusFieldId),
+    [draft, editorId, fields, senderFieldIds, props.focusFieldId],
   );
   const {
     view,
@@ -189,6 +191,7 @@ export function MessageEditor(props: MessageEditorProps) {
     clearTextSelection,
   });
 
+  useMessageEditorInitialField({ editorKey, fieldId: props.focusFieldId, fields, setSelectedFieldId, setContextAnchorFieldId, setView });
   const { handleJsonChange, applyJson, handleApply } = useMessageEditorJsonWorkflow({
     jsonFields,
     draft,

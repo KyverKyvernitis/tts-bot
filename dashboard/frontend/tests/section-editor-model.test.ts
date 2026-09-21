@@ -48,9 +48,9 @@ test("visibilidade welcome respeita render, mídia e webhook", () => {
   assert.equal(sectionEditorFieldVisible("welcome", field("welcome.webhook.avatar_url", "url"), { "welcome.webhook.enabled": true, "welcome.webhook.avatar_mode": "server" }), false);
 });
 
-test("aprovação oculta campos dependentes enquanto desativada", () => {
+test("aprovação permite preparar campos antes de habilitar o envio", () => {
   const role = field("forms.approval.role_id", "role");
-  assert.equal(sectionEditorFieldVisible("forms", role, { "forms.approval.enabled": false }), false);
+  assert.equal(sectionEditorFieldVisible("forms", role, { "forms.approval.enabled": false }), true);
   assert.equal(sectionEditorFieldVisible("forms", role, { "forms.approval.enabled": true }), true);
   assert.equal(sectionEditorFieldVisible("forms", field("forms.approval.enabled", "boolean"), {}), true);
 });

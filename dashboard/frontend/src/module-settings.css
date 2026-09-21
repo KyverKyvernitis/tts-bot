@@ -1,0 +1,154 @@
+/* Áreas de edição compartilham controles; cada módulo mantém sua organização. */
+.osk-module-settings { max-width: 1100px; }
+.osk-module-settings .osk-page-back { margin-bottom: 20px; min-height: 36px; font-size: 13px; }
+.osk-module-heading { display: flex; align-items: center; gap: 18px; margin-bottom: 26px; }
+.osk-module-heading h1 { flex: 1; min-width: 0; }
+.osk-module-emblem { display: grid; place-items: center; flex-shrink: 0; width: 84px; height: 70px; border: 1px solid var(--osk-line); border-radius: 18px; background: var(--osk-paper-pure); overflow: hidden; }
+.osk-root .osk-module-emblem .osk-module-artwork { width: 84px; height: 70px; transform: scale(.7); }
+.osk-module-toggle { display: flex; align-items: center; justify-content: space-between; gap: 14px; font-size: 13px; font-weight: 500; min-height: 48px; padding: 8px 12px; border: 1px solid var(--osk-line); border-radius: 11px; cursor: pointer; }
+.osk-module-toggle > .osk-switch { flex-shrink: 0; }
+.osk-module-tabs { display: flex; align-items: stretch; gap: 4px; overflow-x: auto; scrollbar-width: thin; margin-bottom: 24px; padding: 4px; border: 1px solid var(--osk-line); border-radius: 12px; background: var(--osk-paper-pure); }
+.osk-module-tabs > button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; flex: 1 0 auto; min-height: 42px; padding: 10px 17px; white-space: nowrap; font-size: 13px; font-weight: 500; color: var(--osk-muted); background: transparent; border: 1px solid transparent; border-radius: 8px; }
+.osk-module-tabs > button[aria-selected="true"] { color: var(--osk-ink); background: var(--osk-paper-muted); border-color: var(--osk-line-strong); box-shadow: 0 2px 5px #0002; }
+.osk-area-change { width: 5px; height: 5px; border-radius: 50%; background: var(--osk-ink); }
+.osk-module-area { display: grid; gap: 18px; min-width: 0; }
+.osk-module-card { min-width: 0; padding: 22px; border: 1px solid var(--osk-line); border-radius: 16px; background: var(--osk-paper-pure); }
+.osk-module-card > header { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+.osk-module-card > header svg { color: var(--osk-muted); flex-shrink: 0; }
+.osk-module-card > header h2 { margin: 0; font-size: 15px; line-height: 1.4; }
+.osk-module-card > p { font-size: 13px; color: var(--osk-muted); line-height: 1.6; }
+.osk-module-settings .osk-compact-fields { gap: 0; }
+.osk-module-settings .osk-compact-field { grid-template-columns: minmax(150px, .95fr) minmax(170px, 1fr); align-items: start; gap: 24px; padding: 18px 0; border: 0; border-bottom: 1px solid var(--osk-line); background: transparent; border-radius: 0; }
+.osk-module-settings .osk-compact-field:first-child { padding-top: 0; }
+.osk-module-settings .osk-compact-field:last-child { padding-bottom: 0; border-bottom: 0; }
+.osk-module-settings .osk-compact-field[data-complex] { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.osk-module-settings .osk-compact-field-copy strong { line-height: 1.5; font-size: 13px; font-weight: 500; }
+.osk-module-settings .osk-compact-field-copy small { max-width: 42ch; margin-top: 4px; line-height: 1.5; font-size: 12px; color: var(--osk-muted); }
+.osk-module-settings .osk-compact-field[data-changed] .osk-compact-field-copy strong::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 7px; border-radius: 50%; background: currentColor; vertical-align: middle; }
+.osk-field-control { min-width: 0; width: 100%; }
+.osk-field-control > .osk-select { width: 100%; }
+.osk-module-settings .osk-switch-state { display: none; }
+.osk-module-settings .osk-compact-field[data-type="boolean"] { align-items: center; }
+.osk-module-settings .osk-compact-field[data-type="boolean"] .osk-compact-field-control { justify-self: end; }
+.osk-module-settings .osk-select-trigger, .osk-module-settings input:not([type="checkbox"]):not([type="range"]):not([type="color"]), .osk-module-settings textarea { border-radius: 10px; background: var(--osk-paper); }
+.osk-module-settings .osk-range-control { min-height: 44px; }
+.osk-module-settings .osk-range-control output { min-width: 58px; font-variant-numeric: tabular-nums; font-size: 13px; }
+.osk-module-settings .osk-message-group-panel { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); align-items: start; gap: 24px; }
+.osk-module-settings .osk-message-group-panel:not(:has(> .osk-message-group-settings)) { grid-template-columns: minmax(0, 1fr); }
+.osk-module-settings .osk-message-group-panel > .osk-inline-note { grid-column: 1 / -1; margin: 0; font-size: 12px; }
+.osk-module-settings .osk-message-group-settings .osk-compact-field { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.osk-module-settings .osk-message-group-settings .osk-compact-field[data-type="boolean"] { grid-template-columns: minmax(0, 1fr) auto; }
+.osk-message-preview-card { min-width: 0; overflow: hidden; border: 1px solid var(--osk-line-strong); border-radius: 13px; background: var(--osk-paper); }
+.osk-message-preview-card > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 15px 17px; border-bottom: 1px solid var(--osk-line); }
+.osk-message-preview-card h3 { margin: 4px 0 0; font-family: var(--osk-font-display); font-weight: 500; font-size: 13px; letter-spacing: -.025em; }
+.osk-module-eyebrow { display: block; color: var(--osk-muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.osk-preview-edit { display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex-shrink: 0; min-height: 38px; padding: 8px 12px; font-size: 12px; color: var(--osk-paper); background: var(--osk-ink); border-radius: 8px; }
+.osk-module-preview-body { max-height: 480px; overflow: auto; padding: 20px 16px; }
+.osk-module-preview-body .osk-message-preview { min-width: 0; width: 100%; margin: 0; padding: 0; border: 0; box-shadow: none; background: transparent; }
+.osk-message-preview-card > footer { padding: 10px 17px; border-top: 1px solid var(--osk-line); color: var(--osk-muted); font-size: 11px; line-height: 1.5; }
+.osk-message-preview-card[data-changed] > header { box-shadow: inset 2px 0 var(--osk-ink); }
+.osk-preview-expand { display: none; }
+.osk-module-advanced { border: 1px solid var(--osk-line); border-radius: 14px; background: var(--osk-paper-pure); }
+.osk-module-advanced > summary { display: flex; align-items: center; gap: 10px; padding: 18px 22px; min-height: 56px; cursor: pointer; font-size: 13px; }
+.osk-module-advanced > summary::after { content: "+"; margin-left: auto; font-size: 18px; color: var(--osk-muted); }
+.osk-module-advanced[open] > summary::after { content: "−"; }
+.osk-module-advanced > div { padding: 0 22px 22px; }
+.osk-module-settings .osk-form-fields-limit { margin-bottom: 16px; }
+.osk-module-settings .osk-form-fields-limit small { display: none; }
+.osk-module-settings .osk-form-fields-editor > article, .osk-module-settings .osk-ticket-flow { border-color: var(--osk-line); border-radius: 12px; background: var(--osk-paper); }
+.osk-module-settings .osk-form-question-head { flex-wrap: wrap; gap: 8px; padding: 12px; }
+.osk-module-settings .osk-form-question-summary { gap: 12px; min-height: 44px; }
+.osk-question-number { display: grid !important; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; border: 1px solid var(--osk-line-strong); border-radius: 8px; font-size: 12px; color: var(--osk-muted); }
+.osk-module-settings .osk-form-question-actions button { width: 36px; height: 36px; }
+.osk-module-settings .osk-form-question-panel-inner { padding: 4px 16px 18px; }
+.osk-module-settings .osk-form-question-switches { margin-top: 16px; }
+.osk-module-settings .osk-inline-switch-row { min-height: 48px; }
+.osk-module-settings .osk-ticket-flow__header { padding: 14px; }
+.osk-module-settings .osk-ticket-flow__summary { min-width: 0; }
+.osk-module-settings .osk-ticket-flow__summary strong { font-family: var(--osk-font-display); font-size: 14px; font-weight: 500; }
+.osk-module-settings .osk-ticket-flow__summary small { color: var(--osk-muted); font-size: 12px; }
+.osk-module-settings .osk-ticket-flow__summary em { color: var(--osk-text-soft); font-size: 11px; }
+.osk-module-settings .osk-ticket-flow__panel-inner { padding: 6px 18px 18px; }
+.osk-module-settings .osk-ticket-flow__block h3 { font-size: 12px; color: var(--osk-muted); letter-spacing: .01em; }
+.osk-module-settings .osk-settings-groups > section + section { margin-top: 22px; }
+.osk-module-settings .osk-permission-profiles > button { border: 1px solid var(--osk-line); border-radius: 12px; background: var(--osk-paper); color: var(--osk-ink); box-shadow: none; }
+.osk-module-settings .osk-permission-profiles > button[data-selected] { border-color: var(--osk-line-bright); background: var(--osk-paper-muted); color: var(--osk-ink); box-shadow: inset 0 2px var(--osk-ink); }
+.osk-module-settings .osk-permission-profiles small { color: var(--osk-muted); font-size: 12px; line-height: 1.5; }
+.osk-module-settings .osk-permission-advanced-toggle { min-height: 48px; }
+.osk-module-settings .osk-color-panel-manager__item { display: grid; grid-template-columns: 28px minmax(0,1fr) auto auto; align-items: center; gap: 12px; padding: 16px; border: 1px solid var(--osk-line); border-radius: 12px; background: var(--osk-paper); }
+.osk-color-panel-swatches { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 7px; padding-top: 6px; }
+.osk-color-panel-swatches > span { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--osk-line); border-radius: 6px; font-size: 11px; color: var(--osk-text-soft); }
+.osk-color-panel-swatches i { width: 10px; height: 10px; border-radius: 50%; background: var(--osk-muted); box-shadow: inset 0 0 0 1px #ffffff18; }
+.osk-birthday-time { display: flex; align-items: center; gap: 12px; padding: 15px; margin-bottom: 22px; background: var(--osk-paper); border: 1px solid var(--osk-line); border-radius: 12px; }
+.osk-birthday-time > svg { color: var(--osk-muted); flex-shrink: 0; }
+.osk-birthday-time > div { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.osk-birthday-time strong { font-size: 13px; font-weight: 500; }
+.osk-birthday-time small { font-size: 11px; color: var(--osk-muted); overflow-wrap: anywhere; }
+.osk-birthday-time input { width: 124px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.osk-voice-profile { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; padding: 18px; background: var(--osk-paper); border: 1px solid var(--osk-line); border-radius: 12px; }
+.osk-voice-profile svg { color: var(--osk-muted); }
+.osk-voice-profile div { display: grid; gap: 5px; }
+.osk-voice-profile small { font-size: 11px; color: var(--osk-muted); }
+.osk-voice-profile strong { font-family: var(--osk-font-display); font-size: 15px; font-weight: 500; letter-spacing: -.035em; }
+.osk-module-settings[data-module="tts"] .osk-module-card[data-group="Voz"] .osk-compact-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+.osk-module-settings[data-module="tts"] .osk-module-card[data-group="Voz"] .osk-compact-field { grid-template-columns: minmax(0,1fr); border: 0; padding: 0; gap: 10px; }
+.osk-economy-settings { display: grid; gap: 18px; }
+.osk-economy-table { display: flex; align-items: center; gap: 22px; padding: 28px; border: 1px solid var(--osk-line); border-radius: 16px; background: linear-gradient(120deg, var(--osk-paper-muted), var(--osk-paper-pure) 75%); }
+.osk-root .osk-economy-table .osk-module-artwork { width: 100px; height: 76px; flex-shrink: 0; transform: scale(1.15); }
+.osk-economy-table h2 { margin: 6px 0 8px; font-size: 22px; }
+.osk-economy-table p { margin: 0; color: var(--osk-muted); font-size: 12px; line-height: 1.7; }
+.osk-economy-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; }
+.osk-economy-controls .osk-module-card:last-child { grid-column: 1 / -1; }
+.osk-economy-controls .osk-module-card > header { margin-bottom: 12px; }
+.osk-economy-controls .osk-module-card > p { min-height: 40px; margin: 0 0 18px; font-size: 12px; }
+.osk-economy-controls .osk-module-card:last-child .osk-field-control { max-width: 430px; }
+.osk-field-error { display: block; margin-top: 8px; color: #f2aaa5; font-size: 12px; line-height: 1.5; }
+.osk-field-control[data-invalid] input, .osk-field-control[data-invalid] textarea, .osk-field-control[data-invalid] .osk-select-trigger { border-color: #ba6d68 !important; }
+.osk-field-unavailable { display: grid; gap: 8px; }
+.osk-field-unavailable > small { color: var(--osk-muted); font-size: 11px; }
+.osk-field-unavailable > button { justify-self: start; min-height: 36px; color: var(--osk-ink); text-decoration: underline; font-size: 12px; background: transparent; }
+.osk-module-errors { display: grid; gap: 8px; padding: 16px 18px; margin-bottom: 18px; border: 1px solid #ba6d6855; border-radius: 12px; background: #ba6d680c; font-size: 13px; }
+.osk-module-errors > button { justify-self: start; padding: 4px 0; color: #f2aaa5; background: transparent; font-size: 12px; text-align: left; text-decoration: underline; }
+.osk-editor-draft-note { display: block; flex: 0 0 auto; padding: 7px 18px max(8px, env(safe-area-inset-bottom)); text-align: center; font-size: 11px; line-height: 1.4; color: var(--osk-muted); }
+.osk-ticket-flow__header > .osk-field-control { flex: 0 0 auto; width: auto; }
+
+@media (max-width:1100px) {
+  .osk-module-settings .osk-message-group-panel { grid-template-columns: minmax(0,1fr); }
+  .osk-module-settings .osk-message-group-settings .osk-compact-field { grid-template-columns: minmax(130px, .8fr) minmax(0,1fr); }
+}
+@media (max-width:600px) {
+  .osk-module-heading { gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .osk-module-heading h1 { font-size: 25px; }
+  .osk-module-emblem { width: 62px; height: 58px; border-radius: 13px; }
+  .osk-root .osk-module-emblem .osk-module-artwork { transform: scale(.55); }
+  .osk-module-toggle { width: 100%; padding: 10px 13px; }
+  .osk-module-tabs { margin-inline: -2px; gap: 2px; margin-bottom: 18px; }
+  .osk-module-tabs > button { min-height: 42px; padding: 10px 13px; font-size: 12px; }
+  .osk-module-card { padding: 17px; border-radius: 13px; }
+  .osk-module-card > header { margin-bottom: 18px; }
+  .osk-module-settings .osk-compact-field, .osk-module-settings .osk-message-group-settings .osk-compact-field { grid-template-columns: minmax(0,1fr); gap: 10px; padding-block: 17px; }
+  .osk-module-settings .osk-compact-field[data-type="boolean"], .osk-module-settings .osk-message-group-settings .osk-compact-field[data-type="boolean"] { grid-template-columns: minmax(0,1fr) auto; gap: 14px; }
+  .osk-preview-expand { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 44px; padding: 10px; color: var(--osk-text-soft); font-size: 12px; background: transparent; }
+  .osk-message-preview-card:not([data-expanded]) .osk-module-preview-body { display: none; }
+  .osk-message-preview-card > header { padding: 13px; }
+  .osk-message-preview-card > footer { padding: 10px 13px; }
+  .osk-module-preview-body { padding: 16px 12px; max-height: 420px; }
+  .osk-module-settings .osk-form-question-actions { margin-left: 44px; }
+  .osk-module-settings .osk-form-question-actions button { min-width: 38px; min-height: 38px; }
+  .osk-module-settings .osk-form-question-summary { width: 100%; }
+  .osk-module-settings .osk-ticket-flow__header { padding: 12px; }
+  .osk-module-settings .osk-ticket-flow__panel-inner { padding: 4px 13px 15px; }
+  .osk-module-settings .osk-permission-profiles { grid-template-columns: minmax(0,1fr); }
+  .osk-module-settings .osk-color-panel-manager__item { grid-template-columns: 24px minmax(0,1fr) auto auto; gap: 8px; padding: 12px; }
+  .osk-color-panel-swatches { grid-column: 1 / -1; }
+  .osk-birthday-time { flex-wrap: wrap; padding: 13px; }
+  .osk-birthday-time input { margin-left: 33px; }
+  .osk-module-settings[data-module="tts"] .osk-module-card[data-group="Voz"] .osk-compact-fields { grid-template-columns: minmax(0,1fr); }
+  .osk-economy-table { padding: 22px 16px; gap: 15px; }
+  .osk-root .osk-economy-table .osk-module-artwork { width: 70px; transform: scale(.85); }
+  .osk-economy-table h2 { font-size: 18px; line-height: 1.4; }
+  .osk-economy-controls { grid-template-columns: minmax(0,1fr); gap: 14px; }
+  .osk-economy-controls .osk-module-card > p { min-height: 0; }
+  .osk-module-advanced > summary { padding: 16px; }
+  .osk-module-advanced > div { padding: 0 16px 16px; }
+}

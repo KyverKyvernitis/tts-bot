@@ -162,9 +162,11 @@ test("mantém a prévia legível e limita o painel contextual no mobile", () => 
 test("o mesmo editor compartilhado continua atendendo todas as mensagens dos módulos", () => {
   const sectionEditor = readFileSync(new URL("../src/components/SectionEditor.tsx", import.meta.url), "utf8");
   const panels = readFileSync(new URL("../src/components/SectionEditorPanels.tsx", import.meta.url), "utf8");
+  const moduleGroup = readFileSync(new URL("../src/components/module-settings/ModuleGroup.tsx", import.meta.url), "utf8");
 
   assert.match(sectionEditor, /import \{ MessageEditor \} from "\.\/message-editor"/);
-  assert.match(sectionEditor, /<MessageGroupPanel/);
+  assert.match(sectionEditor, /<ModuleGroup/);
+  assert.match(moduleGroup, /<MessageGroupPanel/);
   assert.match(sectionEditor, /<MessageEditor/);
   assert.match(panels, /metadata\.editors\?\.length/);
   assert.match(panels, /createLegacyMessageEditor\(group, fields\)/);

@@ -11,6 +11,8 @@ import {
   createColorPanelId,
   nextUnusedColorSlot,
   normalizeColorPanelLayout,
+  colorRoleHex,
+  colorRoleLabel,
 } from "./colorRolesModel";
 
 interface ColorRolesPanelManagerProps {
@@ -86,6 +88,12 @@ export function ColorRolesPanelManager({ fields, values, draft, guildOptions, on
         <div className="osk-color-panel-manager__copy"><strong>Painel {index + 1}</strong><small>{panel.slots.length} de 10 opções</small></div>
         <button type="button" className="osk-color-panel-manager__edit" onClick={() => editPanel(index)}><PencilLine size={16} />Editar</button>
         <button type="button" className="osk-color-panel-manager__remove" disabled={layout.length <= 1} onClick={() => removePanel(index)} aria-label={`Remover Painel ${index + 1}`}><Minus size={18} /></button>
+        <div className="osk-color-panel-swatches" aria-label={`Cores do Painel ${index + 1}`}>{panel.slots.map(number => {
+          const slots = draft[slotsField.id] as Record<string, import("../../types/dashboard").DashboardColorSlot> | undefined;
+          const slot = slots?.[String(number)];
+          if (!slot) return <span key={number}><i />Cor {number}</span>;
+          return <span key={number} title={colorRoleLabel(slot, guildOptions)}><i style={{ background: colorRoleHex(slot, guildOptions) }} />{slot.name || `Cor ${number}`}</span>;
+        })}</div>
       </article>)}
     </div>
 

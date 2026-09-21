@@ -13,6 +13,7 @@ export interface MessageEditorProps {
   sectionLabel: string;
   groupLabel: string;
   description?: string;
+  focusFieldId?: string | null;
   fields: DashboardFieldDefinition[];
   senderFieldIds?: string[];
   presentation?: DashboardMessageEditorPresentation;

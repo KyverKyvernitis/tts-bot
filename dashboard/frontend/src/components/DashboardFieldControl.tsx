@@ -1,3 +1,6 @@
+import { useId, useState, type AriaAttributes } from "react";
+import { useFieldFeedback } from "./module-settings/FieldFeedback";
+import { dashboardFieldError } from "../app/dashboardFormValidation";
 import {
   channelOptionsForField,
   dashboardBooleanStateLabel,
@@ -33,7 +36,21 @@ interface DashboardFieldControlProps {
   onColorSlotSelect?(slotNumber: number): void;
 }
 
-export function DashboardFieldControl({ field, value, guildOptions, onChange, onTextSelection, selectedColorSlot, colorSlotIds, onColorSlotSelect }: DashboardFieldControlProps) {
+export function DashboardFieldControl(props: DashboardFieldControlProps) {
+  const feedback = useFieldFeedback();
+  const [touched, setTouched] = useState(false);
+  const errorId = useId();
+  const error = feedback.errors[props.field.id] || (touched ? dashboardFieldError(props.field, props.value) : null);
+  const attributes: AriaAttributes = { "aria-invalid": error ? true : undefined, "aria-describedby": error ? errorId : undefined };
+  const needsOptions = ["channel", "role", "role_multi", "color_slots"].includes(props.field.type);
+  if (needsOptions && !props.guildOptions?.ok) return <div className="osk-field-control osk-field-unavailable" data-field-id={props.field.id}>
+    <SmartSelect value="" options={[]} onChange={() => undefined} disabled ariaLabel={props.field.label} placeholder={feedback.optionsBusy ? "Carregando opções..." : "Opções indisponíveis"} />
+    <small>A seleção atual está preservada.</small>{feedback.onRetryOptions && <button type="button" disabled={feedback.optionsBusy} onClick={feedback.onRetryOptions}>{feedback.optionsBusy ? "Carregando..." : "Tentar novamente"}</button>}
+  </div>;
+  return <div className="osk-field-control" data-field-id={props.field.id} data-invalid={Boolean(error) || undefined} onBlur={() => setTouched(true)}><FieldControl {...props} attributes={attributes} />{error && <small className="osk-field-error" id={errorId} role="alert">{error}</small>}</div>;
+}
+
+function FieldControl({ field, value, guildOptions, onChange, onTextSelection, selectedColorSlot, colorSlotIds, onColorSlotSelect, attributes }: DashboardFieldControlProps & { attributes: AriaAttributes }) {
   const currentValue = stringifyDashboardValue(value);
   const channelOptions = field.type === "channel" && guildOptions?.ok
     ? channelOptionsWithCurrentValue(field, currentValue, guildOptions.channels)
@@ -62,15 +79,15 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange, on
     const options = currentValue && !configuredOptions.some((option) => option.value === currentValue)
       ? [{ value: currentValue, label: `${currentValue} — valor atual` }, ...configuredOptions]
       : configuredOptions;
-    return <SmartSelect id={`field-${field.id}`} ariaLabel={field.label} value={currentValue} options={options} onChange={(next) => onChange(field, next)} placeholder="Selecione uma opção" />;
+    return <SmartSelect id={`field-${field.id}`} ariaLabel={field.label} presentation="anchored" invalid={Boolean(attributes["aria-invalid"])} ariaDescribedBy={attributes["aria-describedby"]} value={currentValue} options={options} onChange={(next) => onChange(field, next)} placeholder="Selecione uma opção" />;
   }
 
   if (field.type === "channel" && channelOptions) {
-    return <SmartSelect id={`field-${field.id}`} ariaLabel={field.label} value={currentValue} options={[{ value: "", label: "Nenhum" }, ...channelOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um canal" emptyLabel="Nenhum canal compatível encontrado" />;
+    return <SmartSelect id={`field-${field.id}`} ariaLabel={field.label} presentation="anchored" invalid={Boolean(attributes["aria-invalid"])} ariaDescribedBy={attributes["aria-describedby"]} value={currentValue} options={[{ value: "", label: field.id === "economy.channel_id" ? "Todos os canais compatíveis" : "Nenhum" }, ...channelOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um canal" emptyLabel="Nenhum canal compatível encontrado" />;
   }
 
   if (field.type === "role" && roleOptions) {
-    return <SmartSelect id={`field-${field.id}`} ariaLabel={field.label} value={currentValue} options={[{ value: "", label: "Nenhum" }, ...roleOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um cargo" emptyLabel="Nenhum cargo encontrado" />;
+    return <SmartSelect id={`field-${field.id}`} ariaLabel={field.label} presentation="anchored" invalid={Boolean(attributes["aria-invalid"])} ariaDescribedBy={attributes["aria-describedby"]} value={currentValue} options={[{ value: "", label: "Nenhum" }, ...roleOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um cargo" emptyLabel="Nenhum cargo encontrado" />;
   }
 
   if (field.type === "role_multi") {
@@ -99,6 +116,7 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange, on
 
   if (field.type === "textarea") {
     return <textarea
+      {...attributes}
       aria-label={field.label}
       data-message-field-id={field.id}
       value={currentValue}
@@ -118,6 +136,7 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange, on
   return <div className={`${field.type === "color" ? "osk-color-input" : ""}${suffix ? " osk-input-suffix" : ""}`.trim()}>
     {field.type === "color" && <input type="color" value={/^#[0-9a-f]{6}$/i.test(currentValue) ? currentValue : "#5865f2"} onChange={(event) => onChange(field, event.target.value)} aria-label={field.label} />}
     <input
+      {...attributes}
       aria-label={field.label}
       data-message-field-id={field.type === "text" ? field.id : undefined}
       type={field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}

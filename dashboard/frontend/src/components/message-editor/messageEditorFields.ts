@@ -13,10 +13,11 @@ export function messageEditorFieldGroups(
   senderFieldIds: string[],
   editorId: string,
   draft: Record<string, unknown>,
+  revealedFieldId?: string | null,
 ): MessageEditorFieldGroups {
   const senderIds = new Set(senderFieldIds);
   const jsonFields = fields.filter((field) => field.type !== "color_slots" && field.type !== "color_panel_layout");
-  const visualFields = fields.filter((field) => messageEditorVisualFieldVisible(editorId, field.id, draft));
+  const visualFields = fields.filter((field) => field.id === revealedFieldId || messageEditorVisualFieldVisible(editorId, field.id, draft));
   return {
     jsonFields,
     visualFields,

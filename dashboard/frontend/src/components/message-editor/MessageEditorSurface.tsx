@@ -66,9 +66,10 @@ export function MessageEditorSurface({
         <footer className="osk-message-editor__footer" data-text-editing={textEditing ? "true" : undefined}>
           <button type="button" className="osk-secondary-button" onClick={onDiscard}>Descartar alterações</button>
           <button type="button" className="osk-primary-button" disabled={pendingJson} onClick={onApply}>
-            {pendingJson ? "Aplicando..." : dirty ? "Aplicar alterações" : "Concluir"}
+            {pendingJson ? "Aplicando..." : dirty ? "Concluir edição" : "Concluir"}
           </button>
         </footer>
+        <small className="osk-editor-draft-note">Concluir mantém a edição no rascunho. Salve no servidor ao voltar ao módulo.</small>
       </div>
     </div>
   );

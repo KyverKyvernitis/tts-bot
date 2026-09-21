@@ -15,13 +15,15 @@ interface SmartSelectProps {
   disabled?: boolean;
   id?: string;
   ariaLabel?: string;
+  invalid?: boolean;
+  ariaDescribedBy?: string;
   presentation?: "adaptive" | "anchored";
   caption?: string;
   menuTitle?: string;
   renderLeading?(option: SmartSelectOption): ReactNode;
 }
 
-export function SmartSelect({ value, options, onChange, placeholder, emptyLabel, disabled, id, ariaLabel, presentation = "adaptive", caption, menuTitle, renderLeading }: SmartSelectProps) {
+export function SmartSelect({ value, options, onChange, placeholder, emptyLabel, disabled, id, ariaLabel, invalid, ariaDescribedBy, presentation = "adaptive", caption, menuTitle, renderLeading }: SmartSelectProps) {
   const select = useSmartSelect(options, value, disabled, onChange, presentation);
   const listboxId = id ? `${id}-listbox` : undefined;
   const activeDescendant = id && select.activeIndex >= 0 && select.filteredOptions[select.activeIndex]
@@ -56,7 +58,7 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
   </div> : null;
 
   return <div className="osk-select" data-presentation={presentation} data-open={select.visible || undefined} data-disabled={disabled || undefined} ref={select.rootRef}>
-    <button ref={select.triggerRef} type="button" id={id} className="osk-select-trigger" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={select.visible} aria-controls={listboxId} disabled={disabled} onClick={() => select.visible ? select.close() : select.open()}>
+    <button ref={select.triggerRef} type="button" id={id} className="osk-select-trigger" aria-label={ariaLabel} aria-invalid={invalid || undefined} aria-describedby={ariaDescribedBy} aria-haspopup="listbox" aria-expanded={select.visible} aria-controls={listboxId} disabled={disabled} onClick={() => select.visible ? select.close() : select.open()}>
       {select.selected && renderLeading && <span className="osk-select-leading">{renderLeading(select.selected)}</span>}
       <span className="osk-select-value">{caption && <small className="osk-select-caption">{caption}</small>}<span>{select.selected ? select.selected.label : <span className="osk-select-placeholder">{placeholder ?? "Selecione"}</span>}</span></span>
       <ChevronDown size={16} className="osk-select-chev" aria-hidden="true" />

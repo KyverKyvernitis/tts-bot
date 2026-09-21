@@ -1,3 +1,4 @@
+import { FieldFeedbackContext } from "./module-settings/FieldFeedback";
 import { CommandsPage } from "./CommandsPage";
 import { GeneralPage } from "./GeneralPage";
 import { ModulesPage } from "./HomePage";
@@ -32,6 +33,9 @@ export interface DashboardShellProps {
   values: Record<string, unknown>;
   draft: Record<string, unknown>;
   guildOptions: DashboardOptionsPayload | null;
+  fieldErrors?: Record<string, string>;
+  optionsBusy?: boolean;
+  onRetryOptions?(): void;
   loading: boolean;
   loadingProgress: number;
   saving: boolean;
@@ -67,6 +71,9 @@ export function DashboardShell({
   values,
   draft,
   guildOptions,
+  fieldErrors = {},
+  optionsBusy,
+  onRetryOptions,
   loading,
   loadingProgress,
   saving,
@@ -93,7 +100,7 @@ export function DashboardShell({
   const activePage: DashboardNavigationPage = route.view === "module" ? "modules" : route.view;
   const editableSection = route.view === "general" || route.view === "module" ? selectedSection : null;
 
-  return <div className="osk-dashboard-shell" data-has-draft={changedCount > 0 || undefined}>
+  return <FieldFeedbackContext.Provider value={{ errors: fieldErrors, optionsBusy, onRetryOptions }}><div className="osk-dashboard-shell" data-has-draft={changedCount > 0 || undefined}>
     <Sidebar
       activePage={activePage}
       mobileOpen={mobileMenuOpen}
@@ -142,7 +149,7 @@ export function DashboardShell({
     </div>
     {!messageEditorActive && editableSection && <SaveDock changedCount={changedCount} sectionLabel={editableSection.label} saving={saving} onDiscard={onDiscard} onSave={onSave} />}
     {!messageEditorActive && <DashboardMobileNav activePage={activePage} onNavigate={onNavigate} />}
-  </div>;
+  </div></FieldFeedbackContext.Provider>;
 }
 
 function DashboardLoading({ progress }: { progress: number }) {

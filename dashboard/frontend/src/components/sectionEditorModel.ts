@@ -38,10 +38,6 @@ export function sectionEditorFieldVisible(
     if (field.id === "welcome.webhook.avatar_url") return String(draft["welcome.webhook.avatar_mode"] || "") === "custom";
   }
 
-  if (sectionId === "forms" && field.id.startsWith("forms.approval.") && field.id !== "forms.approval.enabled") {
-    return Boolean(draft["forms.approval.enabled"]);
-  }
-
   return true;
 }
 

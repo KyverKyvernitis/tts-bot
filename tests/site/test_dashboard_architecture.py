@@ -274,13 +274,16 @@ def test_app_bootstrap_and_decisions_are_extracted_from_root_component() -> None
         FRONTEND / "src/app/appModel.ts": 60,
         FRONTEND / "src/app/sessionModel.ts": 40,
         FRONTEND / "src/app/useDashboardSessionBootstrap.ts": 110,
+        FRONTEND / "src/app/useDashboardSave.ts": 100,
+        FRONTEND / "src/app/dashboardFormValidation.ts": 80,
     }
     for path, maximum in expected.items():
         assert path.is_file(), f"módulo de App ausente: {path.relative_to(ROOT)}"
         assert len(path.read_text(encoding="utf-8").splitlines()) <= maximum
     assert "useDashboardSessionBootstrap" in app
     assert "selectedSectionIdForRoute" in app
-    assert "saveSuccessText" in app
+    assert "useDashboardSave" in app
+    assert "saveSuccessText" in (FRONTEND / "src/app/useDashboardSave.ts").read_text(encoding="utf-8")
     assert "useDashboardData" in app
     assert "fetchDashboardFull" not in app
     assert "fetchDashboardServers" not in app

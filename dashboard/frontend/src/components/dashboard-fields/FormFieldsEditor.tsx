@@ -40,7 +40,7 @@ export function FormFieldsEditor({ field, value, onChange }: { field: DashboardF
       return <article key={item.id || index} data-open={open || undefined} data-enabled={item.enabled || undefined}>
         <div className="osk-form-question-head">
           <button type="button" className="osk-form-question-summary" onClick={() => setOpenId((current) => current === item.id ? null : item.id)} aria-expanded={open} aria-controls={panelId}>
-            <span><strong>{item.label || `Pergunta ${index + 1}`}</strong><small>{item.enabled ? "Ativa" : "Desativada"} · {item.required ? "Obrigatória" : "Opcional"} · {item.long ? "Resposta longa" : "Resposta curta"}</small></span><ChevronDown size={16} />
+            <span className="osk-question-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span><span><strong>{item.label || `Pergunta ${index + 1}`}</strong><small>{item.required ? "Obrigatória" : "Opcional"} · {item.long ? "Resposta longa" : "Resposta curta"}</small></span><ChevronDown size={16} />
           </button>
           <div className="osk-form-question-actions">
             <button type="button" onClick={() => duplicate(index)} disabled={fields.length >= 5} aria-label="Duplicar pergunta"><Copy size={14} /></button>

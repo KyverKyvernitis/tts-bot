@@ -1,4 +1,4 @@
-import { Check, LockKeyhole, PencilLine, ShieldCheck, Users, X } from "lucide-react";
+import { Check, LockKeyhole, ShieldCheck, Users, X } from "lucide-react";
 import type { ReactNode } from "react";
 import type {
   DashboardFieldDefinition,
@@ -7,7 +7,8 @@ import type {
   DashboardSectionDefinition,
   DashboardTemplateVariables,
 } from "../types/dashboard";
-import { DashboardFieldControl, displayDashboardValue } from "./DashboardFieldControl";
+import { DashboardFieldControl } from "./DashboardFieldControl";
+import { MessagePreviewCard } from "./module-settings/MessagePreviewCard";
 import {
   createLegacyMessageEditor,
   sectionEditorEnabled,
@@ -16,11 +17,12 @@ import {
 } from "./sectionEditorModel";
 
 export function MessageGroupPanel({
-  sectionId, group, fields, metadata, values, draft, guildOptions, renderFields, onOpenEditor,
+  sectionId, group, fields, allFields = fields, metadata, values, draft, guildOptions, renderFields, onOpenEditor,
 }: {
   sectionId: string;
   group: string;
   fields: DashboardFieldDefinition[];
+  allFields?: DashboardFieldDefinition[];
   metadata: NonNullable<DashboardSectionDefinition["groupMetadata"]>[string];
   values: Record<string, unknown>;
   draft: Record<string, unknown>;
@@ -35,23 +37,17 @@ export function MessageGroupPanel({
   const enabled = sectionEditorEnabled(sectionId, group, draft);
 
   return <div className="osk-message-group-panel">
+    {!enabled && <div className="osk-inline-note">Você pode preparar estas mensagens agora. O envio acompanha a opção configurada acima.</div>}
     {settingsFields.length > 0 && <div className="osk-message-group-settings">
       {sectionId === "forms" && group === "Aprovação"
         ? <FormsApprovalSettings fields={settingsFields} draft={draft} renderFields={renderFields} />
         : renderFields(settingsFields)}
     </div>}
-    {!enabled && <div className="osk-inline-note">Ative esta opção para usar as mensagens abaixo. O conteúdo atual continuará preservado.</div>}
     <div className="osk-message-launcher-list">
       {editors.map((editor) => {
-        const editorFields = [...editor.fieldIds, ...(editor.senderFieldIds ?? [])].map((id) => fields.find((field) => field.id === id)).filter((field): field is DashboardFieldDefinition => Boolean(field));
+        const editorFields = [...editor.fieldIds, ...(editor.senderFieldIds ?? [])].map((id) => allFields.find((field) => field.id === id)).filter((field): field is DashboardFieldDefinition => Boolean(field));
         const changed = editorFields.some((field) => !sectionEditorValuesEqual(values[field.id], draft[field.id]));
-        const summaryFields = editorFields.filter((field) => ["text", "textarea", "select"].includes(field.type)).slice(0, 2);
-        const summary = summaryFields.map((field) => `${field.label}: ${displayDashboardValue(field, draft[field.id], guildOptions)}`).join(" · ");
-        return <article key={editor.id} className="osk-message-launcher" data-changed={changed || undefined} data-disabled={!enabled || undefined}>
-          <span className="osk-message-launcher__icon"><PencilLine size={19} /></span>
-          <div><strong>{editor.label}</strong><small>{editor.description || "Edite a mensagem diretamente e aplique ao painel."}</small>{summary && <em>{summary}</em>}</div>
-          <button type="button" className="osk-message-launcher__action" disabled={!enabled} onClick={() => onOpenEditor(editor, metadata.variables)}>Editar</button>
-        </article>;
+        return <MessagePreviewCard key={editor.id} sectionId={sectionId} editor={editor} fields={editorFields} draft={draft} guildOptions={guildOptions} changed={changed} variables={metadata.variables} onOpen={onOpenEditor} />;
       })}
     </div>
   </div>;
@@ -89,14 +85,14 @@ function FormsApprovalSettings({ fields, draft, renderFields }: {
   };
   return <div className="osk-approval-settings">
     {enabledField && renderFields([enabledField])}
-    {!enabled && <div className="osk-inline-note">Ative a aprovação para configurar o cargo, os botões e as mensagens enviadas ao membro.</div>}
-    {enabled && <>
+    {!enabled && <div className="osk-inline-note">Prepare o cargo e os botões abaixo. Eles serão usados ao habilitar a aprovação.</div>}
+    <>
       {roleField && <section className="osk-approval-settings__result"><header><LockKeyhole size={17} /><span><strong>Resultado da aprovação</strong><small>Cargo concedido quando a equipe aprova a resposta.</small></span></header>{renderFields([roleField])}</section>}
       <div className="osk-approval-settings__buttons">
         <section><header><span><Check size={17} /><strong>Botão Aprovar</strong></span>{buttonPreview("approve")}</header>{renderFields(approveFields)}</section>
         <section><header><span><X size={17} /><strong>Botão Rejeitar</strong></span>{buttonPreview("reject")}</header>{renderFields(rejectFields)}</section>
       </div>
-    </>}
+    </>
   </div>;
 }
 

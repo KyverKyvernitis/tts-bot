@@ -139,6 +139,7 @@ export function useDashboardData({ sessionState, setSessionState, setUser, setBo
     draft,
     setDraft,
     guildOptions,
+    setGuildOptions,
     loadingDashboard,
     dashboardProgress,
     dashboardLoadRef,

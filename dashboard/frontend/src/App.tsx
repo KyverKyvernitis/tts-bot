@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { BrowserLanding } from "./components/BrowserLanding";
 import { InviteScreen } from "./components/InviteScreen";
 import { LegalPage } from "./components/LegalPage";
@@ -9,13 +9,14 @@ import type { DashboardNavigationPage } from "./components/Sidebar";
 import { mergeDashboardModules, type DashboardVisualModule } from "./moduleCatalog";
 import {
   fetchDashboardInvite,
-  patchDashboardSettings,
   clearDashboardCommandsCache,
 } from "./transport/dashboardApi";
 import { errorText } from "./app/errors";
+import { useDashboardSave } from "./app/useDashboardSave";
+import { useDashboardOptionsRetry } from "./app/useDashboardOptionsRetry";
 import { normalizeInputValue } from "./app/dashboardValues";
 import { parseRoute, routePath, type DashboardRoute, type Route } from "./app/routing";
-import { changedFieldsForSection, isProtectedRoute, loginReturnPath, saveSuccessText, selectedSectionIdForRoute } from "./app/appModel";
+import { changedFieldsForSection, isProtectedRoute, loginReturnPath, selectedSectionIdForRoute } from "./app/appModel";
 import { useDashboardSessionBootstrap, type DashboardNotice } from "./app/useDashboardSessionBootstrap";
 import { useDashboardBrowserNavigation } from "./app/useDashboardBrowserNavigation";
 import { useDashboardData } from "./app/useDashboardData";
@@ -51,6 +52,7 @@ export default function App() {
     draft,
     setDraft,
     guildOptions,
+    setGuildOptions,
     loadingDashboard,
     dashboardProgress,
     dashboardLoadRef,
@@ -60,12 +62,10 @@ export default function App() {
     loadDashboard,
     resetServers,
   } = useDashboardData({ sessionState, setSessionState, setUser, setBotIdentity, setNotice });
-  const [saving, setSaving] = useState(false);
   const [inviteBusy, setInviteBusy] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [messageEditorActive, setMessageEditorActive] = useState(false);
   const [commandsRefreshToken, setCommandsRefreshToken] = useState(0);
-  const savingRef = useRef(false);
 
   const visualModules = useMemo(() => mergeDashboardModules(summary), [summary]);
   const selectedSectionId = selectedSectionIdForRoute(route);
@@ -75,6 +75,9 @@ export default function App() {
     : null, [route, selectedSectionId, visualModules]);
   const changedFields = useMemo(() => changedFieldsForSection(selectedSection, values, draft), [draft, selectedSection, values]);
   const hasUnsavedChanges = changedFields.length > 0;
+  const activeGuildId = route.page === "dashboard" ? route.guildId : null;
+  const { saving, fieldErrors, clearFieldError, handleSave } = useDashboardSave({ guildId: activeGuildId, sectionId: selectedSectionId, fields: changedFields, values, draft, activeGuildRef, setValues, setDraft, setSummary, setNotice });
+  const { optionsBusy, retryOptions } = useDashboardOptionsRetry(activeGuildId, activeGuildRef, setGuildOptions, setNotice);
 
   const closeMobileMenu = useCallback(() => setMobileMenuOpen(false), []);
   const openMobileMenu = useCallback(() => setMobileMenuOpen(true), []);
@@ -139,37 +142,9 @@ export default function App() {
   }, [route]);
 
   const handleFieldChange = useCallback((field: DashboardFieldDefinition, raw: unknown) => {
+    clearFieldError(field.id);
     setDraft((current) => ({ ...current, [field.id]: normalizeInputValue(field, raw) }));
-  }, []);
-
-  const handleSave = useCallback(async () => {
-    if (route.page !== "dashboard" || !selectedSection || changedFields.length === 0 || savingRef.current) return;
-    const guildId = route.guildId;
-    savingRef.current = true;
-    setSaving(true);
-    setNotice(null);
-    try {
-      const updates = Object.fromEntries(changedFields.map((field) => [field.id, draft[field.id]]));
-      const result = await patchDashboardSettings(guildId, updates);
-      if (activeGuildRef.current !== guildId) return;
-      const mergedValues = { ...values, ...result.values };
-      setValues(mergedValues);
-      setDraft(mergedValues);
-      if (result.summary) setSummary(result.summary);
-      if (result.saved.some((id) => id === "general.bot_prefix" || id === "economy.input_mode")) clearDashboardCommandsCache(guildId);
-      const count = result.saved.length;
-      setNotice({
-        type: "success",
-        text: saveSuccessText(count, Boolean(result.summary_error)),
-      });
-    } catch (error) {
-      if (activeGuildRef.current !== guildId) return;
-      setNotice({ type: "error", text: errorText(error) });
-    } finally {
-      savingRef.current = false;
-      setSaving(false);
-    }
-  }, [changedFields, draft, route, selectedSection, values]);
+  }, [clearFieldError]);
 
   const openSection = useCallback((sectionId: string) => {
     if (route.page !== "dashboard") return;
@@ -210,7 +185,7 @@ export default function App() {
     if (!server || route.page !== "dashboard" || guildId === route.guildId) return;
     if (navigate({ page: "dashboard", guildId, view: "modules", moduleId: null })) setSelectedServer(server);
   }, [manageable, navigate, route, setSelectedServer]);
-  const handleDiscard = useCallback(() => setDraft(values), [values]);
+  const handleDiscard = useCallback(() => { setDraft(values); clearFieldError(); }, [values, clearFieldError]);
   const handleRefreshDashboard = useCallback(() => {
     if (route.page !== "dashboard") return;
     if (hasUnsavedChanges && !window.confirm("Recarregar os valores persistidos e descartar as alterações locais?")) return;
@@ -246,6 +221,9 @@ export default function App() {
       values={values}
       draft={draft}
       guildOptions={guildOptions}
+      fieldErrors={fieldErrors}
+      optionsBusy={optionsBusy}
+      onRetryOptions={() => void retryOptions()}
       loading={loadingDashboard}
       loadingProgress={dashboardProgress}
       saving={saving}

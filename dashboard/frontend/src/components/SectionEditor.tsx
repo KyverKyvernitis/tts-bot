@@ -1,159 +1,54 @@
-import { ArrowLeft, ChevronDown, Settings } from "lucide-react";
-import { useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import type {
-  DashboardFieldDefinition,
-  DashboardOptionsPayload,
-  DashboardSectionDefinition,
-} from "../types/dashboard";
+import { useMemo, useState } from "react";
+import type { DashboardFieldDefinition, DashboardOptionsPayload, DashboardSectionDefinition } from "../types/dashboard";
 import type { DashboardVisualModule } from "../moduleCatalog";
 import { MessageEditor } from "./message-editor";
-import { TicketFlowEditor } from "./TicketFlowEditor";
-import { TicketPermissionsEditor } from "./TicketPermissionsEditor";
-import { ColorRolesPanelManager } from "./color-roles/ColorRolesPanelManager";
 import { sectionEditorValuesEqual } from "./sectionEditorModel";
-import { sectionGroupDescription, sectionGroupIcon } from "./sectionGroupPresentation";
 import { useSectionMessageEditor } from "./useSectionMessageEditor";
-import { FieldsPanel, MessageGroupPanel, TicketAttendancePanel } from "./SectionEditorPanels";
+import { moduleAreasFor } from "./module-settings/moduleAreas";
+import { ModuleNavigation } from "./module-settings/ModuleNavigation";
+import { ModuleSettingsHeader } from "./module-settings/ModuleSettingsHeader";
+import { ModuleGroup } from "./module-settings/ModuleGroup";
+import { EconomySettings } from "./module-settings/EconomySettings";
+import { ModulePreviewContext } from "./module-settings/ModulePreviewContext";
+import { useFieldFeedback } from "./module-settings/FieldFeedback";
+import { revealModuleField } from "./module-settings/revealModuleField";
 
 interface SectionEditorProps {
-  section: DashboardSectionDefinition;
-  module: DashboardVisualModule | null;
-  values: Record<string, unknown>;
-  draft: Record<string, unknown>;
-  guildOptions: DashboardOptionsPayload | null;
-  previewBotName?: string;
-  previewBotAvatarUrl?: string | null;
-  previewGuildName?: string;
-  previewGuildAvatarUrl?: string | null;
-  onChange(field: DashboardFieldDefinition, raw: unknown): void;
-  onMessageEditorActiveChange?(active: boolean): void;
-  onBack(): void;
+  section: DashboardSectionDefinition; module: DashboardVisualModule | null;
+  values: Record<string, unknown>; draft: Record<string, unknown>; guildOptions: DashboardOptionsPayload | null;
+  previewBotName?: string; previewBotAvatarUrl?: string | null; previewGuildName?: string; previewGuildAvatarUrl?: string | null;
+  onChange(field: DashboardFieldDefinition, raw: unknown): void; onMessageEditorActiveChange?(active: boolean): void; onBack(): void;
 }
 
-export function SectionEditor({
-  section, module, values, draft, guildOptions, previewBotName, previewBotAvatarUrl,
-  previewGuildName, previewGuildAvatarUrl, onChange, onMessageEditorActiveChange, onBack,
-}: SectionEditorProps) {
-  const Icon = module?.icon ?? Settings;
-  const groups = useMemo(() => section.groups?.length ? section.groups : null, [section.groups]);
-  const [openGroup, setOpenGroup] = useState<string | null>(() => section.groups?.[0] ?? null);
-  const groupRefs = useRef<Record<string, HTMLElement | null>>({});
-  const { activeEditor, openMessageEditor, finishEditor, closeEditorDiscard } = useSectionMessageEditor({
-    section,
-    draft,
-    onChange,
-    onActiveChange: onMessageEditorActiveChange,
-  });
+export function SectionEditor({ section, module, values, draft, guildOptions, previewBotName, previewBotAvatarUrl, previewGuildName, previewGuildAvatarUrl, onChange, onMessageEditorActiveChange, onBack }: SectionEditorProps) {
+  const areas = useMemo(() => moduleAreasFor(section), [section]);
+  const [selectedArea, setSelectedArea] = useState(areas[0]?.id || "");
+  const [focusFieldId, setFocusFieldId] = useState<string | null>(null);
+  const selected = areas.find(area => area.id === selectedArea) || areas[0];
+  const { errors } = useFieldFeedback();
+  const changedAreas = new Set(areas.filter(area => section.fields.some(field => area.groups.includes(field.group || "Geral") && !sectionEditorValuesEqual(values[field.id], draft[field.id]))).map(area => area.id));
+  const { activeEditor, openMessageEditor, finishEditor, closeEditorDiscard } = useSectionMessageEditor({ section, draft, onChange, onActiveChange: onMessageEditorActiveChange });
+  const identity = { botName: previewBotName, botAvatarUrl: previewBotAvatarUrl, guildName: previewGuildName, guildAvatarUrl: previewGuildAvatarUrl };
+  const fieldErrors = section.fields.filter(field => errors[field.id]);
+  const openEditor: typeof openMessageEditor = (editor, variables) => { setFocusFieldId(null); openMessageEditor(editor, variables); };
 
-  function toggleGroup(group: string, scroll = false) {
-    const next = openGroup === group ? null : group;
-    setOpenGroup(next);
-    if (next && scroll) {
-      window.setTimeout(() => groupRefs.current[group]?.scrollIntoView({ behavior: "smooth", block: "start" }), 70);
-    }
+  function revealField(field: DashboardFieldDefinition) {
+    const area = areas.find(item => item.groups.includes(field.group || "Geral"));
+    if (area) setSelectedArea(area.id);
+    const editor = Object.values(section.groupMetadata || {}).flatMap(item => item.editors || []).find(item => [...item.fieldIds, ...(item.senderFieldIds || [])].includes(field.id));
+    if (editor) { setFocusFieldId(field.id); openMessageEditor(editor); }
+    else revealModuleField(field.id);
   }
 
-  function renderFields(fields: DashboardFieldDefinition[]): ReactNode {
-    return <FieldsPanel sectionId={section.id} fields={fields} values={values} draft={draft} guildOptions={guildOptions} onChange={onChange} />;
-  }
-
-  return <>
-  <section className="osk-dashboard-page osk-section-page" aria-hidden={activeEditor ? true : undefined}>
-    <button className="osk-page-back" onClick={onBack}><ArrowLeft size={16} />Módulos</button>
-    <header className="osk-function-heading">
-      <span className="osk-function-heading-icon"><Icon size={24} /></span>
-      <div><h1>{section.label}</h1><p>{module?.description || section.description}</p></div>
-    </header>
-
-    {groups && groups.length > 3 && <nav className="osk-section-jump-nav" aria-label={`Áreas de ${section.label}`}>
-      {groups.map((group) => <button key={group} type="button" data-active={openGroup === group || undefined} onClick={() => toggleGroup(group, true)}>{group}</button>)}
-    </nav>}
-
-    {groups ? (
-      <div className="osk-accordion-list">
-        {groups.map((group, index) => {
-          const GroupIcon = sectionGroupIcon(group);
-          const groupFields = section.fields.filter((field) => field.group === group);
-          const changed = groupFields.filter((field) => !sectionEditorValuesEqual(values[field.id], draft[field.id])).length;
-          const open = openGroup === group;
-          const metadata = section.groupMetadata?.[group];
-          const panelId = `section-panel-${section.id}-${index}`;
-          return <article
-            key={group}
-            id={`section-group-${section.id}-${index}`}
-            ref={(node) => { groupRefs.current[group] = node; }}
-            className="osk-accordion"
-            data-open={open || undefined}
-            style={{ "--osk-card-index": index } as CSSProperties}
-          >
-            <button type="button" className="osk-accordion-trigger" onClick={() => toggleGroup(group)} aria-expanded={open} aria-controls={panelId}>
-              <span className="osk-accordion-icon"><GroupIcon size={19} /></span>
-              <span className="osk-accordion-copy"><strong>{group}</strong><small>{sectionGroupDescription(group)}</small></span>
-              {changed > 0 && <em>Alterado</em>}
-              <ChevronDown size={18} className="osk-accordion-chevron" />
-            </button>
-            {open && <div className="osk-accordion-panel" id={panelId}>
-              <div className="osk-accordion-panel-inner">
-                {section.id === "color_roles" && group === "Painel" ? (
-                  <ColorRolesPanelManager
-                    fields={groupFields}
-                    values={values}
-                    draft={draft}
-                    guildOptions={guildOptions}
-                    onChange={onChange}
-                    onOpenEditor={(editor) => openMessageEditor(editor)}
-                  />
-                ) : section.id === "tickets" && group === "Atendimento" ? (
-                  <TicketAttendancePanel fields={groupFields} renderFields={renderFields} />
-                ) : section.id === "tickets" && group === "Fluxos" ? (
-                  <TicketFlowEditor fields={groupFields} draft={draft} renderFields={renderFields} onChange={onChange} />
-                ) : section.id === "tickets" && group === "Permissões" ? (
-                  <TicketPermissionsEditor fields={groupFields} draft={draft} renderFields={renderFields} onChange={onChange} />
-                ) : metadata?.kind === "message" ? (
-                  <MessageGroupPanel
-                    sectionId={section.id}
-                    group={group}
-                    fields={groupFields}
-                    metadata={metadata}
-                    values={values}
-                    draft={draft}
-                    guildOptions={guildOptions}
-                    renderFields={renderFields}
-                    onOpenEditor={openMessageEditor}
-                  />
-                ) : (
-                  renderFields(groupFields)
-                )}
-              </div>
-            </div>}
-          </article>;
-        })}
-      </div>
-    ) : (
-      <div className="osk-settings-panel">{renderFields(section.fields)}</div>
-    )}
-  </section>
-  {activeEditor && <MessageEditor
-    editorId={activeEditor.id}
-    sectionId={section.id}
-    sectionLabel={section.label}
-    groupLabel={activeEditor.label}
-    description={activeEditor.description}
-    fields={activeEditor.fields}
-    baseline={activeEditor.baseline}
-    draft={draft}
-    guildOptions={guildOptions}
-    botName={previewBotName}
-    botAvatarUrl={previewBotAvatarUrl}
-    guildName={previewGuildName}
-    guildAvatarUrl={previewGuildAvatarUrl}
-    senderFieldIds={activeEditor.senderFieldIds}
-    presentation={activeEditor.presentation}
-    variables={activeEditor.variables}
-    onChange={onChange}
-    onApply={finishEditor}
-    onDiscard={closeEditorDiscard}
-  />}
-  </>;
+  return <ModulePreviewContext.Provider value={identity}>
+    <section className="osk-dashboard-page osk-section-page osk-module-settings" data-module={section.id} aria-hidden={activeEditor ? true : undefined}>
+      <ModuleSettingsHeader section={section} module={module} draft={draft} onChange={onChange} onBack={onBack} />
+      {fieldErrors.length > 0 && <div className="osk-module-errors" role="alert"><strong>Revise antes de salvar</strong>{fieldErrors.map(field => <button key={field.id} type="button" onClick={() => revealField(field)}>{field.label}: {errors[field.id]}</button>)}</div>}
+      {areas.length > 1 && <ModuleNavigation sectionId={section.id} areas={areas} selected={selected?.id || ""} changed={changedAreas} onSelect={setSelectedArea} />}
+      {selected && <div className="osk-module-area" role={areas.length > 1 ? "tabpanel" : undefined} id={`module-area-${section.id}-${selected.id}`} aria-labelledby={areas.length > 1 ? `module-tab-${section.id}-${selected.id}` : undefined}>
+        {section.id === "economy" ? <EconomySettings fields={section.fields} draft={draft} guildOptions={guildOptions} onChange={onChange} /> : selected.groups.map(group => <ModuleGroup key={group} section={section} group={group} values={values} draft={draft} guildOptions={guildOptions} onChange={onChange} onOpenEditor={openEditor} />)}
+      </div>}
+    </section>
+    {activeEditor && <MessageEditor focusFieldId={focusFieldId} editorId={activeEditor.id} sectionId={section.id} sectionLabel={section.label} groupLabel={activeEditor.label} description={activeEditor.description} fields={activeEditor.fields} baseline={activeEditor.baseline} draft={draft} guildOptions={guildOptions} {...identity} senderFieldIds={activeEditor.senderFieldIds} presentation={activeEditor.presentation} variables={activeEditor.variables} onChange={onChange} onApply={finishEditor} onDiscard={closeEditorDiscard} />}
+  </ModulePreviewContext.Provider>;
 }
-

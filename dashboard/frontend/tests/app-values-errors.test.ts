@@ -12,7 +12,9 @@ function field(type: DashboardFieldDefinition["type"], id = `x.${type}`): Dashbo
 test("normaliza valores simples sem alterar estruturas complexas", () => {
   assert.equal(normalizeInputValue(field("boolean"), 1), true);
   assert.equal(normalizeInputValue(field("number"), "12.5"), 12.5);
-  assert.equal(normalizeInputValue(field("number"), "invalido"), 0);
+  assert.equal(normalizeInputValue(field("number"), "invalido"), "invalido");
+  assert.equal(normalizeInputValue(field("number"), ""), "");
+  assert.equal(normalizeInputValue(field("number"), "0"), 0);
   assert.equal(normalizeInputValue(field("channel"), "<#123456789012345678>"), "123456789012345678");
   assert.equal(normalizeInputValue(field("role"), "sem-id"), "");
   const complex = [{ id: "a" }];

@@ -114,7 +114,7 @@ export function MessagePreview({
   return (
     <div className="osk-message-preview" data-interactive={interactive ? "true" : "false"} data-editor-kind={renderKind}>
       <SenderHeader senderFields={senderFields} draft={draft} botName={botName} botAvatarUrl={botAvatarUrl} guildName={guildName} guildAvatarUrl={guildAvatarUrl} interactive={interactive} selected={senderSelected} onSelect={onSelectSender} onEdit={onEditSender} fieldId={senderFields.find((field) => field.id === "welcome.webhook.enabled")?.id ?? senderFields[0]?.id} />
-      <div className="osk-message-preview__canvas" aria-label={`Mensagem editável de ${groupLabel}`}>
+      <div className="osk-message-preview__canvas" aria-label={`${interactive ? "Mensagem editável" : "Prévia"} de ${groupLabel}`}>
         {renderKind === "color-panel" ? <ColorRolesPanelPreview {...shared} />
           : adaptiveWelcome && welcomeMode === "components_v2" ? <WelcomeComponentsV2Preview {...shared} dm={isDm} />
             : renderKind === "components-v2" ? <ComponentsV2Preview {...shared} />
