@@ -291,6 +291,7 @@ MUSIC_SEARCH_PROVIDER_FAST_BUDGET_SECONDS = max(0.15, min(2.0, _parse_float(os.g
 MUSIC_SEARCH_PROVIDER_DEEP_BUDGET_SECONDS = max(MUSIC_SEARCH_PROVIDER_FAST_BUDGET_SECONDS, min(4.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_DEEP_BUDGET_SECONDS", "1.5"), 1.5)))
 MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES = max(1, min(5, _parse_int(os.getenv("MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES", "2"), 2)))
 MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS = max(1.0, min(300.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS", "30.0"), 30.0)))
+MUSIC_SEARCH_PROVIDER_ROUTING_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_PROVIDER_ROUTING_ENABLED", "true"), True)
 # HTTP persistente: os providers compartilham conexoes DNS/TCP/TLS em vez de
 # abrir uma conexao nova a cada busca. Limites pequenos preservam RAM na VPS.
 MUSIC_SEARCH_HTTP_POOL_LIMIT = max(2, min(24, _parse_int(os.getenv("MUSIC_SEARCH_HTTP_POOL_LIMIT", "8"), 8)))

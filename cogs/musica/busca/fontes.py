@@ -8,6 +8,7 @@ from ..metadados.resiliencia import buscar_metadata_compartilhada
 from ..metadados.quota_youtube import busca_youtube_disponivel
 from .chaves import chave_semantica_busca
 from .intencao import analisar_consulta
+from .roteamento_fontes import planejar_fontes
 
 _provedores_api: MusicApiProviders | None = None
 
@@ -96,12 +97,30 @@ async def buscar_candidatos_multifonte(
     budget_default = 1.5 if budget_attr.endswith("DEEP_BUDGET_SECONDS") else 0.65
     budget = max(0.05, float(getattr(config, budget_attr, budget_default) or budget_default))
 
+    profundo = int(limit or limite_fast) > limite_fast
+    plano = None
+    if bool(getattr(config, "MUSIC_SEARCH_PROVIDER_ROUTING_ENABLED", True)):
+        plano = planejar_fontes(
+            texto,
+            profundo=profundo,
+            incluir_youtube=bool(incluir_youtube),
+        )
+        if plano.max_fontes <= 0:
+            return []
+
     async def _buscar() -> list[ApiTrackCandidate]:
+        kwargs = {}
+        if plano is not None:
+            kwargs = {
+                "provider_order": plano.prioridades,
+                "max_providers": plano.max_fontes,
+            }
         return await providers.search_sources(
             texto,
             limit=limit,
             prefer_youtube=bool(incluir_youtube),
             total_budget_seconds=budget,
+            **kwargs,
         )
 
     cache_texto = (
@@ -115,6 +134,10 @@ async def buscar_candidatos_multifonte(
         produtor=_buscar,
         ttl_seconds=float(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 300.0) or 0.0),
         max_itens=int(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 128) or 128),
-        namespace="all" if incluir_youtube else "sem-youtube",
+        namespace=(
+            ("route:" + plano.assinatura)
+            if plano is not None
+            else ("all" if incluir_youtube else "sem-youtube")
+        ),
         cancelar_quando_sem_consumidores=True,
     )

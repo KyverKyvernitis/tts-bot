@@ -129,7 +129,7 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
             return await self.soundcloud_batch_from_url(url, limit=limit)
         return None
 
-    async def search_sources(self, query: str, *, limit: int = 3, prefer_youtube: bool = True, total_budget_seconds: float | None = None) -> list[ApiTrackCandidate]:
+    async def search_sources(self, query: str, *, limit: int = 3, prefer_youtube: bool = True, total_budget_seconds: float | None = None, provider_order: tuple[str, ...] | None = None, max_providers: int | None = None) -> list[ApiTrackCandidate]:
         """Retorna candidatos crus das fontes disponíveis, preservando a origem.
 
         A deduplicação cross-provider fica para a camada de busca inteligente,
@@ -171,17 +171,37 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
                 )
             )
 
-        if prefer_youtube and self.youtube_api_key:
-            # Na lista de resultados, snippet/URL bastam. Duracao/status exatos
-            # ficam para a faixa escolhida/deep metadata e evitamos uma segunda
-            # requisicao videos.list em toda pesquisa.
-            _agendar("youtube", self._youtube_search_com_quota, limit, kwargs={"include_details": False})
-        if self.spotify_client_id and self.spotify_client_secret:
-            _agendar("spotify", self.spotify_search, min(limit, 5))
-        if self.deezer_enabled:
-            _agendar("deezer", self.deezer_search, min(limit, 5))
-        if self.soundcloud_enabled and (self.soundcloud_token or self.soundcloud_client_id):
-            _agendar("soundcloud", self.soundcloud_search, min(limit, 5))
+        ordem = provider_order or ("youtube", "spotify", "deezer", "soundcloud")
+        limite_fontes = None if max_providers is None else max(0, int(max_providers))
+        agendadas = 0
+        vistos: set[str] = set()
+        for nome in ordem:
+            nome = str(nome or "").strip().lower()
+            if not nome or nome in vistos:
+                continue
+            vistos.add(nome)
+            if limite_fontes is not None and agendadas >= limite_fontes:
+                break
+            if nome == "youtube":
+                if not prefer_youtube or not self.youtube_api_key:
+                    continue
+                _agendar("youtube", self._youtube_search_com_quota, limit, kwargs={"include_details": False})
+            elif nome == "spotify":
+                if not (self.spotify_client_id and self.spotify_client_secret):
+                    continue
+                _agendar("spotify", self.spotify_search, min(limit, 5))
+            elif nome == "deezer":
+                if not self.deezer_enabled:
+                    continue
+                _agendar("deezer", self.deezer_search, min(limit, 5))
+            elif nome == "soundcloud":
+                if not (self.soundcloud_enabled and (self.soundcloud_token or self.soundcloud_client_id)):
+                    continue
+                _agendar("soundcloud", self.soundcloud_search, min(limit, 5))
+            else:
+                continue
+            agendadas += 1
+
         if not tasks:
             return []
 
