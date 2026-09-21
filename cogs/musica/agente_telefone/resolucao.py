@@ -638,6 +638,54 @@ async def resolve_music_tracks_on_worker(
                         decisao.top_confianca,
                         decisao.margem,
                     )
+                    avaliar_parcial = None
+                    if bool(getattr(config, "MUSIC_SEARCH_DEEP_EARLY_EXIT_ENABLED", True)):
+                        def _avaliar_parcial_deep(tracks_parciais, api_parciais) -> bool:
+                            if not tracks_parciais and not api_parciais:
+                                return False
+                            candidatos_parciais, _ = fundir_resultados(
+                                clean_query,
+                                [*worker_tracks_fast, *tracks_parciais],
+                                [*api_candidates, *api_parciais],
+                                requester_id=requester_id,
+                                requester_name=requester_name,
+                                limit=decisao.limit,
+                            )
+                            candidatos_parciais, ranking_parcial = ranquear_faixas(
+                                clean_query,
+                                candidatos_parciais,
+                                guild_id=guild_id,
+                                requester_id=requester_id,
+                            )
+                            candidatos_visiveis = candidatos_parciais[:max_limit]
+                            ranking_visivel = ranking_parcial[:max_limit]
+                            if len(candidatos_visiveis) < max_limit:
+                                return False
+                            ainda_precisa_deep = avaliar_busca_profunda(
+                                clean_query,
+                                candidatos_visiveis,
+                                ranking_visivel,
+                                requested_limit=max_limit,
+                                enabled=True,
+                                deep_limit=decisao.limit,
+                                min_results=max_limit,
+                                score_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_SCORE_THRESHOLD", 0.66) or 0.66),
+                                confidence_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", 0.55) or 0.55),
+                                margin_threshold=float(getattr(config, "MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", 0.030) or 0.030),
+                            )
+                            if ainda_precisa_deep.executar:
+                                return False
+                            ganho_parcial = avaliar_ganho_busca_profunda(
+                                fast_tracks_ranked,
+                                fast_ranking,
+                                candidatos_visiveis,
+                                ranking_visivel,
+                                requested_limit=max_limit,
+                            )
+                            return bool(ganho_parcial.aplicar)
+
+                        avaliar_parcial = _avaliar_parcial_deep
+
                     profundo = await executar_passagem_profunda(
                         base=base,
                         token=token,
@@ -648,7 +696,16 @@ async def resolve_music_tracks_on_worker(
                         requester_name=requester_name,
                         executar_worker=executar_tarefa_resolucao,
                         buscar_metadata=buscar_candidatos_multifonte,
+                        avaliar_parcial=avaliar_parcial,
                     )
+                    if profundo.early_exit:
+                        logger.info(
+                            "[music/search] deep early-exit | query=%r motivo=%s fonte=%s elapsed_ms=%.1f",
+                            clean_query,
+                            decisao.motivo,
+                            profundo.early_exit,
+                            profundo.elapsed_ms,
+                        )
                     if profundo.tracks or profundo.api_candidates:
                         candidatos_tracks, fusao_profunda = fundir_resultados(
                             clean_query,

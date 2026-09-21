@@ -319,6 +319,7 @@ MUSIC_SEARCH_YOUTUBE_API_DAILY_SOFT_CALLS = max(0, min(10000, _parse_int(os.gete
 # suficientemente claro. O custo extra é rede no Phone Worker/providers; a VPS
 # faz apenas fusão/ranking local leve.
 MUSIC_SEARCH_DEEP_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_DEEP_ENABLED", "true"), True)
+MUSIC_SEARCH_DEEP_EARLY_EXIT_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_DEEP_EARLY_EXIT_ENABLED", "true"), True)
 MUSIC_SEARCH_DEEP_LIMIT = max(3, min(8, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_LIMIT", "5"), 5)))
 MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS = max(2.5, min(8.0, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS", "5.0"), 5.0)))
 MUSIC_SEARCH_DEEP_MIN_RESULTS = max(2, min(3, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_MIN_RESULTS", "3"), 3)))
