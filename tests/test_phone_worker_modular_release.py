@@ -28,6 +28,7 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/agente/estado.py",
              "cogs/musica/runtime_telefone/agente/mixer_pcm.py",
              "cogs/musica/runtime_telefone/agente/resolucao.py",
+    "cogs/musica/runtime_telefone/agente/ytdlp_quente.py",
              "cogs/musica/runtime_telefone/agente/reproducao.py",
              "cogs/musica/runtime_telefone/agente/tts.py",
              "cogs/musica/runtime_telefone/agente/servidor.py",

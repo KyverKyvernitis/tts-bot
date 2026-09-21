@@ -784,7 +784,7 @@ async def resolve_music_tracks_on_worker(
 
     elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
     logger.info(
-        "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s metadata_only=%s elapsed_ms=%.1f js=%s search=%s cli_rc=%s cli_error=%r",
+        "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s metadata_only=%s elapsed_ms=%.1f js=%s search=%s warm=%s init_ms=%s extract_ms=%s cli_rc=%s cli_error=%r",
         destino.worker_id or destino.name,
         clean_query,
         len(batch.tracks),
@@ -792,6 +792,9 @@ async def resolve_music_tracks_on_worker(
         elapsed_ms,
         data.get("js_runtime") or "",
         data.get("default_search") or "",
+        bool(data.get("warm_ytdlp")),
+        data.get("ytdlp_init_ms"),
+        data.get("ytdlp_extract_ms"),
         data.get("cli_rc"),
         str(data.get("cli_error") or data.get("api_error") or "")[:220],
     )

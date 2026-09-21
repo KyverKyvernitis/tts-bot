@@ -623,6 +623,12 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             for player in players:
                 await self._stop_player_instance(player, disconnect=True)
 
+            warm_client = getattr(self, "_ytdlp_warm_client", None)
+            if warm_client is not None:
+                with contextlib.suppress(Exception):
+                    warm_client.close()
+                self._ytdlp_warm_client = None
+
             close = getattr(self.client, "close", None)
             if callable(close):
                 with contextlib.suppress(Exception):

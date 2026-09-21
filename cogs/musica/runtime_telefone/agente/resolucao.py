@@ -16,6 +16,7 @@ from typing import Any
 
 from .ciclo_vida import remove_owned_task
 from .estado import AgentTrack
+from .ytdlp_quente import WarmYTDLPResolver
 from .utilitarios import (
     _duration_from_ytdlp,
     _float_or_none,
@@ -418,6 +419,40 @@ class ResolucaoMixin:
         base_cmd += ["--no-playlist", "--no-warnings", "--socket-timeout", "12"]
         self.log("yt_dlp_resolve", query=query, target=target, js=self.js_runtimes)
         if _looks_like_url(query):
+            warm_enabled = str(os.getenv("MUSIC_AGENT_YTDLP_WARM_HELPER_ENABLED", "true") or "true").strip().lower() in {"1", "true", "yes", "on", "sim"}
+            if warm_enabled:
+                client = getattr(self, "_ytdlp_warm_client", None)
+                if client is None:
+                    client = WarmYTDLPResolver()
+                    self._ytdlp_warm_client = client
+                cancel_event = getattr(self._resolve_thread_local, "cancel_event", None)
+                hot_started = time.time()
+                try:
+                    hot = client.resolve(
+                        target,
+                        format_selector=self.ytdlp_format,
+                        cookiefile=str(cookies) if cookies.exists() and cookies.stat().st_size > 0 else "",
+                        js_runtimes=self.js_runtimes,
+                        socket_timeout=12,
+                        timeout=max(3.0, min(float(self.ytdlp_timeout), 10.0)),
+                        cancel_event=cancel_event,
+                    )
+                except RuntimeError as exc:
+                    if "cancelada" in str(exc).lower():
+                        raise
+                    hot = None
+                if hot and str(hot.get("stream_url") or "").startswith(("http://", "https://")):
+                    self.log(
+                        "yt_dlp_warm_url_ok",
+                        elapsed_ms=round((time.time() - hot_started) * 1000.0, 1),
+                        helper_elapsed_ms=hot.get("elapsed_ms"),
+                        title=bool(hot.get("title")),
+                    )
+                    hot.pop("ok", None)
+                    hot.pop("id", None)
+                    hot.pop("elapsed_ms", None)
+                    return hot
+                self.log("yt_dlp_warm_url_fallback", elapsed_ms=round((time.time() - hot_started) * 1000.0, 1))
             fast_cmd = base_cmd + [
                 "-f", self.ytdlp_format,
                 "--print", "__title__:%(title)s",

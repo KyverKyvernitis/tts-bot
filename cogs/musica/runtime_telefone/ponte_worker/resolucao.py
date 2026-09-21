@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -13,6 +14,106 @@ from typing import Any
 
 from .streams import register_stream, short_text
 from ..agente.utilitarios import DEFAULT_YTDLP_AUDIO_FORMAT, select_stream_info
+
+
+_WARM_YDL_POOL_LOCK = threading.Lock()
+_WARM_YDL_POOL: list[dict[str, Any]] = []
+
+
+def _warm_ydl_pool_limit() -> int:
+    try:
+        return max(0, min(4, int(float(os.getenv("PHONE_WORKER_MUSIC_YTDLP_WARM_POOL_SIZE", "2") or 2))))
+    except Exception:
+        return 2
+
+
+def _warm_ydl_signature(options: dict[str, Any]) -> tuple[Any, ...]:
+    cookiefile = str(options.get("cookiefile") or "")
+    cookie_stat: tuple[int, int] | tuple[()] = ()
+    if cookiefile:
+        try:
+            stat = Path(cookiefile).stat()
+            cookie_stat = (int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            cookie_stat = ()
+    return (
+        options.get("extract_flat"),
+        int(options.get("playlistend") or 0),
+        bool(options.get("noplaylist")),
+        int(options.get("socket_timeout") or 0),
+        int(options.get("retries") or 0),
+        int(options.get("fragment_retries") or 0),
+        int(options.get("extractor_retries") or 0),
+        str(options.get("cachedir") or ""),
+        cookiefile,
+        cookie_stat,
+    )
+
+
+def _close_warm_ydl(instance: Any) -> None:
+    close = getattr(instance, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def _acquire_warm_ydl(yt_dlp_module: Any, options: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+    limit = _warm_ydl_pool_limit()
+    if limit <= 0:
+        return None, False
+    signature = (id(yt_dlp_module.YoutubeDL),) + _warm_ydl_signature(options)
+    stale: list[dict[str, Any]] = []
+    chosen: tuple[dict[str, Any] | None, bool] = (None, False)
+    with _WARM_YDL_POOL_LOCK:
+        for slot in list(_WARM_YDL_POOL):
+            if slot.get("signature") == signature:
+                continue
+            lock = slot.get("lock")
+            if lock is not None and not lock.locked():
+                _WARM_YDL_POOL.remove(slot)
+                stale.append(slot)
+        for slot in list(_WARM_YDL_POOL):
+            if slot.get("signature") != signature:
+                continue
+            lock = slot.get("lock")
+            if lock is not None and lock.acquire(blocking=False):
+                slot["uses"] = int(slot.get("uses") or 0) + 1
+                chosen = (slot, True)
+                break
+        if chosen[0] is None and len(_WARM_YDL_POOL) < limit:
+            lock = threading.Lock()
+            lock.acquire()
+            instance = yt_dlp_module.YoutubeDL(dict(options))
+            slot = {"signature": signature, "ydl": instance, "lock": lock, "uses": 1}
+            _WARM_YDL_POOL.append(slot)
+            chosen = (slot, False)
+    for old in stale:
+        _close_warm_ydl(old.get("ydl"))
+    return chosen
+
+
+def _release_warm_ydl(slot: dict[str, Any], *, discard: bool = False) -> None:
+    if discard:
+        with _WARM_YDL_POOL_LOCK:
+            if slot in _WARM_YDL_POOL:
+                _WARM_YDL_POOL.remove(slot)
+        _close_warm_ydl(slot.get("ydl"))
+    lock = slot.get("lock")
+    if lock is not None and lock.locked():
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
+
+
+def _reset_warm_ytdlp_pool_for_tests() -> None:
+    with _WARM_YDL_POOL_LOCK:
+        slots = list(_WARM_YDL_POOL)
+        _WARM_YDL_POOL.clear()
+    for slot in slots:
+        _close_warm_ydl(slot.get("ydl"))
 
 def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
     query = str(body.get("query") or body.get("url") or body.get("q") or "").strip()
@@ -134,10 +235,31 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
     started = time.time()
     info: Any = None
     api_error = ""
+    warm_slot: dict[str, Any] | None = None
+    warm_reused = False
+    init_started = time.perf_counter()
+    init_ms = 0.0
+    extract_ms = 0.0
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(target, download=False)
+        if metadata_only and fast_search:
+            warm_slot, warm_reused = _acquire_warm_ydl(yt_dlp, ydl_opts)
+        if warm_slot is not None:
+            init_ms = (time.perf_counter() - init_started) * 1000.0
+            extract_started = time.perf_counter()
+            info = warm_slot["ydl"].extract_info(target, download=False)
+            extract_ms = (time.perf_counter() - extract_started) * 1000.0
+            _release_warm_ydl(warm_slot)
+            warm_slot = None
+        else:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                init_ms = (time.perf_counter() - init_started) * 1000.0
+                extract_started = time.perf_counter()
+                info = ydl.extract_info(target, download=False)
+                extract_ms = (time.perf_counter() - extract_started) * 1000.0
     except Exception as exc:
+        if warm_slot is not None:
+            _release_warm_ydl(warm_slot, discard=True)
+            warm_slot = None
         api_error = f"{type(exc).__name__}: {short_text(exc, limit=220)}"
         info = None
 
@@ -384,6 +506,10 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
         "truncated": bool(len(entries) > len(tracks)),
         "metadata_only": bool(metadata_only),
         "fast_search": bool(fast_search),
+        "warm_ytdlp": bool(metadata_only and fast_search and warm_reused),
+        "warm_pool_size": len(_WARM_YDL_POOL),
+        "ytdlp_init_ms": round(init_ms, 1),
+        "ytdlp_extract_ms": round(extract_ms, 1),
         "allow_playlist": bool(allow_playlist),
         "elapsed_ms": round((time.time() - started) * 1000.0, 1),
         "cookies": "on" if cookies_ok else "off",
