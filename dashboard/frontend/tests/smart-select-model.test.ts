@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { anchoredSelectPosition } from "../src/components/smart-select/anchoredSelectPosition";
 import {
   adjacentEnabledSmartSelectIndex,
   filterSmartSelectOptions,
@@ -44,4 +45,29 @@ test("posição escolhe acima quando falta espaço e mantém margens", () => {
     smartSelectPosition({ left: -10, right: 110, top: 40, bottom: 80, width: 120 }, 300, 700, 220),
     { left: 8, top: 87, width: 220, placement: "below" },
   );
+});
+
+test("seletor de servidor permanece junto ao botão em telas estreitas", () => {
+  for (const width of [320, 390, 736, 1024]) {
+    const rect = { left: 16, right: width - 16, top: 80, bottom: 132, width: width - 32 };
+    const position = anchoredSelectPosition(rect, { left: 0, top: 0, width, height: 780 }, 172);
+    assert.equal(position.top, rect.bottom + 7);
+    assert.equal(position.left, 16);
+    assert.equal(position.width, rect.width);
+    assert.equal(position.placement, "below");
+    assert.ok(position.left + position.width <= width - 8);
+  }
+});
+
+test("menu de servidor vira acima e respeita o espaço disponível com teclado", () => {
+  const rect = { left: 290, right: 630, top: 720, bottom: 772, width: 340 };
+  const flipped = anchoredSelectPosition(rect, { left: 0, top: 0, width: 390, height: 780 }, 172);
+  assert.equal(flipped.placement, "above");
+  assert.equal(flipped.top + 172, rect.top - 7);
+  assert.ok(flipped.left + flipped.width <= 382);
+  const viewport = { left: 12, top: 100, width: 320, height: 250 };
+  const cramped = anchoredSelectPosition({ left: 5, right: 505, top: 145, bottom: 197, width: 500 }, viewport, 420);
+  assert.ok(cramped.left >= 20);
+  assert.ok(cramped.left + cramped.width <= 324);
+  assert.ok(cramped.top + cramped.maxHeight <= 342);
 });

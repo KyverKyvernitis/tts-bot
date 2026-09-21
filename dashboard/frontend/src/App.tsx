@@ -156,7 +156,7 @@ export default function App() {
       setValues(mergedValues);
       setDraft(mergedValues);
       if (result.summary) setSummary(result.summary);
-      if (result.saved.includes("general.bot_prefix")) clearDashboardCommandsCache(guildId);
+      if (result.saved.some((id) => id === "general.bot_prefix" || id === "economy.input_mode")) clearDashboardCommandsCache(guildId);
       const count = result.saved.length;
       setNotice({
         type: "success",
@@ -205,6 +205,11 @@ export default function App() {
   }, [inviteBusy]);
 
   const handleChangeServer = useCallback(() => navigate({ page: "servers" }), [navigate]);
+  const handleSelectServer = useCallback((guildId: string) => {
+    const server = manageable.find((item) => item.id === guildId && item.canManage && item.botPresent);
+    if (!server || route.page !== "dashboard" || guildId === route.guildId) return;
+    if (navigate({ page: "dashboard", guildId, view: "modules", moduleId: null })) setSelectedServer(server);
+  }, [manageable, navigate, route, setSelectedServer]);
   const handleDiscard = useCallback(() => setDraft(values), [values]);
   const handleRefreshDashboard = useCallback(() => {
     if (route.page !== "dashboard") return;
@@ -230,6 +235,7 @@ export default function App() {
     {route.page === "dashboard" && <DashboardShell
       route={route}
       selectedServer={selectedServer}
+      servers={manageable}
       user={user!}
       botIdentity={botIdentity}
       supportServer={supportServer}
@@ -254,6 +260,7 @@ export default function App() {
       onLogout={() => void handleLogout()}
       onRefresh={handleRefreshDashboard}
       onChangeServer={handleChangeServer}
+      onSelectServer={handleSelectServer}
       onFieldChange={handleFieldChange}
       onMessageEditorActiveChange={setMessageEditorActive}
       onDiscard={handleDiscard}

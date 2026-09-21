@@ -5,6 +5,7 @@ import { SaveDock } from "./SaveDock";
 import { SectionEditor } from "./SectionEditor";
 import { Sidebar, type DashboardNavigationPage } from "./Sidebar";
 import { Topbar } from "./Topbar";
+import { DashboardMobileNav } from "./DashboardMobileNav";
 import { LoadingProgress, LoadingVisual } from "./VisualTemplates";
 import type { DashboardVisualModule } from "../moduleCatalog";
 import type {
@@ -20,6 +21,7 @@ import type { DashboardRoute } from "../app/routing";
 export interface DashboardShellProps {
   route: DashboardRoute;
   selectedServer: DashboardServerCard | null;
+  servers: DashboardServerCard[];
   user: DashboardUserPayload;
   botIdentity: DashboardUserPayload | null;
   supportServer: DashboardSupportServerPayload | null;
@@ -44,6 +46,7 @@ export interface DashboardShellProps {
   onLogout(): void;
   onRefresh(): void;
   onChangeServer(): void;
+  onSelectServer(guildId: string): void;
   onFieldChange(field: DashboardFieldDefinition, raw: unknown): void;
   onMessageEditorActiveChange(active: boolean): void;
   onDiscard(): void;
@@ -53,6 +56,7 @@ export interface DashboardShellProps {
 export function DashboardShell({
   route,
   selectedServer,
+  servers,
   user,
   botIdentity,
   supportServer,
@@ -77,6 +81,7 @@ export function DashboardShell({
   onLogout,
   onRefresh,
   onChangeServer,
+  onSelectServer,
   onFieldChange,
   onMessageEditorActiveChange,
   onDiscard,
@@ -101,7 +106,7 @@ export function DashboardShell({
       onLogout={onLogout}
     />
     <div className="osk-dashboard-main">
-      <Topbar guildName={guildName} guildIcon={guildIcon} user={user} supportServer={supportServer} busy={loading} onRefresh={onRefresh} onChangeServer={onChangeServer} onLogout={onLogout} onOpenMenu={onOpenMenu} />
+      <Topbar guildId={route.guildId} guildName={guildName} guildIcon={guildIcon} servers={servers} botName={botName} botAvatarUrl={botIdentity?.avatarUrl} user={user} supportServer={supportServer} busy={loading} onRefresh={onRefresh} onChangeServer={onChangeServer} onSelectServer={onSelectServer} onLogout={onLogout} onOpenMenu={onOpenMenu} />
       <main className="osk-dashboard-content">
         <div key={`${route.view}:${route.moduleId || "root"}`} className="osk-page-motion">
           {loading && !sectionsLoaded ? <DashboardLoading progress={loadingProgress} /> : route.view === "general" && selectedSection ? (
@@ -136,6 +141,7 @@ export function DashboardShell({
       </main>
     </div>
     {!messageEditorActive && editableSection && <SaveDock changedCount={changedCount} sectionLabel={editableSection.label} saving={saving} onDiscard={onDiscard} onSave={onSave} />}
+    {!messageEditorActive && <DashboardMobileNav activePage={activePage} onNavigate={onNavigate} />}
   </div>;
 }
 

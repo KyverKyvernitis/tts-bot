@@ -1,0 +1,74 @@
+.osk-root .osk-module-artwork {
+  --mini-line: light-dark(#d2d2d2, #454545);
+  --mini-soft: light-dark(#ececec, #202020);
+  --mini-strong: light-dark(#777777, #a9a9a9);
+  --mini-bright: light-dark(#414141, #d8d8d8);
+  display: grid; place-items: center; height: 96px; width: 100%; color: var(--mini-strong);
+}
+.osk-root .osk-module-artwork > span { transition: transform 180ms ease; }
+.osk-root .osk-function-card:hover .osk-module-artwork > span { transform: translateY(-2px); }
+.osk-root .osk-mini-message { position: relative; display: flex; align-items: flex-start; gap: 8px; width: 125px; padding-bottom: 18px; }
+.osk-root .osk-mini-avatar { width: 22px; height: 22px; flex-shrink: 0; border: 1px solid var(--mini-line); border-radius: 50%; background: var(--mini-soft); }
+.osk-root .osk-mini-bubble { display: grid; gap: 6px; padding: 12px; width: 88px; border: 1px solid var(--mini-line); border-radius: 3px 11px 11px 11px; background: var(--mini-soft); }
+.osk-root .osk-mini-bubble i { height: 3px; border-radius: 4px; background: var(--mini-line); }
+.osk-root .osk-mini-bubble i:first-child { background: var(--mini-strong); width: 62%; }
+.osk-root .osk-mini-bubble i:last-child { width: 78%; }
+.osk-root .osk-mini-message-reply { position: absolute; right: 0; bottom: 3px; width: 44px; height: 21px; border: 1px solid var(--mini-strong); border-radius: 8px 3px 8px 8px; background: var(--osk-paper-pure); }
+.osk-root .osk-mini-form { display: grid; width: 98px; gap: 9px; padding: 13px; border: 1px solid var(--mini-line); border-radius: 9px; transform: rotate(-4deg); background: var(--mini-soft); }
+.osk-root .osk-mini-form > span { display: flex; align-items: center; gap: 8px; }
+.osk-root .osk-mini-form i { width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--mini-line); }
+.osk-root .osk-mini-form > span:first-child i { background: var(--mini-strong); border-color: var(--mini-strong); }
+.osk-root .osk-mini-form b { width: 45px; height: 3px; border-radius: 5px; background: var(--mini-line); }
+.osk-root .osk-mini-form > span:last-child b { width: 31px; }
+.osk-root .osk-mini-ticket { display: flex; width: 118px; height: 60px; border: 1px solid var(--mini-line); border-radius: 11px; background: var(--mini-soft); transform: rotate(5deg); }
+.osk-root .osk-mini-stub { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; width: 31px; border-right: 1px dashed var(--mini-strong); }
+.osk-root .osk-mini-stub i { width: 11px; height: 2px; background: var(--mini-line); }
+.osk-root .osk-mini-ticket-lines { display: grid; align-content: center; gap: 8px; flex: 1; padding: 12px; }
+.osk-root .osk-mini-ticket-lines i { height: 4px; border-radius: 3px; background: var(--mini-line); }
+.osk-root .osk-mini-ticket-lines i:first-child { background: var(--mini-strong); width: 65%; }
+.osk-root .osk-mini-palette { display: flex; align-items: center; padding-left: 11px; }
+.osk-root .osk-mini-palette i { width: 33px; height: 42px; margin-left: -11px; border-radius: 10px; border: 2px solid var(--osk-paper-pure); background: var(--mini-strong); transform: rotate(calc((var(--tone) - 2) * 9deg)); }
+.osk-root .osk-mini-palette i:nth-child(1) { background: light-dark(#ececec,#ececec); }
+.osk-root .osk-mini-palette i:nth-child(2) { background: light-dark(#c4c4c4,#c4c4c4); }
+.osk-root .osk-mini-palette i:nth-child(3) { background: light-dark(#969696,#969696); }
+.osk-root .osk-mini-palette i:nth-child(4) { background: light-dark(#696969,#696969); }
+.osk-root .osk-mini-palette i:nth-child(5) { background: light-dark(#383838,#383838); }
+.osk-root .osk-mini-calendar { display: grid; width: 76px; border: 1px solid var(--mini-line); border-radius: 10px; overflow: hidden; background: var(--mini-soft); transform: rotate(-3deg); }
+.osk-root .osk-mini-calendar > b { height: 14px; border-bottom: 1px solid var(--mini-line); }
+.osk-root .osk-mini-calendar > span { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; padding: 9px 10px; }
+.osk-root .osk-mini-calendar i { width: 7px; height: 7px; border-radius: 2px; background: var(--mini-line); }
+.osk-root .osk-mini-calendar i[data-marked] { background: var(--mini-bright); box-shadow: 0 0 0 2px var(--mini-bright); }
+.osk-root .osk-mini-wave { display: flex; align-items: center; justify-content: center; gap: 5px; }
+.osk-root .osk-mini-wave i { width: 5px; border-radius: 10px; background: var(--mini-line); }
+.osk-root .osk-mini-wave i:nth-child(4), .osk-root .osk-mini-wave i:nth-child(5), .osk-root .osk-mini-wave i:nth-child(6) { background: var(--mini-strong); }
+
+.osk-root .osk-casino-scene { position: relative; width: 84px; height: 54px; }
+.osk-root .osk-playing-card { position: absolute; display: grid; place-items: center; width: 29px; height: 40px; border: 1px solid var(--mini-line); border-radius: 5px; background: var(--osk-paper-pure); color: var(--mini-bright); }
+.osk-root .osk-playing-card b { position: absolute; top: 0; left: 4px; font-size: 11px; line-height: 14px; font-weight: 500; }
+.osk-root .osk-playing-card > svg { margin-top: 6px; }
+.osk-root .osk-playing-card svg { width: 14px; height: 14px; }
+.osk-root .osk-playing-card-back { top: 2px; left: 32px; transform: rotate(-13deg); }
+.osk-root .osk-playing-card-front { top: 7px; left: 49px; transform: rotate(13deg); }
+.osk-root .osk-casino-chip {
+  --chip-face: light-dark(#f8f8f8, #252525);
+  --chip-rim: light-dark(#626262, #c5c5c5);
+  --chip-edge: light-dark(#ababab, #727272);
+  position: absolute; display: grid; place-items: center; width: 35px; height: 35px; border: 1px solid var(--chip-edge); border-radius: 50%;
+  background: repeating-conic-gradient(from 8deg, var(--chip-rim) 0deg 28deg, var(--chip-face) 28deg 60deg);
+}
+.osk-root .osk-casino-chip > span { display: grid; place-items: center; width: calc(100% - 9px); height: calc(100% - 9px); border: 1px solid var(--chip-rim); border-radius: 50%; background: var(--chip-face); color: var(--mini-bright); }
+.osk-root .osk-casino-chip svg { width: 13px; height: 13px; }
+.osk-root .osk-casino-chip-stack { top: 13px; left: 4px; box-shadow: 0 2px 0 var(--chip-rim), 0 3px 0 var(--chip-face), 0 5px 0 var(--chip-rim), 0 6px 0 var(--chip-face), 0 8px 0 var(--chip-edge); }
+.osk-root .osk-casino-chip-loose { width: 25px; height: 25px; top: 29px; left: 28px; transform: rotate(18deg); }
+
+@media (max-width:600px) {
+  .osk-root .osk-module-artwork { height: 76px; }
+  .osk-root .osk-mini-message { width: 104px; gap: 6px; }
+  .osk-root .osk-mini-avatar { width: 18px; height: 18px; }
+  .osk-root .osk-mini-bubble { width: 76px; padding: 10px; }
+  .osk-root .osk-mini-ticket { width: 99px; height: 55px; }
+  .osk-root .osk-mini-palette i { width: 29px; height: 37px; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .osk-root .osk-function-card:hover .osk-module-artwork > span { transform: none; }
+}

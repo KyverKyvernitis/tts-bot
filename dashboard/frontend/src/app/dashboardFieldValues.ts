@@ -44,6 +44,7 @@ export function channelOptionsForField(
 ): DashboardSelectOption[] {
   const kind = channelKindForField(field);
   return channels.filter((channel) => {
+    if (field.id === "economy.channel_id") return [0, 5, 2, 13].includes(channel.type);
     if (kind === "category") return channel.type === CATEGORY_CHANNEL_TYPE;
     if (kind === "voice") return VOICE_CHANNEL_TYPES.has(channel.type);
     return TEXT_LIKE_CHANNEL_TYPES.has(channel.type);
@@ -103,7 +104,7 @@ export function roleOptionsWithCurrentValue(
   roles: DashboardRoleOption[],
 ): DashboardSelectOption[] {
   const available = roles
-    .filter((role) => !role.managed && role.assignable !== false)
+    .filter((role) => field.id === "economy.staff_role_id" || (!role.managed && role.assignable !== false))
     .map((role) => ({
       value: role.id,
       label: `@${role.name}`,

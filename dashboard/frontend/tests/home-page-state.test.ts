@@ -26,7 +26,7 @@ function module(id: string, state: "active" | "inactive", group: "main" | "syste
   };
 }
 
-test("omite contagem de ativas e mantém os estados individuais", () => {
+test("módulos mostram somente o nome e a ilustração, sem estado nem descrição", () => {
   const modules = [
     module("welcome", "active"),
     module("forms", "active"),
@@ -34,14 +34,18 @@ test("omite contagem de ativas e mantém os estados individuais", () => {
     module("color_roles", "active"),
     module("birthday", "inactive"),
     module("tts", "active"),
+    module("economy", "inactive"),
     module("general", "inactive", "system"),
   ];
   const html = renderToStaticMarkup(React.createElement(ModulesPage, { modules, onOpen() {} }));
 
   assert.doesNotMatch(html, />4\/6</);
   assert.doesNotMatch(html, /funções ativas/);
-  assert.equal((html.match(/>Ativa</g) || []).length, 4);
-  assert.equal((html.match(/>Desativada</g) || []).length, 2);
+  assert.doesNotMatch(html, /Ativa|Desativada|Descrição breve|Ative e configure|data-state=/);
+  assert.equal((html.match(/class="osk-function-card"/g) || []).length, 7);
+  assert.match(html, /data-module="economy" data-wide="true"/);
+  assert.match(html, /osk-casino-chip-stack/);
+  assert.match(html, /aria-label="Configurar Função economy"/);
   assert.doesNotMatch(html, /Configuração parcial|Disponível|Não configurada/);
   assert.doesNotMatch(html, /Geral/);
 });

@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { Cake, ClipboardList, DoorOpen, Palette, Settings, Ticket, Volume2 } from "lucide-react";
+import { Cake, ClipboardList, DoorOpen, Palette, Settings, Spade, Ticket, Volume2 } from "lucide-react";
 import type { DashboardSectionSummary } from "./types/dashboard";
 
 export type ModuleGroup = "main" | "system";
@@ -20,6 +20,7 @@ export const MODULE_CATALOG: ModuleVisualMeta[] = [
   { id: "color_roles", label: "Cargos de cor", description: "Painéis para escolher e organizar cores", icon: Palette, group: "main", aliases: ["colors", "colorroles", "color-roles"] },
   { id: "birthday", label: "Aniversários", description: "Cadastro, calendário e avisos automáticos", icon: Cake, group: "main", aliases: ["birthdays"] },
   { id: "tts", label: "Texto pra Voz", description: "Vozes, idiomas e regras de leitura", icon: Volume2, group: "main" },
+  { id: "economy", label: "Economia / Jogos", description: "Fichas, canal dos jogos e acesso da equipe", icon: Spade, group: "main" },
   { id: "general", label: "Geral", description: "Preferências básicas do bot neste servidor.", icon: Settings, group: "system", aliases: ["guild"] },
 ];
 

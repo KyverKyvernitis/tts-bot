@@ -15,15 +15,16 @@ import {
   smartSelectPosition,
   type SmartSelectOption,
 } from "./smartSelectModel";
+import { anchoredSelectPosition } from "./anchoredSelectPosition";
 
 const SELECT_TRANSITION_MS = 220;
 
-export function useSmartSelect(options: SmartSelectOption[], value: string, disabled: boolean | undefined, onChange: (value: string) => void) {
+export function useSmartSelect(options: SmartSelectOption[], value: string, disabled: boolean | undefined, onChange: (value: string) => void, presentation: "adaptive" | "anchored" = "adaptive") {
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
-  const [position, setPosition] = useState({ left: 0, top: 0, width: 220, placement: "below" as "above" | "below" });
+  const [position, setPosition] = useState({ left: 0, top: 0, width: 220, maxHeight: 420, placement: "below" as "above" | "below" });
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -37,9 +38,19 @@ export function useSmartSelect(options: SmartSelectOption[], value: string, disa
   const updatePosition = useCallback(() => {
     const rect = rootRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const measuredHeight = popoverRef.current?.getBoundingClientRect().height || smartSelectEstimatedHeight(options.length);
-    setPosition(smartSelectPosition(rect, window.innerWidth, window.innerHeight, measuredHeight));
-  }, [options.length]);
+    const measuredHeight = popoverRef.current?.scrollHeight || popoverRef.current?.getBoundingClientRect().height || smartSelectEstimatedHeight(options.length);
+    if (presentation === "anchored") {
+      const viewport = window.visualViewport;
+      setPosition(anchoredSelectPosition(rect, {
+        left: viewport?.offsetLeft || 0,
+        top: viewport?.offsetTop || 0,
+        width: viewport?.width || window.innerWidth,
+        height: viewport?.height || window.innerHeight,
+      }, measuredHeight));
+    } else {
+      setPosition({...smartSelectPosition(rect, window.innerWidth, window.innerHeight, measuredHeight), maxHeight: 420});
+    }
+  }, [options.length, presentation]);
 
   const finishClose = useCallback(() => {
     if (closeTimerRef.current !== null) {
@@ -85,21 +96,26 @@ export function useSmartSelect(options: SmartSelectOption[], value: string, disa
     document.addEventListener("keydown", handleKeyDown);
     window.addEventListener("resize", updatePosition);
     window.addEventListener("scroll", updatePosition, true);
+    const viewport = window.visualViewport;
+    viewport?.addEventListener("resize", updatePosition);
+    viewport?.addEventListener("scroll", updatePosition);
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("touchstart", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("resize", updatePosition);
       window.removeEventListener("scroll", updatePosition, true);
+      viewport?.removeEventListener("resize", updatePosition);
+      viewport?.removeEventListener("scroll", updatePosition);
     };
   }, [close, mounted, updatePosition]);
 
   useEffect(() => {
-    if (!mounted || !window.matchMedia("(max-width: 720px)").matches) return;
+    if (!mounted || presentation === "anchored" || !window.matchMedia("(max-width: 720px)").matches) return;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => { document.body.style.overflow = previousOverflow; };
-  }, [mounted]);
+  }, [mounted, presentation]);
 
   useEffect(() => {
     if (!visible) return;
@@ -109,8 +125,8 @@ export function useSmartSelect(options: SmartSelectOption[], value: string, disa
       : firstEnabledSmartSelectIndex(filteredOptions));
     const focusTimer = window.setTimeout(() => {
       updatePosition();
-      if (searchable) searchRef.current?.focus();
-      else listRef.current?.focus();
+      if (searchable) searchRef.current?.focus({ preventScroll: true });
+      else listRef.current?.focus({ preventScroll: true });
       listRef.current?.querySelector<HTMLElement>('[data-selected="true"]')?.scrollIntoView({ block: "nearest" });
     }, 40);
     return () => window.clearTimeout(focusTimer);

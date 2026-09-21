@@ -1399,6 +1399,16 @@ os.replace(tmp, path)
 PYTSCACHEWRITE
 }
 
+normalize_typescript_cache_permissions() {
+  local entry="${1:?}"
+  [[ -d "$entry" && ! -L "$entry" ]] || return 1
+  # mktemp cria 0700: retirar escrita e trocar o dono para root produziria
+  # 0500, ilegível pelo ubuntu. Normalize também entradas legadas verificadas.
+  # find não segue symlinks; o cache continua sem escrita para o compilador.
+  find "$entry" -type d -exec chmod 0555 -- {} + || return 1
+  find "$entry" -type f -exec chmod 0444 -- {} +
+}
+
 run_frontend_incremental_typecheck() {
   local project_dir="${1:?}" key entry parent tmp local_cache qdir
   LAST_TYPESCRIPT_CACHE_HIT=0
@@ -1410,14 +1420,16 @@ run_frontend_incremental_typecheck() {
   rm -rf -- "$local_cache" 2>/dev/null || true
   install -d -o ubuntu -g ubuntu -m 0775 "$local_cache" || return 1
 
-  if verify_frontend_typescript_cache "$entry" "$key"; then
-    # A camada compartilhada é imutável; a cópia local precisa aceitar escrita do tsc.
-    sudo -u ubuntu -H install -m 0644 -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" || return 1
+  if verify_frontend_typescript_cache "$entry" "$key" \
+      && normalize_typescript_cache_permissions "$entry" 2>/dev/null \
+      && sudo -u ubuntu -H install -m 0644 -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" 2>/dev/null; then
     LAST_TYPESCRIPT_CACHE_HIT=1
     TYPESCRIPT_CACHE_HITS=$(( ${TYPESCRIPT_CACHE_HITS:-0} + 1 ))
     touch "$entry/cache.json" 2>/dev/null || true
     logger -t "$LOG_TAG" "cache TypeScript HIT: frontend ${key:0:12}" 2>/dev/null || true
   else
+    # Uma cópia parcial de buildinfo não pode contaminar o typecheck limpo.
+    rm -f -- "$local_cache/tsconfig.tsbuildinfo" || return 1
     TYPESCRIPT_CACHE_MISSES=$(( ${TYPESCRIPT_CACHE_MISSES:-0} + 1 ))
     logger -t "$LOG_TAG" "cache TypeScript MISS: frontend ${key:0:12}" 2>/dev/null || true
   fi
@@ -1447,7 +1459,10 @@ run_frontend_incremental_typecheck() {
     return 1
   fi
   chown -R root:root "$tmp" 2>/dev/null || true
-  chmod -R a-w "$tmp" 2>/dev/null || true
+  if ! normalize_typescript_cache_permissions "$tmp"; then
+    rm -rf -- "$tmp" "$local_cache" 2>/dev/null || true
+    return 1
+  fi
   if [[ -e "$entry" ]]; then
     chmod -R u+w "$entry" 2>/dev/null || true
     rm -rf -- "$entry" 2>/dev/null || true
@@ -1553,6 +1568,19 @@ backend_typescript_cache_can_seed() {
   return 0
 }
 
+seed_backend_typescript_cache() {
+  local entry="${1:?}" project_dir="${2:?}" local_cache="${3:?}"
+  normalize_typescript_cache_permissions "$entry" || return 1
+  # A camada compartilhada é imutável; somente as cópias locais são graváveis.
+  sudo -u ubuntu -H install -m 0644 -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" || return 1
+  rm -rf -- "$project_dir/dist" || return 1
+  if ! sudo -u ubuntu -H cp -a --reflink=auto --no-preserve=ownership -- "$entry/dist" "$project_dir/dist"; then
+    rm -rf -- "$project_dir/dist" || return 1
+    sudo -u ubuntu -H cp -a --no-preserve=ownership -- "$entry/dist" "$project_dir/dist" || return 1
+  fi
+  sudo -u ubuntu -H chmod -R u+rwX -- "$project_dir/dist"
+}
+
 run_backend_incremental_build() {
   local project_dir="${1:?}" key entry parent tmp local_cache qdir dist_hash
   LAST_BACKEND_TYPESCRIPT_CACHE_HIT=0
@@ -1564,20 +1592,16 @@ run_backend_incremental_build() {
   rm -rf -- "$local_cache" 2>/dev/null || true
   install -d -o ubuntu -g ubuntu -m 0775 "$local_cache" || return 1
 
-  if backend_typescript_cache_can_seed && verify_backend_typescript_cache "$entry" "$key"; then
-    # A camada compartilhada é imutável; a cópia local precisa aceitar escrita do tsc.
-    sudo -u ubuntu -H install -m 0644 -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" || return 1
-    rm -rf -- "$project_dir/dist" 2>/dev/null || true
-    if ! sudo -u ubuntu -H cp -a --reflink=auto --no-preserve=ownership -- "$entry/dist" "$project_dir/dist" 2>/dev/null; then
-      sudo -u ubuntu -H cp -a --no-preserve=ownership -- "$entry/dist" "$project_dir/dist" || return 1
-    fi
-    chmod -R u+w "$project_dir/dist" 2>/dev/null || true
+  if backend_typescript_cache_can_seed && verify_backend_typescript_cache "$entry" "$key" \
+      && seed_backend_typescript_cache "$entry" "$project_dir" "$local_cache" 2>/dev/null; then
     LAST_BACKEND_TYPESCRIPT_CACHE_HIT=1
     TYPESCRIPT_CACHE_HITS=$(( ${TYPESCRIPT_CACHE_HITS:-0} + 1 ))
     touch "$entry/cache.json" 2>/dev/null || true
     logger -t "$LOG_TAG" "cache TypeScript HIT: backend ${key:0:12}" 2>/dev/null || true
   else
-    rm -rf -- "$project_dir/dist" 2>/dev/null || true
+    # Cache indisponível não invalida o build: descarte todo o seed e recompile.
+    rm -rf -- "$project_dir/dist" || return 1
+    rm -f -- "$local_cache/tsconfig.tsbuildinfo" || return 1
     TYPESCRIPT_CACHE_MISSES=$(( ${TYPESCRIPT_CACHE_MISSES:-0} + 1 ))
     logger -t "$LOG_TAG" "cache TypeScript MISS: backend ${key:0:12}" 2>/dev/null || true
   fi
@@ -1619,7 +1643,10 @@ run_backend_incremental_build() {
     return 1
   fi
   chown -R root:root "$tmp" 2>/dev/null || true
-  chmod -R a-w "$tmp" 2>/dev/null || true
+  if ! normalize_typescript_cache_permissions "$tmp"; then
+    rm -rf -- "$tmp" "$local_cache" 2>/dev/null || true
+    return 1
+  fi
   if [[ -e "$entry" ]]; then
     chmod -R u+w "$entry" 2>/dev/null || true
     rm -rf -- "$entry" 2>/dev/null || true

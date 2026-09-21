@@ -1,0 +1,27 @@
+/* Sora dá identidade aos títulos; DM Sans mantém os controles legíveis. */
+:root {
+  --osk-font: "DM Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --osk-font-display: "Sora", "DM Sans", ui-sans-serif, system-ui, sans-serif;
+}
+.osk-root, .osk-select-layer, .osk-account-layer, .osk-multi-sheet {
+  font-family: var(--osk-font);
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+}
+.osk-dashboard-page h1, .osk-dashboard-page h2,
+.osk-function-label strong, .osk-accordion-copy strong,
+.osk-topbar-brand strong, .osk-sidebar-bot-copy strong { font-family: var(--osk-font-display); }
+.osk-dashboard-page h1 { font-size: 32px; line-height: 1.2; font-weight: 600; letter-spacing: -.05em; }
+.osk-dashboard-page h2 { font-weight: 500; letter-spacing: -.025em; }
+.osk-topbar-brand strong, .osk-sidebar-bot-copy strong { font-size: 21px; font-weight: 600; line-height: 1.2; letter-spacing: -.055em; }
+.osk-function-label strong { font-weight: 500; line-height: 1.35; letter-spacing: -.035em; }
+.osk-accordion-copy strong { font-size: 14px; font-weight: 500; letter-spacing: -.025em; }
+.osk-sidebar-link, .osk-select-trigger, .osk-save-dock-actions button, .osk-mobile-navigation button { font-weight: 500; letter-spacing: -.015em; }
+.osk-compact-field input, .osk-compact-field textarea { font-size: 16px; font-weight: 400; letter-spacing: -.01em; }
+.osk-select-caption, .osk-select-option-text small, .osk-select-menu-title { font-weight: 400; letter-spacing: 0; }
+.osk-select-option-text > span, .osk-account-actions > button, .osk-account-actions > a { font-weight: 500; letter-spacing: -.015em; }
+.osk-playing-card b { font-family: Georgia, "Times New Roman", serif; font-weight: 600; letter-spacing: -.04em; }
+@media (max-width:600px) {
+  .osk-dashboard-page h1 { font-size: 28px; }
+  .osk-topbar-brand strong { font-size: 20px; }
+}

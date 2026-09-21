@@ -3,7 +3,7 @@ import { isConfiguredValue, resolveDashboardSectionState } from "../config/dashb
 import { normalizeColorPanelLayout, normalizeFieldValue, serializeFieldValue } from "../config/dashboardValueCodec.js";
 import { DASHBOARD_PREFIX_FIELD_IDS, normalizeDashboardPrefix, validateDashboardPrefixes } from "../config/dashboardValidation.js";
 import { dotSetForPath, getPath, isPlainObject, setPath } from "../config/dashboardObjectUtils.js";
-import { DashboardConfigValidationError, type DashboardFieldScope, type DashboardGuildSummary } from "../config/dashboardTypes.js";
+import { DashboardConfigValidationError, DashboardConfigValueError, type DashboardFieldScope, type DashboardGuildSummary } from "../config/dashboardTypes.js";
 import { snowflakeFromRaw } from "../config/dashboardSnowflakes.js";
 
 export interface DashboardDocs {
@@ -66,6 +66,9 @@ export function planDashboardUpdates(docs: DashboardDocs, updates: Record<string
     const field = fieldsById.get(fieldId);
     if (!field) continue;
     const value = normalizeFieldValue(field, rawValue);
+    if (field.id === "economy.staff_role_id" && String(value) === String(docs.guild.guild_id)) {
+      throw new DashboardConfigValueError(field.id, "O cargo @everyone não pode administrar a economia.");
+    }
     setPath(docs[field.scope], field.path, value);
     const scopePatch = patches.get(field.scope) ?? {};
     dotSetForPath(scopePatch, field.path, value);

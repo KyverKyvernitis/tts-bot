@@ -21,6 +21,8 @@ export function hasStoredDashboardId(value: unknown): boolean {
 
 export function applyLegacyFeatureFlags(type: string, raw: Record<string, unknown>, merged: Record<string, unknown>): void {
   if (type === "guild") {
+    merged.gincana_input_mode = String(raw.gincana_input_mode || "triggers").trim().toLowerCase() === "commands" ? "commands" : "triggers";
+    if (!hasOwn(raw, "gincana_staff_role_id")) merged.gincana_staff_role_id = raw.anti_mzk_staff_role_id ?? 0;
     const rawForms = isPlainObject(raw.forms) ? raw.forms : {};
     const forms = isPlainObject(merged.forms) ? merged.forms : {};
     if (!hasOwn(rawForms, "enabled")) {
