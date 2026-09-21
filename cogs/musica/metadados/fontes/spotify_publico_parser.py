@@ -110,9 +110,11 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
     ignora classes/ids deliberadamente para sobreviver a renomes de CSS.
     """
 
-    def __init__(self, *, limit: int) -> None:
+    def __init__(self, *, limit: int, offset: int = 0) -> None:
         super().__init__(convert_charrefs=True)
         self.limit = max(1, int(limit))
+        self.row_offset = max(0, int(offset))
+        self._seen_rows = 0
         self._tag_stack: list[str] = []
         self._heading_tag = ""
         self._heading_parts: list[str] = []
@@ -161,13 +163,20 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
         if self._pending_title and self._pending_artist and len(self.rows) < self.limit:
             duration = parse_duration_label(value)
             if duration is not None:
-                self.rows.append(SpotifyEmbedRow(self._pending_title, self._pending_artist, duration))
+                self._append_row(SpotifyEmbedRow(self._pending_title, self._pending_artist, duration))
                 self._pending_title = ""
                 self._pending_artist = ""
 
+    def _append_row(self, row: SpotifyEmbedRow) -> None:
+        index = self._seen_rows
+        self._seen_rows += 1
+        if index < self.row_offset or len(self.rows) >= self.limit:
+            return
+        self.rows.append(row)
+
     def _flush_pending_without_duration(self) -> None:
-        if self._pending_title and self._pending_artist and len(self.rows) < self.limit:
-            self.rows.append(SpotifyEmbedRow(self._pending_title, self._pending_artist, None))
+        if self._pending_title and self._pending_artist:
+            self._append_row(SpotifyEmbedRow(self._pending_title, self._pending_artist, None))
         self._pending_title = ""
         self._pending_artist = ""
 
@@ -178,8 +187,8 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
         return SpotifyEmbedDocument(title=h1, subtitle=h2, rows=self.rows[: self.limit])
 
 
-def parse_embed_document(content: str, *, limit: int = 100) -> SpotifyEmbedDocument:
-    parser = _SpotifyEmbedHTMLParser(limit=limit)
+def parse_embed_document(content: str, *, limit: int = 100, offset: int = 0) -> SpotifyEmbedDocument:
+    parser = _SpotifyEmbedHTMLParser(limit=limit, offset=offset)
     try:
         parser.feed(content or "")
         parser.close()

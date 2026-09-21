@@ -15,6 +15,7 @@ from .spotify_publico_parser import (
 )
 
 from ..modelos import ApiTrackBatch, ApiTrackCandidate
+from ...nucleo.modelos import PlaylistCursor
 from ..normalizacao import compact_key, normalize_text, parse_iso8601_duration
 
 logger = logging.getLogger(__name__)
@@ -317,18 +318,32 @@ class SpotifyPublicoMixin:
             extra={"uri": uri} if uri else {},
         )
 
-    def _spotify_public_candidates_from_json(self, data: Any, *, url: str, limit: int) -> list[ApiTrackCandidate]:
+    def _spotify_public_candidates_from_json(
+        self,
+        data: Any,
+        *,
+        url: str,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ApiTrackCandidate]:
         results: list[ApiTrackCandidate] = []
         seen: set[str] = set()
+        skipped = 0
+        offset = max(0, int(offset))
 
         def add(candidate: ApiTrackCandidate | None) -> None:
+            nonlocal skipped
             if not candidate:
                 return
             key = compact_key(f"{candidate.artist} {candidate.title}") or candidate.webpage_url.lower()
             if not key or key in seen:
                 return
             seen.add(key)
-            results.append(candidate)
+            if skipped < offset:
+                skipped += 1
+                return
+            if len(results) < limit:
+                results.append(candidate)
 
         def walk(value: Any, depth: int = 0) -> None:
             if len(results) >= limit or depth > 18:
@@ -351,10 +366,22 @@ class SpotifyPublicoMixin:
         walk(data)
         return results[:limit]
 
-    async def _spotify_public_page_batch(self, kind: str, item_id: str, *, limit: int, original_url: str) -> ApiTrackBatch | None:
+    async def _spotify_public_page_batch(
+        self,
+        kind: str,
+        item_id: str,
+        *,
+        limit: int,
+        original_url: str,
+        offset: int = 0,
+    ) -> ApiTrackBatch | None:
         if not self.spotify_public_fallback_enabled:
             return None
         limit = max(1, min(self.spotify_public_fallback_max_tracks, int(limit)))
+        offset = max(0, int(offset))
+        # Um item extra permite distinguir "janela cheia" de "fim conhecido"
+        # sem manter o restante da playlist em memória.
+        probe_limit = min(self.spotify_public_fallback_max_tracks, limit + 1)
         oembed = await self._spotify_public_oembed(original_url)
         last_title = str(oembed.get("title") or "").strip()
         fallback_thumbnail = str(oembed.get("thumbnail") or "").strip()
@@ -387,14 +414,19 @@ class SpotifyPublicoMixin:
                 except Exception:
                     pass
 
-            for blob in json_blobs:
-                tracks.extend(self._spotify_public_candidates_from_json(blob, url="", limit=limit - len(tracks)))
-                if len(tracks) >= limit:
-                    break
+            if json_blobs:
+                tracks.extend(
+                    self._spotify_public_candidates_from_json(
+                        json_blobs,
+                        url="",
+                        limit=probe_limit,
+                        offset=offset,
+                    )
+                )
 
             # O embed também entrega HTML server-rendered. Isso é crucial para
             # playlists quando o payload interno muda ou deixa de expor JSON.
-            document = parse_embed_document(content, limit=limit)
+            document = parse_embed_document(content, limit=probe_limit, offset=offset)
             if document.title:
                 last_title = last_title or document.title
             if document.thumbnail:
@@ -413,7 +445,7 @@ class SpotifyPublicoMixin:
                         query=" ".join(part for part in (row.artist, row.title, "official audio") if part),
                         score=30,
                     )
-                    for row in document.rows[:limit]
+                    for row in document.rows[:probe_limit]
                 ]
 
             # Track individual no embed usa heading principal/subtítulo em vez
@@ -442,18 +474,39 @@ class SpotifyPublicoMixin:
                     for candidate in tracks:
                         if not candidate.thumbnail:
                             candidate.thumbnail = fallback_thumbnail
-                tracks = await self._spotify_enrich_candidates(tracks, limit=limit)
+                tracks = await self._spotify_enrich_candidates(tracks, limit=probe_limit)
                 if tracks:
+                    has_more_in_document = kind in {"album", "playlist"} and len(tracks) > limit
+                    window = tracks[:limit]
+                    playlist_title = last_title or (window[0].album if kind == "album" else window[0].title if kind == "track" else "Spotify")
+                    cursor = None
+                    if kind in {"album", "playlist"}:
+                        # O embed público costuma expor uma janela server-rendered.
+                        # Mesmo quando não vemos o item +1, 25 linhas podem ser só
+                        # o primeiro recorte; nesse caso mantemos continuação aberta
+                        # e a etapa lazy confirma o fim ao pedir o próximo offset.
+                        maybe_embed_window = len(window) >= 25
+                        cursor = PlaylistCursor(
+                            provider="spotify_public",
+                            source_url=original_url,
+                            title=playlist_title,
+                            resource_type=kind,
+                            resource_id=item_id,
+                            next_offset=offset + len(window),
+                            total_tracks=None,
+                            exhausted=not (has_more_in_document or maybe_embed_window),
+                        )
                     return ApiTrackBatch(
-                        tracks=tracks,
-                        title=last_title or (tracks[0].album if kind == "album" else tracks[0].title if kind == "track" else "Spotify"),
-                        is_playlist=kind in {"album", "playlist"} or len(tracks) > 1,
-                        truncated=kind in {"album", "playlist"} and len(tracks) >= limit,
+                        tracks=window,
+                        title=playlist_title,
+                        is_playlist=kind in {"album", "playlist"} or len(window) > 1,
+                        truncated=bool(cursor and not cursor.exhausted),
                         source="Spotify público",
+                        playlist_cursor=cursor,
                     )
         return None
 
-    async def spotify_public_batch_from_url(self, url: str, *, limit: int = 25) -> ApiTrackBatch | None:
+    async def spotify_public_batch_from_url(self, url: str, *, limit: int = 25, offset: int = 0) -> ApiTrackBatch | None:
         """Resolve metadata Spotify somente pelas páginas públicas/embed.
 
         Este método é deliberadamente independente de ``api.spotify.com`` e
@@ -469,5 +522,21 @@ class SpotifyPublicoMixin:
         ):
             return None
         limit = max(1, min(self.spotify_public_fallback_max_tracks, int(limit)))
-        return await self._spotify_public_page_batch(kind, item_id, limit=limit, original_url=url)
+        offset = max(0, int(offset))
+        if offset:
+            return await self._spotify_public_page_batch(
+                kind,
+                item_id,
+                limit=limit,
+                original_url=url,
+                offset=offset,
+            )
+        # Mantém compatibilidade com wrappers/testes/overrides antigos do
+        # resolver público que ainda expõem a assinatura sem ``offset``.
+        return await self._spotify_public_page_batch(
+            kind,
+            item_id,
+            limit=limit,
+            original_url=url,
+        )
 

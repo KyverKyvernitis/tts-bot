@@ -491,6 +491,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 compact=truthy(body.get("compact"), bool(guild_id)),
                 known_revision=str(body.get("known_revision") or "").strip(),
             )
+        if action in {"playlist_refill", "refill_playlist"}:
+            return await self.cmd_playlist_refill(body)
         if action in {"play", "enqueue", "play_direct", "enqueue_many", "queue_many", "add_many", "playlist"}:
             body = dict(body)
             body["_agent_action"] = action

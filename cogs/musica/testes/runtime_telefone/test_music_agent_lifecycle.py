@@ -1236,3 +1236,180 @@ def test_command_id_concorrente_espera_primeira_execucao(music):
         assert two["deduplicated"] is True
 
     run(scenario())
+
+
+def _virtual_cursor(offset=25, *, exhausted=False):
+    return {
+        "provider": "spotify_public",
+        "source_url": "https://open.spotify.com/playlist/test",
+        "title": "Playlist Grande",
+        "resource_type": "playlist",
+        "resource_id": "test",
+        "next_offset": offset,
+        "total_tracks": None,
+        "exhausted": exhausted,
+    }
+
+
+def _virtual_marker(music, agent, *, offset=25):
+    cursor = _virtual_cursor(offset)
+    return agent._agent_track_from_metadata(
+        {
+            "title": "Playlist Grande",
+            "webpage_url": cursor["source_url"],
+            "source": "playlist-virtual",
+            "virtual_playlist_cursor": cursor,
+            "requester_id": 7,
+            "requester_name": "Core",
+        },
+        body={"requester_id": 7, "requester_name": "Core"},
+        fallback_query="",
+    )
+
+
+def test_virtual_playlist_marker_is_not_resolved_as_audio(music):
+    agent = music.MusicAgent()
+    marker = _virtual_marker(music, agent)
+
+    assert marker.is_virtual_playlist_marker is True
+    assert marker.query == ""
+    assert marker.transport_hint == "playlist-cursor"
+    assert marker.virtual_playlist_cursor["next_offset"] == 25
+
+    gid = 801
+    st = music.GuildMusicState(guild_id=gid, queue=[marker], status="playing")
+    agent.states[gid] = st
+    agent.prefetch_enabled = True
+    agent._query_from_track_meta = lambda *a, **k: (_ for _ in ()).throw(AssertionError("marker não pode ser resolvido"))
+    agent._schedule_next_queue_prefetch(gid)
+    assert agent._prefetch_tasks == {}
+
+
+def test_virtual_playlist_public_state_hides_marker_and_preserves_logical_order(music):
+    agent = music.MusicAgent()
+    marker = _virtual_marker(music, agent)
+    st = music.GuildMusicState(
+        guild_id=802,
+        queue=[
+            music.AgentTrack(title="Antes", query="antes"),
+            marker,
+            music.AgentTrack(title="Manual depois", query="manual"),
+        ],
+    )
+
+    public = st.public()
+    assert public["queue_size"] == 2
+    assert [item["title"] for item in public["queue"]] == ["Antes"]
+    assert public["virtual_playlist"]["materialized_before"] == 1
+    assert public["virtual_playlist"]["cursor"]["next_offset"] == 25
+
+
+def test_playlist_refill_replaces_marker_atomically_and_keeps_later_queue(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 803
+        marker = _virtual_marker(music, agent, offset=25)
+        st = music.GuildMusicState(
+            guild_id=gid,
+            status="playing",
+            current=music.AgentTrack(title="Atual", query="atual"),
+            queue=[
+                music.AgentTrack(title="Antes", query="antes"),
+                marker,
+                music.AgentTrack(title="Manual depois", query="manual"),
+            ],
+        )
+        agent.states[gid] = st
+        agent._schedule_next_queue_prefetch = lambda *a, **k: None
+
+        result = await agent.cmd_playlist_refill(
+            {
+                "guild_id": gid,
+                "expected_cursor": _virtual_cursor(25),
+                "next_cursor": _virtual_cursor(27),
+                "tracks": [
+                    {"title": "Faixa 26", "query": "ytsearch1:faixa 26"},
+                    {"title": "Faixa 27", "query": "ytsearch1:faixa 27"},
+                ],
+                "requester_id": 7,
+                "requester_name": "Core",
+            }
+        )
+
+        assert result["ok"] is True and result["ignored"] is False and result["added"] == 2
+        assert [item.title for item in st.queue] == [
+            "Antes",
+            "Faixa 26",
+            "Faixa 27",
+            "Playlist Grande",
+            "Manual depois",
+        ]
+        assert st.queue[3].is_virtual_playlist_marker is True
+        assert st.queue[3].virtual_playlist_cursor["next_offset"] == 27
+
+    run(scenario())
+
+
+def test_playlist_refill_ignores_stale_cursor_without_duplicate_insertion(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 804
+        marker = _virtual_marker(music, agent, offset=50)
+        st = music.GuildMusicState(guild_id=gid, status="playing", queue=[marker])
+        agent.states[gid] = st
+
+        result = await agent.cmd_playlist_refill(
+            {
+                "guild_id": gid,
+                "expected_cursor": _virtual_cursor(25),
+                "next_cursor": _virtual_cursor(50),
+                "tracks": [{"title": "Duplicada", "query": "ytsearch1:duplicada"}],
+            }
+        )
+
+        assert result["ok"] is True and result["ignored"] is True and result["added"] == 0
+        assert st.queue == [marker]
+
+    run(scenario())
+
+
+def test_play_next_waits_on_virtual_cursor_without_ending_session(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 805
+        marker = _virtual_marker(music, agent)
+        current = music.AgentTrack(title="Última materializada", query="ultima")
+        st = music.GuildMusicState(guild_id=gid, current=current, queue=[marker], status="playing")
+        agent.states[gid] = st
+        idle_calls = []
+        agent._schedule_idle_disconnect = lambda guild_id: idle_calls.append(guild_id)
+
+        await agent._play_next(gid)
+
+        assert st.current is None
+        assert st.queue == [marker]
+        assert st.status == "queued"
+        assert st.last_event == "playlist_refill_needed"
+        assert [item.title for item in st.history] == ["Última materializada"]
+        assert idle_calls == []
+
+    run(scenario())
+
+
+def test_shuffle_does_not_materialize_or_reorder_virtual_playlist(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 806
+        marker = _virtual_marker(music, agent)
+        before = music.AgentTrack(title="Antes", query="antes")
+        after = music.AgentTrack(title="Depois", query="depois")
+        st = music.GuildMusicState(guild_id=gid, queue=[before, marker, after])
+        agent.states[gid] = st
+
+        result = await agent.cmd_shuffle({"guild_id": gid})
+
+        assert result["ok"] is False
+        assert st.queue == [before, marker, after]
+        assert "carregada" in result["error"]
+
+    run(scenario())

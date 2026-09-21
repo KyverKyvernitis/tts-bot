@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from ..nucleo.modelos import PlaylistCursor
+
 
 class PlayInputKind(str, Enum):
     """Intenção do comando de reprodução antes de resolver metadata/áudio.
@@ -69,3 +71,4 @@ class ApiTrackBatch:
     is_playlist: bool = False
     truncated: bool = False
     source: str = ""
+    playlist_cursor: PlaylistCursor | None = None

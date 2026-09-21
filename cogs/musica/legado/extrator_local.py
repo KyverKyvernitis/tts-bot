@@ -15,7 +15,7 @@ from cogs.musica import configuracao as config
 
 from ..metadados.provedores_api import ApiTrackBatch, ApiTrackCandidate, MusicApiProviders, compact_key, is_bad_match_title, normalize_text, title_quality_score
 from ..nucleo.erros import MusicExtractionError
-from ..nucleo.modelos import ExtractedBatch, MusicTrack
+from ..nucleo.modelos import ExtractedBatch, MusicTrack, PlaylistCursor
 from ..metadados.provedores import (
     UrlProfile,
     clean_metadata_title,
@@ -1255,6 +1255,80 @@ class MusicExtractor:
                 logger.debug("[music] search_one falhou | query=%r flat=%s", query, flat, exc_info=True)
         raise MusicExtractionError("Não encontrei uma alternativa tocável para essa música.", detail=str(last_error or ""))
 
+    async def continue_playlist_window(
+        self,
+        cursor: PlaylistCursor,
+        *,
+        requester_id: int,
+        requester_name: str = "",
+        limit: int | None = None,
+    ) -> ExtractedBatch:
+        """Materializa somente a próxima janela de uma playlist por cursor.
+
+        Não resolve áudio e não consulta o YouTube. O retorno continua sendo
+        metadata leve; a faixa só vira stream quando chegar à cabeça da fila.
+        """
+
+        window_limit = max(1, min(50, int(limit or getattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25) or 25)))
+        if cursor.exhausted:
+            return ExtractedBatch(
+                tracks=[],
+                query=cursor.source_url,
+                is_playlist=True,
+                playlist_title=cursor.title,
+                truncated=False,
+                playlist_cursor=cursor,
+            )
+
+        try:
+            api_batch = await self.api.metadata_playlist_window(cursor, limit=window_limit)
+        except Exception as exc:
+            logger.debug(
+                "[music] continuação de playlist falhou | provider=%s offset=%s",
+                cursor.provider,
+                cursor.next_offset,
+                exc_info=True,
+            )
+            raise MusicExtractionError(
+                "Não consegui carregar a próxima parte dessa playlist agora.",
+                detail=str(exc),
+            ) from exc
+
+        if not api_batch or not api_batch.tracks:
+            finished = cursor.advanced(0, exhausted=True)
+            return ExtractedBatch(
+                tracks=[],
+                query=cursor.source_url,
+                is_playlist=True,
+                playlist_title=cursor.title,
+                truncated=False,
+                playlist_cursor=finished,
+            )
+
+        tracks = [
+            self._metadata_track_from_candidate(
+                candidate,
+                requester_id=requester_id,
+                requester_name=requester_name,
+                original_url=cursor.source_url,
+            )
+            for candidate in api_batch.tracks[:window_limit]
+            if self._metadata_is_safe_for_autosearch(candidate)
+        ]
+        # Não deduplicar aqui: repetições podem ser intencionais e o offset já
+        # representa a posição da coleção.
+        next_cursor = getattr(api_batch, "playlist_cursor", None)
+        if next_cursor is None:
+            next_cursor = cursor.advanced(len(tracks), exhausted=len(api_batch.tracks) < window_limit)
+        return ExtractedBatch(
+            tracks=tracks,
+            query=cursor.source_url,
+            is_playlist=True,
+            playlist_title=api_batch.title or cursor.title,
+            truncated=bool(next_cursor and not next_cursor.exhausted),
+            playlist_cursor=next_cursor,
+        )
+
     async def _extract_metadata_only(self, profile: UrlProfile, *, requester_id: int, requester_name: str = "") -> ExtractedBatch:
         """Lê links Spotify/Deezer/Apple como metadata oficial.
 
@@ -1264,10 +1338,19 @@ class MusicExtractor:
         """
         api_batch: ApiTrackBatch | None = None
         api_error = ""
-        # Direct track nunca precisa materializar uma janela de playlist. Isso
-        # mantém o caminho Spotify-track barato e deixa o limite grande apenas
-        # para coleções, que serão tornadas lazy nas waves seguintes.
-        metadata_limit = 1 if profile.resource_type == "track" else self.max_playlist_items
+        # Direct track nunca precisa materializar uma janela de playlist. Para
+        # coleções Spotify, peça desde a primeira leitura somente a janela que
+        # cabe no player; o cursor público continua o restante sob demanda. Isso
+        # evita baixar/converter dezenas de metadados que ainda não serão usados.
+        if profile.resource_type == "track":
+            metadata_limit = 1
+        elif profile.platform == "spotify" and profile.resource_type in {"playlist", "album"}:
+            metadata_limit = min(
+                self.max_playlist_items,
+                max(5, int(getattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25) or 25)),
+            )
+        else:
+            metadata_limit = self.max_playlist_items
         try:
             api_batch = await self.api.metadata_batch_from_url(profile.canonical, limit=metadata_limit)
         except Exception as exc:
@@ -1296,6 +1379,7 @@ class MusicExtractor:
                 is_playlist=bool(api_batch.is_playlist or len(tracks) > 1),
                 playlist_title=api_batch.title,
                 truncated=bool(api_batch.truncated),
+                playlist_cursor=getattr(api_batch, "playlist_cursor", None),
             )
 
         if profile.platform == "spotify" and profile.resource_type == "playlist":

@@ -65,6 +65,10 @@ class ReproducaoMixin:
         st = self.states.setdefault(int(guild_id or 0), GuildMusicState(guild_id=int(guild_id or 0)))
         if not st.queue:
             return
+        if st.queue[0].is_virtual_playlist_marker:
+            # O cursor virtual não é uma faixa reproduzível. O monitor da VPS
+            # materializa a próxima janela quando o marker se aproxima da frente.
+            return
         meta = st.queue[0].public()
         query = self._query_from_track_meta(meta, fallback_query=st.queue[0].query or st.queue[0].webpage_url or st.queue[0].title)
         if not query:
@@ -226,17 +230,25 @@ class ReproducaoMixin:
                     tracks.append(track)
             if not tracks:
                 raise ValueError("playlist/fila sem faixas válidas")
+            playable_added = sum(1 for item in tracks if not item.is_virtual_playlist_marker)
             active = bool(st.current and st.status in {"playing", "starting", "preparing", "paused"})
             st.queue.extend(tracks)
             st.updated_at = time.time()
-            self.log("queued_many", guild_id=guild_id, added=len(tracks), queue_size=len(st.queue), active=active)
+            self.log(
+                "queued_many",
+                guild_id=guild_id,
+                added=playable_added,
+                virtual_markers=len(tracks) - playable_added,
+                queue_size=len(st.queue),
+                active=active,
+            )
             if not active:
                 await self._play_next(guild_id)
                 if st.status in {"failed", "error"}:
-                    return {"ok": False, "queued": False, "added": len(tracks), "error": st.last_error or "falha ao iniciar playback", "state": st.public()}
-                return {"ok": True, "queued": False, "added": len(tracks), "state": st.public()}
+                    return {"ok": False, "queued": False, "added": playable_added, "error": st.last_error or "falha ao iniciar playback", "state": st.public()}
+                return {"ok": True, "queued": False, "added": playable_added, "state": st.public()}
             self._schedule_next_queue_prefetch(guild_id, reason="enqueue_many")
-            return {"ok": True, "queued": True, "added": len(tracks), "state": st.public()}
+            return {"ok": True, "queued": True, "added": playable_added, "state": st.public()}
 
         query = self._query_from_track_meta(track_meta, fallback_query=query) or query
         # Ao escolher um resultado, mantenha apenas o prefetch da faixa escolhida.
@@ -268,6 +280,87 @@ class ReproducaoMixin:
         if st.status in {"failed", "error"}:
             return {"ok": False, "queued": False, "error": st.last_error or "falha ao iniciar playback", "state": st.public()}
         return {"ok": True, "queued": False, "state": st.public()}
+
+    async def cmd_playlist_refill(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Substitui atomicamente um marker virtual pela próxima janela.
+
+        O ``expected_cursor`` funciona como compare-and-swap: refills atrasados
+        ou duplicados são ignorados, evitando inserir a mesma página duas vezes.
+        """
+
+        guild_id = safe_id(body.get("guild_id"))
+        if not guild_id:
+            raise ValueError("guild_id é obrigatório")
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        expected = body.get("expected_cursor") if isinstance(body.get("expected_cursor"), dict) else {}
+        next_cursor = body.get("next_cursor") if isinstance(body.get("next_cursor"), dict) else {}
+
+        def _cursor_key(value: dict[str, Any]) -> tuple[str, str, int]:
+            try:
+                offset = max(0, int(value.get("next_offset") or 0))
+            except Exception:
+                offset = 0
+            return (
+                str(value.get("provider") or "").strip(),
+                str(value.get("source_url") or "").strip(),
+                offset,
+            )
+
+        expected_key = _cursor_key(expected)
+        marker_index = -1
+        marker: AgentTrack | None = None
+        for index, item in enumerate(st.queue):
+            if item.is_virtual_playlist_marker and _cursor_key(item.virtual_playlist_cursor) == expected_key:
+                marker_index = index
+                marker = item
+                break
+        if marker is None:
+            self.log("playlist_refill_ignored", guild_id=guild_id, reason="stale_cursor", expected_offset=expected_key[2])
+            return {"ok": True, "ignored": True, "added": 0, "state": st.public()}
+
+        incoming: list[AgentTrack] = []
+        for item in body.get("tracks") if isinstance(body.get("tracks"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            track = self._agent_track_from_metadata(item, body=body, fallback_query="")
+            if track.is_virtual_playlist_marker:
+                continue
+            if track.query or track.stream_url or track.webpage_url:
+                incoming.append(track)
+
+        exhausted = bool(next_cursor.get("exhausted")) if next_cursor else not incoming
+        replacement: list[AgentTrack] = list(incoming)
+        if next_cursor and not exhausted:
+            marker_payload = {
+                "title": str(next_cursor.get("title") or marker.title or "Playlist"),
+                "webpage_url": str(next_cursor.get("source_url") or marker.webpage_url or ""),
+                "source": "playlist-virtual",
+                "virtual_playlist_cursor": dict(next_cursor),
+                "requester_id": marker.requester_id,
+                "requester_name": marker.requester_name,
+            }
+            replacement.append(self._agent_track_from_metadata(marker_payload, body=body, fallback_query=""))
+
+        # Preserva tudo que foi enfileirado manualmente depois do marker.
+        st.queue[marker_index:marker_index + 1] = replacement
+        st.updated_at = time.time()
+        self.log(
+            "playlist_refilled",
+            guild_id=guild_id,
+            added=len(incoming),
+            exhausted=exhausted,
+            expected_offset=expected_key[2],
+            next_offset=_cursor_key(next_cursor)[2] if next_cursor else expected_key[2],
+            queue_size=len(st.queue),
+        )
+
+        # Se o worker estava parado exatamente no cursor, continue assim que a
+        # janela chegar. Caso contrário, apenas prepare a próxima faixa normal.
+        if marker_index == 0 and st.current is None:
+            await self._play_next(guild_id, preserve_current_to_history=False)
+        else:
+            self._schedule_next_queue_prefetch(guild_id, reason="playlist_refill")
+        return {"ok": True, "ignored": False, "added": len(incoming), "state": st.public()}
 
     async def cmd_pause(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
@@ -422,6 +515,17 @@ class ReproducaoMixin:
         # usado pelo callback do áudio atual; mudar esse token faria a faixa
         # atual terminar sem avançar a queue. Cancele apenas o prefetch antigo.
         self._cancel_prefetch_tasks(guild_id)
+        if any(item.is_virtual_playlist_marker for item in st.queue):
+            # Embaralhar através de um cursor ainda não materializado destruiria
+            # a ordem lógica e exigiria carregar a playlist inteira em memória.
+            return {
+                "ok": False,
+                "shuffled": False,
+                "enabled": False,
+                "error": "A playlist ainda está sendo carregada; aguarde para embaralhar.",
+                "queue_size": sum(1 for item in st.queue if not item.is_virtual_playlist_marker),
+                "state": st.public(),
+            }
         if len(st.queue) > 1:
             import random as _random
             _random.shuffle(st.queue)
@@ -573,6 +677,21 @@ class ReproducaoMixin:
             st.paused = False
             self._set_status(st, "idle", event="queue_empty")
             self._schedule_idle_disconnect(guild_id)
+            return
+        if st.queue[0].is_virtual_playlist_marker:
+            # Não remova o marker: ele é o ponto exato onde a próxima janela
+            # deve entrar. O monitor já existente da VPS verá ``waiting`` e
+            # solicitará o refill sem introduzir um polling adicional.
+            if preserve_current_to_history and st.current is not None:
+                self._push_history(st, st.current)
+            st.current = None
+            st.paused = False
+            self._set_status(st, "queued", event="playlist_refill_needed")
+            self.log(
+                "playlist_refill_needed",
+                guild_id=guild_id,
+                offset=st.queue[0].virtual_playlist_cursor.get("next_offset", 0),
+            )
             return
         next_track = st.queue.pop(0)
         if preserve_current_to_history and st.current is not None:

@@ -100,7 +100,7 @@ async def music_agent_command(
         if "music agent" in lower or "configure music_agent" in lower or "sem token" in lower:
             message = str(getattr(config, "MUSIC_AGENT_MISSING_TOKEN_MESSAGE", MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE) or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE)
         raise MusicWorkerEngineUnavailable(message[:260])
-    if int(guild_id or 0) > 0 and str(action or "").strip().lower() in {"play", "enqueue_many"}:
+    if int(guild_id or 0) > 0 and str(action or "").strip().lower() in {"play", "enqueue_many", "playlist_refill"}:
         vincular_guild_worker(int(guild_id), destino)
     logger.info("[music/agent] comando remoto enviado | worker=%s action=%s guild=%s", destino.worker_id or destino.name, action, guild_id)
     return data

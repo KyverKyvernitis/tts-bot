@@ -81,7 +81,7 @@ async def test_spotify_track_pede_apenas_um_item_ao_resolver_publico(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_otimizacao_de_track_nao_reduz_limite_de_playlist(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_playlist_spotify_inicial_usa_janela_virtual_em_vez_do_limite_total(monkeypatch: pytest.MonkeyPatch) -> None:
     extractor = MusicExtractor(max_playlist_items=37)
     seen: list[int] = []
 
@@ -100,7 +100,7 @@ async def test_otimizacao_de_track_nao_reduz_limite_de_playlist(monkeypatch: pyt
     monkeypatch.setattr(extractor.api, "metadata_batch_from_url", metadata_batch)
     batch = await extractor.extract(SPOTIFY_PLAYLIST, requester_id=1, requester_name="Core")
 
-    assert seen == [37]
+    assert seen == [25]
     assert batch.is_playlist is True
     assert [track.uploader for track in batch.tracks] == ["Artista 1", "Artista 2"]
 

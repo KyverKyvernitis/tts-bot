@@ -9,6 +9,7 @@ from cogs.musica import configuracao as config
 from .comandos import music_agent_status
 from .conversao import estado_da_guild_no_payload
 from .roteamento import desvincular_guild_worker
+from ..reproducao.playlist_virtual import schedule_playlist_refill_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,7 @@ def iniciar_monitor_music_agent(
         failure_seen = 0
         assinatura_painel: tuple[Any, ...] | None = None
         revisao_remota = ""
+        ultimo_estado_remoto: dict[str, Any] | None = None
         status_hint = str(getattr(router.get_state(guild_id), "current_status", "") or "")
         ultimo_refresh_painel = 0.0
         refresh_painel = max(
@@ -218,7 +220,12 @@ def iniciar_monitor_music_agent(
                 failure_seen = 0
                 if bool(payload.get("unchanged")) and revisao_remota:
                     # O estado autoritativo é exatamente o snapshot que já foi
-                    # sincronizado. Não repita conversão, side-effects ou painel.
+                    # sincronizado. Não repita conversão ou painel. O lazy refill
+                    # pode, porém, ter terminado/falhado desde o último poll; use
+                    # o snapshot já em memória para reagendá-lo sem pedir outro
+                    # payload completo ao Worker.
+                    if ultimo_estado_remoto:
+                        schedule_playlist_refill_if_needed(router, guild_id, ultimo_estado_remoto)
                     idle_seen = 0 if status_hint in {"preparing", "starting", "playing", "paused", "queued", "resolving"} else idle_seen
                     continue
                 remote = estado_da_guild_no_payload(payload, guild_id)
@@ -230,6 +237,8 @@ def iniciar_monitor_music_agent(
                         return
                     continue
 
+                ultimo_estado_remoto = remote
+                schedule_playlist_refill_if_needed(router, guild_id, remote)
                 status = str(remote.get("status") or "").lower()
                 status_hint = status
                 nova_assinatura = _assinatura_painel_remoto(remote)

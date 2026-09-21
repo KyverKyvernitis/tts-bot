@@ -14,6 +14,7 @@ import aiohttp
 from cogs.musica import configuracao as config
 
 from .modelos import ApiTrackBatch, ApiTrackCandidate
+from ..nucleo.modelos import PlaylistCursor
 from .normalizacao import compact_key, is_bad_match_title, normalize_text, title_quality_score
 from .fontes.deezer import ProvedorDeezerMixin
 from .fontes.soundcloud import ProvedorSoundCloudMixin
@@ -129,6 +130,28 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
             return await self.deezer_batch_from_url(url, limit=limit)
         if "soundcloud.com" in host and self.soundcloud_enabled and (self.soundcloud_token or self.soundcloud_client_id):
             return await self.soundcloud_batch_from_url(url, limit=limit)
+        return None
+
+    async def metadata_playlist_window(
+        self,
+        cursor: PlaylistCursor,
+        *,
+        limit: int,
+    ) -> ApiTrackBatch | None:
+        """Lê somente a próxima janela indicada por um cursor de playlist.
+
+        O cursor é propositalmente opaco para o restante do player. Hoje o
+        provider público do Spotify usa deslocamento lógico; outros providers
+        podem adotar paginação própria sem alterar a fila virtual.
+        """
+        if cursor.exhausted or limit <= 0:
+            return None
+        if cursor.provider == "spotify_public":
+            return await self.spotify_public_batch_from_url(
+                cursor.source_url,
+                limit=max(1, int(limit)),
+                offset=max(0, int(cursor.next_offset)),
+            )
         return None
 
     async def search_sources(self, query: str, *, limit: int = 3, prefer_youtube: bool = True, total_budget_seconds: float | None = None, provider_order: tuple[str, ...] | None = None, max_providers: int | None = None) -> list[ApiTrackCandidate]:

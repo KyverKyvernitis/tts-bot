@@ -289,6 +289,26 @@ class ResolucaoMixin:
         return text.strip()
 
     def _agent_track_from_metadata(self, track_meta: dict[str, Any], *, body: dict[str, Any], fallback_query: Any = "") -> AgentTrack:
+        virtual_cursor = track_meta.get("virtual_playlist_cursor")
+        if isinstance(virtual_cursor, dict) and virtual_cursor:
+            source_url = str(
+                virtual_cursor.get("source_url")
+                or track_meta.get("webpage_url")
+                or track_meta.get("original_url")
+                or ""
+            ).strip()
+            title = _metadata_text(virtual_cursor.get("title") or track_meta.get("title") or "Playlist", limit=160) or "Playlist"
+            return AgentTrack(
+                title=title,
+                requester_id=safe_id(body.get("requester_id") or track_meta.get("requester_id")),
+                requester_name=short_text(body.get("requester_name") or track_meta.get("requester_name"), 80),
+                query="",
+                webpage_url=source_url,
+                source="playlist-virtual",
+                transport_hint="playlist-cursor",
+                virtual_playlist_cursor=dict(virtual_cursor),
+            )
+
         query = self._query_from_track_meta(track_meta, fallback_query=fallback_query)
         title = _metadata_text(track_meta.get("display_title") or track_meta.get("title") or query, limit=160) or "Música"
         uploader = _metadata_text(track_meta.get("display_uploader") or track_meta.get("uploader") or track_meta.get("artist") or track_meta.get("channel"), limit=120)

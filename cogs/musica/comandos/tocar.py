@@ -13,11 +13,12 @@ from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_ag
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from ..interface.carregamento import MusicLoadingReaction
 from ..interface.componentes import SearchResultView
-from ..metadados.direct_play import consulta_metadata_direct_play
 from ..metadados.modelos import PlayInputKind
 from ..metadados.provedores import classify_play_input, describe_url
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
+from ..nucleo.playlist_virtual import bounded_initial_window
+from ..reproducao.playlist_virtual import consulta_agent_para_faixa, payload_cursor_playlist, payload_faixa_agent
 
 logger = logging.getLogger(__name__)
 
@@ -382,38 +383,17 @@ class FluxoTocar:
         return False
 
     def _music_agent_query_for_track(self, track: MusicTrack, fallback: str = "") -> str:
-        extractor = str(getattr(track, "extractor", "") or "").lower()
-        source = str(getattr(track, "source", "") or getattr(track, "display_source", "") or "").lower()
-        is_metadata = extractor == "metadata" or any(token in source for token in ("spotify", "deezer", "apple", "metadata"))
-        if is_metadata:
-            return consulta_metadata_direct_play(
-                titulo=str(getattr(track, "display_title", "") or getattr(track, "title", "") or ""),
-                artista=str(getattr(track, "display_uploader", "") or getattr(track, "uploader", "") or ""),
-                fallback=fallback,
-            )
-        return str(getattr(track, "webpage_url", "") or getattr(track, "original_url", "") or getattr(track, "stream_url", "") or getattr(track, "title", "") or fallback or "").strip()
+        return consulta_agent_para_faixa(track, fallback)
 
     def _music_agent_tracks_payload(self, tracks: list[MusicTrack], *, requester_id: int = 0, requester_name: str = "") -> list[dict]:
-        payload: list[dict] = []
-        for track in tracks:
-            payload.append({
-                "title": track.title,
-                "webpage_url": track.webpage_url,
-                "original_url": track.original_url,
-                "stream_url": track.stream_url,
-                "duration": track.duration,
-                "uploader": track.uploader,
-                "thumbnail": track.thumbnail,
-                "source": track.source,
-                "extractor": track.extractor,
-                "display_title": getattr(track, "display_title", ""),
-                "display_uploader": getattr(track, "display_uploader", ""),
-                "display_source": getattr(track, "display_source", ""),
-                "query": self._music_agent_query_for_track(track),
-                "requester_id": requester_id or track.requester_id,
-                "requester_name": requester_name or track.requester_name,
-            })
-        return payload
+        return [
+            payload_faixa_agent(
+                track,
+                requester_id=requester_id,
+                requester_name=requester_name,
+            )
+            for track in tracks
+        ]
 
     def _is_lavalink_search_request(self, query: str) -> bool:
         raw = (query or "").strip()
@@ -638,6 +618,27 @@ class FluxoTocar:
                 await self._reply(ctx, "`📭` Não encontrei nada tocável.")
                 return
 
+            virtual_playlist_cursor = getattr(batch, "playlist_cursor", None)
+            if (
+                getattr(self.router, "music_worker_only_enabled", lambda: False)()
+                and batch.is_playlist
+                and virtual_playlist_cursor is not None
+                and not virtual_playlist_cursor.exhausted
+            ):
+                window_tracks, virtual_playlist_cursor = bounded_initial_window(
+                    batch.tracks,
+                    virtual_playlist_cursor,
+                )
+                batch.tracks = window_tracks
+                batch.playlist_cursor = virtual_playlist_cursor
+                batch.truncated = True
+                logger.info(
+                    "[music/playlist] primeira janela materializada | guild=%s tracks=%s next_offset=%s",
+                    ctx.guild.id,
+                    len(batch.tracks),
+                    getattr(virtual_playlist_cursor, "next_offset", 0),
+                )
+
             # `input_profile` já classificou URL/texto antes da resolução.
             # Reusar esse resultado evita materializar o extrator local legado
             # apenas para chamar `looks_like_url()` no caminho Worker-only.
@@ -685,10 +686,25 @@ class FluxoTocar:
 
             if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
                 track = batch.tracks[0]
-                is_multi = bool(len(batch.tracks) > 1)
+                virtual_cursor = getattr(batch, "playlist_cursor", None)
+                virtual_active = bool(batch.is_playlist and virtual_cursor is not None and not virtual_cursor.exhausted)
+                is_multi = bool(len(batch.tracks) > 1 or virtual_active)
                 try:
                     agent_started = time.monotonic()
                     if is_multi:
+                        tracks_payload = self._music_agent_tracks_payload(
+                            batch.tracks,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                        )
+                        if virtual_active:
+                            tracks_payload.append(
+                                payload_cursor_playlist(
+                                    virtual_cursor,
+                                    requester_id=ctx.author.id,
+                                    requester_name=requester_name,
+                                )
+                            )
                         result = await music_agent_command(
                             "enqueue_many",
                             guild_id=ctx.guild.id,
@@ -696,7 +712,7 @@ class FluxoTocar:
                             text_channel_id=ctx.channel.id,
                             query=query,
                             track=track,
-                            tracks=self._music_agent_tracks_payload(batch.tracks, requester_id=ctx.author.id, requester_name=requester_name),
+                            tracks=tracks_payload,
                             requester_id=ctx.author.id,
                             requester_name=requester_name,
                         )
@@ -740,23 +756,31 @@ class FluxoTocar:
                     added = int(result.get("added") or len(batch.tracks))
                     title = (batch.playlist_title or "playlist").strip()
                     label = f" de **{discord.utils.escape_markdown(title[:80])}**" if title else ""
-                    count_label = "música" if added == 1 else "músicas"
                     state_payload = result.get("state") if isinstance(result.get("state"), dict) else {}
                     try:
                         queue_total = int(state_payload.get("queue_size") or 0)
                     except Exception:
                         queue_total = 0
-                    if bool(result.get("queued")):
-                        total_line = f"\n`🎶` Queue agora: `{queue_total}` música(s)." if queue_total else ""
-                        msg = await self._reply(
-                            ctx,
-                            f"`📑` **Playlist adicionada ao final do queue:** `{added}` {count_label}{label}.{total_line}",
-                        )
+                    if virtual_active:
+                        load_line = f"`📑` **Playlist adicionada{label}.** Carregamento contínuo ativado; a fila mantém só uma janela leve em memória."
+                        if bool(result.get("queued")):
+                            total_line = f"\n`🎶` Janela atual no player: `{queue_total}` música(s)." if queue_total else ""
+                            msg = await self._reply(ctx, load_line + total_line)
+                        else:
+                            msg = await self._reply(ctx, load_line + "\n`🎧` Preparando a primeira faixa...")
                     else:
-                        msg = await self._reply(
-                            ctx,
-                            f"`📑` **Playlist adicionada ao queue:** `{added}` {count_label}{label}.\n`🎧` Preparando a primeira faixa...",
-                        )
+                        count_label = "música" if added == 1 else "músicas"
+                        if bool(result.get("queued")):
+                            total_line = f"\n`🎶` Queue agora: `{queue_total}` música(s)." if queue_total else ""
+                            msg = await self._reply(
+                                ctx,
+                                f"`📑` **Playlist adicionada ao final do queue:** `{added}` {count_label}{label}.{total_line}",
+                            )
+                        else:
+                            msg = await self._reply(
+                                ctx,
+                                f"`📑` **Playlist adicionada ao queue:** `{added}` {count_label}{label}.\n`🎧` Preparando a primeira faixa...",
+                            )
                 else:
                     msg = await self._reply(ctx, self._music_agent_play_message(track, result))
                 state = result.get("state") if isinstance(result.get("state"), dict) else {}

@@ -85,6 +85,13 @@ MUSIC_TTS_LAVALINK_RAMP_FLOOR_PERCENT = max(0, min(100, _parse_int(os.getenv("MU
 MUSIC_IDLE_DISCONNECT_SECONDS = _parse_int(os.getenv("MUSIC_IDLE_DISCONNECT_SECONDS", "120"), 120)
 MUSIC_QUEUE_MAXSIZE = min(100, max(1, _parse_int(os.getenv("MUSIC_QUEUE_MAXSIZE", "100"), 100)))
 MUSIC_MAX_PLAYLIST_ITEMS = min(100, max(1, _parse_int(os.getenv("MUSIC_MAX_PLAYLIST_ITEMS", "100"), 100)))
+# Playlist virtual: limite da janela materializada, não limite lógico da coleção.
+# O objetivo é manter consumo de RAM estável mesmo para playlists enormes.
+MUSIC_PLAYLIST_WINDOW_SIZE = min(50, max(5, _parse_int(os.getenv("MUSIC_PLAYLIST_WINDOW_SIZE", "25"), 25)))
+MUSIC_PLAYLIST_LOW_WATERMARK = min(
+    MUSIC_PLAYLIST_WINDOW_SIZE - 1,
+    max(1, _parse_int(os.getenv("MUSIC_PLAYLIST_LOW_WATERMARK", "8"), 8)),
+)
 MUSIC_SEARCH_RESULTS = max(1, min(10, _parse_int(os.getenv("MUSIC_SEARCH_RESULTS", "3"), 3)))
 MUSIC_SEARCH_CHOICE_MEMORY_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_ENABLED", "true"), True)
 MUSIC_SEARCH_CHOICE_MEMORY_MAX_ENTRIES = max(1, min(100000, _parse_int(os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_MAX_ENTRIES", "10000"), 10000)))

@@ -143,6 +143,7 @@ class MusicGuildState:
     agent_playback_token: int = -1
     agent_monitor_task: Optional[asyncio.Task] = None
     agent_side_effect_task: Optional[asyncio.Task] = None
+    virtual_playlist_refill_task: Optional[asyncio.Task] = None
 
     def queue_size(self) -> int:
         local_count = self.queue.qsize() + len(self.forward_queue)

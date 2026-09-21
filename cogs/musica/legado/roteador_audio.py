@@ -698,6 +698,11 @@ class AudioRouter:
             with contextlib.suppress(Exception):
                 task.cancel()
         state.current_resolve_task = None
+        refill_task = getattr(state, "virtual_playlist_refill_task", None)
+        if refill_task is not None and not refill_task.done():
+            with contextlib.suppress(Exception):
+                refill_task.cancel()
+        state.virtual_playlist_refill_task = None
         logger.info("[music] operações pendentes invalidadas | guild=%s reason=%s generation=%s", guild_id, reason, state.music_operation_generation)
         return state.music_operation_generation
 

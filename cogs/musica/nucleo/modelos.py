@@ -90,9 +90,53 @@ class MusicTrack:
 
 
 @dataclass(slots=True)
+class PlaylistCursor:
+    """Cursor leve para continuar uma coleção sem mantê-la inteira em RAM.
+
+    ``next_offset`` aponta para a próxima posição lógica ainda não materializada.
+    Providers podem reinterpretar esse deslocamento internamente, mas o restante
+    do domínio não precisa conhecer paginação, HTML ou tokens específicos.
+    """
+
+    provider: str
+    source_url: str
+    title: str = ""
+    resource_type: str = "playlist"
+    resource_id: str = ""
+    next_offset: int = 0
+    total_tracks: Optional[int] = None
+    exhausted: bool = False
+
+    def advanced(self, count: int, *, exhausted: Optional[bool] = None) -> "PlaylistCursor":
+        return PlaylistCursor(
+            provider=self.provider,
+            source_url=self.source_url,
+            title=self.title,
+            resource_type=self.resource_type,
+            resource_id=self.resource_id,
+            next_offset=max(0, int(self.next_offset) + max(0, int(count))),
+            total_tracks=self.total_tracks,
+            exhausted=self.exhausted if exhausted is None else bool(exhausted),
+        )
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "source_url": self.source_url,
+            "title": self.title,
+            "resource_type": self.resource_type,
+            "resource_id": self.resource_id,
+            "next_offset": max(0, int(self.next_offset)),
+            "total_tracks": self.total_tracks,
+            "exhausted": bool(self.exhausted),
+        }
+
+
+@dataclass(slots=True)
 class ExtractedBatch:
     tracks: list[MusicTrack]
     query: str
     is_playlist: bool = False
     playlist_title: str = ""
     truncated: bool = False
+    playlist_cursor: Optional[PlaylistCursor] = None

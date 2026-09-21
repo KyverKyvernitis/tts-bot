@@ -29,6 +29,11 @@ class AgentTrack:
     start_offset_seconds: float = 0.0
     stream_recovery_attempts: int = 0
     stream_resolved_monotonic: float = 0.0
+    virtual_playlist_cursor: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_virtual_playlist_marker(self) -> bool:
+        return bool(self.virtual_playlist_cursor) or self.transport_hint == "playlist-cursor"
 
     def public(self) -> dict[str, Any]:
         return {
@@ -56,6 +61,7 @@ class AgentTrack:
             "resolved_audio_channels": self.audio_channels,
             "resolved_audio_max_abr": self.audio_abr,
             "start_offset_seconds": self.start_offset_seconds,
+            "virtual_playlist_cursor": dict(self.virtual_playlist_cursor) if self.virtual_playlist_cursor else {},
         }
 
 
@@ -86,6 +92,37 @@ class GuildMusicState:
     playback_token: int = 0
     shuffle: bool = False
     loop_mode: str = "off"
+
+    def _first_virtual_marker(self) -> tuple[int, AgentTrack] | None:
+        for index, item in enumerate(self.queue):
+            if item.is_virtual_playlist_marker:
+                return index, item
+        return None
+
+    def _public_queue_preview(self) -> list[dict[str, Any]]:
+        preview: list[dict[str, Any]] = []
+        for item in self.queue:
+            if item.is_virtual_playlist_marker:
+                # Itens depois do marker pertencem logicamente ao fim da coleção
+                # virtual; não os faça parecer anteriores ao restante da playlist.
+                break
+            preview.append(item.public())
+            if len(preview) >= 10:
+                break
+        return preview
+
+    def _public_virtual_playlist(self) -> dict[str, Any] | None:
+        found = self._first_virtual_marker()
+        if found is None:
+            return None
+        index, marker = found
+        return {
+            "cursor": dict(marker.virtual_playlist_cursor),
+            "materialized_before": sum(1 for item in self.queue[:index] if not item.is_virtual_playlist_marker),
+            "waiting": bool(index == 0 and self.current is None),
+            "requester_id": marker.requester_id,
+            "requester_name": marker.requester_name,
+        }
 
     def state_revision(self) -> str:
         return f"{self.updated_at:.6f}:{self.playback_token}"
@@ -145,7 +182,7 @@ class GuildMusicState:
             "playback_token": int(self.playback_token),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
-            "queue_size": len(self.queue),
+            "queue_size": sum(1 for item in self.queue if not item.is_virtual_playlist_marker),
             "history_size": len(self.history),
             "previous_available": bool(self.history),
             "volume_percent": self.volume_percent,
@@ -154,5 +191,6 @@ class GuildMusicState:
             "shuffle": False,
             "loop_mode": self.loop_mode,
             "repeat": self.loop_mode,
-            "queue": [item.public() for item in self.queue[:10]],
+            "queue": self._public_queue_preview(),
+            "virtual_playlist": self._public_virtual_playlist(),
         }
