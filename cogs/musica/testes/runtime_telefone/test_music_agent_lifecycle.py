@@ -1184,3 +1184,55 @@ def test_resolve_guild_waits_for_gateway_cache_instead_of_failing_first_play(mus
         assert client.calls == 3
 
     run(scenario())
+
+
+def test_command_id_deduplica_retry_de_playback(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        chamadas = []
+
+        async def pause(body):
+            chamadas.append(dict(body))
+            return {"ok": True, "state": {"status": "paused"}}
+
+        agent.cmd_pause = pause
+        body = {"action": "pause", "guild_id": 321, "command_id": "retry-same-command"}
+        first = await agent.dispatch(dict(body))
+        second = await agent.dispatch(dict(body))
+
+        assert len(chamadas) == 1
+        assert first["ok"] is True
+        assert second["ok"] is True
+        assert second["deduplicated"] is True
+
+    run(scenario())
+
+
+def test_command_id_concorrente_espera_primeira_execucao(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        entrou = asyncio.Event()
+        liberar = asyncio.Event()
+        chamadas = 0
+
+        async def pause(body):
+            nonlocal chamadas
+            chamadas += 1
+            entrou.set()
+            await liberar.wait()
+            return {"ok": True, "state": {"status": "paused"}}
+
+        agent.cmd_pause = pause
+        body = {"action": "pause", "guild_id": 654, "command_id": "retry-concurrent"}
+        first = asyncio.create_task(agent.dispatch(dict(body)))
+        await entrou.wait()
+        second = asyncio.create_task(agent.dispatch(dict(body)))
+        await asyncio.sleep(0)
+        assert chamadas == 1
+        liberar.set()
+        one, two = await asyncio.gather(first, second)
+        assert chamadas == 1
+        assert one["ok"] is True
+        assert two["deduplicated"] is True
+
+    run(scenario())

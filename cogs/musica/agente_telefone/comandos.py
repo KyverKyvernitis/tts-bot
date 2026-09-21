@@ -74,12 +74,17 @@ async def music_agent_command(
     except Exception as exc:
         message = str(exc or "").strip() or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
         logger.warning("[music/agent] comando remoto falhou | worker=%s action=%s erro=%s", destino.worker_id or destino.name, action, message)
-        lower = message.lower()
+        # Alguns erros de aiohttp não incluem a palavra "connection" na
+        # mensagem (ex.: ClientConnectionResetError: Cannot write to closing
+        # transport). Inclua o tipo para não vazar erro técnico ao usuário e
+        # para o fluxo tratá-lo como indisponibilidade transitória.
+        lower = f"{type(exc).__name__} {message}".lower()
         if (
             "music agent" in lower
             or "configure music_agent" in lower
             or "connection" in lower
             or "connect" in lower
+            or "closing transport" in lower
             or "refused" in lower
             or "timeout" in lower
             or "pynacl" in lower
@@ -87,7 +92,7 @@ async def music_agent_command(
             or "dependency" in lower
             or "unauthorized" in lower
         ):
-            message = "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
+            message = "Sistema de música indisponível no momento: O worker está reconectando; tente novamente em alguns segundos"
         raise MusicWorkerEngineUnavailable(message[:260]) from exc
     if data.get("ok") is False:
         message = str(data.get("error") or data.get("message") or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE).strip()

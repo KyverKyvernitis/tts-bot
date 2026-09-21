@@ -87,7 +87,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.44"
+AGENT_VERSION = "0.3.45"
 STARTED_AT = time.time()
 
 
@@ -189,6 +189,14 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._voice_dependencies_cache_ttl = max(0.0, env_float("MUSIC_AGENT_DEPENDENCY_CACHE_TTL_SECONDS", 30.0))
         self._prefetch_tasks: dict[str, asyncio.Task] = {}
         self._active_resolve_tasks: dict[int, asyncio.Task] = {}
+        # Retry de transporte VPS -> Phone Worker pode reenviar o mesmo POST
+        # depois de uma troca de rota/Tailscale. command_id garante que ações
+        # mutáveis (play/enqueue/skip...) sejam executadas uma única vez.
+        self.command_dedup_ttl_seconds = max(10.0, env_float("MUSIC_AGENT_COMMAND_DEDUP_TTL_SECONDS", 120.0))
+        self.command_dedup_max_entries = max(64, min(4096, env_int("MUSIC_AGENT_COMMAND_DEDUP_MAX_ENTRIES", 512)))
+        self._command_results: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._command_locks: dict[str, asyncio.Lock] = {}
+        self._command_lock_users: dict[str, int] = {}
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
@@ -475,9 +483,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         })
         return base
 
-    async def dispatch(self, body: dict[str, Any]) -> dict[str, Any]:
-        self._maybe_run_maintenance()
-        action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_")
+    async def _dispatch_action(self, body: dict[str, Any], action: str) -> dict[str, Any]:
         if action in {"status", "get_state"}:
             guild_id = safe_id(body.get("guild_id"))
             return self.status_payload(
@@ -520,6 +526,46 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         if action in {"prefetch", "prepare", "preload"}:
             return await self.cmd_prefetch(body)
         raise ValueError("ação do Music Agent não suportada")
+
+    def _prune_command_results(self, now: float) -> None:
+        expired = [key for key, (expires, _) in self._command_results.items() if expires <= now]
+        for key in expired:
+            self._command_results.pop(key, None)
+        overflow = len(self._command_results) - self.command_dedup_max_entries
+        if overflow > 0:
+            oldest = sorted(self._command_results.items(), key=lambda item: item[1][0])[:overflow]
+            for key, _ in oldest:
+                self._command_results.pop(key, None)
+
+    async def dispatch(self, body: dict[str, Any]) -> dict[str, Any]:
+        self._maybe_run_maintenance()
+        action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_")
+        command_id = str(body.get("command_id") or "").strip()[:96]
+        if not command_id or action in {"status", "get_state"}:
+            return await self._dispatch_action(body, action)
+
+        async with self._registry_lock(
+            self._command_locks,
+            self._command_lock_users,
+            command_id,
+        ):
+            now = time.monotonic()
+            self._prune_command_results(now)
+            cached = self._command_results.get(command_id)
+            if cached is not None and cached[0] > now:
+                result = dict(cached[1])
+                result.setdefault("deduplicated", True)
+                self.log("command_deduplicated", guild_id=safe_id(body.get("guild_id")), action=action)
+                return result
+
+            result = await self._dispatch_action(body, action)
+            if isinstance(result, dict):
+                self._command_results[command_id] = (
+                    time.monotonic() + self.command_dedup_ttl_seconds,
+                    dict(result),
+                )
+                self._prune_command_results(time.monotonic())
+            return result
 
 
 

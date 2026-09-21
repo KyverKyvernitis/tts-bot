@@ -29,6 +29,8 @@ def agente_nao_pronto_transitorio(exc: Exception | str) -> bool:
         or "timeout" in text
         or "connect" in text
         or "connection" in text
+        or "reconect" in text
+        or "closing transport" in text
         or "refused" in text
     )
 

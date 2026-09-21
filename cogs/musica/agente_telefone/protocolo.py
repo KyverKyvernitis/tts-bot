@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+import uuid
 
 from cogs.musica import configuracao as config
 
@@ -60,6 +61,10 @@ def montar_comando(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "task": "music_agent_command",
+        # Identificador estável durante retries HTTP. O Music Agent usa este
+        # valor para tornar comandos mutáveis idempotentes após reconexões de
+        # Wi-Fi/dados/Tailscale.
+        "command_id": uuid.uuid4().hex,
         "action": str(action or ""),
         "guild_id": int(guild_id or 0),
         "voice_channel_id": int(voice_channel_id or 0),
