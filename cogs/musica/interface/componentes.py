@@ -25,9 +25,11 @@ from .tarefas import agendar_tarefa_unica
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 PLAYER_STATUS_ANIMATED_URL = "https://i.ibb.co/QXtk5VB/neon-circle.gif"
 # Components V2 não aceita uma URL de imagem inline dentro de TextDisplay.
-# Reutilizamos um emoji animado já presente no projeto para que o indicador
-# de estado fique ao lado do título, como o author icon do embed antigo, sem I/O.
+# O estado fica ao lado do título usando apenas emojis já resolvidos localmente;
+# o spinner animado é reservado para estados de carregamento, não para playback.
 PLAYER_STATUS_ANIMATED_EMOJI = "<a:loading:1510065277868445796>"
+PLAYER_STATUS_PLAYING_EMOJI = "🎶"
+PLAYER_QUEUE_FINISHED_EMOJI = "<:Barra:1548838704850800712>"
 PLAYER_PAUSED_ICON_URL = "https://cdn.discordapp.com/attachments/480195401543188483/896013933197013002/pause.png"
 PLAYER_ERROR_ICON_URL = "https://cdn.discordapp.com/emojis/1215703754471268414.png"
 QUEUE_PAGE_SIZE = 8
@@ -722,7 +724,7 @@ def _player_status_presentation(state) -> tuple[str, str, discord.Colour]:
     if paused:
         return "Em pausa", "⏸️", discord.Color.gold()
     if getattr(state, "current", None) is not None:
-        return "Tocando Agora", PLAYER_STATUS_ANIMATED_EMOJI, discord.Color.blurple()
+        return "Tocando Agora", PLAYER_STATUS_PLAYING_EMOJI, discord.Color.blurple()
 
     queue = _queue_items(state)
     if queue:
@@ -737,7 +739,7 @@ def _player_status_presentation(state) -> tuple[str, str, discord.Colour]:
     if reason == "track_failed":
         return "Não consegui iniciar", "❌", discord.Color.red()
     if reason == "queue_finished":
-        return "As músicas acabaram", "✅", discord.Color.dark_grey()
+        return "As músicas acabaram", PLAYER_QUEUE_FINISHED_EMOJI, discord.Color.dark_grey()
     return "Nada tocando agora", "💤", discord.Color.dark_grey()
 
 
@@ -2169,7 +2171,10 @@ class MusicPlayerView(discord.ui.LayoutView):
         bar.add_item(media=PLAYER_BAR_URL, description="Barra animada do player")
         container.add_item(bar)
 
-        container.add_item(discord.ui.TextDisplay(_queue_preview_text(state, limit=4)))
+        # Em estado ocioso a mensagem acima já explica por que o player parou
+        # e como iniciar novamente. Não repetimos um segundo bloco "Fila · vazia".
+        if current is not None or queue:
+            container.add_item(discord.ui.TextDisplay(_queue_preview_text(state, limit=4)))
 
         vote_lines = [f"{label}: {count}/{needed}" for label, count, needed in list(getattr(state, "panel_vote_summary", []) or [])]
         if vote_lines:

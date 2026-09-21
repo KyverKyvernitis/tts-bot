@@ -63,6 +63,8 @@ def test_animacoes_existentes_sao_preservadas_sem_polling_extra() -> None:
 
     assert 'PLAYER_STATUS_ANIMATED_URL = "https://i.ibb.co/QXtk5VB/neon-circle.gif"' in source
     assert 'PLAYER_STATUS_ANIMATED_EMOJI = "<a:loading:1510065277868445796>"' in source
+    assert 'PLAYER_STATUS_PLAYING_EMOJI = "🎶"' in source
+    assert 'PLAYER_QUEUE_FINISHED_EMOJI = "<:Barra:1548838704850800712>"' in source
     assert "bar.add_item(media=PLAYER_BAR_URL" in build
     assert 'discord.ui.TextDisplay(f"**{status_emoji} {status_title}**")' in build
     assert "discord.ui.Thumbnail(status_" not in build
@@ -124,3 +126,22 @@ def test_textos_do_player_sao_mais_compactos_no_mobile() -> None:
     assert 'header = f"**Fila** · {total} música' in source
     assert 'marker = "▶" if selected_position == position else f"{position}."' in source
     assert 'f"{position:02d}"' not in source[source.index("def _queue_preview_text"):source.index("def _idle_player_text")]
+
+
+def test_status_inline_nao_usa_spinner_de_loading_para_tocando_e_fim_usa_barra() -> None:
+    source = COMPONENTS.read_text(encoding="utf-8")
+    presentation = source[source.index("def _player_status_presentation"):source.index("def _player_track_text")]
+
+    assert 'return "Tocando Agora", PLAYER_STATUS_PLAYING_EMOJI' in presentation
+    assert 'return "Tocando Agora", PLAYER_STATUS_ANIMATED_EMOJI' not in presentation
+    assert 'return "As músicas acabaram", PLAYER_QUEUE_FINISHED_EMOJI' in presentation
+    assert 'return "As músicas acabaram", "✅"' not in presentation
+
+
+def test_estado_ocioso_nao_repete_bloco_de_fila_vazia() -> None:
+    build = _method_source(COMPONENTS, "MusicPlayerView", "_build")
+
+    assert "if current is not None or queue:" in build
+    queue_add = 'container.add_item(discord.ui.TextDisplay(_queue_preview_text(state, limit=4)))'
+    assert queue_add in build
+    assert build.index("if current is not None or queue:") < build.index(queue_add)
