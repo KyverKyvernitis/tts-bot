@@ -35,7 +35,7 @@ def test_chave_semantica_nao_mistura_qualificadores() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cache_youtube_fast_reusa_consulta_semanticamente_equivalente(monkeypatch) -> None:
+async def test_youtube_fast_nao_cacheia_consulta_semanticamente_equivalente(monkeypatch) -> None:
     limpar_resiliencia_metadata()
     chamadas = 0
 
@@ -62,7 +62,7 @@ async def test_cache_youtube_fast_reusa_consulta_semanticamente_equivalente(monk
     primeiro = await fontes.buscar_candidatos_youtube_fast("Linkin Park - Numb", limit=3)
     segundo = await fontes.buscar_candidatos_youtube_fast("Numb by Linkin Park", limit=3)
 
-    assert chamadas == 1
+    assert chamadas == 2
     assert primeiro[0].webpage_url == segundo[0].webpage_url
     assert primeiro is not segundo
     limpar_resiliencia_metadata()
@@ -134,7 +134,7 @@ def test_guard_youtube_pode_ser_desabilitado() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cache_resolucao_reusa_forma_equivalente_sem_rechamar_worker(monkeypatch) -> None:
+async def test_modo_simples_nao_reusa_cache_de_resolucao_entre_buscas(monkeypatch) -> None:
     from cogs.musica.agente_telefone import cache_resolucao, resolucao, roteamento
 
     cache_resolucao.limpar_cache_resolucao()
@@ -191,8 +191,8 @@ async def test_cache_resolucao_reusa_forma_equivalente_sem_rechamar_worker(monke
         guild_id=999,
     )
 
-    assert chamadas_worker == 1
-    assert chamadas_metadata == 1
+    assert chamadas_worker == 2
+    assert chamadas_metadata == 0
     assert primeiro.query == "Linkin Park - Numb"
     assert segundo.query == "Numb by Linkin Park"
     assert segundo.tracks[0].requester_id == 2
@@ -201,7 +201,7 @@ async def test_cache_resolucao_reusa_forma_equivalente_sem_rechamar_worker(monke
 
 
 @pytest.mark.asyncio
-async def test_cache_youtube_continua_valido_depois_do_soft_limit(monkeypatch) -> None:
+async def test_sem_cache_youtube_soft_limit_forca_fallback_na_busca_seguinte(monkeypatch) -> None:
     limpar_resiliencia_metadata()
     limpar_quota_youtube()
     monkeypatch.setattr("cogs.musica.metadados.provedores_api._env", lambda name, default="": "")
@@ -235,9 +235,9 @@ async def test_cache_youtube_continua_valido_depois_do_soft_limit(monkeypatch) -
     assert not busca_youtube_disponivel(limite_diario=1, habilitado=True)
 
     segundo = await fontes.buscar_candidatos_youtube_fast("Numb by Linkin Park", limit=3)
-    assert segundo
+    assert segundo == []
     assert chamadas == 1
-    assert snapshot_quota_youtube(limite_diario=1).bloqueadas == 0
+    assert snapshot_quota_youtube(limite_diario=1).bloqueadas == 1
 
     await api.close()
     limpar_resiliencia_metadata()

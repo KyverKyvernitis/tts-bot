@@ -281,12 +281,12 @@ MUSIC_AGENT_RESOLVE_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_A
 MUSIC_AGENT_METADATA_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_AGENT_METADATA_CACHE_TTL_SECONDS", "21600.0"), 21600.0))
 MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS", "180.0"), 180.0))
 MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS = max(3.0, _parse_float(os.getenv("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", "18.0"), 18.0))
-MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", "420.0"), 420.0))
-# Cache/singleflight curto apenas para metadata de busca. O cache maior do Phone
-# Worker continua separado porque guarda a resposta yt-dlp ja consolidada.
-MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS = max(0.0, min(600.0, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", "300.0"), 300.0)))
+MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", "0.0"), 0.0))
+# O modo simplificado nao persiste resultados de pesquisa. Singleflight em voo
+# continua ativo, mas chamadas sequenciais sem escolha aprendida consultam de novo.
+MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS = max(0.0, min(600.0, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", "0.0"), 0.0)))
 MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS = max(8, min(256, _parse_int(os.getenv("MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", "128"), 128)))
-MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED", "true"), True)
+MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED", "false"), False)
 MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS = max(0.2, min(10.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS", "1.5"), 1.5)))
 # Budget total: um provider lento nao segura a resposta da pesquisa. No deep pass
 # damos uma janela maior porque ele so roda quando o fast pass ficou inconclusivo.
@@ -305,6 +305,9 @@ MUSIC_SEARCH_HTTP_DNS_CACHE_SECONDS = max(30.0, min(1800.0, _parse_float(os.gete
 # ranking claro, a tela pode ser respondida sem esperar yt-dlp no Phone Worker.
 # A reproducao continua sendo resolvida exclusivamente pelo yt-dlp apos a escolha.
 MUSIC_SEARCH_API_FIRST_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_API_FIRST_ENABLED", "true"), True)
+# Pesquisa simplificada: memoria persistente -> YouTube API -> ytsearch3 fallback.
+# Nao usa cache transitório, fusao multifonte, ranking ou deep pass.
+MUSIC_SEARCH_SIMPLE_MODE_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_SIMPLE_MODE_ENABLED", "true"), True)
 MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS = max(0.15, min(1.5, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS", "0.45"), 0.45)))
 # Pequena vantagem para a API. Se ela nao responder nesse intervalo, o worker
 # entra em paralelo; assim API-first nao adiciona 450 ms ao fallback frio.

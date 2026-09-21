@@ -28,6 +28,7 @@ from ..busca.latencia import (
 )
 from ..busca.chaves import chave_semantica_busca
 from ..busca.fontes import buscar_candidatos_multifonte, buscar_candidatos_youtube_fast
+from ..busca.simples import converter_youtube_api_minimo, filtrar_faixas_minimas
 from ..metadados.quota_youtube import snapshot_quota_youtube
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch
@@ -239,6 +240,147 @@ def _fast_worker_suficiente(
     return not decisao.executar
 
 
+async def _resolver_busca_textual_simplificada(
+    query: str,
+    *,
+    requester_id: int,
+    requester_name: str,
+    guild_id: int,
+    limit: int,
+    timeout_seconds: float | None,
+) -> ExtractedBatch:
+    """Resolve um miss da memoria com no maximo uma fonte por vez.
+
+    Ordem: YouTube Data API -> ytsearch3 no Phone Worker. Nao ha cache de
+    resultados, fusao de providers, ranking ou deep pass. O singleflight em voo
+    continua ativo para impedir chamadas duplicadas simultaneas.
+    """
+    started = time.monotonic()
+    limite = max(1, min(3, int(limit or 3)))
+
+    if bool(getattr(config, "MUSIC_SEARCH_API_FIRST_ENABLED", True)):
+        api_started = time.monotonic()
+        candidatos = []
+        try:
+            candidatos = await buscar_candidatos_youtube_fast(query, limit=limite)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug(
+                "[music/search] api-first simples falhou; usando worker | query=%r erro=%s",
+                query,
+                exc,
+            )
+        tracks_api = converter_youtube_api_minimo(
+            candidatos,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            query=query,
+            limit=limite,
+        )
+        registrar_latencia_api(
+            elapsed_ms=(time.monotonic() - api_started) * 1000.0,
+            suficiente=bool(tracks_api),
+        )
+        if tracks_api:
+            elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+            logger.info(
+                "[music/search] api-first simples | query=%r tracks=%s elapsed_ms=%.1f",
+                query,
+                len(tracks_api),
+                elapsed_ms,
+            )
+            _registrar_telemetria_busca(
+                tracks=tracks_api,
+                ranking=(),
+                elapsed_ms=elapsed_ms,
+                deep_estado="api_first_simples",
+                deep_motivo="primeira_fonte",
+            )
+            return ExtractedBatch(tracks=tracks_api, query=query, is_playlist=False)
+
+    destino = destino_vinculado(guild_id)
+    selection = None
+    if destino is None:
+        selection = await require_music_worker_available_async()
+        destino = resolver_destino_worker(selection, guild_id=guild_id, preferir_vinculo=False)
+    if destino is None:
+        raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+
+    total_timeout = _timeout_resolucao(
+        somente_metadados=True,
+        timeout_seconds=timeout_seconds,
+    )
+    payload = _montar_tarefa_resolucao(
+        query=query,
+        limit=limite,
+        timeout_seconds=total_timeout,
+        somente_metadados=True,
+        permitir_playlist=False,
+        busca_textual=True,
+        fast_search=True,
+    )
+    worker_started = time.monotonic()
+    try:
+        data = await executar_resolucao_compartilhada(
+            executar_tarefa_resolucao,
+            base=destino.base,
+            token=destino.token,
+            payload=payload,
+            timeout_seconds=total_timeout,
+        )
+        registrar_latencia_worker(elapsed_ms=(time.monotonic() - worker_started) * 1000.0)
+    except MusicWorkerUnavailable:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "[music/worker] ytsearch3 simples falhou | worker=%s query=%r erro=%s",
+            destino.worker_id or destino.name,
+            query,
+            exc,
+        )
+        raise MusicExtractionError(
+            "`⚠️` Não consegui pesquisar essa música no worker agora. Tente novamente em alguns segundos.",
+            detail=str(exc),
+        ) from exc
+
+    if data.get("ok") is False:
+        message = str(data.get("message") or data.get("error") or "worker retornou erro ao pesquisar música")
+        raise MusicExtractionError(f"`⚠️` {message[:220]}", detail=message)
+
+    batch = converter_resposta_resolucao(
+        data,
+        base=destino.base,
+        query=query,
+        limit=limite,
+        requester_id=requester_id,
+        requester_name=requester_name,
+    )
+    batch.tracks = filtrar_faixas_minimas(batch.tracks, limit=limite)
+    batch.query = query
+    batch.is_playlist = False
+    elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+    logger.info(
+        "[music/search] worker simples | worker=%s query=%r tracks=%s elapsed_ms=%.1f search=%s warm=%s init_ms=%s extract_ms=%s",
+        destino.worker_id or destino.name,
+        query,
+        len(batch.tracks),
+        elapsed_ms,
+        data.get("default_search") or "",
+        bool(data.get("warm_ytdlp")),
+        data.get("ytdlp_init_ms"),
+        data.get("ytdlp_extract_ms"),
+    )
+    _registrar_telemetria_busca(
+        tracks=batch.tracks,
+        ranking=(),
+        elapsed_ms=elapsed_ms,
+        deep_estado="worker_simples",
+        deep_motivo="fallback_api",
+    )
+    return batch
+
+
 async def resolve_music_tracks_on_worker(
     query: str,
     *,
@@ -297,6 +439,20 @@ async def resolve_music_tracks_on_worker(
                 query=clean_query,
                 is_playlist=False,
             )
+
+    if (
+        busca_textual
+        and somente_metadados
+        and bool(getattr(config, "MUSIC_SEARCH_SIMPLE_MODE_ENABLED", True))
+    ):
+        return await _resolver_busca_textual_simplificada(
+            clean_query,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            guild_id=guild_id,
+            limit=max_limit,
+            timeout_seconds=timeout_seconds,
+        )
 
     destino = destino_vinculado(guild_id)
     selection = None

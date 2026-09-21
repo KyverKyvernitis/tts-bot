@@ -19,6 +19,21 @@ from cogs.musica.nucleo.modelos import ExtractedBatch, MusicTrack
 RAIZ_MUSICA = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _testes_legados_usam_fluxo_completo(monkeypatch):
+    # Este arquivo caracteriza o pipeline multifonte/deep antigo. A pesquisa
+    # padrão agora usa o modo simplificado; mantemos estes contratos isolados
+    # enquanto os módulos legados ainda existem nesta wave de transição.
+    from cogs.musica.agente_telefone import resolucao
+
+    monkeypatch.setattr(
+        resolucao.config,
+        "MUSIC_SEARCH_SIMPLE_MODE_ENABLED",
+        False,
+        raising=False,
+    )
+
+
 def test_cache_de_resolucao_copia_solicitante_sem_mutar_original() -> None:
     faixa = MusicTrack(
         title="Faixa",

@@ -46,18 +46,17 @@ async def buscar_candidatos_youtube_fast(query: str, *, limit: int = 3) -> list[
     async def _buscar() -> list[ApiTrackCandidate]:
         return await providers.search_youtube_fast(texto, limit=limit, timeout_seconds=timeout)
 
-    cache_texto = (
-        chave_semantica_busca(texto)
-        if bool(getattr(config, "MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED", True))
-        else texto
-    )
+    # No caminho normal nao guardamos resultado de pesquisa: apenas coalescemos
+    # requests equivalentes que estejam simultaneamente em voo. A memoria
+    # persistente de escolhas e o unico estado reutilizado entre pesquisas.
+    cache_texto = chave_semantica_busca(texto)
     return await buscar_metadata_compartilhada(
         cache_texto,
         limit=limit,
         produtor=_buscar,
-        ttl_seconds=float(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 300.0) or 0.0),
-        max_itens=int(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 128) or 128),
-        namespace="youtube-fast",
+        ttl_seconds=0.0,
+        max_itens=1,
+        namespace="youtube-fast-no-cache",
         cancelar_quando_sem_consumidores=True,
     )
 
