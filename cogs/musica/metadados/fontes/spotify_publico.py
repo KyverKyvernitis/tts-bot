@@ -7,6 +7,13 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+from .spotify_publico_parser import (
+    html_meta,
+    html_title,
+    json_script_blobs,
+    parse_embed_document,
+)
+
 from ..modelos import ApiTrackBatch, ApiTrackCandidate
 from ..normalizacao import compact_key, normalize_text, parse_iso8601_duration
 
@@ -15,13 +22,36 @@ logger = logging.getLogger(__name__)
 class SpotifyPublicoMixin:
     def _spotify_public_urls(self, kind: str, item_id: str) -> list[str]:
         item_id = quote(item_id)
+        # O embed é menor e server-renderiza a lista de faixas; priorizá-lo reduz
+        # bytes/latência e evita depender do bundle completo do Web Player.
         if kind == "track":
-            return [f"https://open.spotify.com/track/{item_id}", f"https://open.spotify.com/embed/track/{item_id}"]
+            return [f"https://open.spotify.com/embed/track/{item_id}", f"https://open.spotify.com/track/{item_id}"]
         if kind == "album":
-            return [f"https://open.spotify.com/album/{item_id}", f"https://open.spotify.com/embed/album/{item_id}"]
+            return [f"https://open.spotify.com/embed/album/{item_id}", f"https://open.spotify.com/album/{item_id}"]
         if kind == "playlist":
-            return [f"https://open.spotify.com/playlist/{item_id}", f"https://open.spotify.com/embed/playlist/{item_id}"]
+            return [f"https://open.spotify.com/embed/playlist/{item_id}", f"https://open.spotify.com/playlist/{item_id}"]
         return []
+
+    async def _spotify_public_oembed(self, url: str) -> dict[str, str]:
+        """Metadata básica oficial e pública, sem OAuth/Web API.
+
+        oEmbed é usado só como fonte leve de título/capa. Artista, duração e
+        faixas de playlists continuam vindo do HTML público do embed.
+        """
+        try:
+            data = await self._to_thread_json(
+                "https://open.spotify.com/oembed?url=" + quote(url, safe=""),
+                headers={"Accept": "application/json"},
+            )
+        except Exception:
+            logger.debug("[music-api] Spotify oEmbed público falhou | url=%s", url, exc_info=True)
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            "title": html.unescape(str(data.get("title") or "")).strip(),
+            "thumbnail": str(data.get("thumbnail_url") or "").strip(),
+        }
 
     def _spotify_public_duration(self, value: Any) -> float | None:
         if value is None:
@@ -185,7 +215,9 @@ class SpotifyPublicoMixin:
                     item.artist,
                     item.webpage_url,
                 )
-        return self.rank_and_dedupe(enriched, query=" ".join(c.title for c in enriched[:5]), limit=limit) if enriched else []
+        # Não ranqueia uma coleção: score é heurística de busca e poderia
+        # reordenar uma playlist. O parser público já preserva a ordem da fonte.
+        return enriched[:limit]
 
     def _spotify_public_artist_names(self, data: dict[str, Any]) -> str:
         def names_from(value: Any, depth: int = 0) -> list[str]:
@@ -323,7 +355,10 @@ class SpotifyPublicoMixin:
         if not self.spotify_public_fallback_enabled:
             return None
         limit = max(1, min(self.spotify_public_fallback_max_tracks, int(limit)))
-        last_title = ""
+        oembed = await self._spotify_public_oembed(original_url)
+        last_title = str(oembed.get("title") or "").strip()
+        fallback_thumbnail = str(oembed.get("thumbnail") or "").strip()
+
         for url in self._spotify_public_urls(kind, item_id):
             try:
                 content = await self._to_thread_text(url, max_bytes=6_000_000)
@@ -331,46 +366,87 @@ class SpotifyPublicoMixin:
                 logger.debug("[music-api] fallback público Spotify HTML falhou | url=%s", url, exc_info=True)
                 continue
 
-            # Título amigável da página como fallback para nome de playlist/álbum.
-            title_match = re.search(r'<title[^>]*>(.*?)</title>', content, re.IGNORECASE | re.DOTALL)
-            if title_match:
-                last_title = html.unescape(re.sub(r"\s+", " ", title_match.group(1))).replace(" | Spotify", "").strip()
+            # Cabeçalho/metatags são fallbacks baratos e independentes do
+            # framework JS que o Spotify estiver usando no Web Player.
+            page_title = html_title(content)
+            if page_title:
+                last_title = last_title or page_title
+            page_thumbnail = html_meta(content, "og:image", "twitter:image")
+            if page_thumbnail:
+                fallback_thumbnail = fallback_thumbnail or page_thumbnail
 
-            json_blobs: list[Any] = []
-            for match in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', content, re.IGNORECASE | re.DOTALL):
-                try:
-                    json_blobs.append(json.loads(html.unescape(match.group(1))))
-                except Exception:
-                    pass
-            match = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', content, re.IGNORECASE | re.DOTALL)
-            if match:
-                try:
-                    json_blobs.append(json.loads(html.unescape(match.group(1))))
-                except Exception:
-                    pass
-            # Fallback genérico: captura objetos com spotify:track dentro de scripts/RSC.
+            tracks: list[ApiTrackCandidate] = []
+            json_blobs = json_script_blobs(content)
+
+            # Fallback genérico legado para objetos JSON pequenos embutidos em
+            # payloads RSC. Não executa JS; só aceita JSON válido.
             for raw_match in re.finditer(r'\{[^{}]{0,2500}spotify:track:[^{}]{0,2500}\}', content):
                 raw = html.unescape(raw_match.group(0))
                 try:
                     json_blobs.append(json.loads(raw))
                 except Exception:
-                    # Em payload RSC pode haver aspas escapadas dentro de strings maiores.
                     pass
 
-            tracks: list[ApiTrackCandidate] = []
             for blob in json_blobs:
-                tracks.extend(self._spotify_public_candidates_from_json(blob, url=original_url or url, limit=limit - len(tracks)))
+                tracks.extend(self._spotify_public_candidates_from_json(blob, url="", limit=limit - len(tracks)))
                 if len(tracks) >= limit:
                     break
+
+            # O embed também entrega HTML server-rendered. Isso é crucial para
+            # playlists quando o payload interno muda ou deixa de expor JSON.
+            document = parse_embed_document(content, limit=limit)
+            if document.title:
+                last_title = last_title or document.title
+            if document.thumbnail:
+                fallback_thumbnail = fallback_thumbnail or document.thumbnail
+
+            if not tracks and document.rows:
+                tracks = [
+                    ApiTrackCandidate(
+                        title=row.title,
+                        artist=row.artist,
+                        duration=row.duration,
+                        thumbnail=fallback_thumbnail,
+                        webpage_url="",
+                        source="Spotify público",
+                        provider="spotify",
+                        query=" ".join(part for part in (row.artist, row.title, "official audio") if part),
+                        score=30,
+                    )
+                    for row in document.rows[:limit]
+                ]
+
+            # Track individual no embed usa heading principal/subtítulo em vez
+            # de linhas h3/h4. oEmbed completa título/capa quando disponível.
+            if kind == "track" and not tracks:
+                track_title = (document.title or last_title).strip()
+                artist = (document.subtitle or "").strip()
+                if track_title and artist:
+                    tracks = [
+                        ApiTrackCandidate(
+                            title=track_title,
+                            artist=artist,
+                            duration=None,
+                            thumbnail=fallback_thumbnail,
+                            webpage_url=original_url,
+                            source="Spotify público",
+                            provider="spotify",
+                            query=f"{artist} {track_title} official audio".strip(),
+                            score=30,
+                        )
+                    ]
+
             if tracks:
-                tracks = await self._spotify_enrich_candidates(
-                    self.rank_and_dedupe(tracks, query=last_title or original_url, limit=limit),
-                    limit=limit,
-                )
+                # Completa capa do lote sem fazer request por faixa.
+                if fallback_thumbnail:
+                    for candidate in tracks:
+                        if not candidate.thumbnail:
+                            candidate.thumbnail = fallback_thumbnail
+                tracks = await self._spotify_enrich_candidates(tracks, limit=limit)
                 if tracks:
                     return ApiTrackBatch(
                         tracks=tracks,
-                        title=last_title or (tracks[0].album if kind == "album" else "Spotify"),
+                        title=last_title or (tracks[0].album if kind == "album" else tracks[0].title if kind == "track" else "Spotify"),
                         is_playlist=kind in {"album", "playlist"} or len(tracks) > 1,
                         truncated=kind in {"album", "playlist"} and len(tracks) >= limit,
                         source="Spotify público",
@@ -385,7 +461,12 @@ class SpotifyPublicoMixin:
         da música; áudio e busca tocável permanecem no pipeline do worker.
         """
         kind, item_id = self._spotify_resource(url)
-        if not item_id or not self.spotify_public_fallback_enabled:
+        if (
+            kind not in {"track", "album", "playlist"}
+            or not item_id
+            or not re.fullmatch(r"[A-Za-z0-9]{16,32}", item_id)
+            or not self.spotify_public_fallback_enabled
+        ):
             return None
         limit = max(1, min(self.spotify_public_fallback_max_tracks, int(limit)))
         return await self._spotify_public_page_batch(kind, item_id, limit=limit, original_url=url)
