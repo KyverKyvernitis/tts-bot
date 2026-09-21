@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import time
@@ -36,6 +37,7 @@ _fuzzy_assinatura: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], tuple[
 _STOPWORDS_ALIAS = {
     "a", "an", "the", "o", "os", "as", "um", "uma", "of", "de", "da", "do", "das", "dos",
 }
+_SUFFIX_TITULO_RE = re.compile(r"\s*(?:\([^()]{1,96}\)|\[[^\[\]]{1,96}\])\s*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,43 +447,52 @@ def recarregar_memoria_busca() -> None:
     _ensure_loaded()
 
 
-def registrar_selecao_busca(
-    query: str,
-    track: MusicTrack,
-    *,
-    guild_id: int = 0,
-    requester_id: int = 0,
-    now: float | None = None,
-    posicao: int = 0,
-    total: int = 0,
-) -> bool:
-    """Guarda escolha do seletor; links diretos têm prioridade sobre ela."""
-    return _registrar(
-        query,
-        track,
-        origem=_ORIGEM_SELECAO,
-        prioridade=_PRIORIDADE_SELECAO,
-        now=now,
-    ) is not None
+def _remover_sufixos_titulo(value: str) -> str:
+    texto = str(value or "").strip()
+    # Resultados de YouTube frequentemente terminam em ``(Official Video)`` ou
+    # ``[Game/Album]``. Para a memoria de escolha, a versao curta e mais util
+    # como alias e evita uma nova consulta externa na proxima forma equivalente.
+    for _ in range(3):
+        reduzido = _SUFFIX_TITULO_RE.sub("", texto).strip(" -–—|·")
+        if reduzido == texto or not reduzido:
+            break
+        texto = reduzido
+    return texto
 
 
-def _aliases_link(track: MusicTrack) -> tuple[str, ...]:
+def _componentes_alias_track(track: MusicTrack) -> tuple[str, str, str]:
     titulo_bruto = str(getattr(track, "display_title", "") or track.title or "").strip()
     if not titulo_bruto:
-        return ()
-    consulta = analisar_consulta(titulo_bruto)
-    titulo_musica = str(consulta.titulo or consulta.texto or titulo_bruto).strip()
-    artista = str(consulta.artista or getattr(track, "display_uploader", "") or track.uploader or "").strip()
+        return "", "", ""
+    consulta_original = analisar_consulta(titulo_bruto)
+    # Nao transforme uma escolha explicitamente live/remix/instrumental/lyrics
+    # em alias neutro. A degradacao de qualidade desta fase e intencional, mas
+    # ainda preservamos versoes que mudam a gravacao ou a forma pedida.
+    preservar_sufixo = bool(consulta_original.atributos or "lyrics" in consulta_original.apresentacao)
+    titulo_limpo = titulo_bruto if preservar_sufixo else (_remover_sufixos_titulo(titulo_bruto) or titulo_bruto)
+    uploader = str(getattr(track, "display_uploader", "") or track.uploader or "").strip()
+    consulta = analisar_consulta(titulo_limpo)
+    titulo_musica = str(consulta.titulo or consulta.texto or titulo_limpo).strip()
+    artista = str(consulta.artista or uploader).strip()
 
-    candidatos: list[str] = [titulo_bruto]
-    if titulo_musica:
-        candidatos.append(titulo_musica)
-        tokens = tokens_texto(titulo_musica, remover_ruido=True)
-        if tokens and tokens[0] not in _STOPWORDS_ALIAS:
-            candidatos.append(tokens[0])
-        if artista:
-            candidatos.append(f"{artista} - {titulo_musica}")
+    # Quando o resultado vem como ``Titulo - Artista``, o uploader real e um
+    # sinal barato melhor que tentar sofisticar o parser. Corrigimos apenas as
+    # duas formas obvias para gerar alias; isso nao afeta a ordem da pesquisa.
+    base = texto_basico(titulo_limpo)
+    up = texto_basico(uploader)
+    if up and base:
+        if base.startswith(up + " "):
+            resto = base[len(up):].strip()
+            if resto:
+                artista, titulo_musica = uploader, resto
+        elif base.endswith(" " + up):
+            resto = base[:-len(up)].strip()
+            if resto:
+                artista, titulo_musica = uploader, resto
+    return titulo_bruto, titulo_musica, artista
 
+
+def _deduplicar_aliases(candidatos: Sequence[str]) -> tuple[str, ...]:
     vistos: set[str] = set()
     aliases: list[str] = []
     for candidato in candidatos:
@@ -496,6 +507,87 @@ def _aliases_link(track: MusicTrack) -> tuple[str, ...]:
     return tuple(aliases)
 
 
+def _aliases_selecao(query: str, track: MusicTrack) -> tuple[str, ...]:
+    _titulo_bruto, titulo_musica, artista = _componentes_alias_track(track)
+    candidatos: list[str] = [str(query or "").strip()]
+    if titulo_musica:
+        candidatos.append(titulo_musica)
+        if artista:
+            candidatos.append(f"{artista} - {titulo_musica}")
+    # Uma escolha humana ensina no maximo tres formas. Isso aumenta muito a
+    # cobertura da memoria sem transformar resultados de pesquisa em cache.
+    return _deduplicar_aliases(candidatos)[:3]
+
+
+def _registrar_aliases(
+    aliases: Sequence[str],
+    track: MusicTrack,
+    *,
+    origem: str,
+    prioridade: int,
+    now: float | None,
+) -> tuple[EscolhaBusca | None, ...]:
+    escolhas: list[EscolhaBusca | None] = []
+    persistir: list[EscolhaBusca] = []
+    for alias in aliases:
+        escolha = _registrar(
+            alias,
+            track,
+            origem=origem,
+            prioridade=prioridade,
+            now=now,
+            persistir=False,
+        )
+        escolhas.append(escolha)
+        if escolha is not None:
+            persistir.append(escolha)
+    _persistir_varias(persistir)
+    return tuple(escolhas)
+
+
+def registrar_selecao_busca(
+    query: str,
+    track: MusicTrack,
+    *,
+    guild_id: int = 0,
+    requester_id: int = 0,
+    now: float | None = None,
+    posicao: int = 0,
+    total: int = 0,
+) -> bool:
+    """Aprende consulta+título da escolha; link direto continua soberano."""
+    aliases = _aliases_selecao(query, track)
+    if not aliases:
+        return False
+    resultados = _registrar_aliases(
+        aliases,
+        track,
+        origem=_ORIGEM_SELECAO,
+        prioridade=_PRIORIDADE_SELECAO,
+        now=now,
+    )
+    # Mantem o contrato historico: o retorno informa se a consulta original
+    # foi registrada, mesmo que aliases secundarios tenham sido bloqueados por
+    # uma escolha de link com prioridade maior.
+    return bool(resultados and resultados[0] is not None)
+
+
+def _aliases_link(track: MusicTrack) -> tuple[str, ...]:
+    titulo_bruto, titulo_musica, artista = _componentes_alias_track(track)
+    if not titulo_bruto:
+        return ()
+
+    candidatos: list[str] = [titulo_bruto]
+    if titulo_musica:
+        candidatos.append(titulo_musica)
+        tokens = tokens_texto(titulo_musica, remover_ruido=True)
+        if tokens and tokens[0] not in _STOPWORDS_ALIAS:
+            candidatos.append(tokens[0])
+        if artista:
+            candidatos.append(f"{artista} - {titulo_musica}")
+    return _deduplicar_aliases(candidatos)
+
+
 def registrar_link_busca(track: MusicTrack, *, now: float | None = None) -> tuple[str, ...]:
     """Aprende aliases de uma faixa iniciada por link direto.
 
@@ -507,22 +599,14 @@ def registrar_link_busca(track: MusicTrack, *, now: float | None = None) -> tupl
     if not original.startswith(("http://", "https://", "www.")):
         return ()
     aliases = _aliases_link(track)
-    gravados: list[str] = []
-    escolhas: list[EscolhaBusca] = []
-    for alias in aliases:
-        escolha = _registrar(
-            alias,
-            track,
-            origem=_ORIGEM_LINK,
-            prioridade=_PRIORIDADE_LINK,
-            now=now,
-            persistir=False,
-        )
-        if escolha is not None:
-            gravados.append(alias)
-            escolhas.append(escolha)
-    _persistir_varias(escolhas)
-    return tuple(gravados)
+    resultados = _registrar_aliases(
+        aliases,
+        track,
+        origem=_ORIGEM_LINK,
+        prioridade=_PRIORIDADE_LINK,
+        now=now,
+    )
+    return tuple(alias for alias, escolha in zip(aliases, resultados) if escolha is not None)
 
 
 def obter_escolha_busca(
