@@ -18,7 +18,12 @@ from ..metadados.provedores import classify_play_input, describe_url
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 from ..nucleo.playlist_virtual import bounded_initial_window
-from ..reproducao.playlist_virtual import consulta_agent_para_faixa, payload_cursor_playlist, payload_faixa_agent
+from ..reproducao.playlist_virtual import (
+    consulta_agent_para_faixa,
+    payload_cursor_playlist,
+    payload_faixa_agent,
+    schedule_playlist_refill_from_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -744,6 +749,12 @@ class FluxoTocar:
                         return
                     await self._reply(ctx, self._music_error_message(exc))
                     return
+                if virtual_active:
+                    # O comando do worker só retorna após iniciar/enfileirar a
+                    # primeira faixa. A partir daqui podemos preencher o restante
+                    # da janela em background sem competir com o start inicial.
+                    if schedule_playlist_refill_from_result(self.router, ctx.guild.id, result):
+                        logger.info("[music/playlist] refill start-first agendado | guild=%s", ctx.guild.id)
                 await self._sync_music_agent_panel(
                     ctx.guild.id,
                     track,

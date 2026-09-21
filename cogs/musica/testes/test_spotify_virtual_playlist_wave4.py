@@ -86,7 +86,7 @@ def test_janela_virtual_limita_materializacao_sem_perder_cursor() -> None:
         next_offset=100,
         exhausted=False,
     )
-    policy = PlaylistWindowPolicy(low_watermark=8, high_watermark=25)
+    policy = PlaylistWindowPolicy(low_watermark=8, high_watermark=25, startup_size=25)
 
     window, next_cursor = bounded_initial_window(tracks, cursor, policy=policy)
 
@@ -176,7 +176,7 @@ async def test_extractor_propaga_cursor_da_primeira_janela(monkeypatch: pytest.M
     )
 
     async def initial(url: str, *, limit: int = 25):
-        assert limit == 25
+        assert limit == 1
         return ApiTrackBatch(
             tracks=[ApiTrackCandidate(title="Primeira", artist="Artista", duration=180.0, provider="spotify", source="Spotify público")],
             title="Inicial",

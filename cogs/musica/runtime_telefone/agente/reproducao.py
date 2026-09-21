@@ -232,6 +232,12 @@ class ReproducaoMixin:
                 raise ValueError("playlist/fila sem faixas válidas")
             playable_added = sum(1 for item in tracks if not item.is_virtual_playlist_marker)
             active = bool(st.current and st.status in {"playing", "starting", "preparing", "paused"})
+            if not active:
+                # Start-first: uma playlist iniciada com o player ocioso é uma
+                # interação ativa. Cancele yt-dlp especulativo antigo desta guild
+                # antes de resolver a primeira faixa, para ela não ficar atrás de
+                # prefetches de uma seleção/sessão anterior.
+                self._cancel_prefetch_tasks(guild_id)
             st.queue.extend(tracks)
             st.updated_at = time.time()
             self.log(

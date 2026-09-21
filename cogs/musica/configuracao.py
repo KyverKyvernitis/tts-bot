@@ -88,6 +88,13 @@ MUSIC_MAX_PLAYLIST_ITEMS = min(100, max(1, _parse_int(os.getenv("MUSIC_MAX_PLAYL
 # Playlist virtual: limite da janela materializada, não limite lógico da coleção.
 # O objetivo é manter consumo de RAM estável mesmo para playlists enormes.
 MUSIC_PLAYLIST_WINDOW_SIZE = min(50, max(5, _parse_int(os.getenv("MUSIC_PLAYLIST_WINDOW_SIZE", "25"), 25)))
+# Start-first: ao abrir uma playlist virtual materialize só o mínimo necessário
+# para iniciar o áudio. O restante é preenchido em background depois que o
+# primeiro play já foi confirmado pelo Phone Worker.
+MUSIC_PLAYLIST_STARTUP_SIZE = min(
+    MUSIC_PLAYLIST_WINDOW_SIZE,
+    max(1, _parse_int(os.getenv("MUSIC_PLAYLIST_STARTUP_SIZE", "1"), 1)),
+)
 MUSIC_PLAYLIST_LOW_WATERMARK = min(
     MUSIC_PLAYLIST_WINDOW_SIZE - 1,
     max(1, _parse_int(os.getenv("MUSIC_PLAYLIST_LOW_WATERMARK", "8"), 8)),

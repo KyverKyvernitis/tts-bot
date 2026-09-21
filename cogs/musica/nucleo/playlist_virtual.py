@@ -18,12 +18,14 @@ class PlaylistWindowPolicy:
 
     low_watermark: int
     high_watermark: int
+    startup_size: int = 1
 
     @classmethod
     def from_config(cls) -> "PlaylistWindowPolicy":
         high = max(5, min(50, int(getattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25) or 25)))
         low = max(1, min(high - 1, int(getattr(config, "MUSIC_PLAYLIST_LOW_WATERMARK", 8) or 8)))
-        return cls(low_watermark=low, high_watermark=high)
+        startup = max(1, min(high, int(getattr(config, "MUSIC_PLAYLIST_STARTUP_SIZE", 1) or 1)))
+        return cls(low_watermark=low, high_watermark=high, startup_size=startup)
 
     def refill_limit(self, materialized_count: int) -> int:
         return max(0, self.high_watermark - max(0, int(materialized_count)))
@@ -43,7 +45,11 @@ def bounded_initial_window(
     """
 
     policy = policy or PlaylistWindowPolicy.from_config()
-    selected = list(tracks[: policy.high_watermark])
+    # A primeira janela é propositalmente minúscula: a primeira faixa deve
+    # chegar ao Phone Worker antes de gastarmos tempo convertendo/enfileirando
+    # dezenas de metadados que ainda não serão tocados. O refill assíncrono
+    # completa até ``high_watermark`` logo após o start.
+    selected = list(tracks[: policy.startup_size])
     if cursor is None:
         return selected, None
 

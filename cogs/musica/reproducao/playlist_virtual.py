@@ -125,6 +125,19 @@ def _materialized_before_marker(remote: dict[str, Any]) -> tuple[dict[str, Any] 
     return virtual, count
 
 
+def schedule_playlist_refill_from_result(router: Any, guild_id: int, result: Any) -> bool:
+    """Agenda o primeiro refill a partir da resposta já recebida do Worker.
+
+    A função não aguarda rede nem cria polling; apenas reutiliza o snapshot
+    autoritativo retornado pelo comando de play. O scheduler normal coalesce
+    qualquer corrida com o monitor periódico.
+    """
+    remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+    if not remote or not isinstance(remote.get("virtual_playlist"), dict):
+        return False
+    return schedule_playlist_refill_if_needed(router, int(guild_id), remote)
+
+
 def schedule_playlist_refill_if_needed(router: Any, guild_id: int, remote: dict[str, Any]) -> bool:
     """Agenda refill sem criar um segundo polling.
 

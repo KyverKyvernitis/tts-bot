@@ -1345,10 +1345,19 @@ class MusicExtractor:
         if profile.resource_type == "track":
             metadata_limit = 1
         elif profile.platform == "spotify" and profile.resource_type in {"playlist", "album"}:
-            metadata_limit = min(
-                self.max_playlist_items,
-                max(5, int(getattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25) or 25)),
-            )
+            if bool(getattr(config, "MUSIC_PLAYLIST_LAZY_LOAD", True)):
+                # Start-first: a abertura da playlist só precisa descobrir a
+                # primeira faixa e um cursor. O refill posterior materializa a
+                # janela completa sem atrasar o início do áudio.
+                metadata_limit = min(
+                    self.max_playlist_items,
+                    max(1, int(getattr(config, "MUSIC_PLAYLIST_STARTUP_SIZE", 1) or 1)),
+                )
+            else:
+                metadata_limit = min(
+                    self.max_playlist_items,
+                    max(5, int(getattr(config, "MUSIC_PLAYLIST_WINDOW_SIZE", 25) or 25)),
+                )
         else:
             metadata_limit = self.max_playlist_items
         try:
