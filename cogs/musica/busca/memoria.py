@@ -33,6 +33,8 @@ _memoria: OrderedDict[str, "EscolhaBusca"] = OrderedDict()
 _fuzzy_texto: dict[str, str] = {}
 _fuzzy_tokens_ordenados: dict[str, str] = {}
 _fuzzy_assinatura: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = {}
+_lexical_tokens: dict[str, frozenset[str]] = {}
+_lexical_index: dict[str, set[str]] = {}
 
 _STOPWORDS_ALIAS = {
     "a", "an", "the", "o", "os", "as", "um", "uma", "of", "de", "da", "do", "das", "dos",
@@ -97,23 +99,45 @@ def _fuzzy_descriptor(query: str) -> tuple[str, str, tuple[str, tuple[str, ...],
     return texto, ordenado, assinatura
 
 
+def _tokens_lexicais(texto: str) -> frozenset[str]:
+    return frozenset(
+        token
+        for token in texto.split()
+        if token and (token.isdigit() or (len(token) >= 2 and token not in _STOPWORDS_ALIAS))
+    )
+
+
 def _indexar_escolha(escolha: "EscolhaBusca") -> None:
     texto, ordenado, assinatura = _fuzzy_descriptor(escolha.consulta)
     _fuzzy_texto[escolha.chave] = texto
     _fuzzy_tokens_ordenados[escolha.chave] = ordenado
     _fuzzy_assinatura[escolha.chave] = assinatura
+    tokens = _tokens_lexicais(texto)
+    _lexical_tokens[escolha.chave] = tokens
+    for token in tokens:
+        _lexical_index.setdefault(token, set()).add(escolha.chave)
 
 
 def _desindexar_chave(chave: str) -> None:
     _fuzzy_texto.pop(chave, None)
     _fuzzy_tokens_ordenados.pop(chave, None)
     _fuzzy_assinatura.pop(chave, None)
+    tokens = _lexical_tokens.pop(chave, frozenset())
+    for token in tokens:
+        chaves = _lexical_index.get(token)
+        if chaves is None:
+            continue
+        chaves.discard(chave)
+        if not chaves:
+            _lexical_index.pop(token, None)
 
 
 def _limpar_indices() -> None:
     _fuzzy_texto.clear()
     _fuzzy_tokens_ordenados.clear()
     _fuzzy_assinatura.clear()
+    _lexical_tokens.clear()
+    _lexical_index.clear()
 
 
 def _distancia_edicao_limitada(a: str, b: str, limite: int) -> int | None:
@@ -160,6 +184,92 @@ def _limite_para_texto(texto: str) -> int:
     return limite
 
 
+
+
+def _buscar_lexical_agressiva(query: str) -> "EscolhaBusca | None":
+    """Reaproveita memória por sobreposição de tokens, sem consultar rede.
+
+    A qualidade é deliberadamente mais permissiva que a chave semântica exata:
+    aceita subconjunto/superconjunto textual. Números e intenção (live/remix/
+    lyrics/prefixos) ainda precisam coincidir exatamente para evitar os erros
+    mais caros.
+    """
+    texto, _ordenado, assinatura = _fuzzy_descriptor(query)
+    tokens_query = _tokens_lexicais(texto)
+    if not tokens_query:
+        return None
+
+    # Um único token puramente numérico é uma identidade forte demais para
+    # aproximação; esse caso continua reservado ao direct-hit exato/aliases.
+    if len(tokens_query) == 1 and next(iter(tokens_query)).isdigit():
+        return None
+
+    postings = [
+        _lexical_index.get(token, set())
+        for token in tokens_query
+        if _lexical_index.get(token)
+    ]
+    if not postings:
+        return None
+    # Começar pelo token mais raro evita varrer as 10 mil escolhas.
+    candidatos = min(postings, key=len)
+    melhor: EscolhaBusca | None = None
+    melhor_cobertura = -1
+    melhor_excesso = 10**9
+    for chave in candidatos:
+        escolha = _memoria.get(chave)
+        if escolha is None or _fuzzy_assinatura.get(chave) != assinatura:
+            continue
+        tokens_candidato = _lexical_tokens.get(chave, frozenset())
+        if not tokens_candidato:
+            continue
+        # Proteção adicional para anos, números de faixa e títulos numéricos.
+        numeros_query = {item for item in tokens_query if item.isdigit()}
+        numeros_candidato = {item for item in tokens_candidato if item.isdigit()}
+        if numeros_query != numeros_candidato:
+            continue
+        intersecao = tokens_query & tokens_candidato
+        if not intersecao:
+            continue
+        # Agressivo de propósito: um dos lados precisa estar contido no outro,
+        # ou todos menos um token da consulta precisam coincidir.
+        contido = tokens_query <= tokens_candidato or tokens_candidato <= tokens_query
+        quase_contido = len(tokens_query) >= 3 and len(intersecao) >= len(tokens_query) - 1
+        if not contido and not quase_contido:
+            continue
+        cobertura = len(intersecao)
+        excesso = len(tokens_query ^ tokens_candidato)
+        if (
+            melhor is None
+            or escolha.prioridade > melhor.prioridade
+            or (escolha.prioridade == melhor.prioridade and cobertura > melhor_cobertura)
+            or (
+                escolha.prioridade == melhor.prioridade
+                and cobertura == melhor_cobertura
+                and excesso < melhor_excesso
+            )
+            or (
+                escolha.prioridade == melhor.prioridade
+                and cobertura == melhor_cobertura
+                and excesso == melhor_excesso
+                and escolha.registrado_em > melhor.registrado_em
+            )
+        ):
+            melhor = escolha
+            melhor_cobertura = cobertura
+            melhor_excesso = excesso
+
+    if melhor is not None:
+        logger.info(
+            "[music/search-memory] lexical hit | query=%r learned=%r overlap=%s origem=%s",
+            query,
+            melhor.consulta,
+            melhor_cobertura,
+            melhor.origem,
+        )
+    return melhor
+
+
 def _buscar_aproximada(query: str) -> "EscolhaBusca | None":
     if not _approx_enabled():
         return None
@@ -170,7 +280,21 @@ def _buscar_aproximada(query: str) -> "EscolhaBusca | None":
     limite = _limite_para_texto(texto)
     melhor: EscolhaBusca | None = None
     melhor_distancia = limite + 1
-    for chave, escolha in reversed(_memoria.items()):
+    tokens_query = _tokens_lexicais(texto)
+    candidatos_indexados: set[str] = set()
+    for token in tokens_query:
+        candidatos_indexados.update(_lexical_index.get(token, ()))
+    if candidatos_indexados:
+        itens = [
+            (chave, _memoria[chave])
+            for chave in reversed(_memoria)
+            if chave in candidatos_indexados
+        ]
+    else:
+        # Typo total (ex.: ``compas`` -> ``compass``) não compartilha token;
+        # nesses casos preservamos o fallback fuzzy completo da Wave 4.
+        itens = list(reversed(_memoria.items()))
+    for chave, escolha in itens:
         if _fuzzy_assinatura.get(chave) != assinatura:
             continue
         candidato = _fuzzy_texto.get(chave, "")
@@ -623,6 +747,8 @@ def obter_escolha_busca(
     chave = chave_semantica_busca(clean_query)
     with _LOCK:
         escolha = _memoria.get(chave)
+        if escolha is None:
+            escolha = _buscar_lexical_agressiva(clean_query)
         if escolha is None:
             escolha = _buscar_aproximada(clean_query)
             if escolha is None:
