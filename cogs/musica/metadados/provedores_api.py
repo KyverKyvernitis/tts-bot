@@ -20,6 +20,7 @@ from .fontes.soundcloud import ProvedorSoundCloudMixin
 from .fontes.spotify import ProvedorSpotifyMixin
 from .fontes.youtube import ProvedorYouTubeMixin
 from .resiliencia import executar_provider_resiliente
+from .quota_youtube import consumir_busca_youtube
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,24 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
         self._spotify_public_token_expires_at = 0.0
         self._http_session: aiohttp.ClientSession | None = None
         self._http_loop: asyncio.AbstractEventLoop | None = None
+
+    def _consumir_busca_youtube(self) -> bool:
+        return consumir_busca_youtube(
+            limite_diario=int(getattr(config, "MUSIC_SEARCH_YOUTUBE_API_DAILY_SOFT_CALLS", 80) or 0),
+            habilitado=bool(getattr(config, "MUSIC_SEARCH_YOUTUBE_API_QUOTA_GUARD_ENABLED", True)),
+        )
+
+    async def _youtube_search_com_quota(
+        self,
+        query: str,
+        *,
+        limit: int,
+        include_details: bool = False,
+    ) -> list[ApiTrackCandidate]:
+        if not self._consumir_busca_youtube():
+            logger.debug("[music/search] youtube api pulada pelo guard local de quota")
+            return []
+        return await self.youtube_search(query, limit=limit, include_details=include_details)
 
     @property
     def has_any_provider(self) -> bool:
@@ -156,7 +175,7 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
             # Na lista de resultados, snippet/URL bastam. Duracao/status exatos
             # ficam para a faixa escolhida/deep metadata e evitamos uma segunda
             # requisicao videos.list em toda pesquisa.
-            _agendar("youtube", self.youtube_search, limit, kwargs={"include_details": False})
+            _agendar("youtube", self._youtube_search_com_quota, limit, kwargs={"include_details": False})
         if self.spotify_client_id and self.spotify_client_secret:
             _agendar("spotify", self.spotify_search, min(limit, 5))
         if self.deezer_enabled:
@@ -349,7 +368,7 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
         cooldown = max(1.0, float(getattr(config, "MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS", 30.0) or 30.0))
 
         async def _operacao() -> list[ApiTrackCandidate]:
-            return await self.youtube_search(query, limit=limit, include_details=False)
+            return await self._youtube_search_com_quota(query, limit=limit, include_details=False)
 
         return await executar_provider_resiliente(
             "youtube",

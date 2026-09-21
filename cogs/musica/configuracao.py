@@ -281,8 +281,9 @@ MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS = max(3.0, _parse_float(os.getenv("MUSIC_AG
 MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", "420.0"), 420.0))
 # Cache/singleflight curto apenas para metadata de busca. O cache maior do Phone
 # Worker continua separado porque guarda a resposta yt-dlp ja consolidada.
-MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS = max(0.0, min(300.0, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", "90.0"), 90.0)))
-MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS = max(8, min(256, _parse_int(os.getenv("MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", "64"), 64)))
+MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS = max(0.0, min(600.0, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", "300.0"), 300.0)))
+MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS = max(8, min(256, _parse_int(os.getenv("MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", "128"), 128)))
+MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED", "true"), True)
 MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS = max(0.2, min(10.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS", "1.5"), 1.5)))
 # Budget total: um provider lento nao segura a resposta da pesquisa. No deep pass
 # damos uma janela maior porque ele so roda quando o fast pass ficou inconclusivo.
@@ -309,6 +310,10 @@ MUSIC_SEARCH_API_FIRST_HEADSTART_MIN_SECONDS = max(0.0, min(MUSIC_SEARCH_API_FIR
 MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS = max(0.0, min(0.5, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS", "0.08"), 0.08)))
 MUSIC_SEARCH_SKIP_PENDING_METADATA_WHEN_WORKER_SUFFICIENT = _parse_bool(os.getenv("MUSIC_SEARCH_SKIP_PENDING_METADATA_WHEN_WORKER_SUFFICIENT", "true"), True)
 MUSIC_SEARCH_API_FIRST_MIN_RESULTS = max(1, min(3, _parse_int(os.getenv("MUSIC_SEARCH_API_FIRST_MIN_RESULTS", "3"), 3)))
+# Guard local conservador para search.list. O valor é número de chamadas, não
+# unidades de quota; deixa margem para outros usos da mesma chave/projeto.
+MUSIC_SEARCH_YOUTUBE_API_QUOTA_GUARD_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_YOUTUBE_API_QUOTA_GUARD_ENABLED", "true"), True)
+MUSIC_SEARCH_YOUTUBE_API_DAILY_SOFT_CALLS = max(0, min(10000, _parse_int(os.getenv("MUSIC_SEARCH_YOUTUBE_API_DAILY_SOFT_CALLS", "80"), 80)))
 # Busca inteligente: segunda passagem só quando o ranking inicial não estiver
 # suficientemente claro. O custo extra é rede no Phone Worker/providers; a VPS
 # faz apenas fusão/ranking local leve.

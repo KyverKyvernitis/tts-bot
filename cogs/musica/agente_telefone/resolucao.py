@@ -16,7 +16,9 @@ from ..busca import (
 )
 from ..busca.resiliencia import liberar_busca_profunda, tentar_reservar_busca_profunda
 from ..busca.latencia import headstart_adaptativo, registrar_latencia_api, registrar_latencia_worker
+from ..busca.chaves import chave_semantica_busca
 from ..busca.fontes import buscar_candidatos_multifonte, buscar_candidatos_youtube_fast
+from ..metadados.quota_youtube import snapshot_quota_youtube
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch
 from .busca_profunda import executar_passagem_profunda
@@ -75,8 +77,11 @@ def _registrar_telemetria_busca(
     if resumo is not None:
         fontes = ",".join(f"{nome}:{quantidade}" for nome, quantidade in resumo.fontes[:6])
         motivos = ",".join(f"{nome}:{quantidade}" for nome, quantidade in resumo.motivos_deep[:6])
+        quota_youtube = snapshot_quota_youtube(
+            limite_diario=int(getattr(config, "MUSIC_SEARCH_YOUTUBE_API_DAILY_SOFT_CALLS", 80) or 0)
+        )
         logger.info(
-            "[music/search] telemetria agregada | buscas=%s cache_hits=%s deep=%s aplicadas=%s rejeitadas=%s suprimidas=%s sem_resultado=%s selecoes=%s primeiro=%s top3=%s lat_media_ms=%.1f lat_max_ms=%.1f score_medio=%.4f confidence_media=%.4f fontes=%s motivos=%s",
+            "[music/search] telemetria agregada | buscas=%s cache_hits=%s deep=%s aplicadas=%s rejeitadas=%s suprimidas=%s sem_resultado=%s selecoes=%s primeiro=%s top3=%s lat_media_ms=%.1f lat_max_ms=%.1f score_medio=%.4f confidence_media=%.4f fontes=%s motivos=%s yt_api_calls=%s yt_api_blocked=%s yt_api_left=%s",
             resumo.buscas,
             resumo.cache_hits,
             resumo.deep_solicitadas,
@@ -93,6 +98,9 @@ def _registrar_telemetria_busca(
             resumo.confianca_media,
             fontes,
             motivos,
+            quota_youtube.chamadas,
+            quota_youtube.bloqueadas,
+            quota_youtube.restantes,
         )
 
 
@@ -224,8 +232,13 @@ async def resolve_music_tracks_on_worker(
         timeout_seconds=timeout_seconds,
     )
 
+    cache_query = clean_query
+    if busca_textual and somente_metadados and bool(
+        getattr(config, "MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED", True)
+    ):
+        cache_query = chave_semantica_busca(clean_query)
     cache_key = chave_cache_resolucao(
-        clean_query,
+        cache_query,
         max_limit,
         somente_metadados,
         allow_playlist,
@@ -236,6 +249,7 @@ async def resolve_music_tracks_on_worker(
         requester_id=requester_id,
         requester_name=requester_name,
         somente_metadados=somente_metadados,
+        query_override=clean_query,
     )
     if cached_batch is not None:
         logger.info(

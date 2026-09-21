@@ -11,6 +11,10 @@ _CACHE_RESOLUCAO: dict[_CHAVE_CACHE, tuple[float, ExtractedBatch]] = {}
 _MAX_ITENS_CACHE = 96
 
 
+def limpar_cache_resolucao() -> None:
+    _CACHE_RESOLUCAO.clear()
+
+
 def copiar_faixa_para_requisicao(
     track: MusicTrack,
     *,
@@ -111,6 +115,7 @@ def obter_cache_resolucao(
     requester_id: int,
     requester_name: str,
     somente_metadados: bool,
+    query_override: str = "",
 ) -> ExtractedBatch | None:
     ttl = ttl_cache_resolucao(somente_metadados=somente_metadados)
     if ttl <= 0:
@@ -122,11 +127,14 @@ def obter_cache_resolucao(
     if time.monotonic() - created > ttl:
         _CACHE_RESOLUCAO.pop(key, None)
         return None
-    return copiar_lote_para_requisicao(
+    clone = copiar_lote_para_requisicao(
         batch,
         requester_id=requester_id,
         requester_name=requester_name,
     )
+    if query_override:
+        clone.query = str(query_override).strip()
+    return clone
 
 
 def armazenar_cache_resolucao(

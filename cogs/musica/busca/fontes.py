@@ -5,6 +5,8 @@ from cogs.musica import configuracao as config
 from ..metadados.modelos import ApiTrackCandidate
 from ..metadados.provedores_api import MusicApiProviders
 from ..metadados.resiliencia import buscar_metadata_compartilhada
+from ..metadados.quota_youtube import busca_youtube_disponivel
+from .chaves import chave_semantica_busca
 from .intencao import analisar_consulta
 
 _provedores_api: MusicApiProviders | None = None
@@ -15,6 +17,15 @@ def _provedores() -> MusicApiProviders:
     if _provedores_api is None:
         _provedores_api = MusicApiProviders()
     return _provedores_api
+
+
+def youtube_api_fast_disponivel() -> bool:
+    # Credencial/enable continuam responsabilidade do provider. Aqui o roteador
+    # consulta apenas o guard local, mantendo o fast path testável e desacoplado.
+    return busca_youtube_disponivel(
+        limite_diario=int(getattr(config, "MUSIC_SEARCH_YOUTUBE_API_DAILY_SOFT_CALLS", 80) or 0),
+        habilitado=bool(getattr(config, "MUSIC_SEARCH_YOUTUBE_API_QUOTA_GUARD_ENABLED", True)),
+    )
 
 
 async def buscar_candidatos_youtube_fast(query: str, *, limit: int = 3) -> list[ApiTrackCandidate]:
@@ -34,12 +45,17 @@ async def buscar_candidatos_youtube_fast(query: str, *, limit: int = 3) -> list[
     async def _buscar() -> list[ApiTrackCandidate]:
         return await providers.search_youtube_fast(texto, limit=limit, timeout_seconds=timeout)
 
+    cache_texto = (
+        chave_semantica_busca(texto)
+        if bool(getattr(config, "MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED", True))
+        else texto
+    )
     return await buscar_metadata_compartilhada(
-        texto,
+        cache_texto,
         limit=limit,
         produtor=_buscar,
-        ttl_seconds=float(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 90.0) or 0.0),
-        max_itens=int(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 64) or 64),
+        ttl_seconds=float(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 300.0) or 0.0),
+        max_itens=int(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 128) or 128),
         namespace="youtube-fast",
         cancelar_quando_sem_consumidores=True,
     )
@@ -88,12 +104,17 @@ async def buscar_candidatos_multifonte(
             total_budget_seconds=budget,
         )
 
+    cache_texto = (
+        chave_semantica_busca(texto)
+        if bool(getattr(config, "MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED", True))
+        else texto
+    )
     return await buscar_metadata_compartilhada(
-        texto,
+        cache_texto,
         limit=limit,
         produtor=_buscar,
-        ttl_seconds=float(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 90.0) or 0.0),
-        max_itens=int(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 64) or 64),
+        ttl_seconds=float(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", 300.0) or 0.0),
+        max_itens=int(getattr(config, "MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", 128) or 128),
         namespace="all" if incluir_youtube else "sem-youtube",
         cancelar_quando_sem_consumidores=True,
     )
