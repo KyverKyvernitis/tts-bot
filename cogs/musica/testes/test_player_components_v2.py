@@ -63,7 +63,7 @@ def test_animacoes_existentes_sao_preservadas_sem_polling_extra() -> None:
 
     assert 'PLAYER_STATUS_ANIMATED_URL = "https://i.ibb.co/QXtk5VB/neon-circle.gif"' in source
     assert 'PLAYER_STATUS_ANIMATED_EMOJI = "<a:loading:1510065277868445796>"' in source
-    assert 'PLAYER_STATUS_PLAYING_EMOJI = "🎶"' in source
+    assert 'PLAYER_STATUS_PLAYING_EMOJI = "<a:circulando:1551635281738858670>"' in source
     assert 'PLAYER_QUEUE_FINISHED_EMOJI = "<:Barra:1548838704850800712>"' in source
     assert "bar.add_item(media=PLAYER_BAR_URL" in build
     assert 'discord.ui.TextDisplay(f"**{status_emoji} {status_title}**")' in build

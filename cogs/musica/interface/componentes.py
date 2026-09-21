@@ -28,7 +28,7 @@ PLAYER_STATUS_ANIMATED_URL = "https://i.ibb.co/QXtk5VB/neon-circle.gif"
 # O estado fica ao lado do título usando apenas emojis já resolvidos localmente;
 # o spinner animado é reservado para estados de carregamento, não para playback.
 PLAYER_STATUS_ANIMATED_EMOJI = "<a:loading:1510065277868445796>"
-PLAYER_STATUS_PLAYING_EMOJI = "🎶"
+PLAYER_STATUS_PLAYING_EMOJI = "<a:circulando:1551635281738858670>"
 PLAYER_QUEUE_FINISHED_EMOJI = "<:Barra:1548838704850800712>"
 PLAYER_PAUSED_ICON_URL = "https://cdn.discordapp.com/attachments/480195401543188483/896013933197013002/pause.png"
 PLAYER_ERROR_ICON_URL = "https://cdn.discordapp.com/emojis/1215703754471268414.png"
