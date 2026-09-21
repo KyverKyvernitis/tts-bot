@@ -23,11 +23,7 @@ export function sectionEditorFieldVisible(
   draft: Record<string, unknown>,
 ): boolean {
   if (field.id === "tts.ignored_tts_role_enabled") return false;
-  if (sectionId === "tts") {
-    const engine = String(draft["tts.engine"] || "edge");
-    if (field.id === "tts.language") return engine === "gtts";
-    if (["tts.voice", "tts.rate", "tts.pitch"].includes(field.id)) return engine === "edge";
-  }
+  if (sectionId === "tts" && field.id === "tts.engine") return false;
 
   if (sectionId === "welcome") {
     if (field.id === "welcome.style") return String(draft["welcome.render_mode"] || "") === "components_v2";

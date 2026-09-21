@@ -19,7 +19,7 @@ export function EconomySettings({ fields, draft, guildOptions, onChange }: Props
     <div className="osk-economy-controls">{settings.map(({ id, title, icon: Icon, note }) => {
       const field = fields.find(item => item.id === id);
       if (!field) return null;
-      return <article className="osk-module-card" key={id}><header><Icon size={19} /><h2>{title}</h2></header><p>{note}</p><DashboardFieldControl field={field} value={draft[id]} guildOptions={guildOptions} onChange={onChange} /></article>;
+      return <article className="osk-settings-card" key={id}><header><Icon size={19} /><h2>{title}</h2></header><p>{note}</p><DashboardFieldControl field={field} value={draft[id]} guildOptions={guildOptions} onChange={onChange} /></article>;
     })}</div>
   </div>;
 }

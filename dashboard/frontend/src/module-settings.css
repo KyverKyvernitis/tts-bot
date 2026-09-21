@@ -12,13 +12,14 @@
 .osk-module-tabs > button[aria-selected="true"] { color: var(--osk-ink); background: var(--osk-paper-muted); border-color: var(--osk-line-strong); box-shadow: 0 2px 5px #0002; }
 .osk-area-change { width: 5px; height: 5px; border-radius: 50%; background: var(--osk-ink); }
 .osk-module-area { display: grid; gap: 18px; min-width: 0; }
-.osk-module-card { min-width: 0; padding: 22px; border: 1px solid var(--osk-line); border-radius: 16px; background: var(--osk-paper-pure); }
-.osk-module-card > header { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
-.osk-module-card > header svg { color: var(--osk-muted); flex-shrink: 0; }
-.osk-module-card > header h2 { margin: 0; font-size: 15px; line-height: 1.4; }
-.osk-module-card > p { font-size: 13px; color: var(--osk-muted); line-height: 1.6; }
+.osk-settings-card { display: block; width: 100%; min-width: 0; padding: 22px; border: 1px solid var(--osk-line); border-radius: 16px; color: var(--osk-ink); background: var(--osk-paper-pure); }
+.osk-settings-card > * { min-width: 0; }
+.osk-settings-card > header { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+.osk-settings-card > header svg { color: var(--osk-muted); flex-shrink: 0; }
+.osk-settings-card > header h2 { margin: 0; font-size: 15px; line-height: 1.4; }
+.osk-settings-card > p { font-size: 13px; color: var(--osk-muted); line-height: 1.6; }
 .osk-module-settings .osk-compact-fields { gap: 0; }
-.osk-module-settings .osk-compact-field { grid-template-columns: minmax(150px, .95fr) minmax(170px, 1fr); align-items: start; gap: 24px; padding: 18px 0; border: 0; border-bottom: 1px solid var(--osk-line); background: transparent; border-radius: 0; }
+.osk-module-settings .osk-compact-field { grid-template-columns: minmax(0, .95fr) minmax(0, 1fr); align-items: start; gap: 24px; padding: 18px 0; border: 0; border-bottom: 1px solid var(--osk-line); background: transparent; border-radius: 0; box-shadow: none; }
 .osk-module-settings .osk-compact-field:first-child { padding-top: 0; }
 .osk-module-settings .osk-compact-field:last-child { padding-bottom: 0; border-bottom: 0; }
 .osk-module-settings .osk-compact-field[data-complex] { grid-template-columns: minmax(0, 1fr); gap: 14px; }
@@ -56,13 +57,15 @@
 .osk-module-settings .osk-form-fields-limit { margin-bottom: 16px; }
 .osk-module-settings .osk-form-fields-limit small { display: none; }
 .osk-module-settings .osk-form-fields-editor > article, .osk-module-settings .osk-ticket-flow { border-color: var(--osk-line); border-radius: 12px; background: var(--osk-paper); }
-.osk-module-settings .osk-form-question-head { flex-wrap: wrap; gap: 8px; padding: 12px; }
-.osk-module-settings .osk-form-question-summary { gap: 12px; min-height: 44px; }
+.osk-module-settings .osk-form-question-head { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; padding: 12px; }
+.osk-module-settings .osk-form-question-summary { display: grid; grid-template-columns: 32px minmax(0,1fr) 18px; gap: 12px; min-height: 44px; padding: 0; }
+.osk-module-settings .osk-form-question-summary > span { min-width: 0; }
 .osk-question-number { display: grid !important; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; border: 1px solid var(--osk-line-strong); border-radius: 8px; font-size: 12px; color: var(--osk-muted); }
 .osk-module-settings .osk-form-question-actions button { width: 36px; height: 36px; }
 .osk-module-settings .osk-form-question-panel-inner { padding: 4px 16px 18px; }
 .osk-module-settings .osk-form-question-switches { margin-top: 16px; }
-.osk-module-settings .osk-inline-switch-row { min-height: 48px; }
+.osk-module-settings .osk-inline-switch-row { display: flex; min-height: 48px; }
+.osk-module-settings .osk-inline-switch-row > .osk-switch { flex-shrink: 0; }
 .osk-module-settings .osk-ticket-flow__header { padding: 14px; }
 .osk-module-settings .osk-ticket-flow__summary { min-width: 0; }
 .osk-module-settings .osk-ticket-flow__summary strong { font-family: var(--osk-font-display); font-size: 14px; font-weight: 500; }
@@ -85,23 +88,25 @@
 .osk-birthday-time strong { font-size: 13px; font-weight: 500; }
 .osk-birthday-time small { font-size: 11px; color: var(--osk-muted); overflow-wrap: anywhere; }
 .osk-birthday-time input { width: 124px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
-.osk-voice-profile { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; padding: 18px; background: var(--osk-paper); border: 1px solid var(--osk-line); border-radius: 12px; }
-.osk-voice-profile svg { color: var(--osk-muted); }
-.osk-voice-profile div { display: grid; gap: 5px; }
-.osk-voice-profile small { font-size: 11px; color: var(--osk-muted); }
-.osk-voice-profile strong { font-family: var(--osk-font-display); font-size: 15px; font-weight: 500; letter-spacing: -.035em; }
-.osk-module-settings[data-module="tts"] .osk-module-card[data-group="Voz"] .osk-compact-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
-.osk-module-settings[data-module="tts"] .osk-module-card[data-group="Voz"] .osk-compact-field { grid-template-columns: minmax(0,1fr); border: 0; padding: 0; gap: 10px; }
+.osk-tts-settings { display: grid; gap: 18px; min-width: 0; }
+.osk-tts-engines { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 18px; align-items: start; }
+.osk-tts-engine > header { margin-bottom: 10px; }
+.osk-tts-prefix { display: flex; align-items: center; gap: 8px; margin: 0 0 22px; color: var(--osk-muted); font-size: 12px; }
+.osk-tts-prefix code { padding: 3px 9px; border: 1px solid var(--osk-line); border-radius: 6px; color: var(--osk-ink); font-size: 14px; }
+.osk-module-settings .osk-tts-engine .osk-compact-field { grid-template-columns: minmax(0,1fr); gap: 10px; }
+.osk-module-settings .osk-range-control { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.osk-module-settings .osk-range-control input[type="range"] { flex: 1; min-width: 0; width: 0; padding: 0; box-shadow: none; background: transparent; }
+.osk-module-settings .osk-range-control output { flex: 0 0 auto; }
 .osk-economy-settings { display: grid; gap: 18px; }
 .osk-economy-table { display: flex; align-items: center; gap: 22px; padding: 28px; border: 1px solid var(--osk-line); border-radius: 16px; background: linear-gradient(120deg, var(--osk-paper-muted), var(--osk-paper-pure) 75%); }
 .osk-root .osk-economy-table .osk-module-artwork { width: 100px; height: 76px; flex-shrink: 0; transform: scale(1.15); }
 .osk-economy-table h2 { margin: 6px 0 8px; font-size: 22px; }
 .osk-economy-table p { margin: 0; color: var(--osk-muted); font-size: 12px; line-height: 1.7; }
 .osk-economy-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; }
-.osk-economy-controls .osk-module-card:last-child { grid-column: 1 / -1; }
-.osk-economy-controls .osk-module-card > header { margin-bottom: 12px; }
-.osk-economy-controls .osk-module-card > p { min-height: 40px; margin: 0 0 18px; font-size: 12px; }
-.osk-economy-controls .osk-module-card:last-child .osk-field-control { max-width: 430px; }
+.osk-economy-controls .osk-settings-card:last-child { grid-column: 1 / -1; }
+.osk-economy-controls .osk-settings-card > header { margin-bottom: 12px; }
+.osk-economy-controls .osk-settings-card > p { min-height: 40px; margin: 0 0 18px; font-size: 12px; }
+.osk-economy-controls .osk-settings-card:last-child .osk-field-control { max-width: 430px; }
 .osk-field-error { display: block; margin-top: 8px; color: #f2aaa5; font-size: 12px; line-height: 1.5; }
 .osk-field-control[data-invalid] input, .osk-field-control[data-invalid] textarea, .osk-field-control[data-invalid] .osk-select-trigger { border-color: #ba6d68 !important; }
 .osk-field-unavailable { display: grid; gap: 8px; }
@@ -124,8 +129,8 @@
   .osk-module-toggle { width: 100%; padding: 10px 13px; }
   .osk-module-tabs { margin-inline: -2px; gap: 2px; margin-bottom: 18px; }
   .osk-module-tabs > button { min-height: 42px; padding: 10px 13px; font-size: 12px; }
-  .osk-module-card { padding: 17px; border-radius: 13px; }
-  .osk-module-card > header { margin-bottom: 18px; }
+  .osk-settings-card { padding: 17px; border-radius: 13px; }
+  .osk-settings-card > header { margin-bottom: 18px; }
   .osk-module-settings .osk-compact-field, .osk-module-settings .osk-message-group-settings .osk-compact-field { grid-template-columns: minmax(0,1fr); gap: 10px; padding-block: 17px; }
   .osk-module-settings .osk-compact-field[data-type="boolean"], .osk-module-settings .osk-message-group-settings .osk-compact-field[data-type="boolean"] { grid-template-columns: minmax(0,1fr) auto; gap: 14px; }
   .osk-preview-expand { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 44px; padding: 10px; color: var(--osk-text-soft); font-size: 12px; background: transparent; }
@@ -133,7 +138,8 @@
   .osk-message-preview-card > header { padding: 13px; }
   .osk-message-preview-card > footer { padding: 10px 13px; }
   .osk-module-preview-body { padding: 16px 12px; max-height: 420px; }
-  .osk-module-settings .osk-form-question-actions { margin-left: 44px; }
+  .osk-module-settings .osk-form-question-head { grid-template-columns: minmax(0,1fr); }
+  .osk-module-settings .osk-form-question-actions { justify-content: flex-end; margin-left: 0; }
   .osk-module-settings .osk-form-question-actions button { min-width: 38px; min-height: 38px; }
   .osk-module-settings .osk-form-question-summary { width: 100%; }
   .osk-module-settings .osk-ticket-flow__header { padding: 12px; }
@@ -143,12 +149,12 @@
   .osk-color-panel-swatches { grid-column: 1 / -1; }
   .osk-birthday-time { flex-wrap: wrap; padding: 13px; }
   .osk-birthday-time input { margin-left: 33px; }
-  .osk-module-settings[data-module="tts"] .osk-module-card[data-group="Voz"] .osk-compact-fields { grid-template-columns: minmax(0,1fr); }
+  .osk-tts-engines { grid-template-columns: minmax(0,1fr); }
   .osk-economy-table { padding: 22px 16px; gap: 15px; }
   .osk-root .osk-economy-table .osk-module-artwork { width: 70px; transform: scale(.85); }
   .osk-economy-table h2 { font-size: 18px; line-height: 1.4; }
   .osk-economy-controls { grid-template-columns: minmax(0,1fr); gap: 14px; }
-  .osk-economy-controls .osk-module-card > p { min-height: 0; }
+  .osk-economy-controls .osk-settings-card > p { min-height: 0; }
   .osk-module-advanced > summary { padding: 16px; }
   .osk-module-advanced > div { padding: 0 16px 16px; }
 }

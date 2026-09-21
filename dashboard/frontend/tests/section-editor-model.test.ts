@@ -30,12 +30,13 @@ test("habilitação de editores preserva dependências funcionais", () => {
   assert.equal(sectionEditorEnabled("tickets", "Mensagens", {}), true);
 });
 
-test("visibilidade TTS alterna campos conforme engine", () => {
+test("Edge e gTTS permanecem configuráveis juntos, sem escolha exclusiva de motor", () => {
   assert.equal(sectionEditorFieldVisible("tts", field("tts.ignored_tts_role_enabled", "boolean"), {}), false);
   assert.equal(sectionEditorFieldVisible("tts", field("tts.language", "select"), { "tts.engine": "gtts" }), true);
-  assert.equal(sectionEditorFieldVisible("tts", field("tts.language", "select"), { "tts.engine": "edge" }), false);
+  assert.equal(sectionEditorFieldVisible("tts", field("tts.language", "select"), { "tts.engine": "edge" }), true);
   assert.equal(sectionEditorFieldVisible("tts", field("tts.voice", "select"), { "tts.engine": "edge" }), true);
-  assert.equal(sectionEditorFieldVisible("tts", field("tts.pitch", "text"), { "tts.engine": "gtts" }), false);
+  assert.equal(sectionEditorFieldVisible("tts", field("tts.pitch", "text"), { "tts.engine": "gtts" }), true);
+  assert.equal(sectionEditorFieldVisible("tts", field("tts.engine", "select"), {}), false);
 });
 
 test("visibilidade welcome respeita render, mídia e webhook", () => {

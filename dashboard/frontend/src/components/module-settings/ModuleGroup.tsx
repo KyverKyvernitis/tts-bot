@@ -5,7 +5,7 @@ import { TicketPermissionsEditor } from "../TicketPermissionsEditor";
 import { ColorRolesPanelManager } from "../color-roles/ColorRolesPanelManager";
 import { sectionGroupIcon } from "../sectionGroupPresentation";
 import { BirthdayTimeField } from "./BirthdayTimeField";
-import { AudioLines } from "lucide-react";
+import { TtsVoiceSettings } from "./TtsVoiceSettings";
 
 export interface ModuleGroupProps {
   section: DashboardSectionDefinition; group: string; values: Record<string, unknown>; draft: Record<string, unknown>;
@@ -30,14 +30,10 @@ export function ModuleGroup({ section, group, values, draft, guildOptions, onCha
   else if (metadata?.kind === "message") content = <MessageGroupPanel {...common} sectionId={section.id} group={group} fields={fields} allFields={section.fields} metadata={metadata} renderFields={renderFields} onOpenEditor={onOpenEditor} />;
   else content = renderFields(fields);
   if (!fields.length) return null;
+  if (section.id === "tts" && group === "Voz") return <TtsVoiceSettings {...common} fields={fields} />;
   if (section.id === "tickets" && group === "Textos") return <details className="osk-module-advanced"><summary><Icon size={17} />Mensagens padrão e encerramento</summary><div>{content}</div></details>;
-  return <section className="osk-module-card" data-group={group}>
+  return <section className="osk-settings-card" data-group={group}>
     <header><Icon size={19} aria-hidden="true" /><h2>{group === "Geral" && section.id === "birthday" ? "Preferências do cadastro" : group}</h2></header>
-    {section.id === "tts" && group === "Voz" && <div className="osk-voice-profile"><AudioLines size={26} aria-hidden="true" /><div><small>Voz do servidor</small><strong>{(() => {
-      const id = draft["tts.engine"] === "gtts" ? "tts.language" : "tts.voice";
-      const field = fields.find(item => item.id === id);
-      return field?.options?.find(option => option.value === String(draft[id]))?.label || String(draft[id] || "Escolha uma voz");
-    })()}</strong></div></div>}
     {content}
   </section>;
 }

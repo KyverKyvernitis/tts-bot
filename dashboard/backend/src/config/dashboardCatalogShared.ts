@@ -5,17 +5,14 @@ export const TTS_ENGINE_OPTIONS = [
   { value: "edge", label: "Microsoft Edge" },
 ];
 export const TTS_LANGUAGE_OPTIONS = [
-  { value: "pt-BR", label: "Português — Brasil" },
-  { value: "pt-PT", label: "Português — Portugal" },
-  { value: "en-US", label: "Inglês — Estados Unidos" },
-  { value: "en-GB", label: "Inglês — Reino Unido" },
-  { value: "es-ES", label: "Espanhol — Espanha" },
-  { value: "es-MX", label: "Espanhol — México" },
-  { value: "fr-FR", label: "Francês — França" },
-  { value: "de-DE", label: "Alemão — Alemanha" },
-  { value: "it-IT", label: "Italiano — Itália" },
-  { value: "ja-JP", label: "Japonês" },
-  { value: "ko-KR", label: "Coreano" },
+  { value: "pt", label: "Português" },
+  { value: "en", label: "Inglês" },
+  { value: "es", label: "Espanhol" },
+  { value: "fr", label: "Francês" },
+  { value: "de", label: "Alemão" },
+  { value: "it", label: "Italiano" },
+  { value: "ja", label: "Japonês" },
+  { value: "ko", label: "Coreano" },
 ];
 export const TTS_VOICE_OPTIONS = [
   { value: "pt-BR-FranciscaNeural", label: "Francisca — feminina" },
@@ -184,4 +181,3 @@ export function ticketOptionFields(id: string, label: string): DashboardFieldDef
     { id: `${fieldId}.use_report_types`, label: `${label}: usar tipos de denúncia`, type: "boolean", scope: "guild", path: `${prefix}.use_report_types`, group: "Fluxos" },
   ];
 }
-
