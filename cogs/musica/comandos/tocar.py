@@ -90,6 +90,7 @@ class FluxoTocar:
                     requester_name=requester_name,
                     tracks=payload_tracks,
                     limit=len(payload_tracks),
+                    prefetch_kind="selection",
                     timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0),
                 )
                 logger.info(
@@ -652,11 +653,8 @@ class FluxoTocar:
                         value=f"{track.uploader or track.source or 'resultado'} • `{track.duration_label}`",
                         inline=False,
                     )
-                await self._reply(
-                    ctx,
-                    embed=embed,
-                    view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id, query),
-                )
+                # Inicie o top-1 especulativo antes do POST da mensagem ao
+                # Discord. Assim resolução yt-dlp e latência da UI se sobrepõem.
                 self._schedule_music_agent_prefetch(
                     ctx.guild.id,
                     batch.tracks[:10],
@@ -664,6 +662,11 @@ class FluxoTocar:
                     text_channel_id=ctx.channel.id,
                     requester_id=ctx.author.id,
                     requester_name=requester_name,
+                )
+                await self._reply(
+                    ctx,
+                    embed=embed,
+                    view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id, query),
                 )
                 return
 

@@ -1077,3 +1077,62 @@ def test_mixer_constructor_caps_direct_boost_at_150_percent(music):
         assert mixer.normal_music_volume == 1.5
 
     run(scenario())
+
+
+def test_selection_prefetch_idle_usa_prioridade_alta_e_apenas_top1(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        captured = []
+
+        async def fake_prefetch(body, track_meta, query, cache_key):
+            captured.append((dict(body), dict(track_meta), query, cache_key))
+
+        agent._prefetch_track = fake_prefetch
+        result = await agent.cmd_prefetch({
+            "guild_id": 501,
+            "prefetch_kind": "selection",
+            "limit": 3,
+            "tracks": [
+                {"title": "A", "webpage_url": "https://youtube.test/a"},
+                {"title": "B", "webpage_url": "https://youtube.test/b"},
+                {"title": "C", "webpage_url": "https://youtube.test/c"},
+            ],
+        })
+        await asyncio.sleep(0)
+        assert result["accepted"] == 1
+        assert len(captured) == 1
+        body, track_meta, _, _ = captured[0]
+        assert track_meta["title"] == "A"
+        assert body["_prefetch_priority"] == agent.selection_prefetch_idle_priority
+        assert body["prefetch_kind"] == "selection"
+
+    run(scenario())
+
+
+def test_selection_prefetch_com_musica_ativa_fica_em_background(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 502
+        agent.states[gid] = music.GuildMusicState(
+            guild_id=gid,
+            current=music.AgentTrack(title="Atual", query="atual"),
+            status="playing",
+        )
+        captured = []
+
+        async def fake_prefetch(body, track_meta, query, cache_key):
+            captured.append(dict(body))
+
+        agent._prefetch_track = fake_prefetch
+        result = await agent.cmd_prefetch({
+            "guild_id": gid,
+            "prefetch_kind": "selection",
+            "limit": 3,
+            "tracks": [{"title": "A", "webpage_url": "https://youtube.test/a"}],
+        })
+        await asyncio.sleep(0)
+        assert result["accepted"] == 1
+        assert captured[0]["_prefetch_priority"] == agent.selection_prefetch_active_priority
+        assert agent.selection_prefetch_active_priority > agent.selection_prefetch_idle_priority
+
+    run(scenario())

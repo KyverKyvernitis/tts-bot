@@ -193,6 +193,7 @@ def _schedule_agent_prefetch(
                 requester_name=requester_name,
                 tracks=payload_tracks,
                 limit=len(payload_tracks),
+                prefetch_kind="selection",
                 timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0),
             )
             logger.info(
@@ -1205,11 +1206,7 @@ class AddSongModal(discord.ui.Modal):
             )
             for idx, track in enumerate(batch.tracks[:10], start=1):
                 embed.add_field(name=f"{idx}. {track.short_title}", value=f"{track.uploader or track.source or 'resultado'} • `{track.duration_label}`", inline=False)
-            await interaction.followup.send(
-                embed=embed,
-                view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:10], interaction.user.id, query),
-                ephemeral=True,
-            )
+            # Sobreponha resolução do top-1 ao envio do menu no Discord.
             _schedule_agent_prefetch(
                 self.router,
                 guild.id,
@@ -1218,6 +1215,11 @@ class AddSongModal(discord.ui.Modal):
                 text_channel_id=getattr(text_channel, "id", 0),
                 requester_id=interaction.user.id,
                 requester_name=requester_name,
+            )
+            await interaction.followup.send(
+                embed=embed,
+                view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:10], interaction.user.id, query),
+                ephemeral=True,
             )
             return
 

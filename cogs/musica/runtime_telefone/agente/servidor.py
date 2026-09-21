@@ -156,6 +156,11 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.resolve_cache_ttl = self.stream_cache_ttl
         self.prefetch_enabled = truthy(os.getenv("MUSIC_AGENT_PREFETCH_ENABLED"), True)
         self.prefetch_timeout = max(3.0, env_float("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", 18.0))
+        # Prefetch de seleção é especulativo: quando a guild está ociosa ele
+        # recebe prioridade maior para reduzir clique -> primeiro áudio. Com
+        # música ativa, continua em background para não competir com playback.
+        self.selection_prefetch_idle_priority = max(-5, min(20, env_int("MUSIC_AGENT_SELECTION_PREFETCH_IDLE_PRIORITY", 5)))
+        self.selection_prefetch_active_priority = max(5, min(40, env_int("MUSIC_AGENT_SELECTION_PREFETCH_ACTIVE_PRIORITY", 20)))
         self.stream_recovery_enabled = truthy(os.getenv("MUSIC_AGENT_STREAM_RECOVERY_ENABLED"), True)
         self.stream_recovery_max_attempts = max(0, min(3, env_int("MUSIC_AGENT_STREAM_RECOVERY_MAX_ATTEMPTS", 1)))
         self.stream_recovery_backtrack_seconds = max(0.0, min(3.0, env_float("MUSIC_AGENT_STREAM_RECOVERY_BACKTRACK_SECONDS", 0.35)))

@@ -142,10 +142,31 @@ class ReproducaoMixin:
             single = body.get("track") if isinstance(body.get("track"), dict) else {}
             if single:
                 tracks = [single]
+        prefetch_kind = str(body.get("prefetch_kind") or "background").strip().lower()
         try:
             limit = max(0, min(3, int(float(body.get("limit") or len(tracks) or 0))))
         except Exception:
             limit = min(2, len(tracks))
+        # Seleção de busca só especula o top-1. Resolver também os resultados
+        # 2/3 aumenta CPU/rede e pode atrasar justamente a faixa escolhida.
+        if prefetch_kind == "selection":
+            limit = min(limit, 1)
+        guild_id = safe_id(body.get("guild_id"))
+        state = self.states.get(guild_id)
+        active = bool(
+            state
+            and state.current is not None
+            and str(getattr(state, "status", "") or "").lower()
+            in {"playing", "starting", "preparing", "paused"}
+        )
+        if prefetch_kind == "selection":
+            priority = (
+                int(self.selection_prefetch_active_priority)
+                if active
+                else int(self.selection_prefetch_idle_priority)
+            )
+        else:
+            priority = 20
         accepted = 0
         for meta in tracks[:limit]:
             if not isinstance(meta, dict):
@@ -161,6 +182,7 @@ class ReproducaoMixin:
                 continue
             child = dict(body)
             child["track"] = dict(meta)
+            child["_prefetch_priority"] = priority
             task = asyncio.create_task(self._prefetch_track(child, dict(meta), query, cache_key))
             self._prefetch_tasks[task_key] = task
             accepted += 1

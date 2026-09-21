@@ -308,8 +308,19 @@ class ResolucaoMixin:
     async def _prefetch_track(self, body: dict[str, Any], track_meta: dict[str, Any], query: str, cache_key: str) -> None:
         try:
             started = time.time()
-            await asyncio.wait_for(self.resolve_track(query, track_meta=track_meta, body=body, priority=20), timeout=self.prefetch_timeout)
-            self.log("prefetch_ok", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), elapsed_ms=round((time.time() - started) * 1000.0, 1))
+            try:
+                priority = int(body.get("_prefetch_priority", 20))
+            except Exception:
+                priority = 20
+            await asyncio.wait_for(self.resolve_track(query, track_meta=track_meta, body=body, priority=priority), timeout=self.prefetch_timeout)
+            self.log(
+                "prefetch_ok",
+                guild_id=safe_id(body.get("guild_id")),
+                title=track_meta.get("title"),
+                priority=priority,
+                kind=str(body.get("prefetch_kind") or "background"),
+                elapsed_ms=round((time.time() - started) * 1000.0, 1),
+            )
         except asyncio.CancelledError:
             return
         except Exception as exc:
