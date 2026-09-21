@@ -13,7 +13,8 @@ from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_ag
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from ..interface.carregamento import MusicLoadingReaction
 from ..interface.componentes import SearchResultView
-from ..metadados.provedores import describe_url
+from ..metadados.modelos import PlayInputKind
+from ..metadados.provedores import classify_play_input, describe_url
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 
@@ -272,6 +273,9 @@ class FluxoTocar:
     def _query_profile(self, query: str):
         return describe_url((query or "").strip())
 
+    def _play_input_kind(self, query: str) -> PlayInputKind:
+        return classify_play_input((query or "").strip())
+
     def _is_youtube_link(self, query: str) -> bool:
         return bool(self._query_profile(query).is_youtube)
 
@@ -469,6 +473,7 @@ class FluxoTocar:
                     return
 
             input_profile = self._query_profile(query)
+            input_kind = self._play_input_kind(query)
 
             # Shadow mode Lavalink: consulta o node em paralelo, mas mantém o áudio real
             # no player local atual. YouTube direto fica totalmente fora do LavaSrc/node
@@ -637,10 +642,17 @@ class FluxoTocar:
             # `input_profile` já classificou URL/texto antes da resolução.
             # Reusar esse resultado evita materializar o extrator local legado
             # apenas para chamar `looks_like_url()` no caminho Worker-only.
+            # Somente pesquisa textual pode abrir seleção. Links são direct
+            # play por contrato — inclusive Spotify track/playlist — mesmo que
+            # a resolução interna gere vários candidatos/faixas.
             should_open_selection = bool(
-                (self._should_use_lavalink_for_input(query, ctx.guild.id) and self._is_lavalink_search_request(query))
-                or (self._is_youtube_text_search(query) and len(batch.tracks) > 1)
-                or (not input_profile.is_url and len(batch.tracks) > 1)
+                input_kind is PlayInputKind.SEARCH
+                and len(batch.tracks) > 1
+                and (
+                    self._is_lavalink_search_request(query)
+                    or self._is_youtube_text_search(query)
+                    or not input_profile.is_url
+                )
             )
             if should_open_selection:
                 logger.info("[music/timing] resultados prontos | guild=%s elapsed_ms=%.1f tracks=%s", ctx.guild.id, (time.monotonic() - command_started) * 1000.0, len(batch.tracks))

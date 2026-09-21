@@ -1,7 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
+
+
+class PlayInputKind(str, Enum):
+    """Intenção do comando de reprodução antes de resolver metadata/áudio.
+
+    URLs sempre são direct play. A distinção track/playlist só decide se o
+    pipeline deve materializar uma faixa ou uma coleção; jamais abre o seletor
+    de resultados usado por pesquisa textual.
+    """
+
+    SEARCH = "search"
+    DIRECT_TRACK = "direct_track"
+    DIRECT_PLAYLIST = "direct_playlist"
 
 
 @dataclass(frozen=True, slots=True)

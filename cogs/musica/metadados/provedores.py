@@ -8,7 +8,7 @@ from typing import Iterable
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-from .modelos import UrlProfile
+from .modelos import PlayInputKind, UrlProfile
 from .normalizacao import clean_metadata_title, unique_queries
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,21 @@ _METADATA_TITLE_PATTERNS = (
 
 def looks_like_url(value: str) -> bool:
     return bool(_URL_RE.search(value or ""))
+
+
+def classify_play_input(value: str) -> PlayInputKind:
+    """Classifica a entrada sem executar I/O.
+
+    Pesquisa textual é o único caminho que pode abrir seleção. Qualquer URL
+    reconhecida é direct play; playlists/álbuns mantêm um tipo separado para
+    que o carregamento possa ser preguiçoso nas waves seguintes.
+    """
+    profile = describe_url(value)
+    if not profile.is_url:
+        return PlayInputKind.SEARCH
+    if profile.resource_type in {"playlist", "album"}:
+        return PlayInputKind.DIRECT_PLAYLIST
+    return PlayInputKind.DIRECT_TRACK
 
 
 def describe_url(value: str) -> UrlProfile:

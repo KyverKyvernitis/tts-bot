@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-import base64
 import html
 import json
 import logging
 import re
-import time
-from typing import Any, Iterable
-from urllib.error import HTTPError
-from urllib.parse import quote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from typing import Any
+from urllib.parse import quote
 
 from ..modelos import ApiTrackBatch, ApiTrackCandidate
 from ..normalizacao import compact_key, normalize_text, parse_iso8601_duration
@@ -164,74 +159,14 @@ class SpotifyPublicoMixin:
         return bool((candidate.title or "").strip() and (candidate.artist or "").strip())
 
     async def _spotify_enrich_candidate(self, candidate: ApiTrackCandidate) -> ApiTrackCandidate:
-        """Completa artista/duração de um item público do Spotify.
+        """Mantém o candidato público sem consultar a Spotify Web API.
 
-        O fallback HTML às vezes só encontra o título. Se houver track id/URL,
-        usa a Web API de faixa, que normalmente funciona mesmo quando playlist
-        pública retorna 403 para apps novos. Se não houver id, tenta uma busca
-        curta no Spotify e aceita só um título bem parecido.
+        Antes este passo tentava ``/v1/tracks`` e ``/v1/search`` para completar
+        metadata incompleta. O fluxo de reprodução não pode depender de OAuth,
+        Client Credentials, refresh token ou plano de API. A segurança da
+        resolução continua garantida por ``_spotify_enrich_candidates``, que só
+        aceita itens públicos com título e artista.
         """
-        if self._spotify_candidate_metadata_ok(candidate) and candidate.duration:
-            return candidate
-        if not (self.spotify_client_id and self.spotify_client_secret):
-            return candidate
-        token = ""
-        try:
-            token = await self.spotify_token()
-        except Exception:
-            logger.debug("[music-api] token Spotify para enrich falhou", exc_info=True)
-        if not token:
-            return candidate
-
-        track_id = self._spotify_track_id_from_candidate(candidate)
-        if track_id:
-            try:
-                data = await self._to_thread_json(
-                    f"https://api.spotify.com/v1/tracks/{quote(track_id)}?market={quote(self.spotify_market)}",
-                    headers=self._spotify_headers(token),
-                )
-                enriched = self._spotify_candidate(data, url=candidate.webpage_url)
-                if enriched:
-                    enriched.source = candidate.source or "Spotify público"
-                    enriched.score = max(candidate.score, enriched.score)
-                    return enriched
-            except Exception:
-                logger.debug("[music-api] enrich Spotify por track id falhou | id=%s", track_id, exc_info=True)
-
-        title_norm = normalize_text(candidate.title)
-        if not title_norm:
-            return candidate
-        try:
-            params = urlencode({"q": candidate.title, "type": "track", "limit": 5, "market": self.spotify_market})
-            data = await self._spotify_to_thread_json(f"https://api.spotify.com/v1/search?{params}", headers=self._spotify_headers(token))
-            items = (((data.get("tracks") or {}).get("items")) or [])
-            best: ApiTrackCandidate | None = None
-            best_score = -999.0
-            for item in items:
-                found = self._spotify_candidate(item)
-                if not found:
-                    continue
-                found_norm = normalize_text(found.title)
-                if not found_norm:
-                    continue
-                # Exige título muito próximo quando não há artista para comparar.
-                title_words = set(title_norm.split())
-                found_words = set(found_norm.split())
-                overlap = len(title_words & found_words) / max(1, len(title_words))
-                score = overlap * 100
-                if found_norm == title_norm:
-                    score += 60
-                if candidate.duration and found.duration:
-                    diff = abs(float(candidate.duration) - float(found.duration))
-                    score += 30 if diff <= 5 else 15 if diff <= 15 else -30
-                if score > best_score:
-                    best_score = score
-                    best = found
-            if best and best_score >= 95:
-                best.source = candidate.source or "Spotify público"
-                return best
-        except Exception:
-            logger.debug("[music-api] enrich Spotify por search falhou | title=%r", candidate.title, exc_info=True)
         return candidate
 
     async def _spotify_enrich_candidates(self, candidates: list[ApiTrackCandidate], *, limit: int) -> list[ApiTrackCandidate]:
@@ -437,102 +372,21 @@ class SpotifyPublicoMixin:
                         tracks=tracks,
                         title=last_title or (tracks[0].album if kind == "album" else "Spotify"),
                         is_playlist=kind in {"album", "playlist"} or len(tracks) > 1,
-                        truncated=len(tracks) >= limit,
+                        truncated=kind in {"album", "playlist"} and len(tracks) >= limit,
                         source="Spotify público",
                     )
         return None
 
     async def spotify_public_batch_from_url(self, url: str, *, limit: int = 25) -> ApiTrackBatch | None:
+        """Resolve metadata Spotify somente pelas páginas públicas/embed.
+
+        Este método é deliberadamente independente de ``api.spotify.com`` e
+        dos fluxos OAuth. O Spotify continua sendo apenas fonte de identidade
+        da música; áudio e busca tocável permanecem no pipeline do worker.
+        """
         kind, item_id = self._spotify_resource(url)
         if not item_id or not self.spotify_public_fallback_enabled:
             return None
         limit = max(1, min(self.spotify_public_fallback_max_tracks, int(limit)))
-        quoted_id = quote(item_id)
-        last_error: Exception | None = None
-        try:
-            if kind == "track":
-                data = await self._spotify_public_json(f"tracks/{quoted_id}?market={quote(self.spotify_market)}")
-                candidate = self._spotify_candidate(data, url=url)
-                if candidate:
-                    candidate.source = "Spotify público"
-                    return ApiTrackBatch(tracks=[candidate], title=candidate.title, is_playlist=False, source="Spotify público")
-            elif kind == "album":
-                data = await self._spotify_public_json(f"albums/{quoted_id}?market={quote(self.spotify_market)}")
-                if data:
-                    album_title = str(data.get("name") or "Álbum Spotify")
-                    images = data.get("images") or []
-                    album_image = str((images[0] or {}).get("url") or "") if images else ""
-                    album_artists = data.get("artists") or []
-                    default_artist = ", ".join(str(a.get("name") or "").strip() for a in album_artists if a.get("name"))
-                    tracks: list[ApiTrackCandidate] = []
-                    for item in (((data.get("tracks") or {}).get("items")) or [])[:limit]:
-                        candidate = self._spotify_candidate({**item, "album": data}, url=str(((item.get("external_urls") or {}).get("spotify")) or url))
-                        if candidate:
-                            candidate.source = "Spotify público"
-                            if not candidate.artist:
-                                candidate.artist = default_artist
-                            if not candidate.thumbnail:
-                                candidate.thumbnail = album_image
-                            candidate.album = album_title
-                            tracks.append(candidate)
-                    total = int(((data.get("tracks") or {}).get("total")) or len(tracks))
-                    if tracks:
-                        tracks = await self._spotify_enrich_candidates(tracks, limit=limit)
-                        if tracks:
-                            return ApiTrackBatch(tracks=tracks, title=album_title, is_playlist=True, truncated=total > len(tracks), source="Spotify público")
-            elif kind == "playlist":
-                tracks: list[ApiTrackCandidate] = []
-                offset = 0
-                total = 0
-                playlist_title = "Playlist Spotify"
-                try:
-                    meta = await self._spotify_public_json(
-                        f"playlists/{quoted_id}?fields=name,tracks.total&market={quote(self.spotify_market)}"
-                    )
-                    playlist_title = str(meta.get("name") or playlist_title)
-                    total = int(((meta.get("tracks") or {}).get("total")) or 0)
-                except Exception as exc:
-                    last_error = exc
-                    logger.debug("[music-api] fallback público Spotify meta playlist falhou", exc_info=True)
-                while len(tracks) < limit:
-                    page_limit = min(50, limit - len(tracks))
-                    fields = "items(track(name,artists(name),album(name,images),duration_ms,external_ids,external_urls,is_local,type)),next,total"
-                    params = urlencode({
-                        "limit": page_limit,
-                        "offset": offset,
-                        "fields": fields,
-                        "market": self.spotify_market,
-                        "additional_types": "track",
-                    })
-                    data = await self._spotify_public_json(f"playlists/{quoted_id}/tracks?{params}")
-                    items = data.get("items") or []
-                    if not items:
-                        break
-                    for row in items:
-                        track_data = row.get("track") or {}
-                        if not track_data or track_data.get("is_local") or str(track_data.get("type") or "track") != "track":
-                            continue
-                        candidate = self._spotify_candidate(track_data)
-                        if candidate:
-                            candidate.source = "Spotify público"
-                            tracks.append(candidate)
-                            if len(tracks) >= limit:
-                                break
-                    total = total or int(data.get("total") or 0)
-                    if not data.get("next"):
-                        break
-                    offset += len(items)
-                if tracks:
-                    tracks = await self._spotify_enrich_candidates(tracks, limit=limit)
-                    if tracks:
-                        return ApiTrackBatch(tracks=tracks, title=playlist_title, is_playlist=True, truncated=bool((total or 0) and total > len(tracks)), source="Spotify público")
-        except Exception as exc:
-            last_error = exc
-            logger.debug("[music-api] fallback público Spotify API falhou | kind=%s id=%s", kind, item_id, exc_info=True)
+        return await self._spotify_public_page_batch(kind, item_id, limit=limit, original_url=url)
 
-        page_batch = await self._spotify_public_page_batch(kind, item_id, limit=limit, original_url=url)
-        if page_batch and page_batch.tracks:
-            return page_batch
-        if last_error:
-            logger.debug("[music-api] fallback público Spotify sem resultado", exc_info=last_error)
-        return None

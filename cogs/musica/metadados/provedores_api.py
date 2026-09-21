@@ -122,7 +122,9 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
         host = (parsed.netloc or "").lower()
         path = parsed.path or ""
         if "open.spotify.com" in host:
-            return await self.spotify_batch_from_url(url, limit=limit)
+            # Playback não depende da Spotify Web API/OAuth. Links Spotify são
+            # direct play e usam somente metadata pública do web player/embed.
+            return await self.spotify_public_batch_from_url(url, limit=limit)
         if "deezer.com" in host:
             return await self.deezer_batch_from_url(url, limit=limit)
         if "soundcloud.com" in host and self.soundcloud_enabled and (self.soundcloud_token or self.soundcloud_client_id):

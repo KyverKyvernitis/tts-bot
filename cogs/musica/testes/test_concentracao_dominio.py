@@ -168,7 +168,8 @@ def test_roteador_legado_carrega_extrator_e_backends_sob_demanda() -> None:
 
 def test_worker_only_nao_materializa_extrator_so_para_classificar_url() -> None:
     texto = _texto("cogs/musica/comandos/tocar.py")
-    assert "not input_profile.is_url and len(batch.tracks) > 1" in texto
+    assert "input_kind = self._play_input_kind(query)" in texto
+    assert "input_kind is PlayInputKind.SEARCH" in texto
     assert "not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1" not in texto
 
 

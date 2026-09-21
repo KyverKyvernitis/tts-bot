@@ -1285,29 +1285,19 @@ class MusicExtractor:
             )
 
         if profile.platform == "spotify" and profile.resource_type == "playlist":
-            if any(token in api_error for token in ("HTTP Error 429", "HTTP Error 500", "HTTP Error 502", "HTTP Error 503", "HTTP Error 504", "temporarily_unavailable")):
-                raise MusicExtractionError(
-                    "A Spotify API ficou temporariamente indisponível ao ler essa playlist pública. Tente novamente em alguns segundos; se repetir, envie uma playlist menor ou uma música única.",
-                    detail=api_error,
-                )
-            if "404" in api_error or "Not Found" in api_error or "Resource not found" in api_error:
-                raise MusicExtractionError(
-                    "A Spotify API não expôs essa playlist para o token atual. Ela pode parecer pública no app/site, mas a Web API retornou 404 para esse link.",
-                    detail=api_error,
-                )
-            if "403" in api_error or "Forbidden" in api_error:
-                raise MusicExtractionError(
-                    "A Spotify API recusou essa playlist. Se ela for privada/colaborativa, gere um SPOTIFY_REFRESH_TOKEN com acesso; se for pública, é restrição temporária ou do app Spotify.",
-                    detail=api_error,
-                )
             raise MusicExtractionError(
-                "Não consegui ler essa playlist do Spotify. Para playlists públicas o bot tenta client credentials primeiro; se uma playlist pequena funciona, este link específico pode estar restrito, paginado com erro ou temporariamente indisponível.",
+                "Não consegui ler essa playlist pública do Spotify agora. O bot usa apenas metadata pública do web player/embed, sem Spotify Web API, OAuth ou token Premium.",
                 detail=api_error,
             )
 
-        if profile.platform in {"spotify", "deezer"} and profile.resource_type in {"playlist", "album"}:
+        if profile.platform == "spotify" and profile.resource_type == "album":
             raise MusicExtractionError(
-                "Não consegui ler essa playlist/álbum. Configure a API da plataforma ou envie uma pesquisa/link de música única.",
+                "Não consegui ler esse álbum público do Spotify agora. O bot usa apenas metadata pública do web player/embed, sem Spotify Web API ou OAuth.",
+                detail=api_error,
+            )
+        if profile.platform == "deezer" and profile.resource_type in {"playlist", "album"}:
+            raise MusicExtractionError(
+                "Não consegui ler essa playlist/álbum do Deezer. Configure a integração da plataforma ou envie uma pesquisa/link de música única.",
                 detail=api_error,
             )
 
