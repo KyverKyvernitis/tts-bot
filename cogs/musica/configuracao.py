@@ -192,6 +192,13 @@ MUSIC_AUTO_BITRATE_MAX = max(8000, _parse_int(os.getenv("MUSIC_AUTO_BITRATE_MAX"
 MUSIC_AUTO_BITRATE_MIN_GAIN = max(0, _parse_int(os.getenv("MUSIC_AUTO_BITRATE_MIN_GAIN", "16000"), 16000))
 MUSIC_PANEL_UPDATE_THROTTLE_SECONDS = max(0.05, _parse_float(os.getenv("MUSIC_PANEL_UPDATE_THROTTLE_SECONDS", "2.0"), 2.0))
 MUSIC_PANEL_REPOST_ON_TRACK_CHANGE = _parse_bool(os.getenv("MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", "true"), True)
+MUSIC_SOURCE_EMOJIS = {
+    "youtube": "<:YouTube:1502490543891021827>",
+    "spotify": "<:Spotify:1502490573205016676>",
+    "deezer": "<:Deezer:1502490958997094420>",
+    "soundcloud": "<:SoundCloud:1502491211485675631>",
+}
+MUSIC_SOURCE_EMOJI_FALLBACK = "🎵"
 MUSIC_VOICE_STATUS_ENABLED = _parse_bool(os.getenv("MUSIC_VOICE_STATUS_ENABLED", "true"), True)
 MUSIC_VOICE_STATUS_TEMPLATE = (
     os.getenv(

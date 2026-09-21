@@ -128,13 +128,10 @@ MUSIC_VOICE_STATUS_ENABLED = bool(getattr(config, "MUSIC_VOICE_STATUS_ENABLED", 
 MUSIC_VOICE_STATUS_TEMPLATE = str(getattr(config, "MUSIC_VOICE_STATUS_TEMPLATE", "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})") or "{source_emoji} <a:2574_Rainbow_Heart:1381731924162384023> {title}, {author} ({requester})").strip()
 MUSIC_VOICE_STATUS_IDLE = str(getattr(config, "MUSIC_VOICE_STATUS_IDLE", "") or "").strip()
 MUSIC_VOICE_STATUS_UPDATE_INTERVAL_SECONDS = max(15.0, float(getattr(config, "MUSIC_VOICE_STATUS_UPDATE_INTERVAL_SECONDS", 60.0)))
-MUSIC_SOURCE_EMOJIS = {
-    "youtube": "<:YouTube:1502490543891021827>",
-    "spotify": "<:Spotify:1502490573205016676>",
-    "deezer": "<:Deezer:1502490958997094420>",
-    "soundcloud": "<:SoundCloud:1502491211485675631>",
-}
-MUSIC_SOURCE_EMOJI_FALLBACK = "🎵"
+# Fonte única dos emojis visuais de música. Mantém status e UI sincronizados
+# sem qualquer consulta ao Discord no caminho crítico.
+MUSIC_SOURCE_EMOJIS = config.MUSIC_SOURCE_EMOJIS
+MUSIC_SOURCE_EMOJI_FALLBACK = config.MUSIC_SOURCE_EMOJI_FALLBACK
 
 PHONE_WORKER_ENABLED = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
 PHONE_WORKER_HOST = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()

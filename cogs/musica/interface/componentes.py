@@ -24,6 +24,9 @@ from .tarefas import agendar_tarefa_unica
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 QUEUE_PAGE_SIZE = 8
+# Já resolvido em memória no import: nenhuma chamada de API/fetch de emoji é feita
+# quando o menu de resultados é montado.
+YOUTUBE_SEARCH_OPTION_EMOJI = config.MUSIC_SOURCE_EMOJIS.get("youtube") or config.MUSIC_SOURCE_EMOJI_FALLBACK
 logger = logging.getLogger(__name__)
 
 
@@ -1002,7 +1005,7 @@ class SearchSelect(discord.ui.Select):
                     label=track.short_title[:100],
                     description=f"{track.uploader or track.source or 'resultado'} • {track.duration_label}"[:100],
                     value=str(idx),
-                    emoji="🎵",
+                    emoji=YOUTUBE_SEARCH_OPTION_EMOJI,
                 )
             )
         super().__init__(placeholder="Escolha o resultado para adicionar ao queue", min_values=1, max_values=1, options=options)
