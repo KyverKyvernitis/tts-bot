@@ -13,6 +13,7 @@ from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_ag
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from ..interface.carregamento import MusicLoadingReaction
 from ..interface.componentes import SearchResultView
+from ..metadados.direct_play import consulta_metadata_direct_play
 from ..metadados.modelos import PlayInputKind
 from ..metadados.provedores import classify_play_input, describe_url
 from ..nucleo.erros import MusicExtractionError
@@ -385,13 +386,11 @@ class FluxoTocar:
         source = str(getattr(track, "source", "") or getattr(track, "display_source", "") or "").lower()
         is_metadata = extractor == "metadata" or any(token in source for token in ("spotify", "deezer", "apple", "metadata"))
         if is_metadata:
-            base = str(getattr(track, "display_title", "") or getattr(track, "title", "") or fallback or "").strip()
-            uploader = str(getattr(track, "display_uploader", "") or getattr(track, "uploader", "") or "").strip()
-            if uploader and uploader.lower() not in base.lower():
-                base = f"{uploader} {base}".strip()
-            if base and "official" not in base.lower():
-                base = f"{base} official audio"
-            return base or fallback or getattr(track, "title", "") or ""
+            return consulta_metadata_direct_play(
+                titulo=str(getattr(track, "display_title", "") or getattr(track, "title", "") or ""),
+                artista=str(getattr(track, "display_uploader", "") or getattr(track, "uploader", "") or ""),
+                fallback=fallback,
+            )
         return str(getattr(track, "webpage_url", "") or getattr(track, "original_url", "") or getattr(track, "stream_url", "") or getattr(track, "title", "") or fallback or "").strip()
 
     def _music_agent_tracks_payload(self, tracks: list[MusicTrack], *, requester_id: int = 0, requester_name: str = "") -> list[dict]:

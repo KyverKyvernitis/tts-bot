@@ -316,9 +316,14 @@ class MusicExtractor:
                 f"Não consegui confirmar essa faixa do {platform_label}. O link só retornou `{title}` sem artista/duração confiável. "
                 "Para evitar tocar uma música errada, não adicionei nada ao queue."
             )
+        if (platform or "").lower() == "spotify":
+            return (
+                "Não consegui ler título/artista suficientes desse link público do Spotify agora. "
+                "Tente novamente ou pesquise por `nome da música artista`; o playback não exige Spotify Web API/OAuth."
+            )
         return (
             f"Não consegui ler artista/duração confiável desse link do {platform_label}. "
-            "Tente configurar a API da plataforma ou pesquise por `nome da música artista`."
+            "Tente outro link público ou pesquise por `nome da música artista`."
         )
 
     def _candidate_matches_metadata(self, candidate: ApiTrackCandidate, meta: ApiTrackCandidate) -> bool:
@@ -1259,8 +1264,12 @@ class MusicExtractor:
         """
         api_batch: ApiTrackBatch | None = None
         api_error = ""
+        # Direct track nunca precisa materializar uma janela de playlist. Isso
+        # mantém o caminho Spotify-track barato e deixa o limite grande apenas
+        # para coleções, que serão tornadas lazy nas waves seguintes.
+        metadata_limit = 1 if profile.resource_type == "track" else self.max_playlist_items
         try:
-            api_batch = await self.api.metadata_batch_from_url(profile.canonical, limit=self.max_playlist_items)
+            api_batch = await self.api.metadata_batch_from_url(profile.canonical, limit=metadata_limit)
         except Exception as exc:
             api_error = str(exc)
             logger.debug("[music] metadata batch API falhou | url=%s", profile.raw, exc_info=True)
@@ -1268,10 +1277,15 @@ class MusicExtractor:
         if api_batch and api_batch.tracks:
             tracks = [
                 self._metadata_track_from_candidate(candidate, requester_id=requester_id, requester_name=requester_name, original_url=profile.raw)
-                for candidate in api_batch.tracks[: self.max_playlist_items]
+                for candidate in api_batch.tracks[:metadata_limit]
                 if self._metadata_is_safe_for_autosearch(candidate)
             ]
-            tracks = self._dedupe_tracks(tracks)
+            # Em playlist/álbum, repetição pode ser intencional e a ordem faz
+            # parte do conteúdo. Além disso, o fallback HTML público nem sempre
+            # expõe URL individual por faixa; deduplicar pelo URL da coleção
+            # colapsaria toda a playlist em um único item.
+            if not (api_batch.is_playlist or profile.resource_type in {"playlist", "album"}):
+                tracks = self._dedupe_tracks(tracks)
             if not tracks:
                 if api_batch.is_playlist:
                     raise MusicExtractionError("Consegui ler a playlist, mas nenhuma música veio com artista/duração confiável o suficiente para tocar com segurança.")

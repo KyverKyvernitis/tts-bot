@@ -268,6 +268,12 @@ class ResolucaoMixin:
         url_is_metadata_only = source_kind in {"spotify", "deezer", "apple"}
         if original_url.startswith(("http://", "https://")) and not url_is_metadata_only:
             return original_url
+        # O VPS já pode enviar a consulta interna fechada em ytsearch1. Não a
+        # reconstrua no Agent: além de preservar o contrato direct-play, isso
+        # impede que MUSIC_AGENT_YTDLP_DEFAULT_SEARCH=ytsearch3 multiplique
+        # candidatos para uma faixa cuja identidade já é conhecida.
+        if raw_query.lower().startswith(("ytsearch", "ytmsearch")):
+            return raw_query
         if raw_query.startswith(("http://", "https://")) and not any(marker in raw_query.lower() for marker in ("spotify.com", "deezer.com", "music.apple.com")):
             return raw_query
         title = _metadata_text(meta.get("display_title") or meta.get("title") or meta.get("track") or fallback_query, limit=160)
@@ -276,8 +282,10 @@ class ResolucaoMixin:
             text = f"{artist} - {title}"
         else:
             text = title or artist or raw_query
-        if source_kind in {"spotify", "deezer", "apple"} and text and "official" not in text.lower():
+        if url_is_metadata_only and text and "official" not in text.lower():
             text = f"{text} official audio"
+        if url_is_metadata_only and text:
+            return f"ytsearch1:{text.strip()}"
         return text.strip()
 
     def _agent_track_from_metadata(self, track_meta: dict[str, Any], *, body: dict[str, Any], fallback_query: Any = "") -> AgentTrack:
