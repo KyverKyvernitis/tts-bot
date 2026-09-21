@@ -62,8 +62,10 @@ def test_animacoes_existentes_sao_preservadas_sem_polling_extra() -> None:
     build = _method_source(COMPONENTS, "MusicPlayerView", "_build")
 
     assert 'PLAYER_STATUS_ANIMATED_URL = "https://i.ibb.co/QXtk5VB/neon-circle.gif"' in source
+    assert 'PLAYER_STATUS_ANIMATED_EMOJI = "<a:loading:1510065277868445796>"' in source
     assert "bar.add_item(media=PLAYER_BAR_URL" in build
-    assert "discord.ui.Thumbnail(status_icon" in build
+    assert 'discord.ui.TextDisplay(f"**{status_emoji} {status_title}**")' in build
+    assert "discord.ui.Thumbnail(status_" not in build
     assert "await " not in build
     for forbidden in ("music_agent_status(", "resolve_music_tracks_on_worker(", "yt_dlp", "aiohttp", "requests."):
         assert forbidden not in build
@@ -96,8 +98,9 @@ def test_painel_refinado_prioriza_faixa_barra_fila_e_controles() -> None:
     source = COMPONENTS.read_text(encoding="utf-8")
     build = _method_source(COMPONENTS, "MusicPlayerView", "_build")
 
-    assert 'discord.ui.TextDisplay(f"**{status_title}**")' in build
-    assert 'discord.ui.TextDisplay(f"### {status_title}")' not in build
+    assert 'discord.ui.TextDisplay(f"**{status_emoji} {status_title}**")' in build
+    assert 'discord.ui.TextDisplay(f"**{status_title}**")' not in build
+    assert "accessory=discord.ui.Thumbnail(status_" not in build
     assert '"-# Use os controles abaixo para controlar o player."' not in build
 
     # Ordem semântica: dados da faixa -> barra animada -> fila -> controles.

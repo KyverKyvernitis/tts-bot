@@ -24,6 +24,10 @@ from .tarefas import agendar_tarefa_unica
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 PLAYER_STATUS_ANIMATED_URL = "https://i.ibb.co/QXtk5VB/neon-circle.gif"
+# Components V2 não aceita uma URL de imagem inline dentro de TextDisplay.
+# Reutilizamos um emoji animado já presente no projeto para que o indicador
+# de estado fique ao lado do título, como o author icon do embed antigo, sem I/O.
+PLAYER_STATUS_ANIMATED_EMOJI = "<a:loading:1510065277868445796>"
 PLAYER_PAUSED_ICON_URL = "https://cdn.discordapp.com/attachments/480195401543188483/896013933197013002/pause.png"
 PLAYER_ERROR_ICON_URL = "https://cdn.discordapp.com/emojis/1215703754471268414.png"
 QUEUE_PAGE_SIZE = 8
@@ -700,34 +704,41 @@ def _track_link_v2(track: MusicTrack, *, title_limit: int = 84, bold: bool = Fal
 
 
 def _player_status_presentation(state) -> tuple[str, str, discord.Colour]:
+    """Retorna título, emoji inline e cor do estado do player.
+
+    O embed antigo podia usar ``set_author(..., icon_url=...)``. Components V2
+    não possui author icon e TextDisplay não renderiza uma URL arbitrária como
+    imagem inline; por isso o equivalente correto é um emoji Discord no próprio
+    texto do cabeçalho. Todos os valores são locais, sem fetch ou request.
+    """
     status = str(getattr(state, "current_status", "playing") or "playing").lower()
     paused = bool(getattr(state, "paused", False)) or status == "paused"
     if status == "error":
-        return "Erro no player", PLAYER_ERROR_ICON_URL, discord.Color.red()
+        return "Erro no player", "❌", discord.Color.red()
     if status == "skipping":
-        return "Pulando música", PLAYER_STATUS_ANIMATED_URL, discord.Color.gold()
+        return "Pulando música", "⏭️", discord.Color.gold()
     if status in {"resolving", "starting"}:
-        return "Preparando áudio", PLAYER_STATUS_ANIMATED_URL, discord.Color.gold()
+        return "Preparando áudio", PLAYER_STATUS_ANIMATED_EMOJI, discord.Color.gold()
     if paused:
-        return "Em pausa", PLAYER_PAUSED_ICON_URL, discord.Color.gold()
+        return "Em pausa", "⏸️", discord.Color.gold()
     if getattr(state, "current", None) is not None:
-        return "Tocando Agora", PLAYER_STATUS_ANIMATED_URL, discord.Color.blurple()
+        return "Tocando Agora", PLAYER_STATUS_ANIMATED_EMOJI, discord.Color.blurple()
 
     queue = _queue_items(state)
     if queue:
-        return "Fila pronta", PLAYER_STATUS_ANIMATED_URL, discord.Color.blurple()
+        return "Fila pronta", "🎶", discord.Color.blurple()
     reason = str(getattr(state, "idle_reason", "idle") or "idle")
     if reason == "manual_stop":
-        return "Player encerrado", PLAYER_ERROR_ICON_URL, discord.Color.dark_grey()
+        return "Player encerrado", "⏹️", discord.Color.dark_grey()
     if reason == "external_disconnect":
-        return "Player interrompido", PLAYER_ERROR_ICON_URL, discord.Color.red()
+        return "Player interrompido", "⚠️", discord.Color.red()
     if reason == "external_move":
-        return "Player movido", PLAYER_STATUS_ANIMATED_URL, discord.Color.blurple()
+        return "Player movido", "↪️", discord.Color.blurple()
     if reason == "track_failed":
-        return "Não consegui iniciar", PLAYER_ERROR_ICON_URL, discord.Color.red()
+        return "Não consegui iniciar", "❌", discord.Color.red()
     if reason == "queue_finished":
-        return "As músicas acabaram", PLAYER_STATUS_ANIMATED_URL, discord.Color.dark_grey()
-    return "Nada tocando agora", PLAYER_STATUS_ANIMATED_URL, discord.Color.dark_grey()
+        return "As músicas acabaram", "✅", discord.Color.dark_grey()
+    return "Nada tocando agora", "💤", discord.Color.dark_grey()
 
 
 def _player_track_text(state, track: MusicTrack) -> str:
@@ -2113,18 +2124,13 @@ class MusicPlayerView(discord.ui.LayoutView):
         state = self.router.get_state(self.guild_id)
         current = getattr(state, "current", None)
         queue = _queue_items(state)
-        status_title, status_icon, accent_color = _player_status_presentation(state)
+        status_title, status_emoji, accent_color = _player_status_presentation(state)
         controls = self._control_state(state, queue)
 
         container = discord.ui.Container(accent_color=accent_color)
-        container.add_item(
-            discord.ui.Section(
-                # A animação de status continua dinâmica. O texto deixa de usar
-                # heading para não competir visualmente com o título da música.
-                discord.ui.TextDisplay(f"**{status_title}**"),
-                accessory=discord.ui.Thumbnail(status_icon, description=status_title),
-            )
-        )
+        # No embed antigo o indicador ficava ao lado do author/title. Em V2 ele
+        # volta a ocupar essa posição como emoji inline, em vez de virar thumbnail.
+        container.add_item(discord.ui.TextDisplay(f"**{status_emoji} {status_title}**"))
 
         if current is not None:
             track_text = discord.ui.TextDisplay(_player_track_text(state, current))
