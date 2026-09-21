@@ -10,6 +10,41 @@ from ..agente_telefone.roteamento import desvincular_guild_worker
 from ..nucleo.modelos import MusicTrack
 
 
+def _playlist_virtual_publica(remote: dict[str, Any]) -> dict[str, Any]:
+    """Normaliza somente metadata leve da playlist virtual para a UI local."""
+
+    virtual = remote.get("virtual_playlist") if isinstance(remote.get("virtual_playlist"), dict) else None
+    if not virtual:
+        return {}
+    cursor = virtual.get("cursor") if isinstance(virtual.get("cursor"), dict) else None
+    if not cursor or bool(cursor.get("exhausted")):
+        return {}
+
+    def inteiro(value: Any, default: int = 0) -> int:
+        try:
+            return max(0, int(value if value not in (None, "") else default))
+        except Exception:
+            return max(0, int(default))
+
+    total_raw = cursor.get("total_tracks")
+    try:
+        total_tracks = None if total_raw in (None, "") else max(0, int(total_raw))
+    except Exception:
+        total_tracks = None
+
+    return {
+        "active": True,
+        "provider": str(cursor.get("provider") or "").strip(),
+        "source_url": str(cursor.get("source_url") or "").strip(),
+        "title": str(cursor.get("title") or "").strip(),
+        "resource_type": str(cursor.get("resource_type") or "playlist").strip() or "playlist",
+        "next_offset": inteiro(cursor.get("next_offset")),
+        "total_tracks": total_tracks,
+        "materialized_before": inteiro(virtual.get("materialized_before")),
+        "waiting": bool(virtual.get("waiting")),
+    }
+
+
 def sincronizar_fila_remota(
     state: Any,
     remote: dict[str, Any],
@@ -23,6 +58,10 @@ def sincronizar_fila_remota(
     """
     if not isinstance(remote, dict):
         return
+
+    # Atualize o cursor mesmo quando o Worker omitir o preview da fila. Isso
+    # evita a UI dizer "fila vazia" enquanto está parada exatamente no marker.
+    state.agent_virtual_playlist = _playlist_virtual_publica(remote)
 
     remote_queue = remote.get("queue")
     try:

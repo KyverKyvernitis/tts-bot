@@ -36,6 +36,23 @@ def _assinatura_faixa_painel(item: Any) -> tuple[Any, ...]:
     )
 
 
+def _assinatura_playlist_virtual(remote: dict[str, Any]) -> tuple[Any, ...]:
+    virtual = remote.get("virtual_playlist") if isinstance(remote.get("virtual_playlist"), dict) else None
+    if not virtual:
+        return ()
+    cursor = virtual.get("cursor") if isinstance(virtual.get("cursor"), dict) else {}
+    return (
+        str(cursor.get("provider") or ""),
+        str(cursor.get("source_url") or ""),
+        str(cursor.get("title") or ""),
+        cursor.get("next_offset"),
+        cursor.get("total_tracks"),
+        bool(cursor.get("exhausted")),
+        virtual.get("materialized_before"),
+        bool(virtual.get("waiting")),
+    )
+
+
 def _assinatura_painel_remoto(remote: dict[str, Any]) -> tuple[Any, ...]:
     """Retorna apenas campos remotos que podem mudar o painel/controles.
 
@@ -73,6 +90,7 @@ def _assinatura_painel_remoto(remote: dict[str, Any]) -> tuple[Any, ...]:
         bool(remote.get("previous_available")),
         _assinatura_faixa_painel(current),
         queue_signature,
+        _assinatura_playlist_virtual(remote),
     )
 
 

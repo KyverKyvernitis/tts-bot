@@ -14,10 +14,12 @@ from cogs.musica import configuracao as config
 from ..nucleo.erros import MusicExtractionError
 from ..busca import registrar_selecao_busca
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
+from ..nucleo.playlist_virtual import bounded_initial_window
 from ..metadados.provedores import describe_url
 from ..agente_telefone.comandos import music_agent_command, music_agent_status
 from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..reproducao.controle_remoto import enviar_controle_remoto
+from ..reproducao.playlist_virtual import payload_cursor_playlist, schedule_playlist_refill_from_result
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from .carregamento import MusicLoadingReaction
 from .tarefas import agendar_tarefa_unica
@@ -608,6 +610,27 @@ def _queue_total_count(state, items: list[MusicTrack]) -> int:
     return max(0, total)
 
 
+def _virtual_playlist_info(state) -> dict:
+    value = getattr(state, "agent_virtual_playlist", None)
+    if not isinstance(value, dict) or not bool(value.get("active")):
+        return {}
+    return value
+
+
+def _virtual_playlist_total_label(state) -> str:
+    info = _virtual_playlist_info(state)
+    if not info:
+        return ""
+    total = info.get("total_tracks")
+    try:
+        total_int = max(0, int(total)) if total not in (None, "") else 0
+    except Exception:
+        total_int = 0
+    if total_int:
+        return f"{total_int} música{'s' if total_int != 1 else ''} no total"
+    return "playlist carregando…"
+
+
 def _queue_duration_label(items: list[MusicTrack]) -> str:
     total = 0
     unknown = False
@@ -729,6 +752,8 @@ def _player_status_presentation(state) -> tuple[str, str, discord.Colour]:
     queue = _queue_items(state)
     if queue:
         return "Fila pronta", "🎶", discord.Color.blurple()
+    if _virtual_playlist_info(state):
+        return "Carregando playlist", PLAYER_STATUS_ANIMATED_EMOJI, discord.Color.gold()
     reason = str(getattr(state, "idle_reason", "idle") or "idle")
     if reason == "manual_stop":
         return "Player encerrado", "⏹️", discord.Color.dark_grey()
@@ -773,7 +798,13 @@ def _player_track_text(state, track: MusicTrack) -> str:
 def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None = None, page: int = 0) -> str:
     items = _queue_items(state)
     total = _queue_total_count(state, items)
+    virtual = _virtual_playlist_info(state)
     if not items:
+        if virtual:
+            title = _escape(str(virtual.get("title") or "playlist"), limit=72)
+            total_label = _virtual_playlist_total_label(state)
+            detail = f" · **{title}**" if title and title.lower() != "playlist" else ""
+            return f"**Fila** · {total_label}{detail}\n-# Próximas músicas sendo carregadas sob demanda."
         return "**Fila** · vazia\n-# Use `_play <nome ou link>` para adicionar músicas."
 
     page = max(0, int(page))
@@ -783,7 +814,15 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
     else:
         preview = items[: max(1, int(limit))]
     duration = _queue_duration_label(items)
-    header = f"**Fila** · {total} música{'s' if total != 1 else ''} · {duration}"
+    if virtual:
+        total_label = _virtual_playlist_total_label(state)
+        header = f"**Fila** · {total_label}"
+        title = _escape(str(virtual.get("title") or ""), limit=72)
+        if title and title.lower() != "playlist":
+            header += f" · **{title}**"
+        header += f"\n-# {total} próxima{'s' if total != 1 else ''} pronta{'s' if total != 1 else ''} · duração carregada {duration}"
+    else:
+        header = f"**Fila** · {total} música{'s' if total != 1 else ''} · {duration}"
     lines = [header]
     for offset, item in enumerate(preview, start=1):
         position = start + offset
@@ -791,7 +830,9 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
         lines.append(f"**{marker}** {_track_link_v2(item, title_limit=58)} · {item.duration_label}")
     hidden = max(0, int(total) - len(preview) - start)
     if hidden:
-        lines.append(f"-# + {hidden} música{'s' if hidden != 1 else ''}")
+        lines.append(f"-# + {hidden} música{'s' if hidden != 1 else ''} já carregada{'s' if hidden != 1 else ''}")
+    if virtual:
+        lines.append("-# + restante da playlist carregado automaticamente conforme necessário")
     return "\n".join(lines)
 
 
@@ -1401,6 +1442,21 @@ class AddSongModal(discord.ui.Modal):
             await interaction.followup.send("`📭` Não encontrei nada tocável.", ephemeral=True)
             return
 
+        virtual_playlist_cursor = getattr(batch, "playlist_cursor", None)
+        if (
+            getattr(self.router, "music_worker_only_enabled", lambda: False)()
+            and batch.is_playlist
+            and virtual_playlist_cursor is not None
+            and not virtual_playlist_cursor.exhausted
+        ):
+            window_tracks, virtual_playlist_cursor = bounded_initial_window(
+                batch.tracks,
+                virtual_playlist_cursor,
+            )
+            batch.tracks = window_tracks
+            batch.playlist_cursor = virtual_playlist_cursor
+            batch.truncated = True
+
         should_open_selection = bool(
             force_selection
             or (not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1)
@@ -1432,9 +1488,20 @@ class AddSongModal(discord.ui.Modal):
 
         if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
             track = batch.tracks[0]
-            is_multi = bool(len(batch.tracks) > 1)
+            virtual_cursor = getattr(batch, "playlist_cursor", None)
+            virtual_active = bool(batch.is_playlist and virtual_cursor is not None and not virtual_cursor.exhausted)
+            is_multi = bool(len(batch.tracks) > 1 or virtual_active)
             try:
                 if is_multi:
+                    tracks_payload = _agent_tracks_payload(batch.tracks, requester_id=interaction.user.id, requester_name=requester_name)
+                    if virtual_active:
+                        tracks_payload.append(
+                            payload_cursor_playlist(
+                                virtual_cursor,
+                                requester_id=interaction.user.id,
+                                requester_name=requester_name,
+                            )
+                        )
                     result = await music_agent_command(
                         "enqueue_many",
                         guild_id=guild.id,
@@ -1442,7 +1509,7 @@ class AddSongModal(discord.ui.Modal):
                         text_channel_id=getattr(text_channel, "id", self.text_channel_id),
                         query=query,
                         track=track,
-                        tracks=_agent_tracks_payload(batch.tracks, requester_id=interaction.user.id, requester_name=requester_name),
+                        tracks=tracks_payload,
                         requester_id=interaction.user.id,
                         requester_name=requester_name,
                     )
@@ -1483,6 +1550,11 @@ class AddSongModal(discord.ui.Modal):
                 result,
                 queued=bool(result.get("queued")),
             )
+            if virtual_active:
+                # Igual ao comando _play: a primeira faixa chega ao Worker antes
+                # de qualquer refill. O restante da janela só é agendado depois
+                # do ACK de play/enqueue, sem polling adicional.
+                schedule_playlist_refill_from_result(self.router, guild.id, result)
             if is_multi:
                 added = int(result.get("added") or len(batch.tracks))
                 label = f" de **{discord.utils.escape_markdown((batch.playlist_title or '')[:80])}**" if batch.playlist_title else ""
@@ -1492,16 +1564,30 @@ class AddSongModal(discord.ui.Modal):
                     queue_total = int(state_payload.get("queue_size") or 0)
                 except Exception:
                     queue_total = 0
-                if bool(result.get("queued")):
-                    total_line = f"\n`🎶` Queue agora: `{queue_total}` música(s)." if queue_total else ""
+                if virtual_active:
+                    if bool(result.get("queued")):
+                        ready_line = f"\n`🎶` `{queue_total}` música(s) já pronta(s) no player." if queue_total else ""
+                        sent = await interaction.followup.send(
+                            f"`📑` **Playlist adicionada à fila{label}.** O restante será carregado automaticamente sob demanda.{ready_line}",
+                            ephemeral=True,
+                            wait=True,
+                        )
+                    else:
+                        sent = await interaction.followup.send(
+                            f"`📑` **Playlist em direct play{label}.**\n`🎧` Preparando a primeira faixa; o restante será carregado sob demanda.",
+                            ephemeral=True,
+                            wait=True,
+                        )
+                elif bool(result.get("queued")):
+                    total_line = f"\n`🎶` Fila agora: `{queue_total}` música(s)." if queue_total else ""
                     sent = await interaction.followup.send(
-                        f"`📑` **Playlist adicionada ao final do queue:** `{added}` {count_label}{label}.{total_line}",
+                        f"`📑` **Playlist adicionada ao final da fila:** `{added}` {count_label}{label}.{total_line}",
                         ephemeral=True,
                         wait=True,
                     )
                 else:
                     sent = await interaction.followup.send(
-                        f"`📑` **Playlist adicionada ao queue:** `{added}` {count_label}{label}.\n`🎧` Preparando a primeira faixa...",
+                        f"`📑` **Playlist adicionada à fila:** `{added}` {count_label}{label}.\n`🎧` Preparando a primeira faixa...",
                         ephemeral=True,
                         wait=True,
                     )
@@ -1729,13 +1815,28 @@ class QueueView(discord.ui.LayoutView):
 
     def _queue_text(self, state, items: list[MusicTrack]) -> str:
         total = _queue_total_count(state, items)
+        virtual = _virtual_playlist_info(state)
         if not items:
+            if virtual:
+                title = _escape(str(virtual.get("title") or "playlist"), limit=80)
+                return (
+                    f"# 📜 Fila · {_virtual_playlist_total_label(state)}\n"
+                    f"**{title}**\n"
+                    "-# Próximas músicas sendo carregadas automaticamente sob demanda."
+                )
             return "# 📜 Fila\nA fila está vazia.\n-# Use `_play <nome ou link>` para adicionar músicas."
         max_page = self._max_page(items)
         start = self.page * QUEUE_PAGE_SIZE
         chunk = items[start : start + QUEUE_PAGE_SIZE]
         page_label = f" · página {self.page + 1}/{max_page + 1}" if max_page else ""
-        lines = [f"# 📜 Fila · {total} música{'s' if total != 1 else ''}{page_label}"]
+        if virtual:
+            lines = [f"# 📜 Fila · {_virtual_playlist_total_label(state)}{page_label}"]
+            title = _escape(str(virtual.get("title") or ""), limit=80)
+            if title and title.lower() != "playlist":
+                lines.append(f"-# {title}")
+            lines.append(f"-# {total} próxima{'s' if total != 1 else ''} já carregada{'s' if total != 1 else ''}")
+        else:
+            lines = [f"# 📜 Fila · {total} música{'s' if total != 1 else ''}{page_label}"]
         current = getattr(state, "current", None)
         if current is not None:
             lines.extend([f"-# Tocando agora: {_track_link_v2(current, title_limit=64)}", ""])
@@ -1745,7 +1846,14 @@ class QueueView(discord.ui.LayoutView):
             lines.append(f"**{marker}**  {_track_link_v2(track, title_limit=62)}  ·  {track.duration_label}")
             requester = _escape(track.requester_name, limit=42) if track.requester_name else f"<@{track.requester_id}>"
             lines.append(f"-# pedido por {requester}")
-        lines.extend(["", f"-# Duração aproximada: {_queue_duration_label(items)}"] )
+        if virtual:
+            lines.extend([
+                "",
+                f"-# Duração das músicas carregadas: {_queue_duration_label(items)}",
+                "-# O restante da playlist é materializado conforme se aproxima da reprodução.",
+            ])
+        else:
+            lines.extend(["", f"-# Duração aproximada: {_queue_duration_label(items)}"] )
         return "\n".join(lines)
 
     def _refresh_components(self) -> None:
@@ -1757,7 +1865,8 @@ class QueueView(discord.ui.LayoutView):
             self.selected_position = None
 
         state = self.router.get_state(self.guild_id)
-        container = discord.ui.Container(accent_color=discord.Color.blurple() if items else discord.Color.dark_grey())
+        virtual = _virtual_playlist_info(state)
+        container = discord.ui.Container(accent_color=discord.Color.blurple() if (items or virtual) else discord.Color.dark_grey())
         container.add_item(discord.ui.TextDisplay(self._queue_text(state, items)))
 
         if items:
@@ -1781,7 +1890,7 @@ class QueueView(discord.ui.LayoutView):
             next_button.callback = self.next_page
             container.add_item(discord.ui.ActionRow(previous, page_label, next_button))
 
-        if items:
+        if items or virtual:
             clear = discord.ui.Button(label="Limpar fila", emoji="🧹", style=discord.ButtonStyle.danger, custom_id="music:queue:clear")
             clear.callback = self.clear_queue
             container.add_item(discord.ui.ActionRow(clear))
@@ -1849,7 +1958,8 @@ class QueueView(discord.ui.LayoutView):
         await self._redraw(interaction)
 
     async def clear_queue(self, interaction: discord.Interaction):
-        if not self._queue_items():
+        state = self.router.get_state(self.guild_id)
+        if not self._queue_items() and not _virtual_playlist_info(state):
             await interaction.response.send_message("A fila já está vazia.", ephemeral=True)
             return
         await interaction.response.send_message(
@@ -2102,12 +2212,13 @@ class MusicPlayerView(discord.ui.LayoutView):
     def _control_state(self, state, queue: list[MusicTrack]) -> dict[str, bool]:
         status = str(getattr(state, "current_status", "") or "")
         paused = bool(getattr(state, "paused", False)) or status == "paused"
+        virtual = _virtual_playlist_info(state)
         has_current = bool(
             getattr(state, "current", None)
             or getattr(state, "current_source", None)
             or status in {"resolving", "starting", "skipping", "playing", "paused"}
         )
-        has_queue = bool(queue)
+        has_queue = bool(queue or virtual)
         has_history = bool(list(getattr(state, "history", []) or [])) or bool(
             int(getattr(state, "agent_remote_history_size", 0) or 0) > 0
         )
@@ -2126,6 +2237,7 @@ class MusicPlayerView(discord.ui.LayoutView):
         state = self.router.get_state(self.guild_id)
         current = getattr(state, "current", None)
         queue = _queue_items(state)
+        virtual = _virtual_playlist_info(state)
         status_title, status_emoji, accent_color = _player_status_presentation(state)
         controls = self._control_state(state, queue)
 
@@ -2161,6 +2273,16 @@ class MusicPlayerView(discord.ui.LayoutView):
                 )
             else:
                 container.add_item(next_text)
+        elif virtual:
+            title = _escape(str(virtual.get("title") or "playlist"), limit=88)
+            total_label = _virtual_playlist_total_label(state)
+            container.add_item(
+                discord.ui.TextDisplay(
+                    "### Playlist sendo carregada\n"
+                    f"**{title}**\n"
+                    f"-# {total_label} · próxima janela chegando sob demanda"
+                )
+            )
         else:
             container.add_item(discord.ui.TextDisplay(_idle_player_text(state)))
 
@@ -2174,6 +2296,8 @@ class MusicPlayerView(discord.ui.LayoutView):
         # Em estado ocioso a mensagem acima já explica por que o player parou
         # e como iniciar novamente. Não repetimos um segundo bloco "Fila · vazia".
         if current is not None or queue:
+            container.add_item(discord.ui.TextDisplay(_queue_preview_text(state, limit=4)))
+        elif virtual:
             container.add_item(discord.ui.TextDisplay(_queue_preview_text(state, limit=4)))
 
         vote_lines = [f"{label}: {count}/{needed}" for label, count, needed in list(getattr(state, "panel_vote_summary", []) or [])]

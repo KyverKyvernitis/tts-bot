@@ -147,6 +147,10 @@ class MusicGuildState:
     virtual_playlist_refill_cursor_key: str = ""
     virtual_playlist_refill_failures: int = 0
     virtual_playlist_refill_retry_not_before: float = 0.0
+    # Espelho leve da coleção virtual autoritativa do Phone Worker. Não guarda
+    # a playlist inteira: apenas cursor/contagem suficientes para a UI explicar
+    # que ainda existem faixas sendo carregadas sob demanda.
+    agent_virtual_playlist: dict[str, Any] = field(default_factory=dict)
 
     def queue_size(self) -> int:
         local_count = self.queue.qsize() + len(self.forward_queue)
