@@ -1,9 +1,12 @@
 from .estrutura import EstruturaConsulta, analisar_estrutura
 from .intencao import analisar_consulta
 from .memoria import (
+    EscolhaBusca,
     PreferenciaBusca,
     estabilizar_com_preferencia,
+    esquecer_escolha_busca,
     limpar_memoria_busca,
+    obter_escolha_busca,
     obter_preferencia_busca,
     registrar_selecao_busca,
 )
@@ -22,6 +25,7 @@ from .telemetria import (
 
 __all__ = [
     "ConsultaNormalizada",
+    "EscolhaBusca",
     "PreferenciaBusca",
     "EstruturaConsulta",
     "ResultadoRanking",
@@ -32,7 +36,9 @@ __all__ = [
     "SnapshotTelemetriaBusca",
     "fundir_resultados",
     "estabilizar_com_preferencia",
+    "esquecer_escolha_busca",
     "limpar_memoria_busca",
+    "obter_escolha_busca",
     "obter_preferencia_busca",
     "registrar_selecao_busca",
     "avaliar_busca_profunda",

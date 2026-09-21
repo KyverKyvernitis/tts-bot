@@ -10,6 +10,7 @@ from cogs.musica import configuracao as config
 from ..busca import (
     avaliar_busca_profunda,
     avaliar_ganho_busca_profunda,
+    obter_escolha_busca,
     fundir_resultados,
     ranquear_faixas,
     registrar_busca_telemetria,
@@ -254,16 +255,6 @@ async def resolve_music_tracks_on_worker(
     A VPS atua somente como plano de controle. Ela não executa yt-dlp local e
     não reproduz áudio; a resolução e a sessão de voz pertencem ao telefone.
     """
-    destino = destino_vinculado(guild_id)
-    selection = None
-    if destino is None:
-        selection = await require_music_worker_available_async()
-        destino = resolver_destino_worker(selection, guild_id=guild_id, preferir_vinculo=False)
-    if destino is None:
-        raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
-    base = destino.base
-    token = destino.token
-
     clean_query = str(query or "").strip()
     if not clean_query:
         return ExtractedBatch(tracks=[], query="", is_playlist=False)
@@ -274,6 +265,49 @@ async def resolve_music_tracks_on_worker(
         permitir_playlist=allow_playlist,
     )
     somente_metadados = bool(busca_textual) if metadata_only is None else bool(metadata_only)
+
+    # Uma escolha já confirmada é um direct-hit global. Esse caminho acontece
+    # antes de disponibilidade do worker, providers, cache de busca, ranking e
+    # deep pass. O Phone Worker só volta a participar quando a faixa for tocar.
+    if (
+        busca_textual
+        and somente_metadados
+        and bool(getattr(config, "MUSIC_SEARCH_CHOICE_MEMORY_ENABLED", True))
+    ):
+        escolhida = obter_escolha_busca(
+            clean_query,
+            requester_id=requester_id,
+            requester_name=requester_name,
+        )
+        if escolhida is not None:
+            logger.info(
+                "[music/search] choice memory hit | query=%r track=%r",
+                clean_query,
+                escolhida.display_title or escolhida.title,
+            )
+            _registrar_telemetria_busca(
+                tracks=[escolhida],
+                ranking=(),
+                elapsed_ms=0.0,
+                cache_hit=True,
+                deep_estado="escolha_memoria",
+            )
+            return ExtractedBatch(
+                tracks=[escolhida],
+                query=clean_query,
+                is_playlist=False,
+            )
+
+    destino = destino_vinculado(guild_id)
+    selection = None
+    if destino is None:
+        selection = await require_music_worker_available_async()
+        destino = resolver_destino_worker(selection, guild_id=guild_id, preferir_vinculo=False)
+    if destino is None:
+        raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+    base = destino.base
+    token = destino.token
+
     total_timeout = _timeout_resolucao(
         somente_metadados=somente_metadados,
         timeout_seconds=timeout_seconds,

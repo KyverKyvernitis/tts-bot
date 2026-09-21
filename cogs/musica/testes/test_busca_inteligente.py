@@ -500,7 +500,7 @@ def test_by_artist_usa_ultimo_by_quando_titulo_contem_by() -> None:
     assert consulta.artista == "ben e king"
 
 
-def test_memoria_curta_estabiliza_empate_para_resultado_escolhido() -> None:
+def test_memoria_de_escolha_nao_participa_do_ranking() -> None:
     from cogs.musica.busca import limpar_memoria_busca, registrar_selecao_busca
 
     limpar_memoria_busca()
@@ -520,37 +520,65 @@ def test_memoria_curta_estabiliza_empate_para_resultado_escolhido() -> None:
         requester_id=20,
     )
 
-    assert ordenadas[0] is b
-    assert ranking[0].indice_original == 1
+    assert ordenadas[0] is a
+    assert ranking[0].indice_original == 0
     limpar_memoria_busca()
 
 
-def test_memoria_curta_nao_vaza_entre_usuarios_ou_guilds() -> None:
-    from cogs.musica.busca import limpar_memoria_busca, registrar_selecao_busca
+def test_memoria_de_escolha_e_global_entre_usuarios_e_guilds() -> None:
+    from cogs.musica.busca import (
+        limpar_memoria_busca,
+        obter_escolha_busca,
+        registrar_selecao_busca,
+    )
 
     limpar_memoria_busca()
-    a = _track("Same Song", "Same Artist", url="https://youtube.test/a")
-    b = _track("Same Song", "Same Artist", url="https://youtube.test/b")
+    escolhido = _track("Mili - Compass [Limbus Company]", "Mili", url="https://youtube.test/compass")
+    escolhido.stream_url = "https://stream.test/expira"
     registrar_selecao_busca(
-        "Same Artist - Same Song",
-        b,
+        "mili compass",
+        escolhido,
         guild_id=10,
         requester_id=20,
     )
 
-    outra_pessoa, _ = ranquear_faixas(
-        "Same Artist - Same Song", [a, b], guild_id=10, requester_id=21
-    )
-    outra_guild, _ = ranquear_faixas(
-        "Same Artist - Same Song", [a, b], guild_id=11, requester_id=20
+    hit = obter_escolha_busca(
+        "MILI   COMPASS",
+        requester_id=999,
+        requester_name="Outra pessoa",
     )
 
-    assert outra_pessoa[0] is a
-    assert outra_guild[0] is a
+    assert hit is not None
+    assert hit.webpage_url == "https://youtube.test/compass"
+    assert hit.requester_id == 999
+    assert hit.requester_name == "Outra pessoa"
+    assert hit.stream_url == ""
     limpar_memoria_busca()
 
 
-def test_memoria_curta_expira_sem_persistencia() -> None:
+def test_memoria_de_escolha_preserva_intencoes_diferentes() -> None:
+    from cogs.musica.busca import (
+        limpar_memoria_busca,
+        obter_escolha_busca,
+        registrar_selecao_busca,
+    )
+
+    limpar_memoria_busca()
+    normal = _track("Numb", "Linkin Park", url="https://youtube.test/numb")
+    registrar_selecao_busca(
+        "Linkin Park - Numb",
+        normal,
+        guild_id=10,
+        requester_id=20,
+    )
+
+    assert obter_escolha_busca("Linkin Park - Numb", requester_id=1) is not None
+    assert obter_escolha_busca("Linkin Park - Numb live", requester_id=1) is None
+    assert obter_escolha_busca("Linkin Park - Numb lyrics", requester_id=1) is None
+    limpar_memoria_busca()
+
+
+def test_memoria_de_escolha_fica_ate_evicao_ou_limpeza() -> None:
     from cogs.musica.busca import (
         limpar_memoria_busca,
         obter_preferencia_busca,
@@ -568,11 +596,8 @@ def test_memoria_curta_expira_sem_persistencia() -> None:
     )
 
     assert obter_preferencia_busca(
-        "Same Artist - Same Song", guild_id=10, requester_id=20, now=1299.0
+        "Same Artist - Same Song", guild_id=999, requester_id=999, now=999999.0
     ) is not None
-    assert obter_preferencia_busca(
-        "Same Artist - Same Song", guild_id=10, requester_id=20, now=1301.0
-    ) is None
     limpar_memoria_busca()
 
 
