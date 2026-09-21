@@ -1413,3 +1413,128 @@ def test_shuffle_does_not_materialize_or_reorder_virtual_playlist(music):
         assert "carregada" in result["error"]
 
     run(scenario())
+
+
+def test_failed_playlist_track_is_skipped_without_entering_history(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 1601
+        st = music.GuildMusicState(guild_id=gid, voice_channel_id=0, text_channel_id=20)
+        bad = music.AgentTrack(title="quebrada", query="ytsearch1:quebrada")
+        good = music.AgentTrack(title="boa", query="ytsearch1:boa")
+        st.queue = [bad, good]
+        agent.states[gid] = st
+        events = []
+
+        async def resolve(query, **kwargs):
+            if "quebrada" in query:
+                raise RuntimeError("não encontrei fonte tocável")
+            return music.AgentTrack(title="boa", query=query, stream_url="https://audio.example/boa.opus")
+
+        async def play_direct(guild_id, track, **kwargs):
+            events.append(("played", track.title))
+
+        agent.resolve_track = resolve
+        agent._play_direct_voice = play_direct
+        agent._should_use_direct_voice = lambda track: True
+        agent.log = lambda event, **fields: events.append((event, fields.get("title", "")))
+
+        await agent._play_next(gid)
+
+        assert st.current is not None
+        assert st.current.title == "boa"
+        assert st.history == []
+        assert not st.queue
+        assert ("track_failed_skipped", "quebrada") in events
+        assert ("played", "boa") in events
+
+    run(scenario())
+
+
+def test_playlist_refill_defensively_caps_materialized_batch(music, monkeypatch):
+    async def scenario():
+        monkeypatch.setenv("MUSIC_AGENT_PLAYLIST_REFILL_MAX_ITEMS", "2")
+        agent = music.MusicAgent()
+        gid = 1602
+        cursor = {
+            "provider": "spotify_public",
+            "source_url": "https://open.spotify.com/playlist/abc1234567890123",
+            "title": "Grande",
+            "resource_type": "playlist",
+            "resource_id": "abc1234567890123",
+            "next_offset": 25,
+            "total_tracks": None,
+            "exhausted": False,
+        }
+        marker = music.AgentTrack(
+            title="Grande",
+            source="playlist-virtual",
+            transport_hint="playlist-cursor",
+            virtual_playlist_cursor=dict(cursor),
+        )
+        st = music.GuildMusicState(guild_id=gid)
+        st.current = music.AgentTrack(title="tocando", stream_url="https://audio.example/current")
+        st.status = "playing"
+        st.queue = [marker]
+        agent.states[gid] = st
+        agent.log = lambda *args, **kwargs: None
+
+        tracks = [
+            {"title": f"faixa {index}", "query": f"ytsearch1:faixa {index}"}
+            for index in range(5)
+        ]
+        next_cursor = dict(cursor)
+        next_cursor["next_offset"] = 30
+
+        result = await agent.cmd_playlist_refill({
+            "guild_id": gid,
+            "tracks": tracks,
+            "expected_cursor": cursor,
+            "next_cursor": next_cursor,
+        })
+
+        assert result["added"] == 2
+        assert [item.title for item in st.queue[:2]] == ["faixa 0", "faixa 1"]
+        assert st.queue[2].is_virtual_playlist_marker
+
+    run(scenario())
+
+
+def test_failed_startup_track_advances_to_virtual_playlist_marker(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 1603
+        cursor = {
+            "provider": "spotify_public",
+            "source_url": "https://open.spotify.com/playlist/abc1234567890123",
+            "next_offset": 1,
+            "exhausted": False,
+        }
+        bad = music.AgentTrack(title="quebrada", query="ytsearch1:quebrada")
+        marker = music.AgentTrack(
+            title="Playlist",
+            source="playlist-virtual",
+            transport_hint="playlist-cursor",
+            virtual_playlist_cursor=cursor,
+        )
+        st = music.GuildMusicState(guild_id=gid, voice_channel_id=0)
+        st.queue = [bad, marker]
+        agent.states[gid] = st
+        events = []
+
+        async def resolve(*args, **kwargs):
+            raise RuntimeError("indisponível")
+
+        agent.resolve_track = resolve
+        agent.log = lambda event, **fields: events.append(event)
+
+        await agent._play_next(gid)
+
+        assert st.current is None
+        assert st.status == "queued"
+        assert st.last_event == "playlist_refill_needed"
+        assert st.queue == [marker]
+        assert "track_failed_skipped" in events
+        assert "playlist_refill_needed" in events
+
+    run(scenario())

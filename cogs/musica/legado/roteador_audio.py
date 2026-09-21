@@ -29,6 +29,7 @@ from ..nucleo.modelos import LoopMode, MusicTrack
 from ..nucleo.estado import ControlVote, MusicGuildState
 from ..metadados.provedores import describe_url
 from ..reproducao.sincronizacao import sincronizar_estado_agente
+from ..reproducao.playlist_virtual import cancel_playlist_refill
 from ..reproducao.fila_remota import alternar_repeticao_worker, embaralhar_fila_worker, voltar_historico_worker
 from ..reproducao.controle_remoto import ajustar_volume, buscar_momento
 from ..agente_telefone.monitor import iniciar_monitor_music_agent
@@ -703,6 +704,9 @@ class AudioRouter:
             with contextlib.suppress(Exception):
                 refill_task.cancel()
         state.virtual_playlist_refill_task = None
+        state.virtual_playlist_refill_cursor_key = ""
+        state.virtual_playlist_refill_failures = 0
+        state.virtual_playlist_refill_retry_not_before = 0.0
         logger.info("[music] operações pendentes invalidadas | guild=%s reason=%s generation=%s", guild_id, reason, state.music_operation_generation)
         return state.music_operation_generation
 
@@ -5427,6 +5431,10 @@ class AudioRouter:
 
     async def replace_queue(self, guild_id: int, tracks: list[MusicTrack]) -> None:
         state = self.get_state(guild_id)
+        # Qualquer mutação manual da fila invalida a posição lógica usada por
+        # um refill em andamento. Cancele só o carregamento virtual; não mate a
+        # resolução/áudio atual apenas porque o usuário moveu ou limpou a fila.
+        cancel_playlist_refill(state)
         self._cancel_next_prefetch(state)
         await substituir_fila_local(state, tracks, limite=MUSIC_QUEUE_MAXSIZE)
         if tracks:

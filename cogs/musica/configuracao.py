@@ -99,6 +99,21 @@ MUSIC_PLAYLIST_LOW_WATERMARK = min(
     MUSIC_PLAYLIST_WINDOW_SIZE - 1,
     max(1, _parse_int(os.getenv("MUSIC_PLAYLIST_LOW_WATERMARK", "8"), 8)),
 )
+# Robustez da playlist virtual. O monitor existente continua sendo a única
+# cadência contínua; estes valores só controlam concorrência/retry quando um
+# refill já foi solicitado.
+MUSIC_PLAYLIST_REFILL_MAX_CONCURRENCY = min(4, max(1, _parse_int(os.getenv("MUSIC_PLAYLIST_REFILL_MAX_CONCURRENCY", "2"), 2)))
+MUSIC_PLAYLIST_REFILL_MAX_ATTEMPTS = min(4, max(1, _parse_int(os.getenv("MUSIC_PLAYLIST_REFILL_MAX_ATTEMPTS", "3"), 3)))
+MUSIC_PLAYLIST_REFILL_COMMAND_MAX_ATTEMPTS = min(3, max(1, _parse_int(os.getenv("MUSIC_PLAYLIST_REFILL_COMMAND_MAX_ATTEMPTS", "2"), 2)))
+MUSIC_PLAYLIST_REFILL_RETRY_BASE_SECONDS = max(0.1, _parse_float(os.getenv("MUSIC_PLAYLIST_REFILL_RETRY_BASE_SECONDS", "0.6"), 0.6))
+MUSIC_PLAYLIST_REFILL_RETRY_MAX_SECONDS = max(
+    MUSIC_PLAYLIST_REFILL_RETRY_BASE_SECONDS,
+    _parse_float(os.getenv("MUSIC_PLAYLIST_REFILL_RETRY_MAX_SECONDS", "4.0"), 4.0),
+)
+MUSIC_PLAYLIST_REFILL_FAILURE_COOLDOWN_MAX_SECONDS = max(
+    MUSIC_PLAYLIST_REFILL_RETRY_BASE_SECONDS,
+    _parse_float(os.getenv("MUSIC_PLAYLIST_REFILL_FAILURE_COOLDOWN_MAX_SECONDS", "20.0"), 20.0),
+)
 MUSIC_SEARCH_RESULTS = max(1, min(10, _parse_int(os.getenv("MUSIC_SEARCH_RESULTS", "3"), 3)))
 MUSIC_SEARCH_CHOICE_MEMORY_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_ENABLED", "true"), True)
 MUSIC_SEARCH_CHOICE_MEMORY_MAX_ENTRIES = max(1, min(100000, _parse_int(os.getenv("MUSIC_SEARCH_CHOICE_MEMORY_MAX_ENTRIES", "10000"), 10000)))

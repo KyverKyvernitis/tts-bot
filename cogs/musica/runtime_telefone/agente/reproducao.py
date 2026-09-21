@@ -325,7 +325,9 @@ class ReproducaoMixin:
             return {"ok": True, "ignored": True, "added": 0, "state": st.public()}
 
         incoming: list[AgentTrack] = []
-        for item in body.get("tracks") if isinstance(body.get("tracks"), list) else []:
+        max_refill_items = max(1, min(100, env_int("MUSIC_AGENT_PLAYLIST_REFILL_MAX_ITEMS", 50)))
+        raw_tracks = body.get("tracks") if isinstance(body.get("tracks"), list) else []
+        for item in raw_tracks[:max_refill_items]:
             if not isinstance(item, dict):
                 continue
             track = self._agent_track_from_metadata(item, body=body, fallback_query="")
@@ -333,6 +335,13 @@ class ReproducaoMixin:
                 continue
             if track.query or track.stream_url or track.webpage_url:
                 incoming.append(track)
+        if len(raw_tracks) > max_refill_items:
+            self.log(
+                "playlist_refill_capped",
+                guild_id=guild_id,
+                received=len(raw_tracks),
+                accepted=max_refill_items,
+            )
 
         exhausted = bool(next_cursor.get("exhausted")) if next_cursor else not incoming
         replacement: list[AgentTrack] = list(incoming)
@@ -804,9 +813,30 @@ class ReproducaoMixin:
                     with contextlib.suppress(Exception):
                         if getattr(voice_client, "is_connected", lambda: False)():
                             await voice_client.disconnect(force=True)
-            self._invalidate_track_stream_cache(st.current)
+            failed_track = st.current
+            self._invalidate_track_stream_cache(failed_track)
             self._set_status(st, "failed", event="play_failed", error=f"{type(exc).__name__}: {short_text(exc, 260)}")
-            self.log("play_failed", guild_id=guild_id, transport=st.transport or "unknown", error=st.last_error)
+            self.log(
+                "play_failed",
+                guild_id=guild_id,
+                transport=st.transport or "unknown",
+                error=st.last_error,
+                title=getattr(failed_track, "title", ""),
+            )
+            if st.queue:
+                # Uma faixa quebrada não deve derrubar uma playlist/fila inteira.
+                # Ela não entra no histórico porque nunca chegou a tocar; avance
+                # para a próxima faixa (ou para o cursor virtual) imediatamente.
+                st.current = None
+                st.paused = False
+                self.log(
+                    "track_failed_skipped",
+                    guild_id=guild_id,
+                    title=getattr(failed_track, "title", ""),
+                    queue_size=len(st.queue),
+                )
+                await asyncio.sleep(0)
+                await self._play_next(guild_id, preserve_current_to_history=False)
 
     def _should_use_direct_voice(self, track: AgentTrack) -> bool:
         return bool(
