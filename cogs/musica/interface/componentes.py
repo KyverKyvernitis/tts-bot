@@ -731,6 +731,8 @@ def _player_status_presentation(state) -> tuple[str, str, discord.Colour]:
 
 
 def _player_track_text(state, track: MusicTrack) -> str:
+    # Um nível menor que o antigo H2 reduz quebras de linha no mobile sem
+    # truncar agressivamente o nome da faixa. Tudo vem do estado em memória.
     title = _track_link_v2(track, title_limit=88, bold=True)
     source = _escape(track.uploader or track.source or track.extractor or "fonte desconhecida", limit=64)
     requester = _escape(track.requester_name, limit=42) if track.requester_name else f"<@{track.requester_id}>"
@@ -738,10 +740,10 @@ def _player_track_text(state, track: MusicTrack) -> str:
     quality = _public_audio_quality_label(state, track)
     duration = "Ao vivo" if track.is_live else track.duration_label
 
-    metadata = [f"⏱️ {duration}", f"{source_emoji} {source_label}"]
+    metadata = [duration, f"{source_emoji} {source_label}"]
     if quality:
         metadata.append(quality)
-    lines = [f"## {title}", f"-# {source}", " · ".join(metadata), f"-# Pedido por {requester}"]
+    lines = [f"### {title}", f"-# {source}", " · ".join(metadata), f"-# Pedido por {requester}"]
 
     loop_mode = getattr(state, "loop_mode", None)
     loop_label = str(getattr(loop_mode, "label", "desligado") or "desligado")
@@ -759,7 +761,7 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
     items = _queue_items(state)
     total = _queue_total_count(state, items)
     if not items:
-        return "### Fila · vazia\n-# Use `_play <nome ou link>` para adicionar músicas."
+        return "**Fila** · vazia\n-# Use `_play <nome ou link>` para adicionar músicas."
 
     page = max(0, int(page))
     start = page * QUEUE_PAGE_SIZE if page else 0
@@ -768,12 +770,12 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
     else:
         preview = items[: max(1, int(limit))]
     duration = _queue_duration_label(items)
-    header = f"### Fila · {total} música{'s' if total != 1 else ''} · {duration}"
+    header = f"**Fila** · {total} música{'s' if total != 1 else ''} · {duration}"
     lines = [header]
     for offset, item in enumerate(preview, start=1):
         position = start + offset
-        marker = "▶" if selected_position == position else f"{position:02d}"
-        lines.append(f"**{marker}**  {_track_link_v2(item, title_limit=58)}  ·  {item.duration_label}")
+        marker = "▶" if selected_position == position else f"{position}."
+        lines.append(f"**{marker}** {_track_link_v2(item, title_limit=58)} · {item.duration_label}")
     hidden = max(0, int(total) - len(preview) - start)
     if hidden:
         lines.append(f"-# + {hidden} música{'s' if hidden != 1 else ''}")
@@ -2117,7 +2119,9 @@ class MusicPlayerView(discord.ui.LayoutView):
         container = discord.ui.Container(accent_color=accent_color)
         container.add_item(
             discord.ui.Section(
-                discord.ui.TextDisplay(f"### {status_title}"),
+                # A animação de status continua dinâmica. O texto deixa de usar
+                # heading para não competir visualmente com o título da música.
+                discord.ui.TextDisplay(f"**{status_title}**"),
                 accessory=discord.ui.Thumbnail(status_icon, description=status_title),
             )
         )
@@ -2136,7 +2140,7 @@ class MusicPlayerView(discord.ui.LayoutView):
         elif queue:
             first = queue[0]
             next_text = discord.ui.TextDisplay(
-                "## Próxima música\n"
+                "### Próxima música\n"
                 f"{_track_link_v2(first, title_limit=88, bold=True)}\n"
                 f"-# {first.duration_label}"
             )
@@ -2152,19 +2156,19 @@ class MusicPlayerView(discord.ui.LayoutView):
         else:
             container.add_item(discord.ui.TextDisplay(_idle_player_text(state)))
 
-        container.add_item(discord.ui.Separator())
+        # A barra animada pertence visualmente à faixa/estado atual, por isso fica
+        # imediatamente antes da fila. Continua sendo o mesmo GIF e não cria
+        # timer, polling ou qualquer I/O adicional.
+        bar = discord.ui.MediaGallery()
+        bar.add_item(media=PLAYER_BAR_URL, description="Barra animada do player")
+        container.add_item(bar)
+
         container.add_item(discord.ui.TextDisplay(_queue_preview_text(state, limit=4)))
 
         vote_lines = [f"{label}: {count}/{needed}" for label, count, needed in list(getattr(state, "panel_vote_summary", []) or [])]
         if vote_lines:
             container.add_item(discord.ui.TextDisplay("-# 🗳️ " + " · ".join(vote_lines)))
 
-        # Mantém a barra animada atual, agora como mídia nativa de Components V2.
-        # O GIF continua sendo renderizado pelo Discord; não existe polling extra.
-        bar = discord.ui.MediaGallery()
-        bar.add_item(media=PLAYER_BAR_URL, description="Barra animada do player")
-        container.add_item(bar)
-        container.add_item(discord.ui.TextDisplay("-# Use os controles abaixo para controlar o player."))
         container.add_item(discord.ui.Separator())
 
         invalid = controls["invalid"]

@@ -89,3 +89,35 @@ def test_comando_fila_nao_envia_embed_legado() -> None:
     assert "from ..interface.componentes import QueueView" in source
     assert "build_queue_embed" not in source
     assert "view=QueueView(" in source
+
+
+
+def test_painel_refinado_prioriza_faixa_barra_fila_e_controles() -> None:
+    source = COMPONENTS.read_text(encoding="utf-8")
+    build = _method_source(COMPONENTS, "MusicPlayerView", "_build")
+
+    assert 'discord.ui.TextDisplay(f"**{status_title}**")' in build
+    assert 'discord.ui.TextDisplay(f"### {status_title}")' not in build
+    assert '"-# Use os controles abaixo para controlar o player."' not in build
+
+    # Ordem semântica: dados da faixa -> barra animada -> fila -> controles.
+    track_pos = build.index("_player_track_text(state, current)")
+    bar_pos = build.index("bar.add_item(media=PLAYER_BAR_URL")
+    queue_pos = build.index("_queue_preview_text(state, limit=4)")
+    controls_pos = build.index("discord.ui.ActionRow(back, pause, skip, stop, queue_button)")
+    assert track_pos < bar_pos < queue_pos < controls_pos
+
+    # O refinamento é puramente de renderização e continua sem polling/I/O novo.
+    assert "await " not in build
+    for forbidden in ("music_agent_status(", "resolve_music_tracks_on_worker(", "yt_dlp", "aiohttp", "requests."):
+        assert forbidden not in build
+
+
+def test_textos_do_player_sao_mais_compactos_no_mobile() -> None:
+    source = COMPONENTS.read_text(encoding="utf-8")
+
+    assert 'lines = [f"### {title}"' in source
+    assert 'metadata = [duration, f"{source_emoji} {source_label}"]' in source
+    assert 'header = f"**Fila** · {total} música' in source
+    assert 'marker = "▶" if selected_position == position else f"{position}."' in source
+    assert 'f"{position:02d}"' not in source[source.index("def _queue_preview_text"):source.index("def _idle_player_text")]
