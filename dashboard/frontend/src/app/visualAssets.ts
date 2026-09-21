@@ -4,11 +4,12 @@ export type CompletedImageLike = {
 };
 
 /**
- * O pacote não distribui imagens decorativas obrigatórias. Manter os fallbacks
- * vazios evita requests 404; instalações podem fornecer URLs por VITE_*.
+ * Os assets de public/assets são copiados pelo Vite para /assets no build.
+ * Instalações podem substituir as URLs por VITE_*; os componentes mantêm
+ * seus fallbacks se os arquivos estiverem ausentes em um pacote de código.
  */
-export const BUNDLED_DECORATIVE_IMAGE_URL = "";
-export const BUNDLED_LOADING_GIF_URL = "";
+export const BUNDLED_DECORATIVE_IMAGE_URL = "/assets/osaka-landing-character.jpg";
+export const BUNDLED_LOADING_GIF_URL = "/assets/osaka-loading.gif";
 
 export function resolveCompletedImageState(
   image: CompletedImageLike | null,

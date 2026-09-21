@@ -9,14 +9,13 @@ const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = readFileSync(join(projectRoot, "src/components/VisualTemplates.tsx"), "utf8");
 const theme = readFileSync(join(projectRoot, "src/yin-yang-theme.css"), "utf8");
 
-test("não referencia assets locais ausentes no pacote", () => {
-  assert.equal(BUNDLED_DECORATIVE_IMAGE_URL, "");
-  assert.equal(BUNDLED_LOADING_GIF_URL, "");
-  assert.doesNotMatch(source, /["']\/assets\//);
-  assert.doesNotMatch(theme, /url\(["']?\/assets\//);
+test("usa os assets originais de public/assets por padrão", () => {
+  assert.equal(BUNDLED_DECORATIVE_IMAGE_URL, "/assets/osaka-landing-character.jpg");
+  assert.equal(BUNDLED_LOADING_GIF_URL, "/assets/osaka-loading.gif");
+  assert.match(theme, /url\(["']?\/assets\/osaka-landing-stars\.jpg["']?\)/);
 });
 
-test("mantém fallback de carregamento quando nenhuma imagem é configurada", () => {
+test("mantém fallback de carregamento quando a imagem falha", () => {
   assert.match(source, /state !== "ready" \? <LoaderCircle/);
   assert.match(source, /if \(!decorativeImageUrl \|\| state === "failed"\) return null/);
 });
@@ -33,8 +32,8 @@ test("mantém as imagens opcionais visíveis quando carregadas", () => {
   assert.match(theme, /\.osk-loading-visual img\s*\{[\s\S]*?opacity:\s*1/);
 });
 
-test("gera o fundo estrelado sem depender de arquivos externos", () => {
+test("mantém estrelas em CSS como fallback do fundo original", () => {
   assert.match(theme, /\.osk-minimal-landing\s*\{[\s\S]*?min-height:\s*100dvh/);
-  assert.match(theme, /\.osk-minimal-landing::before\s*\{[\s\S]*?radial-gradient[\s\S]*?linear-gradient/s);
-  assert.match(theme, /background-size:\s*88px 88px,\s*112px 112px,\s*136px 136px,\s*cover/);
+  assert.match(theme, /\.osk-minimal-landing::before\s*\{[\s\S]*?linear-gradient[\s\S]*?osaka-landing-stars\.jpg[\s\S]*?radial-gradient/s);
+  assert.match(theme, /background-size:\s*cover,\s*cover,\s*88px 88px,\s*112px 112px,\s*136px 136px/);
 });

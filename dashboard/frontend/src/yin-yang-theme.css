@@ -190,14 +190,16 @@ body { color: var(--osk-ink); }
   height: 100vh;
   height: 100lvh;
   pointer-events: none;
+  /* A imagem original cobre as estrelas em CSS, que ficam como fallback. */
   background-image:
+    linear-gradient(180deg, rgba(7,7,7,.46), rgba(7,7,7,.68)),
+    url("/assets/osaka-landing-stars.jpg"),
     radial-gradient(circle at 18% 16%, rgba(255,255,255,.18) 0 1px, transparent 1.4px),
     radial-gradient(circle at 72% 28%, rgba(255,255,255,.12) 0 1px, transparent 1.3px),
-    radial-gradient(circle at 42% 72%, rgba(255,255,255,.10) 0 1px, transparent 1.2px),
-    linear-gradient(180deg, rgba(7,7,7,.46), rgba(7,7,7,.68));
-  background-position: 0 0, 18px 22px, 7px 13px, center;
-  background-repeat: repeat, repeat, repeat, no-repeat;
-  background-size: 88px 88px, 112px 112px, 136px 136px, cover;
+    radial-gradient(circle at 42% 72%, rgba(255,255,255,.10) 0 1px, transparent 1.2px);
+  background-position: center, center top, 0 0, 18px 22px, 7px 13px;
+  background-repeat: no-repeat, no-repeat, repeat, repeat, repeat;
+  background-size: cover, cover, 88px 88px, 112px 112px, 136px 136px;
   transform: translateZ(0);
   backface-visibility: hidden;
 }
@@ -1225,11 +1227,6 @@ body { color: var(--osk-ink); }
 
 @media (max-width: 720px) {
   .osk-minimal-nav { background: rgba(7,7,7,.94); }
-  .osk-minimal-landing::before {
-    background-position: center, center top;
-    background-repeat: no-repeat;
-    background-size: cover;
-  }
   .osk-minimal-main { padding-bottom: clamp(2rem, 5vh, 4rem); }
   .osk-decorative-template { top: 7rem; right: -3rem; width: min(var(--osk-decorative-size), 15rem); max-width: 58vw; }
   .osk-decorative-template { opacity: calc(var(--osk-decorative-opacity) * .34); }
