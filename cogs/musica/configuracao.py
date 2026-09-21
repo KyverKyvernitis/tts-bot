@@ -281,67 +281,25 @@ MUSIC_AGENT_RESOLVE_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_A
 MUSIC_AGENT_METADATA_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_AGENT_METADATA_CACHE_TTL_SECONDS", "21600.0"), 21600.0))
 MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS", "180.0"), 180.0))
 MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS = max(3.0, _parse_float(os.getenv("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", "18.0"), 18.0))
-MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", "0.0"), 0.0))
-# O modo simplificado nao persiste resultados de pesquisa. Singleflight em voo
-# continua ativo, mas chamadas sequenciais sem escolha aprendida consultam de novo.
-MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS = max(0.0, min(600.0, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_CACHE_TTL_SECONDS", "0.0"), 0.0)))
-MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS = max(8, min(256, _parse_int(os.getenv("MUSIC_SEARCH_METADATA_CACHE_MAX_ITEMS", "128"), 128)))
-MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_SEMANTIC_CACHE_ENABLED", "false"), False)
 MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS = max(0.2, min(10.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_TIMEOUT_SECONDS", "1.5"), 1.5)))
-# Budget total: um provider lento nao segura a resposta da pesquisa. No deep pass
-# damos uma janela maior porque ele so roda quando o fast pass ficou inconclusivo.
 MUSIC_SEARCH_PROVIDER_FAST_BUDGET_SECONDS = max(0.15, min(2.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_FAST_BUDGET_SECONDS", "0.65"), 0.65)))
-MUSIC_SEARCH_PROVIDER_DEEP_BUDGET_SECONDS = max(MUSIC_SEARCH_PROVIDER_FAST_BUDGET_SECONDS, min(4.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_DEEP_BUDGET_SECONDS", "1.5"), 1.5)))
 MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES = max(1, min(5, _parse_int(os.getenv("MUSIC_SEARCH_PROVIDER_CIRCUIT_FAILURES", "2"), 2)))
 MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS = max(1.0, min(300.0, _parse_float(os.getenv("MUSIC_SEARCH_PROVIDER_CIRCUIT_COOLDOWN_SECONDS", "30.0"), 30.0)))
-MUSIC_SEARCH_PROVIDER_ROUTING_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_PROVIDER_ROUTING_ENABLED", "true"), True)
 # HTTP persistente: os providers compartilham conexoes DNS/TCP/TLS em vez de
 # abrir uma conexao nova a cada busca. Limites pequenos preservam RAM na VPS.
 MUSIC_SEARCH_HTTP_POOL_LIMIT = max(2, min(24, _parse_int(os.getenv("MUSIC_SEARCH_HTTP_POOL_LIMIT", "8"), 8)))
 MUSIC_SEARCH_HTTP_POOL_LIMIT_PER_HOST = max(1, min(MUSIC_SEARCH_HTTP_POOL_LIMIT, _parse_int(os.getenv("MUSIC_SEARCH_HTTP_POOL_LIMIT_PER_HOST", "4"), 4)))
 MUSIC_SEARCH_HTTP_KEEPALIVE_SECONDS = max(5.0, min(120.0, _parse_float(os.getenv("MUSIC_SEARCH_HTTP_KEEPALIVE_SECONDS", "30.0"), 30.0)))
 MUSIC_SEARCH_HTTP_DNS_CACHE_SECONDS = max(30.0, min(1800.0, _parse_float(os.getenv("MUSIC_SEARCH_HTTP_DNS_CACHE_SECONDS", "300.0"), 300.0)))
-# API-first: quando a YouTube Data API retorna rapidamente 3 candidatos com
-# ranking claro, a tela pode ser respondida sem esperar yt-dlp no Phone Worker.
+# API-first: a YouTube Data API e a unica fonte da primeira tentativa.
+# Se vier ao menos um resultado utilizavel, nao consultamos o Phone Worker.
 # A reproducao continua sendo resolvida exclusivamente pelo yt-dlp apos a escolha.
 MUSIC_SEARCH_API_FIRST_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_API_FIRST_ENABLED", "true"), True)
-# Pesquisa simplificada: memoria persistente -> YouTube API -> ytsearch3 fallback.
-# Nao usa cache transitório, fusao multifonte, ranking ou deep pass.
-MUSIC_SEARCH_SIMPLE_MODE_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_SIMPLE_MODE_ENABLED", "true"), True)
 MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS = max(0.15, min(1.5, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_TIMEOUT_SECONDS", "0.45"), 0.45)))
-# Pequena vantagem para a API. Se ela nao responder nesse intervalo, o worker
-# entra em paralelo; assim API-first nao adiciona 450 ms ao fallback frio.
-MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS = max(0.0, min(0.5, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS", "0.15"), 0.15)))
-MUSIC_SEARCH_API_FIRST_ADAPTIVE_HEDGE = _parse_bool(os.getenv("MUSIC_SEARCH_API_FIRST_ADAPTIVE_HEDGE", "true"), True)
-MUSIC_SEARCH_API_FIRST_HEADSTART_MIN_SECONDS = max(0.0, min(MUSIC_SEARCH_API_FIRST_HEADSTART_SECONDS, _parse_float(os.getenv("MUSIC_SEARCH_API_FIRST_HEADSTART_MIN_SECONDS", "0.03"), 0.03)))
-MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS = max(0.0, min(0.5, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS", "0.08"), 0.08)))
-MUSIC_SEARCH_ADAPTIVE_TAIL_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_ADAPTIVE_TAIL_ENABLED", "true"), True)
-MUSIC_SEARCH_ADAPTIVE_TAIL_MIN_SAMPLES = max(2, min(20, _parse_int(os.getenv("MUSIC_SEARCH_ADAPTIVE_TAIL_MIN_SAMPLES", "4"), 4)))
-MUSIC_SEARCH_METADATA_GRACE_MIN_SECONDS = max(0.0, min(MUSIC_SEARCH_METADATA_AFTER_WORKER_GRACE_SECONDS, _parse_float(os.getenv("MUSIC_SEARCH_METADATA_GRACE_MIN_SECONDS", "0.015"), 0.015)))
-MUSIC_SEARCH_SKIP_PENDING_METADATA_WHEN_WORKER_SUFFICIENT = _parse_bool(os.getenv("MUSIC_SEARCH_SKIP_PENDING_METADATA_WHEN_WORKER_SUFFICIENT", "true"), True)
-MUSIC_SEARCH_API_FIRST_MIN_RESULTS = max(1, min(3, _parse_int(os.getenv("MUSIC_SEARCH_API_FIRST_MIN_RESULTS", "3"), 3)))
 # Guard local conservador para search.list. O valor é número de chamadas, não
 # unidades de quota; deixa margem para outros usos da mesma chave/projeto.
 MUSIC_SEARCH_YOUTUBE_API_QUOTA_GUARD_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_YOUTUBE_API_QUOTA_GUARD_ENABLED", "true"), True)
 MUSIC_SEARCH_YOUTUBE_API_DAILY_SOFT_CALLS = max(0, min(10000, _parse_int(os.getenv("MUSIC_SEARCH_YOUTUBE_API_DAILY_SOFT_CALLS", "80"), 80)))
-# Busca inteligente: segunda passagem só quando o ranking inicial não estiver
-# suficientemente claro. O custo extra é rede no Phone Worker/providers; a VPS
-# faz apenas fusão/ranking local leve.
-MUSIC_SEARCH_DEEP_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_DEEP_ENABLED", "true"), True)
-MUSIC_SEARCH_DEEP_EARLY_EXIT_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_DEEP_EARLY_EXIT_ENABLED", "true"), True)
-MUSIC_SEARCH_DEEP_LIMIT = max(3, min(8, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_LIMIT", "5"), 5)))
-MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS = max(2.5, min(8.0, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS", "5.0"), 5.0)))
-MUSIC_SEARCH_DEEP_TIMEOUT_MIN_SECONDS = max(2.5, min(MUSIC_SEARCH_DEEP_TIMEOUT_SECONDS, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_TIMEOUT_MIN_SECONDS", "3.0"), 3.0)))
-MUSIC_SEARCH_DEEP_MIN_RESULTS = max(2, min(3, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_MIN_RESULTS", "3"), 3)))
-# Thresholds um pouco mais conservadores: com apenas 3 resultados, deep pass so
-# entra quando ha sinal real de baixa qualidade/ambiguidade.
-MUSIC_SEARCH_DEEP_SCORE_THRESHOLD = max(0.0, min(1.0, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_SCORE_THRESHOLD", "0.66"), 0.66)))
-MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD = max(0.0, min(1.0, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_CONFIDENCE_THRESHOLD", "0.55"), 0.55)))
-MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD = max(0.0, min(0.30, _parse_float(os.getenv("MUSIC_SEARCH_DEEP_MARGIN_THRESHOLD", "0.030"), 0.030)))
-MUSIC_SEARCH_DEEP_MAX_CONCURRENT = max(0, min(4, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_MAX_CONCURRENT", "2"), 2)))
-MUSIC_SEARCH_DEEP_MAX_WORKER_INFLIGHT = max(1, min(12, _parse_int(os.getenv("MUSIC_SEARCH_DEEP_MAX_WORKER_INFLIGHT", "4"), 4)))
-MUSIC_SEARCH_TELEMETRY_ENABLED = _parse_bool(os.getenv("MUSIC_SEARCH_TELEMETRY_ENABLED", "true"), True)
-MUSIC_SEARCH_TELEMETRY_SUMMARY_EVERY = max(5, min(500, _parse_int(os.getenv("MUSIC_SEARCH_TELEMETRY_SUMMARY_EVERY", "25"), 25)))
 MUSIC_WORKER_DIRECT_CACHE_TTL_SECONDS = max(0.0, _parse_float(os.getenv("MUSIC_WORKER_DIRECT_CACHE_TTL_SECONDS", "90.0"), 90.0))
 MUSIC_AGENT_BOOTSTRAP_ON_PLAY = _parse_bool(os.getenv("MUSIC_AGENT_BOOTSTRAP_ON_PLAY", "true"), True)
 MUSIC_AGENT_MISSING_TOKEN_MESSAGE = (

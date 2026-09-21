@@ -33,15 +33,10 @@ async def test_direct_hit_global_pula_worker_provider_ranking_e_seletor(monkeypa
         raise AssertionError("direct-hit não deve consultar disponibilidade do worker")
 
     async def nao_pode_consultar_provider(*args, **kwargs):
-        raise AssertionError("direct-hit não deve consultar provider")
-
-    def nao_pode_rankear(*args, **kwargs):
-        raise AssertionError("direct-hit não deve executar ranking")
+        raise AssertionError("direct-hit não deve consultar YouTube API")
 
     monkeypatch.setattr(resolucao, "require_music_worker_available_async", nao_pode_consultar_worker)
-    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", nao_pode_consultar_provider)
     monkeypatch.setattr(resolucao, "buscar_candidatos_youtube_fast", nao_pode_consultar_provider)
-    monkeypatch.setattr(resolucao, "ranquear_faixas", nao_pode_rankear)
 
     lote = await resolucao.resolve_music_tracks_on_worker(
         "  MILI   COMPASS  ",

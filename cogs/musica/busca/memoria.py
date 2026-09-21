@@ -16,9 +16,7 @@ from cogs.musica import configuracao as config
 from ..nucleo.modelos import MusicTrack
 from .chaves import chave_semantica_busca
 from .intencao import analisar_consulta
-from .modelos import ResultadoRanking
 from .normalizacao import tokens_texto
-from .telemetria import registrar_selecao_telemetria
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +46,6 @@ class EscolhaBusca:
     origem: str = _ORIGEM_SELECAO
     prioridade: int = _PRIORIDADE_SELECAO
 
-
-# Alias mantido para imports antigos. A preferência antiga deixou de participar
-# do ranking; agora a memória representa apenas uma escolha direta global.
-PreferenciaBusca = EscolhaBusca
 
 
 def _max_entries() -> int:
@@ -311,11 +305,6 @@ def registrar_selecao_busca(
     total: int = 0,
 ) -> bool:
     """Guarda escolha do seletor; links diretos têm prioridade sobre ela."""
-    registrar_selecao_telemetria(
-        posicao=posicao,
-        total=total,
-        fonte=(track.display_source or track.source),
-    )
     return _registrar(
         query,
         track,
@@ -425,34 +414,3 @@ def esquecer_escolha_busca(query: str) -> bool:
         except Exception:
             logger.warning("[music/search-memory] falha ao remover escolha persistida", exc_info=True)
         return True
-
-
-def obter_preferencia_busca(
-    query: str,
-    *,
-    guild_id: int = 0,
-    requester_id: int = 0,
-    now: float | None = None,
-) -> PreferenciaBusca | None:
-    """Compatibilidade para código externo antigo; não é usada pelo ranking."""
-    clean_query = str(query or "").strip()
-    if not clean_query:
-        return None
-    _ensure_loaded()
-    chave = chave_semantica_busca(clean_query)
-    with _LOCK:
-        escolha = _memoria.get(chave)
-        if escolha is not None:
-            _memoria.move_to_end(chave)
-        return escolha
-
-
-def estabilizar_com_preferencia(
-    tracks: Sequence[MusicTrack],
-    avaliados: Sequence[ResultadoRanking],
-    preferencia: PreferenciaBusca | None,
-    *,
-    max_score_delta: float = 0.0,
-) -> list[ResultadoRanking]:
-    """Compatibilidade: memória de escolha não interfere mais no ranking."""
-    return list(avaliados)

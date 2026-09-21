@@ -8,11 +8,10 @@ from cogs.musica.metadados.modelos import ApiTrackCandidate
 
 
 @pytest.mark.asyncio
-async def test_api_first_simples_preserva_ordem_e_nao_chama_worker_rank_deep_ou_multifonte(monkeypatch) -> None:
+async def test_api_first_preserva_ordem_e_nao_chama_worker(monkeypatch) -> None:
     from cogs.musica.agente_telefone import resolucao
 
     limpar_memoria_busca()
-    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_SIMPLE_MODE_ENABLED", True, raising=False)
     monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_API_FIRST_ENABLED", True, raising=False)
 
     async def api(query: str, *, limit: int = 3):
@@ -33,17 +32,11 @@ async def test_api_first_simples_preserva_ordem_e_nao_chama_worker_rank_deep_ou_
             ),
         ]
 
-    async def proibido_async(*args, **kwargs):
-        raise AssertionError("API-first suficiente nao deve chamar outro caminho")
-
-    def proibido_sync(*args, **kwargs):
-        raise AssertionError("busca simplificada nao deve rankear/deep")
+    async def worker_proibido(*args, **kwargs):
+        raise AssertionError("API-first suficiente nao deve chamar o worker")
 
     monkeypatch.setattr(resolucao, "buscar_candidatos_youtube_fast", api)
-    monkeypatch.setattr(resolucao, "require_music_worker_available_async", proibido_async)
-    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", proibido_async)
-    monkeypatch.setattr(resolucao, "ranquear_faixas", proibido_sync)
-    monkeypatch.setattr(resolucao, "avaliar_busca_profunda", proibido_sync)
+    monkeypatch.setattr(resolucao, "require_music_worker_available_async", worker_proibido)
 
     lote = await resolucao.resolve_music_tracks_on_worker(
         "505",
@@ -68,8 +61,6 @@ async def test_api_first_com_um_resultado_nao_busca_para_completar_tres(monkeypa
     from cogs.musica.agente_telefone import resolucao
 
     limpar_memoria_busca()
-    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_SIMPLE_MODE_ENABLED", True, raising=False)
-    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_API_FIRST_ENABLED", True, raising=False)
 
     async def api(*args, **kwargs):
         return [
@@ -97,13 +88,10 @@ async def test_api_first_com_um_resultado_nao_busca_para_completar_tres(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_api_vazia_faz_um_ytsearch3_sem_ranking_multifonte_deep_ou_cache(monkeypatch) -> None:
+async def test_api_vazia_faz_um_ytsearch3_sem_cache(monkeypatch) -> None:
     from cogs.musica.agente_telefone import resolucao
 
     limpar_memoria_busca()
-    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_SIMPLE_MODE_ENABLED", True, raising=False)
-    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_API_FIRST_ENABLED", True, raising=False)
-
     chamadas = {"api": 0, "worker": 0}
 
     async def api(*args, **kwargs):
@@ -145,12 +133,6 @@ async def test_api_vazia_faz_um_ytsearch3_sem_ranking_multifonte_deep_ou_cache(m
             ],
         }
 
-    async def proibido_async(*args, **kwargs):
-        raise AssertionError("multifonte nao deve rodar")
-
-    def proibido_sync(*args, **kwargs):
-        raise AssertionError("ranking/deep nao deve rodar")
-
     monkeypatch.setattr(resolucao, "buscar_candidatos_youtube_fast", api)
     monkeypatch.setattr(
         resolucao,
@@ -158,9 +140,6 @@ async def test_api_vazia_faz_um_ytsearch3_sem_ranking_multifonte_deep_ou_cache(m
         lambda guild_id: DestinoWorker("phone", "Phone", "http://worker.test", "token"),
     )
     monkeypatch.setattr(resolucao, "executar_resolucao_compartilhada", worker)
-    monkeypatch.setattr(resolucao, "buscar_candidatos_multifonte", proibido_async)
-    monkeypatch.setattr(resolucao, "ranquear_faixas", proibido_sync)
-    monkeypatch.setattr(resolucao, "avaliar_busca_profunda", proibido_sync)
 
     primeiro = await resolucao.resolve_music_tracks_on_worker(
         "busca sem memoria",
@@ -183,7 +162,44 @@ async def test_api_vazia_faz_um_ytsearch3_sem_ranking_multifonte_deep_ou_cache(m
         "Segundo bruto",
         "Terceiro bruto",
     ]
-    # Sem escolha registrada, duas pesquisas sequenciais sao duas consultas:
-    # nao existe cache transitório de resultados no caminho simplificado.
     assert chamadas == {"api": 2, "worker": 2}
+    limpar_memoria_busca()
+
+
+@pytest.mark.asyncio
+async def test_api_desabilitada_pula_direto_para_worker(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import resolucao
+
+    limpar_memoria_busca()
+    monkeypatch.setattr(resolucao.config, "MUSIC_SEARCH_API_FIRST_ENABLED", False, raising=False)
+    monkeypatch.setattr(
+        resolucao,
+        "destino_vinculado",
+        lambda guild_id: DestinoWorker("phone", "Phone", "http://worker.test", "token"),
+    )
+
+    async def api_proibida(*args, **kwargs):
+        raise AssertionError("API desabilitada nao deve ser chamada")
+
+    async def worker(executor, *, base, token, payload, timeout_seconds):
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "default_search": "ytsearch3",
+            "tracks": [
+                {
+                    "title": "Resultado",
+                    "webpage_url": "https://youtube.test/1",
+                    "uploader": "Canal",
+                    "source": "worker-ytdlp",
+                    "metadata_only": True,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(resolucao, "buscar_candidatos_youtube_fast", api_proibida)
+    monkeypatch.setattr(resolucao, "executar_resolucao_compartilhada", worker)
+
+    lote = await resolucao.resolve_music_tracks_on_worker("teste", metadata_only=True, guild_id=1)
+    assert [track.title for track in lote.tracks] == ["Resultado"]
     limpar_memoria_busca()

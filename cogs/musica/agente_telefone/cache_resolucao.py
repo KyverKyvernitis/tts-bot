@@ -75,13 +75,7 @@ def copiar_lote_para_requisicao(
 
 def ttl_cache_resolucao(*, somente_metadados: bool) -> float:
     if somente_metadados:
-        return max(
-            0.0,
-            float(
-                getattr(config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 420.0)
-                or 0.0
-            ),
-        )
+        return 0.0
     return max(
         0.0,
         float(
