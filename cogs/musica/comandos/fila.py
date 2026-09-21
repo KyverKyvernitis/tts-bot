@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 from discord.ext import commands
 
-from ..interface.componentes import QueueView, build_queue_embed
+from ..interface.componentes import QueueView
 
 
 class FluxoFila:
@@ -12,10 +12,8 @@ class FluxoFila:
     async def _run_queue(self, ctx: commands.Context) -> None:
         if not await self._ensure_music_action_voice(ctx):
             return
-        state = self.router.get_state(ctx.guild.id)
         await self._reply(
             ctx,
-            embed=build_queue_embed(state, 0),
             view=QueueView(self.router, ctx.guild.id, 0, owner_id=ctx.author.id),
         )
 

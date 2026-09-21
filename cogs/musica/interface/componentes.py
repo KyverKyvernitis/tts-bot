@@ -23,6 +23,9 @@ from .carregamento import MusicLoadingReaction
 from .tarefas import agendar_tarefa_unica
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
+PLAYER_STATUS_ANIMATED_URL = "https://i.ibb.co/QXtk5VB/neon-circle.gif"
+PLAYER_PAUSED_ICON_URL = "https://cdn.discordapp.com/attachments/480195401543188483/896013933197013002/pause.png"
+PLAYER_ERROR_ICON_URL = "https://cdn.discordapp.com/emojis/1215703754471268414.png"
 QUEUE_PAGE_SIZE = 8
 # Já resolvido em memória no import: nenhuma chamada de API/fetch de emoji é feita
 # quando o menu de resultados é montado.
@@ -615,6 +618,190 @@ def _queue_duration_label(items: list[MusicTrack]) -> str:
     if unknown:
         label += "+"
     return label
+
+
+def _source_key_for_track(track: MusicTrack | None) -> str:
+    if track is None:
+        return ""
+    fields: list[str] = []
+    for attr in ("source", "extractor", "original_url", "webpage_url", "display_url", "stream_url"):
+        with contextlib.suppress(Exception):
+            value = str(getattr(track, attr, "") or "").strip().lower()
+            if value:
+                fields.append(value)
+    text = " ".join(fields)
+    if "spotify" in text:
+        return "spotify"
+    if "soundcloud" in text or "sound cloud" in text:
+        return "soundcloud"
+    if "deezer" in text:
+        return "deezer"
+    if "youtube" in text or "youtu.be" in text or "ytmusic" in text or "yt-dlp" in text:
+        return "youtube"
+    return ""
+
+
+def _source_badge_for_track(track: MusicTrack | None) -> tuple[str, str]:
+    key = _source_key_for_track(track)
+    emoji = config.MUSIC_SOURCE_EMOJIS.get(key) or config.MUSIC_SOURCE_EMOJI_FALLBACK
+    label = {
+        "youtube": "YouTube",
+        "spotify": "Spotify",
+        "deezer": "Deezer",
+        "soundcloud": "SoundCloud",
+    }.get(key, "Áudio")
+    return emoji, label
+
+
+def _public_audio_quality_label(state, track: MusicTrack | None) -> str:
+    if track is None:
+        return ""
+    ext = str(getattr(track, "resolved_audio_ext", "") or "").strip().lower()
+    codec = str(getattr(track, "resolved_audio_codec", "") or "").strip().lower()
+    abr = 0
+    with contextlib.suppress(Exception):
+        abr = int(float(getattr(track, "resolved_audio_abr", 0) or 0))
+
+    codec_label = ""
+    if codec and codec != "none":
+        short_codec = codec.split(".", 1)[0]
+        codec_label = {
+            "opus": "Opus",
+            "aac": "AAC",
+            "mp3": "MP3",
+            "vorbis": "Vorbis",
+        }.get(short_codec, short_codec.upper())
+    elif ext:
+        codec_label = ext.upper()
+
+    backend = str(getattr(state, "current_backend", "") or "").lower()
+    if not abr and backend == "agent":
+        with contextlib.suppress(Exception):
+            abr = int(float(getattr(state, "current_quality_kbps", 0) or 0))
+
+    parts: list[str] = []
+    if codec_label:
+        parts.append(codec_label)
+    if abr:
+        parts.append(f"{abr} kbps")
+    if parts:
+        return " · ".join(parts)
+
+    quality = str(getattr(state, "current_quality_label", "") or "").strip() if backend == "agent" else ""
+    return quality or ("Resolvendo áudio" if str(getattr(state, "current_status", "") or "") in {"resolving", "starting"} else "")
+
+
+def _track_link_v2(track: MusicTrack, *, title_limit: int = 84, bold: bool = False) -> str:
+    title = _escape(track.short_title or track.title, limit=title_limit)
+    label = f"**{title}**" if bold else title
+    if track.display_url:
+        return f"[{label}]({track.display_url})"
+    return label
+
+
+def _player_status_presentation(state) -> tuple[str, str, discord.Colour]:
+    status = str(getattr(state, "current_status", "playing") or "playing").lower()
+    paused = bool(getattr(state, "paused", False)) or status == "paused"
+    if status == "error":
+        return "Erro no player", PLAYER_ERROR_ICON_URL, discord.Color.red()
+    if status == "skipping":
+        return "Pulando música", PLAYER_STATUS_ANIMATED_URL, discord.Color.gold()
+    if status in {"resolving", "starting"}:
+        return "Preparando áudio", PLAYER_STATUS_ANIMATED_URL, discord.Color.gold()
+    if paused:
+        return "Em pausa", PLAYER_PAUSED_ICON_URL, discord.Color.gold()
+    if getattr(state, "current", None) is not None:
+        return "Tocando Agora", PLAYER_STATUS_ANIMATED_URL, discord.Color.blurple()
+
+    queue = _queue_items(state)
+    if queue:
+        return "Fila pronta", PLAYER_STATUS_ANIMATED_URL, discord.Color.blurple()
+    reason = str(getattr(state, "idle_reason", "idle") or "idle")
+    if reason == "manual_stop":
+        return "Player encerrado", PLAYER_ERROR_ICON_URL, discord.Color.dark_grey()
+    if reason == "external_disconnect":
+        return "Player interrompido", PLAYER_ERROR_ICON_URL, discord.Color.red()
+    if reason == "external_move":
+        return "Player movido", PLAYER_STATUS_ANIMATED_URL, discord.Color.blurple()
+    if reason == "track_failed":
+        return "Não consegui iniciar", PLAYER_ERROR_ICON_URL, discord.Color.red()
+    if reason == "queue_finished":
+        return "As músicas acabaram", PLAYER_STATUS_ANIMATED_URL, discord.Color.dark_grey()
+    return "Nada tocando agora", PLAYER_STATUS_ANIMATED_URL, discord.Color.dark_grey()
+
+
+def _player_track_text(state, track: MusicTrack) -> str:
+    title = _track_link_v2(track, title_limit=88, bold=True)
+    source = _escape(track.uploader or track.source or track.extractor or "fonte desconhecida", limit=64)
+    requester = _escape(track.requester_name, limit=42) if track.requester_name else f"<@{track.requester_id}>"
+    source_emoji, source_label = _source_badge_for_track(track)
+    quality = _public_audio_quality_label(state, track)
+    duration = "Ao vivo" if track.is_live else track.duration_label
+
+    metadata = [f"⏱️ {duration}", f"{source_emoji} {source_label}"]
+    if quality:
+        metadata.append(quality)
+    lines = [f"## {title}", f"-# {source}", " · ".join(metadata), f"-# Pedido por {requester}"]
+
+    loop_mode = getattr(state, "loop_mode", None)
+    loop_label = str(getattr(loop_mode, "label", "desligado") or "desligado")
+    state_bits: list[str] = []
+    if loop_label != "desligado":
+        state_bits.append(f"🔁 {loop_label}")
+    if getattr(state, "shuffle", False):
+        state_bits.append("🔀 embaralhado")
+    if state_bits:
+        lines.append("-# " + " · ".join(state_bits))
+    return "\n".join(lines)
+
+
+def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None = None, page: int = 0) -> str:
+    items = _queue_items(state)
+    total = _queue_total_count(state, items)
+    if not items:
+        return "### Fila · vazia\n-# Use `_play <nome ou link>` para adicionar músicas."
+
+    page = max(0, int(page))
+    start = page * QUEUE_PAGE_SIZE if page else 0
+    if page:
+        preview = items[start : start + QUEUE_PAGE_SIZE]
+    else:
+        preview = items[: max(1, int(limit))]
+    duration = _queue_duration_label(items)
+    header = f"### Fila · {total} música{'s' if total != 1 else ''} · {duration}"
+    lines = [header]
+    for offset, item in enumerate(preview, start=1):
+        position = start + offset
+        marker = "▶" if selected_position == position else f"{position:02d}"
+        lines.append(f"**{marker}**  {_track_link_v2(item, title_limit=58)}  ·  {item.duration_label}")
+    hidden = max(0, int(total) - len(preview) - start)
+    if hidden:
+        lines.append(f"-# + {hidden} música{'s' if hidden != 1 else ''}")
+    return "\n".join(lines)
+
+
+def _idle_player_text(state) -> str:
+    reason = str(getattr(state, "idle_reason", "idle") or "idle")
+    actor_id = getattr(state, "idle_actor_id", None)
+    actor_name = str(getattr(state, "idle_actor_name", "") or "")
+    channel_name = str(getattr(state, "idle_channel_name", "") or "")
+    if reason == "queue_finished":
+        return "A fila terminou. Use `_play <link ou pesquisa>` para adicionar outra música."
+    if reason == "track_failed":
+        title = _escape(actor_name or "essa música", limit=64)
+        detail = _escape(channel_name, limit=120) if channel_name else ""
+        return f"Falhei antes do áudio começar em **{title}**." + (f"\n-# {detail}" if detail else "")
+    if reason == "manual_stop":
+        return "A reprodução foi parada e a fila foi limpa.\n-# Use `_play <link ou pesquisa>` quando quiser tocar algo de novo."
+    if reason == "external_disconnect":
+        who = f"<@{int(actor_id)}>" if actor_id else (_escape(actor_name, limit=48) if actor_name else "alguém")
+        where = f" de **{_escape(channel_name, limit=48)}**" if channel_name else ""
+        return f"O bot foi desconectado{where} por {who}.\n-# Use `_play <link ou pesquisa>` para iniciar novamente."
+    if reason == "external_move":
+        who = f" por <@{int(actor_id)}>" if actor_id else (f" por {_escape(actor_name, limit=48)}" if actor_name else "")
+        where = f" para **{_escape(channel_name, limit=48)}**" if channel_name else ""
+        return f"O bot foi movido{where}{who}."
+    return "Use `_play <link ou pesquisa>` para adicionar uma música."
 
 
 def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
@@ -1353,13 +1540,13 @@ class QueueSelect(discord.ui.Select):
             options.append(
                 discord.SelectOption(
                     label=f"{idx}. {track.short_title}"[:100],
-                    description=f"{track.duration_label} • {track.uploader or track.source or 'queue'}"[:100],
+                    description=f"{track.duration_label} • {track.uploader or track.source or 'fila'}"[:100],
                     value=str(idx),
                     emoji="🎵",
                     default=selected_position == idx,
                 )
             )
-        super().__init__(placeholder="Selecione uma música do queue", min_values=1, max_values=1, options=options, row=0)
+        super().__init__(placeholder="Selecione uma música da fila", min_values=1, max_values=1, options=options, custom_id="music:queue:select")
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
@@ -1380,7 +1567,7 @@ class MoveSelectedModal(discord.ui.Modal):
         self.owner_id = int(owner_id or 0)
         self.message = message
         self.to_pos = discord.ui.TextInput(
-            label="Nova posição no queue",
+            label="Nova posição na fila",
             placeholder="Exemplo: 1",
             min_length=1,
             max_length=4,
@@ -1403,14 +1590,25 @@ class MoveSelectedModal(discord.ui.Modal):
             await interaction.response.send_message("Essa música já está nessa posição.", ephemeral=True)
             return
         ok = await self.router.move(self.guild_id, self.from_pos, to_pos)
-        await interaction.response.send_message("`↪️` Música movida." if ok else "Não consegui mover: confira a posição no queue.", ephemeral=True)
+        await interaction.response.send_message("`↪️` Música movida." if ok else "Não consegui mover: confira a posição na fila.", ephemeral=True)
         if ok and self.message is not None:
             view = QueueView(self.router, self.guild_id, self.page, owner_id=self.owner_id)
             with contextlib.suppress(Exception):
-                await self.message.edit(embed=build_queue_embed(self.router.get_state(self.guild_id), view.page), view=view)
+                await self.message.edit(content=None, embeds=[], attachments=[], view=view)
 
 
-class QueueConfirmView(discord.ui.View):
+class StaticMusicMessageView(discord.ui.LayoutView):
+    def __init__(self, text: str, *, accent_color: discord.Colour | int | None = None) -> None:
+        super().__init__(timeout=None)
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(text),
+                accent_color=accent_color if accent_color is not None else discord.Color.dark_grey(),
+            )
+        )
+
+
+class QueueConfirmView(discord.ui.LayoutView):
     def __init__(self, router, guild_id: int, *, action: str, owner_id: int | None = None, page: int = 0, position: int | None = None, message=None) -> None:
         super().__init__(timeout=45)
         self.router = router
@@ -1420,6 +1618,18 @@ class QueueConfirmView(discord.ui.View):
         self.page = max(0, int(page))
         self.position = int(position or 0)
         self.message = message
+        prompt = "Limpar todas as músicas da fila?" if action == "clear" else "Remover esta música da fila?"
+        confirm = discord.ui.Button(label="Confirmar", emoji="✅", style=discord.ButtonStyle.danger, custom_id=f"music:queue:confirm:{action}")
+        confirm.callback = self.confirm
+        cancel = discord.ui.Button(label="Cancelar", emoji="❌", style=discord.ButtonStyle.secondary, custom_id=f"music:queue:cancel:{action}")
+        cancel.callback = self.cancel
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(f"### {prompt}"),
+                discord.ui.ActionRow(confirm, cancel),
+                accent_color=discord.Color.red(),
+            )
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.owner_id and interaction.user and interaction.user.id != self.owner_id:
@@ -1427,8 +1637,7 @@ class QueueConfirmView(discord.ui.View):
             return False
         # Não faça healthcheck/seleção de worker no interaction_check: o Discord
         # só chama o callback depois disso, então qualquer I/O aqui pode gerar
-        # "Esta interação falhou" mesmo com a ação aplicada. O callback faz defer
-        # primeiro e só depois consulta o worker/agent.
+        # "Esta interação falhou" mesmo com a ação aplicada.
         return await _require_music_voice_interaction(interaction, self.router, self.guild_id, check_worker=False)
 
     async def _refresh_parent(self) -> None:
@@ -1436,13 +1645,15 @@ class QueueConfirmView(discord.ui.View):
             return
         view = QueueView(self.router, self.guild_id, self.page, owner_id=self.owner_id)
         with contextlib.suppress(Exception):
-            await self.message.edit(embed=build_queue_embed(self.router.get_state(self.guild_id), view.page), view=view)
+            await self.message.edit(content=None, embeds=[], attachments=[], view=view)
 
-    @discord.ui.button(label="Confirmar", emoji="✅", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirm(self, interaction: discord.Interaction):
         if self.action == "clear":
             await self.router.replace_queue(self.guild_id, [])
-            await interaction.response.edit_message(content="`🧹` Queue limpo.", view=None)
+            await interaction.response.edit_message(
+                content=None, embeds=[], attachments=[],
+                view=StaticMusicMessageView("### 🧹 Fila limpa", accent_color=discord.Color.green()),
+            )
             await self._refresh_parent()
             self.stop()
             return
@@ -1450,23 +1661,34 @@ class QueueConfirmView(discord.ui.View):
         if self.action == "remove":
             removed = await self.router.remove_at(self.guild_id, self.position)
             if removed is None:
-                await interaction.response.edit_message(content="Essa posição não existe mais no queue.", view=None)
+                text = "### Essa posição não existe mais na fila."
+                color = discord.Color.red()
             else:
-                await interaction.response.edit_message(content=f"`🗑️` Removido do queue: **{_escape(removed.short_title, limit=80)}**.", view=None)
+                text = f"### 🗑️ Removido da fila\n{_escape(removed.short_title, limit=80)}"
+                color = discord.Color.green()
+            await interaction.response.edit_message(
+                content=None, embeds=[], attachments=[],
+                view=StaticMusicMessageView(text, accent_color=color),
+            )
             await self._refresh_parent()
             self.stop()
             return
 
-        await interaction.response.edit_message(content="Ação desconhecida.", view=None)
+        await interaction.response.edit_message(
+            content=None, embeds=[], attachments=[],
+            view=StaticMusicMessageView("### Ação desconhecida", accent_color=discord.Color.red()),
+        )
         self.stop()
 
-    @discord.ui.button(label="Cancelar", emoji="❌", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="Ação cancelada.", view=None)
+    async def cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=None, embeds=[], attachments=[],
+            view=StaticMusicMessageView("### Ação cancelada", accent_color=discord.Color.dark_grey()),
+        )
         self.stop()
 
 
-class QueueView(discord.ui.View):
+class QueueView(discord.ui.LayoutView):
     def __init__(self, router, guild_id: int, page: int = 0, *, owner_id: int | None = None, selected_position: int | None = None) -> None:
         super().__init__(timeout=300)
         self.router = router
@@ -1478,65 +1700,82 @@ class QueueView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.owner_id and interaction.user and interaction.user.id != self.owner_id:
-            await interaction.response.send_message(f"Apenas <@{self.owner_id}> pode interagir nesse painel de queue.", ephemeral=True)
+            await interaction.response.send_message(f"Apenas <@{self.owner_id}> pode interagir nesse painel de fila.", ephemeral=True)
             return False
-        # Não faça healthcheck/seleção de worker no interaction_check: o Discord
-        # só chama o callback depois disso, então qualquer I/O aqui pode gerar
-        # "Esta interação falhou" mesmo com a ação aplicada. O callback faz defer
-        # primeiro e só depois consulta o worker/agent.
+        # Não faça healthcheck/seleção de worker no interaction_check.
         return await _require_music_voice_interaction(interaction, self.router, self.guild_id, check_worker=False)
 
     def _queue_items(self) -> list[MusicTrack]:
         return self.router.snapshot_queue(self.guild_id)
 
-    def _max_page(self) -> int:
-        items = self._queue_items()
+    def _max_page(self, items: list[MusicTrack] | None = None) -> int:
+        items = self._queue_items() if items is None else items
         return max(0, (len(items) - 1) // QUEUE_PAGE_SIZE)
+
+    def _queue_text(self, state, items: list[MusicTrack]) -> str:
+        total = _queue_total_count(state, items)
+        if not items:
+            return "# 📜 Fila\nA fila está vazia.\n-# Use `_play <nome ou link>` para adicionar músicas."
+        max_page = self._max_page(items)
+        start = self.page * QUEUE_PAGE_SIZE
+        chunk = items[start : start + QUEUE_PAGE_SIZE]
+        page_label = f" · página {self.page + 1}/{max_page + 1}" if max_page else ""
+        lines = [f"# 📜 Fila · {total} música{'s' if total != 1 else ''}{page_label}"]
+        current = getattr(state, "current", None)
+        if current is not None:
+            lines.extend([f"-# Tocando agora: {_track_link_v2(current, title_limit=64)}", ""])
+        for offset, track in enumerate(chunk, start=1):
+            index = start + offset
+            marker = "▶" if self.selected_position == index else f"{index:02d}"
+            lines.append(f"**{marker}**  {_track_link_v2(track, title_limit=62)}  ·  {track.duration_label}")
+            requester = _escape(track.requester_name, limit=42) if track.requester_name else f"<@{track.requester_id}>"
+            lines.append(f"-# pedido por {requester}")
+        lines.extend(["", f"-# Duração aproximada: {_queue_duration_label(items)}"] )
+        return "\n".join(lines)
 
     def _refresh_components(self) -> None:
         self.clear_items()
         items = self._queue_items()
-        max_page = self._max_page()
+        max_page = self._max_page(items)
         self.page = max(0, min(self.page, max_page))
         if self.selected_position and not (1 <= self.selected_position <= len(items)):
             self.selected_position = None
 
-        if items:
-            self.add_item(QueueSelect(self.router, self.guild_id, self.page, self.selected_position))
+        state = self.router.get_state(self.guild_id)
+        container = discord.ui.Container(accent_color=discord.Color.blurple() if items else discord.Color.dark_grey())
+        container.add_item(discord.ui.TextDisplay(self._queue_text(state, items)))
 
-        row = 1
+        if items:
+            container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.ActionRow(QueueSelect(self.router, self.guild_id, self.page, self.selected_position)))
+
         if self.selected_position:
-            play = discord.ui.Button(label="Tocar agora", emoji="▶️", style=discord.ButtonStyle.primary, row=row)
+            play = discord.ui.Button(label="Tocar agora", emoji="▶️", style=discord.ButtonStyle.primary, custom_id="music:queue:play")
             play.callback = self.play_selected
-            self.add_item(play)
-            move = discord.ui.Button(label="Mover", emoji="↪️", style=discord.ButtonStyle.secondary, row=row)
+            move = discord.ui.Button(label="Mover", emoji="↪️", style=discord.ButtonStyle.secondary, custom_id="music:queue:move")
             move.callback = self.move_selected
-            self.add_item(move)
-            remove = discord.ui.Button(label="Remover", emoji="🗑️", style=discord.ButtonStyle.danger, row=row)
+            remove = discord.ui.Button(label="Remover", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="music:queue:remove")
             remove.callback = self.remove_selected
-            self.add_item(remove)
-            row += 1
+            container.add_item(discord.ui.ActionRow(play, move, remove))
 
         if max_page > 0:
-            previous = discord.ui.Button(emoji="⬅️", style=discord.ButtonStyle.secondary, row=row, disabled=self.page <= 0)
+            previous = discord.ui.Button(emoji="⬅️", style=discord.ButtonStyle.secondary, disabled=self.page <= 0, custom_id="music:queue:previous")
             previous.callback = self.previous_page
-            self.add_item(previous)
-            page_label = discord.ui.Button(label=f"Página {self.page + 1}/{max_page + 1}", style=discord.ButtonStyle.secondary, row=row, disabled=True)
-            self.add_item(page_label)
-            next_button = discord.ui.Button(emoji="➡️", style=discord.ButtonStyle.secondary, row=row, disabled=self.page >= max_page)
+            page_label = discord.ui.Button(label=f"Página {self.page + 1}/{max_page + 1}", style=discord.ButtonStyle.secondary, disabled=True, custom_id="music:queue:page")
+            next_button = discord.ui.Button(emoji="➡️", style=discord.ButtonStyle.secondary, disabled=self.page >= max_page, custom_id="music:queue:next")
             next_button.callback = self.next_page
-            self.add_item(next_button)
-            row += 1
+            container.add_item(discord.ui.ActionRow(previous, page_label, next_button))
 
         if items:
-            clear = discord.ui.Button(label="Limpar queue", emoji="🧹", style=discord.ButtonStyle.danger, row=row)
+            clear = discord.ui.Button(label="Limpar fila", emoji="🧹", style=discord.ButtonStyle.danger, custom_id="music:queue:clear")
             clear.callback = self.clear_queue
-            self.add_item(clear)
+            container.add_item(discord.ui.ActionRow(clear))
+
+        self.add_item(container)
 
     async def _redraw(self, interaction: discord.Interaction) -> None:
         self._refresh_components()
-        embed = build_queue_embed(self.router.get_state(self.guild_id), self.page, selected_position=self.selected_position)
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(content=None, embeds=[], attachments=[], view=self)
 
     async def previous_page(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)
@@ -1557,7 +1796,7 @@ class QueueView(discord.ui.View):
             await interaction.response.send_message("Selecione uma música primeiro.", ephemeral=True)
             return
         ok = await self.router.skip_to(self.guild_id, self.selected_position)
-        await interaction.response.send_message("`▶️` Tocando a música selecionada." if ok else "Não consegui tocar essa posição no queue.", ephemeral=True)
+        await interaction.response.send_message("`▶️` Tocando a música selecionada." if ok else "Não consegui tocar essa posição na fila.", ephemeral=True)
 
     async def move_selected(self, interaction: discord.Interaction):
         if not self.selected_position:
@@ -1579,7 +1818,6 @@ class QueueView(discord.ui.View):
             await interaction.response.send_message("Selecione uma música primeiro.", ephemeral=True)
             return
         await interaction.response.send_message(
-            "Remover esta música do queue?",
             view=QueueConfirmView(
                 self.router,
                 self.guild_id,
@@ -1597,10 +1835,9 @@ class QueueView(discord.ui.View):
 
     async def clear_queue(self, interaction: discord.Interaction):
         if not self._queue_items():
-            await interaction.response.send_message("O queue já está vazio.", ephemeral=True)
+            await interaction.response.send_message("A fila já está vazia.", ephemeral=True)
             return
         await interaction.response.send_message(
-            "Limpar todas as músicas do queue?",
             view=QueueConfirmView(
                 self.router,
                 self.guild_id,
@@ -1611,7 +1848,6 @@ class QueueView(discord.ui.View):
             ),
             ephemeral=True,
         )
-
 
 
 class VoiceStatusTemplateModal(discord.ui.Modal):
@@ -1781,13 +2017,13 @@ class PlayerOptionsSelect(discord.ui.Select):
         state = router.get_state(guild_id)
         volume_percent = int(round(float(getattr(state, "volume", 0.55)) * 100))
         options = [
-            discord.SelectOption(label="Adicionar música", emoji="🎶", value="add_song", description="Adicionar uma música ou playlist no queue."),
+            discord.SelectOption(label="Adicionar música", emoji="🎶", value="add_song", description="Adicionar uma música ou playlist na fila."),
             discord.SelectOption(label=f"Volume: {volume_percent}%", emoji="🔊", value="volume", description="Ajustar volume da música."),
             discord.SelectOption(label="Selecionar momento", emoji="💠", value="seek", description="Ir para um tempo específico da música."),
-            discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/queue."),
-            discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Embaralhar o queue uma vez."),
+            discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/fila."),
+            discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Embaralhar a fila uma vez."),
         ]
-        super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, row=1)
+        super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, custom_id="music:options")
         self.router = router
         self.guild_id = int(guild_id)
 
@@ -1835,67 +2071,159 @@ class PlayerOptionsSelect(discord.ui.Select):
         await interaction.response.defer(ephemeral=True)
 
 
-class MusicPlayerView(discord.ui.View):
+class MusicPlayerView(discord.ui.LayoutView):
+    """Painel principal 100% Discord Components V2.
+
+    O renderer usa apenas o estado já disponível em memória. Não faz consultas de
+    rede, yt-dlp, banco, Lavalink ou worker para montar a interface.
+    """
+
     def __init__(self, router, guild_id: int) -> None:
         super().__init__(timeout=None)
         self.router = router
         self.guild_id = int(guild_id)
-        self.add_item(PlayerOptionsSelect(router, guild_id))
-        self._sync_components()
+        self._build()
 
-    def _emoji_name(self, item) -> str:
-        emoji = getattr(item, "emoji", None)
-        return str(getattr(emoji, "name", None) or emoji or "")
-
-    def _sync_components(self) -> None:
-        state = self.router.get_state(self.guild_id)
+    def _control_state(self, state, queue: list[MusicTrack]) -> dict[str, bool]:
         status = str(getattr(state, "current_status", "") or "")
         paused = bool(getattr(state, "paused", False)) or status == "paused"
-        has_current = bool(getattr(state, "current", None) or getattr(state, "current_source", None) or status in {"resolving", "starting", "skipping", "playing", "paused"})
-        has_queue = bool(_queue_items(state))
-        has_history = bool(list(getattr(state, "history", []) or [])) or bool(int(getattr(state, "agent_remote_history_size", 0) or 0) > 0)
+        has_current = bool(
+            getattr(state, "current", None)
+            or getattr(state, "current_source", None)
+            or status in {"resolving", "starting", "skipping", "playing", "paused"}
+        )
+        has_queue = bool(queue)
+        has_history = bool(list(getattr(state, "history", []) or [])) or bool(
+            int(getattr(state, "agent_remote_history_size", 0) or 0) > 0
+        )
         has_session = bool(getattr(state, "music_session_active", False) or has_current or has_queue)
-        controls_invalid = _panel_controls_invalid(state)
+        return {
+            "paused": paused,
+            "has_current": has_current,
+            "has_queue": has_queue,
+            "has_history": has_history,
+            "has_session": has_session,
+            "invalid": _panel_controls_invalid(state),
+        }
 
-        for item in self.children:
-            if isinstance(item, discord.ui.Select):
-                item.disabled = controls_invalid
-                continue
-            if not isinstance(item, discord.ui.Button):
-                continue
-            item.label = None
-            emoji_name = self._emoji_name(item)
-            custom_id = str(getattr(item, "custom_id", "") or "")
-            if controls_invalid:
-                # Painel encerrado expira controles destrutivos, mas o botão de
-                # voltar continua útil quando há histórico tocável após fila vazia.
-                item.disabled = not (emoji_name == "⏮️" and has_history)
-                continue
-            if custom_id.endswith(":pause_resume") or emoji_name in {"⏸️", "▶️"}:
-                item.emoji = "▶️" if paused else "⏸️"
-                item.style = discord.ButtonStyle.primary if paused else discord.ButtonStyle.secondary
-                item.disabled = not has_current
-            elif emoji_name == "⏮️":
-                item.disabled = not has_history
-            elif emoji_name == "⏭️":
-                item.disabled = not (has_current or has_queue)
-            elif custom_id.endswith(":stop") or emoji_name == "⏹️":
-                item.disabled = not has_session
-            elif emoji_name == "📜":
-                item.disabled = False
+    def _build(self) -> None:
+        self.clear_items()
+        state = self.router.get_state(self.guild_id)
+        current = getattr(state, "current", None)
+        queue = _queue_items(state)
+        status_title, status_icon, accent_color = _player_status_presentation(state)
+        controls = self._control_state(state, queue)
+
+        container = discord.ui.Container(accent_color=accent_color)
+        container.add_item(
+            discord.ui.Section(
+                discord.ui.TextDisplay(f"### {status_title}"),
+                accessory=discord.ui.Thumbnail(status_icon, description=status_title),
+            )
+        )
+
+        if current is not None:
+            track_text = discord.ui.TextDisplay(_player_track_text(state, current))
+            if current.thumbnail:
+                container.add_item(
+                    discord.ui.Section(
+                        track_text,
+                        accessory=discord.ui.Thumbnail(current.thumbnail, description=_escape(current.short_title, limit=120)),
+                    )
+                )
+            else:
+                container.add_item(track_text)
+        elif queue:
+            first = queue[0]
+            next_text = discord.ui.TextDisplay(
+                "## Próxima música\n"
+                f"{_track_link_v2(first, title_limit=88, bold=True)}\n"
+                f"-# {first.duration_label}"
+            )
+            if first.thumbnail:
+                container.add_item(
+                    discord.ui.Section(
+                        next_text,
+                        accessory=discord.ui.Thumbnail(first.thumbnail, description=_escape(first.short_title, limit=120)),
+                    )
+                )
+            else:
+                container.add_item(next_text)
+        else:
+            container.add_item(discord.ui.TextDisplay(_idle_player_text(state)))
+
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(_queue_preview_text(state, limit=4)))
+
+        vote_lines = [f"{label}: {count}/{needed}" for label, count, needed in list(getattr(state, "panel_vote_summary", []) or [])]
+        if vote_lines:
+            container.add_item(discord.ui.TextDisplay("-# 🗳️ " + " · ".join(vote_lines)))
+
+        # Mantém a barra animada atual, agora como mídia nativa de Components V2.
+        # O GIF continua sendo renderizado pelo Discord; não existe polling extra.
+        bar = discord.ui.MediaGallery()
+        bar.add_item(media=PLAYER_BAR_URL, description="Barra animada do player")
+        container.add_item(bar)
+        container.add_item(discord.ui.TextDisplay("-# Use os controles abaixo para controlar o player."))
+        container.add_item(discord.ui.Separator())
+
+        invalid = controls["invalid"]
+        back = discord.ui.Button(
+            emoji="⏮️",
+            style=discord.ButtonStyle.secondary,
+            disabled=not controls["has_history"],
+            custom_id="music:back",
+        )
+        back.callback = self.back
+        pause = discord.ui.Button(
+            emoji="▶️" if controls["paused"] else "⏸️",
+            style=discord.ButtonStyle.primary if controls["paused"] else discord.ButtonStyle.secondary,
+            disabled=invalid or not controls["has_current"],
+            custom_id="music:pause_resume",
+        )
+        pause.callback = self.pause_resume
+        skip = discord.ui.Button(
+            emoji="⏭️",
+            style=discord.ButtonStyle.secondary,
+            disabled=invalid or not (controls["has_current"] or controls["has_queue"]),
+            custom_id="music:skip",
+        )
+        skip.callback = self.skip
+        stop = discord.ui.Button(
+            emoji="⏹️",
+            style=discord.ButtonStyle.danger,
+            disabled=invalid or not controls["has_session"],
+            custom_id="music:stop",
+        )
+        stop.callback = self.stop
+        queue_button = discord.ui.Button(
+            emoji="📜",
+            style=discord.ButtonStyle.secondary,
+            disabled=False,
+            custom_id="music:queue",
+        )
+        queue_button.callback = self.queue
+        container.add_item(discord.ui.ActionRow(back, pause, skip, stop, queue_button))
+
+        options = PlayerOptionsSelect(self.router, self.guild_id)
+        options.disabled = invalid
+        container.add_item(discord.ui.ActionRow(options))
+        self.add_item(container)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         state = self.router.get_state(self.guild_id)
         if _panel_controls_invalid(state):
             custom_id = str((getattr(interaction, "data", {}) or {}).get("custom_id") or "")
-            has_history = bool(list(getattr(state, "history", []) or [])) or bool(int(getattr(state, "agent_remote_history_size", 0) or 0) > 0)
-            if not (custom_id.endswith(":back") or custom_id == "") or not has_history:
-                await _send_interaction_notice(interaction, "`⌛` Esse painel expirou. Use `_play <link ou pesquisa>` para começar de novo.")
+            has_history = bool(list(getattr(state, "history", []) or [])) or bool(
+                int(getattr(state, "agent_remote_history_size", 0) or 0) > 0
+            )
+            if custom_id != "music:back" or not has_history:
+                await _send_interaction_notice(
+                    interaction,
+                    "`⌛` Esse painel expirou. Use `_play <link ou pesquisa>` para começar de novo.",
+                )
                 return False
-        # Não faça healthcheck/seleção de worker no interaction_check: o Discord
-        # só chama o callback depois disso, então qualquer I/O aqui pode gerar
-        # "Esta interação falhou" mesmo com a ação aplicada. O callback faz defer
-        # primeiro e só depois consulta o worker/agent.
+        # O callback confirma a interação antes de qualquer I/O do worker.
         return await _require_music_voice_interaction(interaction, self.router, self.guild_id, check_worker=False)
 
     async def _ack(self, interaction: discord.Interaction, message: str) -> None:
@@ -1918,14 +2246,15 @@ class MusicPlayerView(discord.ui.View):
             except Exception:
                 logger.debug("[music/ui] falha ao deferir controle", exc_info=True)
 
-    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:back")
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def back(self, interaction: discord.Interaction):
         await self._defer_control(interaction)
         ok = await self.router.previous(self.guild_id)
         await self._ack(interaction, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
 
     def _music_agent_default_enabled(self) -> bool:
-        return bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)()
+        return bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(
+            self.router, "music_worker_only_enabled", lambda: False
+        )()
 
     async def _send_agent_control(self, interaction: discord.Interaction, action: str, message: str) -> bool:
         if not self._music_agent_default_enabled():
@@ -1951,8 +2280,7 @@ class MusicPlayerView(discord.ui.View):
         await self._ack(interaction, message)
         return True
 
-    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:pause_resume")
-    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def pause_resume(self, interaction: discord.Interaction):
         await self._defer_control(interaction)
         state = self.router.get_state(self.guild_id)
         if state.paused:
@@ -1972,36 +2300,35 @@ class MusicPlayerView(discord.ui.View):
             else:
                 await self._ack(interaction, "Não havia música tocando.")
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
-    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def skip(self, interaction: discord.Interaction):
         await self._defer_control(interaction)
         if await self._send_agent_control(interaction, "skip", "`⏭️` Pulando música."):
             return
         _ok, message = await self.router.request_skip(self.guild_id, interaction.user)
         await self._ack(interaction, message)
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0, custom_id="music:stop")
-    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def stop(self, interaction: discord.Interaction):
         await self._defer_control(interaction)
         if await self._send_agent_control(interaction, "stop", "`⏹️` Player encerrado e desconectado."):
             return
         _ok, message = await self.router.request_stop(self.guild_id, interaction.user, disconnect=True)
         await self._ack(interaction, message)
 
-    @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, row=0)
-    async def queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def queue(self, interaction: discord.Interaction):
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
-        state = self.router.get_state(self.guild_id)
         try:
             await interaction.followup.send(
-                embed=build_queue_embed(state, 0),
-                view=QueueView(self.router, self.guild_id, 0, owner_id=getattr(interaction.user, "id", None)),
+                view=QueueView(
+                    self.router,
+                    self.guild_id,
+                    0,
+                    owner_id=getattr(interaction.user, "id", None),
+                ),
                 ephemeral=True,
             )
         except discord.NotFound:
             return
-

@@ -3867,13 +3867,12 @@ class AudioRouter:
         if channel is None:
             return
         try:
-            from ..interface.componentes import build_player_embeds, MusicPlayerView
+            from ..interface.componentes import build_player_embeds, MusicPlayerView, StaticMusicMessageView
 
             has_player_content = bool(state.current or self._has_pending_track(state))
             if has_player_content:
                 self._reactivate_panel_controls_now(int(guild_id))
             state.panel_vote_summary = self.pending_vote_summary(guild_id)
-            embeds = build_player_embeds(state)
             # O painel mantém a mesma estrutura de controles mesmo quando a música acaba,
             # é parada ou o bot é desconectado. Os botões ficam visíveis e a view decide
             # quais ações ainda fazem sentido.
@@ -3908,12 +3907,20 @@ class AudioRouter:
                         await old_message.delete()
                     except Exception:
                         with contextlib.suppress(Exception):
-                            await old_message.edit(view=None)
+                            await old_message.edit(
+                                content=None,
+                                embeds=[],
+                                attachments=[],
+                                view=StaticMusicMessageView(
+                                    "-# Este painel foi substituído pela música atual.",
+                                    accent_color=discord.Color.dark_grey(),
+                                ),
+                            )
                     logger.info("[music] repostando painel do player | guild=%s track_key=%s", guild_id, current_panel_key)
 
                 if state.now_message is not None and not should_repost:
                     try:
-                        await state.now_message.edit(content=None, embeds=embeds, view=view)
+                        await state.now_message.edit(content=None, embeds=[], attachments=[], view=view)
                         state.panel_track_key = current_panel_key
                         return
                     except Exception:
@@ -3921,7 +3928,7 @@ class AudioRouter:
                         state.panel_track_key = None
 
                 if create:
-                    state.now_message = await channel.send(embeds=embeds, view=view, silent=True)
+                    state.now_message = await channel.send(view=view, silent=True)
                     state.panel_track_key = current_panel_key
         except Exception:
             logger.debug("[music] falha ao atualizar painel", exc_info=True)
