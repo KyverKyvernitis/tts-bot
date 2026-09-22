@@ -9,6 +9,26 @@ from typing import Any
 
 
 _DURATION_RE = re.compile(r"^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})$")
+
+
+def _spotify_track_url_from_attrs(attrs) -> str:
+    """Extrai um link público de faixa Spotify sem depender de classes CSS."""
+    for raw_name, raw_value in attrs or ():
+        name = str(raw_name or "").strip().lower()
+        if name not in {"href", "data-uri", "data-track-uri", "data-testid-uri", "uri"}:
+            continue
+        value = html.unescape(str(raw_value or "")).strip()
+        if not value:
+            continue
+        if value.startswith("spotify:track:"):
+            item_id = value.rsplit(":", 1)[-1].strip()
+            if re.fullmatch(r"[A-Za-z0-9]{16,32}", item_id):
+                return f"https://open.spotify.com/track/{item_id}"
+        match = re.search(r"(?:https?://open\.spotify\.com)?/track/([A-Za-z0-9]{16,32})", value)
+        if match:
+            return f"https://open.spotify.com/track/{match.group(1)}"
+    return ""
+
 _JSON_SCRIPT_RE = re.compile(
     r"<script(?P<attrs>[^>]*)>(?P<body>.*?)</script>",
     re.IGNORECASE | re.DOTALL,
@@ -23,6 +43,7 @@ class SpotifyEmbedRow:
     title: str
     artist: str
     duration: float | None = None
+    webpage_url: str = ""
 
 
 @dataclass(slots=True)
@@ -120,10 +141,13 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
         self.row_offset = max(0, int(offset))
         self._seen_rows = 0
         self._tag_stack: list[str] = []
+        self._track_url_stack: list[str] = []
         self._heading_tag = ""
         self._heading_parts: list[str] = []
+        self._heading_track_url = ""
         self._pending_title = ""
         self._pending_artist = ""
+        self._pending_track_url = ""
         self._top_headings: list[tuple[str, str]] = []
         self._done = False
         self.rows: list[SpotifyEmbedRow] = []
@@ -132,10 +156,16 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
         if self._done:
             return
         tag = tag.lower()
+        track_url = _spotify_track_url_from_attrs(attrs)
         self._tag_stack.append(tag)
+        self._track_url_stack.append(track_url)
+        if self._heading_tag and track_url and not self._heading_track_url:
+            # Alguns layouts colocam o <a href=/track/...> dentro do h3.
+            self._heading_track_url = track_url
         if tag in {"h1", "h2", "h3", "h4"}:
             self._heading_tag = tag
             self._heading_parts = []
+            self._heading_track_url = next((value for value in reversed(self._track_url_stack) if value), "")
 
     def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
         if self._done:
@@ -162,15 +192,18 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
                         return
                     self._pending_title = value
                     self._pending_artist = ""
+                    self._pending_track_url = self._heading_track_url
                 elif tag == "h4" and self._pending_title and not self._pending_artist:
                     self._pending_artist = value
             self._heading_tag = ""
             self._heading_parts = []
+            self._heading_track_url = ""
         if self._tag_stack:
             # HTML pode ser imperfeito; remove a ocorrência mais interna.
             for index in range(len(self._tag_stack) - 1, -1, -1):
                 if self._tag_stack[index] == tag:
                     del self._tag_stack[index:]
+                    del self._track_url_stack[index:]
                     break
 
     def handle_data(self, data: str) -> None:  # type: ignore[override]
@@ -185,9 +218,10 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
         if self._pending_title and self._pending_artist and len(self.rows) < self.limit:
             duration = parse_duration_label(value)
             if duration is not None:
-                self._append_row(SpotifyEmbedRow(self._pending_title, self._pending_artist, duration))
+                self._append_row(SpotifyEmbedRow(self._pending_title, self._pending_artist, duration, self._pending_track_url))
                 self._pending_title = ""
                 self._pending_artist = ""
+                self._pending_track_url = ""
 
     def _append_row(self, row: SpotifyEmbedRow) -> None:
         index = self._seen_rows
@@ -206,9 +240,10 @@ class _SpotifyEmbedHTMLParser(HTMLParser):
 
     def _flush_pending_without_duration(self) -> None:
         if self._pending_title and self._pending_artist:
-            self._append_row(SpotifyEmbedRow(self._pending_title, self._pending_artist, None))
+            self._append_row(SpotifyEmbedRow(self._pending_title, self._pending_artist, None, self._pending_track_url))
         self._pending_title = ""
         self._pending_artist = ""
+        self._pending_track_url = ""
 
     def finish(self) -> SpotifyEmbedDocument:
         if not self._done:

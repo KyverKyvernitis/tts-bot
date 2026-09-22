@@ -440,7 +440,7 @@ class SpotifyPublicoMixin:
                         artist=row.artist,
                         duration=row.duration,
                         thumbnail=fallback_thumbnail,
-                        webpage_url="",
+                        webpage_url=row.webpage_url,
                         source="Spotify público",
                         provider="spotify",
                         query=" ".join(part for part in (row.artist, row.title, "official audio") if part),
@@ -448,6 +448,36 @@ class SpotifyPublicoMixin:
                     )
                     for row in document.rows[:probe_limit]
                 ]
+
+                # Alguns layouts deixam o h3/h4 server-rendered sem href, mas
+                # mantêm a URI da faixa nos blobs JSON de hidratação. Use esses
+                # blobs apenas para completar links, nunca para reordenar a
+                # playlist nem substituir os metadados já lidos do HTML.
+                if any(not item.webpage_url for item in tracks):
+                    for blob in json_script_blobs(content):
+                        linked = self._spotify_public_candidates_from_json(
+                            blob,
+                            url="",
+                            limit=probe_limit,
+                            offset=offset,
+                        )
+                        if not linked:
+                            continue
+                        available: list[ApiTrackCandidate] = [item for item in linked if item.webpage_url]
+                        for item in tracks:
+                            if item.webpage_url:
+                                continue
+                            title_key = normalize_text(item.title)
+                            artist_key = normalize_text(item.artist)
+                            match_index = next((
+                                idx for idx, candidate in enumerate(available)
+                                if normalize_text(candidate.title) == title_key
+                                and normalize_text(candidate.artist) == artist_key
+                            ), -1)
+                            if match_index >= 0:
+                                item.webpage_url = available.pop(match_index).webpage_url
+                        if all(item.webpage_url for item in tracks):
+                            break
 
             if not tracks:
                 json_blobs = json_script_blobs(content)

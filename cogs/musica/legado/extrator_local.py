@@ -2078,16 +2078,24 @@ class MusicExtractor:
         title = candidate.title or candidate.search_query or "Música sem título"
         artist = candidate.artist or ""
         display_title = " - ".join(part for part in (artist, title) if part).strip() or title
+        public_track_url = str(candidate.webpage_url or "").strip()
         track = MusicTrack(
             title=display_title,
-            webpage_url="",
+            # Para metadata pública (especialmente Spotify), preserve o link
+            # individual da faixa já na fila. O Music Agent continuará usando
+            # título/artista para resolver áudio; esta URL é identidade/UI.
+            webpage_url=public_track_url,
             requester_id=int(requester_id),
             requester_name=requester_name,
             duration=candidate.duration,
             uploader=artist,
             thumbnail=candidate.thumbnail,
             source=candidate.source or candidate.provider or "metadata",
-            original_url=candidate.webpage_url or original_url or candidate.search_query,
+            # ``original_url`` continua representando a coleção quando a faixa
+            # veio de playlist/álbum; ``webpage_url`` guarda o link Spotify da
+            # música. Assim o Worker reconhece a janela como playlist sem perder
+            # o hyperlink individual.
+            original_url=original_url or public_track_url or candidate.search_query,
             extractor="metadata",
         )
         track.display_title = display_title

@@ -7,6 +7,7 @@ from .memoria import (
     obter_escolha_busca,
     recarregar_memoria_busca,
     registrar_link_busca,
+    registrar_lote_link_busca,
     registrar_selecao_busca,
 )
 from .modelos import ConsultaNormalizada
@@ -22,5 +23,6 @@ __all__ = [
     "obter_escolha_busca",
     "recarregar_memoria_busca",
     "registrar_link_busca",
+    "registrar_lote_link_busca",
     "registrar_selecao_busca",
 ]

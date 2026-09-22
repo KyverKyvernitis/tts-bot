@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 
@@ -12,6 +13,7 @@ from ..agente_telefone.comandos import music_agent_command, music_agent_status
 from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from ..interface.carregamento import MusicLoadingReaction
+from ..busca import registrar_lote_link_busca
 from ..interface.componentes import SearchResultView
 from ..metadados.modelos import PlayInputKind
 from ..metadados.provedores import classify_play_input, describe_url
@@ -622,6 +624,13 @@ class FluxoTocar:
             if not batch.tracks:
                 await self._reply(ctx, "`📭` Não encontrei nada tocável.")
                 return
+
+            # Playlist Spotify também alimenta a mesma memória agressiva de
+            # links diretos: título, título limpo e primeira palavra útil viram
+            # direct-hit de `_play`, sem API de busca na próxima chamada.
+            if batch.is_playlist and input_profile.platform == "spotify":
+                with contextlib.suppress(Exception):
+                    registrar_lote_link_busca(batch.tracks)
 
             virtual_playlist_cursor = getattr(batch, "playlist_cursor", None)
             if (

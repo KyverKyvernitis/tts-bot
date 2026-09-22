@@ -12,7 +12,7 @@ import discord
 from cogs.musica import configuracao as config
 
 from ..nucleo.erros import MusicExtractionError
-from ..busca import registrar_selecao_busca
+from ..busca import registrar_lote_link_busca, registrar_selecao_busca
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 from ..nucleo.playlist_virtual import bounded_initial_window
 from ..metadados.provedores import describe_url
@@ -563,21 +563,34 @@ def _escape(value: str, *, limit: int | None = None) -> str:
 
 
 def _public_track_link_url(track: MusicTrack) -> str:
-    """Retorna somente uma URL pública/clicável para a faixa.
+    """Retorna a URL pública da música, separada da fonte real do áudio.
 
-    Queries internas como ``ytsearch1:...`` são instruções para o resolver e
-    não URLs válidas do Discord. Em itens ainda não resolvidos de uma playlist
-    Spotify, ``original_url`` aponta para a coleção inteira; também não usamos
-    essa URL como hyperlink individual da faixa.
+    Em direct play por Spotify o áudio normalmente resolve para YouTube, mas a
+    UI deve continuar levando à faixa individual do Spotify. Queries internas
+    (``ytsearch1:...``) e URLs de coleção nunca viram hyperlinks.
     """
-    for raw in (getattr(track, "webpage_url", ""), getattr(track, "original_url", "")):
+    values = (
+        getattr(track, "original_url", ""),
+        getattr(track, "webpage_url", ""),
+        getattr(track, "display_url", ""),
+    )
+
+    # Se houver uma faixa Spotify individual, ela é a procedência pública
+    # preferida mesmo quando ``webpage_url`` já virou o vídeo YouTube tocado.
+    for raw in values:
         value = str(raw or "").strip()
         if not value.lower().startswith(("http://", "https://")):
             continue
         profile = describe_url(value)
-        if not profile.is_url:
+        if profile.is_url and profile.platform == "spotify" and profile.resource_type == "track":
+            return profile.canonical or value
+
+    for raw in values:
+        value = str(raw or "").strip()
+        if not value.lower().startswith(("http://", "https://")):
             continue
-        if profile.resource_type in {"playlist", "album"}:
+        profile = describe_url(value)
+        if not profile.is_url or profile.resource_type in {"playlist", "album"}:
             continue
         return profile.canonical or value
     return ""
@@ -1474,6 +1487,11 @@ class AddSongModal(discord.ui.Modal):
         if not batch.tracks:
             await interaction.followup.send("`📭` Não encontrei nada tocável.", ephemeral=True)
             return
+
+        profile = describe_url(query)
+        if batch.is_playlist and profile.platform == "spotify":
+            with contextlib.suppress(Exception):
+                registrar_lote_link_busca(batch.tracks)
 
         virtual_playlist_cursor = getattr(batch, "playlist_cursor", None)
         if (

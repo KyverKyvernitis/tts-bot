@@ -9,6 +9,7 @@ from typing import Any
 from cogs.musica import configuracao as config
 
 from ..agente_telefone.comandos import music_agent_command
+from ..busca import registrar_lote_link_busca
 from ..metadados.direct_play import consulta_metadata_direct_play
 from ..nucleo.modelos import MusicTrack, PlaylistCursor
 from ..nucleo.playlist_virtual import PlaylistWindowPolicy
@@ -268,6 +269,13 @@ def schedule_playlist_refill_if_needed(router: Any, guild_id: int, remote: dict[
                 return
             if batch is None or router.current_music_operation_generation(guild_id) != generation:
                 return
+
+            # Cada nova janela da playlist passa a servir também como memória
+            # de direct play por nome. Isso reutiliza os aliases existentes de
+            # link (incluindo primeira palavra) e evita pesquisa externa futura.
+            if cursor.provider.startswith("spotify") and batch.tracks:
+                with contextlib.suppress(Exception):
+                    registrar_lote_link_busca(batch.tracks)
 
             next_cursor = batch.playlist_cursor or cursor.advanced(len(batch.tracks), exhausted=not batch.tracks)
             tracks_payload = [

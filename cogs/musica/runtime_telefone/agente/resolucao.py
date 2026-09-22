@@ -352,13 +352,26 @@ class ResolucaoMixin:
                 playback_source = "YouTube"
             elif query_lower.startswith("scsearch"):
                 playback_source = "SoundCloud"
-        metadata_origin_url = str(track_meta.get("original_url") or track_meta.get("webpage_url") or "").strip() if metadata_kind else str(track_meta.get("original_url") or "").strip()
+        metadata_track_url = ""
+        if metadata_kind:
+            candidate_public_url = str(track_meta.get("webpage_url") or "").strip()
+            low_public_url = candidate_public_url.lower()
+            if (
+                (metadata_kind == "spotify" and "open.spotify.com/track/" in low_public_url)
+                or (metadata_kind == "deezer" and "/track/" in low_public_url)
+                or (metadata_kind == "apple" and "music.apple.com/" in low_public_url)
+            ):
+                metadata_track_url = candidate_public_url
+        metadata_origin_url = (
+            metadata_track_url
+            or (str(track_meta.get("original_url") or track_meta.get("webpage_url") or "").strip() if metadata_kind else str(track_meta.get("original_url") or "").strip())
+        )
         resolved_webpage_url = str(resolved.get("webpage_url") or "").strip()
-        # Para providers de metadata (Spotify/Deezer/Apple), a URL da coleção é
-        # procedência, não identidade da faixa reproduzida. Depois da resolução
-        # preserve a origem em ``original_url`` e exponha em ``webpage_url`` a
-        # página real resolvida (normalmente YouTube). Isso impede que todas as
-        # músicas de uma playlist pareçam a mesma faixa para cache/histórico.
+        # Para providers de metadata, ``webpage_url`` vira a mídia realmente
+        # tocada (normalmente YouTube). Quando o parser já conhece o link
+        # individual Spotify/Deezer/Apple, promovemos esse link para
+        # ``original_url``; a URL da coleção só é necessária antes da resolução
+        # para identificar a janela virtual e nunca deve identificar uma música.
         webpage_url = (
             resolved_webpage_url
             if metadata_kind and resolved_webpage_url

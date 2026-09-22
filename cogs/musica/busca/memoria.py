@@ -733,6 +733,42 @@ def registrar_link_busca(track: MusicTrack, *, now: float | None = None) -> tupl
     return tuple(alias for alias, escolha in zip(aliases, resultados) if escolha is not None)
 
 
+
+def registrar_lote_link_busca(
+    tracks: Sequence[MusicTrack],
+    *,
+    now: float | None = None,
+) -> int:
+    """Aprende em lote os mesmos aliases agressivos usados por link direto.
+
+    Playlists de metadata já conhecem título/artista antes de tocar. Registrar a
+    janela inteira faz ``_play <nome>`` virar direct-hit sem consultar novamente
+    a busca externa. A persistência é feita numa única transação para não
+    acrescentar uma sequência de I/O síncrono ao comando da playlist.
+    """
+    persistir: list[EscolhaBusca] = []
+    registrados = 0
+    for track in tracks:
+        original = str(getattr(track, "original_url", "") or getattr(track, "webpage_url", "") or "").strip().lower()
+        if not original.startswith(("http://", "https://", "www.")):
+            continue
+        aliases = _aliases_link(track)
+        for alias in aliases:
+            escolha = _registrar(
+                alias,
+                track,
+                origem=_ORIGEM_LINK,
+                prioridade=_PRIORIDADE_LINK,
+                now=now,
+                persistir=False,
+            )
+            if escolha is not None:
+                persistir.append(escolha)
+                registrados += 1
+    if persistir:
+        _persistir_varias(persistir)
+    return registrados
+
 def obter_escolha_busca(
     query: str,
     *,
