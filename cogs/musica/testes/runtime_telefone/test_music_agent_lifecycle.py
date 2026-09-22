@@ -1602,3 +1602,163 @@ def test_skip_rejects_prefetched_stream_reused_from_previous_playlist_item(music
         assert seen[0].transport_hint == "metadata-lazy"
 
     run(scenario())
+
+
+def test_skip_preserva_prefetch_da_proxima_faixa_em_andamento(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 601
+        next_track = music.AgentTrack(title="next", query="next")
+        state = music.GuildMusicState(
+            guild_id=gid,
+            current=music.AgentTrack(title="current", query="current"),
+            queue=[next_track],
+            status="playing",
+        )
+        agent.states[gid] = state
+        query = agent._query_from_track_meta(next_track.public(), fallback_query=next_track.query)
+        key = agent._guild_prefetch_key(gid, agent._resolve_cache_key(query, next_track.public()))
+        prefetch = asyncio.create_task(asyncio.sleep(60))
+        discarded = asyncio.create_task(asyncio.sleep(60))
+        agent._prefetch_tasks = {key: prefetch, f"{gid}:old": discarded}
+        agent._prefetch_resolving.add(key)
+        agent._stop_player_instance = lambda *args, **kwargs: asyncio.sleep(0)
+        async def next_play(_guild_id):
+            assert not prefetch.cancelled()
+            assert discarded.cancelled()
+        agent._play_next = next_play
+        try:
+            result = await agent.cmd_skip({"guild_id": gid})
+            assert result["ok"] is True
+            assert agent._prefetch_tasks.get(key) is prefetch
+            assert not prefetch.cancelled()
+        finally:
+            prefetch.cancel()
+            await asyncio.gather(prefetch, discarded, return_exceptions=True)
+
+    run(scenario())
+
+
+def test_eof_no_meio_de_faixa_recupera_sem_erro_ffmpeg(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 602
+        state = music.GuildMusicState(
+            guild_id=gid,
+            current=music.AgentTrack(title="long song", query="long song", duration=180.0),
+            playback_token=10,
+            started_monotonic=music.time.monotonic() - 45.0,
+            status="playing",
+        )
+        agent.states[gid] = state
+        recovered = []
+        async def recover(_guild_id, *, played_for, reason):
+            recovered.append((played_for, reason))
+            return True
+        agent._recover_current_stream = recover
+        await agent._direct_after(gid, None, 10)
+        assert len(recovered) == 1
+        assert recovered[0][0] >= 45.0
+        assert recovered[0][1] == "direct_after_early_end"
+        assert state.current.title == "long song"
+
+    run(scenario())
+
+
+def test_mixer_persistente_carrega_tts_na_troca_de_faixa(music, monkeypatch):
+    class PCM:
+        def __init__(self, url, **kwargs):
+            self.frames = [b"\x04\x00" * 1920, b""]
+            self.cleaned = False
+        def read(self):
+            return self.frames.pop(0) if self.frames else b""
+        def cleanup(self):
+            self.cleaned = True
+
+    class Speech:
+        def __init__(self):
+            self.frames = [b"\x02\x00" * 1920] * 4 + [b""]
+            self.cleaned = False
+        def read(self):
+            return self.frames.pop(0)
+        def cleanup(self):
+            self.cleaned = True
+
+    class Voice:
+        def __init__(self, channel_id):
+            self.channel = types.SimpleNamespace(id=channel_id, bitrate=128_000)
+            self.source = None
+            self.calls = 0
+            self.playing = False
+        def is_connected(self): return True
+        def is_playing(self): return self.playing
+        def is_paused(self): return False
+        def play(self, source, after=None, **kwargs):
+            self.calls += 1
+            self.source = source
+            self.after = after
+            self.playing = True
+        def stop(self): self.playing = False
+
+    async def scenario():
+        monkeypatch.setattr(music.discord, "FFmpegPCMAudio", PCM)
+        agent = music.MusicAgent()
+        agent._loop = asyncio.get_running_loop()
+        gid, channel_id = 603, 904
+        voice = Voice(channel_id)
+        agent._ensure_direct_voice_client = lambda _guild_id: asyncio.sleep(0, result=(voice, False))
+        agent._schedule_next_queue_prefetch = lambda *args, **kwargs: None
+        agent._schedule_idle_disconnect = lambda *args, **kwargs: None
+        async def confirm(_voice, source, *, max_delay):
+            assert source.read()
+            return 0.0
+        agent._confirm_direct_playback = confirm
+        first = music.AgentTrack(title="one", stream_url="https://cdn/one", duration=0.1)
+        second = music.AgentTrack(title="two", stream_url="https://cdn/two", duration=0.1)
+        state = music.GuildMusicState(guild_id=gid, voice_channel_id=channel_id, current=first, queue=[second])
+        agent.states[gid] = state
+
+        await agent._play_direct_voice(gid, first)
+        mixer = voice.source
+        speech = Speech()
+        done = mixer.add_tts(speech)
+        assert mixer.read()  # EOF da primeira música; TTS continua
+        for _ in range(20):
+            if state.current is second and state.status == "playing":
+                break
+            await asyncio.sleep(0.01)
+        assert state.current is second and state.status == "playing"
+        assert voice.calls == 1
+        assert voice.source is mixer
+        assert mixer.has_tts() and not done.done()
+        while mixer.has_tts():
+            mixer.read()
+            await asyncio.sleep(0)
+        assert done.done() and speech.cleaned
+        third = music.AgentTrack(title="three", stream_url="https://cdn/three", duration=0.1)
+        state.queue.append(third)
+        second_speech = Speech()
+        second_done = mixer.add_tts(second_speech)
+        await agent.cmd_skip({"guild_id": gid})
+        assert voice.calls == 1
+        assert voice.source is mixer
+        assert state.current is third
+        assert mixer.has_tts() and not second_done.done()
+        recoveries = []
+        async def recover(_guild_id, *, played_for, reason):
+            recoveries.append((state.current.title, reason))
+            return True
+        agent._recover_current_stream = recover
+        voice.after(RuntimeError("transport dropped"))
+        for _ in range(20):
+            if recoveries:
+                break
+            await asyncio.sleep(0.01)
+        assert recoveries == [("three", "direct_after_error")]
+        while mixer.has_tts():
+            mixer.read()
+            await asyncio.sleep(0)
+        assert second_done.done() and second_speech.cleaned
+        mixer.cleanup()
+
+    run(scenario())

@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .ciclo_vida import remove_owned_task
+from .correspondencia import avaliar_correspondencia, busca_alternativa
 from .estado import AgentTrack
 from .ytdlp_quente import WarmYTDLPResolver
 from .utilitarios import (
@@ -507,12 +508,14 @@ class ResolucaoMixin:
         )
 
     async def _prefetch_track(self, body: dict[str, Any], track_meta: dict[str, Any], query: str, cache_key: str) -> None:
+        task_key = self._guild_prefetch_key(safe_id(body.get("guild_id")), cache_key)
         try:
             started = time.time()
             try:
                 priority = int(body.get("_prefetch_priority", 20))
             except Exception:
                 priority = 20
+            self._prefetch_resolving.add(task_key)
             await asyncio.wait_for(self.resolve_track(query, track_meta=track_meta, body=body, priority=priority), timeout=self.prefetch_timeout)
             self.log(
                 "prefetch_ok",
@@ -527,9 +530,10 @@ class ResolucaoMixin:
         except Exception as exc:
             self.log("prefetch_failed", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), error=short_text(exc, 180))
         finally:
+            self._prefetch_resolving.discard(task_key)
             current_task = asyncio.current_task()
-            for task_key in (cache_key, self._guild_prefetch_key(safe_id(body.get("guild_id")), cache_key)):
-                remove_owned_task(self._prefetch_tasks, task_key, current_task)
+            for key in (cache_key, task_key):
+                remove_owned_task(self._prefetch_tasks, key, current_task)
 
     async def resolve_track(self, query: str, *, track_meta: dict[str, Any], body: dict[str, Any], priority: int = 0) -> AgentTrack:
         direct = str(track_meta.get("stream_url") or body.get("stream_url") or "").strip()
@@ -605,9 +609,10 @@ class ResolucaoMixin:
 
                 def _run() -> dict[str, Any]:
                     self._resolve_thread_local.cancel_event = cancel_event
+                    self._resolve_thread_local.deadline = time.monotonic() + max(1.0, float(self.ytdlp_timeout))
                     try:
                         try:
-                            return self._resolve_with_ytdlp(resolve_target)
+                            resolved = self._resolve_with_ytdlp(resolve_target)
                         except Exception:
                             if resolve_target == query:
                                 raise
@@ -619,10 +624,28 @@ class ResolucaoMixin:
                                 guild_id=safe_id(body.get("guild_id")),
                                 target=resolve_target[:120],
                             )
-                            return self._resolve_with_ytdlp(query)
+                            resolved = self._resolve_with_ytdlp(query)
+                        if self._metadata_source_kind(track_meta) in {"spotify", "deezer", "apple"}:
+                            valid, _score, reason = avaliar_correspondencia(track_meta, resolved)
+                            if not valid:
+                                self.log(
+                                    "resolve_metadata_mismatch",
+                                    guild_id=safe_id(body.get("guild_id")),
+                                    reason=reason,
+                                    expected=short_text(track_meta.get("title"), 90),
+                                    found=short_text(resolved.get("title"), 90),
+                                )
+                                # Só casos comprovadamente duvidosos pagam pela
+                                # busca de três candidatos. O prazo é compartilhado.
+                                resolved = self._resolve_with_ytdlp(
+                                    busca_alternativa(query), expected_metadata=track_meta,
+                                )
+                        return resolved
                     finally:
                         with contextlib.suppress(Exception):
                             del self._resolve_thread_local.cancel_event
+                        with contextlib.suppress(Exception):
+                            del self._resolve_thread_local.deadline
 
                 resolver_task = asyncio.create_task(asyncio.to_thread(_run))
                 try:
@@ -646,7 +669,19 @@ class ResolucaoMixin:
             )
             return self._agent_track_from_resolved(resolved, query=query, track_meta=track_meta, body=body, cached=False)
 
-    def _resolve_with_ytdlp(self, query: str) -> dict[str, Any]:
+    def _resolve_with_ytdlp(self, query: str, *, expected_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        # Helper aquecido, -g e JSON dividem o mesmo limite de tempo. Falhas
+        # sucessivas não podem multiplicar o timeout de uma ação de play/skip.
+        deadline = getattr(self._resolve_thread_local, "deadline", None)
+        if deadline is None:
+            deadline = time.monotonic() + max(1.0, float(self.ytdlp_timeout))
+
+        def remaining() -> float:
+            left = float(deadline) - time.monotonic()
+            if left < 0.5:
+                raise TimeoutError("prazo total da resolução yt-dlp esgotado")
+            return left
+
         target = query
         lowered = query.lower().strip()
         if not _looks_like_url(query) and not lowered.startswith(_LOCAL_SEARCH_PREFIXES):
@@ -657,11 +692,11 @@ class ResolucaoMixin:
             base_cmd += ["--cookies", str(cookies)]
         if self.js_runtimes:
             base_cmd += ["--js-runtimes", self.js_runtimes]
-        base_cmd += ["--no-playlist", "--no-warnings", "--socket-timeout", "12"]
+        base_cmd += ["--no-playlist", "--no-warnings", "--socket-timeout", "12", "--format-sort", self.ytdlp_sort]
         self.log("yt_dlp_resolve", query=query, target=target, js=self.js_runtimes)
         if _looks_like_url(query):
             warm_enabled = str(os.getenv("MUSIC_AGENT_YTDLP_WARM_HELPER_ENABLED", "true") or "true").strip().lower() in {"1", "true", "yes", "on", "sim"}
-            if warm_enabled:
+            if warm_enabled and remaining() > 1.0:
                 client = getattr(self, "_ytdlp_warm_client", None)
                 if client is None:
                     client = WarmYTDLPResolver()
@@ -672,10 +707,11 @@ class ResolucaoMixin:
                     hot = client.resolve(
                         target,
                         format_selector=self.ytdlp_format,
+                        format_sort=self.ytdlp_sort,
                         cookiefile=str(cookies) if cookies.exists() and cookies.stat().st_size > 0 else "",
                         js_runtimes=self.js_runtimes,
                         socket_timeout=12,
-                        timeout=max(3.0, min(float(self.ytdlp_timeout), 10.0)),
+                        timeout=min(10.0, remaining()),
                         cancel_event=cancel_event,
                     )
                 except RuntimeError as exc:
@@ -710,7 +746,12 @@ class ResolucaoMixin:
                 "-g", target,
             ]
             fast_started = time.time()
-            fast = self._run_ytdlp_command(fast_cmd, timeout=max(5, min(self.ytdlp_timeout, 18)))
+            try:
+                fast = self._run_ytdlp_command(fast_cmd, timeout=min(18.0, remaining()))
+            except subprocess.TimeoutExpired:
+                # Uma tentativa rápida lenta ainda pode deixar orçamento para
+                # o fallback JSON; nunca recomece com um timeout inteiro.
+                fast = subprocess.CompletedProcess(fast_cmd, 124, "", "fast path timeout")
             lines = [line.strip() for line in (fast.stdout or "").splitlines() if line.strip()]
             urls = [line for line in lines if line.startswith(("http://", "https://")) and not line.startswith(("https://i.ytimg.com", "http://i.ytimg.com"))]
             def marker(name: str) -> str:
@@ -758,12 +799,23 @@ class ResolucaoMixin:
                 }
             self.log("yt_dlp_fast_url_fallback", rc=fast.returncode, error=short_text(fast.stderr, 160))
         cmd = base_cmd + ["-f", self.ytdlp_format, "-J", target]
-        proc = self._run_ytdlp_command(cmd, timeout=self.ytdlp_timeout)
+        proc = self._run_ytdlp_command(cmd, timeout=remaining())
         if proc.returncode != 0 and not proc.stdout.strip():
             raise RuntimeError(short_text(proc.stderr or f"yt-dlp rc={proc.returncode}", 300))
         data = json.loads(proc.stdout or "{}")
         if isinstance(data, dict) and isinstance(data.get("entries"), list):
-            data = next((item for item in data.get("entries") or [] if isinstance(item, dict)), {})
+            entries = [item for item in data.get("entries") or [] if isinstance(item, dict)]
+            if expected_metadata is not None:
+                eligible = []
+                for entry in entries:
+                    valid, score, _reason = avaliar_correspondencia(expected_metadata, entry)
+                    if valid and _select_stream_info(entry).get("stream_url"):
+                        eligible.append((score, entry))
+                if not eligible:
+                    raise RuntimeError("nenhuma fonte encontrada corresponde à faixa solicitada")
+                data = max(eligible, key=lambda item: item[0])[1]
+            else:
+                data = next(iter(entries), {})
         if not isinstance(data, dict) or not data:
             raise RuntimeError("yt-dlp não retornou mídia")
         stream_info = _select_stream_info(data)

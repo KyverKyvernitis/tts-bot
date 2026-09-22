@@ -12,7 +12,7 @@ import contextlib
 import threading
 import time
 from array import array
-from typing import Any
+from typing import Any, Callable
 
 import discord
 
@@ -137,6 +137,8 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         duck_factor: float = 0.08,
         telemetry_enabled: bool = True,
         stall_threshold_ms: float = 80.0,
+        on_music_end: Callable[[Exception | None, dict[str, Any]], None] | None = None,
+        persistent: bool = False,
     ) -> None:
         self.loop = loop
         self.music_source = music_source
@@ -146,6 +148,9 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self._lock = threading.RLock()
         self._closed = False
         self._music_ended = False
+        self.persistent = bool(persistent)
+        self._finish_when_idle = False
+        self._on_music_end = on_music_end
         self._started_monotonic = time.monotonic()
         self.first_frame_ms: float | None = None
         self.first_frame_monotonic: float | None = None
@@ -164,9 +169,60 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
     def set_duck_factor(self, factor: float) -> None:
         self.duck_factor = max(0.0, min(1.0, float(factor)))
 
+    @property
+    def music_ended(self) -> bool:
+        with self._lock:
+            return self._music_ended
+
+    def replace_music_source(
+        self,
+        source: discord.AudioSource,
+        *,
+        volume: float,
+        on_music_end: Callable[[Exception | None, dict[str, Any]], None] | None,
+    ) -> None:
+        """Mantém overlays TTS e a sessão de voz durante a troca da música."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("mixer de voz encerrado")
+            previous = self.music_source
+            self.music_source = source
+            self._music_ended = False
+            self._finish_when_idle = False
+            self._on_music_end = on_music_end
+            self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(volume)))
+            self._started_monotonic = time.monotonic()
+            self.first_frame_ms = None
+            self.first_frame_monotonic = None
+            self._init_audio_telemetry(
+                telemetry_enabled=self.telemetry_enabled,
+                stall_threshold_ms=self.stall_threshold_ms,
+                expected_frame_bytes=PCM_FRAME_BYTES,
+            )
+        if previous is not None and previous is not source:
+            with contextlib.suppress(Exception):
+                previous.cleanup()
+
+    def stop_music(self) -> None:
+        """Para o áudio da faixa sem cancelar uma fala TTS em curso."""
+        with self._lock:
+            previous = self.music_source
+            self.music_source = None
+            self._music_ended = True
+            self._on_music_end = None
+        if previous is not None:
+            with contextlib.suppress(Exception):
+                previous.cleanup()
+
+    def finish_when_idle(self) -> None:
+        with self._lock:
+            self._finish_when_idle = True
+
     def add_tts(self, source: discord.AudioSource, *, volume: float = 1.0) -> asyncio.Future:
         future = self.loop.create_future()
         with self._lock:
+            if self._closed:
+                raise RuntimeError("mixer de voz encerrado")
             self._overlays.append({"source": source, "volume": max(0.0, min(2.0, float(volume))), "future": future, "ended": False})
         return future
 
@@ -298,15 +354,47 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             return b""
         with self._lock:
             overlays = list(self._overlays)
+            music_source = None if self._music_ended else self.music_source
         music_frame = b""
-        if not self._music_ended:
-            music_frame = self._read_source(self.music_source)
+        read_error: Exception | None = None
+        if music_source is not None:
+            try:
+                music_frame = self._read_source(music_source)
+            except Exception as exc:
+                if not self.persistent:
+                    raise
+                read_error = exc
             if not music_frame:
-                self._music_ended = True
+                with self._lock:
+                    if self.music_source is music_source:
+                        self.music_source = None
+                        self._music_ended = True
+                        callback, self._on_music_end = self._on_music_end, None
+                    else:
+                        callback = None
                 with contextlib.suppress(Exception):
-                    self.music_source.cleanup()
+                    music_source.cleanup()
+                if callback is not None:
+                    with contextlib.suppress(Exception):
+                        callback(read_error, self.audio_telemetry())
+            else:
+                with self._lock:
+                    # Um skip pode substituir a fonte enquanto read() aguarda
+                    # FFmpeg. Nunca envie um quadro atrasado da faixa anterior.
+                    if self.music_source is not music_source or self._closed:
+                        music_frame = b""
+            if music_frame and len(music_frame) != PCM_FRAME_BYTES:
+                # Discord espera 20 ms de PCM; preencha apenas o quadro final.
+                music_frame = music_frame[:PCM_FRAME_BYTES].ljust(PCM_FRAME_BYTES, b"\x00")
         if not music_frame and not overlays:
-            self.cleanup()
+            with self._lock:
+                # A decisão de encerrar precisa ser atômica com uma troca de
+                # faixa ou um overlay que entrou entre o snapshot e este ponto.
+                if self.music_source is not None or self._overlays:
+                    return b"\x00" * PCM_FRAME_BYTES
+                if self.persistent and not self._finish_when_idle and not self._closed:
+                    return b"\x00" * PCM_FRAME_BYTES
+                self.cleanup()
             return b""
         music_volume = self.normal_music_volume * (self.duck_factor if overlays else 1.0)
         if music_frame and not overlays:
@@ -322,6 +410,8 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             try:
                 frame = source.read() if source is not None else b""
             except Exception as exc:
+                with contextlib.suppress(Exception):
+                    source.cleanup()
                 if isinstance(future, asyncio.Future):
                     self._future_exception(future, exc)
                 ended.append(overlay)
@@ -337,17 +427,20 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         if ended:
             with self._lock:
                 self._overlays = [ov for ov in self._overlays if ov not in ended]
-        return self._mark_first_frame(base)
+        return self._mark_first_frame(base) if music_frame else base
 
     def cleanup(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        with contextlib.suppress(Exception):
-            self.music_source.cleanup()
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            music_source, self.music_source = self.music_source, None
+            self._on_music_end = None
             overlays = list(self._overlays)
             self._overlays.clear()
+        if music_source is not None:
+            with contextlib.suppress(Exception):
+                music_source.cleanup()
         for overlay in overlays:
             with contextlib.suppress(Exception):
                 overlay.get("source").cleanup()

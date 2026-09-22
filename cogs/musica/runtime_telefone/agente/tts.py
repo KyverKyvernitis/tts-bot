@@ -30,6 +30,7 @@ class _TimedTTSSource(discord.AudioSource):
         self.first_frame_ms = None
         self.closed = False
         self.error = None
+        self.finished = False
         self.frames = queue.Queue(maxsize=25) if buffered else None
         self.ready = threading.Event()
         if buffered:
@@ -52,6 +53,7 @@ class _TimedTTSSource(discord.AudioSource):
             self.error = error
             self.ready.set()
         finally:
+            self.finished = True
             self.ready.set()
 
     def read(self):
@@ -65,6 +67,8 @@ class _TimedTTSSource(discord.AudioSource):
             except queue.Empty:
                 if self.error:
                     raise self.error
+                if self.finished:
+                    return b''
                 return bytes(3840)  # keep the music clock running during provider stalls
         if not frame and self.reader is not None and self.reader.error is not None:
             raise RuntimeError('síntese progressiva incompleta') from self.reader.error
@@ -380,6 +384,17 @@ class TTSMixin:
             await asyncio.gather(task, return_exceptions=True)
         return {'ok': True, 'cancelled': True, 'tts_request_id': request}
 
+    async def _buffer_tts_source(self, source, *, started, timeout, reader=None):
+        timed = _TimedTTSSource(source, started=started, reader=reader, buffered=True)
+        try:
+            ready = await asyncio.to_thread(timed.ready.wait, min(20.0, max(1.0, float(timeout))))
+            if not ready or timed.error:
+                raise RuntimeError('TTS não preparou o primeiro PCM') from timed.error
+            return timed
+        except BaseException:
+            timed.cleanup()
+            raise
+
     async def _prepare_tts_source(self, body, target, *, started):
         text = str(body.get('text') or body.get('content') or '').strip()
         if not text or len(text) > 1600:
@@ -393,14 +408,14 @@ class TTSMixin:
         if cache_hit:
             source = discord.FFmpegPCMAudio(str(target), executable=self.ffmpeg_executable,
                 before_options='-nostdin', options='-vn -sn -dn -loglevel warning')
-            return _TimedTTSSource(source, started=started), f'{engine}-cache'
+            return await self._buffer_tts_source(source, started=started, timeout=body.get('timeout_seconds') or 30), f'{engine}-cache'
         try:
             transport = importlib.import_module('tts_transport')
         except ImportError:
             await self._synthesize_tts_file(body, target)
             source = discord.FFmpegPCMAudio(str(target), executable=self.ffmpeg_executable,
                 before_options='-nostdin', options='-vn -sn -dn -loglevel warning')
-            return _TimedTTSSource(source, started=started), engine
+            return await self._buffer_tts_source(source, started=started, timeout=body.get('timeout_seconds') or 30), engine
 
         provider_module = {'gtts': 'gtts', 'edge': 'edge_tts'}.get(engine)
         if provider_module:
@@ -425,10 +440,7 @@ class TTSMixin:
             source = discord.FFmpegPCMAudio(reader, pipe=True, executable=self.ffmpeg_executable,
                 before_options='-nostdin -f mp3 -probesize 32768 -analyzeduration 0',
                 options='-vn -sn -dn -loglevel warning')
-            timed = _TimedTTSSource(source, started=started, reader=reader, buffered=True)
-            ready = await asyncio.to_thread(timed.ready.wait, min(20, float(body.get('timeout_seconds') or 30)))
-            if not ready or timed.error:
-                raise RuntimeError('TTS não preparou o primeiro PCM') from timed.error
+            timed = await self._buffer_tts_source(source, started=started, reader=reader, timeout=body.get('timeout_seconds') or 30)
             return timed, engine
         except BaseException:
             reader.close()
@@ -475,8 +487,11 @@ class TTSMixin:
                 else:
                     tts_source, engine = await self._prepare_tts_source(body, path, started=started)
                 if tts_source is None:
-                    tts_source = _TimedTTSSource(discord.FFmpegPCMAudio(tts_input, executable=self.ffmpeg_executable,
-                        before_options="-nostdin", options="-vn -sn -dn -loglevel warning"), started=started)
+                    tts_source = await self._buffer_tts_source(
+                        discord.FFmpegPCMAudio(tts_input, executable=self.ffmpeg_executable,
+                            before_options="-nostdin", options="-vn -sn -dn -loglevel warning"),
+                        started=started, timeout=timeout,
+                    )
                 future = source.add_tts(tts_source, volume=max(0.0, min(2.0, env_float("MUSIC_AGENT_TTS_VOLUME", 1.0))))
                 self.log("tts_overlay_start", guild_id=guild_id, engine=engine, chars=len(str(body.get("text") or "")), prebuilt=bool(audio_url or audio_b64))
                 await asyncio.wait_for(future, timeout=timeout)

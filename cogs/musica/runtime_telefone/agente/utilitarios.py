@@ -11,15 +11,23 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-# Formato padrão: prioriza áudio-only Opus já em 48 kHz para reduzir perdas e
-# evitar resampling quando a fonte oferece esse caminho. Os fallbacks preservam
-# compatibilidade com outros extratores/serviços sem exigir filtros no FFmpeg.
-DEFAULT_YTDLP_AUDIO_FORMAT = (
+# O formato antigo dava prioridade absoluta a Opus/48 kHz, mesmo quando uma
+# alternativa tinha bitrate bem maior. A seleção atual considera primeiro a
+# qualidade disponível e usa codec/taxa como critérios seguintes.
+LEGACY_YTDLP_AUDIO_FORMAT = (
     "bestaudio[acodec=opus][asr=48000]/"
     "bestaudio[acodec=opus]/"
     "bestaudio[asr=48000]/"
     "bestaudio/best"
 )
+DEFAULT_YTDLP_AUDIO_FORMAT = "bestaudio/best"
+DEFAULT_YTDLP_AUDIO_SORT = "abr,acodec,asr"
+
+
+def formato_audio_configurado(value: str | None) -> str:
+    """Migra o antigo padrão presente em music-agent.env sem alterar opções próprias."""
+    configured = str(value or "").strip()
+    return DEFAULT_YTDLP_AUDIO_FORMAT if not configured or configured == LEGACY_YTDLP_AUDIO_FORMAT else configured
 
 
 def _int_metric(value: Any) -> int:

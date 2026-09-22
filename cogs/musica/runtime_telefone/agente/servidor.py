@@ -62,8 +62,10 @@ from cogs.musica.runtime_telefone.agente.reproducao import ReproducaoMixin  # no
 from cogs.musica.runtime_telefone.agente.tts import TTSMixin, _TimedTTSSource  # noqa: E402
 from cogs.musica.runtime_telefone.agente.utilitarios import (  # noqa: E402
     DEFAULT_YTDLP_AUDIO_FORMAT,
+    DEFAULT_YTDLP_AUDIO_SORT,
     _float_or_none,
     _metadata_text,
+    formato_audio_configurado,
     safe_id,
     short_text,
 )
@@ -107,7 +109,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.port = env_int("MUSIC_AGENT_PORT", 8780)
         self.token = os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or ""
         self.discord_token = os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or ""
-        self.ytdlp_format = os.getenv("MUSIC_AGENT_YTDLP_FORMAT") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or DEFAULT_YTDLP_AUDIO_FORMAT
+        self.ytdlp_format = formato_audio_configurado(os.getenv("MUSIC_AGENT_YTDLP_FORMAT") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or DEFAULT_YTDLP_AUDIO_FORMAT)
+        self.ytdlp_sort = os.getenv("MUSIC_AGENT_YTDLP_SORT") or DEFAULT_YTDLP_AUDIO_SORT
         self.ytdlp_timeout = env_int("MUSIC_AGENT_YTDLP_TIMEOUT_SECONDS", 35)
         self.cookies_file = os.getenv("MUSIC_AGENT_YTDLP_COOKIES_FILE") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE") or str(Path.home() / "phone-worker" / "secrets" / "youtube-cookies.txt")
         self.js_runtimes = os.getenv("MUSIC_AGENT_YTDLP_JS_RUNTIMES") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES") or "node"
@@ -188,6 +191,9 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._voice_dependencies_cache: tuple[float, dict[str, Any]] | None = None
         self._voice_dependencies_cache_ttl = max(0.0, env_float("MUSIC_AGENT_DEPENDENCY_CACHE_TTL_SECONDS", 30.0))
         self._prefetch_tasks: dict[str, asyncio.Task] = {}
+        # Distingue uma resolução já iniciada de um prefetch que ainda dorme.
+        # Uma troca de faixa pode aproveitar somente o primeiro caso.
+        self._prefetch_resolving: set[str] = set()
         self._active_resolve_tasks: dict[int, asyncio.Task] = {}
         # Retry de transporte VPS -> Phone Worker pode reenviar o mesmo POST
         # depois de uma troca de rota/Tailscale. command_id garante que ações

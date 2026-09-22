@@ -48,16 +48,42 @@ class ReproducaoMixin:
         self.log("active_resolve_cancelled", guild_id=guild_id)
         return True
 
-    def _bump_playback_generation(self, st: GuildMusicState, *, reason: str = "change") -> int:
+    def _bump_playback_generation(
+        self,
+        st: GuildMusicState,
+        *,
+        reason: str = "change",
+        keep_prefetch_task_keys: set[str] | None = None,
+    ) -> int:
         st.playback_token += 1
         st.updated_at = time.time()
-        self._cancel_prefetch_tasks(st.guild_id)
+        if keep_prefetch_task_keys:
+            self._cancel_prefetch_tasks(st.guild_id, keep_task_keys=keep_prefetch_task_keys)
+        else:
+            self._cancel_prefetch_tasks(st.guild_id)
         self._cancel_active_resolve(st.guild_id)
         self.log("playback_generation_bumped", guild_id=st.guild_id, reason=reason, token=st.playback_token)
         return st.playback_token
 
     def _guild_prefetch_key(self, guild_id: int, cache_key: str) -> str:
         return f"{int(guild_id or 0)}:{cache_key}"
+
+    def _next_resolving_prefetch_keys(self, st: GuildMusicState) -> set[str]:
+        """Preserva apenas a resolução já iniciada da próxima faixa da fila."""
+        if not st.queue or st.queue[0].is_virtual_playlist_marker:
+            return set()
+        meta = st.queue[0].public()
+        query = self._query_from_track_meta(
+            meta,
+            fallback_query=st.queue[0].query or st.queue[0].webpage_url or st.queue[0].title,
+        )
+        if not query:
+            return set()
+        key = self._guild_prefetch_key(st.guild_id, self._resolve_cache_key(query, meta))
+        task = self._prefetch_tasks.get(key)
+        if task is not None and not task.done() and key in self._prefetch_resolving:
+            return {key}
+        return set()
 
     def _schedule_next_queue_prefetch(self, guild_id: int, *, reason: str = "playing") -> None:
         if not self.prefetch_enabled:
@@ -124,6 +150,7 @@ class ReproducaoMixin:
                     "query": query,
                     "track": current_first.public(),
                 }
+                self._prefetch_resolving.add(task_key)
                 resolved = await asyncio.wait_for(self.resolve_track(query, track_meta=current_first.public(), body=body, priority=20), timeout=self.prefetch_timeout)
                 latest2 = self.states.setdefault(int(guild_id or 0), GuildMusicState(guild_id=int(guild_id or 0)))
                 if int(getattr(latest2, "playback_token", 0) or 0) == token and latest2.queue:
@@ -172,6 +199,7 @@ class ReproducaoMixin:
             except Exception as exc:
                 self.log("next_prefetch_failed", guild_id=guild_id, reason=reason, error=short_text(exc, 180))
             finally:
+                self._prefetch_resolving.discard(task_key)
                 remove_owned_task(self._prefetch_tasks, task_key, asyncio.current_task())
 
         self._prefetch_tasks[task_key] = asyncio.create_task(_runner())
@@ -548,6 +576,9 @@ class ReproducaoMixin:
         return track
 
     async def _stop_player_instance(self, player: Any, *, disconnect: bool = False) -> None:
+        source = getattr(player, "source", None)
+        if isinstance(source, AgentMixedAudioSource) and source.persistent:
+            source.stop_music()
         await stop_player_instance(player, disconnect=disconnect)
 
     async def _stop_current_player_for_transition(self, st: GuildMusicState, *, disconnect: bool = False) -> None:
@@ -577,16 +608,20 @@ class ReproducaoMixin:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.last_action = "skip"
-        self._cancel_prefetch_tasks(guild_id)
         player = st.player
         previous = st.current
         self._push_history(st, previous)
         # Antes de trocar a geração, remova somente um stream/cache comprovadamente
         # contaminado pelo áudio atual. Isso preserva o prefetch correto e evita
         # re-resolver sem necessidade.
-        self._guard_distinct_next_stream(st, previous)
-        self._bump_playback_generation(st, reason="skip")
-        await self._stop_player_instance(player, disconnect=False)
+        contaminated = self._guard_distinct_next_stream(st, previous)
+        keep = set() if contaminated else self._next_resolving_prefetch_keys(st)
+        self._bump_playback_generation(st, reason="skip", keep_prefetch_task_keys=keep)
+        mixed = getattr(player, "source", None)
+        if isinstance(mixed, AgentMixedAudioSource) and mixed.persistent and getattr(player, "is_playing", lambda: False)():
+            mixed.stop_music()
+        else:
+            await self._stop_player_instance(player, disconnect=False)
         st.current = None
         await self._play_next(guild_id)
         return {"ok": True, "state": st.public()}
@@ -796,6 +831,7 @@ class ReproducaoMixin:
             st.current = None
             st.paused = False
             self._set_status(st, "idle", event="queue_empty")
+            self._finish_mixer_when_idle(st)
             self._schedule_idle_disconnect(guild_id)
             return
         if st.queue[0].is_virtual_playlist_marker:
@@ -807,6 +843,7 @@ class ReproducaoMixin:
             st.current = None
             st.paused = False
             self._set_status(st, "queued", event="playlist_refill_needed")
+            self._finish_mixer_when_idle(st)
             self.log(
                 "playlist_refill_needed",
                 guild_id=guild_id,
@@ -942,6 +979,14 @@ class ReproducaoMixin:
                 )
                 await asyncio.sleep(0)
                 await self._play_next(guild_id, preserve_current_to_history=False)
+            else:
+                self._finish_mixer_when_idle(st)
+
+    @staticmethod
+    def _finish_mixer_when_idle(st: GuildMusicState) -> None:
+        source = getattr(st.player, "source", None)
+        if isinstance(source, AgentMixedAudioSource) and source.persistent:
+            source.finish_when_idle()
 
     def _should_use_direct_voice(self, track: AgentTrack) -> bool:
         return bool(
@@ -1132,23 +1177,29 @@ class ReproducaoMixin:
             voice_client, _created = await self._ensure_direct_voice_client(guild_id)
         else:
             self.log("voice_preconnect_reused", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
-        if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
+        existing_source = getattr(voice_client, "source", None)
+        reusable = bool(
+            self.direct_pcm_volume_enabled
+            and isinstance(existing_source, AgentMixedAudioSource)
+            and existing_source.persistent
+            and existing_source.music_ended
+            and getattr(voice_client, "is_playing", lambda: False)()
+        )
+        if not reusable and (getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)()):
+            if isinstance(existing_source, AgentMixedAudioSource) and existing_source.persistent:
+                existing_source.stop_music()
             voice_client.stop()
         opus_bitrate_kbps, channel_bitrate_kbps = self._discord_opus_bitrate_kbps(voice_client, track)
         source_rate = max(0, int(getattr(track, "audio_sample_rate", 0) or 0))
         _audio_options, resample_mode = self._ffmpeg_options_for_source(source_rate)
-        source = self._build_ffmpeg_source(
-            track.stream_url,
-            volume_percent=st.volume_percent,
-            start_offset_seconds=getattr(track, "start_offset_seconds", 0.0),
-            opus_bitrate_kbps=opus_bitrate_kbps,
-            source_sample_rate=source_rate,
-        )
         st.player = voice_client
         st.transport = "direct"
         st.playback_token += 1
         playback_token = st.playback_token
         self._set_status(st, "starting", event="direct_player_starting")
+        # O EOF pode chegar antes da confirmação do primeiro frame. Não use o
+        # relógio herdado da faixa anterior ao decidir se deve recuperar.
+        st.started_monotonic = time.monotonic()
         source_channels = max(0, int(getattr(track, "audio_channels", 0) or 0))
         quality_context: dict[str, Any] = {
             "source_format": getattr(track, "audio_format_id", ""),
@@ -1180,26 +1231,63 @@ class ReproducaoMixin:
             volume_percent=int(st.volume_percent),
             volume_mode="soft_limited_boost" if int(st.volume_percent) > 100 else "linear",
         )
-        self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title, offset=round(float(getattr(track, "start_offset_seconds", 0.0) or 0.0), 2))
+        self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title, offset=round(float(getattr(track, "start_offset_seconds", 0.0) or 0.0), 2), mixer_reused=reusable)
+
+        def on_music_end(error: Exception | None, metrics: dict[str, Any]) -> None:
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                return
+            asyncio.run_coroutine_threadsafe(
+                self._direct_after(guild_id, error, playback_token, audio_metrics=metrics, quality_context=dict(quality_context)),
+                loop,
+            )
+
+        source = self._build_ffmpeg_source(
+            track.stream_url,
+            volume_percent=st.volume_percent,
+            start_offset_seconds=getattr(track, "start_offset_seconds", 0.0),
+            opus_bitrate_kbps=opus_bitrate_kbps,
+            source_sample_rate=source_rate,
+            on_music_end=on_music_end if self.direct_pcm_volume_enabled else None,
+            reuse_mixer=existing_source if reusable else None,
+        )
+        if isinstance(source, AgentMixedAudioSource) and source.persistent:
+            source.quality_context = dict(quality_context)
 
         def after(error: Exception | None) -> None:
             loop = self._loop
             if loop is None or loop.is_closed():
                 return
+            callback_token = playback_token
+            callback_error = error
+            callback_quality = dict(quality_context)
+            if isinstance(source, AgentMixedAudioSource) and source.persistent:
+                # A sessão de voz continua entre faixas; este callback pertence
+                # ao transporte, não à música que a iniciou. Um EOF de faixa
+                # já foi entregue por on_music_end, mas uma queda de voz durante
+                # qualquer faixa precisa recuperar a música atual.
+                if source.music_ended or st.current is None or st.player is not voice_client:
+                    return
+                if getattr(voice_client, "source", source) not in (source, None):
+                    return
+                callback_token = int(st.playback_token)
+                callback_error = error or RuntimeError("sessão de voz encerrada durante a música")
+                callback_quality = dict(getattr(source, "quality_context", quality_context))
             metrics = self._audio_source_telemetry(source)
             asyncio.run_coroutine_threadsafe(
                 self._direct_after(
                     guild_id,
-                    error,
-                    playback_token,
+                    callback_error,
+                    callback_token,
                     audio_metrics=metrics,
-                    quality_context=dict(quality_context),
+                    quality_context=callback_quality,
                 ),
                 loop,
             )
 
         play_called_monotonic = time.monotonic()
-        self._play_music_source(voice_client, source, after=after, opus_bitrate_kbps=opus_bitrate_kbps)
+        if not reusable:
+            self._play_music_source(voice_client, source, after=after, opus_bitrate_kbps=opus_bitrate_kbps)
         # Confirme assim que o primeiro frame PCM for consumido. O limite antigo
         # continua como fallback, mas deixa de ser uma espera fixa no hot path.
         confirm_delay = max(0.05, min(1.2, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.35)))
@@ -1226,6 +1314,8 @@ class ReproducaoMixin:
             transition_gap_ms = max(0.0, (st.started_monotonic - previous_end) * 1000.0)
         quality_context["first_frame_ms"] = getattr(source, "first_frame_ms", None)
         quality_context["transition_gap_ms"] = round(transition_gap_ms, 1) if transition_gap_ms is not None else None
+        if isinstance(source, AgentMixedAudioSource) and source.persistent:
+            source.quality_context = dict(quality_context)
         self._set_status(st, "playing", event="direct_track_start_confirmed")
         self.log(
             "play_started",
@@ -1293,6 +1383,8 @@ class ReproducaoMixin:
         start_offset_seconds: float = 0.0,
         opus_bitrate_kbps: int | None = None,
         source_sample_rate: int = 0,
+        on_music_end: Any = None,
+        reuse_mixer: AgentMixedAudioSource | None = None,
     ) -> Any:
         volume = max(0.0, min(1.5, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
         before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
@@ -1305,6 +1397,9 @@ class ReproducaoMixin:
                 options=ffmpeg_options,
             )
             loop = self._loop or asyncio.get_running_loop()
+            if reuse_mixer is not None:
+                reuse_mixer.replace_music_source(pcm, volume=volume, on_music_end=on_music_end)
+                return reuse_mixer
             return AgentMixedAudioSource(
                 loop=loop,
                 music_source=pcm,
@@ -1312,6 +1407,8 @@ class ReproducaoMixin:
                 duck_factor=max(0.0, min(1.0, self.duck_volume_percent / 100.0)),
                 telemetry_enabled=bool(getattr(self, "audio_telemetry_enabled", True)),
                 stall_threshold_ms=float(getattr(self, "audio_stall_threshold_ms", 80.0)),
+                on_music_end=on_music_end,
+                persistent=on_music_end is not None,
             )
         opus_cls = getattr(discord, "FFmpegOpusAudio", None)
         if opus_cls is not None:
@@ -1447,12 +1544,34 @@ class ReproducaoMixin:
             return
         if st.current is None and not st.queue:
             return
+        ended_monotonic = time.monotonic()
+        played_for = ended_monotonic - float(st.started_monotonic or 0.0) if st.started_monotonic else 0.0
+        remaining_expected: float | None = None
+        if st.current is not None and st.current.duration is not None:
+            with contextlib.suppress(Exception):
+                remaining_expected = max(
+                    0.0,
+                    float(st.current.duration)
+                    - max(0.0, float(getattr(st.current, "start_offset_seconds", 0.0) or 0.0)),
+                )
+        remaining_after_play = (
+            max(0.0, remaining_expected - played_for)
+            if remaining_expected is not None else None
+        )
+        min_ok = max(0.5, env_float("MUSIC_AGENT_EARLY_END_SECONDS", 2.5))
+        cutoff_tolerance = max(10.0, min(30.0, (remaining_expected or 0.0) * 0.07))
+        early_unexpected = bool(
+            st.current is not None
+            and (
+                (played_for < min_ok and (remaining_expected is None or remaining_expected > min_ok))
+                or (remaining_after_play is not None and remaining_after_play > cutoff_tolerance)
+            )
+        )
         # Invalidate this callback before any await in the transition. Discord may
         # invoke the same direct-player callback more than once while the next
         # track is still resolving/preparing.
-        self._bump_playback_generation(st, reason="direct_after")
-        ended_monotonic = time.monotonic()
-        played_for = ended_monotonic - float(st.started_monotonic or 0.0) if st.started_monotonic else 0.0
+        keep = self._next_resolving_prefetch_keys(st) if not error and not early_unexpected else set()
+        self._bump_playback_generation(st, reason="direct_after", keep_prefetch_task_keys=keep)
         st.last_audio_end_monotonic = ended_monotonic
         metrics = dict(audio_metrics or {})
         quality = dict(quality_context or {})
@@ -1470,7 +1589,6 @@ class ReproducaoMixin:
                 **summary_fields,
             )
 
-        min_ok = max(0.5, env_float("MUSIC_AGENT_EARLY_END_SECONDS", 2.5))
         if error:
             log_summary("error")
             if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_error"):
@@ -1480,29 +1598,23 @@ class ReproducaoMixin:
             self.log("play_failed", guild_id=guild_id, transport="direct", error=st.last_error)
             if st.queue:
                 await self._play_next(guild_id)
+            else:
+                self._finish_mixer_when_idle(st)
             return
-        remaining_expected: float | None = None
-        if st.current is not None and st.current.duration is not None:
-            with contextlib.suppress(Exception):
-                remaining_expected = max(
-                    0.0,
-                    float(st.current.duration)
-                    - max(0.0, float(getattr(st.current, "start_offset_seconds", 0.0) or 0.0)),
-                )
-        early_unexpected = bool(
-            played_for < min_ok
-            and st.current is not None
-            and (remaining_expected is None or remaining_expected > min_ok)
-        )
+        # Um EOF sem erro depois de 2,5 s também pode ser uma conexão que caiu
+        # no meio de uma música de vários minutos. Tolere diferenças pequenas
+        # entre as durações fornecidas pelo site e pelo player.
         if early_unexpected:
             log_summary("early_end")
             if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_early_end"):
                 return
             self._invalidate_track_stream_cache(st.current)
-            self._set_status(st, "failed", event="direct_after_early_end", error=f"áudio encerrou cedo demais ({played_for:.1f}s)")
+            self._set_status(st, "failed", event="direct_after_early_end", error=f"áudio encerrou cedo demais ({played_for:.1f}s; restantes {remaining_after_play:.1f}s)" if remaining_after_play is not None else f"áudio encerrou cedo demais ({played_for:.1f}s)")
             self.log("play_failed", guild_id=guild_id, transport="direct", error=st.last_error, title=getattr(st.current, "title", ""))
             if st.queue:
                 await self._play_next(guild_id)
+            else:
+                self._finish_mixer_when_idle(st)
             return
         log_summary("ended")
         self.log("play_ended", guild_id=guild_id, transport="direct", title=getattr(st.current, "title", ""))
@@ -1512,6 +1624,7 @@ class ReproducaoMixin:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         if error:
             self._set_status(st, "failed", event=event, error=error)
+            self._finish_mixer_when_idle(st)
             return
         finished = st.current
         st.current = None
@@ -1538,6 +1651,7 @@ class ReproducaoMixin:
             await self._play_next(guild_id)
             return
         self._set_status(st, "idle", event=event)
+        self._finish_mixer_when_idle(st)
         # Fim normal de fila não é desconexão externa: mantenha a sessão de voz
         # viva e deixe o mesmo timeout AFK/idle decidir quando sair da call.
         self._schedule_idle_disconnect(guild_id)

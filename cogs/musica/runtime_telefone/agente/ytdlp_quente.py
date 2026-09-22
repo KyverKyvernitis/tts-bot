@@ -42,6 +42,8 @@ def _worker_options(yt_dlp: Any, request: dict[str, Any]) -> dict[str, Any]:
         str(max(3, min(20, int(float(request.get("socket_timeout") or 12))))),
         "-f",
         str(request.get("format") or "bestaudio/best"),
+        "--format-sort",
+        str(request.get("format_sort") or "abr,acodec,asr"),
     ]
     cookiefile = str(request.get("cookiefile") or "").strip()
     if cookiefile and Path(cookiefile).is_file():
@@ -81,6 +83,7 @@ def _worker_main() -> int:
             next_signature = json.dumps(
                 {
                     "format": options.get("format"),
+                    "format_sort": options.get("format_sort"),
                     "cookiefile": options.get("cookiefile"),
                     "js_runtimes": str(request.get("js_runtimes") or ""),
                     "socket_timeout": options.get("socket_timeout"),
@@ -190,6 +193,7 @@ class WarmYTDLPResolver:
         target: str,
         *,
         format_selector: str,
+        format_sort: str = "abr,acodec,asr",
         cookiefile: str = "",
         js_runtimes: str = "",
         socket_timeout: int = 12,
@@ -209,6 +213,7 @@ class WarmYTDLPResolver:
                 "id": request_id,
                 "target": target,
                 "format": format_selector,
+                "format_sort": format_sort,
                 "cookiefile": cookiefile,
                 "js_runtimes": js_runtimes,
                 "socket_timeout": socket_timeout,

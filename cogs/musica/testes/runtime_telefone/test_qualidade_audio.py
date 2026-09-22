@@ -4,7 +4,10 @@ from pathlib import Path
 
 from cogs.musica.runtime_telefone.agente.utilitarios import (
     DEFAULT_YTDLP_AUDIO_FORMAT,
+    DEFAULT_YTDLP_AUDIO_SORT,
     audio_format_score,
+    formato_audio_configurado,
+    LEGACY_YTDLP_AUDIO_FORMAT,
     select_stream_info,
 )
 
@@ -34,11 +37,11 @@ def _fmt(
     }
 
 
-def test_default_ytdlp_format_prioriza_opus_48k_com_fallbacks() -> None:
-    assert DEFAULT_YTDLP_AUDIO_FORMAT.startswith("bestaudio[acodec=opus][asr=48000]/")
-    assert "/bestaudio[acodec=opus]/" in DEFAULT_YTDLP_AUDIO_FORMAT
-    assert "/bestaudio[asr=48000]/" in DEFAULT_YTDLP_AUDIO_FORMAT
-    assert DEFAULT_YTDLP_AUDIO_FORMAT.endswith("bestaudio/best")
+def test_default_ytdlp_format_equilibra_bitrate_codec_e_rate() -> None:
+    assert DEFAULT_YTDLP_AUDIO_FORMAT == "bestaudio/best"
+    assert DEFAULT_YTDLP_AUDIO_SORT == "abr,acodec,asr"
+    assert formato_audio_configurado(LEGACY_YTDLP_AUDIO_FORMAT) == DEFAULT_YTDLP_AUDIO_FORMAT
+    assert formato_audio_configurado("bestaudio[ext=m4a]/best") == "bestaudio[ext=m4a]/best"
 
 
 def test_select_stream_preserva_escolha_final_do_ytdlp_e_telemetria() -> None:
@@ -354,3 +357,121 @@ def test_wave_e_pipeline_registra_primeiro_frame_gap_e_stalls() -> None:
     # Telemetria não introduz análise espectral, normalização ou filtros.
     for forbidden in ("loudnorm", "astats", "ebur128", "acompressor"):
         assert forbidden not in (playback + mixer).lower()
+
+
+def test_candidatos_de_catalogo_rejeitam_remix_e_duracao_errada() -> None:
+    from cogs.musica.runtime_telefone.agente.correspondencia import avaliar_correspondencia, busca_alternativa
+
+    original = {"title": "Northern Lights", "artist": "Olive", "duration": 200}
+    assert avaliar_correspondencia(original, {"title": "Olive - Northern Lights", "duration": 201})[0]
+    assert not avaliar_correspondencia(original, {"title": "Olive - Northern Lights live", "duration": 201})[0]
+    assert not avaliar_correspondencia(original, {"title": "Olive - Northern Lights", "duration": 560})[0]
+    assert busca_alternativa("ytsearch1:Olive Northern Lights") == "ytsearch3:Olive Northern Lights"
+
+
+def test_busca_de_catalogo_troca_primeiro_video_errado_por_candidato_valido(monkeypatch) -> None:
+    import asyncio
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    queries = []
+
+    def resolve(query, *, expected_metadata=None):
+        queries.append((query, expected_metadata))
+        return {
+            "title": "Other Song" if len(queries) == 1 else "Olive - Northern Lights",
+            "duration": 200,
+            "webpage_url": "https://youtu.be/correct",
+            "stream_url": "https://cdn/correct",
+        }
+
+    agent._resolve_with_ytdlp = resolve
+    meta = {"title": "Northern Lights", "artist": "Olive", "duration": 200, "source": "spotify"}
+    track = asyncio.run(agent.resolve_track("ytsearch1:Olive - Northern Lights official audio", track_meta=meta, body={"guild_id": 4}))
+    assert track.stream_url == "https://cdn/correct"
+    assert len(queries) == 2
+    assert queries[1][0].startswith("ytsearch3:")
+    assert queries[1][1] == meta
+
+
+def test_ytdlp_fallback_compartilha_o_prazo_e_ordena_por_qualidade(monkeypatch) -> None:
+    import json
+    import subprocess
+    import types
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    from cogs.musica.runtime_telefone.agente import resolucao as runtime
+    agent = music.MusicAgent()
+    agent.cookies_file = "/nonexistent"
+    agent.ytdlp_timeout = 20.0
+    monkeypatch.setenv("MUSIC_AGENT_YTDLP_WARM_HELPER_ENABLED", "false")
+    clock = [100.0]
+    monkeypatch.setattr(runtime, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0]))
+    calls = []
+
+    def command(cmd, *, timeout):
+        calls.append((cmd, timeout))
+        if "-g" in cmd:
+            clock[0] += 8.0
+            return subprocess.CompletedProcess(cmd, 1, "", "unavailable")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({
+            "title": "song", "url": "https://cdn/audio", "acodec": "opus", "vcodec": "none",
+            "abr": 160, "asr": 48000,
+        }), "")
+
+    agent._run_ytdlp_command = command
+    resolved = agent._resolve_with_ytdlp("https://youtu.be/example")
+    assert resolved["stream_url"] == "https://cdn/audio"
+    assert len(calls) == 2
+    assert calls[0][1] == 18.0
+    assert calls[1][1] == 12.0
+    assert all(cmd[cmd.index("--format-sort") + 1] == "abr,acodec,asr" for cmd, _timeout in calls)
+
+
+def test_ytdlp_busca_alternativa_seleciona_candidato_compativel(monkeypatch) -> None:
+    import json
+    import subprocess
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    agent.cookies_file = "/nonexistent"
+
+    def command(cmd, *, timeout):
+        data = {"entries": [
+            {"title": "Other Song", "duration": 200, "url": "https://cdn/wrong", "acodec": "opus"},
+            {"title": "Olive - Northern Lights", "duration": 201, "url": "https://cdn/correct", "acodec": "opus"},
+        ]}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(data), "")
+
+    agent._run_ytdlp_command = command
+    resolved = agent._resolve_with_ytdlp(
+        "ytsearch3:Olive Northern Lights", expected_metadata={"title": "Northern Lights", "artist": "Olive", "duration": 200},
+    )
+    assert resolved["stream_url"] == "https://cdn/correct"
+
+
+def test_tts_bufferizado_termina_apos_o_ultimo_frame(monkeypatch):
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+    _load_music_agent(monkeypatch)
+    from cogs.musica.runtime_telefone.agente.tts import _TimedTTSSource
+
+    class FakeSource:
+        def __init__(self):
+            self.frames = [b"frame", b""]
+        def read(self):
+            return self.frames.pop(0)
+        def cleanup(self):
+            pass
+        def is_opus(self):
+            return False
+
+    import time
+    timed = _TimedTTSSource(FakeSource(), started=time.monotonic(), buffered=True)
+    assert timed.ready.wait(timeout=1)
+    assert timed.read() == b"frame"
+    assert timed.read() == b""
+    assert timed.read() == b""
+    timed.cleanup()
