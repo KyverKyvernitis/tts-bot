@@ -6,6 +6,7 @@ import {
 import { MODULE_CATALOG, type ModuleVisualMeta } from "../moduleCatalog";
 import type { DashboardSupportServerPayload, DashboardUserPayload } from "../types/dashboard";
 import { AccountMenu } from "./AccountMenu";
+import { ModuleArtwork } from "./ModuleArtwork";
 import { SmartAvatar } from "./SmartAvatar";
 import { DecorativeVisualTemplate } from "./VisualTemplates";
 
@@ -26,6 +27,7 @@ const landingFeatureIds = ["welcome", "tickets", "forms", "color_roles", "birthd
 const features = landingFeatureIds
   .map((id) => MODULE_CATALOG.find((module) => module.id === id))
   .filter((module): module is ModuleVisualMeta => Boolean(module));
+const games = MODULE_CATALOG.find((module) => module.id === "economy");
 
 function displayName(identity: DashboardUserPayload | null, fallback: string) {
   return identity?.global_name?.trim() || identity?.username?.trim() || fallback;
@@ -95,19 +97,20 @@ export function BrowserLanding({
       </header>
 
       <main className="osk-minimal-main">
-        <DecorativeVisualTemplate />
         <section className="osk-minimal-hero">
-          <span className="osk-minimal-kicker">Configuração centralizada</span>
-          <h1>Dashboard</h1>
-          <p>Aqui você pode editar todas as funções do bot de cada servidor que você tenha acesso de maneira rápida</p>
-          <button className="osk-primary-button osk-minimal-primary-action" onClick={primaryAction}>
-            {loggedIn ? "Abrir dashboard" : "Entrar com Discord"}
-            <ArrowRight size={17} />
-          </button>
+          <div className="osk-landing-hero-copy">
+            <h1><span>Do primeiro oi</span><span>à última ficha.</span></h1>
+            <p>Escolha seu servidor e deixe a Osaka com a sua cara.</p>
+            <button className="osk-primary-button osk-minimal-primary-action" onClick={primaryAction}>
+              {loggedIn ? "Escolher servidor" : "Entrar com Discord"}
+              <ArrowRight size={18} aria-hidden="true" />
+            </button>
+          </div>
+          <div className="osk-landing-hero-art" aria-hidden="true"><DecorativeVisualTemplate /></div>
         </section>
 
         <section className="osk-minimal-features" aria-labelledby="landing-features-title">
-          <h2 id="landing-features-title">Funções</h2>
+          <h2 id="landing-features-title">O que a Osaka faz</h2>
           <div className="osk-minimal-feature-grid">
             {features.map((feature) => (
               <article key={feature.id}>
@@ -115,9 +118,12 @@ export function BrowserLanding({
                   <span className="osk-minimal-feature-icon" aria-hidden="true"><feature.icon size={20} /></span>
                   <h3>{feature.label}</h3>
                 </div>
-                <p>{feature.description}</p>
               </article>
             ))}
+            {games && <article className="osk-landing-games" data-economy="true">
+              <h3>{games.label}</h3>
+              <ModuleArtwork moduleId={games.id} fallbackIcon={games.icon} />
+            </article>}
           </div>
         </section>
 

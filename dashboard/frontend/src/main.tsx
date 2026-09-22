@@ -8,6 +8,7 @@ import "./dashboard-design.css";
 import "./module-artwork.css";
 import "./typography.css";
 import "./module-settings.css";
+import "./landing-refresh.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

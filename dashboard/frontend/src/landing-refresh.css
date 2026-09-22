@@ -1,0 +1,239 @@
+/* Landing da Osaka: tipografia editorial e arte do próprio projeto. */
+.osk-minimal-landing {
+  width: min(1080px, calc(100% - 56px));
+}
+
+.osk-minimal-nav {
+  min-height: 78px;
+}
+
+.osk-minimal-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.12fr) minmax(250px, .88fr);
+  align-items: center;
+  gap: clamp(1rem, 4vw, 3.75rem);
+  max-width: none;
+  min-height: 440px;
+  padding: clamp(3rem, 6vw, 5rem) 0;
+  overflow: clip;
+}
+
+.osk-landing-hero-copy {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+
+.osk-minimal-hero h1 {
+  display: block;
+  max-width: none;
+  margin: 0;
+  font-size: clamp(3.25rem, 5.55vw, 5.1rem);
+  font-weight: 650;
+  letter-spacing: -.075em;
+  line-height: 1.05;
+  text-wrap: balance;
+}
+
+.osk-minimal-hero h1 span {
+  display: block;
+  font-weight: inherit;
+}
+
+.osk-minimal-hero h1 span:last-child {
+  color: #e1d8cc;
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-weight: 400;
+  letter-spacing: -.065em;
+}
+
+.osk-minimal-hero p {
+  max-width: 29ch;
+  margin: 1.5rem 0 0;
+  font-size: clamp(.95rem, 1.4vw, 1.1rem);
+  line-height: 1.55;
+}
+
+.osk-minimal-primary-action {
+  display: inline-flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-top: 1.8rem;
+  padding-inline: 1.35rem;
+}
+
+.osk-landing-hero-art {
+  position: relative;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 330px;
+  pointer-events: none;
+  mask-image: linear-gradient(to bottom, #000 65%, transparent 100%);
+}
+
+.osk-landing-hero-art .osk-decorative-template,
+.osk-landing-hero-art .osk-decorative-template[data-ready] {
+  position: absolute;
+  top: auto;
+  right: 0;
+  bottom: -4%;
+  width: min(100%, var(--osk-decorative-size));
+  max-width: none;
+  opacity: min(.62, var(--osk-decorative-opacity));
+}
+
+.osk-minimal-features {
+  padding: 1.7rem 0 1rem;
+}
+
+.osk-minimal-features > h2 {
+  margin: 0 0 1.15rem;
+  font-family: var(--osk-font-display);
+  font-size: clamp(1.2rem, 2vw, 1.5rem);
+  font-weight: 600;
+  letter-spacing: -.045em;
+  text-transform: none;
+}
+
+.osk-minimal-feature-grid {
+  gap: .8rem;
+}
+
+.osk-minimal-feature-grid article {
+  position: relative;
+  min-height: 94px;
+  justify-content: center;
+  gap: 0;
+  padding: 1rem 1.15rem;
+  border-radius: 18px;
+  background: rgba(7,7,7,.78);
+}
+
+.osk-minimal-feature-grid article:hover {
+  color: var(--osk-ink);
+  border-color: var(--osk-line-strong);
+  background: rgba(7,7,7,.78);
+  transform: none;
+}
+
+.osk-minimal-feature-grid article:hover h3 { color: var(--osk-ink); }
+
+.osk-minimal-feature-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+}
+
+.osk-minimal-feature-grid h3 {
+  font-family: var(--osk-font-display);
+  font-size: clamp(.82rem, 1.3vw, .98rem);
+  font-weight: 600;
+  letter-spacing: -.025em;
+}
+
+.osk-minimal-feature-grid .osk-landing-games {
+  min-height: 52px;
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-block: .35rem;
+  border-color: rgba(188, 166, 134, .38);
+  background: linear-gradient(100deg, rgba(104, 83, 59, .26), rgba(7,7,7,.9) 65%);
+}
+
+.osk-minimal-feature-grid .osk-landing-games:hover {
+  border-color: rgba(188, 166, 134, .55);
+  background: linear-gradient(100deg, rgba(104, 83, 59, .26), rgba(7,7,7,.9) 65%);
+}
+
+.osk-landing-games h3 { color: #f5ede1; }
+.osk-minimal-feature-grid .osk-landing-games:hover h3 { color: #f5ede1; }
+
+.osk-root .osk-landing-games .osk-module-artwork {
+  flex: 0 0 74px;
+  width: 74px;
+  height: 40px;
+}
+
+.osk-root .osk-landing-games .osk-casino-scene {
+  transform: scale(.74);
+}
+
+.osk-support-card { margin-top: 1.5rem; }
+
+@media (max-width: 720px) {
+  .osk-minimal-landing { width: calc(100% - 28px); }
+  .osk-minimal-nav { min-height: 62px; }
+
+  .osk-minimal-hero {
+    display: block;
+    min-height: 0;
+    padding: 2.35rem 0 2.55rem;
+  }
+
+  .osk-minimal-hero h1 {
+    font-size: clamp(2.5rem, 10.4vw, 3.25rem);
+    line-height: 1.07;
+  }
+
+  .osk-minimal-hero p {
+    max-width: 27ch;
+    margin-top: 1.1rem;
+    font-size: .9rem;
+  }
+
+  .osk-minimal-primary-action {
+    width: 100%;
+    min-height: 50px;
+    margin-top: 1.5rem;
+  }
+
+  .osk-landing-hero-art {
+    position: absolute;
+    z-index: 0;
+    top: 4.5rem;
+    right: -2rem;
+    bottom: 2.5rem;
+    width: min(43%, 13rem);
+    min-height: 0;
+    opacity: .5;
+  }
+
+  .osk-landing-hero-art .osk-decorative-template,
+  .osk-landing-hero-art .osk-decorative-template[data-ready] {
+    bottom: 0;
+    width: 100%;
+    opacity: min(.48, var(--osk-decorative-opacity));
+  }
+
+  .osk-minimal-features { padding-top: 1.35rem; }
+  .osk-minimal-feature-grid { gap: .55rem; }
+
+  .osk-minimal-feature-grid article {
+    min-height: 90px;
+    padding: .8rem;
+    border-radius: 14px;
+  }
+
+  .osk-minimal-feature-heading { gap: .6rem; }
+  .osk-minimal-feature-icon { width: 36px; height: 36px; }
+  .osk-minimal-feature-grid h3 { font-size: .78rem; line-height: 1.25; }
+
+  .osk-minimal-feature-grid .osk-landing-games {
+    min-height: 48px;
+    padding: .2rem .85rem;
+  }
+
+  .osk-landing-games h3 { font-size: .9rem; }
+  .osk-support-card { margin-top: 1.1rem; }
+}
+
+@media (max-width: 360px) {
+  .osk-minimal-hero h1 { font-size: 2.35rem; }
+  .osk-minimal-feature-grid h3 { font-size: .73rem; }
+}
