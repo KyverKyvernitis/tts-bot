@@ -125,7 +125,7 @@ def test_queueview_permanece_operavel_quando_so_existe_cursor_virtual() -> None:
     assert "if items or virtual:" in refresh
     assert "not _virtual_playlist_info(state)" in clear
     assert "Carregando próximas músicas…" in queue_text
-    assert "Duração:" in queue_text
+    assert "Duração:" not in queue_text
 
 
 def test_modal_de_adicionar_preserva_direct_play_virtual_start_first() -> None:

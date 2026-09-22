@@ -1319,6 +1319,14 @@ class MusicExtractor:
         # representa a posição da coleção.
         next_cursor = getattr(api_batch, "playlist_cursor", None)
         raw_count = min(window_limit, len(api_batch.tracks))
+        if next_cursor is not None:
+            # Depois que o primeiro HTML revelou o total da coleção, refills
+            # posteriores não podem apagar essa informação caso uma página
+            # pública intermediária omita o contador.
+            if next_cursor.total_tracks is None:
+                next_cursor.total_tracks = cursor.total_tracks
+            if not next_cursor.title:
+                next_cursor.title = api_batch.title or cursor.title
         if next_cursor is None:
             # O offset representa itens consumidos da fonte, não só itens que
             # passaram pelo filtro de segurança. Caso contrário uma faixa

@@ -102,7 +102,7 @@ def test_interface_prioriza_fonte_real_e_nao_expoe_detalhes_de_implementacao() -
 
     assert 'for attr in ("display_source", "source", "extractor")' in components
     assert 'requester_line = f"-# Pedido por {requester}" + (f" · via' in components
-    assert 'total_text = f"{total}+" if virtual else str(total)' in components
+    assert 'total_text = str(total) if (not virtual or virtual_total_known) else f"{total}+"' in components
     assert 'lines.append(f"-# + {hidden} música' in components
     lower = components.lower()
     assert "restante da playlist carregado automaticamente conforme necessário" not in lower

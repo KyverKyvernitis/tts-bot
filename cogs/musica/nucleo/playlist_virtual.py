@@ -72,6 +72,35 @@ def bounded_initial_window(
     return selected, next_cursor
 
 
+
+def logical_virtual_queue_count(
+    *,
+    total_tracks: int | None,
+    next_offset: int,
+    materialized_before: int,
+    remote_queue_size: int,
+) -> int | None:
+    """Quantidade lógica exata ainda na fila de uma playlist virtual.
+
+    ``remote_queue_size`` contém só itens materializados (e eventuais músicas
+    manuais após o marker). O restante virtual é derivado do cursor, sem manter
+    a coleção inteira em memória. Retorna ``None`` enquanto o provider ainda
+    não conhece o total.
+    """
+    if total_tracks is None:
+        return None
+    try:
+        total = max(0, int(total_tracks))
+        offset = max(0, int(next_offset))
+        before = max(0, int(materialized_before))
+        remote = max(0, int(remote_queue_size))
+    except Exception:
+        return None
+    consumed_from_playlist = max(0, offset - before)
+    remaining_playlist = max(0, total - consumed_from_playlist)
+    manual_after_marker = max(0, remote - before)
+    return remaining_playlist + manual_after_marker
+
 def should_refill_playlist(
     materialized_count: int,
     cursor: PlaylistCursor | None,

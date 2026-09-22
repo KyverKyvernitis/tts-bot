@@ -158,6 +158,186 @@ class SpotifyPublicoMixin:
                     return parsed
         return None
 
+    def _spotify_public_total_tracks_from_content(self, content: str, *, minimum: int = 0) -> int | None:
+        """Extrai a contagem total da coleção sem materializar todas as faixas.
+
+        O Web Player/embed já costuma publicar esse número em JSON de hidratação,
+        JSON-LD ou metatags. Usamos somente o HTML que já foi baixado para a
+        janela atual: nenhuma request extra é criada só para contar músicas.
+        """
+        minimum = max(0, int(minimum or 0))
+
+        def as_count(value: Any) -> int | None:
+            if isinstance(value, bool):
+                return None
+            try:
+                number = int(value)
+            except Exception:
+                return None
+            if number < minimum or number < 0 or number > 1_000_000:
+                return None
+            return number
+
+        # Caminho mais barato: as chaves explícitas aparecem literalmente no
+        # HTML/JSON serializado e não exigem decodificar/traversar o payload.
+        explicit: list[int] = []
+        for match in re.finditer(
+            r'["\'](?:numTracks|numberOfTracks|trackCount|tracksCount|totalTracks|totalTrackCount)["\']\s*:\s*["\']?(\d{1,7})',
+            content or "",
+            flags=re.IGNORECASE,
+        ):
+            number = as_count(match.group(1))
+            if number is not None:
+                explicit.append(number)
+        if explicit:
+            return max(explicit)
+
+        # Muitas páginas públicas já dizem "137 songs" na descrição. Também é
+        # uma leitura local e evita percorrer hydration JSON grande.
+        description = html_meta(content, "description", "og:description", "twitter:description")
+        for text in (description, html_title(content)):
+            match = re.search(r"\b(\d{1,7})\s+(?:songs?|tracks?|músicas?|faixas?)\b", text or "", re.IGNORECASE)
+            if match:
+                number = as_count(match.group(1))
+                if number is not None:
+                    return number
+
+        candidates: list[tuple[int, int]] = []
+        blocked_path = {"followers", "following", "likes", "users", "owners", "owner"}
+        strong_keys = {
+            "numtracks", "numberoftracks", "trackcount", "trackscount",
+            "totaltracks", "totaltrackcount", "numberofitems",
+        }
+        contextual_keys = {"totalcount", "itemcount", "itemscount", "total"}
+
+        def walk(value: Any, path: tuple[str, ...] = (), depth: int = 0) -> None:
+            if depth > 18:
+                return
+            if isinstance(value, dict):
+                path_low = tuple(str(part or "").lower() for part in path)
+                for key, raw in value.items():
+                    key_low = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
+                    number = as_count(raw)
+                    if number is not None:
+                        if key_low in strong_keys:
+                            candidates.append((100, number))
+                        elif key_low in contextual_keys:
+                            recent = set(path_low[-4:])
+                            path_text = " ".join(path_low[-5:])
+                            if not recent.intersection(blocked_path) and any(
+                                marker in path_text
+                                for marker in ("track", "playlist", "content", "items", "entries")
+                            ):
+                                candidates.append((75, number))
+                    walk(raw, path + (str(key or ""),), depth + 1)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item, path, depth + 1)
+
+        for blob in json_script_blobs(content):
+            walk(blob)
+        if not candidates:
+            return None
+        best_score = max(score for score, _ in candidates)
+        return max(number for score, number in candidates if score == best_score)
+
+    def _spotify_complete_public_track_urls(
+        self,
+        tracks: list[ApiTrackCandidate],
+        *,
+        content: str,
+        offset: int,
+        limit: int,
+    ) -> None:
+        """Completa URLs individuais Spotify usando JSON já presente na página.
+
+        O layout server-rendered nem sempre coloca o ``href=/track/...`` ao
+        redor do h3/h4. Quando isso acontece, os mesmos itens aparecem nos
+        blobs de hidratação. O matching exato é preferido, mas um fallback
+        posicional preserva hyperlinks mesmo quando o JSON escreve artista ou
+        título com pequenas diferenças cosméticas.
+        """
+        if not tracks or all(item.webpage_url for item in tracks):
+            return
+
+        for blob in json_script_blobs(content):
+            linked = self._spotify_public_candidates_from_json(
+                blob,
+                url="",
+                limit=max(1, int(limit)),
+                offset=max(0, int(offset)),
+            )
+            available: list[ApiTrackCandidate] = [item for item in linked if item.webpage_url]
+            if not available:
+                continue
+
+            used: set[int] = set()
+            # Primeiro: título + artista exatos.
+            for item in tracks:
+                if item.webpage_url:
+                    continue
+                title_key = normalize_text(item.title)
+                artist_key = normalize_text(item.artist)
+                match_index = next((
+                    idx for idx, candidate in enumerate(available)
+                    if idx not in used
+                    and normalize_text(candidate.title) == title_key
+                    and (not artist_key or not normalize_text(candidate.artist) or normalize_text(candidate.artist) == artist_key)
+                ), -1)
+                if match_index >= 0:
+                    item.webpage_url = available[match_index].webpage_url
+                    used.add(match_index)
+
+            # Segundo: título exato. O HTML e o payload público podem divergir
+            # apenas no selo Explicit ou em formatação do artista.
+            for item in tracks:
+                if item.webpage_url:
+                    continue
+                title_key = normalize_text(item.title)
+                match_index = next((
+                    idx for idx, candidate in enumerate(available)
+                    if idx not in used and normalize_text(candidate.title) == title_key
+                ), -1)
+                if match_index >= 0:
+                    item.webpage_url = available[match_index].webpage_url
+                    used.add(match_index)
+
+            # Último fallback: os dois parsers estão na mesma janela/offset e
+            # preservam a ordem da coleção. Isso recupera links mesmo quando o
+            # JSON traz sufixos como Remastered/Explicit que não existem no h3.
+            for idx, item in enumerate(tracks):
+                if item.webpage_url or idx >= len(available):
+                    continue
+                candidate = available[idx]
+                if candidate.webpage_url:
+                    item.webpage_url = candidate.webpage_url
+
+            if all(item.webpage_url for item in tracks):
+                return
+
+        # Fallback final para layouts em que a URI existe no HTML bruto mas o
+        # blob de hidratação mudou de shape. Não faz rede: apenas recolhe links
+        # /track já presentes no documento e os alinha com a mesma janela.
+        raw_urls: list[str] = []
+        for match in re.finditer(
+            r'(?:https?://open\.spotify\.com)?/track/([A-Za-z0-9]{16,32})|spotify:track:([A-Za-z0-9]{16,32})',
+            content or "",
+            flags=re.IGNORECASE,
+        ):
+            item_id = str(match.group(1) or match.group(2) or "").strip()
+            if not item_id:
+                continue
+            url = f"https://open.spotify.com/track/{item_id}"
+            # href + uri do mesmo elemento aparecem frequentemente lado a lado.
+            # Comprima somente duplicatas consecutivas; repetições reais da
+            # playlist em posições diferentes continuam preservadas.
+            if not raw_urls or raw_urls[-1] != url:
+                raw_urls.append(url)
+        if len(raw_urls) >= len(tracks):
+            for idx, item in enumerate(tracks):
+                if not item.webpage_url and idx < len(raw_urls):
+                    item.webpage_url = raw_urls[idx]
+
     def _spotify_public_external_url(self, data: dict[str, Any], *, fallback_url: str = "") -> str:
         for key in ("external_urls", "externalUrls", "sharingInfo", "shareUrl", "uri"):
             value = data.get(key)
@@ -450,34 +630,15 @@ class SpotifyPublicoMixin:
                 ]
 
                 # Alguns layouts deixam o h3/h4 server-rendered sem href, mas
-                # mantêm a URI da faixa nos blobs JSON de hidratação. Use esses
-                # blobs apenas para completar links, nunca para reordenar a
-                # playlist nem substituir os metadados já lidos do HTML.
-                if any(not item.webpage_url for item in tracks):
-                    for blob in json_script_blobs(content):
-                        linked = self._spotify_public_candidates_from_json(
-                            blob,
-                            url="",
-                            limit=probe_limit,
-                            offset=offset,
-                        )
-                        if not linked:
-                            continue
-                        available: list[ApiTrackCandidate] = [item for item in linked if item.webpage_url]
-                        for item in tracks:
-                            if item.webpage_url:
-                                continue
-                            title_key = normalize_text(item.title)
-                            artist_key = normalize_text(item.artist)
-                            match_index = next((
-                                idx for idx, candidate in enumerate(available)
-                                if normalize_text(candidate.title) == title_key
-                                and normalize_text(candidate.artist) == artist_key
-                            ), -1)
-                            if match_index >= 0:
-                                item.webpage_url = available.pop(match_index).webpage_url
-                        if all(item.webpage_url for item in tracks):
-                            break
+                # mantêm a URI da faixa nos blobs JSON de hidratação. Complete
+                # somente a URL pública; ordem/título/artista continuam vindo
+                # da lista server-rendered.
+                self._spotify_complete_public_track_urls(
+                    tracks,
+                    content=content,
+                    offset=offset,
+                    limit=probe_limit,
+                )
 
             if not tracks:
                 json_blobs = json_script_blobs(content)
@@ -538,6 +699,14 @@ class SpotifyPublicoMixin:
                     playlist_title = last_title or (window[0].album if kind == "album" else window[0].title if kind == "track" else "Spotify")
                     cursor = None
                     if kind in {"album", "playlist"}:
+                        # A contagem total é metadata leve publicada na mesma
+                        # página. Ela não exige materializar a coleção nem criar
+                        # uma request separada, e permite que o painel mostre a
+                        # fila real desde a primeira janela.
+                        total_tracks = self._spotify_public_total_tracks_from_content(
+                            content,
+                            minimum=offset + len(window),
+                        )
                         # O embed público costuma expor uma janela server-rendered.
                         # Mesmo quando não vemos o item +1, 25 linhas podem ser só
                         # o primeiro recorte; nesse caso mantemos continuação aberta
@@ -550,7 +719,7 @@ class SpotifyPublicoMixin:
                             resource_type=kind,
                             resource_id=item_id,
                             next_offset=offset + len(window),
-                            total_tracks=None,
+                            total_tracks=total_tracks,
                             exhausted=not (has_more_in_document or maybe_embed_window),
                         )
                     return ApiTrackBatch(

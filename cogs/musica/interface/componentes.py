@@ -14,7 +14,7 @@ from cogs.musica import configuracao as config
 from ..nucleo.erros import MusicExtractionError
 from ..busca import registrar_lote_link_busca, registrar_selecao_busca
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
-from ..nucleo.playlist_virtual import bounded_initial_window
+from ..nucleo.playlist_virtual import bounded_initial_window, logical_virtual_queue_count
 from ..metadados.provedores import describe_url
 from ..agente_telefone.comandos import music_agent_command, music_agent_status
 from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
@@ -640,8 +640,26 @@ def _queue_total_count(state, items: list[MusicTrack]) -> int:
     total = len(items)
     with contextlib.suppress(Exception):
         total = max(total, int(state.queue_size()))
+    remote_queue_size = 0
     with contextlib.suppress(Exception):
-        total = max(total, int(getattr(state, "agent_remote_queue_size", 0) or 0))
+        remote_queue_size = max(0, int(getattr(state, "agent_remote_queue_size", 0) or 0))
+        total = max(total, remote_queue_size)
+
+    # Playlist virtual: ``queue_size`` contém apenas a janela materializada. Se
+    # o provider publicou ``total_tracks``, derive a quantidade lógica restante
+    # sem carregar o restante da coleção. ``next_offset - materialized_before``
+    # é quantas faixas da playlist já saíram da fila (tocadas/atuais). Itens
+    # manuais depois do marker continuam incluídos em ``remote_queue_size``.
+    info = _virtual_playlist_info(state)
+    if info:
+        exact = logical_virtual_queue_count(
+            total_tracks=info.get("total_tracks"),
+            next_offset=info.get("next_offset") or 0,
+            materialized_before=info.get("materialized_before") or 0,
+            remote_queue_size=remote_queue_size,
+        )
+        if exact is not None:
+            total = max(total, exact)
     return max(0, total)
 
 
@@ -864,11 +882,15 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
         preview = items[: max(1, int(limit))]
 
     duration = _queue_duration_label(items)
-    total_text = f"{total}+" if virtual else str(total)
-    count_label = "música" if total == 1 and not virtual else "músicas"
+    virtual_total_known = bool(virtual and virtual.get("total_tracks") not in (None, ""))
+    total_text = str(total) if (not virtual or virtual_total_known) else f"{total}+"
+    count_label = "música" if total == 1 else "músicas"
     header = f"**Fila** · {total_text} {count_label}"
-    if duration and duration != "desconhecida":
-        header += f" · {duration}{'+' if virtual and not duration.endswith('+') else ''}"
+    # Em playlist virtual a duração calculada é somente da janela em memória,
+    # não da coleção inteira. Omiti-la evita apresentar ``34:20+`` como se fosse
+    # uma duração total. Quando a coleção deixa de ser virtual, volta ao normal.
+    if not virtual and duration and duration != "desconhecida":
+        header += f" · {duration}"
 
     lines = [header]
     for offset, item in enumerate(preview, start=1):
@@ -1875,8 +1897,9 @@ class QueueView(discord.ui.LayoutView):
         chunk = items[start : start + QUEUE_PAGE_SIZE]
         page_label = f" · página {self.page + 1}/{max_page + 1}" if max_page else ""
         if virtual:
-            known_total = _virtual_playlist_total_label(state)
-            count = known_total or f"{total}+ música{'s' if total != 1 else ''}"
+            total_known = virtual.get("total_tracks") not in (None, "")
+            suffix = "" if total_known else "+"
+            count = f"{total}{suffix} música{'s' if total != 1 else ''}"
             lines = [f"# 📜 Fila · {count}{page_label}"]
             title = _escape(str(virtual.get("title") or ""), limit=80)
             if title and title.lower() != "playlist":
@@ -1892,11 +1915,7 @@ class QueueView(discord.ui.LayoutView):
             lines.append(f"**{marker}**  {_track_link_v2(track, title_limit=62)}  ·  {track.duration_label}")
             requester = _escape(track.requester_name, limit=42) if track.requester_name else f"<@{track.requester_id}>"
             lines.append(f"-# pedido por {requester}")
-        if virtual:
-            duration = _queue_duration_label(items)
-            if duration and duration != "desconhecida":
-                lines.extend(["", f"-# Duração: {duration}+"])
-        else:
+        if not virtual:
             lines.extend(["", f"-# Duração aproximada: {_queue_duration_label(items)}"] )
         return "\n".join(lines)
 
