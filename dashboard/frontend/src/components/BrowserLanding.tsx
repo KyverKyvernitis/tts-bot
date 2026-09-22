@@ -99,8 +99,7 @@ export function BrowserLanding({
       <main className="osk-minimal-main">
         <section className="osk-minimal-hero">
           <div className="osk-landing-hero-copy">
-            <h1><span>Do primeiro oi</span><span>à última ficha.</span></h1>
-            <p>Escolha seu servidor e deixe a Osaka com a sua cara.</p>
+            <h1>Dashboard</h1>
             <button className="osk-primary-button osk-minimal-primary-action" onClick={primaryAction}>
               {loggedIn ? "Escolher servidor" : "Entrar com Discord"}
               <ArrowRight size={18} aria-hidden="true" />
@@ -110,7 +109,7 @@ export function BrowserLanding({
         </section>
 
         <section className="osk-minimal-features" aria-labelledby="landing-features-title">
-          <h2 id="landing-features-title">O que a Osaka faz</h2>
+          <h2 id="landing-features-title">Funções</h2>
           <div className="osk-minimal-feature-grid">
             {features.map((feature) => (
               <article key={feature.id}>
