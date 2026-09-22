@@ -151,6 +151,26 @@ class ResolucaoMixin:
         raw = re.sub(r"[?&](utm_[^=&]+|feature|si)=[^&]+", "", raw)
         return raw or str(query or "").strip().lower()
 
+    def _metadata_playlist_stream_cache_allowed(self, query: str, track_meta: dict[str, Any] | None = None) -> bool:
+        """Evita cache global de stream para itens metadata-only de coleções.
+
+        O cache de metadados continua ativo. Para playlists Spotify o próximo
+        item é pré-resolvido diretamente na própria fila, então não precisamos
+        depender de um cache global de URLs de áudio efêmeras. Isso elimina a
+        classe de falha em que músicas distintas reaproveitam um stream antigo.
+        """
+        meta = track_meta or {}
+        source_kind = self._metadata_source_kind(meta)
+        if source_kind not in {"spotify", "deezer", "apple"}:
+            return True
+        for raw in (meta.get("original_url"), meta.get("webpage_url")):
+            value = str(raw or "").strip().lower()
+            if not value.startswith(("http://", "https://")):
+                continue
+            if "/playlist/" in value or "/album/" in value:
+                return False
+        return True
+
     def _cache_prune_one(self, cache: dict[str, tuple[float, dict[str, Any]]]) -> None:
         if not cache:
             return
@@ -441,7 +461,8 @@ class ResolucaoMixin:
                 stream_resolved_monotonic=time.monotonic(),
             )
         cache_key = self._resolve_cache_key(query, track_meta)
-        cached = self._resolve_cache_get(cache_key)
+        stream_cache_allowed = self._metadata_playlist_stream_cache_allowed(query, track_meta)
+        cached = self._resolve_cache_get(cache_key) if stream_cache_allowed else None
         if cached:
             self.log("resolve_stream_cache_hit", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
             return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
@@ -454,7 +475,7 @@ class ResolucaoMixin:
             track_meta = merged_meta
             self.log("resolve_metadata_cache_hit", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
         async with self._registry_lock(self._resolve_locks, self._resolve_lock_users, cache_key):
-            cached = self._resolve_cache_get(cache_key)
+            cached = self._resolve_cache_get(cache_key) if stream_cache_allowed else None
             if cached:
                 self.log("resolve_stream_cache_hit_after_wait", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
                 return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
@@ -481,7 +502,12 @@ class ResolucaoMixin:
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(asyncio.shield(resolver_task), timeout=1.5)
                     raise
-            self._resolve_cache_put(cache_key, resolved)
+            if stream_cache_allowed:
+                self._resolve_cache_put(cache_key, resolved)
+            else:
+                # Preserve somente metadata estável; o stream de uma coleção
+                # metadata-only fica ligado à entrada pré-resolvida da fila.
+                self._metadata_cache_put(cache_key, resolved)
             self.log("resolve_ytdlp_done", guild_id=safe_id(body.get("guild_id")), elapsed_ms=round((time.time() - started) * 1000.0, 1), title=resolved.get("title"))
             return self._agent_track_from_resolved(resolved, query=query, track_meta=track_meta, body=body, cached=False)
 

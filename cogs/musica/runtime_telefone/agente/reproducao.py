@@ -75,7 +75,8 @@ class ReproducaoMixin:
             return
         cache_key = self._resolve_cache_key(query, meta)
         task_key = self._guild_prefetch_key(guild_id, cache_key)
-        if self._resolve_cache_get(cache_key):
+        stream_cache_allowed = self._metadata_playlist_stream_cache_allowed(query, meta)
+        if stream_cache_allowed and self._resolve_cache_get(cache_key):
             return
         current_task = self._prefetch_tasks.get(task_key)
         if current_task is not None and not current_task.done():
@@ -83,8 +84,14 @@ class ReproducaoMixin:
         token = int(getattr(st, "playback_token", 0) or 0)
         delay = 3.0
         current = st.current
+        # Em playlists metadata-only mantenha exatamente uma faixa à frente
+        # pronta. Isso compensa a ausência deliberada de stream-cache global e
+        # deixa skip rápido sem resolver a playlist inteira antecipadamente.
+        metadata_playlist_next = not stream_cache_allowed
         try:
-            if current is not None and current.duration and st.started_monotonic:
+            if metadata_playlist_next:
+                delay = 0.0
+            elif current is not None and current.duration and st.started_monotonic:
                 base = max(0.0, float(getattr(current, "start_offset_seconds", 0.0) or 0.0))
                 elapsed = base + max(0.0, time.monotonic() - float(st.started_monotonic))
                 remaining = max(0.0, float(current.duration) - elapsed)

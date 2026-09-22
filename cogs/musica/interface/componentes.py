@@ -562,10 +562,32 @@ def _escape(value: str, *, limit: int | None = None) -> str:
     return value
 
 
+def _public_track_link_url(track: MusicTrack) -> str:
+    """Retorna somente uma URL pública/clicável para a faixa.
+
+    Queries internas como ``ytsearch1:...`` são instruções para o resolver e
+    não URLs válidas do Discord. Em itens ainda não resolvidos de uma playlist
+    Spotify, ``original_url`` aponta para a coleção inteira; também não usamos
+    essa URL como hyperlink individual da faixa.
+    """
+    for raw in (getattr(track, "webpage_url", ""), getattr(track, "original_url", "")):
+        value = str(raw or "").strip()
+        if not value.lower().startswith(("http://", "https://")):
+            continue
+        profile = describe_url(value)
+        if not profile.is_url:
+            continue
+        if profile.resource_type in {"playlist", "album"}:
+            continue
+        return profile.canonical or value
+    return ""
+
+
 def _track_link(track: MusicTrack, *, title_limit: int = 82) -> str:
     title = _escape(track.short_title or track.title, limit=title_limit)
-    if track.display_url:
-        return f"[`{title}`]({track.display_url})"
+    url = _public_track_link_url(track)
+    if url:
+        return f"[`{title}`]({url})"
     return f"`{title}`"
 
 
@@ -737,8 +759,9 @@ def _public_audio_quality_label(state, track: MusicTrack | None) -> str:
 def _track_link_v2(track: MusicTrack, *, title_limit: int = 84, bold: bool = False) -> str:
     title = _escape(track.short_title or track.title, limit=title_limit)
     label = f"**{title}**" if bold else title
-    if track.display_url:
-        return f"[{label}]({track.display_url})"
+    url = _public_track_link_url(track)
+    if url:
+        return f"[{label}]({url})"
     return label
 
 
