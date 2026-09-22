@@ -9,23 +9,21 @@
 
 .osk-minimal-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1.12fr) minmax(250px, .88fr);
+  grid-template-columns: minmax(0, 1fr) minmax(180px, .7fr);
+  grid-template-areas: "title art" "action art";
+  grid-template-rows: 1fr 1fr;
   align-items: center;
-  gap: clamp(1rem, 4vw, 3.75rem);
+  gap: 1.5rem clamp(1rem, 4vw, 3.75rem);
   max-width: none;
-  min-height: 390px;
-  padding: clamp(3rem, 6vw, 5rem) 0;
-  overflow: clip;
-}
-
-.osk-landing-hero-copy {
-  position: relative;
-  z-index: 1;
-  min-width: 0;
+  min-height: 0;
+  padding: clamp(2rem, 4vw, 3rem) 0;
 }
 
 .osk-minimal-hero h1 {
   display: block;
+  grid-area: title;
+  align-self: end;
+  min-width: 0;
   max-width: none;
   margin: 0;
   font-size: clamp(3.25rem, 5.55vw, 5.1rem);
@@ -37,32 +35,44 @@
 
 .osk-minimal-primary-action {
   display: inline-flex;
+  grid-area: action;
+  align-self: start;
+  justify-self: start;
   min-height: 54px;
   align-items: center;
   justify-content: space-between;
   gap: 2rem;
-  margin-top: 1.4rem;
+  margin-top: 0;
   padding-inline: 1.35rem;
 }
 
 .osk-landing-hero-art {
   position: relative;
-  align-self: stretch;
+  grid-area: art;
+  align-self: center;
   min-width: 0;
-  min-height: 300px;
+  height: clamp(15rem, 28vw, 21rem);
   pointer-events: none;
-  mask-image: linear-gradient(to bottom, #000 65%, transparent 100%);
 }
 
 .osk-landing-hero-art .osk-decorative-template,
 .osk-landing-hero-art .osk-decorative-template[data-ready] {
-  position: absolute;
-  top: auto;
-  right: 0;
-  bottom: -4%;
-  width: min(100%, var(--osk-decorative-size));
+  position: static;
+  display: block;
+  z-index: auto;
+  width: 100%;
+  height: 100%;
   max-width: none;
-  opacity: min(.62, var(--osk-decorative-opacity));
+  opacity: var(--osk-decorative-opacity);
+}
+
+/* A imagem inteira cabe na área reservada, inclusive no celular. */
+.osk-landing-hero-art .osk-decorative-template img {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+  object-position: center;
 }
 
 .osk-minimal-features {
@@ -119,29 +129,28 @@
   grid-column: 1 / -1;
   flex-direction: row;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding-block: .35rem;
-  border-color: rgba(188, 166, 134, .38);
-  background: linear-gradient(100deg, rgba(104, 83, 59, .26), rgba(7,7,7,.9) 65%);
+  justify-content: flex-start;
+  gap: .8rem;
+  padding-block: .3rem;
 }
-
-.osk-minimal-feature-grid .osk-landing-games:hover {
-  border-color: rgba(188, 166, 134, .55);
-  background: linear-gradient(100deg, rgba(104, 83, 59, .26), rgba(7,7,7,.9) 65%);
-}
-
-.osk-landing-games h3 { color: #f5ede1; }
-.osk-minimal-feature-grid .osk-landing-games:hover h3 { color: #f5ede1; }
 
 .osk-root .osk-landing-games .osk-module-artwork {
-  flex: 0 0 74px;
-  width: 74px;
-  height: 40px;
+  position: relative;
+  display: block;
+  flex: 0 0 54px;
+  width: 54px;
+  height: 36px;
 }
 
+/* Centraliza a ilustração pelo tamanho real antes de reduzir. */
 .osk-root .osk-landing-games .osk-casino-scene {
-  transform: scale(.74);
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 84px;
+  height: 58px;
+  transform: translate(-50%, -50%) scale(.6);
+  transform-origin: center;
 }
 
 .osk-support-card { margin-top: 1.5rem; }
@@ -151,38 +160,27 @@
   .osk-minimal-nav { min-height: 62px; }
 
   .osk-minimal-hero {
-    display: block;
-    min-height: 230px;
-    padding: 2.35rem 0 1.8rem;
+    grid-template-columns: minmax(0, 1fr) clamp(5.5rem, 28vw, 9rem);
+    grid-template-areas: "title art" "action action";
+    grid-template-rows: auto auto;
+    gap: 1.25rem .75rem;
+    padding: 1.5rem 0 1.75rem;
   }
 
   .osk-minimal-hero h1 {
-    font-size: clamp(2.5rem, 10.4vw, 3.25rem);
+    align-self: center;
+    font-size: clamp(2.125rem, 9.8vw, 3.25rem);
     line-height: 1.07;
   }
 
   .osk-minimal-primary-action {
     width: 100%;
     min-height: 50px;
-    margin-top: 1.5rem;
+    margin-top: 0;
   }
 
   .osk-landing-hero-art {
-    position: absolute;
-    z-index: 0;
-    top: .75rem;
-    right: -2rem;
-    bottom: .5rem;
-    width: min(43%, 13rem);
-    min-height: 0;
-    opacity: .5;
-  }
-
-  .osk-landing-hero-art .osk-decorative-template,
-  .osk-landing-hero-art .osk-decorative-template[data-ready] {
-    bottom: 0;
-    width: 100%;
-    opacity: min(.48, var(--osk-decorative-opacity));
+    height: clamp(9rem, 42vw, 12rem);
   }
 
   .osk-minimal-features { padding-top: 1.35rem; }
@@ -200,7 +198,7 @@
 
   .osk-minimal-feature-grid .osk-landing-games {
     min-height: 48px;
-    padding: .2rem .85rem;
+    padding: .3rem .8rem;
   }
 
   .osk-landing-games h3 { font-size: .9rem; }
@@ -208,6 +206,5 @@
 }
 
 @media (max-width: 360px) {
-  .osk-minimal-hero h1 { font-size: 2.35rem; }
   .osk-minimal-feature-grid h3 { font-size: .73rem; }
 }

@@ -97,15 +97,13 @@ export function BrowserLanding({
       </header>
 
       <main className="osk-minimal-main">
-        <section className="osk-minimal-hero">
-          <div className="osk-landing-hero-copy">
-            <h1>Dashboard</h1>
-            <button className="osk-primary-button osk-minimal-primary-action" onClick={primaryAction}>
-              {loggedIn ? "Escolher servidor" : "Entrar com Discord"}
-              <ArrowRight size={18} aria-hidden="true" />
-            </button>
-          </div>
+        <section className="osk-minimal-hero" aria-labelledby="landing-title">
+          <h1 id="landing-title">Dashboard</h1>
           <div className="osk-landing-hero-art" aria-hidden="true"><DecorativeVisualTemplate /></div>
+          <button className="osk-primary-button osk-minimal-primary-action" onClick={primaryAction}>
+            {loggedIn ? "Escolher servidor" : "Entrar com Discord"}
+            <ArrowRight size={18} aria-hidden="true" />
+          </button>
         </section>
 
         <section className="osk-minimal-features" aria-labelledby="landing-features-title">
@@ -120,8 +118,8 @@ export function BrowserLanding({
               </article>
             ))}
             {games && <article className="osk-landing-games" data-economy="true">
-              <h3>{games.label}</h3>
               <ModuleArtwork moduleId={games.id} fallbackIcon={games.icon} />
+              <h3>{games.label}</h3>
             </article>}
           </div>
         </section>
