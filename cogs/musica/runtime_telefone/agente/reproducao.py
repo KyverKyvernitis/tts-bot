@@ -126,7 +126,27 @@ class ReproducaoMixin:
                         latest2.queue[0].public(),
                     )
                     if check_key == cache_key:
-                        latest2.queue[0] = resolved
+                        current = latest2.current
+                        same_stream = bool(
+                            current is not None
+                            and str(getattr(current, "stream_url", "") or "").strip()
+                            and str(getattr(current, "stream_url", "") or "").strip()
+                            == str(getattr(resolved, "stream_url", "") or "").strip()
+                            and self._track_key(current) != self._track_key(current_first)
+                        )
+                        if same_stream:
+                            # Não injete na fila um prefetch que aponta para o
+                            # áudio da música atual. Remova a entrada contaminada
+                            # para a resolução JIT refazer somente essa faixa.
+                            self._invalidate_stream_cache(cache_key)
+                            self.log(
+                                "next_prefetch_stream_reuse_rejected",
+                                guild_id=guild_id,
+                                current=getattr(current, "title", ""),
+                                next=getattr(current_first, "title", ""),
+                            )
+                        else:
+                            latest2.queue[0] = resolved
                 self.log("next_prefetch_ready", guild_id=guild_id, reason=reason, elapsed_ms=round((time.time() - started) * 1000.0, 1), title=getattr(resolved, "title", ""))
             except asyncio.CancelledError:
                 return
@@ -412,11 +432,63 @@ class ReproducaoMixin:
     def _track_key(self, track: AgentTrack | None) -> str:
         if track is None:
             return ""
-        for value in (track.webpage_url, track.query, track.stream_url, track.title):
+        # ``query`` identifica a faixa lógica. Em playlists Spotify várias
+        # entradas compartilham a mesma ``original_url`` da coleção; usar a
+        # URL antes da query fazia músicas diferentes parecerem idênticas.
+        for value in (track.query, track.webpage_url, track.original_url, track.stream_url, track.title):
             raw = str(value or "").strip().lower()
             if raw:
                 return raw[:300]
         return ""
+
+    def _guard_distinct_next_stream(self, st: GuildMusicState, previous: AgentTrack | None) -> bool:
+        """Descarta prefetch/cache contaminado que reutilizou o áudio anterior.
+
+        Faixas diferentes de uma playlist nunca devem apontar para exatamente o
+        mesmo stream efêmero só porque compartilham a URL da coleção. O guard é
+        barato (somente memória) e só atua quando as identidades lógicas diferem
+        e o stream é literalmente o mesmo. Duplicatas legítimas da mesma faixa
+        continuam reaproveitando cache normalmente.
+        """
+        if previous is None or not st.queue or st.queue[0].is_virtual_playlist_marker:
+            return False
+        next_track = st.queue[0]
+        previous_key = self._track_key(previous)
+        next_key = self._track_key(next_track)
+        if not previous_key or not next_key or previous_key == next_key:
+            return False
+        previous_stream = str(previous.stream_url or "").strip()
+        if not previous_stream:
+            return False
+
+        next_meta = next_track.public()
+        next_query = self._query_from_track_meta(
+            next_meta,
+            fallback_query=next_track.query or next_track.webpage_url or next_track.original_url or next_track.title,
+        )
+        cache_key = self._resolve_cache_key(next_query, next_meta) if next_query else ""
+        cached = self._resolve_cache_get(cache_key) if cache_key else None
+        cached_stream = str((cached or {}).get("stream_url") or "").strip()
+        queued_stream = str(next_track.stream_url or "").strip()
+        contaminated = queued_stream == previous_stream or cached_stream == previous_stream
+        if not contaminated:
+            return False
+
+        if cache_key:
+            self._invalidate_stream_cache(cache_key)
+        if queued_stream == previous_stream:
+            next_track.stream_url = ""
+            next_track.transport_hint = "metadata-lazy"
+            next_track.stream_resolved_monotonic = 0.0
+        self.log(
+            "playlist_stream_reuse_guard",
+            guild_id=st.guild_id,
+            previous=getattr(previous, "title", ""),
+            next=getattr(next_track, "title", ""),
+            cache=bool(cached_stream == previous_stream),
+            queued=bool(queued_stream == previous_stream),
+        )
+        return True
 
     def _clone_track(self, track: AgentTrack | None) -> AgentTrack | None:
         if track is None:
@@ -479,7 +551,12 @@ class ReproducaoMixin:
         st.last_action = "skip"
         self._cancel_prefetch_tasks(guild_id)
         player = st.player
-        self._push_history(st, st.current)
+        previous = st.current
+        self._push_history(st, previous)
+        # Antes de trocar a geração, remova somente um stream/cache comprovadamente
+        # contaminado pelo áudio atual. Isso preserva o prefetch correto e evita
+        # re-resolver sem necessidade.
+        self._guard_distinct_next_stream(st, previous)
         self._bump_playback_generation(st, reason="skip")
         await self._stop_player_instance(player, disconnect=False)
         st.current = None

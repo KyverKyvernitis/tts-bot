@@ -1538,3 +1538,67 @@ def test_failed_startup_track_advances_to_virtual_playlist_marker(music):
         assert "playlist_refill_needed" in events
 
     run(scenario())
+
+
+def test_playlist_track_key_prefers_query_over_shared_collection_url(music):
+    agent = music.MusicAgent()
+    playlist = "https://open.spotify.com/playlist/shared"
+    juliet = music.AgentTrack(
+        title="Cavetown - Juliet",
+        query="ytsearch1:Cavetown - Juliet official audio",
+        webpage_url="",
+        original_url=playlist,
+    )
+    home = music.AgentTrack(
+        title="Cavetown - Home",
+        query="ytsearch1:Cavetown - Home official audio",
+        webpage_url="",
+        original_url=playlist,
+    )
+    assert agent._track_key(juliet) != agent._track_key(home)
+
+
+def test_skip_rejects_prefetched_stream_reused_from_previous_playlist_item(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 2201
+        playlist = "https://open.spotify.com/playlist/shared"
+        previous = music.AgentTrack(
+            title="Cavetown - Juliet",
+            query="ytsearch1:Cavetown - Juliet official audio",
+            webpage_url="https://www.youtube.com/watch?v=juliet",
+            original_url=playlist,
+            stream_url="https://rr.example/SAME",
+        )
+        nxt = music.AgentTrack(
+            title="Cavetown - Home",
+            query="ytsearch1:Cavetown - Home official audio",
+            webpage_url="https://www.youtube.com/watch?v=home",
+            original_url=playlist,
+            stream_url="https://rr.example/SAME",
+            transport_hint="direct-cache",
+        )
+        st = music.GuildMusicState(guild_id=gid, current=previous, queue=[nxt], status="playing")
+        agent.states[gid] = st
+        agent._cancel_prefetch_tasks = lambda *args, **kwargs: 0
+        agent._cancel_active_resolve = lambda *args, **kwargs: False
+        seen = []
+
+        async def stop_player(_player, *, disconnect=False):
+            return None
+
+        async def play_next(guild_id, *, preserve_current_to_history=True):
+            item = agent.states[guild_id].queue.pop(0)
+            seen.append(item)
+            agent.states[guild_id].current = item
+
+        agent._stop_player_instance = stop_player
+        agent._play_next = play_next
+        await agent.cmd_skip({"guild_id": gid})
+
+        assert len(seen) == 1
+        assert seen[0].title == "Cavetown - Home"
+        assert seen[0].stream_url == ""
+        assert seen[0].transport_hint == "metadata-lazy"
+
+    run(scenario())

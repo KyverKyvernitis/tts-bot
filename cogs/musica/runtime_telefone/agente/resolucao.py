@@ -145,7 +145,7 @@ class ResolucaoMixin:
                 semantic = " | ".join(part for part in (artist, title) if part)
             semantic = re.sub(r"\s+", " ", semantic).strip()
             if semantic:
-                return f"metadata:{source_kind or 'generic'}:{semantic}"
+                return f"metadata:v2:{source_kind or 'generic'}:{semantic}"
 
         raw = str(meta.get("webpage_url") or meta.get("original_url") or meta.get("stream_url") or query or "").strip().lower()
         raw = re.sub(r"[?&](utm_[^=&]+|feature|si)=[^&]+", "", raw)
@@ -244,7 +244,18 @@ class ResolucaoMixin:
                 playback_source = "YouTube"
             elif query_lower.startswith("scsearch"):
                 playback_source = "SoundCloud"
-        webpage_url = str(track_meta.get("webpage_url") or track_meta.get("original_url") or resolved.get("webpage_url") or query).strip()
+        metadata_origin_url = str(track_meta.get("original_url") or track_meta.get("webpage_url") or "").strip() if metadata_kind else str(track_meta.get("original_url") or "").strip()
+        resolved_webpage_url = str(resolved.get("webpage_url") or "").strip()
+        # Para providers de metadata (Spotify/Deezer/Apple), a URL da coleção é
+        # procedência, não identidade da faixa reproduzida. Depois da resolução
+        # preserve a origem em ``original_url`` e exponha em ``webpage_url`` a
+        # página real resolvida (normalmente YouTube). Isso impede que todas as
+        # músicas de uma playlist pareçam a mesma faixa para cache/histórico.
+        webpage_url = (
+            resolved_webpage_url
+            if metadata_kind and resolved_webpage_url
+            else str(track_meta.get("webpage_url") or resolved_webpage_url or query).strip()
+        )
         resolved_title = _metadata_text(resolved.get("title"), limit=160)
         resolved_uploader = _metadata_text(resolved.get("uploader"), limit=120)
         meta_url = str(track_meta.get("webpage_url") or track_meta.get("original_url") or "").lower()
@@ -261,6 +272,7 @@ class ResolucaoMixin:
             requester_name=requester_name,
             query=query,
             webpage_url=webpage_url,
+            original_url=metadata_origin_url or str(track_meta.get("original_url") or "").strip(),
             stream_url=str(resolved.get("stream_url") or ""),
             duration=meta_duration if meta_duration is not None else _float_or_none(resolved.get("duration")),
             uploader=meta_uploader or resolved_uploader,
@@ -341,6 +353,7 @@ class ResolucaoMixin:
                 requester_name=short_text(body.get("requester_name") or track_meta.get("requester_name"), 80),
                 query="",
                 webpage_url=source_url,
+                original_url=source_url,
                 source="playlist-virtual",
                 transport_hint="playlist-cursor",
                 virtual_playlist_cursor=dict(virtual_cursor),
@@ -355,7 +368,8 @@ class ResolucaoMixin:
             requester_id=safe_id(body.get("requester_id") or track_meta.get("requester_id")),
             requester_name=short_text(body.get("requester_name") or track_meta.get("requester_name"), 80),
             query=query,
-            webpage_url=str(track_meta.get("webpage_url") or track_meta.get("original_url") or "").strip(),
+            webpage_url=str(track_meta.get("webpage_url") or "").strip(),
+            original_url=str(track_meta.get("original_url") or track_meta.get("webpage_url") or "").strip(),
             stream_url=str(track_meta.get("stream_url") or "").strip(),
             duration=_float_or_none(track_meta.get("duration")),
             uploader=uploader,
@@ -410,6 +424,7 @@ class ResolucaoMixin:
                 requester_name=requester_name,
                 query=query,
                 webpage_url=webpage_url,
+                original_url=str(track_meta.get("original_url") or "").strip(),
                 stream_url=direct,
                 duration=_float_or_none(track_meta.get("duration")),
                 uploader=_metadata_text(track_meta.get("uploader"), limit=120),

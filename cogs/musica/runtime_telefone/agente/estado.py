@@ -14,6 +14,7 @@ class AgentTrack:
     requester_name: str = ""
     query: str = ""
     webpage_url: str = ""
+    original_url: str = ""
     stream_url: str = ""
     duration: float | None = None
     uploader: str = ""
@@ -42,6 +43,7 @@ class AgentTrack:
             "requester_name": self.requester_name,
             "query": self.query,
             "webpage_url": self.webpage_url,
+            "original_url": self.original_url,
             "duration": self.duration,
             "uploader": self.uploader,
             "thumbnail": self.thumbnail,
