@@ -55,7 +55,7 @@ def test_cache_metadata_tem_namespace_novo_e_identidade_por_query() -> None:
     home = _meta("Home")
     a = resolver._resolve_cache_key(juliet["query"], juliet)
     b = resolver._resolve_cache_key(home["query"], home)
-    assert a.startswith("metadata:v2:spotify:")
-    assert b.startswith("metadata:v2:spotify:")
+    assert a.startswith("metadata:v3:spotify:")
+    assert b.startswith("metadata:v3:spotify:")
     assert a != b
 

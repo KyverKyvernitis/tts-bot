@@ -20,7 +20,7 @@ def test_interface_nao_expoe_ytsearch_como_hyperlink() -> None:
     assert components.count("url = _public_track_link_url(track)") >= 2
 
 
-def test_playlist_spotify_nao_usa_stream_cache_global() -> None:
+def test_playlist_spotify_pode_usar_stream_cache_global_corrigido() -> None:
     resolver = object.__new__(ResolucaoMixin)
     meta = {
         "title": "Cavetown - Home",
@@ -31,7 +31,7 @@ def test_playlist_spotify_nao_usa_stream_cache_global() -> None:
         "original_url": PLAYLIST,
         "query": "ytsearch1:Cavetown - Home official audio",
     }
-    assert resolver._metadata_playlist_stream_cache_allowed(meta["query"], meta) is False
+    assert resolver._metadata_playlist_stream_cache_allowed(meta["query"], meta) is True
 
 
 def test_track_spotify_individual_pode_usar_stream_cache() -> None:
@@ -45,9 +45,9 @@ def test_track_spotify_individual_pode_usar_stream_cache() -> None:
     assert resolver._metadata_playlist_stream_cache_allowed("ytsearch1:Marcos Valle - Estrelar official audio", meta) is True
 
 
-def test_playlist_metadata_prefetcha_uma_faixa_a_frente_sem_cache_global() -> None:
+def test_playlist_metadata_prefetcha_uma_faixa_a_frente_com_cache_global() -> None:
     root = Path(__file__).resolve().parents[1]
     playback = (root / "runtime_telefone" / "agente" / "reproducao.py").read_text(encoding="utf-8")
-    assert "metadata_playlist_next = not stream_cache_allowed" in playback
+    assert "metadata_playlist_next = self._is_metadata_collection_item(meta)" in playback
     assert "if metadata_playlist_next:" in playback
     assert "delay = 0.0" in playback

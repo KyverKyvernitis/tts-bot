@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .ciclo_vida import remove_owned_task
 from .estado import AgentTrack
@@ -127,16 +128,52 @@ class ResolucaoMixin:
             except subprocess.TimeoutExpired:
                 continue
 
+    def _normalize_public_media_url(self, value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw.startswith(("http://", "https://")):
+            return ""
+        try:
+            parsed = urlparse(raw)
+        except Exception:
+            return raw.lower()
+        host = (parsed.netloc or "").lower().split(":", 1)[0]
+        path = parsed.path or ""
+        query_pairs = parse_qsl(parsed.query or "", keep_blank_values=False)
+
+        video_id = ""
+        if host in {"youtu.be", "www.youtu.be"}:
+            video_id = path.strip("/").split("/", 1)[0]
+        elif host.endswith("youtube.com"):
+            if path.rstrip("/") == "/watch":
+                video_id = next((v for k, v in query_pairs if k == "v"), "")
+            else:
+                match = re.match(r"^/(?:shorts|live|embed)/([^/?#]+)", path)
+                if match:
+                    video_id = match.group(1)
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+        kept = []
+        for key, val in query_pairs:
+            low = key.lower()
+            if low.startswith("utm_") or low in {"feature", "si", "pp"}:
+                continue
+            kept.append((key, val))
+        normalized = urlunparse((
+            (parsed.scheme or "https").lower(),
+            host,
+            path.rstrip("/") or "/",
+            "",
+            urlencode(kept, doseq=True),
+            "",
+        ))
+        return normalized
+
     def _resolve_cache_key(self, query: str, track_meta: dict[str, Any] | None = None) -> str:
+        """Stable logical-track key. Never use collection URLs as track IDs."""
         meta = track_meta or {}
         source_kind = self._metadata_source_kind(meta)
         extractor = str(meta.get("extractor") or "").strip().lower()
-
-        # Metadata-only links (Spotify/Deezer/Apple) are only the origin of the
-        # request. In a playlist every item can inherit the SAME collection URL,
-        # so keying the stream cache by original_url makes every skip reuse the
-        # first resolved song. Key these items by their semantic direct-play
-        # query instead. Duplicates of the same song still share cache safely.
         if source_kind in {"spotify", "deezer", "apple"} or extractor == "metadata":
             semantic = str(query or meta.get("query") or "").strip().lower()
             if not semantic:
@@ -145,31 +182,69 @@ class ResolucaoMixin:
                 semantic = " | ".join(part for part in (artist, title) if part)
             semantic = re.sub(r"\s+", " ", semantic).strip()
             if semantic:
-                return f"metadata:v2:{source_kind or 'generic'}:{semantic}"
+                # v3 separates Wave 13's two-layer cache from legacy entries.
+                return f"metadata:v3:{source_kind or 'generic'}:{semantic}"
 
-        raw = str(meta.get("webpage_url") or meta.get("original_url") or meta.get("stream_url") or query or "").strip().lower()
-        raw = re.sub(r"[?&](utm_[^=&]+|feature|si)=[^&]+", "", raw)
-        return raw or str(query or "").strip().lower()
+        normalized = self._normalize_public_media_url(meta.get("webpage_url") or meta.get("original_url") or query)
+        if normalized:
+            return f"logical:v3:{normalized.lower()}"
+        raw = re.sub(r"\s+", " ", str(query or "").strip().lower())
+        return f"logical:v3:{raw}" if raw else ""
 
-    def _metadata_playlist_stream_cache_allowed(self, query: str, track_meta: dict[str, Any] | None = None) -> bool:
-        """Evita cache global de stream para itens metadata-only de coleções.
-
-        O cache de metadados continua ativo. Para playlists Spotify o próximo
-        item é pré-resolvido diretamente na própria fila, então não precisamos
-        depender de um cache global de URLs de áudio efêmeras. Isso elimina a
-        classe de falha em que músicas distintas reaproveitam um stream antigo.
-        """
+    def _is_metadata_collection_item(self, track_meta: dict[str, Any] | None = None) -> bool:
         meta = track_meta or {}
-        source_kind = self._metadata_source_kind(meta)
-        if source_kind not in {"spotify", "deezer", "apple"}:
-            return True
+        if self._metadata_source_kind(meta) not in {"spotify", "deezer", "apple"}:
+            return False
         for raw in (meta.get("original_url"), meta.get("webpage_url")):
             value = str(raw or "").strip().lower()
-            if not value.startswith(("http://", "https://")):
-                continue
-            if "/playlist/" in value or "/album/" in value:
-                return False
+            if value.startswith(("http://", "https://")) and any(marker in value for marker in ("/playlist/", "/album/")):
+                return True
+        return False
+
+    def _metadata_playlist_stream_cache_allowed(self, query: str, track_meta: dict[str, Any] | None = None) -> bool:
+        """Compatibility hook: Wave 13 safely caches collection items too."""
         return True
+
+    def _media_cache_key(self, data: dict[str, Any] | AgentTrack | None) -> str:
+        if data is None:
+            return ""
+        if isinstance(data, AgentTrack):
+            webpage_url = data.webpage_url
+            format_id = data.audio_format_id
+        else:
+            webpage_url = data.get("webpage_url") or data.get("resolved_webpage_url") or ""
+            format_id = data.get("audio_format_id") or data.get("format_id") or ""
+        normalized = self._normalize_public_media_url(webpage_url)
+        if not normalized:
+            return ""
+        fmt = re.sub(r"[^A-Za-z0-9_.-]+", "", str(format_id or "").strip().lower())
+        return f"media:v1:{normalized.lower()}|fmt:{fmt or 'auto'}"
+
+    def _metadata_media_target(self, data: dict[str, Any] | None) -> str:
+        if not data:
+            return ""
+        value = self._normalize_public_media_url(data.get("webpage_url"))
+        if not value:
+            return ""
+        # Metadata providers are identifiers/origins, not playable media URLs.
+        low = value.lower()
+        if any(host in low for host in ("open.spotify.com/", "deezer.com/", "music.apple.com/")):
+            return ""
+        return value
+
+    def _cached_resolved_get(self, logical_key: str) -> dict[str, Any] | None:
+        stable = self._metadata_cache_get(logical_key)
+        if not stable:
+            return None
+        media_key = self._media_cache_key(stable)
+        if not media_key:
+            return None
+        stream = self._resolve_cache_get(media_key)
+        if not stream:
+            return None
+        merged = dict(stable)
+        merged.update(stream)
+        return merged
 
     def _cache_prune_one(self, cache: dict[str, tuple[float, dict[str, Any]]]) -> None:
         if not cache:
@@ -187,54 +262,67 @@ class ResolucaoMixin:
         if time.monotonic() - created > self.metadata_cache_ttl:
             self._metadata_cache.pop(key, None)
             return None
+        marker = str(data.get("_logical_cache_key") or "")
+        if marker and marker != key:
+            self._metadata_cache.pop(key, None)
+            return None
         return dict(data)
 
     def _metadata_cache_put(self, key: str, data: dict[str, Any]) -> None:
         if self.metadata_cache_ttl <= 0 or not key or not data:
             return
         stable = dict(data)
-        for volatile_key in ("stream_url", "url", "direct_url", "http_headers", "_stream_resolved_monotonic"):
+        for volatile_key in ("stream_url", "url", "direct_url", "http_headers", "_stream_resolved_monotonic", "_media_cache_key"):
             stable.pop(volatile_key, None)
+        stable["_logical_cache_key"] = key
         if len(self._metadata_cache) >= 512:
             self._cache_prune_one(self._metadata_cache)
         self._metadata_cache[key] = (time.monotonic(), stable)
 
-    def _resolve_cache_get(self, key: str) -> dict[str, Any] | None:
-        if self.stream_cache_ttl <= 0 or not key:
+    def _resolve_cache_get(self, media_key: str) -> dict[str, Any] | None:
+        if self.stream_cache_ttl <= 0 or not media_key:
             return None
-        item = self._resolve_cache.get(key)
+        item = self._resolve_cache.get(media_key)
         if not item:
             return None
         created, data = item
         if time.monotonic() - created > self.stream_cache_ttl:
-            # Preserve metadata even when the playable URL expired.
-            self._metadata_cache_put(key, data)
-            self._resolve_cache.pop(key, None)
+            self._resolve_cache.pop(media_key, None)
+            return None
+        if str(data.get("_media_cache_key") or "") != media_key:
+            # Legacy/corrupted entries are never trusted after Wave 13.
+            self._resolve_cache.pop(media_key, None)
             return None
         return dict(data)
 
-    def _resolve_cache_put(self, key: str, data: dict[str, Any]) -> None:
-        if not key or not data:
-            return
-        self._metadata_cache_put(key, data)
-        if self.stream_cache_ttl <= 0 or not data.get("stream_url"):
+    def _resolve_cache_put(self, media_key: str, data: dict[str, Any]) -> None:
+        if self.stream_cache_ttl <= 0 or not media_key or not data.get("stream_url"):
             return
         if len(self._resolve_cache) >= 128:
             self._cache_prune_one(self._resolve_cache)
         payload = dict(data)
+        payload["_media_cache_key"] = media_key
         payload.setdefault("_stream_resolved_monotonic", time.monotonic())
-        self._resolve_cache[key] = (time.monotonic(), payload)
+        self._resolve_cache[media_key] = (time.monotonic(), payload)
 
-    def _invalidate_stream_cache(self, key: str) -> None:
-        if key:
-            self._resolve_cache.pop(key, None)
+    def _invalidate_stream_cache(self, media_key: str) -> None:
+        if media_key:
+            self._resolve_cache.pop(media_key, None)
+
+    def _invalidate_logical_resolution(self, logical_key: str) -> None:
+        if logical_key:
+            self._metadata_cache.pop(logical_key, None)
 
     def _invalidate_track_stream_cache(self, track: AgentTrack | None) -> None:
         if track is None:
             return
-        meta = track.public()
-        key = self._resolve_cache_key(track.query or track.webpage_url or track.title, meta)
-        self._invalidate_stream_cache(key)
+        media_key = self._media_cache_key(track)
+        if not media_key:
+            meta = track.public()
+            logical_key = self._resolve_cache_key(track.query or track.webpage_url or track.title, meta)
+            stable = self._metadata_cache_get(logical_key)
+            media_key = self._media_cache_key(stable)
+        self._invalidate_stream_cache(media_key)
 
     def _track_stream_needs_refresh(self, track: AgentTrack | None) -> bool:
         if track is None or not str(track.stream_url or "").startswith(("http://", "https://")):
@@ -460,25 +548,41 @@ class ResolucaoMixin:
                 start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
                 stream_resolved_monotonic=time.monotonic(),
             )
-        cache_key = self._resolve_cache_key(query, track_meta)
-        stream_cache_allowed = self._metadata_playlist_stream_cache_allowed(query, track_meta)
-        cached = self._resolve_cache_get(cache_key) if stream_cache_allowed else None
+        logical_key = self._resolve_cache_key(query, track_meta)
+        cached = self._cached_resolved_get(logical_key)
         if cached:
             self.log("resolve_stream_cache_hit", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
             return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
-        cached_meta = self._metadata_cache_get(cache_key)
+        cached_meta = self._metadata_cache_get(logical_key)
+        resolve_target = query
         if cached_meta:
-            # Metadata stable can fill missing title/artist/duration while yt-dlp
-            # refreshes the short-lived playable URL.
+            # Keep the stable logical -> media mapping for hours. If only the
+            # short-lived stream expired, refresh that exact video URL instead
+            # of repeating the text search.
+            stable_target = self._metadata_media_target(cached_meta)
+            if stable_target:
+                resolve_target = stable_target
             merged_meta = dict(cached_meta)
             merged_meta.update({k: v for k, v in track_meta.items() if v not in (None, "", [], {})})
             track_meta = merged_meta
-            self.log("resolve_metadata_cache_hit", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
-        async with self._registry_lock(self._resolve_locks, self._resolve_lock_users, cache_key):
-            cached = self._resolve_cache_get(cache_key) if stream_cache_allowed else None
+            self.log(
+                "resolve_metadata_cache_hit",
+                guild_id=safe_id(body.get("guild_id")),
+                title=track_meta.get("title"),
+                query=query[:90],
+                direct_refresh=bool(stable_target),
+            )
+        async with self._registry_lock(self._resolve_locks, self._resolve_lock_users, logical_key):
+            cached = self._cached_resolved_get(logical_key)
             if cached:
                 self.log("resolve_stream_cache_hit_after_wait", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
                 return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
+            # Another waiter may have populated metadata while we waited.
+            latest_meta = self._metadata_cache_get(logical_key)
+            if latest_meta:
+                latest_target = self._metadata_media_target(latest_meta)
+                if latest_target:
+                    resolve_target = latest_target
             started = time.time()
             async with self._resolve_slot(priority):
                 # The blocking resolver runs in a worker thread, but cancellation
@@ -489,7 +593,20 @@ class ResolucaoMixin:
                 def _run() -> dict[str, Any]:
                     self._resolve_thread_local.cancel_event = cancel_event
                     try:
-                        return self._resolve_with_ytdlp(query)
+                        try:
+                            return self._resolve_with_ytdlp(resolve_target)
+                        except Exception:
+                            if resolve_target == query:
+                                raise
+                            # The cached logical->media mapping can outlive a
+                            # removed/private video. Only then fall back to one
+                            # fresh textual resolve and replace that mapping.
+                            self.log(
+                                "resolve_cached_media_refresh_failed",
+                                guild_id=safe_id(body.get("guild_id")),
+                                target=resolve_target[:120],
+                            )
+                            return self._resolve_with_ytdlp(query)
                     finally:
                         with contextlib.suppress(Exception):
                             del self._resolve_thread_local.cancel_event
@@ -502,13 +619,18 @@ class ResolucaoMixin:
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(asyncio.shield(resolver_task), timeout=1.5)
                     raise
-            if stream_cache_allowed:
-                self._resolve_cache_put(cache_key, resolved)
-            else:
-                # Preserve somente metadata estável; o stream de uma coleção
-                # metadata-only fica ligado à entrada pré-resolvida da fila.
-                self._metadata_cache_put(cache_key, resolved)
-            self.log("resolve_ytdlp_done", guild_id=safe_id(body.get("guild_id")), elapsed_ms=round((time.time() - started) * 1000.0, 1), title=resolved.get("title"))
+            self._metadata_cache_put(logical_key, resolved)
+            media_key = self._media_cache_key(resolved)
+            if media_key:
+                self._resolve_cache_put(media_key, resolved)
+            self.log(
+                "resolve_ytdlp_done",
+                guild_id=safe_id(body.get("guild_id")),
+                elapsed_ms=round((time.time() - started) * 1000.0, 1),
+                title=resolved.get("title"),
+                cache_media=bool(media_key),
+                reused_resolution=bool(resolve_target != query),
+            )
             return self._agent_track_from_resolved(resolved, query=query, track_meta=track_meta, body=body, cached=False)
 
     def _resolve_with_ytdlp(self, query: str) -> dict[str, Any]:

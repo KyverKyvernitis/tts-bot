@@ -75,8 +75,7 @@ class ReproducaoMixin:
             return
         cache_key = self._resolve_cache_key(query, meta)
         task_key = self._guild_prefetch_key(guild_id, cache_key)
-        stream_cache_allowed = self._metadata_playlist_stream_cache_allowed(query, meta)
-        if stream_cache_allowed and self._resolve_cache_get(cache_key):
+        if self._cached_resolved_get(cache_key):
             return
         current_task = self._prefetch_tasks.get(task_key)
         if current_task is not None and not current_task.done():
@@ -84,10 +83,10 @@ class ReproducaoMixin:
         token = int(getattr(st, "playback_token", 0) or 0)
         delay = 3.0
         current = st.current
-        # Em playlists metadata-only mantenha exatamente uma faixa à frente
-        # pronta. Isso compensa a ausência deliberada de stream-cache global e
-        # deixa skip rápido sem resolver a playlist inteira antecipadamente.
-        metadata_playlist_next = not stream_cache_allowed
+        # Em coleções metadata-only mantenha exatamente uma faixa à frente
+        # pronta. Wave 13 preserva o cache global, mas a próxima faixa continua
+        # sendo aquecida imediatamente para skip sem espera.
+        metadata_playlist_next = self._is_metadata_collection_item(meta)
         try:
             if metadata_playlist_next:
                 delay = 0.0
@@ -134,23 +133,36 @@ class ReproducaoMixin:
                     )
                     if check_key == cache_key:
                         current = latest2.current
-                        same_stream = bool(
-                            current is not None
-                            and str(getattr(current, "stream_url", "") or "").strip()
-                            and str(getattr(current, "stream_url", "") or "").strip()
-                            == str(getattr(resolved, "stream_url", "") or "").strip()
-                            and self._track_key(current) != self._track_key(current_first)
+                        current_logical = ""
+                        if current is not None:
+                            current_meta = current.public()
+                            current_logical = self._resolve_cache_key(
+                                self._query_from_track_meta(current_meta, fallback_query=current.query or current.webpage_url or current.title),
+                                current_meta,
+                            )
+                        next_logical = cache_key
+                        current_media = self._media_cache_key(current) if current is not None else ""
+                        next_media = self._media_cache_key(resolved)
+                        wrong_media_reuse = bool(
+                            current_logical
+                            and next_logical
+                            and current_logical != next_logical
+                            and current_media
+                            and current_media == next_media
                         )
-                        if same_stream:
-                            # Não injete na fila um prefetch que aponta para o
-                            # áudio da música atual. Remova a entrada contaminada
-                            # para a resolução JIT refazer somente essa faixa.
-                            self._invalidate_stream_cache(cache_key)
+                        if wrong_media_reuse:
+                            # Distinct logical songs resolving to the same stable
+                            # media identity indicates a poisoned logical mapping.
+                            # Keep the shared media cache intact for legitimate
+                            # users, but discard this song -> media association so
+                            # the next JIT resolve performs one fresh text search.
+                            self._invalidate_logical_resolution(next_logical)
                             self.log(
-                                "next_prefetch_stream_reuse_rejected",
+                                "next_prefetch_media_reuse_rejected",
                                 guild_id=guild_id,
                                 current=getattr(current, "title", ""),
                                 next=getattr(current_first, "title", ""),
+                                media=next_media[:140],
                             )
                         else:
                             latest2.queue[0] = resolved
@@ -207,7 +219,7 @@ class ReproducaoMixin:
                 continue
             cache_key = self._resolve_cache_key(query, meta)
             task_key = self._guild_prefetch_key(safe_id(body.get("guild_id")), cache_key)
-            if self._resolve_cache_get(cache_key):
+            if self._cached_resolved_get(cache_key):
                 continue
             if task_key in self._prefetch_tasks and not self._prefetch_tasks[task_key].done():
                 continue
@@ -449,51 +461,60 @@ class ReproducaoMixin:
         return ""
 
     def _guard_distinct_next_stream(self, st: GuildMusicState, previous: AgentTrack | None) -> bool:
-        """Descarta prefetch/cache contaminado que reutilizou o áudio anterior.
+        """Reject a poisoned logical->media mapping before a skip starts.
 
-        Faixas diferentes de uma playlist nunca devem apontar para exatamente o
-        mesmo stream efêmero só porque compartilham a URL da coleção. O guard é
-        barato (somente memória) e só atua quando as identidades lógicas diferem
-        e o stream é literalmente o mesmo. Duplicatas legítimas da mesma faixa
-        continuam reaproveitando cache normalmente.
+        Signed googlevideo URLs are not stable identities. Wave 13 compares the
+        resolved public media fingerprint (e.g. YouTube video id + format) and
+        only rejects reuse when two *different logical songs* map to that same
+        media. Consecutive legitimate duplicates keep sharing cache.
         """
         if previous is None or not st.queue or st.queue[0].is_virtual_playlist_marker:
             return False
         next_track = st.queue[0]
-        previous_key = self._track_key(previous)
-        next_key = self._track_key(next_track)
-        if not previous_key or not next_key or previous_key == next_key:
-            return False
-        previous_stream = str(previous.stream_url or "").strip()
-        if not previous_stream:
-            return False
-
+        previous_meta = previous.public()
         next_meta = next_track.public()
+        previous_query = self._query_from_track_meta(
+            previous_meta,
+            fallback_query=previous.query or previous.webpage_url or previous.original_url or previous.title,
+        )
         next_query = self._query_from_track_meta(
             next_meta,
             fallback_query=next_track.query or next_track.webpage_url or next_track.original_url or next_track.title,
         )
-        cache_key = self._resolve_cache_key(next_query, next_meta) if next_query else ""
-        cached = self._resolve_cache_get(cache_key) if cache_key else None
-        cached_stream = str((cached or {}).get("stream_url") or "").strip()
+        previous_logical = self._resolve_cache_key(previous_query, previous_meta) if previous_query else ""
+        next_logical = self._resolve_cache_key(next_query, next_meta) if next_query else ""
+        if not previous_logical or not next_logical or previous_logical == next_logical:
+            return False
+
+        previous_media = self._media_cache_key(previous)
+        queued_media = self._media_cache_key(next_track)
+        stable = self._metadata_cache_get(next_logical)
+        cached_media = self._media_cache_key(stable)
+        previous_stream = str(previous.stream_url or "").strip()
         queued_stream = str(next_track.stream_url or "").strip()
-        contaminated = queued_stream == previous_stream or cached_stream == previous_stream
+        same_stable_media = bool(previous_media and previous_media in {queued_media, cached_media})
+        same_literal_stream = bool(previous_stream and queued_stream and previous_stream == queued_stream)
+        contaminated = same_stable_media or same_literal_stream
         if not contaminated:
             return False
 
-        if cache_key:
-            self._invalidate_stream_cache(cache_key)
-        if queued_stream == previous_stream:
+        # Invalidate only the wrong song->media mapping. The global stream cache
+        # remains available to the actual media owner and other legitimate hits.
+        self._invalidate_logical_resolution(next_logical)
+        if queued_media == previous_media or same_literal_stream:
             next_track.stream_url = ""
+            next_track.webpage_url = "" if self._is_metadata_collection_item(next_meta) else next_track.webpage_url
             next_track.transport_hint = "metadata-lazy"
             next_track.stream_resolved_monotonic = 0.0
         self.log(
-            "playlist_stream_reuse_guard",
+            "playlist_media_reuse_guard",
             guild_id=st.guild_id,
             previous=getattr(previous, "title", ""),
             next=getattr(next_track, "title", ""),
-            cache=bool(cached_stream == previous_stream),
-            queued=bool(queued_stream == previous_stream),
+            media=previous_media[:140],
+            queued=bool(queued_media == previous_media),
+            cached=bool(cached_media == previous_media),
+            same_stream=same_literal_stream,
         )
         return True
 
