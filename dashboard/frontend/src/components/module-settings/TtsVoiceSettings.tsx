@@ -19,7 +19,9 @@ function withDefaultOption(field: DashboardFieldDefinition, draft: Record<string
   const options = [{ value: "", label }, ...(field.options || []).filter(option => option.value !== "")];
   const current = String(draft[field.id] || "");
   if (field.id === "tts.language" && current && !options.some(option => option.value === current)) {
-    const language = options.find(option => option.value === current.toLowerCase().split("-")[0]);
+    const normalized = current.replace(/_/g, "-").toLowerCase();
+    const language = options.find(option => option.value.toLowerCase() === normalized)
+      || options.find(option => option.value === normalized.split("-")[0]);
     if (language) options.push({ value: current, label: `${language.label} — configuração atual` });
   }
   return { ...field, options };

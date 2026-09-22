@@ -611,6 +611,30 @@ body { color: var(--osk-ink); }
 
 /* Portais */
 .osk-select-backdrop,
+.osk-account-backdrop,
+.osk-multi-sheet__backdrop {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  box-shadow: none;
+}
+
+/* Backdrops cover the viewport; focus indicators belong to the menu controls. */
+.osk-select-layer .osk-select-backdrop:focus,
+.osk-select-layer .osk-select-backdrop:focus-visible,
+.osk-account-layer .osk-account-backdrop:focus,
+.osk-account-layer .osk-account-backdrop:focus-visible,
+.osk-multi-sheet .osk-multi-sheet__backdrop:focus,
+.osk-multi-sheet .osk-multi-sheet__backdrop:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.osk-select-backdrop,
 .osk-multi-sheet__backdrop { background: rgba(7,7,7,.56); backdrop-filter: blur(3px); }
 
 .osk-account-backdrop { background: transparent; backdrop-filter: none; }

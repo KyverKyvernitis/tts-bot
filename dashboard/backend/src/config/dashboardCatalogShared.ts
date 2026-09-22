@@ -1,18 +1,9 @@
 import type { DashboardFieldDefinition, DashboardFieldScope, DashboardTemplateSyntax, DashboardTemplateVariables } from "./dashboardTypes.js";
+export { TTS_LANGUAGE_OPTIONS } from "./dashboardTtsLanguages.js";
 
 export const TTS_ENGINE_OPTIONS = [
   { value: "gtts", label: "gTTS" },
   { value: "edge", label: "Microsoft Edge" },
-];
-export const TTS_LANGUAGE_OPTIONS = [
-  { value: "pt", label: "Português" },
-  { value: "en", label: "Inglês" },
-  { value: "es", label: "Espanhol" },
-  { value: "fr", label: "Francês" },
-  { value: "de", label: "Alemão" },
-  { value: "it", label: "Italiano" },
-  { value: "ja", label: "Japonês" },
-  { value: "ko", label: "Coreano" },
 ];
 export const TTS_VOICE_OPTIONS = [
   { value: "pt-BR-FranciscaNeural", label: "Francisca — feminina" },

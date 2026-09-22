@@ -79,11 +79,18 @@ test("todos os prefixos permanecem na área de voz e mantêm validação", () =>
   assert.throws(() => planDashboardUpdates(docs(), { "tts.edge_prefix": "." }));
 });
 
-test("idiomas enviados pelo painel usam códigos aceitos pelo gTTS", () => {
+test("painel oferece todos os idiomas do gTTS 2.5.4 e salva os códigos sem alterações", () => {
   const language = ttsSection.fields.find(field => field.id === "tts.language")!;
-  const supported = new Set(["", "pt", "en", "es", "fr", "de", "it", "ja", "ko"]);
+  // Contract from the pinned provider's tts_langs(), including its extra aliases.
+  const supported = "af am ar bg bn bs ca cs cy da de el en es et eu fi fr fr-CA gl gu ha hi hr hu id is it iw ja jw km kn ko la lt lv ml mr ms my ne nl no pa pl pt pt-PT ro ru si sk sq sr su sv sw ta te th tl tr uk ur vi yue zh-CN zh-TW zh".split(" ");
+  assert.deepEqual(language.options!.map(option => option.value).sort(), ["", ...supported].sort());
+  const state = docs();
+  planDashboardUpdates(state, { "tts.voice": "ja-JP-NanamiNeural", "tts.rate": "+25%" }, voices);
   for (const option of language.options!) {
-    assert.ok(supported.has(option.value), option.value);
-    assert.equal(planDashboardUpdates(docs(), { "tts.language": option.value }).values["tts.language"], option.value);
+    planDashboardUpdates(state, { "tts.language": option.value });
+    const loaded = dashboardValuesFromDocs(state);
+    assert.equal(loaded["tts.language"], option.value);
+    assert.equal(loaded["tts.voice"], "ja-JP-NanamiNeural");
+    assert.equal(loaded["tts.rate"], "+25%");
   }
 });

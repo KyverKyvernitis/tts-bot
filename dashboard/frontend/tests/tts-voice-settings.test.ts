@@ -43,3 +43,16 @@ test("mostra idioma legado e prefixos salvos sem reescrever o rascunho", () => {
   assert.match(html, /data-field-id="tts.atts_prefix"/); assert.match(html, /data-field-id="tts.teto_prefix"/);
   assert.deepEqual(draft, before);
 });
+
+test("idiomas regionais legados conservam a região e o valor salvo", () => {
+  const regionalFields = fields.map(item => item.id === "tts.language" ? { ...item, options: [
+    { value: "pt", label: "Português (Brasil)" }, { value: "pt-PT", label: "Português (Portugal)" },
+    { value: "zh-CN", label: "Chinês (simplificado)" }, { value: "zh-TW", label: "Chinês (tradicional, Taiwan)" },
+  ] } : item);
+  for (const [value, label] of [["pt-pt", "Português (Portugal)"], ["zh_tw", "Chinês (tradicional, Taiwan)"]]) {
+    const draft = { "tts.language": value };
+    const html = renderToStaticMarkup(React.createElement(TtsVoiceSettings, { fields: regionalFields, values: draft, draft, guildOptions: null, onChange() {} }));
+    assert.ok(html.includes(`${label} — configuração atual`));
+    assert.deepEqual(draft, { "tts.language": value });
+  }
+});
