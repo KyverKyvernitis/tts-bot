@@ -97,12 +97,13 @@ export function BrowserLanding({
       </header>
 
       <main className="osk-minimal-main">
+        <DecorativeVisualTemplate />
         <section className="osk-minimal-hero" aria-labelledby="landing-title">
           <h1 id="landing-title">Dashboard</h1>
-          <div className="osk-landing-hero-art" aria-hidden="true"><DecorativeVisualTemplate /></div>
+          <p>Aqui você pode editar todas as funções do bot de cada servidor que você tenha acesso de maneira rápida</p>
           <button className="osk-primary-button osk-minimal-primary-action" onClick={primaryAction}>
-            {loggedIn ? "Escolher servidor" : "Entrar com Discord"}
-            <ArrowRight size={18} aria-hidden="true" />
+            {loggedIn ? "Abrir dashboard" : "Entrar com Discord"}
+            <ArrowRight size={17} aria-hidden="true" />
           </button>
         </section>
 

@@ -1,93 +1,4 @@
-/* Landing da Osaka: composição com a arte do próprio projeto. */
-.osk-minimal-landing {
-  width: min(1080px, calc(100% - 56px));
-}
-
-.osk-minimal-nav {
-  min-height: 78px;
-}
-
-.osk-minimal-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(180px, .7fr);
-  grid-template-areas: "title art" "action art";
-  grid-template-rows: 1fr 1fr;
-  align-items: center;
-  gap: 1.5rem clamp(1rem, 4vw, 3.75rem);
-  max-width: none;
-  min-height: 0;
-  padding: clamp(2rem, 4vw, 3rem) 0;
-}
-
-.osk-minimal-hero h1 {
-  display: block;
-  grid-area: title;
-  align-self: end;
-  min-width: 0;
-  max-width: none;
-  margin: 0;
-  font-size: clamp(3.25rem, 5.55vw, 5.1rem);
-  font-weight: 650;
-  letter-spacing: -.075em;
-  line-height: 1.05;
-  text-wrap: balance;
-}
-
-.osk-minimal-primary-action {
-  display: inline-flex;
-  grid-area: action;
-  align-self: start;
-  justify-self: start;
-  min-height: 54px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 2rem;
-  margin-top: 0;
-  padding-inline: 1.35rem;
-}
-
-.osk-landing-hero-art {
-  position: relative;
-  grid-area: art;
-  align-self: center;
-  min-width: 0;
-  height: clamp(15rem, 28vw, 21rem);
-  pointer-events: none;
-}
-
-.osk-landing-hero-art .osk-decorative-template,
-.osk-landing-hero-art .osk-decorative-template[data-ready] {
-  position: static;
-  display: block;
-  z-index: auto;
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  opacity: var(--osk-decorative-opacity);
-}
-
-/* A imagem inteira cabe na área reservada, inclusive no celular. */
-.osk-landing-hero-art .osk-decorative-template img {
-  width: 100%;
-  height: 100%;
-  max-height: none;
-  object-fit: contain;
-  object-position: center;
-}
-
-.osk-minimal-features {
-  padding: 1.7rem 0 1rem;
-}
-
-.osk-minimal-features > h2 {
-  margin: 0 0 1.15rem;
-  font-family: var(--osk-font-display);
-  font-size: clamp(1.2rem, 2vw, 1.5rem);
-  font-weight: 600;
-  letter-spacing: -.045em;
-  text-transform: none;
-}
-
+/* Ajustes restritos aos cards; o restante usa a composição original da landing. */
 .osk-minimal-feature-grid {
   gap: .8rem;
 }
@@ -153,37 +64,7 @@
   transform-origin: center;
 }
 
-.osk-support-card { margin-top: 1.5rem; }
-
 @media (max-width: 720px) {
-  .osk-minimal-landing { width: calc(100% - 28px); }
-  .osk-minimal-nav { min-height: 62px; }
-
-  .osk-minimal-hero {
-    grid-template-columns: minmax(0, 1fr) clamp(5.5rem, 28vw, 9rem);
-    grid-template-areas: "title art" "action action";
-    grid-template-rows: auto auto;
-    gap: 1.25rem .75rem;
-    padding: 1.5rem 0 1.75rem;
-  }
-
-  .osk-minimal-hero h1 {
-    align-self: center;
-    font-size: clamp(2.125rem, 9.8vw, 3.25rem);
-    line-height: 1.07;
-  }
-
-  .osk-minimal-primary-action {
-    width: 100%;
-    min-height: 50px;
-    margin-top: 0;
-  }
-
-  .osk-landing-hero-art {
-    height: clamp(9rem, 42vw, 12rem);
-  }
-
-  .osk-minimal-features { padding-top: 1.35rem; }
   .osk-minimal-feature-grid { gap: .55rem; }
 
   .osk-minimal-feature-grid article {
@@ -202,7 +83,6 @@
   }
 
   .osk-landing-games h3 { font-size: .9rem; }
-  .osk-support-card { margin-top: 1.1rem; }
 }
 
 @media (max-width: 360px) {
