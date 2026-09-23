@@ -88,7 +88,7 @@ def _erro_transporte_recuperavel(exc: BaseException) -> bool:
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (aiohttp.ClientConnectionError, ConnectionError, OSError)):
+        if isinstance(current, (asyncio.TimeoutError, TimeoutError, aiohttp.ClientConnectionError, ConnectionError, OSError)):
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -167,12 +167,23 @@ async def post_json_worker(
 
         session = await obter_sessao_http()
         try:
+            # Não deixe a primeira conexão consumir o orçamento inteiro. Isso é
+            # especialmente importante quando a rota Tailscale ficou half-open:
+            # o socket pode só estourar no timeout total e impedir qualquer retry.
+            # Comandos mutáveis carregam command_id e o Music Agent os deduplica,
+            # portanto é seguro refazer o transporte enquanto a primeira thread
+            # do proxy ainda termina do outro lado.
+            attempts_left = max(1, len(_RECOVERY_DELAYS) - attempt + 1)
+            per_attempt = min(
+                remaining,
+                max(0.75, min(6.0, remaining / attempts_left * 1.5)),
+            )
             return await _post_json_once(
                 session=session,
                 url=url,
                 headers=headers,
                 payload=payload,
-                timeout_seconds=remaining,
+                timeout_seconds=per_attempt,
                 max_erro=max_erro,
             )
         except asyncio.CancelledError:

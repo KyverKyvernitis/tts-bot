@@ -146,6 +146,9 @@ class MusicGuildState:
     agent_monitor_last_error: str = ""
     agent_monitor_reconnecting_since: float = 0.0
     agent_monitor_recoveries: int = 0
+    agent_deferred_command_status: str = ""
+    agent_deferred_command_attempts: int = 0
+    agent_deferred_command_error: str = ""
     agent_side_effect_task: Optional[asyncio.Task] = None
     virtual_playlist_refill_task: Optional[asyncio.Task] = None
     virtual_playlist_refill_cursor_key: str = ""

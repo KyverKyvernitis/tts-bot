@@ -9,7 +9,7 @@ from cogs.musica import configuracao as config
 import discord
 from discord.ext import commands
 
-from ..agente_telefone.comandos import music_agent_command, music_agent_status
+from ..agente_telefone.comandos import estado_comando_diferido, music_agent_command, music_agent_status
 from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from ..interface.carregamento import MusicLoadingReaction
@@ -269,7 +269,14 @@ class FluxoTocar:
             except Exception:
                 logger.debug("[music/agent] falha ao acompanhar estado remoto", exc_info=True)
         with contextlib.suppress(Exception):
-            await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.")
+            local = estado_local_music_agent(self.router, guild_id)
+            deferred = estado_comando_diferido(guild_id)
+            if str(local.get("status") or "").lower() == "reconnecting" and str(deferred.get("status") or "") == "pending":
+                attempts = max(0, int(deferred.get("attempts") or 0))
+                suffix = f" (tentativa {attempts})" if attempts else ""
+                await message.edit(content=f"`🔄` **{track.short_title}** continua pendente enquanto o Phone Worker reconecta{suffix}. O play será reenviado automaticamente.")
+            else:
+                await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.")
         if loading_reaction is not None:
             await loading_reaction.finish()
     def _is_lavalink_real_enabled(self, guild_id: int | None) -> bool:

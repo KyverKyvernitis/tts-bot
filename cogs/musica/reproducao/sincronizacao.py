@@ -249,13 +249,20 @@ async def sincronizar_estado_agente(
             state.volume = max(0.0, min(1.5, float(remote.get("volume_percent") or 0.0) / 100.0))
     state.shuffle = False
     if state.current is not None:
+        # O estado nasce com defaults usados pelo player legado. No backend do
+        # agente esses defaults não são evidência da mídia real; se a nova faixa
+        # ainda não foi resolvida, zerar evita exibir "Spotify · 256 kbps" antes
+        # de o yt-dlp informar codec/bitrate de verdade (e evita herdar a faixa
+        # anterior durante uma troca).
+        state.current_quality_kbps = 0
+        state.current_quality_label = ""
         with contextlib.suppress(Exception):
             kbps = int(float(getattr(state.current, "resolved_audio_abr", 0) or getattr(state.current, "resolved_audio_max_abr", 0) or 0))
             if kbps > 0:
                 state.current_quality_kbps = kbps
         ext = str(getattr(state.current, "resolved_audio_ext", "") or "").strip()
         codec = str(getattr(state.current, "resolved_audio_codec", "") or "").strip()
-        if ext or codec:
+        if ext or codec or state.current_quality_kbps > 0:
             state.current_quality_label = "Worker"
     state.current_lavalink_player = None
     state.current_source = None

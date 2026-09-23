@@ -16,7 +16,7 @@ from ..busca import registrar_lote_link_busca, registrar_selecao_busca
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 from ..nucleo.playlist_virtual import bounded_initial_window, logical_virtual_queue_count
 from ..metadados.provedores import describe_url
-from ..agente_telefone.comandos import music_agent_command, music_agent_status
+from ..agente_telefone.comandos import estado_comando_diferido, music_agent_command, music_agent_status
 from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..reproducao.controle_remoto import enviar_controle_remoto
 from ..reproducao.playlist_virtual import payload_cursor_playlist, schedule_playlist_refill_from_result
@@ -268,7 +268,14 @@ async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, rou
                 # Não quebra o fluxo do usuário se o acompanhamento não conseguir consultar o worker.
                 continue
         with contextlib.suppress(Exception):
-            await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.", embed=None, view=None)
+            local = estado_local_music_agent(router, guild_id) if router is not None else {}
+            deferred = estado_comando_diferido(guild_id)
+            if str(local.get("status") or "").lower() == "reconnecting" and str(deferred.get("status") or "") == "pending":
+                attempts = max(0, int(deferred.get("attempts") or 0))
+                suffix = f" (tentativa {attempts})" if attempts else ""
+                await message.edit(content=f"`🔄` **{track.short_title}** continua pendente enquanto o Phone Worker reconecta{suffix}. O play será reenviado automaticamente.", embed=None, view=None)
+            else:
+                await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.", embed=None, view=None)
     finally:
         if loading_reaction is not None:
             with contextlib.suppress(Exception):
@@ -856,8 +863,14 @@ def _player_track_text(state, track: MusicTrack) -> str:
     lines = [f"### {title}", f"-# {source}", " · ".join(metadata), requester_line]
     if str(getattr(state, "current_status", "") or "").lower() == "reconnecting":
         failures = max(0, int(getattr(state, "agent_monitor_failures", 0) or 0))
-        suffix = f" · tentativa {failures}" if failures else ""
-        lines.append(f"-# 🔄 Reconectando ao Phone Worker sem descartar a faixa ou a fila{suffix}.")
+        deferred_attempts = max(0, int(getattr(state, "agent_deferred_command_attempts", 0) or 0))
+        deferred_status = str(getattr(state, "agent_deferred_command_status", "") or "").lower()
+        shown_attempt = deferred_attempts if deferred_status == "pending" and deferred_attempts else failures
+        suffix = f" · tentativa {shown_attempt}" if shown_attempt else ""
+        if deferred_status == "pending":
+            lines.append(f"-# 🔄 Reconectando ao Phone Worker e reenviando o play automaticamente{suffix}.")
+        else:
+            lines.append(f"-# 🔄 Reconectando ao Phone Worker sem descartar a faixa ou a fila{suffix}.")
 
     loop_mode = getattr(state, "loop_mode", None)
     loop_label = str(getattr(loop_mode, "label", "desligado") or "desligado")

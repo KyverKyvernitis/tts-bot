@@ -1186,6 +1186,12 @@ def test_resolve_guild_waits_for_gateway_cache_instead_of_failing_first_play(mus
     run(scenario())
 
 
+def test_command_id_dedup_ttl_cobre_janela_maxima_de_reenvio(music, monkeypatch):
+    monkeypatch.setenv("MUSIC_AGENT_COMMAND_DEDUP_TTL_SECONDS", "10")
+    agent = music.MusicAgent()
+    assert agent.command_dedup_ttl_seconds >= 360.0
+
+
 def test_command_id_deduplica_retry_de_playback(music):
     async def scenario():
         agent = music.MusicAgent()

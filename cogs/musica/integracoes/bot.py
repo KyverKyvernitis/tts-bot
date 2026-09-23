@@ -10,6 +10,7 @@ from cogs.musica.legado.roteador_audio import AudioRouter
 from cogs.musica.integracoes.status_canal import instalar_ponte_gateway_status_canal
 from cogs.musica.agente_telefone.transporte_http import fechar_sessao_http
 from cogs.musica.agente_telefone.roteamento import limpar_vinculos_worker
+from cogs.musica.agente_telefone.comandos import cancelar_comandos_diferidos
 from cogs.musica.interface.tarefas import cancelar_tarefas_interface
 
 LOG = logging.getLogger("music")
@@ -85,6 +86,7 @@ class IntegracaoMusicaBot:
         if tarefa is not None:
             tarefa.cancel()
         await cancelar_tarefas_interface()
+        await cancelar_comandos_diferidos()
         limpar_vinculos_worker()
         try:
             await self.router.close()

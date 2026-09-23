@@ -6,7 +6,7 @@ from typing import Any
 
 from cogs.musica import configuracao as config
 
-from .comandos import music_agent_status
+from .comandos import estado_comando_diferido, music_agent_status
 from .conversao import estado_da_guild_no_payload
 from .roteamento import desvincular_guild_worker
 from ..reproducao.playlist_virtual import schedule_playlist_refill_if_needed
@@ -187,6 +187,10 @@ async def _marcar_monitor_reconectando(router: Any, guild_id: int, *, falhas: in
     state = router.get_state(int(guild_id))
     state.agent_monitor_failures = max(0, int(falhas or 0))
     state.agent_monitor_last_error = str(erro or "")[:260]
+    deferred = estado_comando_diferido(guild_id)
+    state.agent_deferred_command_status = str(deferred.get("status") or "")
+    state.agent_deferred_command_attempts = max(0, int(deferred.get("attempts") or 0))
+    state.agent_deferred_command_error = str(deferred.get("last_error") or "")[:260]
     if not float(getattr(state, "agent_monitor_reconnecting_since", 0.0) or 0.0):
         try:
             state.agent_monitor_reconnecting_since = asyncio.get_running_loop().time()
@@ -218,6 +222,10 @@ def _limpar_auditoria_monitor(router: Any, guild_id: int, *, recovered: bool) ->
     state.agent_monitor_failures = 0
     state.agent_monitor_last_error = ""
     state.agent_monitor_reconnecting_since = 0.0
+    deferred = estado_comando_diferido(guild_id)
+    state.agent_deferred_command_status = str(deferred.get("status") or "")
+    state.agent_deferred_command_attempts = max(0, int(deferred.get("attempts") or 0))
+    state.agent_deferred_command_error = str(deferred.get("last_error") or "")[:260]
     if recovered and previous:
         state.agent_monitor_recoveries = int(getattr(state, "agent_monitor_recoveries", 0) or 0) + 1
 
@@ -277,6 +285,30 @@ def iniciar_monitor_music_agent(
                     )
                     if failure_seen >= int(getattr(config, "MUSIC_AGENT_MONITOR_UI_FAILURES", 2) or 2):
                         await _marcar_monitor_reconectando(router, guild_id, falhas=failure_seen, erro=ultimo_erro_monitor)
+                    deferred = estado_comando_diferido(guild_id)
+                    if (
+                        ultimo_estado_remoto is None
+                        and str(deferred.get("status") or "") in {"failed", "expired"}
+                    ):
+                        state = router.get_state(guild_id)
+                        detail = str(deferred.get("last_error") or ultimo_erro_monitor or "Phone Worker indisponível")[:300]
+                        setter = getattr(router, "_set_current_status", None)
+                        if callable(setter):
+                            setter(state, "error")
+                        else:
+                            state.current_status = "error"
+                        state.current_status_detail = detail
+                        state.agent_deferred_command_status = str(deferred.get("status") or "")
+                        state.agent_deferred_command_attempts = max(0, int(deferred.get("attempts") or 0))
+                        state.agent_deferred_command_error = detail
+                        updater = getattr(router, "update_panel", None)
+                        if callable(updater) and getattr(state, "now_message", None) is not None:
+                            try:
+                                await updater(guild_id, create=False)
+                            except Exception:
+                                logger.debug("[music/agent] painel de falha diferida não pôde ser atualizado | guild=%s", guild_id, exc_info=True)
+                        desvincular_guild_worker(guild_id)
+                        return
                     rebind_every = max(1, int(getattr(config, "MUSIC_AGENT_MONITOR_REBIND_FAILURES", 4) or 4))
                     if failure_seen % rebind_every == 0:
                         # Solte periodicamente a afinidade. Assim uma rota/Worker
@@ -293,6 +325,30 @@ def iniciar_monitor_music_agent(
                     ultimo_erro_monitor = str(payload.get("error") or "worker indisponível")[:260]
                     if failure_seen >= int(getattr(config, "MUSIC_AGENT_MONITOR_UI_FAILURES", 2) or 2):
                         await _marcar_monitor_reconectando(router, guild_id, falhas=failure_seen, erro=ultimo_erro_monitor)
+                    deferred = estado_comando_diferido(guild_id)
+                    if (
+                        ultimo_estado_remoto is None
+                        and str(deferred.get("status") or "") in {"failed", "expired"}
+                    ):
+                        state = router.get_state(guild_id)
+                        detail = str(deferred.get("last_error") or ultimo_erro_monitor or "Phone Worker indisponível")[:300]
+                        setter = getattr(router, "_set_current_status", None)
+                        if callable(setter):
+                            setter(state, "error")
+                        else:
+                            state.current_status = "error"
+                        state.current_status_detail = detail
+                        state.agent_deferred_command_status = str(deferred.get("status") or "")
+                        state.agent_deferred_command_attempts = max(0, int(deferred.get("attempts") or 0))
+                        state.agent_deferred_command_error = detail
+                        updater = getattr(router, "update_panel", None)
+                        if callable(updater) and getattr(state, "now_message", None) is not None:
+                            try:
+                                await updater(guild_id, create=False)
+                            except Exception:
+                                logger.debug("[music/agent] painel de falha diferida não pôde ser atualizado | guild=%s", guild_id, exc_info=True)
+                        desvincular_guild_worker(guild_id)
+                        return
                     rebind_every = max(1, int(getattr(config, "MUSIC_AGENT_MONITOR_REBIND_FAILURES", 4) or 4))
                     if failure_seen % rebind_every == 0:
                         desvincular_guild_worker(guild_id)

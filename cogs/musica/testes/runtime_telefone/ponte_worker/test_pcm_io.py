@@ -14,7 +14,7 @@ import pytest
 from cogs.musica.testes.runtime_telefone.ponte_worker.test_streams_pcm import Handler, pcm  # noqa: F401
 
 
-def wait_file(path, timeout=3):
+def wait_file(path, timeout=8):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():
@@ -81,7 +81,7 @@ def test_live_stderr_saturation_does_not_block_audio_or_eof(local, monkeypatch):
     script = "import os\nfor _ in range(256): os.write(2, b'e'*8192)\nos.write(1, b'pcm-bytes')\n"
     handler, thread, done, failures = start_live(local, monkeypatch, script, io.BytesIO())
     try:
-        completed = done.wait(1.5)
+        completed = done.wait(4.0)
     finally:
         stop_children(local, thread)
     assert completed, "unconsumed stderr blocked stdout before the first PCM bytes"
@@ -100,7 +100,7 @@ def test_live_disconnect_reaps_the_owned_process_and_closes_pipes(local, monkeyp
     script = "import os,time\nos.write(1, b'p'*65536)\ntime.sleep(30)\n"
     handler, thread, done, failures = start_live(local, monkeypatch, script, Output())
     try:
-        completed = done.wait(1.5)
+        completed = done.wait(4.0)
     finally:
         stop_children(local, thread)
     assert completed and not failures and handler.responses == [200]

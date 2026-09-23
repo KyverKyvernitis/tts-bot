@@ -89,7 +89,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.47"
+AGENT_VERSION = "0.3.48"
 STARTED_AT = time.time()
 
 
@@ -204,7 +204,13 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         # Retry de transporte VPS -> Phone Worker pode reenviar o mesmo POST
         # depois de uma troca de rota/Tailscale. command_id garante que ações
         # mutáveis (play/enqueue/skip...) sejam executadas uma única vez.
-        self.command_dedup_ttl_seconds = max(10.0, env_float("MUSIC_AGENT_COMMAND_DEDUP_TTL_SECONDS", 120.0))
+        # A VPS pode manter um play idempotente pendente por até 300 s durante
+        # uma queda de Tailscale. O resultado precisa sobreviver por mais tempo
+        # que toda essa janela; caso contrário, um POST cuja resposta se perdeu
+        # poderia ser reenviado depois do cache expirar e iniciar a faixa duas
+        # vezes. 360 s mantém uma margem fixa sem crescimento relevante (o
+        # registro continua limitado por command_dedup_max_entries).
+        self.command_dedup_ttl_seconds = max(360.0, env_float("MUSIC_AGENT_COMMAND_DEDUP_TTL_SECONDS", 360.0))
         self.command_dedup_max_entries = max(64, min(4096, env_int("MUSIC_AGENT_COMMAND_DEDUP_MAX_ENTRIES", 512)))
         self._command_results: dict[str, tuple[float, dict[str, Any]]] = {}
         self._command_locks: dict[str, asyncio.Lock] = {}

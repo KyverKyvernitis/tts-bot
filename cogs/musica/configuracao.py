@@ -312,6 +312,13 @@ MUSIC_AGENT_PANEL_REFRESH_SECONDS = max(10.0, min(300.0, _parse_float(os.getenv(
 MUSIC_AGENT_MONITOR_REBIND_FAILURES = max(2, min(12, _parse_int(os.getenv("MUSIC_AGENT_MONITOR_REBIND_FAILURES", "4"), 4)))
 MUSIC_AGENT_MONITOR_MAX_FAILURES = max(MUSIC_AGENT_MONITOR_REBIND_FAILURES + 1, min(600, _parse_int(os.getenv("MUSIC_AGENT_MONITOR_MAX_FAILURES", "120"), 120)))
 MUSIC_AGENT_MONITOR_UI_FAILURES = max(1, min(MUSIC_AGENT_MONITOR_REBIND_FAILURES, _parse_int(os.getenv("MUSIC_AGENT_MONITOR_UI_FAILURES", "2"), 2)))
+# Se um `_play` chegar justamente durante uma troca de Wi-Fi/dados/Tailscale,
+# o POST pode falhar antes de alcançar o Phone Worker. O monitor sozinho não
+# resolve esse caso: ele só consulta estado. Mantenha o comando idempotente
+# pendente por uma janela limitada e reenvie-o automaticamente quando a rota
+# voltar, usando o mesmo command_id para não duplicar playback no agente.
+MUSIC_AGENT_DEFERRED_PLAY_SECONDS = max(10.0, min(300.0, _parse_float(os.getenv("MUSIC_AGENT_DEFERRED_PLAY_SECONDS", "120.0"), 120.0)))
+MUSIC_AGENT_DEFERRED_PLAY_RETRY_MAX_SECONDS = max(0.25, min(15.0, _parse_float(os.getenv("MUSIC_AGENT_DEFERRED_PLAY_RETRY_MAX_SECONDS", "5.0"), 5.0)))
 MUSIC_AGENT_IDLE_DISCONNECT_SECONDS = max(15.0, _parse_float(os.getenv("MUSIC_AGENT_IDLE_DISCONNECT_SECONDS", os.getenv("MUSIC_IDLE_DISCONNECT_SECONDS", "120")), 120.0))
 MUSIC_LOADING_REACTION_EMOJI = (os.getenv("MUSIC_LOADING_REACTION_EMOJI", "<a:areia:1496606578395189473>") or "<a:areia:1496606578395189473>").strip()
 MUSIC_AGENT_MIN_VERSION = (os.getenv("MUSIC_AGENT_MIN_VERSION", "0.3.23") or "0.3.23").strip()
