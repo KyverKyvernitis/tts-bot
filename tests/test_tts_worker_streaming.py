@@ -245,11 +245,16 @@ class ResourceTests(unittest.TestCase):
     def test_mixer_cancellation_removes_only_its_own_overlay(self):
         # Load only the real mixer class; this test does not need Discord login.
         text = (ROOT / 'cogs/musica/runtime_telefone/agente/mixer_pcm.py').read_text()
-        node = next(n for n in ast.parse(text).body if isinstance(n,ast.ClassDef) and n.name=='AgentMixedAudioSource')
+        tree = ast.parse(text)
+        nodes = [n for n in tree.body if isinstance(n,ast.ClassDef) and n.name in {'_AudioReadTelemetry','AgentMixedAudioSource'}]
         from array import array
-        namespace = {'discord':types.SimpleNamespace(AudioSource=object), 'asyncio':asyncio,
-                     'contextlib':contextlib,'threading':threading,'time':time,'array':array,'PCM_FRAME_BYTES':3840,'Any':object}
-        exec(compile(ast.Module(body=[node], type_ignores=[]),'<mixer>', 'exec'),namespace)
+        from typing import Any, Callable
+        class AudioSource: pass
+        namespace = {'discord':types.SimpleNamespace(AudioSource=AudioSource), 'asyncio':asyncio,
+                     'contextlib':contextlib,'threading':threading,'time':time,'array':array,
+                     'PCM_FRAME_BYTES':3840,'MAX_MUSIC_VOLUME':1.5,'PCM_PEAK':32767,
+                     'PCM_BOOST_KNEE':int(32767*0.95),'Any':Any,'Callable':Callable}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]),'<mixer>', 'exec'),namespace)
         class Source:
             cleaned = False
             def cleanup(self): self.cleaned = True

@@ -1870,3 +1870,234 @@ def test_remote_public_queue_preview_covers_virtual_window(music):
     payload = st.public()
     assert len(payload["queue"]) == 25
     assert payload["queue_size"] == 25
+
+
+def test_voice_connect_singleflight_serializes_concurrent_callers(music):
+    class VoiceClient:
+        def __init__(self, channel):
+            self.channel = channel
+        def is_connected(self):
+            return True
+
+    class Guild:
+        voice_client = None
+        def __init__(self, channel):
+            self.channel = channel
+        def get_channel(self, channel_id):
+            return self.channel if channel_id == self.channel.id else None
+
+    class Channel:
+        id = 1901
+        def __init__(self):
+            self.calls = 0
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.guild = None
+        async def connect(self, self_deaf=True):
+            self.calls += 1
+            self.entered.set()
+            await self.release.wait()
+            voice = VoiceClient(self)
+            self.guild.voice_client = voice
+            return voice
+
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 1900
+        channel = Channel()
+        guild = Guild(channel)
+        channel.guild = guild
+        agent.states[gid] = music.GuildMusicState(guild_id=gid, voice_channel_id=channel.id)
+        agent.client.get_guild = lambda value: guild if value == gid else None
+        agent.client.get_channel = lambda value: channel if value == channel.id else None
+        agent.log = lambda *args, **kwargs: None
+
+        first = asyncio.create_task(agent._ensure_direct_voice_client(gid))
+        await asyncio.wait_for(channel.entered.wait(), timeout=1.0)
+        second = asyncio.create_task(agent._ensure_direct_voice_client(gid))
+        await asyncio.sleep(0)
+        assert channel.calls == 1
+        channel.release.set()
+        result1, result2 = await asyncio.gather(first, second)
+
+        assert channel.calls == 1
+        assert result1[0] is result2[0]
+        assert sorted([result1[1], result2[1]]) == [False, True]
+        assert agent._voice_connect_locks == {}
+        assert agent._voice_connect_lock_users == {}
+
+    run(scenario())
+
+
+def test_voice_connect_recovers_discord_already_connected_race(music, monkeypatch):
+    monkeypatch.setenv("MUSIC_AGENT_VOICE_RECONNECT_GRACE_SECONDS", "0")
+
+    class VoiceClient:
+        def __init__(self, channel):
+            self.channel = channel
+        def is_connected(self):
+            return True
+        async def move_to(self, channel):
+            self.channel = channel
+
+    class Channel:
+        id = 1903
+        def __init__(self):
+            self.guild = None
+            self.calls = 0
+        async def connect(self, self_deaf=True):
+            self.calls += 1
+            # Reproduz a janela em que discord.py já registrou o cliente, mas a
+            # outra coroutine venceu a corrida e channel.connect() reclama.
+            self.guild.voice_client = VoiceClient(self)
+            raise RuntimeError("Already connected to a voice channel.")
+
+    class Guild:
+        voice_client = None
+        def __init__(self, channel):
+            self.channel = channel
+        def get_channel(self, channel_id):
+            return self.channel if channel_id == self.channel.id else None
+
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 1902
+        channel = Channel()
+        guild = Guild(channel)
+        channel.guild = guild
+        agent.states[gid] = music.GuildMusicState(guild_id=gid, voice_channel_id=channel.id)
+        agent.client.get_guild = lambda value: guild if value == gid else None
+        agent.client.get_channel = lambda value: channel if value == channel.id else None
+        events = []
+        agent.log = lambda event, **fields: events.append(event)
+
+        voice, created = await agent._ensure_direct_voice_client(gid)
+        assert voice is guild.voice_client
+        assert created is False
+        assert channel.calls == 1
+        assert "voice_connect_race_recovered" in events
+
+    run(scenario())
+
+
+def test_stale_disconnected_voice_client_is_cleaned_before_reconnect(music, monkeypatch):
+    monkeypatch.setenv("MUSIC_AGENT_VOICE_RECONNECT_GRACE_SECONDS", "0")
+
+    class StaleVoice:
+        def __init__(self, guild, channel):
+            self.guild = guild
+            self.channel = channel
+            self.disconnected = False
+        def is_connected(self):
+            return False
+        async def disconnect(self, force=False):
+            self.disconnected = True
+            self.guild.voice_client = None
+
+    class FreshVoice:
+        def __init__(self, channel):
+            self.channel = channel
+        def is_connected(self):
+            return True
+
+    class Channel:
+        id = 1905
+        def __init__(self):
+            self.guild = None
+            self.calls = 0
+        async def connect(self, self_deaf=True):
+            self.calls += 1
+            voice = FreshVoice(self)
+            self.guild.voice_client = voice
+            return voice
+
+    class Guild:
+        def __init__(self, channel):
+            self.channel = channel
+            self.voice_client = StaleVoice(self, channel)
+        def get_channel(self, channel_id):
+            return self.channel if channel_id == self.channel.id else None
+
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 1904
+        channel = Channel()
+        guild = Guild(channel)
+        stale = guild.voice_client
+        channel.guild = guild
+        agent.states[gid] = music.GuildMusicState(guild_id=gid, voice_channel_id=channel.id)
+        agent.client.get_guild = lambda value: guild if value == gid else None
+        agent.client.get_channel = lambda value: channel if value == channel.id else None
+        events = []
+        agent.log = lambda event, **fields: events.append(event)
+
+        voice, created = await agent._ensure_direct_voice_client(gid)
+        assert stale.disconnected is True
+        assert created is True
+        assert voice is guild.voice_client
+        assert channel.calls == 1
+        assert "voice_stale_client_cleanup" in events
+
+    run(scenario())
+
+
+def test_voice_transport_failure_retries_same_track_and_preserves_queue(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 1906
+        current = music.AgentTrack(title="current", query="current", stream_url="https://media.example/current")
+        next_track = music.AgentTrack(title="next", query="next", stream_url="https://media.example/next")
+        st = music.GuildMusicState(guild_id=gid, queue=[current, next_track])
+        agent.states[gid] = st
+        events = []
+
+        async def fail_voice(*args, **kwargs):
+            raise RuntimeError("Already connected to a voice channel.")
+
+        agent._play_direct_voice = fail_voice
+        agent.log = lambda event, **fields: events.append((event, fields))
+
+        await agent._play_next(gid)
+
+        assert st.status == "failed"
+        assert st.current is current
+        assert st.queue == [next_track]
+        assert st.last_error_category == "voice_transport"
+        assert st.last_error_phase == "playback_start"
+        assert st.play_attempt_sequence == 2
+        assert current.voice_recovery_attempts == 1
+        assert not any(event == "track_failed_skipped" for event, _ in events)
+        assert any(event == "voice_transport_retry" for event, _ in events)
+        assert any(event == "voice_transport_queue_preserved" for event, _ in events)
+
+    run(scenario())
+
+
+def test_consecutive_start_failure_circuit_preserves_remaining_queue(music, monkeypatch):
+    monkeypatch.setenv("MUSIC_AGENT_MAX_CONSECUTIVE_START_FAILURES", "2")
+
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 1907
+        tracks = [music.AgentTrack(title=f"bad-{n}", query=f"bad-{n}") for n in range(3)]
+        st = music.GuildMusicState(guild_id=gid, queue=list(tracks))
+        agent.states[gid] = st
+        events = []
+
+        async def fail_resolve(*args, **kwargs):
+            raise RuntimeError("fonte indisponível")
+
+        agent.resolve_track = fail_resolve
+        agent.log = lambda event, **fields: events.append((event, fields))
+
+        await agent._play_next(gid)
+
+        assert st.status == "failed"
+        assert st.current is tracks[1]
+        assert st.queue == [tracks[2]]
+        assert st.consecutive_start_failures == 2
+        assert st.last_error_category == "resolution"
+        assert sum(1 for event, _ in events if event == "track_failed_skipped") == 1
+        assert sum(1 for event, _ in events if event == "track_failure_circuit_open") == 1
+
+    run(scenario())

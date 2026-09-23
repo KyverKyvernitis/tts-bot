@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from .ciclo_vida import remove_owned_task
+from .ciclo_vida import consume_task_result, remove_owned_task
 from .correspondencia import avaliar_correspondencia, busca_alternativa
 from .estado import AgentTrack
 from .ytdlp_quente import WarmYTDLPResolver
@@ -655,8 +655,17 @@ class ResolucaoMixin:
                     resolved = await asyncio.shield(resolver_task)
                 except asyncio.CancelledError:
                     cancel_event.set()
-                    with contextlib.suppress(Exception):
+                    try:
                         await asyncio.wait_for(asyncio.shield(resolver_task), timeout=1.5)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        # O thread pode levar mais alguns instantes para matar
+                        # yt-dlp. Colete o resultado quando terminar para não
+                        # produzir "exception in shielded future".
+                        resolver_task.add_done_callback(consume_task_result)
+                    except Exception:
+                        # A exceção final do resolver foi observada aqui; a
+                        # operação externa continua sendo um cancelamento.
+                        pass
                     raise
             self._metadata_cache_put(logical_key, resolved)
             media_key = self._media_cache_key(resolved)

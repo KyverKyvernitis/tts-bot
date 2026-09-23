@@ -14,6 +14,20 @@ def remove_owned_task(registry: dict[Any, Any], key: Any, task: Any) -> bool:
     return True
 
 
+def consume_task_result(task: Any) -> None:
+    """Collect a detached task result so late failures never become warnings.
+
+    Blocking yt-dlp work can outlive the coroutine that requested cancellation.
+    In that case the task is intentionally detached for a short period, but its
+    eventual exception still needs an owner or asyncio reports
+    ``exception was never retrieved`` / ``exception in shielded future``.
+    """
+    if not isinstance(task, asyncio.Future) or not task.done():
+        return
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        task.result()
+
+
 def playback_owned(state: Any, track: Any, token: int) -> bool:
     """Return whether a delayed playback step still owns the state generation."""
     return (

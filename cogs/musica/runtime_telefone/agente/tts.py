@@ -534,15 +534,10 @@ class TTSMixin:
             if st.current is not None:
                 return {"ok": False, "error": "música ativa sem mixer TTS direto; evitando interromper player", "state": st.public()}
 
-            guild, channel = await self._resolve_guild_and_channel(guild_id, voice_channel_id)
-            existing = guild.voice_client
-            if existing is None or not getattr(existing, "is_connected", lambda: False)():
-                self.log("voice_direct_tts_connecting", guild_id=guild_id, channel=voice_channel_id)
-                voice_client = await channel.connect(self_deaf=True)
-            else:
-                voice_client = existing
-                if getattr(getattr(voice_client, "channel", None), "id", None) != voice_channel_id:
-                    await voice_client.move_to(channel)
+            # Música e TTS compartilham a mesma sessão Discord Voice. Passe pelo
+            # mesmo single-flight para não competir com preconnect/playback.
+            self.log("voice_direct_tts_prepare", guild_id=guild_id, channel=voice_channel_id)
+            voice_client, _created = await self._ensure_direct_voice_client(guild_id)
             st.player = voice_client
             st.transport = "worker_voice_direct_tts"
             st.status = "tts_direct"

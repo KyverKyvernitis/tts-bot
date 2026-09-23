@@ -89,7 +89,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.45"
+AGENT_VERSION = "0.3.46"
 STARTED_AT = time.time()
 
 
@@ -170,6 +170,11 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         default_refresh_age = min(max(self.stream_cache_ttl * 0.75, 30.0), 150.0) if self.stream_cache_ttl > 0 else 120.0
         self.stream_refresh_before_play_seconds = max(15.0, env_float("MUSIC_AGENT_STREAM_REFRESH_BEFORE_PLAY_SECONDS", default_refresh_age))
         self._idle_disconnect_tasks: dict[int, asyncio.Task] = {}
+        # Todas as conexões/movimentos Discord Voice (música e TTS) passam por
+        # este lock por guild. Sem isso o preconnect e o caminho normal podem
+        # executar channel.connect() simultaneamente.
+        self._voice_connect_locks: dict[int, asyncio.Lock] = {}
+        self._voice_connect_lock_users: dict[int, int] = {}
         self._tts_direct_locks: dict[int, asyncio.Lock] = {}
         self._tts_direct_lock_users: dict[int, int] = {}
         self._metadata_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -311,6 +316,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             st.last_error = short_text(error, 320)
         elif status not in {"failed", "error"}:
             st.last_error = ""
+            st.last_error_category = ""
+            st.last_error_phase = ""
         if status in {"preparing", "starting"}:
             st.preparing_since = now
             st.playing_since = 0.0

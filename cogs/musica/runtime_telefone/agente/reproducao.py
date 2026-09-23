@@ -16,7 +16,46 @@ from .mixer_pcm import AgentMixedAudioSource, AgentTelemetryAudioSource, PCM_FRA
 from .utilitarios import safe_id, short_text
 
 
+class VoiceSessionError(RuntimeError):
+    """Falha de transporte/sessão Discord Voice, não falha da mídia."""
+
+
 class ReproducaoMixin:
+    @staticmethod
+    def _is_already_connected_voice_error(exc: BaseException) -> bool:
+        text = str(exc or "").strip().lower()
+        return "already connected to a voice channel" in text
+
+    @staticmethod
+    def _is_voice_transport_error(exc: BaseException, *, phase: str = "") -> bool:
+        if isinstance(exc, VoiceSessionError):
+            return True
+        text = f"{type(exc).__name__}: {exc}".lower()
+        if "already connected to a voice channel" in text:
+            return True
+        if phase in {"voice_preconnect", "voice_connect", "voice_move"}:
+            return True
+        voice_markers = (
+            "voice websocket",
+            "voice connection",
+            "not connected to voice",
+            "disconnected from voice",
+            "voz caiu",
+            "conexão de voz",
+            "sessão de voz",
+        )
+        return any(marker in text for marker in voice_markers)
+
+    def _classify_play_failure(self, exc: BaseException, *, phase: str) -> tuple[str, bool]:
+        if self._is_voice_transport_error(exc, phase=phase):
+            return "voice_transport", True
+        if phase == "resolve":
+            return "resolution", False
+        text = f"{type(exc).__name__}: {exc}".lower()
+        if "ffmpeg" in text or "stream" in text or "source" in text or "áudio" in text:
+            return "media_start", False
+        return "playback_start", False
+
     def _cancel_prefetch_tasks(
         self,
         guild_id: int | None = None,
@@ -987,10 +1026,22 @@ class ReproducaoMixin:
         st.ducked = False
         st.normal_volume_percent = max(0, min(150, int(st.normal_volume_percent or self.default_volume_percent)))
         st.volume_percent = st.normal_volume_percent
+        st.play_attempt_sequence += 1
+        play_attempt = int(st.play_attempt_sequence)
         self._set_status(st, "preparing", event="play_preparing")
-        self.log("track_loading", guild_id=guild_id, title=getattr(st.current, "title", ""), source=getattr(st.current, "source", ""), lazy=not bool(getattr(st.current, "stream_url", "")))
+        self.log(
+            "track_loading",
+            guild_id=guild_id,
+            attempt=play_attempt,
+            title=getattr(st.current, "title", ""),
+            source=getattr(st.current, "source", ""),
+            lazy=not bool(getattr(st.current, "stream_url", "")),
+            queue_size=len(st.queue),
+            playback_token=int(st.playback_token),
+        )
         voice_prepare_task: asyncio.Task | None = None
         prepared_voice: tuple[Any, bool] | None = None
+        failure_phase = "prepare"
         try:
             if st.current and self._track_stream_needs_refresh(st.current):
                 self.log(
@@ -1007,6 +1058,7 @@ class ReproducaoMixin:
                 # dois em paralelo para que o tempo de handshake de voz não
                 # seja somado ao tempo de resolução da faixa.
                 if self.direct_audio_enabled and st.voice_channel_id:
+                    failure_phase = "voice_preconnect"
                     voice_prepare_task = asyncio.create_task(
                         asyncio.wait_for(
                             self._ensure_direct_voice_client(guild_id),
@@ -1014,6 +1066,7 @@ class ReproducaoMixin:
                         )
                     )
                     self.log("voice_preconnect_started", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
+                failure_phase = "resolve"
                 started = time.time()
                 meta = st.current.public()
                 query = self._query_from_track_meta(meta, fallback_query=st.current.query or st.current.title)
@@ -1057,8 +1110,10 @@ class ReproducaoMixin:
             if not self._should_use_direct_voice(st.current):
                 raise RuntimeError("playback direto do Music Agent indisponível para a faixa resolvida")
             if voice_prepare_task is not None:
+                failure_phase = "voice_preconnect"
                 prepared_voice = await voice_prepare_task
                 voice_prepare_task = None
+            failure_phase = "playback_start"
             play_coro = (
                 self._play_direct_voice(guild_id, st.current, prepared_voice=prepared_voice)
                 if prepared_voice is not None
@@ -1076,15 +1131,73 @@ class ReproducaoMixin:
                         if getattr(voice_client, "is_connected", lambda: False)():
                             await voice_client.disconnect(force=True)
             failed_track = st.current
-            self._invalidate_track_stream_cache(failed_track)
+            category, recoverable = self._classify_play_failure(exc, phase=failure_phase)
+            if category != "voice_transport":
+                self._invalidate_track_stream_cache(failed_track)
             self._set_status(st, "failed", event="play_failed", error=f"{type(exc).__name__}: {short_text(exc, 260)}")
+            st.last_error_category = category
+            st.last_error_phase = failure_phase
+            st.consecutive_start_failures += 1
             self.log(
                 "play_failed",
                 guild_id=guild_id,
+                attempt=play_attempt,
                 transport=st.transport or "unknown",
+                category=category,
+                phase=failure_phase,
+                recoverable=recoverable,
+                failure_streak=st.consecutive_start_failures,
+                queue_size=len(st.queue),
                 error=st.last_error,
                 title=getattr(failed_track, "title", ""),
             )
+            if category == "voice_transport" and failed_track is not None:
+                max_voice_retries = max(0, min(3, env_int("MUSIC_AGENT_VOICE_START_RETRIES", 1)))
+                attempts = int(getattr(failed_track, "voice_recovery_attempts", 0) or 0)
+                if attempts < max_voice_retries:
+                    failed_track.voice_recovery_attempts = attempts + 1
+                    st.current = None
+                    st.paused = False
+                    st.queue.insert(0, failed_track)
+                    self._set_status(st, "queued", event="voice_transport_retry")
+                    self.log(
+                        "voice_transport_retry",
+                        guild_id=guild_id,
+                        attempt=play_attempt,
+                        retry=failed_track.voice_recovery_attempts,
+                        max_retries=max_voice_retries,
+                        title=getattr(failed_track, "title", ""),
+                        queue_size=len(st.queue),
+                    )
+                    await asyncio.sleep(0)
+                    await self._play_next(guild_id, preserve_current_to_history=False)
+                    return
+                # Falha de infraestrutura não pode consumir a música nem iniciar
+                # uma cascata pela playlist. Mantenha current + fila para retry.
+                self.log(
+                    "voice_transport_queue_preserved",
+                    guild_id=guild_id,
+                    attempt=play_attempt,
+                    title=getattr(failed_track, "title", ""),
+                    queue_size=len(st.queue),
+                    retries=attempts,
+                )
+                return
+
+            max_consecutive = max(1, min(25, env_int("MUSIC_AGENT_MAX_CONSECUTIVE_START_FAILURES", 5)))
+            if st.consecutive_start_failures >= max_consecutive:
+                # Evita consumir milhares de itens/recursão profunda quando uma
+                # dependência externa quebra de forma sistêmica.
+                self.log(
+                    "track_failure_circuit_open",
+                    guild_id=guild_id,
+                    category=category,
+                    failure_streak=st.consecutive_start_failures,
+                    max_failures=max_consecutive,
+                    title=getattr(failed_track, "title", ""),
+                    queue_size=len(st.queue),
+                )
+                return
             if st.queue:
                 # Uma faixa quebrada não deve derrubar uma playlist/fila inteira.
                 # Ela não entra no histórico porque nunca chegou a tocar; avance
@@ -1094,6 +1207,9 @@ class ReproducaoMixin:
                 self.log(
                     "track_failed_skipped",
                     guild_id=guild_id,
+                    category=category,
+                    phase=failure_phase,
+                    failure_streak=st.consecutive_start_failures,
                     title=getattr(failed_track, "title", ""),
                     queue_size=len(st.queue),
                 )
@@ -1166,21 +1282,102 @@ class ReproducaoMixin:
     async def _ensure_direct_voice_client(self, guild_id: int) -> tuple[Any, bool]:
         """Prepare a sessão de voz e diga se esta chamada criou a conexão."""
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
-        guild, channel = await self._resolve_guild_and_channel(guild_id, st.voice_channel_id)
-        existing = guild.voice_client
-        if existing is None or not getattr(existing, "is_connected", lambda: False)():
-            self.log("voice_connecting", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
-            voice_client = await channel.connect(self_deaf=True)
-            self.log("voice_connected", guild_id=guild_id, channel=st.voice_channel_id, transport="direct", reused=False)
-            return voice_client, True
-        voice_client = existing
-        current_channel_id = getattr(getattr(voice_client, "channel", None), "id", None)
-        if current_channel_id != st.voice_channel_id:
-            self.log("voice_moving", guild_id=guild_id, channel=st.voice_channel_id, from_channel=current_channel_id, transport="direct")
-            await voice_client.move_to(channel)
-        else:
-            self.log("voice_reused", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
-        return voice_client, False
+        requested_channel_id = int(st.voice_channel_id or 0)
+        lock_started = time.monotonic()
+        async with self._registry_lock(self._voice_connect_locks, self._voice_connect_lock_users, guild_id):
+            waited_ms = max(0.0, (time.monotonic() - lock_started) * 1000.0)
+            if waited_ms >= 5.0:
+                self.log(
+                    "voice_connect_serialized",
+                    guild_id=guild_id,
+                    channel=requested_channel_id,
+                    waited_ms=round(waited_ms, 1),
+                )
+            # O canal pode ter mudado enquanto aguardávamos o lock.
+            requested_channel_id = int(st.voice_channel_id or requested_channel_id)
+            guild, channel = await self._resolve_guild_and_channel(guild_id, requested_channel_id)
+            existing = guild.voice_client
+
+            if existing is not None and not getattr(existing, "is_connected", lambda: False)():
+                grace = max(0.0, min(2.0, env_float("MUSIC_AGENT_VOICE_RECONNECT_GRACE_SECONDS", 0.6)))
+                if grace > 0:
+                    reconnect_started = time.monotonic()
+                    deadline = time.monotonic() + grace
+                    while time.monotonic() < deadline:
+                        await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                        current = guild.voice_client
+                        if current is not None and getattr(current, "is_connected", lambda: False)():
+                            existing = current
+                            self.log(
+                                "voice_existing_recovered",
+                                guild_id=guild_id,
+                                channel=getattr(getattr(existing, "channel", None), "id", None),
+                                waited_ms=round((time.monotonic() - reconnect_started) * 1000.0, 1),
+                            )
+                            break
+                if not getattr(existing, "is_connected", lambda: False)():
+                    self.log(
+                        "voice_stale_client_cleanup",
+                        guild_id=guild_id,
+                        channel=getattr(getattr(existing, "channel", None), "id", None),
+                    )
+                    try:
+                        await existing.disconnect(force=True)
+                    except Exception as cleanup_exc:
+                        self.log(
+                            "voice_stale_client_cleanup_failed",
+                            guild_id=guild_id,
+                            channel=getattr(getattr(existing, "channel", None), "id", None),
+                            error=f"{type(cleanup_exc).__name__}: {short_text(cleanup_exc, 180)}",
+                        )
+                    existing = guild.voice_client
+
+            if existing is None or not getattr(existing, "is_connected", lambda: False)():
+                self.log("voice_connecting", guild_id=guild_id, channel=requested_channel_id, transport="direct")
+                try:
+                    voice_client = await channel.connect(self_deaf=True)
+                except Exception as exc:
+                    if not self._is_already_connected_voice_error(exc):
+                        raise VoiceSessionError(f"falha ao conectar voz: {type(exc).__name__}: {short_text(exc, 220)}") from exc
+                    # discord.py pode registrar o VoiceClient um instante antes
+                    # de a coroutine concorrente devolver. Releia o registro em
+                    # vez de tratar isso como falha da música.
+                    recovered = guild.voice_client
+                    if recovered is not None:
+                        deadline = time.monotonic() + max(0.1, min(1.5, env_float("MUSIC_AGENT_VOICE_RACE_RECOVERY_SECONDS", 0.8)))
+                        while time.monotonic() < deadline and not getattr(recovered, "is_connected", lambda: False)():
+                            await asyncio.sleep(0.04)
+                            recovered = guild.voice_client or recovered
+                    if recovered is not None and getattr(recovered, "is_connected", lambda: False)():
+                        self.log(
+                            "voice_connect_race_recovered",
+                            guild_id=guild_id,
+                            channel=getattr(getattr(recovered, "channel", None), "id", None),
+                            error=short_text(exc, 160),
+                        )
+                        voice_client = recovered
+                        current_channel_id = getattr(getattr(voice_client, "channel", None), "id", None)
+                        if current_channel_id != requested_channel_id:
+                            try:
+                                await voice_client.move_to(channel)
+                            except Exception as move_exc:
+                                raise VoiceSessionError(f"falha ao mover voz após corrida: {type(move_exc).__name__}: {short_text(move_exc, 220)}") from move_exc
+                        return voice_client, False
+                    raise VoiceSessionError(f"corrida de conexão de voz não recuperada: {type(exc).__name__}: {short_text(exc, 220)}") from exc
+                self.log("voice_connected", guild_id=guild_id, channel=requested_channel_id, transport="direct", reused=False)
+                return voice_client, True
+
+            voice_client = existing
+            current_channel_id = getattr(getattr(voice_client, "channel", None), "id", None)
+            if current_channel_id != requested_channel_id:
+                self.log("voice_moving", guild_id=guild_id, channel=requested_channel_id, from_channel=current_channel_id, transport="direct")
+                try:
+                    await voice_client.move_to(channel)
+                except Exception as exc:
+                    raise VoiceSessionError(f"falha ao mover sessão de voz: {type(exc).__name__}: {short_text(exc, 220)}") from exc
+            else:
+                self.log("voice_reused", guild_id=guild_id, channel=requested_channel_id, transport="direct")
+            return voice_client, False
 
     async def _discard_prepared_voice_task(self, guild_id: int, task: asyncio.Task | None) -> None:
         """Cancele um preconnect obsoleto e desfaça apenas conexões criadas por ele."""
@@ -1208,7 +1405,7 @@ class ReproducaoMixin:
         tracks_first_frame = hasattr(source, "first_frame_ms")
         while True:
             if not getattr(voice_client, "is_connected", lambda: False)():
-                raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
+                raise VoiceSessionError("conectei no canal, mas a voz caiu antes do áudio")
             playing = bool(
                 getattr(voice_client, "is_playing", lambda: False)()
                 or getattr(voice_client, "is_paused", lambda: False)()
@@ -1220,7 +1417,7 @@ class ReproducaoMixin:
                 break
             await asyncio.sleep(min(poll, max(0.0, deadline - now)))
         if not getattr(voice_client, "is_connected", lambda: False)():
-            raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
+            raise VoiceSessionError("conectei no canal, mas a voz caiu antes do áudio")
         if not getattr(voice_client, "is_playing", lambda: False)() and not getattr(voice_client, "is_paused", lambda: False)():
             raise RuntimeError("ffmpeg iniciou, mas o áudio não ficou tocando")
         return max(0.0, time.monotonic() - started)
@@ -1436,6 +1633,10 @@ class ReproducaoMixin:
         quality_context["transition_gap_ms"] = round(transition_gap_ms, 1) if transition_gap_ms is not None else None
         if isinstance(source, AgentMixedAudioSource) and source.persistent:
             source.quality_context = dict(quality_context)
+        st.consecutive_start_failures = 0
+        st.last_error_category = ""
+        st.last_error_phase = ""
+        track.voice_recovery_attempts = 0
         self._set_status(st, "playing", event="direct_track_start_confirmed")
         self.log(
             "play_started",

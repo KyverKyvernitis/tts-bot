@@ -29,6 +29,7 @@ class AgentTrack:
     audio_channels: int = 0
     start_offset_seconds: float = 0.0
     stream_recovery_attempts: int = 0
+    voice_recovery_attempts: int = 0
     stream_resolved_monotonic: float = 0.0
     virtual_playlist_cursor: dict[str, Any] = field(default_factory=dict)
 
@@ -99,6 +100,12 @@ class GuildMusicState:
     # determinístico durante a sessão e é descartado quando o cursor termina.
     virtual_shuffle_active: bool = False
     virtual_shuffle_seed: int = 0
+    # Auditoria de startup. Estes campos são pequenos, persistem somente em
+    # memória e ajudam a distinguir mídia inválida de falha do transporte de voz.
+    play_attempt_sequence: int = 0
+    consecutive_start_failures: int = 0
+    last_error_category: str = ""
+    last_error_phase: str = ""
 
     def _first_virtual_marker(self) -> tuple[int, AgentTrack] | None:
         for index, item in enumerate(self.queue):
@@ -172,6 +179,8 @@ class GuildMusicState:
             "status": self.status,
             "paused": self.paused,
             "last_error": self.last_error,
+            "last_error_category": self.last_error_category,
+            "last_error_phase": self.last_error_phase,
             "last_action": self.last_action,
             "last_event": self.last_event,
             "transport": self.transport,
@@ -190,6 +199,8 @@ class GuildMusicState:
             ),
             "state_revision": self.state_revision(),
             "playback_token": int(self.playback_token),
+            "play_attempt_sequence": int(self.play_attempt_sequence),
+            "consecutive_start_failures": int(self.consecutive_start_failures),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": sum(1 for item in self.queue if not item.is_virtual_playlist_marker),
