@@ -217,7 +217,7 @@ async def _marcar_monitor_reconectando(router: Any, guild_id: int, *, falhas: in
             setter(state, "reconnecting")
         else:
             state.current_status = "reconnecting"
-        state.current_status_detail = "Phone Worker temporariamente inacessível; reconectando"
+        state.current_status_detail = "Conexão do player temporariamente indisponível; tentando restabelecer"
         updater = getattr(router, "update_panel", None)
         if callable(updater) and getattr(state, "now_message", None) is not None:
             try:
@@ -301,7 +301,7 @@ def iniciar_monitor_music_agent(
                         and str(deferred.get("status") or "") in {"failed", "expired"}
                     ):
                         state = router.get_state(guild_id)
-                        detail = str(deferred.get("last_error") or ultimo_erro_monitor or "Phone Worker indisponível")[:300]
+                        detail = str(deferred.get("last_error") or ultimo_erro_monitor or "Conexão do player indisponível")[:300]
                         setter = getattr(router, "_set_current_status", None)
                         if callable(setter):
                             setter(state, "error")
@@ -341,7 +341,7 @@ def iniciar_monitor_music_agent(
                         and str(deferred.get("status") or "") in {"failed", "expired"}
                     ):
                         state = router.get_state(guild_id)
-                        detail = str(deferred.get("last_error") or ultimo_erro_monitor or "Phone Worker indisponível")[:300]
+                        detail = str(deferred.get("last_error") or ultimo_erro_monitor or "Conexão do player indisponível")[:300]
                         setter = getattr(router, "_set_current_status", None)
                         if callable(setter):
                             setter(state, "error")

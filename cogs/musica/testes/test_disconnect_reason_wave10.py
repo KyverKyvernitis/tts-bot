@@ -25,7 +25,8 @@ def test_player_has_distinct_disconnect_messages():
         "external_disconnect",
     ):
         assert reason in source
-    assert "Nenhuma ação humana foi confirmada no Audit Log" in source
+    assert "Motivo: causa não determinada" in source
+    assert "não há registro de quem o removeu nem de uma saída automática" in source
 
 
 def test_worker_snapshot_exposes_disconnect_cause():

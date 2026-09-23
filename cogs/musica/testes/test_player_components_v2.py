@@ -134,7 +134,7 @@ def test_status_inline_nao_usa_spinner_de_loading_para_tocando_e_fim_usa_barra()
 
     assert 'return "Tocando Agora", PLAYER_STATUS_PLAYING_EMOJI' in presentation
     assert 'return "Tocando Agora", PLAYER_STATUS_ANIMATED_EMOJI' not in presentation
-    assert 'return "As músicas acabaram", PLAYER_QUEUE_FINISHED_EMOJI' in presentation
+    assert 'return "Fila concluída", PLAYER_QUEUE_FINISHED_EMOJI' in presentation
     assert 'return "As músicas acabaram", "✅"' not in presentation
 
 

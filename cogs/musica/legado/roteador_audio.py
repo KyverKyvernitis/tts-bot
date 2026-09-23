@@ -3660,7 +3660,7 @@ class AudioRouter:
             # Não destrua current/fila por uma queda de rota. O monitor do
             # Worker já possui backoff/rebind e pode recuperar a sessão.
             self._set_current_status(state, "reconnecting")
-            state.current_status_detail = "Phone Worker inacessível durante a desconexão de voz; verificando rede e sessão"
+            state.current_status_detail = "Não foi possível confirmar o estado da reprodução após a saída do canal; verificando a sessão"
             self._set_idle_reason(state, "worker_unreachable", channel_name=getattr(before_channel, "name", "") or "")
             state.agent_monitor_failures = max(1, int(getattr(state, "agent_monitor_failures", 0) or 0))
             self.start_music_agent_monitor(
