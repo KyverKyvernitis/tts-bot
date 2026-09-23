@@ -106,9 +106,15 @@ musica_ensure_agent_if_needed() {
     upsert_env_value MUSIC_AGENT_TOKEN "$PHONE_WORKER_TOKEN"
   fi
   log "garantindo Music Agent do worker; release=$release"
+  local rc=0
   PHONE_WORKER_RELEASE_DIR="$release" \
   PHONE_WORKER_DIR="$WORKER_DIR" \
   MUSIC_AGENT_ENV="$MUSIC_AGENT_ENV_FILE" \
-    "$start_command" >/dev/null 2>&1 || \
-    log "não consegui iniciar Music Agent automaticamente; música direta no worker pode ficar indisponível"
+    "$start_command" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    log "não consegui iniciar Music Agent automaticamente; rc=$rc; música direta no worker pode ficar indisponível"
+  fi
+  # O Music Agent é um companion: falhar nele não derruba o control plane.
+  # O watchdog repetirá esta garantia no próximo ciclo.
+  return 0
 }

@@ -281,9 +281,31 @@ def test_music_agent_autostart_is_not_turbo_only():
     integration = (ROOT / "cogs/musica/runtime_telefone/termux/integracao-worker.sh").read_text(encoding="utf-8")
     assert "ensure_music_agent_for_turbo_if_needed" not in source + integration
     assert "musica_ensure_agent_if_needed()" in integration
-    maintenance = source.split("run_post_start_maintenance_async()", 1)[1].split("\n}\n", 1)[0]
-    assert "musica_ensure_agent_if_needed" in maintenance
+    companions = source.split("ensure_runtime_companions()", 1)[1].split("\n}\n", 1)[0]
+    assert "musica_ensure_agent_if_needed" in companions
     assert "is_turbo_profile || return 0" not in integration.split("musica_ensure_agent_if_needed()", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_phone_worker_healthy_paths_supervise_music_agent_before_success():
+    source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
+    already_online = source.split('log "worker Termux já saudável; pid=$existing_pid"', 1)[0].rsplit("else", 1)[1]
+    assert "ensure_runtime_companions" in already_online
+    assert already_online.index("ensure_runtime_companions") < already_online.index("run_post_start_maintenance_async")
+
+    just_started = source.split('if worker_healthy_for_pid "$child_pid"; then', 1)[1].split("\nfi", 1)[0]
+    assert "ensure_runtime_companions" in just_started
+    assert just_started.index("ensure_runtime_companions") < just_started.index("run_post_start_maintenance_async")
+
+
+def test_phone_worker_maintenance_lock_recovers_orphaned_directory():
+    source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
+    acquire = source.split("acquire_maintenance_lock()", 1)[1].split("\n}\n", 1)[0]
+    release = source.split("release_maintenance_lock()", 1)[1].split("\n}\n", 1)[0]
+    assert 'owner_file="$MAINT_LOCK_DIR/owner.pid"' in acquire
+    assert "printf '%s\\n' \"$BASHPID\"" in acquire
+    assert 'maintenance_lock_owner_alive "$old_pid"' in acquire
+    assert 'rm -rf "$MAINT_LOCK_DIR"' in acquire
+    assert '"$owner" == "$BASHPID"' in release
 
 def test_music_agent_supervisor_runs_agent_from_active_release():
     source = (ROOT / "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh").read_text(encoding="utf-8")
@@ -301,6 +323,15 @@ def test_phone_worker_autostart_prefers_active_release_music_supervisor():
     assert '$release/cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh' in integration
     assert 'PHONE_WORKER_RELEASE_DIR="$release"' in integration
     assert 'MUSIC_AGENT_ENV="$MUSIC_AGENT_ENV_FILE"' in integration
+
+
+def test_phone_worker_music_autostart_keeps_supervisor_output_for_audit():
+    integration = (ROOT / "cogs/musica/runtime_telefone/termux/integracao-worker.sh").read_text(encoding="utf-8")
+    block = integration.split("musica_ensure_agent_if_needed()", 1)[1].split("\n}\n", 1)[0]
+    assert '"$start_command" || rc=$?' in block
+    assert '"$start_command" >/dev/null 2>&1' not in block
+    assert 'rc=$rc' in block
+    assert "return 0" in block
 
 
 def test_phone_worker_music_dependency_bootstrap_is_profile_independent_and_lightweight():

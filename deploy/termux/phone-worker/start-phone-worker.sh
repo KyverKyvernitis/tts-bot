@@ -679,25 +679,70 @@ ensure_turbo_deps_if_needed() {
   ensure_turbo_piper_wrapper_if_needed
 }
 
+maintenance_lock_owner_alive() {
+  local pid="${1:-}" cmdline=""
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [[ -r "/proc/$pid/cmdline" ]]; then
+    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    [[ "$cmdline" == *"start-phone-worker.sh"* ]] || return 1
+  fi
+  return 0
+}
+
+acquire_maintenance_lock() {
+  local owner_file="$MAINT_LOCK_DIR/owner.pid" old_pid=""
+  if mkdir "$MAINT_LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$BASHPID" > "$owner_file" 2>/dev/null || true
+    return 0
+  fi
+  [[ -f "$owner_file" ]] && old_pid="$(head -n 1 "$owner_file" 2>/dev/null || true)"
+  if maintenance_lock_owner_alive "$old_pid"; then
+    return 1
+  fi
+  log "lock órfão da manutenção pós-start detectado; recuperando"
+  rm -rf "$MAINT_LOCK_DIR" 2>/dev/null || return 1
+  mkdir "$MAINT_LOCK_DIR" 2>/dev/null || return 1
+  printf '%s\n' "$BASHPID" > "$owner_file" 2>/dev/null || true
+  return 0
+}
+
+release_maintenance_lock() {
+  local owner_file="$MAINT_LOCK_DIR/owner.pid" owner=""
+  [[ -f "$owner_file" ]] && owner="$(head -n 1 "$owner_file" 2>/dev/null || true)"
+  if [[ -z "$owner" || "$owner" == "$BASHPID" ]]; then
+    rm -rf "$MAINT_LOCK_DIR" 2>/dev/null || true
+  fi
+}
+
+ensure_runtime_companions() {
+  # O watchdog considera o Phone Worker saudável pelo control plane, mas isso
+  # não prova que o plano de áudio está vivo. Garanta companions essenciais
+  # sincronamente para que boot, update e crash do Music Agent sejam reparados
+  # no próximo ciclo, independentemente da manutenção de dependências.
+  musica_cleanup_safe_mode
+  musica_ensure_agent_if_needed
+}
+
 run_post_start_maintenance_async() {
   mkdir -p "$(dirname "$MAINT_LOG_FILE")" 2>/dev/null || true
   (
-    if ! mkdir "$MAINT_LOCK_DIR" 2>/dev/null; then
+    if ! acquire_maintenance_lock; then
       log "manutenção pós-start já em andamento"
       exit 0
     fi
-    trap 'rm -rf "$MAINT_LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+    trap 'release_maintenance_lock' EXIT INT TERM
     log "manutenção pós-start iniciada"
     if is_turbo_profile; then
       cleanup_stale_heavy_dependency_builds
       musica_cleanup_safe_mode
       ensure_turbo_deps_if_needed
     fi
-    # Música é independente do perfil APK/turbo: o Termux fallback também
-    # resolve via yt-dlp e hospeda o Music Agent direto.
+    # Dependências permanecem na manutenção assíncrona para não atrasar o
+    # health do control plane. O Music Agent em si é supervisionado no caminho
+    # síncrono por ensure_runtime_companions().
     musica_ensure_ytdlp_deps_if_needed
     musica_ensure_agent_deps_if_needed
-    musica_ensure_agent_if_needed
     log "manutenção pós-start finalizada"
   ) >> "$MAINT_LOG_FILE" 2>&1 &
 }
@@ -725,6 +770,7 @@ if [[ -n "$existing_pid" && "$count" -le 1 ]] && worker_healthy_for_pid "$existi
     write_status "restart_for_update pid=$existing_pid runtime=$running_ver file=$file_ver $(now_iso)"
     kill_worker_processes
   else
+    ensure_runtime_companions
     run_post_start_maintenance_async
     log "worker Termux já saudável; pid=$existing_pid"
     write_status "ok already_online pid=$existing_pid $(now_iso)"
@@ -769,6 +815,7 @@ if worker_healthy_for_pid "$child_pid"; then
   effective_port="$(runtime_http_port)"
   log "worker Termux iniciado e validado; pid=$child_pid http_port=${effective_port:-none}"
   write_status "ok pid=$child_pid http_port=${effective_port:-none} $(now_iso)"
+  ensure_runtime_companions
   run_post_start_maintenance_async
   exit 0
 fi
