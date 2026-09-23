@@ -401,6 +401,7 @@ class ReproducaoMixin:
         if not query and not tracks_payload:
             raise ValueError("query/url vazia")
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        self._update_auto_leave_from_body(st, body)
         st.voice_channel_id = voice_channel_id
         st.text_channel_id = text_channel_id
         if not st.normal_volume_percent:
@@ -409,6 +410,8 @@ class ReproducaoMixin:
             st.volume_percent = st.normal_volume_percent
         st.last_action = "play"
         self._cancel_idle_disconnect(guild_id)
+        self._cancel_voice_presence_disconnect(guild_id)
+        self._set_voice_session_mode(st, "music_active", reason="play_received")
         command_generation = int(getattr(st, "playback_token", 0) or 0)
         self.log("play_received", guild_id=guild_id, voice=voice_channel_id, query=query, action=action, tracks=len(tracks_payload), generation=command_generation)
 
@@ -740,6 +743,7 @@ class ReproducaoMixin:
         st.last_action = "stop"
         self._cancel_prefetch_tasks(guild_id)
         self._cancel_idle_disconnect(guild_id)
+        self._cancel_voice_presence_disconnect(guild_id)
         st.queue.clear()
         st.history.clear()
         st.virtual_shuffle_active = False
@@ -748,6 +752,7 @@ class ReproducaoMixin:
         st.player = None
         st.current = None
         self._set_status(st, "idle", event="stop")
+        self._set_voice_session_mode(st, "disconnected", reason="manual_stop")
         st.paused = False
         self._bump_playback_generation(st, reason="stop")
         await self._stop_player_instance(player, disconnect=True)
@@ -1090,6 +1095,7 @@ class ReproducaoMixin:
             self._set_status(st, "idle", event="queue_empty")
             self._finish_mixer_when_idle(st)
             self._schedule_idle_disconnect(guild_id)
+            await self._refresh_voice_presence_policy(guild_id, source="queue_empty")
             return
         if st.queue[0].is_virtual_playlist_marker:
             # Não remova o marker: ele é o ponto exato onde a próxima janela
@@ -1804,6 +1810,8 @@ class ReproducaoMixin:
         st.voice_runtime_recovery_last_error = ""
         track.voice_recovery_attempts = 0
         self._set_status(st, "playing", event="direct_track_start_confirmed")
+        self._set_voice_session_mode(st, "music_active", reason="play_started")
+        await self._refresh_voice_presence_policy(guild_id, source="play_started")
         self.log(
             "play_started",
             guild_id=guild_id,
@@ -2391,3 +2399,4 @@ class ReproducaoMixin:
         # Fim normal de fila não é desconexão externa: mantenha a sessão de voz
         # viva e deixe o mesmo timeout AFK/idle decidir quando sair da call.
         self._schedule_idle_disconnect(guild_id)
+        await self._refresh_voice_presence_policy(guild_id, source="queue_finished")

@@ -4074,6 +4074,17 @@ class TTSAudioMixin(SharedSynthesisMixin):
             logger.debug("[worker_voice_agent] TTS direto worker pulado | guild=%s reason=%s", guild.id, reason)
             return None
         payload = self._worker_voice_direct_tts_payload(guild, item)
+        try:
+            payload["auto_leave_enabled"] = bool(await self._maybe_await(
+                self._get_guild_toggle_value(
+                    guild.id,
+                    public_key="auto_leave",
+                    raw_key="auto_leave_enabled",
+                    default=True,
+                )
+            ))
+        except Exception:
+            payload["auto_leave_enabled"] = True
         started = time.monotonic()
         try:
             prebuilt_path: str | None = None

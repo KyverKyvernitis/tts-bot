@@ -90,7 +90,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.52"
+AGENT_VERSION = "0.3.53"
 STARTED_AT = time.time()
 
 
@@ -175,6 +175,10 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         normal_idle = env_float("MUSIC_IDLE_DISCONNECT_SECONDS", 120.0)
         min_idle = max(15.0, env_float("MUSIC_AGENT_MIN_IDLE_DISCONNECT_SECONDS", normal_idle))
         self.idle_disconnect_seconds = max(min_idle, env_float("MUSIC_AGENT_IDLE_DISCONNECT_SECONDS", normal_idle))
+        self.voice_empty_disconnect_seconds = max(
+            0.5,
+            min(15.0, env_float("MUSIC_AGENT_VOICE_EMPTY_DISCONNECT_SECONDS", 2.0)),
+        )
         # Cache separado: metadata pode viver muito mais que URL tocável. URLs
         # diretas do YouTube/googlevideo expiram, então o cache de stream é curto
         # e é invalidado em erro de playback.
@@ -195,6 +199,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         default_refresh_age = min(max(self.stream_cache_ttl * 0.75, 30.0), 150.0) if self.stream_cache_ttl > 0 else 120.0
         self.stream_refresh_before_play_seconds = max(15.0, env_float("MUSIC_AGENT_STREAM_REFRESH_BEFORE_PLAY_SECONDS", default_refresh_age))
         self._idle_disconnect_tasks: dict[int, asyncio.Task] = {}
+        self._voice_presence_disconnect_tasks: dict[int, asyncio.Task] = {}
         # Todas as conexões/movimentos Discord Voice (música e TTS) passam por
         # este lock por guild. Sem isso o preconnect e o caminho normal podem
         # executar channel.connect() simultaneamente.
@@ -266,6 +271,24 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         async def on_ready() -> None:  # type: ignore[no-untyped-def]
             self.log("discord_ready", user=str(self.client.user), version=AGENT_VERSION, playback="direct")
 
+        @self.client.event
+        async def on_voice_state_update(member, before, after) -> None:  # type: ignore[no-untyped-def]
+            guild = getattr(member, "guild", None)
+            guild_id = safe_id(getattr(guild, "id", 0))
+            if guild_id <= 0 or guild_id not in self.states:
+                return
+            st = self.states[guild_id]
+            player = st.player
+            player_channel = getattr(player, "channel", None) if player is not None else None
+            player_channel_id = safe_id(getattr(player_channel, "id", 0) or st.voice_channel_id)
+            if player_channel_id <= 0:
+                return
+            before_id = safe_id(getattr(getattr(before, "channel", None), "id", 0))
+            after_id = safe_id(getattr(getattr(after, "channel", None), "id", 0))
+            if player_channel_id not in {before_id, after_id}:
+                return
+            await self._refresh_voice_presence_policy(guild_id, source="voice_state_update")
+
     @contextlib.asynccontextmanager
     async def _registry_lock(self, locks: dict[Any, asyncio.Lock], users: dict[Any, int], key: Any):
         """Serializa uma chave sem manter locks ociosos para sempre.
@@ -307,10 +330,218 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         if task and not task.done():
             task.cancel()
 
+    def _cancel_voice_presence_disconnect(self, guild_id: int) -> None:
+        task = self._voice_presence_disconnect_tasks.pop(int(guild_id or 0), None)
+        if task and not task.done():
+            task.cancel()
+
+    def _set_voice_session_mode(self, st: GuildMusicState, mode: str, *, reason: str = "") -> None:
+        mode = str(mode or "disconnected").strip().lower() or "disconnected"
+        previous = str(getattr(st, "voice_session_mode", "") or "disconnected")
+        st.voice_session_mode = mode
+        if reason:
+            st.voice_presence_reason = short_text(reason, 120)
+        if previous != mode:
+            self.log(
+                "voice_session_mode_changed",
+                guild_id=st.guild_id,
+                previous=previous,
+                current=mode,
+                reason=reason,
+            )
+
+    @staticmethod
+    def _update_auto_leave_from_body(st: GuildMusicState, body: dict[str, Any]) -> None:
+        if "auto_leave_enabled" in body:
+            st.auto_leave_enabled = truthy(body.get("auto_leave_enabled"), True)
+
+    def _voice_human_count(self, st: GuildMusicState) -> int | None:
+        player = st.player
+        channel = getattr(player, "channel", None) if player is not None else None
+        if channel is None and st.voice_channel_id:
+            getter = getattr(self.client, "get_channel", None)
+            if callable(getter):
+                with contextlib.suppress(Exception):
+                    channel = getter(int(st.voice_channel_id))
+        if channel is None:
+            return None
+        try:
+            members = list(getattr(channel, "members", []) or [])
+        except Exception:
+            return None
+        return sum(1 for member in members if not bool(getattr(member, "bot", False)))
+
+    def _schedule_voice_presence_disconnect(
+        self,
+        guild_id: int,
+        *,
+        delay: float,
+        reason: str,
+        expected_mode: str,
+    ) -> None:
+        guild_id = int(guild_id or 0)
+        if guild_id <= 0:
+            return
+        existing = self._voice_presence_disconnect_tasks.get(guild_id)
+        if existing is not None and not existing.done():
+            return
+        self._voice_presence_disconnect_tasks[guild_id] = asyncio.create_task(
+            self._voice_presence_disconnect_later(
+                guild_id,
+                max(0.0, float(delay)),
+                reason=str(reason or "voice_empty"),
+                expected_mode=str(expected_mode or ""),
+            )
+        )
+        self.log(
+            "voice_presence_timer_started",
+            guild_id=guild_id,
+            reason=reason,
+            mode=expected_mode,
+            delay=round(float(delay), 2),
+        )
+
+    async def _voice_presence_disconnect_later(
+        self,
+        guild_id: int,
+        delay: float,
+        *,
+        reason: str,
+        expected_mode: str,
+    ) -> None:
+        try:
+            await asyncio.sleep(delay)
+            st = self.states.get(int(guild_id))
+            if st is None or not bool(getattr(st, "auto_leave_enabled", True)):
+                return
+            current_mode = str(getattr(st, "voice_session_mode", "") or "")
+            if expected_mode == "music_owned":
+                if current_mode not in {"music_active", "music_idle_grace"}:
+                    return
+            elif current_mode != expected_mode:
+                return
+            humans = self._voice_human_count(st)
+            if humans is None or humans > 0:
+                return
+            st.voice_human_count = int(humans)
+
+            if reason == "music_alone":
+                # Esta é a política de 2 minutos enquanto ainda existe música:
+                # encerra a sessão musical inteira, inclusive fila pendente.
+                if current_mode == "music_active" and not (
+                    st.current is not None
+                    or st.queue
+                    or st.status in {"preparing", "starting", "playing", "paused", "queued"}
+                ):
+                    return
+                self._cancel_idle_disconnect(guild_id)
+                self._cancel_prefetch_tasks(guild_id)
+                st.queue.clear()
+                st.virtual_shuffle_active = False
+                st.virtual_shuffle_seed = 0
+                st.current = None
+                st.paused = False
+                self._bump_playback_generation(st, reason="voice_alone_timeout")
+                event = "voice_alone_timeout_disconnect"
+            else:
+                # Após TTS assumir uma sessão musical já ociosa, a call passa a
+                # seguir a semântica normal de TTS: 2 s sem humanos bastam.
+                if st.current is not None or st.queue or st.status == "tts_direct":
+                    return
+                event = "voice_empty_timeout_disconnect"
+
+            player = st.player
+            st.player = None
+            st.transport = ""
+            st.paused = False
+            self._set_status(st, "idle", event=event)
+            self._set_voice_session_mode(st, "disconnected", reason=reason)
+            if player is not None:
+                await self._stop_player_instance(player, disconnect=True)
+            self.log(
+                event,
+                guild_id=guild_id,
+                delay=round(delay, 2),
+                humans=humans,
+            )
+        except asyncio.CancelledError:
+            return
+        finally:
+            remove_owned_task(self._voice_presence_disconnect_tasks, guild_id, asyncio.current_task())
+
+    async def _refresh_voice_presence_policy(self, guild_id: int, *, source: str = "") -> None:
+        st = self.states.get(int(guild_id))
+        if st is None:
+            return
+        if not bool(getattr(st, "auto_leave_enabled", True)):
+            self._cancel_voice_presence_disconnect(guild_id)
+            return
+        humans = self._voice_human_count(st)
+        if humans is None:
+            return
+        previous = int(getattr(st, "voice_human_count", -1))
+        st.voice_human_count = int(humans)
+        mode = str(getattr(st, "voice_session_mode", "") or "disconnected")
+        if previous != humans:
+            self.log(
+                "voice_human_count_changed",
+                guild_id=guild_id,
+                previous=previous,
+                current=humans,
+                mode=mode,
+                source=source,
+            )
+
+        if mode == "music_active":
+            if humans <= 0:
+                self._schedule_voice_presence_disconnect(
+                    guild_id,
+                    delay=float(self.idle_disconnect_seconds or 120.0),
+                    reason="music_alone",
+                    expected_mode="music_owned",
+                )
+            else:
+                self._cancel_voice_presence_disconnect(guild_id)
+            return
+
+        if mode == "music_idle_grace":
+            # As duas condições são independentes. A janela de 120 s após o fim
+            # da fila continua valendo, mas se o bot já estava sozinho antes do
+            # fim da música o timer "music_alone" não deve ser reiniciado. Se
+            # alguém entrar, apenas esse timer de presença é cancelado; o idle
+            # musical continua contando desde o fim da fila.
+            if humans <= 0:
+                self._schedule_voice_presence_disconnect(
+                    guild_id,
+                    delay=float(self.idle_disconnect_seconds or 120.0),
+                    reason="music_alone",
+                    expected_mode="music_owned",
+                )
+            else:
+                self._cancel_voice_presence_disconnect(guild_id)
+            return
+
+        if mode == "voice_idle":
+            if humans <= 0:
+                self._schedule_voice_presence_disconnect(
+                    guild_id,
+                    delay=float(self.voice_empty_disconnect_seconds or 2.0),
+                    reason="voice_idle_empty",
+                    expected_mode="voice_idle",
+                )
+            else:
+                self._cancel_voice_presence_disconnect(guild_id)
+            return
+
+        # Durante TTS ativo e estados desconectados não há timer de presença.
+        self._cancel_voice_presence_disconnect(guild_id)
+
     def _schedule_idle_disconnect(self, guild_id: int) -> None:
         guild_id = int(guild_id or 0)
         if not guild_id:
             return
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        self._set_voice_session_mode(st, "music_idle_grace", reason="queue_idle")
         self._cancel_idle_disconnect(guild_id)
         delay = max(15.0, float(self.idle_disconnect_seconds or 120.0))
         self._idle_disconnect_tasks[guild_id] = asyncio.create_task(self._idle_disconnect_later(guild_id, delay))
@@ -319,6 +550,10 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         try:
             await asyncio.sleep(delay)
             st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+            if not bool(getattr(st, "auto_leave_enabled", True)):
+                return
+            if str(getattr(st, "voice_session_mode", "") or "") != "music_idle_grace":
+                return
             if st.current is not None or st.queue or st.status not in {"idle", "stopped"}:
                 return
             player = st.player
@@ -328,6 +563,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             st.transport = ""
             st.paused = False
             self._set_status(st, "idle", event="idle_timeout_disconnect")
+            self._set_voice_session_mode(st, "disconnected", reason="music_idle_timeout")
             with contextlib.suppress(Exception):
                 if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
                     player.stop()
@@ -521,6 +757,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
         base.update({
             "idle_disconnect_seconds": self.idle_disconnect_seconds,
+            "voice_empty_disconnect_seconds": self.voice_empty_disconnect_seconds,
             "cache": {
                 "metadata_entries": len(self._metadata_cache),
                 "stream_entries": len(self._resolve_cache),
@@ -709,10 +946,12 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
             background = (
                 list(self._idle_disconnect_tasks.values())
+                + list(self._voice_presence_disconnect_tasks.values())
                 + list(self._prefetch_tasks.values())
                 + list(self._voice_runtime_recovery_tasks.values())
             )
             self._idle_disconnect_tasks.clear()
+            self._voice_presence_disconnect_tasks.clear()
             self._prefetch_tasks.clear()
             self._voice_runtime_recovery_tasks.clear()
             await cancel_tasks(background)

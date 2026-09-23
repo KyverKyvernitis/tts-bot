@@ -157,7 +157,7 @@ def test_shutdown_cancels_background_tasks_disconnects_players_and_closes_resour
     run(scenario())
 
 
-def test_direct_tts_cancellation_restores_idle_state_and_idle_timer(music, monkeypatch):
+def test_direct_tts_cancellation_transfers_to_short_voice_idle_policy(music, monkeypatch):
     async def scenario():
         agent = music.MusicAgent()
         gid = 203
@@ -165,6 +165,7 @@ def test_direct_tts_cancellation_restores_idle_state_and_idle_timer(music, monke
         played = asyncio.Event()
         stopped = []
         idle = []
+        presence = []
 
         class Audio:
             def __init__(self, *args, **kwargs):
@@ -201,13 +202,18 @@ def test_direct_tts_cancellation_restores_idle_state_and_idle_timer(music, monke
 
         voice = VoiceClient()
         guild = types.SimpleNamespace(voice_client=voice)
-        channel = types.SimpleNamespace(id=channel_id)
+        human = types.SimpleNamespace(bot=False)
+        channel = types.SimpleNamespace(id=channel_id, members=[human])
+        voice.channel = channel
 
         async def resolve(*args, **kwargs):
             return guild, channel
 
         agent._resolve_guild_and_channel = resolve
         agent._schedule_idle_disconnect = lambda value: idle.append(value)
+        async def refresh(value, *, source=""):
+            presence.append((value, source))
+        agent._refresh_voice_presence_policy = refresh
         body = {
             "guild_id": gid,
             "voice_channel_id": channel_id,
@@ -221,8 +227,153 @@ def test_direct_tts_cancellation_restores_idle_state_and_idle_timer(music, monke
         assert task.cancelled()
         st = agent.states[gid]
         assert st.status == "idle"
-        assert idle == [gid]
+        assert st.voice_session_mode == "voice_idle"
+        assert idle == []
+        assert presence == [(gid, "direct_tts_end")]
         assert stopped
+
+    run(scenario())
+
+
+def test_voice_idle_disconnects_after_two_second_no_human_confirmation(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 211
+        agent.voice_empty_disconnect_seconds = 2.0
+        disconnected = []
+
+        bot_member = types.SimpleNamespace(bot=True)
+        channel = types.SimpleNamespace(id=901, members=[bot_member])
+
+        class VoiceClient:
+            def __init__(self):
+                self.channel = channel
+            def is_connected(self): return True
+            def is_playing(self): return False
+            def is_paused(self): return False
+            def stop(self): return None
+            async def disconnect(self, force=False): disconnected.append(force)
+
+        st = music.GuildMusicState(
+            guild_id=gid,
+            voice_channel_id=channel.id,
+            player=VoiceClient(),
+            status="idle",
+            voice_session_mode="voice_idle",
+        )
+        agent.states[gid] = st
+
+        real_sleep = asyncio.sleep
+        async def no_wait(_):
+            await real_sleep(0)
+        monkeypatch.setattr(music.asyncio, "sleep", no_wait)
+
+        agent._schedule_voice_presence_disconnect(
+            gid,
+            delay=2.0,
+            reason="voice_idle_empty",
+            expected_mode="voice_idle",
+        )
+        task = agent._voice_presence_disconnect_tasks[gid]
+        await task
+
+        assert disconnected == [True]
+        assert st.player is None
+        assert st.voice_session_mode == "disconnected"
+        assert st.last_event == "voice_empty_timeout_disconnect"
+
+    run(scenario())
+
+
+def test_music_active_alone_uses_music_timeout_not_short_tts_timeout(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 212
+        agent.idle_disconnect_seconds = 120.0
+        calls = []
+        bot_member = types.SimpleNamespace(bot=True)
+        channel = types.SimpleNamespace(id=902, members=[bot_member])
+        player = types.SimpleNamespace(channel=channel)
+        st = music.GuildMusicState(
+            guild_id=gid,
+            voice_channel_id=channel.id,
+            player=player,
+            current=music.AgentTrack(title="x", query="x"),
+            status="playing",
+            voice_session_mode="music_active",
+        )
+        agent.states[gid] = st
+
+        def schedule(value, *, delay, reason, expected_mode):
+            calls.append((value, delay, reason, expected_mode))
+        agent._schedule_voice_presence_disconnect = schedule
+
+        await agent._refresh_voice_presence_policy(gid, source="test")
+        assert calls == [(gid, 120.0, "music_alone", "music_owned")]
+
+    run(scenario())
+
+
+def test_music_idle_grace_keeps_idle_timer_and_preserves_alone_condition(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 213
+        presence_calls = []
+        bot_member = types.SimpleNamespace(bot=True)
+        channel = types.SimpleNamespace(id=903, members=[bot_member])
+        player = types.SimpleNamespace(channel=channel)
+        st = music.GuildMusicState(
+            guild_id=gid,
+            voice_channel_id=channel.id,
+            player=player,
+            status="idle",
+            voice_session_mode="music_idle_grace",
+        )
+        agent.states[gid] = st
+
+        def schedule(*args, **kwargs):
+            presence_calls.append((args, kwargs))
+        agent._schedule_voice_presence_disconnect = schedule
+        await agent._refresh_voice_presence_policy(gid, source="test")
+        assert presence_calls == [
+            ((gid,), {"delay": 120.0, "reason": "music_alone", "expected_mode": "music_owned"})
+        ]
+
+    run(scenario())
+
+
+def test_voice_idle_human_leave_arms_two_second_disconnect(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 214
+        human = types.SimpleNamespace(bot=False)
+        bot_member = types.SimpleNamespace(bot=True)
+        channel = types.SimpleNamespace(id=904, members=[human, bot_member])
+        player = types.SimpleNamespace(channel=channel)
+        st = music.GuildMusicState(
+            guild_id=gid,
+            voice_channel_id=channel.id,
+            player=player,
+            status="idle",
+            voice_session_mode="voice_idle",
+        )
+        agent.states[gid] = st
+        calls = []
+
+        def schedule(value, *, delay, reason, expected_mode):
+            calls.append((value, delay, reason, expected_mode))
+        agent._schedule_voice_presence_disconnect = schedule
+
+        await agent._refresh_voice_presence_policy(gid, source="tts_done")
+        assert calls == []
+
+        channel.members[:] = [bot_member]
+        member = types.SimpleNamespace(guild=types.SimpleNamespace(id=gid), bot=False)
+        before = types.SimpleNamespace(channel=channel)
+        after = types.SimpleNamespace(channel=None)
+        await agent.client.on_voice_state_update(member, before, after)
+
+        assert calls == [(gid, 2.0, "voice_idle_empty", "voice_idle")]
 
     run(scenario())
 

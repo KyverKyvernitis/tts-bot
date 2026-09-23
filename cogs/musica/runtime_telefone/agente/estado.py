@@ -117,6 +117,19 @@ class GuildMusicState:
     voice_runtime_recovery_attempts: int = 0
     voice_runtime_recovery_last_error: str = ""
     queue_invariant_repairs: int = 0
+    # Por que o VoiceClient continua conectado. O worker é o dono físico da
+    # call, então essa informação precisa viver junto do player real.
+    #
+    # - music_active: música/fila ainda mantém a sessão;
+    # - music_idle_grace: a fila terminou e vale a janela musical de 120 s;
+    # - tts_active: TTS direto está usando a sessão;
+    # - voice_idle: a sessão já foi reutilizada pelo TTS e volta à política
+    #   curta de presença humana (~2 s sem humanos);
+    # - disconnected: não existe mais sessão de voz controlada pelo agente.
+    voice_session_mode: str = "disconnected"
+    voice_human_count: int = -1
+    voice_presence_reason: str = ""
+    auto_leave_enabled: bool = True
 
     def _repair_current_queue_alias(self) -> int:
         """Remove somente a MESMA entrada de fila que também virou current.
@@ -238,6 +251,10 @@ class GuildMusicState:
             "voice_runtime_recovery_attempts": int(self.voice_runtime_recovery_attempts),
             "voice_runtime_recovery_last_error": str(self.voice_runtime_recovery_last_error or ""),
             "queue_invariant_repairs": int(self.queue_invariant_repairs),
+            "voice_session_mode": str(self.voice_session_mode or "disconnected"),
+            "voice_human_count": int(self.voice_human_count),
+            "voice_presence_reason": str(self.voice_presence_reason or ""),
+            "auto_leave_enabled": bool(self.auto_leave_enabled),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": sum(1 for item in self.queue if not item.is_virtual_playlist_marker),

@@ -55,7 +55,7 @@ def test_music_agent_audit_remove_tracking_sem_alterar_parametros_funcionais() -
 
     # servidor importa discord/aiohttp; os testes de unidade só precisam da função pura.
     source = (Path(__file__).resolve().parents[1] / "runtime_telefone" / "agente" / "servidor.py").read_text(encoding="utf-8")
-    assert 'AGENT_VERSION = "0.3.52"' in source
+    assert 'AGENT_VERSION = "0.3.53"' in source
     assert '_audit_value(key, value)' in source
 
     # Exercita a mesma política por AST/exec sem inicializar o Discord client.

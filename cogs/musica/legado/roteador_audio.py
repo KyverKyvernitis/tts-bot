@@ -4022,6 +4022,7 @@ class AudioRouter:
         if not self.should_route_tts_to_music_agent(guild_id, channel_id):
             return {"ok": False, "tts_agent_route": False, "reason": "agent_not_owner"}
         started = time.monotonic()
+        auto_leave_enabled = await self._music_auto_leave_enabled(int(guild_id))
         result = await _music_agent_command(
             "tts",
             guild_id=int(guild_id),
@@ -4039,6 +4040,7 @@ class AudioRouter:
             language=str(language or "pt-br"),
             rate=str(rate or "+0%"),
             pitch=str(pitch or "+0Hz"),
+            auto_leave_enabled=bool(auto_leave_enabled),
             timeout_seconds=max(3.0, float(timeout or MUSIC_AGENT_TTS_TIMEOUT_SECONDS)),
         )
         elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)

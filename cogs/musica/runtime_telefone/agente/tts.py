@@ -451,6 +451,7 @@ class TTSMixin:
     async def cmd_tts(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        self._update_auto_leave_from_body(st, body)
         player = st.player
         if not guild_id or player is None or st.current is None:
             return {"ok": False, "error": "sem sessão musical ativa no worker", "state": st.public()}
@@ -523,6 +524,7 @@ class TTSMixin:
         started = time.monotonic()
         async with self._registry_lock(self._tts_direct_locks, self._tts_direct_lock_users, guild_id):
             st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+            self._update_auto_leave_from_body(st, body)
             st.voice_channel_id = voice_channel_id
             st.text_channel_id = safe_id(body.get("text_channel_id") or st.text_channel_id)
             # If worker music is currently playing through the mixed source, reuse
@@ -538,6 +540,9 @@ class TTSMixin:
             # mesmo single-flight para não competir com preconnect/playback.
             self.log("voice_direct_tts_prepare", guild_id=guild_id, channel=voice_channel_id)
             voice_client, _created = await self._ensure_direct_voice_client(guild_id)
+            self._cancel_idle_disconnect(guild_id)
+            self._cancel_voice_presence_disconnect(guild_id)
+            self._set_voice_session_mode(st, "tts_active", reason="direct_tts_start")
             st.player = voice_client
             st.transport = "worker_voice_direct_tts"
             st.status = "tts_direct"
@@ -649,7 +654,6 @@ class TTSMixin:
                 playback_ms = max(0.0, (time.monotonic() - play_started) * 1000.0)
                 st.status = "idle"
                 st.updated_at = time.time()
-                self._schedule_idle_disconnect(guild_id)
                 self.log("voice_direct_tts_done", guild_id=guild_id, engine=engine, elapsed_ms=round(elapsed_ms, 1))
                 return {
                     "ok": True,
@@ -667,4 +671,13 @@ class TTSMixin:
             finally:
                 if st.player is voice_client and st.current is None and st.status == "tts_direct":
                     self._set_status(st, "idle", event="voice_direct_tts_end")
-                    self._schedule_idle_disconnect(guild_id)
+                if st.player is voice_client and st.current is None:
+                    if st.queue:
+                        self._set_voice_session_mode(st, "music_active", reason="direct_tts_end_queue_pending")
+                    else:
+                        # Um TTS reproduzido depois do fim da música transfere a
+                        # política de permanência: não reinicie os 120 s da
+                        # música. A partir daqui vale a saída normal de voz/TTS,
+                        # confirmada após ~2 s sem humanos.
+                        self._set_voice_session_mode(st, "voice_idle", reason="direct_tts_end")
+                    await self._refresh_voice_presence_policy(guild_id, source="direct_tts_end")
