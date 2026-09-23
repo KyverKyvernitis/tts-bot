@@ -3524,6 +3524,8 @@ class AudioRouter:
             )
             return
 
+        agent_probe_missing = False
+        agent_remote_disconnect_authoritative = False
         if str(getattr(state, "current_backend", "") or "").lower() == "agent":
             status = str(getattr(state, "current_status", "") or "").lower()
             reason = str(getattr(state, "idle_reason", "") or "").lower()
@@ -3538,6 +3540,9 @@ class AudioRouter:
                 "idle",
                 "stopped",
                 "idle_timeout_disconnect",
+                "voice_alone_timeout_disconnect",
+                "voice_empty_timeout_disconnect",
+                "voice_transport_disconnected",
             }
             if (
                 status == "idle"
@@ -3555,6 +3560,7 @@ class AudioRouter:
             # O evento de voice_state pode chegar antes do monitor da VPS ver
             # que o Music Agent entrou em idle/fila vazia. Consulte o worker com
             # timeout curto antes de acusar desconexão externa.
+            remote = {}
             with contextlib.suppress(Exception):
                 remote = await atualizar_estado_controle_remoto(
                     self,
@@ -3564,24 +3570,53 @@ class AudioRouter:
                     create_panel=True,
                     timeout_seconds=min(2.0, float(getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0) or 5.0)),
                 )
-                if remote:
-                    remote_status = str(remote.get("status") or "").strip().lower()
-                    remote_event = str(remote.get("last_event") or "").strip().lower()
-                    remote_current = remote.get("current") if isinstance(remote.get("current"), dict) else {}
-                    remote_queue_size = int(remote.get("queue_size") or 0)
-                    if remote_status in {"idle", "stopped"} and not remote_current and remote_queue_size <= 0 and remote_event in internal_idle_events:
-                        logger.info(
-                            "[music/agent] voice_state disconnect confirmado como idle remoto | guild=%s event=%s",
-                            guild.id,
-                            remote_event or "-",
-                        )
-                        # sincronizar_estado_agente agenda esses efeitos, mas o
-                        # voice_state pode ser o último evento observado. Finalize
-                        # também aqui de forma idempotente para não depender da task.
-                        await self._restore_music_session_side_effects(
-                            guild, state, reason="agent_idle", channel_hint=before_channel
-                        )
-                        return
+            if remote:
+                remote_status = str(remote.get("status") or "").strip().lower()
+                remote_event = str(remote.get("last_event") or "").strip().lower()
+                remote_disconnect_reason = str(
+                    remote.get("last_disconnect_reason")
+                    or remote.get("voice_presence_reason")
+                    or ""
+                ).strip().lower()
+                remote_current = remote.get("current") if isinstance(remote.get("current"), dict) else {}
+                remote_queue_size = int(remote.get("queue_size") or 0)
+                known_disconnect_reasons = {
+                    "manual_stop",
+                    "music_alone",
+                    "music_idle_timeout",
+                    "voice_idle_empty",
+                    "voice_empty",
+                    "voice_transport_lost",
+                }
+                agent_remote_disconnect_authoritative = bool(
+                    remote_disconnect_reason in known_disconnect_reasons
+                    or remote_event in internal_idle_events
+                )
+                if bool(remote.get("voice_runtime_recovery_pending")):
+                    logger.info(
+                        "[music/agent] voice_state disconnect pertence a recovery remoto; preservando sessão | guild=%s attempts=%s",
+                        guild.id,
+                        remote.get("voice_runtime_recovery_attempts") or 0,
+                    )
+                    return
+                if (
+                    remote_status in {"idle", "stopped", "failed", "error"}
+                    and remote_queue_size <= 0
+                    and agent_remote_disconnect_authoritative
+                    and not bool(remote.get("voice_runtime_recovery_pending"))
+                ):
+                    logger.info(
+                        "[music/agent] voice_state disconnect confirmado pelo Worker | guild=%s reason=%s event=%s",
+                        guild.id,
+                        remote_disconnect_reason or "-",
+                        remote_event or "-",
+                    )
+                    await self._restore_music_session_side_effects(
+                        guild, state, reason="agent_idle", channel_hint=before_channel
+                    )
+                    return
+            else:
+                agent_probe_missing = True
 
         if str(getattr(state, "current_backend", "") or "").lower() == "agent" and state.current is not None:
             # Em alguns eventos do worker-owned voice, o Discord envia o voice_state
@@ -3620,6 +3655,27 @@ class AudioRouter:
             before_channel_id=int(getattr(before_channel, "id", 0) or 0) or None,
             after_channel_id=int(getattr(after_channel, "id", 0) or 0) or None,
         )
+
+        if str(getattr(state, "current_backend", "") or "").lower() == "agent" and actor is None and agent_probe_missing:
+            # Não destrua current/fila por uma queda de rota. O monitor do
+            # Worker já possui backoff/rebind e pode recuperar a sessão.
+            self._set_current_status(state, "reconnecting")
+            state.current_status_detail = "Phone Worker inacessível durante a desconexão de voz; verificando rede e sessão"
+            self._set_idle_reason(state, "worker_unreachable", channel_name=getattr(before_channel, "name", "") or "")
+            state.agent_monitor_failures = max(1, int(getattr(state, "agent_monitor_failures", 0) or 0))
+            self.start_music_agent_monitor(
+                guild.id,
+                voice_channel_id=int(getattr(before_channel, "id", 0) or 0) or None,
+                text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+            )
+            logger.warning(
+                "[music/agent] voice_state disconnect sem Worker alcançável; preservando sessão | guild=%s channel=%s",
+                guild.id,
+                getattr(before_channel, "id", None),
+            )
+            await self.update_panel(guild.id, create=True)
+            return
+
         if state.current_source is not None:
             with contextlib.suppress(Exception):
                 state.current_source.cleanup()
@@ -3656,7 +3712,7 @@ class AudioRouter:
         self._cancel_music_idle_disconnect(state)
         self._set_idle_reason(
             state,
-            "external_disconnect",
+            "external_disconnect" if actor is not None else "unknown_disconnect",
             actor=actor,
             channel_name=getattr(before_channel, "name", "") or "",
         )

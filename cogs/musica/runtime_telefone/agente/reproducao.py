@@ -752,6 +752,9 @@ class ReproducaoMixin:
         st.player = None
         st.current = None
         self._set_status(st, "idle", event="stop")
+        recorder = getattr(self, "_record_voice_disconnect", None)
+        if callable(recorder):
+            recorder(st, reason="manual_stop", event="stop", humans=self._voice_human_count(st))
         self._set_voice_session_mode(st, "disconnected", reason="manual_stop")
         st.paused = False
         self._bump_playback_generation(st, reason="stop")

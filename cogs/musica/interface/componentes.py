@@ -846,6 +846,18 @@ def _player_status_presentation(state) -> tuple[str, str, discord.Colour]:
     reason = str(getattr(state, "idle_reason", "idle") or "idle")
     if reason == "manual_stop":
         return "Player encerrado", "⏹️", discord.Color.dark_grey()
+    if reason == "music_alone_timeout":
+        return "Saí da call", "👋", discord.Color.dark_grey()
+    if reason == "music_idle_timeout":
+        return "Player ocioso", "💤", discord.Color.dark_grey()
+    if reason == "voice_idle_empty":
+        return "Call vazia", "💤", discord.Color.dark_grey()
+    if reason == "voice_connection_lost":
+        return "Conexão de voz perdida", "📡", discord.Color.red()
+    if reason == "worker_unreachable":
+        return "Phone Worker inacessível", "🔄", discord.Color.gold()
+    if reason == "unknown_disconnect":
+        return "Player desconectado", "⚠️", discord.Color.red()
     if reason == "external_disconnect":
         return "Player interrompido", "⚠️", discord.Color.red()
     if reason == "external_move":
@@ -952,8 +964,20 @@ def _idle_player_text(state) -> str:
         return f"Falhei antes do áudio começar em **{title}**." + (f"\n-# {detail}" if detail else "")
     if reason == "manual_stop":
         return "A reprodução foi parada e a fila foi limpa.\n-# Use `_play <link ou pesquisa>` quando quiser tocar algo de novo."
+    if reason == "music_alone_timeout":
+        return "Fiquei sozinho na call por 2 minutos e saí automaticamente.\n-# Use `_play <link ou pesquisa>` para iniciar novamente."
+    if reason == "music_idle_timeout":
+        return "A fila ficou vazia por 2 minutos e saí automaticamente.\n-# Use `_play <link ou pesquisa>` para iniciar novamente."
+    if reason == "voice_idle_empty":
+        return "Depois do TTS, a call ficou sem humanos e saí após a confirmação curta.\n-# Use `_play <link ou pesquisa>` para iniciar novamente."
+    if reason == "voice_connection_lost":
+        return "A sessão de voz foi perdida inesperadamente. Isso pode acontecer por rede instável, Discord ou reinício do Worker.\n-# Não identifiquei uma ação humana como causa."
+    if reason == "worker_unreachable":
+        return "Perdi contato com o Phone Worker e estou tentando restabelecer a sessão.\n-# A fila não é descartada enquanto a falha ainda parece transitória."
+    if reason == "unknown_disconnect":
+        return "A sessão de voz terminou, mas não consegui determinar a causa com segurança.\n-# Nenhuma ação humana foi confirmada no Audit Log."
     if reason == "external_disconnect":
-        who = f"<@{int(actor_id)}>" if actor_id else (_escape(actor_name, limit=48) if actor_name else "alguém")
+        who = f"<@{int(actor_id)}>" if actor_id else (_escape(actor_name, limit=48) if actor_name else "um moderador")
         where = f" de **{_escape(channel_name, limit=48)}**" if channel_name else ""
         return f"O bot foi desconectado{where} por {who}.\n-# Use `_play <link ou pesquisa>` para iniciar novamente."
     if reason == "external_move":
@@ -1156,6 +1180,21 @@ def build_player_embeds(state) -> list[discord.Embed]:
                 "A reprodução foi parada e o queue foi limpo.\n"
                 "Use `_play <link ou pesquisa>` quando quiser tocar algo de novo."
             )
+        elif reason == "music_alone_timeout":
+            embed.set_author(name="Saí da call", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
+            embed.description = "Fiquei sozinho na call por 2 minutos e saí automaticamente."
+        elif reason == "music_idle_timeout":
+            embed.set_author(name="Player ocioso", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
+            embed.description = "A fila ficou vazia por 2 minutos e saí automaticamente."
+        elif reason == "voice_idle_empty":
+            embed.set_author(name="Call vazia", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
+            embed.description = "Depois do TTS, a call ficou sem humanos e saí após a confirmação curta."
+        elif reason == "voice_connection_lost":
+            embed.set_author(name="Conexão de voz perdida", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
+            embed.description = "A sessão de voz foi perdida inesperadamente; não identifiquei uma ação humana como causa."
+        elif reason == "unknown_disconnect":
+            embed.set_author(name="Player desconectado", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
+            embed.description = "A sessão de voz terminou, mas a causa não pôde ser determinada com segurança."
         elif reason == "external_disconnect":
             embed.set_author(name="Player interrompido", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
             if actor_id:
@@ -1163,7 +1202,7 @@ def build_player_embeds(state) -> list[discord.Embed]:
             elif actor_name:
                 who = _escape(actor_name, limit=48)
             else:
-                who = "alguém"
+                who = "um moderador"
             where = f" de **{_escape(channel_name, limit=48)}**" if channel_name else ""
             embed.description = (
                 f"O bot foi desconectado{where} por {who}.\n"

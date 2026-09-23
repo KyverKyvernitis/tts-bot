@@ -90,7 +90,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.53"
+AGENT_VERSION = "0.3.54"
 STARTED_AT = time.time()
 
 
@@ -287,6 +287,42 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             after_id = safe_id(getattr(getattr(after, "channel", None), "id", 0))
             if player_channel_id not in {before_id, after_id}:
                 return
+            # O próprio bot saiu da call. Se nenhum caminho interno registrou a
+            # saída imediatamente antes, trate como perda inesperada do transporte
+            # de voz (rede/Discord/processo), nunca como "alguém desconectou".
+            bot_id = safe_id(getattr(self.client.user, "id", 0))
+            member_id = safe_id(getattr(member, "id", 0))
+            if bot_id and member_id == bot_id and before_id > 0 and after_id <= 0:
+                recent_internal = bool(
+                    st.last_disconnect_at
+                    and (time.time() - float(st.last_disconnect_at)) <= 15.0
+                    and str(st.last_disconnect_reason or "") not in {"", "voice_transport_lost", "unknown"}
+                )
+                if not recent_internal:
+                    humans = self._voice_human_count(st)
+                    self._record_voice_disconnect(
+                        st,
+                        reason="voice_transport_lost",
+                        event="voice_transport_disconnected",
+                        humans=humans,
+                    )
+                    # Se havia faixa ativa, preserve current/fila e deixe o
+                    # recovery de voz tentar retomar. O painel verá
+                    # voice_runtime_recovery_pending em vez de concluir que um
+                    # moderador expulsou o bot.
+                    if st.current is not None:
+                        played_for = max(0.0, time.monotonic() - float(st.started_monotonic or time.monotonic()))
+                        scheduler = getattr(self, "_schedule_voice_runtime_recovery", None)
+                        if callable(scheduler) and scheduler(
+                            guild_id,
+                            played_for=played_for,
+                            reason="voice_state_disconnect",
+                            error="Discord VoiceClient desconectado inesperadamente",
+                        ):
+                            return
+                    self._set_status(st, "idle", event="voice_transport_disconnected")
+                    self._set_voice_session_mode(st, "disconnected", reason="voice_transport_lost")
+                return
             await self._refresh_voice_presence_policy(guild_id, source="voice_state_update")
 
     @contextlib.asynccontextmanager
@@ -354,6 +390,29 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
     def _update_auto_leave_from_body(st: GuildMusicState, body: dict[str, Any]) -> None:
         if "auto_leave_enabled" in body:
             st.auto_leave_enabled = truthy(body.get("auto_leave_enabled"), True)
+
+    def _record_voice_disconnect(
+        self,
+        st: GuildMusicState,
+        *,
+        reason: str,
+        event: str,
+        humans: int | None = None,
+    ) -> None:
+        """Persiste a causa da saída para a VPS não precisar inferir pelo gateway."""
+        st.last_disconnect_reason = short_text(reason or "unknown", 96)
+        st.last_disconnect_event = short_text(event or "voice_disconnected", 96)
+        st.last_disconnect_at = time.time()
+        if humans is not None:
+            st.last_disconnect_human_count = int(humans)
+        st.updated_at = st.last_disconnect_at
+        self.log(
+            "voice_disconnect_reason",
+            guild_id=st.guild_id,
+            reason=st.last_disconnect_reason,
+            disconnect_event=st.last_disconnect_event,
+            humans=st.last_disconnect_human_count,
+        )
 
     def _voice_human_count(self, st: GuildMusicState) -> int | None:
         player = st.player
@@ -455,6 +514,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             st.transport = ""
             st.paused = False
             self._set_status(st, "idle", event=event)
+            self._record_voice_disconnect(st, reason=reason, event=event, humans=humans)
             self._set_voice_session_mode(st, "disconnected", reason=reason)
             if player is not None:
                 await self._stop_player_instance(player, disconnect=True)
@@ -559,10 +619,17 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             player = st.player
             if player is None:
                 return
+            humans = self._voice_human_count(st)
             st.player = None
             st.transport = ""
             st.paused = False
             self._set_status(st, "idle", event="idle_timeout_disconnect")
+            self._record_voice_disconnect(
+                st,
+                reason="music_idle_timeout",
+                event="idle_timeout_disconnect",
+                humans=humans,
+            )
             self._set_voice_session_mode(st, "disconnected", reason="music_idle_timeout")
             with contextlib.suppress(Exception):
                 if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():

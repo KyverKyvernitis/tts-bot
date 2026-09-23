@@ -749,3 +749,95 @@ def test_compact_status_can_return_unchanged_without_serializing_guild(music):
     assert payload["unchanged"] is True
     assert payload["state_revision"] == revision
     assert payload["guilds"] == {}
+
+
+def test_voice_alone_timeout_publishes_authoritative_disconnect_reason(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 310
+        agent.idle_disconnect_seconds = 120.0
+        bot_member = types.SimpleNamespace(bot=True)
+        channel = types.SimpleNamespace(id=9310, members=[bot_member])
+        disconnected = []
+
+        class VoiceClient:
+            def __init__(self):
+                self.channel = channel
+            def is_connected(self): return True
+            def is_playing(self): return True
+            def is_paused(self): return False
+            def stop(self): return None
+            async def disconnect(self, force=False): disconnected.append(force)
+
+        st = music.GuildMusicState(
+            guild_id=gid,
+            voice_channel_id=channel.id,
+            player=VoiceClient(),
+            current=music.AgentTrack(title="x", query="x"),
+            queue=[music.AgentTrack(title="y", query="y")],
+            status="playing",
+            voice_session_mode="music_active",
+        )
+        agent.states[gid] = st
+        real_sleep = asyncio.sleep
+        async def no_wait(_):
+            await real_sleep(0)
+        monkeypatch.setattr(music.asyncio, "sleep", no_wait)
+
+        agent._schedule_voice_presence_disconnect(
+            gid,
+            delay=120.0,
+            reason="music_alone",
+            expected_mode="music_owned",
+        )
+        await agent._voice_presence_disconnect_tasks[gid]
+
+        payload = st.public()
+        assert disconnected == [True]
+        assert payload["last_disconnect_reason"] == "music_alone"
+        assert payload["last_disconnect_event"] == "voice_alone_timeout_disconnect"
+        assert payload["last_disconnect_human_count"] == 0
+        assert payload["voice_session_mode"] == "disconnected"
+
+    run(scenario())
+
+
+def test_music_idle_timeout_publishes_authoritative_disconnect_reason(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 311
+        bot_member = types.SimpleNamespace(bot=True)
+        channel = types.SimpleNamespace(id=9311, members=[bot_member])
+
+        class VoiceClient:
+            def __init__(self):
+                self.channel = channel
+                self.disconnected = 0
+            def is_connected(self): return True
+            def is_playing(self): return False
+            def is_paused(self): return False
+            def stop(self): return None
+            async def disconnect(self, force=False): self.disconnected += 1
+
+        voice = VoiceClient()
+        st = music.GuildMusicState(
+            guild_id=gid,
+            voice_channel_id=channel.id,
+            player=voice,
+            status="idle",
+            voice_session_mode="music_idle_grace",
+        )
+        agent.states[gid] = st
+        real_sleep = asyncio.sleep
+        async def no_wait(_):
+            await real_sleep(0)
+        monkeypatch.setattr(music.asyncio, "sleep", no_wait)
+
+        await agent._idle_disconnect_later(gid, 120.0)
+        payload = st.public()
+        assert voice.disconnected == 1
+        assert payload["last_disconnect_reason"] == "music_idle_timeout"
+        assert payload["last_disconnect_event"] == "idle_timeout_disconnect"
+        assert payload["last_disconnect_human_count"] == 0
+
+    run(scenario())

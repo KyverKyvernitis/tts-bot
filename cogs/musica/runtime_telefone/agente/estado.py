@@ -129,6 +129,12 @@ class GuildMusicState:
     voice_session_mode: str = "disconnected"
     voice_human_count: int = -1
     voice_presence_reason: str = ""
+    # Motivo autoritativo da última saída de voz. Diferente de last_event:
+    # este campo só muda quando a sessão de voz realmente é encerrada/perdida.
+    last_disconnect_reason: str = ""
+    last_disconnect_event: str = ""
+    last_disconnect_at: float = 0.0
+    last_disconnect_human_count: int = -1
     auto_leave_enabled: bool = True
 
     def _repair_current_queue_alias(self) -> int:
@@ -254,6 +260,10 @@ class GuildMusicState:
             "voice_session_mode": str(self.voice_session_mode or "disconnected"),
             "voice_human_count": int(self.voice_human_count),
             "voice_presence_reason": str(self.voice_presence_reason or ""),
+            "last_disconnect_reason": str(self.last_disconnect_reason or ""),
+            "last_disconnect_event": str(self.last_disconnect_event or ""),
+            "last_disconnect_at": float(self.last_disconnect_at or 0.0),
+            "last_disconnect_human_count": int(self.last_disconnect_human_count),
             "auto_leave_enabled": bool(self.auto_leave_enabled),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,

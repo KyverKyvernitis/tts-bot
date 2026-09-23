@@ -284,11 +284,26 @@ async def sincronizar_estado_agente(
                 if remote_playback_token is not None:
                     state.agent_playback_token = remote_playback_token
                 state.agent_last_idle_event = last_event or raw_status
-                if last_action == "stop" or last_event == "stop":
+                disconnect_reason = str(remote.get("last_disconnect_reason") or remote.get("voice_presence_reason") or "").strip().lower()
+                if last_action == "stop" or last_event == "stop" or disconnect_reason == "manual_stop":
                     router._set_idle_reason(state, "manual_stop")
                     router._invalidate_panel_controls_now(guild_id)
+                elif disconnect_reason == "music_alone" or last_event == "voice_alone_timeout_disconnect":
+                    router._set_idle_reason(state, "music_alone_timeout")
+                    router._invalidate_panel_controls_now(guild_id)
+                elif disconnect_reason == "music_idle_timeout" or last_event == "idle_timeout_disconnect":
+                    router._set_idle_reason(state, "music_idle_timeout")
+                    router._invalidate_panel_controls_now(guild_id)
+                elif disconnect_reason in {"voice_idle_empty", "voice_empty"} or last_event == "voice_empty_timeout_disconnect":
+                    router._set_idle_reason(state, "voice_idle_empty")
+                    router._invalidate_panel_controls_now(guild_id)
+                elif disconnect_reason == "voice_transport_lost" or last_event == "voice_transport_disconnected":
+                    router._set_idle_reason(state, "voice_connection_lost")
+                    router._invalidate_panel_controls_now(guild_id)
                 elif last_event in {"external_disconnect", "voice_disconnected", "kicked"}:
-                    router._set_idle_reason(state, "external_disconnect")
+                    # Eventos legados não possuem causalidade suficiente para
+                    # acusar ação humana. O Audit Log do gateway decide isso.
+                    router._set_idle_reason(state, "unknown_disconnect")
                     router._invalidate_panel_controls_now(guild_id)
                 else:
                     router._set_idle_reason(state, "queue_finished")
@@ -322,6 +337,14 @@ async def sincronizar_estado_agente(
     with contextlib.suppress(Exception):
         state.agent_voice_recovery_attempts = max(0, int(remote.get("voice_runtime_recovery_attempts") or 0))
     state.agent_voice_recovery_last_error = str(remote.get("voice_runtime_recovery_last_error") or "")[:260]
+    state.agent_voice_session_mode = str(remote.get("voice_session_mode") or "")[:64]
+    state.agent_voice_presence_reason = str(remote.get("voice_presence_reason") or "")[:120]
+    state.agent_last_disconnect_reason = str(remote.get("last_disconnect_reason") or "")[:96]
+    state.agent_last_disconnect_event = str(remote.get("last_disconnect_event") or "")[:96]
+    with contextlib.suppress(Exception):
+        state.agent_last_disconnect_at = float(remote.get("last_disconnect_at") or 0.0)
+    with contextlib.suppress(Exception):
+        state.agent_last_disconnect_human_count = int(remote.get("last_disconnect_human_count") if remote.get("last_disconnect_human_count") is not None else -1)
     state.agent_monitor_failures = 0
     state.agent_monitor_last_error = ""
     state.agent_monitor_reconnecting_since = 0.0

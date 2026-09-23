@@ -144,6 +144,12 @@ class MusicGuildState:
     agent_voice_recovery_pending: bool = False
     agent_voice_recovery_attempts: int = 0
     agent_voice_recovery_last_error: str = ""
+    agent_voice_session_mode: str = ""
+    agent_voice_presence_reason: str = ""
+    agent_last_disconnect_reason: str = ""
+    agent_last_disconnect_event: str = ""
+    agent_last_disconnect_at: float = 0.0
+    agent_last_disconnect_human_count: int = -1
     agent_monitor_task: Optional[asyncio.Task] = None
     agent_monitor_failures: int = 0
     agent_monitor_last_error: str = ""
