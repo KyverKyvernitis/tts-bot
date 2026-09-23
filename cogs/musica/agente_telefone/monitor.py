@@ -122,6 +122,13 @@ def _intervalo_poll_music_agent(status: str, *, falhas: int = 0) -> float:
     startup = max(0.4, min(1.5, float(getattr(config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.75) or 0.75)))
     playing = max(1.0, min(4.0, float(getattr(config, "MUSIC_AGENT_PANEL_POLL_SECONDS", 2.0) or 2.0)))
     paused = max(playing, min(6.0, float(getattr(config, "MUSIC_AGENT_PAUSED_POLL_SECONDS", 3.0) or 3.0)))
+    if falhas >= 30:
+        # Outage longo (Tailscale desligado/rede móvel trocada): reduza o
+        # polling para não martelar Worker/VPS, mas mantenha o watcher vivo
+        # tempo suficiente para autorrecuperar quando a rota voltar.
+        return max(6.0, min(10.0, playing * 3.0))
+    if falhas >= 12:
+        return max(4.0, min(8.0, playing * 2.0))
     if falhas:
         return min(4.0, max(startup, playing))
     if status in {"preparing", "resolving", "starting", "queued", ""}:
@@ -173,6 +180,47 @@ def estado_local_music_agent(router: Any, guild_id: int) -> dict[str, Any]:
     }
 
 
+
+
+async def _marcar_monitor_reconectando(router: Any, guild_id: int, *, falhas: int, erro: str = "") -> None:
+    """Espelha indisponibilidade transitória sem fingir que a faixa terminou."""
+    state = router.get_state(int(guild_id))
+    state.agent_monitor_failures = max(0, int(falhas or 0))
+    state.agent_monitor_last_error = str(erro or "")[:260]
+    if not float(getattr(state, "agent_monitor_reconnecting_since", 0.0) or 0.0):
+        try:
+            state.agent_monitor_reconnecting_since = asyncio.get_running_loop().time()
+        except RuntimeError:
+            state.agent_monitor_reconnecting_since = 0.0
+    active = bool(
+        getattr(state, "current", None) is not None
+        or getattr(state, "music_session_active", False)
+        or str(getattr(state, "current_status", "") or "") in {"resolving", "starting", "playing", "paused", "queued", "reconnecting"}
+    )
+    if active:
+        setter = getattr(router, "_set_current_status", None)
+        if callable(setter):
+            setter(state, "reconnecting")
+        else:
+            state.current_status = "reconnecting"
+        state.current_status_detail = "Phone Worker temporariamente inacessível; reconectando"
+        updater = getattr(router, "update_panel", None)
+        if callable(updater) and getattr(state, "now_message", None) is not None:
+            try:
+                await updater(int(guild_id), create=False)
+            except Exception:
+                logger.debug("[music/agent] painel de reconexão não pôde ser atualizado | guild=%s", guild_id, exc_info=True)
+
+
+def _limpar_auditoria_monitor(router: Any, guild_id: int, *, recovered: bool) -> None:
+    state = router.get_state(int(guild_id))
+    previous = int(getattr(state, "agent_monitor_failures", 0) or 0)
+    state.agent_monitor_failures = 0
+    state.agent_monitor_last_error = ""
+    state.agent_monitor_reconnecting_since = 0.0
+    if recovered and previous:
+        state.agent_monitor_recoveries = int(getattr(state, "agent_monitor_recoveries", 0) or 0) + 1
+
 def iniciar_monitor_music_agent(
     router: Any,
     guild_id: int,
@@ -191,6 +239,7 @@ def iniciar_monitor_music_agent(
     async def _runner() -> None:
         idle_seen = 0
         failure_seen = 0
+        ultimo_erro_monitor = ""
         assinatura_painel: tuple[Any, ...] | None = None
         revisao_remota = ""
         ultimo_estado_remoto: dict[str, Any] | None = None
@@ -217,33 +266,68 @@ def iniciar_monitor_music_agent(
                         guild_id=guild_id,
                         known_revision=known_revision,
                     )
-                except Exception:
+                except Exception as exc:
                     failure_seen += 1
+                    ultimo_erro_monitor = f"{type(exc).__name__}: {exc}"[:260]
                     logger.debug(
                         "[music/agent] monitor não conseguiu consultar status | guild=%s falhas=%s",
                         guild_id,
                         failure_seen,
                         exc_info=True,
                     )
-                    if failure_seen >= 4:
+                    if failure_seen >= int(getattr(config, "MUSIC_AGENT_MONITOR_UI_FAILURES", 2) or 2):
+                        await _marcar_monitor_reconectando(router, guild_id, falhas=failure_seen, erro=ultimo_erro_monitor)
+                    rebind_every = max(1, int(getattr(config, "MUSIC_AGENT_MONITOR_REBIND_FAILURES", 4) or 4))
+                    if failure_seen % rebind_every == 0:
+                        # Solte periodicamente a afinidade. Assim uma rota/Worker
+                        # que ficou stale após troca de rede nunca prende a guild
+                        # ao mesmo endpoint até o monitor expirar.
+                        desvincular_guild_worker(guild_id)
+                        revisao_remota = ""
+                    if failure_seen >= int(getattr(config, "MUSIC_AGENT_MONITOR_MAX_FAILURES", 30) or 30):
                         desvincular_guild_worker(guild_id)
                         return
                     continue
                 if not bool(payload.get("ok", True)) or (payload.get("available") is False and payload.get("error")):
                     failure_seen += 1
-                    if failure_seen >= 4:
+                    ultimo_erro_monitor = str(payload.get("error") or "worker indisponível")[:260]
+                    if failure_seen >= int(getattr(config, "MUSIC_AGENT_MONITOR_UI_FAILURES", 2) or 2):
+                        await _marcar_monitor_reconectando(router, guild_id, falhas=failure_seen, erro=ultimo_erro_monitor)
+                    rebind_every = max(1, int(getattr(config, "MUSIC_AGENT_MONITOR_REBIND_FAILURES", 4) or 4))
+                    if failure_seen % rebind_every == 0:
+                        desvincular_guild_worker(guild_id)
+                        revisao_remota = ""
+                    if failure_seen >= int(getattr(config, "MUSIC_AGENT_MONITOR_MAX_FAILURES", 30) or 30):
                         desvincular_guild_worker(guild_id)
                         return
                     continue
+                recovered_after_failures = failure_seen > 0
                 failure_seen = 0
+                if recovered_after_failures:
+                    logger.info(
+                        "[music/agent] monitor recuperado | guild=%s erro_anterior=%s",
+                        guild_id,
+                        ultimo_erro_monitor or "-",
+                    )
+                _limpar_auditoria_monitor(router, guild_id, recovered=recovered_after_failures)
                 if bool(payload.get("unchanged")) and revisao_remota:
-                    # O estado autoritativo é exatamente o snapshot que já foi
-                    # sincronizado. Não repita conversão ou painel. O lazy refill
-                    # pode, porém, ter terminado/falhado desde o último poll; use
-                    # o snapshot já em memória para reagendá-lo sem pedir outro
-                    # payload completo ao Worker.
+                    # Se a rede caiu, o espelho local foi marcado como
+                    # `reconnecting`. Mesmo que o Worker responda `unchanged`,
+                    # reaplique o último snapshot autoritativo para não deixar o
+                    # painel congelado em reconexão.
                     if ultimo_estado_remoto:
                         schedule_playlist_refill_if_needed(router, guild_id, ultimo_estado_remoto)
+                        local_status = str(getattr(router.get_state(guild_id), "current_status", "") or "").lower()
+                        if recovered_after_failures or local_status == "reconnecting":
+                            await router.sync_music_agent_state(
+                                guild_id,
+                                None,
+                                ultimo_estado_remoto,
+                                voice_channel_id=voice_channel_id,
+                                text_channel_id=text_channel_id,
+                                queued=False,
+                                create_panel=True,
+                            )
                     idle_seen = 0 if status_hint in {"preparing", "starting", "playing", "paused", "queued", "resolving"} else idle_seen
                     continue
                 remote = estado_da_guild_no_payload(payload, guild_id)

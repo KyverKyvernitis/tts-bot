@@ -89,7 +89,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.46"
+AGENT_VERSION = "0.3.47"
 STARTED_AT = time.time()
 
 
@@ -175,6 +175,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         # executar channel.connect() simultaneamente.
         self._voice_connect_locks: dict[int, asyncio.Lock] = {}
         self._voice_connect_lock_users: dict[int, int] = {}
+        self._voice_runtime_recovery_tasks: dict[int, asyncio.Task] = {}
         self._tts_direct_locks: dict[int, asyncio.Lock] = {}
         self._tts_direct_lock_users: dict[int, int] = {}
         self._metadata_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -299,7 +300,11 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             with contextlib.suppress(Exception):
                 if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
                     player.stop()
-                await player.disconnect(force=True)
+            await self._disconnect_voice_client_bounded(
+                player,
+                guild_id=guild_id,
+                reason="idle_timeout",
+            )
             self.log("idle_timeout_disconnect", guild_id=guild_id, delay=round(delay, 1))
         except asyncio.CancelledError:
             return
@@ -671,9 +676,14 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             self._active_tts_requests.clear()
             await cancel_tasks(active_tts)
 
-            background = list(self._idle_disconnect_tasks.values()) + list(self._prefetch_tasks.values())
+            background = (
+                list(self._idle_disconnect_tasks.values())
+                + list(self._prefetch_tasks.values())
+                + list(self._voice_runtime_recovery_tasks.values())
+            )
             self._idle_disconnect_tasks.clear()
             self._prefetch_tasks.clear()
+            self._voice_runtime_recovery_tasks.clear()
             await cancel_tasks(background)
 
             players: list[Any] = []

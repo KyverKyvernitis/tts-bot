@@ -810,6 +810,8 @@ def _player_status_presentation(state) -> tuple[str, str, discord.Colour]:
         return "Erro no player", "❌", discord.Color.red()
     if status == "skipping":
         return "Pulando música", "⏭️", discord.Color.gold()
+    if status == "reconnecting":
+        return "Reconectando ao player", "🔄", discord.Color.gold()
     if status in {"resolving", "starting"}:
         return "Preparando áudio", PLAYER_STATUS_ANIMATED_EMOJI, discord.Color.gold()
     if paused:
@@ -852,6 +854,10 @@ def _player_track_text(state, track: MusicTrack) -> str:
     origin = str(getattr(track, "fallback_reason", "") or "").strip()
     requester_line = f"-# Pedido por {requester}" + (f" · via {_escape(origin, limit=32)}" if origin else "")
     lines = [f"### {title}", f"-# {source}", " · ".join(metadata), requester_line]
+    if str(getattr(state, "current_status", "") or "").lower() == "reconnecting":
+        failures = max(0, int(getattr(state, "agent_monitor_failures", 0) or 0))
+        suffix = f" · tentativa {failures}" if failures else ""
+        lines.append(f"-# 🔄 Reconectando ao Phone Worker sem descartar a faixa ou a fila{suffix}.")
 
     loop_mode = getattr(state, "loop_mode", None)
     loop_label = str(getattr(loop_mode, "label", "desligado") or "desligado")
@@ -2300,7 +2306,7 @@ class MusicPlayerView(discord.ui.LayoutView):
         has_current = bool(
             getattr(state, "current", None)
             or getattr(state, "current_source", None)
-            or status in {"resolving", "starting", "skipping", "playing", "paused"}
+            or status in {"resolving", "starting", "reconnecting", "skipping", "playing", "paused"}
         )
         has_queue = bool(queue or virtual)
         has_history = bool(list(getattr(state, "history", []) or [])) or bool(

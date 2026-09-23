@@ -624,6 +624,19 @@ class TTSMixin:
                         voice_client.play(audio_source, after=_after)
                         self.log("voice_direct_tts_start", guild_id=guild_id, engine=engine, channel=voice_channel_id, chars=len(str(body.get("text") or "")))
                         await asyncio.wait_for(finished, timeout=timeout)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        self.log(
+                            "voice_direct_tts_timeout",
+                            guild_id=guild_id,
+                            engine=engine,
+                            channel=voice_channel_id,
+                            timeout_seconds=round(timeout, 2),
+                            elapsed_ms=round(max(0.0, (time.monotonic() - started) * 1000.0), 1),
+                        )
+                        with contextlib.suppress(Exception):
+                            if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
+                                voice_client.stop()
+                        raise
                     except BaseException:
                         with contextlib.suppress(Exception):
                             if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():

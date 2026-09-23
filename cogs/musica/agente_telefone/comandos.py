@@ -62,7 +62,11 @@ async def music_agent_command(
         timeout_seconds=timeout_seconds,
         **extra,
     )
-    total_timeout = max(2.0, float(payload["timeout_seconds"]) + 2.0)
+    action_normalized = str(action or "").strip().lower().replace("-", "_")
+    timeout_headroom = 2.0
+    if action_normalized == "tts":
+        timeout_headroom = max(3.0, float(getattr(config, "MUSIC_AGENT_TTS_HTTP_HEADROOM_SECONDS", 12.0) or 12.0))
+    total_timeout = max(2.0, float(payload["timeout_seconds"]) + timeout_headroom)
     try:
         data = await post_json_worker(
             url=f"{base}/task",

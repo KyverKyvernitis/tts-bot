@@ -21,6 +21,73 @@ class VoiceSessionError(RuntimeError):
 
 
 class ReproducaoMixin:
+    def _voice_operation_timeout_seconds(self) -> float:
+        default = min(8.0, max(3.0, float(getattr(self, "prepare_timeout", 8.0) or 8.0)))
+        return max(1.5, min(20.0, env_float("MUSIC_AGENT_VOICE_OPERATION_TIMEOUT_SECONDS", default)))
+
+    async def _disconnect_voice_client_bounded(
+        self,
+        voice_client: Any,
+        *,
+        guild_id: int = 0,
+        reason: str = "cleanup",
+    ) -> bool:
+        """Desconecta sem permitir que um VoiceClient stale prenda o agente."""
+        if voice_client is None:
+            return True
+        timeout = self._voice_operation_timeout_seconds()
+        try:
+            await asyncio.wait_for(voice_client.disconnect(force=True), timeout=timeout)
+            return True
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            self.log(
+                "voice_disconnect_timeout",
+                guild_id=int(guild_id or 0),
+                reason=reason,
+                timeout_seconds=round(timeout, 2),
+                channel=getattr(getattr(voice_client, "channel", None), "id", None),
+            )
+            # VoiceProtocol.cleanup() remove o registro interno do discord.py.
+            # É síncrono e serve como último recurso quando disconnect() ficou
+            # preso após troca/perda de rede.
+            cleanup = getattr(voice_client, "cleanup", None)
+            if callable(cleanup):
+                with contextlib.suppress(Exception):
+                    cleanup()
+            return False
+        except Exception as exc:
+            self.log(
+                "voice_disconnect_failed",
+                guild_id=int(guild_id or 0),
+                reason=reason,
+                channel=getattr(getattr(voice_client, "channel", None), "id", None),
+                error=f"{type(exc).__name__}: {short_text(exc, 180)}",
+            )
+            cleanup = getattr(voice_client, "cleanup", None)
+            if callable(cleanup):
+                with contextlib.suppress(Exception):
+                    cleanup()
+            return False
+
+    @staticmethod
+    def _voice_client_is_connected(voice_client: Any) -> bool:
+        if voice_client is None:
+            return False
+        with contextlib.suppress(Exception):
+            return bool(getattr(voice_client, "is_connected", lambda: False)())
+        return False
+
+    def _resume_offset_for_track(self, track: AgentTrack, *, played_for: float) -> float:
+        base_offset = max(0.0, float(getattr(track, "start_offset_seconds", 0.0) or 0.0))
+        resume_offset = max(
+            0.0,
+            base_offset + max(0.0, float(played_for or 0.0)) - self.stream_recovery_backtrack_seconds,
+        )
+        if track.duration is not None:
+            with contextlib.suppress(Exception):
+                resume_offset = min(resume_offset, max(0.0, float(track.duration) - 0.05))
+        return resume_offset
+
     @staticmethod
     def _is_already_connected_voice_error(exc: BaseException) -> bool:
         text = str(exc or "").strip().lower()
@@ -94,6 +161,7 @@ class ReproducaoMixin:
         reason: str = "change",
         keep_prefetch_task_keys: set[str] | None = None,
     ) -> int:
+        self._cancel_voice_runtime_recovery(st.guild_id)
         st.playback_token += 1
         st.updated_at = time.time()
         if keep_prefetch_task_keys:
@@ -628,7 +696,19 @@ class ReproducaoMixin:
         source = getattr(player, "source", None)
         if isinstance(source, AgentMixedAudioSource) and source.persistent:
             source.stop_music()
-        await stop_player_instance(player, disconnect=disconnect)
+        if not disconnect:
+            await stop_player_instance(player, disconnect=False)
+            return
+        if player is None:
+            return
+        with contextlib.suppress(Exception):
+            if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
+                player.stop()
+        await self._disconnect_voice_client_bounded(
+            player,
+            guild_id=int(getattr(getattr(player, "guild", None), "id", 0) or 0),
+            reason="stop_player",
+        )
 
     async def _stop_current_player_for_transition(self, st: GuildMusicState, *, disconnect: bool = False) -> None:
         player = st.player
@@ -1126,10 +1206,12 @@ class ReproducaoMixin:
                 # Se o preconnect criou uma sessão que nem chegou a ser entregue
                 # ao player, não deixe uma conexão órfã após falha de resolução.
                 voice_client, created = prepared_voice
-                if created:
-                    with contextlib.suppress(Exception):
-                        if getattr(voice_client, "is_connected", lambda: False)():
-                            await voice_client.disconnect(force=True)
+                if created and self._voice_client_is_connected(voice_client):
+                    await self._disconnect_voice_client_bounded(
+                        voice_client,
+                        guild_id=guild_id,
+                        reason="failed_preconnect_cleanup",
+                    )
             failed_track = st.current
             category, recoverable = self._classify_play_failure(exc, phase=failure_phase)
             if category != "voice_transport":
@@ -1321,21 +1403,41 @@ class ReproducaoMixin:
                         guild_id=guild_id,
                         channel=getattr(getattr(existing, "channel", None), "id", None),
                     )
-                    try:
-                        await existing.disconnect(force=True)
-                    except Exception as cleanup_exc:
-                        self.log(
-                            "voice_stale_client_cleanup_failed",
-                            guild_id=guild_id,
-                            channel=getattr(getattr(existing, "channel", None), "id", None),
-                            error=f"{type(cleanup_exc).__name__}: {short_text(cleanup_exc, 180)}",
-                        )
+                    await self._disconnect_voice_client_bounded(
+                        existing,
+                        guild_id=guild_id,
+                        reason="stale_client",
+                    )
                     existing = guild.voice_client
 
             if existing is None or not getattr(existing, "is_connected", lambda: False)():
                 self.log("voice_connecting", guild_id=guild_id, channel=requested_channel_id, transport="direct")
+                connect_timeout = self._voice_operation_timeout_seconds()
                 try:
-                    voice_client = await channel.connect(self_deaf=True)
+                    voice_client = await asyncio.wait_for(
+                        channel.connect(self_deaf=True),
+                        timeout=connect_timeout,
+                    )
+                except (asyncio.TimeoutError, TimeoutError) as exc:
+                    recovered = guild.voice_client
+                    if recovered is not None and self._voice_client_is_connected(recovered):
+                        self.log(
+                            "voice_connect_timeout_recovered",
+                            guild_id=guild_id,
+                            channel=getattr(getattr(recovered, "channel", None), "id", None),
+                            timeout_seconds=round(connect_timeout, 2),
+                        )
+                        voice_client = recovered
+                    else:
+                        if recovered is not None:
+                            await self._disconnect_voice_client_bounded(
+                                recovered,
+                                guild_id=guild_id,
+                                reason="connect_timeout_cleanup",
+                            )
+                        raise VoiceSessionError(
+                            f"timeout ao conectar voz após {connect_timeout:.1f}s"
+                        ) from exc
                 except Exception as exc:
                     if not self._is_already_connected_voice_error(exc):
                         raise VoiceSessionError(f"falha ao conectar voz: {type(exc).__name__}: {short_text(exc, 220)}") from exc
@@ -1359,7 +1461,10 @@ class ReproducaoMixin:
                         current_channel_id = getattr(getattr(voice_client, "channel", None), "id", None)
                         if current_channel_id != requested_channel_id:
                             try:
-                                await voice_client.move_to(channel)
+                                await asyncio.wait_for(
+                                    voice_client.move_to(channel),
+                                    timeout=self._voice_operation_timeout_seconds(),
+                                )
                             except Exception as move_exc:
                                 raise VoiceSessionError(f"falha ao mover voz após corrida: {type(move_exc).__name__}: {short_text(move_exc, 220)}") from move_exc
                         return voice_client, False
@@ -1372,7 +1477,10 @@ class ReproducaoMixin:
             if current_channel_id != requested_channel_id:
                 self.log("voice_moving", guild_id=guild_id, channel=requested_channel_id, from_channel=current_channel_id, transport="direct")
                 try:
-                    await voice_client.move_to(channel)
+                    await asyncio.wait_for(
+                        voice_client.move_to(channel),
+                        timeout=self._voice_operation_timeout_seconds(),
+                    )
                 except Exception as exc:
                     raise VoiceSessionError(f"falha ao mover sessão de voz: {type(exc).__name__}: {short_text(exc, 220)}") from exc
             else:
@@ -1391,9 +1499,12 @@ class ReproducaoMixin:
             voice_client, created = prepared
             st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
             if created and st.player is not voice_client:
-                with contextlib.suppress(Exception):
-                    if getattr(voice_client, "is_connected", lambda: False)():
-                        await voice_client.disconnect(force=True)
+                if self._voice_client_is_connected(voice_client):
+                    await self._disconnect_voice_client_bounded(
+                        voice_client,
+                        guild_id=guild_id,
+                        reason="discarded_preconnect",
+                    )
                 self.log("voice_preconnect_discarded", guild_id=guild_id, transport="direct")
 
     async def _confirm_direct_playback(self, voice_client: Any, source: Any, *, max_delay: float) -> float:
@@ -1636,6 +1747,8 @@ class ReproducaoMixin:
         st.consecutive_start_failures = 0
         st.last_error_category = ""
         st.last_error_phase = ""
+        st.voice_runtime_recovery_pending = False
+        st.voice_runtime_recovery_last_error = ""
         track.voice_recovery_attempts = 0
         self._set_status(st, "playing", event="direct_track_start_confirmed")
         self.log(
@@ -1759,6 +1872,146 @@ class ReproducaoMixin:
             expected_frame_bytes=PCM_FRAME_BYTES,
         )
 
+    def _cancel_voice_runtime_recovery(self, guild_id: int) -> None:
+        registry = getattr(self, "_voice_runtime_recovery_tasks", None)
+        if not isinstance(registry, dict):
+            return
+        task = registry.pop(int(guild_id or 0), None)
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
+    def _schedule_voice_runtime_recovery(
+        self,
+        guild_id: int,
+        *,
+        played_for: float,
+        reason: str,
+        error: str,
+    ) -> bool:
+        """Recupera perda de Discord Voice sem consumir a faixa ou a fila."""
+        guild_id = int(guild_id or 0)
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        track = st.current
+        if track is None:
+            return False
+        registry = getattr(self, "_voice_runtime_recovery_tasks", None)
+        if not isinstance(registry, dict):
+            self._voice_runtime_recovery_tasks = registry = {}
+        existing = registry.get(guild_id)
+        if existing is not None and not existing.done():
+            return True
+
+        resume_offset = self._resume_offset_for_track(track, played_for=played_for)
+        track.start_offset_seconds = resume_offset
+        st.voice_runtime_recovery_pending = True
+        st.voice_runtime_recovery_attempts = 0
+        st.voice_runtime_recovery_last_error = str(error or "")[:260]
+        self._set_status(st, "preparing", event="voice_runtime_recovery_wait")
+        self.log(
+            "voice_runtime_recovery_scheduled",
+            guild_id=guild_id,
+            reason=reason,
+            resume_offset=round(resume_offset, 2),
+            title=getattr(track, "title", ""),
+            queue_size=len(st.queue),
+        )
+
+        async def _runner() -> None:
+            attempts = max(1, min(20, env_int("MUSIC_AGENT_VOICE_RUNTIME_RECOVERY_ATTEMPTS", 10)))
+            base_delay = max(0.2, min(5.0, env_float("MUSIC_AGENT_VOICE_RUNTIME_RECOVERY_BASE_SECONDS", 0.75)))
+            last_exc: BaseException | None = None
+            try:
+                for attempt in range(1, attempts + 1):
+                    current = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+                    if current.current is not track:
+                        return
+                    delay = 0.0 if attempt == 1 else min(8.0, base_delay * (2 ** min(attempt - 2, 4)))
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    if current.current is not track:
+                        return
+                    current.voice_runtime_recovery_attempts = attempt
+                    current.updated_at = time.time()
+                    self.log(
+                        "voice_runtime_recovery_attempt",
+                        guild_id=guild_id,
+                        attempt=attempt,
+                        max_attempts=attempts,
+                        delay_seconds=round(delay, 2),
+                        title=getattr(track, "title", ""),
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            self._play_direct_voice(guild_id, track),
+                            timeout=max(5.0, float(self.prepare_timeout)),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        last_exc = exc
+                        category, recoverable = self._classify_play_failure(exc, phase="voice_connect")
+                        current.voice_runtime_recovery_last_error = f"{type(exc).__name__}: {short_text(exc, 220)}"
+                        current.last_error_category = category
+                        current.last_error_phase = "voice_runtime_recovery"
+                        self.log(
+                            "voice_runtime_recovery_failed",
+                            guild_id=guild_id,
+                            attempt=attempt,
+                            max_attempts=attempts,
+                            category=category,
+                            recoverable=recoverable,
+                            error=current.voice_runtime_recovery_last_error,
+                        )
+                        if category != "voice_transport":
+                            break
+                        continue
+                    current.voice_runtime_recovery_pending = False
+                    current.voice_runtime_recovery_last_error = ""
+                    current.last_error_category = ""
+                    current.last_error_phase = ""
+                    self.log(
+                        "voice_runtime_recovered",
+                        guild_id=guild_id,
+                        attempt=attempt,
+                        resume_offset=round(float(getattr(track, "start_offset_seconds", 0.0) or 0.0), 2),
+                        title=getattr(track, "title", ""),
+                    )
+                    return
+
+                current = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+                if current.current is track:
+                    current.voice_runtime_recovery_pending = False
+                    message = current.voice_runtime_recovery_last_error or (
+                        f"{type(last_exc).__name__}: {short_text(last_exc, 220)}" if last_exc else "reconexão de voz esgotada"
+                    )
+                    self._set_status(current, "failed", event="voice_runtime_recovery_exhausted", error=message)
+                    current.last_error_category = "voice_transport"
+                    current.last_error_phase = "voice_runtime_recovery"
+                    self.log(
+                        "voice_runtime_recovery_exhausted",
+                        guild_id=guild_id,
+                        attempts=current.voice_runtime_recovery_attempts,
+                        title=getattr(track, "title", ""),
+                        queue_size=len(current.queue),
+                        error=message,
+                    )
+            except asyncio.CancelledError:
+                raise
+            finally:
+                current = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+                if current.current is not track or str(getattr(current, "status", "") or "") == "playing":
+                    current.voice_runtime_recovery_pending = False
+                remove_owned_task(registry, guild_id, asyncio.current_task())
+
+        try:
+            task = asyncio.create_task(_runner())
+            registry[guild_id] = task
+            task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            return True
+        except RuntimeError:
+            st.voice_runtime_recovery_pending = False
+            return False
+
     async def _recover_current_stream(self, guild_id: int, *, played_for: float, reason: str) -> bool:
         """Re-resolve uma URL tocável quebrada e retoma a faixa uma única vez.
 
@@ -1831,12 +2084,18 @@ class ReproducaoMixin:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._invalidate_track_stream_cache(st.current)
+            category, _recoverable = self._classify_play_failure(exc, phase="playback_start")
+            if category != "voice_transport":
+                self._invalidate_track_stream_cache(st.current)
+            else:
+                st.last_error_category = "voice_transport"
+                st.last_error_phase = "stream_recovery_voice"
             self.log(
                 "stream_recovery_failed",
                 guild_id=guild_id,
                 reason=reason,
                 attempt=attempts + 1,
+                category=category,
                 error=f"{type(exc).__name__}: {short_text(exc, 220)}",
             )
             return False
@@ -1912,7 +2171,30 @@ class ReproducaoMixin:
 
         if error:
             log_summary("error")
+            callback_voice_failure = self._is_voice_transport_error(error, phase="") or not self._voice_client_is_connected(st.player)
             if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_error"):
+                return
+            recovery_voice_failure = str(getattr(st, "last_error_category", "") or "") == "voice_transport"
+            if st.current is not None and (callback_voice_failure or recovery_voice_failure):
+                message = f"{type(error).__name__}: {short_text(error, 260)}"
+                st.last_error_category = "voice_transport"
+                st.last_error_phase = "runtime_playback"
+                self.log(
+                    "voice_transport_playback_preserved",
+                    guild_id=guild_id,
+                    played_for=round(played_for, 2),
+                    title=getattr(st.current, "title", ""),
+                    queue_size=len(st.queue),
+                    error=message,
+                )
+                if self._schedule_voice_runtime_recovery(
+                    guild_id,
+                    played_for=0.0 if recovery_voice_failure else played_for,
+                    reason="direct_after_error",
+                    error=message,
+                ):
+                    return
+                self._set_status(st, "failed", event="voice_runtime_recovery_unavailable", error=message)
                 return
             self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="direct_after_error", error=f"{type(error).__name__}: {short_text(error, 260)}")
@@ -1927,7 +2209,33 @@ class ReproducaoMixin:
         # entre as durações fornecidas pelo site e pelo player.
         if early_unexpected:
             log_summary("early_end")
+            voice_was_lost = not self._voice_client_is_connected(st.player)
             if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_early_end"):
+                return
+            recovery_voice_failure = str(getattr(st, "last_error_category", "") or "") == "voice_transport"
+            if st.current is not None and (voice_was_lost or recovery_voice_failure):
+                message = (
+                    f"áudio encerrou cedo após perda de voz ({played_for:.1f}s; restantes {remaining_after_play:.1f}s)"
+                    if remaining_after_play is not None
+                    else f"áudio encerrou cedo após perda de voz ({played_for:.1f}s)"
+                )
+                st.last_error_category = "voice_transport"
+                st.last_error_phase = "runtime_playback"
+                self.log(
+                    "voice_transport_early_end_preserved",
+                    guild_id=guild_id,
+                    played_for=round(played_for, 2),
+                    title=getattr(st.current, "title", ""),
+                    queue_size=len(st.queue),
+                )
+                if self._schedule_voice_runtime_recovery(
+                    guild_id,
+                    played_for=0.0 if recovery_voice_failure else played_for,
+                    reason="direct_after_early_end",
+                    error=message,
+                ):
+                    return
+                self._set_status(st, "failed", event="voice_runtime_recovery_unavailable", error=message)
                 return
             self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="direct_after_early_end", error=f"áudio encerrou cedo demais ({played_for:.1f}s; restantes {remaining_after_play:.1f}s)" if remaining_after_play is not None else f"áudio encerrou cedo demais ({played_for:.1f}s)")

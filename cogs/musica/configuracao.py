@@ -306,6 +306,12 @@ MUSIC_AGENT_PAUSED_POLL_SECONDS = max(MUSIC_AGENT_PANEL_POLL_SECONDS, min(6.0, _
 # mesma mensagem do Discord a cada poll. Atualizações sem mudança ficam limitadas
 # a um refresh periódico para manter capacidade de autorreparo do painel.
 MUSIC_AGENT_PANEL_REFRESH_SECONDS = max(10.0, min(300.0, _parse_float(os.getenv("MUSIC_AGENT_PANEL_REFRESH_SECONDS", "30.0"), 30.0)))
+# Falhas transitórias do Tailscale/rede não encerram o monitor imediatamente.
+# O vínculo com o endpoint é solto cedo para permitir reseleção, mas o watcher
+# continua tentando e atualiza o painel para "reconectando".
+MUSIC_AGENT_MONITOR_REBIND_FAILURES = max(2, min(12, _parse_int(os.getenv("MUSIC_AGENT_MONITOR_REBIND_FAILURES", "4"), 4)))
+MUSIC_AGENT_MONITOR_MAX_FAILURES = max(MUSIC_AGENT_MONITOR_REBIND_FAILURES + 1, min(600, _parse_int(os.getenv("MUSIC_AGENT_MONITOR_MAX_FAILURES", "120"), 120)))
+MUSIC_AGENT_MONITOR_UI_FAILURES = max(1, min(MUSIC_AGENT_MONITOR_REBIND_FAILURES, _parse_int(os.getenv("MUSIC_AGENT_MONITOR_UI_FAILURES", "2"), 2)))
 MUSIC_AGENT_IDLE_DISCONNECT_SECONDS = max(15.0, _parse_float(os.getenv("MUSIC_AGENT_IDLE_DISCONNECT_SECONDS", os.getenv("MUSIC_IDLE_DISCONNECT_SECONDS", "120")), 120.0))
 MUSIC_LOADING_REACTION_EMOJI = (os.getenv("MUSIC_LOADING_REACTION_EMOJI", "<a:areia:1496606578395189473>") or "<a:areia:1496606578395189473>").strip()
 MUSIC_AGENT_MIN_VERSION = (os.getenv("MUSIC_AGENT_MIN_VERSION", "0.3.23") or "0.3.23").strip()
@@ -314,6 +320,10 @@ MUSIC_AGENT_PLAYING_CONFIRM_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGE
 MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT = max(0, min(100, _parse_int(os.getenv("MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT", "8"), 8)))
 MUSIC_AGENT_TTS_ROUTE_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_TTS_ROUTE_ENABLED", "true"), True)
 MUSIC_AGENT_TTS_TIMEOUT_SECONDS = max(3.0, _parse_float(os.getenv("MUSIC_AGENT_TTS_TIMEOUT_SECONDS", "30.0"), 30.0))
+# O timeout enviado ao Worker limita a reprodução TTS; síntese/cache/conexão
+# acontecem antes dela. O transporte HTTP precisa de margem adicional ou a VPS
+# pode desistir enquanto o Worker ainda está processando um TTS válido.
+MUSIC_AGENT_TTS_HTTP_HEADROOM_SECONDS = max(3.0, min(30.0, _parse_float(os.getenv("MUSIC_AGENT_TTS_HTTP_HEADROOM_SECONDS", "12.0"), 12.0)))
 MUSIC_AGENT_DIRECT_CONFIRM_SECONDS = max(0.15, _parse_float(os.getenv("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", "0.35"), 0.35))
 MUSIC_AGENT_PREFETCH_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_PREFETCH_ENABLED", "true"), True)
 MUSIC_AGENT_PREFETCH_TOP_RESULTS = max(0, min(3, _parse_int(os.getenv("MUSIC_AGENT_PREFETCH_TOP_RESULTS", "1"), 1)))

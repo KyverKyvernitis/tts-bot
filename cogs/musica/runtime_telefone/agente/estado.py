@@ -106,6 +106,9 @@ class GuildMusicState:
     consecutive_start_failures: int = 0
     last_error_category: str = ""
     last_error_phase: str = ""
+    voice_runtime_recovery_pending: bool = False
+    voice_runtime_recovery_attempts: int = 0
+    voice_runtime_recovery_last_error: str = ""
 
     def _first_virtual_marker(self) -> tuple[int, AgentTrack] | None:
         for index, item in enumerate(self.queue):
@@ -201,6 +204,9 @@ class GuildMusicState:
             "playback_token": int(self.playback_token),
             "play_attempt_sequence": int(self.play_attempt_sequence),
             "consecutive_start_failures": int(self.consecutive_start_failures),
+            "voice_runtime_recovery_pending": bool(self.voice_runtime_recovery_pending),
+            "voice_runtime_recovery_attempts": int(self.voice_runtime_recovery_attempts),
+            "voice_runtime_recovery_last_error": str(self.voice_runtime_recovery_last_error or ""),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": sum(1 for item in self.queue if not item.is_virtual_playlist_marker),

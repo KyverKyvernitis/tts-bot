@@ -2101,3 +2101,81 @@ def test_consecutive_start_failure_circuit_preserves_remaining_queue(music, monk
         assert sum(1 for event, _ in events if event == "track_failure_circuit_open") == 1
 
     run(scenario())
+
+
+def test_direct_after_voice_loss_preserves_current_and_queue(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 2110
+        current = music.AgentTrack(title="current", query="current", stream_url="https://media/current", duration=180)
+        next_track = music.AgentTrack(title="next", query="next", stream_url="https://media/next")
+        st = music.GuildMusicState(guild_id=gid, current=current, queue=[next_track], status="playing")
+        st.started_monotonic = music.time.monotonic() - 12.0
+
+        class Voice:
+            def is_connected(self): return False
+
+        st.player = Voice()
+        agent.states[gid] = st
+        agent.log = lambda *args, **kwargs: None
+        agent._recover_current_stream = lambda *args, **kwargs: asyncio.sleep(0, result=False)
+        scheduled = []
+        agent._schedule_voice_runtime_recovery = lambda guild_id, **kwargs: scheduled.append((guild_id, kwargs)) or True
+
+        await agent._direct_after(gid, RuntimeError("sessão de voz encerrada durante a música"), st.playback_token)
+
+        assert st.current is current
+        assert st.queue == [next_track]
+        assert st.last_error_category == "voice_transport"
+        assert st.last_error_phase == "runtime_playback"
+        assert scheduled and scheduled[0][0] == gid
+        assert scheduled[0][1]["reason"] == "direct_after_error"
+        assert not any(getattr(item, "title", "") == "current" for item in st.queue)
+
+    run(scenario())
+
+
+def test_runtime_voice_recovery_retries_same_track_until_success(music, monkeypatch):
+    monkeypatch.setenv("MUSIC_AGENT_VOICE_RUNTIME_RECOVERY_ATTEMPTS", "3")
+    monkeypatch.setenv("MUSIC_AGENT_VOICE_RUNTIME_RECOVERY_BASE_SECONDS", "0.2")
+
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 2111
+        current = music.AgentTrack(title="current", query="current", stream_url="https://media/current", duration=200)
+        next_track = music.AgentTrack(title="next", query="next", stream_url="https://media/next")
+        st = music.GuildMusicState(guild_id=gid, current=current, queue=[next_track], status="failed")
+        agent.states[gid] = st
+        events = []
+        calls = 0
+
+        async def play(_gid, track, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise music.VoiceSessionError("conexão de voz temporariamente indisponível")
+            agent._set_status(st, "playing", event="test_recovered")
+
+        agent._play_direct_voice = play
+        agent.log = lambda event, **fields: events.append((event, fields))
+
+        assert agent._schedule_voice_runtime_recovery(
+            gid,
+            played_for=14.0,
+            reason="test",
+            error="voice lost",
+        ) is True
+        task = agent._voice_runtime_recovery_tasks[gid]
+        await task
+
+        assert calls == 3
+        assert st.current is current
+        assert st.queue == [next_track]
+        assert st.status == "playing"
+        assert st.voice_runtime_recovery_pending is False
+        assert st.voice_runtime_recovery_attempts == 3
+        assert any(event == "voice_runtime_recovered" for event, _ in events)
+        assert gid not in agent._voice_runtime_recovery_tasks
+        assert current.start_offset_seconds > 10.0
+
+    run(scenario())

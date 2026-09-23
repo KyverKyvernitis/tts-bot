@@ -142,6 +142,10 @@ class MusicGuildState:
     voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     agent_playback_token: int = -1
     agent_monitor_task: Optional[asyncio.Task] = None
+    agent_monitor_failures: int = 0
+    agent_monitor_last_error: str = ""
+    agent_monitor_reconnecting_since: float = 0.0
+    agent_monitor_recoveries: int = 0
     agent_side_effect_task: Optional[asyncio.Task] = None
     virtual_playlist_refill_task: Optional[asyncio.Task] = None
     virtual_playlist_refill_cursor_key: str = ""

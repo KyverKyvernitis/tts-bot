@@ -237,6 +237,9 @@ async def sincronizar_estado_agente(
             router._set_current_status(state, mapped)
 
     state.current_backend = "agent"
+    state.agent_monitor_failures = 0
+    state.agent_monitor_last_error = ""
+    state.agent_monitor_reconnecting_since = 0.0
     remote_loop_mode = str(remote.get("loop_mode") or remote.get("repeat") or "").strip().lower()
     if remote_loop_mode in {"off", "one", "all"}:
         with contextlib.suppress(Exception):
@@ -275,7 +278,7 @@ async def sincronizar_estado_agente(
     state.music_session_active = bool(state.current or raw_status in {"preparing", "starting", "playing", "paused", "queued"})
     if raw_status and raw_status not in {"failed", "error"}:
         state.current_status_detail = raw_status
-    active_statuses = {"resolving", "starting", "playing", "paused", "queued"}
+    active_statuses = {"resolving", "starting", "reconnecting", "playing", "paused", "queued"}
     new_panel_key = router._panel_key_for_track(state.current)
     active_started_signal = bool(remote_status_original == "playing" and state.current is not None)
     active_confirmed = bool(raw_status == "playing" and confirmed_playing and state.current is not None)

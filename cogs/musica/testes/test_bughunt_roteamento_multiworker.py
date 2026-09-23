@@ -233,3 +233,227 @@ async def test_monitor_nao_resincroniza_snapshot_com_mesma_revisao(monkeypatch) 
 
     assert sync_calls == ["rev-1"]
     assert known_revisions[:3] == ["", "rev-1", "rev-1"]
+
+
+@pytest.mark.asyncio
+async def test_monitor_transient_failure_recovers_and_resyncs_panel(monkeypatch) -> None:
+    real_sleep = asyncio.sleep
+    current = SimpleNamespace(title="Faixa A")
+    state = SimpleNamespace(
+        agent_monitor_task=None,
+        now_message=object(),
+        current_status="playing",
+        current_status_detail="playing",
+        current=current,
+        music_session_active=True,
+        agent_monitor_failures=0,
+        agent_monitor_last_error="",
+        agent_monitor_reconnecting_since=0.0,
+        agent_monitor_recoveries=0,
+    )
+    panel_updates: list[bool] = []
+    sync_calls: list[str] = []
+    calls = 0
+
+    class Router:
+        def get_state(self, guild_id):
+            return state
+
+        def _set_current_status(self, st, status):
+            st.current_status = status
+
+        async def update_panel(self, guild_id, *, create=True, repost=False):
+            panel_updates.append(bool(create))
+
+        async def sync_music_agent_state(self, guild_id, track, remote, **kwargs):
+            sync_calls.append(str(remote.get("status") or ""))
+            state.current_status = str(remote.get("status") or "idle")
+            state.current = current if remote.get("current") else None
+
+    async def status_fake(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return {"ok": False, "available": False, "error": "tailscale route unavailable"}
+        if calls == 3:
+            return {
+                "ok": True,
+                "available": True,
+                "guilds": {
+                    "99": {
+                        "status": "playing",
+                        "confirmed_playing": True,
+                        "voice_connected": True,
+                        "player_present": True,
+                        "state_revision": "recovered-1",
+                        "current": {"title": "Faixa A", "webpage_url": "https://example.test/a"},
+                        "queue": [],
+                        "queue_size": 0,
+                    }
+                },
+            }
+        return {
+            "ok": True,
+            "available": True,
+            "guilds": {
+                "99": {
+                    "status": "idle",
+                    "state_revision": f"idle-{calls}",
+                    "current": None,
+                    "queue": [],
+                    "queue_size": 0,
+                }
+            },
+        }
+
+    async def yield_sleep(delay):
+        await real_sleep(0)
+
+    monkeypatch.setattr(monitor, "music_agent_status", status_fake)
+    monkeypatch.setattr(monitor.asyncio, "sleep", yield_sleep)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_MONITOR_UI_FAILURES", 2, raising=False)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_MONITOR_REBIND_FAILURES", 4, raising=False)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_MONITOR_MAX_FAILURES", 8, raising=False)
+
+    monitor.iniciar_monitor_music_agent(Router(), 99)
+    task = state.agent_monitor_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert panel_updates == [False]
+    assert "playing" in sync_calls
+    assert state.agent_monitor_failures == 0
+    assert state.agent_monitor_last_error == ""
+    assert state.agent_monitor_recoveries == 1
+
+
+@pytest.mark.asyncio
+async def test_tts_remote_command_has_http_headroom_for_synthesis(monkeypatch) -> None:
+    roteamento.limpar_vinculos_worker()
+    monkeypatch.setattr(roteamento.config, "PHONE_WORKER_TOKEN", "token", raising=False)
+    monkeypatch.setattr(comandos.config, "MUSIC_AGENT_TTS_HTTP_HEADROOM_SECONDS", 12.0, raising=False)
+
+    async def selecionar():
+        return _selection("worker-a", "http://worker-a:8766")
+
+    seen = {}
+
+    async def post_fake(**kwargs):
+        seen.update(kwargs)
+        return {"ok": True, "state": {}}
+
+    monkeypatch.setattr(comandos, "require_music_worker_available_async", selecionar)
+    monkeypatch.setattr(comandos, "post_json_worker", post_fake)
+
+    await comandos.music_agent_command(
+        "tts",
+        guild_id=88,
+        voice_channel_id=99,
+        text="oi",
+        timeout_seconds=30.0,
+    )
+
+    assert seen["timeout_seconds"] == pytest.approx(42.0)
+    roteamento.limpar_vinculos_worker()
+
+
+def test_poll_de_outage_longo_reduz_pressao_sem_matar_monitor(monkeypatch) -> None:
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.5, raising=False)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_PANEL_POLL_SECONDS", 2.0, raising=False)
+
+    assert monitor._intervalo_poll_music_agent("playing", falhas=1) == 2.0
+    assert monitor._intervalo_poll_music_agent("playing", falhas=12) >= 4.0
+    assert monitor._intervalo_poll_music_agent("playing", falhas=30) >= 6.0
+
+
+@pytest.mark.asyncio
+async def test_monitor_rebind_periodico_sobrevive_outage_e_recupera(monkeypatch) -> None:
+    real_sleep = asyncio.sleep
+    current = SimpleNamespace(title="Faixa A")
+    state = SimpleNamespace(
+        agent_monitor_task=None,
+        now_message=object(),
+        current_status="playing",
+        current_status_detail="playing",
+        current=current,
+        music_session_active=True,
+        agent_monitor_failures=0,
+        agent_monitor_last_error="",
+        agent_monitor_reconnecting_since=0.0,
+        agent_monitor_recoveries=0,
+    )
+    calls = 0
+    unbinds: list[int] = []
+    synced: list[str] = []
+
+    class Router:
+        def get_state(self, guild_id):
+            return state
+
+        def _set_current_status(self, st, status):
+            st.current_status = status
+
+        async def update_panel(self, guild_id, *, create=True, repost=False):
+            return None
+
+        async def sync_music_agent_state(self, guild_id, track, remote, **kwargs):
+            synced.append(str(remote.get("status") or ""))
+            state.current_status = str(remote.get("status") or "idle")
+            state.current = current if remote.get("current") else None
+
+    async def status_fake(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= 5:
+            return {"ok": False, "available": False, "error": "route down"}
+        if calls == 6:
+            return {
+                "ok": True,
+                "available": True,
+                "guilds": {
+                    "101": {
+                        "status": "playing",
+                        "confirmed_playing": True,
+                        "voice_connected": True,
+                        "player_present": True,
+                        "state_revision": "back-1",
+                        "current": {"title": "Faixa A", "webpage_url": "https://example.test/a"},
+                        "queue": [],
+                        "queue_size": 0,
+                    }
+                },
+            }
+        return {
+            "ok": True,
+            "available": True,
+            "guilds": {
+                "101": {
+                    "status": "idle",
+                    "state_revision": f"idle-{calls}",
+                    "current": None,
+                    "queue": [],
+                    "queue_size": 0,
+                }
+            },
+        }
+
+    async def yield_sleep(delay):
+        await real_sleep(0)
+
+    monkeypatch.setattr(monitor, "music_agent_status", status_fake)
+    monkeypatch.setattr(monitor, "desvincular_guild_worker", lambda gid: unbinds.append(int(gid)))
+    monkeypatch.setattr(monitor.asyncio, "sleep", yield_sleep)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_MONITOR_UI_FAILURES", 2, raising=False)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_MONITOR_REBIND_FAILURES", 2, raising=False)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_MONITOR_MAX_FAILURES", 20, raising=False)
+
+    monitor.iniciar_monitor_music_agent(Router(), 101)
+    task = state.agent_monitor_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # Durante 5 falhas, a afinidade é liberada nas falhas 2 e 4; o último
+    # unbind ocorre naturalmente quando o snapshot remoto fica idle.
+    assert unbinds.count(101) >= 2
+    assert "playing" in synced
+    assert state.agent_monitor_recoveries == 1
