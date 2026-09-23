@@ -20,6 +20,7 @@ def _assinatura_faixa_painel(item: Any) -> tuple[Any, ...]:
     return tuple(
         item.get(key)
         for key in (
+            "queue_item_id",
             "title",
             "webpage_url",
             "duration",
@@ -91,6 +92,7 @@ def _assinatura_painel_remoto(remote: dict[str, Any]) -> tuple[Any, ...]:
         queue_size,
         history_size,
         bool(remote.get("previous_available")),
+        int(remote.get("playback_token") or 0),
         _assinatura_faixa_painel(current),
         queue_signature,
         _assinatura_playlist_virtual(remote),

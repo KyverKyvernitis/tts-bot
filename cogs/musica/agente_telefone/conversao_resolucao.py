@@ -119,6 +119,7 @@ def converter_resposta_resolucao(
             track.display_source = "YouTube"
         elif worker_stream_url:
             track.display_source = "Worker local"
+        track.queue_item_id = str(item.get("queue_item_id") or "").strip()
         tracks.append(track)
 
     return ExtractedBatch(

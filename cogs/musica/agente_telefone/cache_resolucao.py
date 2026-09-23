@@ -43,6 +43,7 @@ def copiar_faixa_para_requisicao(
     clone.resolved_audio_format_id = track.resolved_audio_format_id
     clone.resolved_audio_sample_rate = track.resolved_audio_sample_rate
     clone.resolved_audio_channels = track.resolved_audio_channels
+    clone.queue_item_id = str(getattr(track, "queue_item_id", "") or "")
     clone.fallback_reason = track.fallback_reason
     clone.display_title = track.display_title
     clone.display_uploader = track.display_uploader

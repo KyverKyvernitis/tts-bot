@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +33,11 @@ class AgentTrack:
     voice_recovery_attempts: int = 0
     stream_resolved_monotonic: float = 0.0
     virtual_playlist_cursor: dict[str, Any] = field(default_factory=dict)
+    queue_item_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def __post_init__(self) -> None:
+        if not str(self.queue_item_id or "").strip():
+            self.queue_item_id = uuid.uuid4().hex
 
     @property
     def is_virtual_playlist_marker(self) -> bool:
@@ -65,6 +71,7 @@ class AgentTrack:
             "resolved_audio_max_abr": self.audio_abr,
             "start_offset_seconds": self.start_offset_seconds,
             "virtual_playlist_cursor": dict(self.virtual_playlist_cursor) if self.virtual_playlist_cursor else {},
+            "queue_item_id": self.queue_item_id,
         }
 
 
@@ -109,6 +116,28 @@ class GuildMusicState:
     voice_runtime_recovery_pending: bool = False
     voice_runtime_recovery_attempts: int = 0
     voice_runtime_recovery_last_error: str = ""
+    queue_invariant_repairs: int = 0
+
+    def _repair_current_queue_alias(self) -> int:
+        """Remove somente a MESMA entrada de fila que também virou current.
+
+        Repetições legítimas da mesma música possuem ``queue_item_id`` distintos
+        e permanecem intactas. Este guard é uma última defesa contra races de
+        promoção/espelhamento que poderiam tocar o mesmo item duas vezes.
+        """
+        current_id = str(getattr(self.current, "queue_item_id", "") or "")
+        if not current_id or not self.queue:
+            return 0
+        before = len(self.queue)
+        self.queue[:] = [
+            item for item in self.queue
+            if item.is_virtual_playlist_marker or str(getattr(item, "queue_item_id", "") or "") != current_id
+        ]
+        removed = before - len(self.queue)
+        if removed > 0:
+            self.queue_invariant_repairs += removed
+            self.updated_at = time.time()
+        return removed
 
     def _first_virtual_marker(self) -> tuple[int, AgentTrack] | None:
         for index, item in enumerate(self.queue):
@@ -148,6 +177,7 @@ class GuildMusicState:
         return f"{self.updated_at:.6f}:{self.playback_token}"
 
     def public(self) -> dict[str, Any]:
+        self._repair_current_queue_alias()
         player = self.player
         voice_connected = False
         playing = False
@@ -207,6 +237,7 @@ class GuildMusicState:
             "voice_runtime_recovery_pending": bool(self.voice_runtime_recovery_pending),
             "voice_runtime_recovery_attempts": int(self.voice_runtime_recovery_attempts),
             "voice_runtime_recovery_last_error": str(self.voice_runtime_recovery_last_error or ""),
+            "queue_invariant_repairs": int(self.queue_invariant_repairs),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": sum(1 for item in self.queue if not item.is_virtual_playlist_marker),

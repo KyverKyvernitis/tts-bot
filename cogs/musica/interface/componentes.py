@@ -19,7 +19,11 @@ from ..metadados.provedores import describe_url
 from ..agente_telefone.comandos import estado_comando_diferido, music_agent_command, music_agent_status
 from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..reproducao.controle_remoto import enviar_controle_remoto
-from ..reproducao.playlist_virtual import payload_cursor_playlist, schedule_playlist_refill_from_result
+from ..reproducao.playlist_virtual import (
+    carregar_pagina_fila_virtual,
+    payload_cursor_playlist,
+    schedule_playlist_refill_from_result,
+)
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from .carregamento import MusicLoadingReaction
 from .tarefas import agendar_tarefa_unica
@@ -389,6 +393,7 @@ def _agent_tracks_payload(tracks: list[MusicTrack], *, requester_id: int = 0, re
             "query": _agent_query_for_track(track),
             "requester_id": requester_id or track.requester_id,
             "requester_name": requester_name or track.requester_name,
+            "queue_item_id": str(getattr(track, "queue_item_id", "") or ""),
         })
     return payload
 
@@ -666,7 +671,12 @@ def _queue_total_count(state, items: list[MusicTrack]) -> int:
             remote_queue_size=remote_queue_size,
         )
         if exact is not None:
-            total = max(total, exact)
+            # Quando o cursor conhece o total, ele é a autoridade da coleção
+            # virtual. ``queue_size`` é somente a janela materializada e pode
+            # ficar um snapshot atrasado durante a promoção current<-queue.
+            # Nunca deixe essa janela stale manter +1 e contar a faixa atual
+            # novamente. Preserve apenas o mínimo já visível no espelho.
+            total = max(len(items), exact)
     return max(0, total)
 
 
@@ -1726,15 +1736,30 @@ class AddSongModal(discord.ui.Modal):
 
 
 class QueueSelect(discord.ui.Select):
-    def __init__(self, router, guild_id: int, page: int = 0, selected_position: int | None = None) -> None:
+    def __init__(
+        self,
+        router,
+        guild_id: int,
+        page: int = 0,
+        selected_position: int | None = None,
+        *,
+        items: list[MusicTrack] | None = None,
+        start_position: int | None = None,
+    ) -> None:
         self.router = router
         self.guild_id = int(guild_id)
         self.page = max(0, int(page))
         self.selected_position = selected_position
-        items = router.snapshot_queue(guild_id)
-        start = self.page * QUEUE_PAGE_SIZE
+        if items is None:
+            all_items = router.snapshot_queue(guild_id)
+            start = self.page * QUEUE_PAGE_SIZE
+            page_items = all_items[start : start + QUEUE_PAGE_SIZE]
+            first_position = start + 1
+        else:
+            page_items = list(items)
+            first_position = max(1, int(start_position or (self.page * QUEUE_PAGE_SIZE + 1)))
         options = []
-        for idx, track in enumerate(items[start : start + QUEUE_PAGE_SIZE], start=start + 1):
+        for idx, track in enumerate(page_items, start=first_position):
             options.append(
                 discord.SelectOption(
                     label=f"{idx}. {track.short_title}"[:100],
@@ -1912,31 +1937,71 @@ class QueueView(discord.ui.LayoutView):
     def _queue_items(self) -> list[MusicTrack]:
         return self.router.snapshot_queue(self.guild_id)
 
-    def _max_page(self, items: list[MusicTrack] | None = None) -> int:
+    def _max_page(self, items: list[MusicTrack] | None = None, state=None) -> int:
         items = self._queue_items() if items is None else items
-        return max(0, (len(items) - 1) // QUEUE_PAGE_SIZE)
+        state = self.router.get_state(self.guild_id) if state is None else state
+        total = max(len(items), _queue_total_count(state, items))
+        return max(0, (total - 1) // QUEUE_PAGE_SIZE)
+
+    def _page_items(self, state, items: list[MusicTrack]) -> tuple[list[MusicTrack], bool]:
+        """Retorna itens da página e se vieram do cache virtual de UI."""
+        start = self.page * QUEUE_PAGE_SIZE
+        end = start + QUEUE_PAGE_SIZE
+        if end <= len(items) or (start < len(items) and not _virtual_playlist_info(state)):
+            return items[start:end], False
+        pages = getattr(state, "agent_virtual_playlist_pages", None)
+        if isinstance(pages, dict):
+            cached = pages.get(self.page)
+            if isinstance(cached, list):
+                return list(cached), True
+        return items[start:end], False
+
+    async def _prepare_page(self) -> None:
+        # Cada clique precisa partir do snapshot autoritativo atual. Antes, o
+        # usuário podia navegar 1/3 -> 2/3 -> 3/3 enquanto a música avançava e
+        # o card mantinha current/fila antigos, aparentando duplicação.
+        refresh = getattr(self.router, "refresh_queue_controller", None)
+        if callable(refresh):
+            with contextlib.suppress(Exception):
+                await refresh(self.guild_id)
+        state = self.router.get_state(self.guild_id)
+        items = self._queue_items()
+        self.page = max(0, min(self.page, self._max_page(items, state)))
+        start = self.page * QUEUE_PAGE_SIZE
+        end = start + QUEUE_PAGE_SIZE
+        virtual = _virtual_playlist_info(state)
+        if virtual and end > len(items):
+            await carregar_pagina_fila_virtual(
+                self.router,
+                self.guild_id,
+                self.page,
+                page_size=QUEUE_PAGE_SIZE,
+            )
 
     def _queue_text(self, state, items: list[MusicTrack]) -> str:
         total = _queue_total_count(state, items)
         virtual = _virtual_playlist_info(state)
-        if not items:
+        page_items, from_virtual_cache = self._page_items(state, items)
+        if not items and not page_items:
             if virtual:
+                error = str(getattr(state, "agent_virtual_playlist_browse_error", "") or "").strip()
+                if error:
+                    return "## 📜 Fila\nNão consegui carregar esta página agora.\n-# Tente navegar novamente em alguns segundos."
                 return "## 📜 Fila\nCarregando próximas músicas…"
             return "## 📜 Fila\nA fila está vazia.\n-# Use `_play <nome ou link>` para adicionar músicas."
-        max_page = self._max_page(items)
+
+        max_page = self._max_page(items, state)
         start = self.page * QUEUE_PAGE_SIZE
-        chunk = items[start : start + QUEUE_PAGE_SIZE]
-        page_label = f" · página {self.page + 1}/{max_page + 1}" if max_page else ""
         if virtual:
             total_known = virtual.get("total_tracks") not in (None, "")
             suffix = "" if total_known else "+"
             count = f"{total}{suffix} música{'s' if total != 1 else ''}"
             lines = [f"## 📜 Fila · {count}"]
-            # As páginas cobrem somente a janela já materializada no Phone
-            # Worker. Não cole "página 1/3" ao total lógico da playlist, pois
-            # isso fazia parecer que três páginas continham 50+ músicas.
-            if max_page:
-                lines.append(f"-# Próximas {len(items)} prontas{page_label}")
+            page_line = f"Página {self.page + 1}/{max_page + 1}"
+            if from_virtual_cache:
+                lines.append(f"-# {page_line} · metadata carregada sob demanda")
+            else:
+                lines.append(f"-# {page_line} · {len(items)} próxima{'s' if len(items) != 1 else ''} pronta{'s' if len(items) != 1 else ''} no player")
             title = _escape(str(virtual.get("title") or ""), limit=80)
             if title and title.lower() != "playlist":
                 lines.append(f"-# {title}")
@@ -1944,35 +2009,67 @@ class QueueView(discord.ui.LayoutView):
             lines = [f"## 📜 Fila · {total} música{'s' if total != 1 else ''}"]
             if max_page:
                 lines.append(f"-# Página {self.page + 1}/{max_page + 1}")
+
         current = getattr(state, "current", None)
         if current is not None:
             lines.extend([f"-# Tocando agora: {_track_link_v2(current, title_limit=64)}", ""])
-        for offset, track in enumerate(chunk, start=1):
-            index = start + offset
-            marker = "▶" if self.selected_position == index else f"{index:02d}"
-            lines.append(f"**{marker}**  {_track_link_v2(track, title_limit=62)}  ·  {track.duration_label}")
+
+        if not page_items:
+            lines.append("-# Esta página ainda não ficou disponível para visualização.")
+        else:
+            for offset, track in enumerate(page_items, start=1):
+                index = start + offset
+                marker = "▶" if self.selected_position == index else f"{index:02d}"
+                lines.append(f"**{marker}**  {_track_link_v2(track, title_limit=62)}  ·  {track.duration_label}")
+
         if not virtual:
-            lines.extend(["", f"-# Duração aproximada: {_queue_duration_label(items)}"] )
+            lines.extend(["", f"-# Duração aproximada: {_queue_duration_label(items)}"])
         return "\n".join(lines)
 
     def _refresh_components(self) -> None:
         self.clear_items()
         items = self._queue_items()
-        max_page = self._max_page(items)
-        self.page = max(0, min(self.page, max_page))
-        if self.selected_position and not (1 <= self.selected_position <= len(items)):
-            self.selected_position = None
-
         state = self.router.get_state(self.guild_id)
+        max_page = self._max_page(items, state)
+        self.page = max(0, min(self.page, max_page))
+        page_items, from_virtual_cache = self._page_items(state, items)
+
+        # Só itens materializados no Worker são editáveis hoje. Páginas
+        # distantes continuam totalmente visíveis, mas não fingem que move/remove
+        # já conseguem atravessar o cursor virtual.
+        selected_materialized = bool(
+            self.selected_position
+            and 1 <= int(self.selected_position) <= len(items)
+        )
+        if self.selected_position and not (
+            1 <= int(self.selected_position) <= max(1, _queue_total_count(state, items))
+        ):
+            self.selected_position = None
+            selected_materialized = False
+
         virtual = _virtual_playlist_info(state)
-        container = discord.ui.Container(accent_color=discord.Color.blurple() if (items or virtual) else discord.Color.dark_grey())
+        container = discord.ui.Container(accent_color=discord.Color.blurple() if (items or page_items or virtual) else discord.Color.dark_grey())
         container.add_item(discord.ui.TextDisplay(self._queue_text(state, items)))
 
-        if items:
+        start = self.page * QUEUE_PAGE_SIZE
+        if page_items and not from_virtual_cache and start < len(items):
             container.add_item(discord.ui.Separator())
-            container.add_item(discord.ui.ActionRow(QueueSelect(self.router, self.guild_id, self.page, self.selected_position)))
+            container.add_item(
+                discord.ui.ActionRow(
+                    QueueSelect(
+                        self.router,
+                        self.guild_id,
+                        self.page,
+                        self.selected_position,
+                        items=page_items,
+                        start_position=start + 1,
+                    )
+                )
+            )
+        elif page_items and from_virtual_cache:
+            container.add_item(discord.ui.TextDisplay("-# Esta página é visualização da playlist virtual; ela entra na janela editável conforme a reprodução avança."))
 
-        if self.selected_position:
+        if selected_materialized:
             play = discord.ui.Button(label="Tocar agora", emoji="▶️", style=discord.ButtonStyle.primary, custom_id="music:queue:play")
             play.callback = self.play_selected
             move = discord.ui.Button(label="Mover", emoji="↪️", style=discord.ButtonStyle.secondary, custom_id="music:queue:move")
@@ -1997,8 +2094,18 @@ class QueueView(discord.ui.LayoutView):
         self.add_item(container)
 
     async def _redraw(self, interaction: discord.Interaction) -> None:
+        # Defer antes de qualquer consulta pública de metadata para não estourar
+        # o deadline da interação em páginas ainda não cacheadas.
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        await self._prepare_page()
         self._refresh_components()
-        await interaction.response.edit_message(content=None, embeds=[], attachments=[], view=self)
+        message = getattr(interaction, "message", None)
+        if message is not None:
+            await message.edit(content=None, embeds=[], attachments=[], view=self)
+        else:
+            with contextlib.suppress(Exception):
+                await interaction.edit_original_response(content=None, embeds=[], attachments=[], view=self)
 
     async def previous_page(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)

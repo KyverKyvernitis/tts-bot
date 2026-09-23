@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections import deque
 from typing import Any
 
@@ -8,6 +9,8 @@ from ..agente_telefone.conversao import faixa_do_payload
 from ..busca import registrar_link_busca
 from ..agente_telefone.roteamento import desvincular_guild_worker
 from ..nucleo.modelos import MusicTrack
+
+logger = logging.getLogger(__name__)
 
 
 def _playlist_virtual_publica(remote: dict[str, Any]) -> dict[str, Any]:
@@ -38,12 +41,30 @@ def _playlist_virtual_publica(remote: dict[str, Any]) -> dict[str, Any]:
         "source_url": str(cursor.get("source_url") or "").strip(),
         "title": str(cursor.get("title") or "").strip(),
         "resource_type": str(cursor.get("resource_type") or "playlist").strip() or "playlist",
+        "resource_id": str(cursor.get("resource_id") or "").strip(),
         "next_offset": inteiro(cursor.get("next_offset")),
         "total_tracks": total_tracks,
         "materialized_before": inteiro(virtual.get("materialized_before")),
         "waiting": bool(virtual.get("waiting")),
     }
 
+
+
+def _virtual_playlist_browse_key(info: dict[str, Any]) -> str:
+    if not isinstance(info, dict) or not info:
+        return ""
+    try:
+        consumed = max(0, int(info.get("next_offset") or 0) - int(info.get("materialized_before") or 0))
+    except Exception:
+        consumed = 0
+    return "|".join(
+        (
+            str(info.get("provider") or "").strip(),
+            str(info.get("source_url") or "").strip(),
+            str(consumed),
+            str(info.get("total_tracks") if info.get("total_tracks") not in (None, "") else "?"),
+        )
+    )
 
 def sincronizar_fila_remota(
     state: Any,
@@ -59,9 +80,33 @@ def sincronizar_fila_remota(
     if not isinstance(remote, dict):
         return
 
+    try:
+        remote_repair_total = max(0, int(remote.get("queue_invariant_repairs") or 0))
+    except Exception:
+        remote_repair_total = 0
+    previous_remote_repairs = max(0, int(getattr(state, "agent_queue_invariant_repairs", 0) or 0))
+    if remote_repair_total > previous_remote_repairs:
+        logger.warning(
+            "[music/queue] Worker reparou alias current/queue | repairs_total=%s novos=%s",
+            remote_repair_total,
+            remote_repair_total - previous_remote_repairs,
+        )
+    state.agent_queue_invariant_repairs = remote_repair_total
+
     # Atualize o cursor mesmo quando o Worker omitir o preview da fila. Isso
     # evita a UI dizer "fila vazia" enquanto está parada exatamente no marker.
-    state.agent_virtual_playlist = _playlist_virtual_publica(remote)
+    virtual_info = _playlist_virtual_publica(remote)
+    state.agent_virtual_playlist = virtual_info
+
+    def commit_virtual_browse_state() -> None:
+        browse_key = _virtual_playlist_browse_key(virtual_info)
+        previous_browse_key = str(getattr(state, "agent_virtual_playlist_browse_key", "") or "")
+        if browse_key != previous_browse_key:
+            # As posições lógicas mudaram (nova playlist ou a faixa atual avançou).
+            # Invalide só o cache visual; a fila autoritativa continua no Worker.
+            state.agent_virtual_playlist_pages.clear()
+            state.agent_virtual_playlist_browse_error = ""
+            state.agent_virtual_playlist_browse_key = browse_key
 
     remote_queue = remote.get("queue")
     try:
@@ -72,6 +117,7 @@ def sincronizar_fila_remota(
     if remote_queue is None and remote.get("queue_size") in (0, "0"):
         remote_queue = []
     if not isinstance(remote_queue, list):
+        commit_virtual_browse_state()
         return
 
     if not state.agent_remote_queue_size:
@@ -80,11 +126,46 @@ def sincronizar_fila_remota(
         state.agent_remote_queue_size = max(state.agent_remote_queue_size, len(remote_queue))
 
     mirrored: deque[MusicTrack] = deque(maxlen=limite_fila)
+    current_payload = remote.get("current") if isinstance(remote.get("current"), dict) else {}
+    current_queue_item_id = str(current_payload.get("queue_item_id") or "").strip()
+    mirrored_duplicate_repairs = 0
     for item in remote_queue[:limite_fila]:
         if isinstance(item, dict):
+            if current_queue_item_id and str(item.get("queue_item_id") or "").strip() == current_queue_item_id:
+                # Defesa para snapshots produzidos durante uma corrida antiga:
+                # a MESMA entrada não pode estar em current e queue. Repetições
+                # legítimas possuem ids diferentes e não são removidas.
+                mirrored_duplicate_repairs += 1
+                continue
             track = faixa_do_payload(item)
             if track is not None:
                 mirrored.append(track)
+    if mirrored_duplicate_repairs:
+        state.agent_remote_queue_size = max(0, state.agent_remote_queue_size - mirrored_duplicate_repairs)
+        state.agent_queue_snapshot_repairs = max(0, int(getattr(state, "agent_queue_snapshot_repairs", 0) or 0)) + mirrored_duplicate_repairs
+        repair_signature = f"{current_queue_item_id}:{mirrored_duplicate_repairs}"
+        if repair_signature != str(getattr(state, "agent_queue_last_repair_signature", "") or ""):
+            logger.warning(
+                "[music/queue] snapshot remoto continha current também na fila; reparando espelho | id=%s removidos=%s",
+                current_queue_item_id[:24],
+                mirrored_duplicate_repairs,
+            )
+        state.agent_queue_last_repair_signature = repair_signature
+        if virtual_info:
+            # Snapshots de versões antigas podiam contar a faixa atual também
+            # em ``materialized_before``. Corrija a mesma unidade no cursor,
+            # senão a UI ainda exibiria +1 no total lógico apesar de filtrar a
+            # duplicata visual da queue.
+            virtual_info["materialized_before"] = max(
+                0,
+                int(virtual_info.get("materialized_before") or 0) - mirrored_duplicate_repairs,
+            )
+            state.agent_virtual_playlist = virtual_info
+
+    if not mirrored_duplicate_repairs:
+        state.agent_queue_last_repair_signature = ""
+
+    commit_virtual_browse_state()
 
     state.forward_queue.clear()
     state.forward_queue.extend(mirrored)

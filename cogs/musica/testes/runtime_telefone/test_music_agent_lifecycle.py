@@ -2449,3 +2449,34 @@ def test_voice_registry_fallback_reuses_client_when_guild_cache_is_temporarily_e
         assert channel.connect_calls == 0
 
     run(scenario())
+
+
+def test_queue_item_identity_survives_stream_resolution(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        meta = {
+            "title": "Mesma faixa",
+            "queue_item_id": "queue-entry-123",
+            "stream_url": "https://cdn.example.invalid/audio.opus",
+            "source": "YouTube",
+        }
+        direct = await agent.resolve_track(
+            "https://cdn.example.invalid/audio.opus",
+            track_meta=meta,
+            body={"guild_id": 1},
+        )
+        assert direct.queue_item_id == "queue-entry-123"
+
+        resolved = agent._agent_track_from_resolved(
+            {
+                "stream_url": "https://cdn.example.invalid/resolved.opus",
+                "webpage_url": "https://youtube.com/watch?v=abc",
+                "title": "Mesma faixa",
+            },
+            query="ytsearch1:Mesma faixa",
+            track_meta={"title": "Mesma faixa", "queue_item_id": "queue-entry-456"},
+            body={"guild_id": 1},
+        )
+        assert resolved.queue_item_id == "queue-entry-456"
+
+    run(scenario())

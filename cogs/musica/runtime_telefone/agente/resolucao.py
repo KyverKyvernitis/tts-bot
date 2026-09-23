@@ -409,6 +409,7 @@ class ResolucaoMixin:
             audio_channels=int(float(resolved.get("audio_channels") or resolved.get("channels") or 0) or 0),
             start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
             stream_resolved_monotonic=max(0.0, float(resolved.get("_stream_resolved_monotonic") or time.monotonic())),
+            queue_item_id=str(track_meta.get("queue_item_id") or ""),
         )
         return track
 
@@ -479,6 +480,7 @@ class ResolucaoMixin:
                 source="playlist-virtual",
                 transport_hint="playlist-cursor",
                 virtual_playlist_cursor=dict(virtual_cursor),
+                queue_item_id=str(track_meta.get("queue_item_id") or ""),
             )
 
         query = self._query_from_track_meta(track_meta, fallback_query=fallback_query)
@@ -505,6 +507,7 @@ class ResolucaoMixin:
             audio_sample_rate=int(float(track_meta.get("resolved_audio_sample_rate") or track_meta.get("audio_sample_rate") or track_meta.get("asr") or 0) or 0),
             audio_channels=int(float(track_meta.get("resolved_audio_channels") or track_meta.get("audio_channels") or track_meta.get("channels") or 0) or 0),
             start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
+            queue_item_id=str(track_meta.get("queue_item_id") or ""),
         )
 
     async def _prefetch_track(self, body: dict[str, Any], track_meta: dict[str, Any], query: str, cache_key: str) -> None:
@@ -564,6 +567,7 @@ class ResolucaoMixin:
                 audio_channels=int(float(track_meta.get("resolved_audio_channels") or track_meta.get("audio_channels") or track_meta.get("channels") or 0) or 0),
                 start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
                 stream_resolved_monotonic=time.monotonic(),
+                queue_item_id=str(track_meta.get("queue_item_id") or ""),
             )
         logical_key = self._resolve_cache_key(query, track_meta)
         cached = self._cached_resolved_get(logical_key)

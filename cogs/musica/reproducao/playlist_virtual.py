@@ -100,6 +100,7 @@ def payload_faixa_agent(
         "query": consulta_agent_para_faixa(track, fallback_query),
         "requester_id": requester_id or track.requester_id,
         "requester_name": requester_name or track.requester_name,
+        "queue_item_id": str(getattr(track, "queue_item_id", "") or ""),
     }
 
 
@@ -370,6 +371,146 @@ def schedule_playlist_refill_if_needed(router: Any, guild_id: int, remote: dict[
     task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
     return True
 
+
+
+def virtual_playlist_consumed_count(info: dict[str, Any]) -> int:
+    """Quantidade de itens da coleção que já deixaram a fila lógica.
+
+    ``next_offset`` aponta depois da janela já materializada e
+    ``materialized_before`` conta quantos desses itens ainda estão antes do
+    marker no Worker. A diferença é exatamente o deslocamento da primeira
+    posição atualmente visível da playlist.
+    """
+    if not isinstance(info, dict):
+        return 0
+    try:
+        return max(0, int(info.get("next_offset") or 0) - int(info.get("materialized_before") or 0))
+    except Exception:
+        return 0
+
+
+def virtual_playlist_remaining_count(info: dict[str, Any]) -> int | None:
+    if not isinstance(info, dict):
+        return None
+    total = info.get("total_tracks")
+    if total in (None, ""):
+        return None
+    try:
+        return max(0, int(total) - virtual_playlist_consumed_count(info))
+    except Exception:
+        return None
+
+
+def _virtual_browse_state_key(info: dict[str, Any]) -> str:
+    if not isinstance(info, dict) or not info:
+        return ""
+    return "|".join(
+        (
+            str(info.get("provider") or "").strip(),
+            str(info.get("source_url") or "").strip(),
+            str(virtual_playlist_consumed_count(info)),
+            str(info.get("total_tracks") if info.get("total_tracks") not in (None, "") else "?"),
+        )
+    )
+
+
+async def carregar_pagina_fila_virtual(
+    router: Any,
+    guild_id: int,
+    page: int,
+    *,
+    page_size: int,
+) -> list[MusicTrack]:
+    """Carrega somente metadata de uma página distante da fila virtual.
+
+    Isto é browse/UI, não refill de playback: não altera cursor do Worker, não
+    resolve áudio e não materializa a playlist inteira. O cache é invalidado
+    automaticamente quando a posição lógica avança ou a coleção muda.
+    """
+    state = router.get_state(int(guild_id))
+    info = getattr(state, "agent_virtual_playlist", None)
+    if not isinstance(info, dict) or not bool(info.get("active")):
+        return []
+
+    page = max(0, int(page))
+    page_size = max(1, min(25, int(page_size)))
+    expected_key = _virtual_browse_state_key(info)
+    if not expected_key:
+        return []
+    if str(getattr(state, "agent_virtual_playlist_browse_key", "") or "") != expected_key:
+        state.agent_virtual_playlist_pages.clear()
+        state.agent_virtual_playlist_browse_key = expected_key
+        state.agent_virtual_playlist_browse_error = ""
+
+    cached = state.agent_virtual_playlist_pages.get(page)
+    if isinstance(cached, list):
+        return list(cached)
+
+    total_remaining = virtual_playlist_remaining_count(info)
+    logical_start = page * page_size
+    if total_remaining is not None and logical_start >= total_remaining:
+        state.agent_virtual_playlist_pages[page] = []
+        return []
+
+    source_offset = virtual_playlist_consumed_count(info) + logical_start
+    cursor = PlaylistCursor(
+        provider=str(info.get("provider") or "").strip(),
+        source_url=str(info.get("source_url") or "").strip(),
+        title=str(info.get("title") or "").strip(),
+        resource_type=str(info.get("resource_type") or "playlist").strip() or "playlist",
+        resource_id=str(info.get("resource_id") or "").strip(),
+        next_offset=source_offset,
+        total_tracks=(None if info.get("total_tracks") in (None, "") else int(info.get("total_tracks"))),
+        exhausted=False,
+    )
+    if not cursor.provider or not cursor.source_url:
+        return []
+
+    requester_id = 0
+    requester_name = ""
+    # O snapshot público simplificado não precisa carregar requester, mas os
+    # metadados exibidos na fila ficam melhores quando preservamos o atual.
+    with contextlib.suppress(Exception):
+        if getattr(state, "current", None) is not None:
+            requester_id = int(getattr(state.current, "requester_id", 0) or 0)
+            requester_name = str(getattr(state.current, "requester_name", "") or "")
+
+    try:
+        batch = await router.extractor.continue_playlist_window(
+            cursor,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            limit=page_size,
+        )
+        tracks = list(batch.tracks[:page_size]) if batch is not None else []
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        state.agent_virtual_playlist_browse_error = f"{type(exc).__name__}: {exc}"[:220]
+        logger.debug(
+            "[music/playlist] página virtual da fila não pôde ser carregada | guild=%s page=%s offset=%s",
+            guild_id,
+            page,
+            source_offset,
+            exc_info=True,
+        )
+        return []
+
+    # Não grave resultado se a faixa avançou enquanto o I/O estava em curso.
+    current = router.get_state(int(guild_id))
+    current_info = getattr(current, "agent_virtual_playlist", None)
+    if _virtual_browse_state_key(current_info if isinstance(current_info, dict) else {}) != expected_key:
+        return []
+    current.agent_virtual_playlist_pages[page] = list(tracks)
+    current.agent_virtual_playlist_browse_error = ""
+    logger.info(
+        "[music/playlist] página virtual pronta para UI | guild=%s page=%s offset=%s tracks=%s",
+        guild_id,
+        page + 1,
+        source_offset,
+        len(tracks),
+    )
+    return tracks
 
 def cancel_playlist_refill(state: Any) -> None:
     task = getattr(state, "virtual_playlist_refill_task", None)

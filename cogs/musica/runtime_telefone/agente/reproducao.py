@@ -1116,6 +1116,16 @@ class ReproducaoMixin:
             if self._track_key(st.current) != self._track_key(next_track):
                 self._push_history(st, st.current)
         st.current = next_track
+        repaired = st._repair_current_queue_alias()
+        if repaired:
+            self.log(
+                "queue_current_duplicate_repaired",
+                guild_id=guild_id,
+                queue_item_id=str(getattr(next_track, "queue_item_id", "") or "")[:24],
+                removed=repaired,
+                title=getattr(next_track, "title", ""),
+                queue_size=len(st.queue),
+            )
         request_token = int(getattr(st, "playback_token", 0) or 0)
         current_ref = st.current
         st.paused = False

@@ -97,6 +97,11 @@ def faixa_do_payload(payload: dict[str, Any], fallback: MusicTrack | None = None
         track.resolved_audio_sample_rate = int(float(payload.get("resolved_audio_sample_rate") or payload.get("audio_sample_rate") or payload.get("asr") or 0))
     with contextlib.suppress(Exception):
         track.resolved_audio_channels = int(float(payload.get("resolved_audio_channels") or payload.get("audio_channels") or payload.get("channels") or 0))
+    track.queue_item_id = str(
+        payload.get("queue_item_id")
+        or (getattr(fallback, "queue_item_id", "") if fallback is not None else "")
+        or ""
+    ).strip()
     return track
 
 

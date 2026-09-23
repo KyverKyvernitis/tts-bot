@@ -161,6 +161,17 @@ class MusicGuildState:
     # a playlist inteira: apenas cursor/contagem suficientes para a UI explicar
     # que ainda existem faixas sendo carregadas sob demanda.
     agent_virtual_playlist: dict[str, Any] = field(default_factory=dict)
+    # Cache exclusivamente visual de páginas da coleção virtual. O player
+    # continua materializando somente a janela curta no Phone Worker; páginas
+    # distantes são metadata sob demanda para o controlador de fila.
+    agent_virtual_playlist_pages: dict[int, list[MusicTrack]] = field(default_factory=dict)
+    agent_virtual_playlist_browse_key: str = ""
+    agent_virtual_playlist_browse_error: str = ""
+    # Auditoria das invariantes current/queue. O primeiro contador vem do
+    # Worker; o segundo mede snapshots legados reparados defensivamente na VPS.
+    agent_queue_invariant_repairs: int = 0
+    agent_queue_snapshot_repairs: int = 0
+    agent_queue_last_repair_signature: str = ""
 
     def queue_size(self) -> int:
         local_count = self.queue.qsize() + len(self.forward_queue)

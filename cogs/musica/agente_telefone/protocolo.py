@@ -31,6 +31,7 @@ def faixa_para_payload(track: MusicTrack | Mapping[str, Any]) -> dict[str, Any]:
         "extractor": track.extractor,
         "requester_id": track.requester_id,
         "requester_name": track.requester_name,
+        "queue_item_id": str(getattr(track, "queue_item_id", "") or ""),
         "resolved_audio_format_id": getattr(track, "resolved_audio_format_id", ""),
         "resolved_audio_ext": getattr(track, "resolved_audio_ext", ""),
         "resolved_audio_codec": getattr(track, "resolved_audio_codec", ""),

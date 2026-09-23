@@ -65,6 +65,10 @@ class MusicTrack:
     lavalink_recoveries: int = 0
     lavalink_last_position_ms: int = 0
     lavalink_last_played_seconds: float = 0.0
+    # Identidade lógica da entrada na fila remota. Diferencia repetições
+    # legítimas da mesma música de um mesmo item acidentalmente espelhado em
+    # ``current`` e ``queue`` ao mesmo tempo.
+    queue_item_id: str = ""
 
     @property
     def display_url(self) -> str:

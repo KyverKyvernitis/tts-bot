@@ -60,6 +60,7 @@ def test_sync_espelha_playlist_virtual_sem_materializar_colecao() -> None:
         "source_url": "https://open.spotify.com/playlist/abc1234567890123456789",
         "title": "Playlist Gigante",
         "resource_type": "playlist",
+        "resource_id": "abc1234567890123456789",
         "next_offset": 25,
         "total_tracks": None,
         "materialized_before": 0,
@@ -121,10 +122,11 @@ def test_queueview_permanece_operavel_quando_so_existe_cursor_virtual() -> None:
     clear = _class_method_source("QueueView", "clear_queue")
     queue_text = _class_method_source("QueueView", "_queue_text")
 
-    assert "if (items or virtual)" in refresh
     assert "if items or virtual:" in refresh
+    assert "_queue_total_count(state, items)" in refresh
     assert "not _virtual_playlist_info(state)" in clear
     assert "Carregando próximas músicas…" in queue_text
+    assert "Página {self.page + 1}/{max_page + 1}" in queue_text
     assert "Duração:" not in queue_text
 
 
