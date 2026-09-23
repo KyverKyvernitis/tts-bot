@@ -418,6 +418,8 @@ def test_direct_seek_offset_is_not_counted_twice_in_reported_position(music, mon
         agent._loop = asyncio.get_running_loop()
         agent._resolve_guild_and_channel = resolve_channel
         agent._build_ffmpeg_source = lambda *args, **kwargs: object()
+        async def prepared_pcm(*args): return object()
+        agent._prepare_current_pcm = prepared_pcm
         agent._schedule_next_queue_prefetch = lambda *args, **kwargs: None
         monkeypatch.setattr(music.asyncio, "sleep", no_sleep)
 
@@ -934,6 +936,8 @@ def test_direct_start_confirmation_cannot_overwrite_callback_transition(music):
 
         voice = Voice()
         agent._build_ffmpeg_source = lambda *args, **kwargs: object()
+        async def prepared_pcm(*args): return object()
+        agent._prepare_current_pcm = prepared_pcm
 
         async def superseded_confirm(*args, **kwargs):
             st.playback_token += 1

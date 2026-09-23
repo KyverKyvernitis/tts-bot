@@ -28,6 +28,7 @@ class AgentTrack:
     audio_abr: int = 0
     audio_sample_rate: int = 0
     audio_channels: int = 0
+    is_live: bool = False
     start_offset_seconds: float = 0.0
     stream_recovery_attempts: int = 0
     voice_recovery_attempts: int = 0
@@ -62,6 +63,7 @@ class AgentTrack:
             "audio_abr": self.audio_abr,
             "audio_sample_rate": self.audio_sample_rate,
             "audio_channels": self.audio_channels,
+            "is_live": self.is_live,
             "resolved_audio_format_id": self.audio_format_id,
             "resolved_audio_ext": self.audio_ext,
             "resolved_audio_codec": self.audio_codec,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import selectors
+import signal
 import shutil
 import subprocess
 import sys
@@ -64,7 +65,8 @@ def _worker_main() -> int:
     _enable_domain_path()
     try:
         import yt_dlp  # type: ignore
-        from cogs.musica.runtime_telefone.agente.utilitarios import select_stream_info
+        from cogs.musica.runtime_telefone.agente.utilitarios import select_stream_info, select_playback_stream
+        from cogs.musica.runtime_telefone.agente.correspondencia import avaliar_correspondencia
     except Exception as exc:
         sys.stdout.write(json.dumps({"ok": False, "fatal": True, "error": f"{type(exc).__name__}: {exc}"}) + "\n")
         sys.stdout.flush()
@@ -103,10 +105,25 @@ def _worker_main() -> int:
             started = time.perf_counter()
             info = instance.extract_info(target, download=False)
             if isinstance(info, dict) and isinstance(info.get("entries"), list):
-                info = next((entry for entry in info.get("entries") or [] if isinstance(entry, dict)), {})
+                entries = [entry for entry in info.get("entries") or [] if isinstance(entry, dict)]
+                expected = request.get("expected_metadata")
+                if isinstance(expected, dict):
+                    candidates = []
+                    for entry in entries:
+                        valid, score, _reason = avaliar_correspondencia(expected, entry)
+                        if valid and select_stream_info(entry).get("stream_url"):
+                            candidates.append((score, entry))
+                    if not candidates:
+                        raise RuntimeError("nenhuma fonte encontrada corresponde à faixa solicitada")
+                    info = max(candidates, key=lambda item: item[0])[1]
+                else:
+                    info = next(iter(entries), {})
             if not isinstance(info, dict) or not info:
                 raise RuntimeError("yt-dlp não retornou mídia")
-            stream = select_stream_info(info)
+            stream = select_playback_stream(
+                info, format_selector=str(request.get("format") or ""),
+                format_sort=str(request.get("format_sort") or ""),
+            )
             if not stream.get("stream_url"):
                 raise RuntimeError("yt-dlp não retornou stream_url")
             payload = {
@@ -117,6 +134,7 @@ def _worker_main() -> int:
                 "uploader": info.get("uploader") or info.get("channel") or info.get("creator") or "",
                 "duration": info.get("duration"),
                 "thumbnail": info.get("thumbnail") or "",
+                "is_live": bool(info.get("is_live")),
                 "webpage_url": info.get("webpage_url") or info.get("original_url") or target,
                 **stream,
             }
@@ -152,13 +170,26 @@ class WarmYTDLPResolver:
             return
         if proc.poll() is None:
             try:
-                proc.terminate()
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGTERM)
+                else:
+                    proc.terminate()
                 proc.wait(timeout=0.4)
             except Exception:
                 try:
-                    proc.kill()
+                    if os.name == "posix":
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
                 except Exception:
                     pass
+            finally:
+                if os.name == "posix":
+                    # O helper pode sair antes de seu runtime JavaScript.
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
         for stream in (proc.stdin, proc.stdout):
             try:
                 if stream is not None:
@@ -183,6 +214,7 @@ class WarmYTDLPResolver:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
+            start_new_session=os.name == "posix",
             cwd=str(worker_cwd) if worker_cwd.is_dir() else None,
         )
         self._process = proc
@@ -199,6 +231,7 @@ class WarmYTDLPResolver:
         socket_timeout: int = 12,
         timeout: float = 10.0,
         cancel_event: threading.Event | None = None,
+        expected_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         # Nunca crie uma segunda fila escondida: se o helper já estiver ocupado,
         # o chamador usa imediatamente o subprocesso yt-dlp tradicional.
@@ -218,6 +251,8 @@ class WarmYTDLPResolver:
                 "js_runtimes": js_runtimes,
                 "socket_timeout": socket_timeout,
             }
+            if expected_metadata is not None:
+                request["expected_metadata"] = dict(expected_metadata)
             proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
             proc.stdin.flush()
             selector = selectors.DefaultSelector()

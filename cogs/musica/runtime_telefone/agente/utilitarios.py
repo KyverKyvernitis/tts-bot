@@ -168,6 +168,36 @@ def select_stream_info(entry: dict[str, Any]) -> dict[str, Any]:
     return _best_stream_from_formats(entry.get("formats"))
 
 
+def select_playback_stream(
+    entry: dict[str, Any], *, format_selector: str, format_sort: str,
+) -> dict[str, Any]:
+    """Compara codec/bitrate/rate no padrão, preservando escolhas explícitas.
+
+    Usa somente formatos já obtidos pelo yt-dlp. Mantém idioma e preferência
+    de origem da escolha original; não faz sondagens/downloads adicionais.
+    """
+    selected = select_stream_info(entry)
+    if format_selector != DEFAULT_YTDLP_AUDIO_FORMAT or format_sort != DEFAULT_YTDLP_AUDIO_SORT:
+        return selected
+    formats = [fmt for fmt in entry.get("formats") or [] if isinstance(fmt, dict)]
+    original = next((fmt for fmt in formats if fmt.get("url") == selected.get("stream_url")), entry)
+    candidates = []
+    for fmt in formats:
+        if fmt.get("has_drm") or str(fmt.get("vcodec") or "none") != "none":
+            continue
+        if original.get("language") and fmt.get("language") != original.get("language"):
+            continue
+        if any(
+            isinstance(original.get(key), (int, float)) and isinstance(fmt.get(key), (int, float))
+            and fmt[key] < original[key]
+            for key in ("preference", "language_preference", "source_preference", "quality")
+        ):
+            continue
+        if str(fmt.get("url") or "").startswith(("http://", "https://")):
+            candidates.append(fmt)
+    return _best_stream_from_formats(candidates) or selected
+
+
 def select_stream_url(entry: dict[str, Any]) -> str:
     return str(select_stream_info(entry).get("stream_url") or "")
 

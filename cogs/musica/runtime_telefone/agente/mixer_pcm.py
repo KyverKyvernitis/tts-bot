@@ -47,8 +47,11 @@ class _AudioReadTelemetry:
         self._source_read_max_ns = 0
         self._source_stall_count = 0
         self._partial_frame_count = 0
+        self._source_deadline_overruns = 0
+        self._telemetry_source: Any = None
 
     def _read_source(self, source: discord.AudioSource) -> bytes:
+        self._telemetry_source = source
         if not self.telemetry_enabled:
             return source.read()
         started_ns = time.perf_counter_ns()
@@ -60,6 +63,8 @@ class _AudioReadTelemetry:
             self._source_read_max_ns = elapsed_ns
         if elapsed_ns >= int(self.stall_threshold_ms * 1_000_000.0):
             self._source_stall_count += 1
+        if elapsed_ns > 20_000_000:
+            self._source_deadline_overruns += 1
         if frame:
             self._audio_frame_count += 1
             self._audio_bytes += len(frame)
@@ -70,7 +75,7 @@ class _AudioReadTelemetry:
     def audio_telemetry(self) -> dict[str, Any]:
         reads = int(self._source_read_count)
         total_ns = int(self._source_read_total_ns)
-        return {
+        metrics = {
             "telemetry_enabled": bool(self.telemetry_enabled),
             "first_frame_ms": round(float(getattr(self, "first_frame_ms", 0.0) or 0.0), 2),
             "source_read_count": reads,
@@ -81,7 +86,13 @@ class _AudioReadTelemetry:
             "source_stall_count": int(self._source_stall_count),
             "stall_threshold_ms": round(float(self.stall_threshold_ms), 1),
             "partial_frame_count": int(self._partial_frame_count),
+            "source_deadline_overruns": int(self._source_deadline_overruns),
+            "mix_limited_frames": int(getattr(self, "_mix_limited_frames", 0)),
         }
+        getter = getattr(self._telemetry_source, "audio_buffer_metrics", None)
+        if callable(getter):
+            metrics.update(getter())
+        return metrics
 
 
 class AgentTelemetryAudioSource(discord.AudioSource, _AudioReadTelemetry):
@@ -151,6 +162,10 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self.persistent = bool(persistent)
         self._finish_when_idle = False
         self._on_music_end = on_music_end
+        self._encoder_update: Callable[[], None] | None = None
+        self._music_gain = self.normal_music_volume
+        self._mix_gain = 1.0
+        self._mix_limited_frames = 0
         self._started_monotonic = time.monotonic()
         self.first_frame_ms: float | None = None
         self.first_frame_monotonic: float | None = None
@@ -168,6 +183,11 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
 
     def set_duck_factor(self, factor: float) -> None:
         self.duck_factor = max(0.0, min(1.0, float(factor)))
+
+    def queue_encoder_update(self, update: Callable[[], None]) -> None:
+        """Executa o CTL na thread que codifica, antes do próximo frame."""
+        with self._lock:
+            self._encoder_update = update
 
     @property
     def music_ended(self) -> bool:
@@ -191,6 +211,8 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             self._finish_when_idle = False
             self._on_music_end = on_music_end
             self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(volume)))
+            self._music_gain = self.normal_music_volume
+            self._mix_limited_frames = 0
             self._started_monotonic = time.monotonic()
             self.first_frame_ms = None
             self.first_frame_monotonic = None
@@ -349,12 +371,50 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self._mix_into(base_samples, frame, volume)
         return base_samples.tobytes()
 
+    def _smooth_music(self, frame: bytes, target: float) -> bytes:
+        previous = self._music_gain
+        if abs(target - previous) <= 0.001:
+            self._music_gain = target
+            return self._scale_frame(frame, target)
+        # Ataque ~40 ms e retorno ~120 ms; só a transição usa quatro blocos.
+        rate = 0.5 if target < previous else 1.0 / 6.0
+        self._music_gain = previous + (target - previous) * rate
+        step = len(frame) // 4
+        return b"".join(
+            self._scale_frame(frame[i * step:(i + 1) * step], previous + (self._music_gain - previous) * (i + 1) / 4)
+            for i in range(4)
+        )
+
+    def _safe_mix_gain(self, frames: list[tuple[bytes, float]]) -> float:
+        # Estima um limite superior do pico da soma antes de audioop.add:
+        # nenhuma parcela é saturada antes de aplicar a proteção comum.
+        module = self._audioop()
+        peak_bound = 0.0
+        for frame, volume in frames:
+            if not frame:
+                continue
+            if module is not None and hasattr(module, "max"):
+                peak = module.max(frame, 2)
+            else:
+                samples = array("h")
+                samples.frombytes(frame)
+                peak = max((abs(sample) for sample in samples), default=0)
+            peak_bound += peak * abs(volume)
+        safe = min(1.0, 32000.0 / peak_bound) if peak_bound else 1.0
+        self._mix_gain = min(safe, self._mix_gain + (1.0 - self._mix_gain) / 8.0)
+        if self._mix_gain < 0.999:
+            self._mix_limited_frames += 1
+        return self._mix_gain
+
     def read(self) -> bytes:
         if self._closed:
             return b""
         with self._lock:
             overlays = list(self._overlays)
             music_source = None if self._music_ended else self.music_source
+            encoder_update, self._encoder_update = self._encoder_update, None
+        if encoder_update is not None:
+            encoder_update()
         music_frame = b""
         read_error: Exception | None = None
         if music_source is not None:
@@ -397,12 +457,19 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                 self.cleanup()
             return b""
         music_volume = self.normal_music_volume * (self.duck_factor if overlays else 1.0)
+        music_has_audio = bool(music_frame and getattr(music_source, "last_read_had_audio", True))
         if music_frame and not overlays:
-            return self._mark_first_frame(self._scale_frame(music_frame, music_volume))
+            output = self._smooth_music(music_frame, music_volume)
+            if self._mix_gain < 0.999:
+                output = self._scale_frame(output, self._safe_mix_gain([(output, 1.0)]))
+            else:
+                self._mix_gain = 1.0
+            return self._mark_first_frame(output) if music_has_audio else output
         if music_frame:
-            base = self._scale_frame(music_frame, music_volume)
+            base = self._smooth_music(music_frame, music_volume)
         else:
             base = b"\x00" * PCM_FRAME_BYTES
+        overlay_frames: list[tuple[bytes, float]] = []
         ended: list[dict[str, Any]] = []
         for overlay in overlays:
             source = overlay.get("source")
@@ -417,17 +484,22 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                 ended.append(overlay)
                 continue
             if frame:
-                base = self._mix_bytes(base, frame, float(overlay.get("volume") or 1.0))
+                frame = frame[:PCM_FRAME_BYTES].ljust(PCM_FRAME_BYTES, b"\0")
+                overlay_frames.append((frame, float(overlay.get("volume", 1.0))))
             else:
                 with contextlib.suppress(Exception):
                     source.cleanup()
                 if isinstance(future, asyncio.Future):
                     self._future_result(future, None)
                 ended.append(overlay)
+        gain = self._safe_mix_gain([(base, 1.0), *overlay_frames])
+        base = self._scale_frame(base, gain)
+        for frame, volume in overlay_frames:
+            base = self._mix_bytes(base, frame, volume * gain)
         if ended:
             with self._lock:
                 self._overlays = [ov for ov in self._overlays if ov not in ended]
-        return self._mark_first_frame(base) if music_frame else base
+        return self._mark_first_frame(base) if music_has_audio else base
 
     def cleanup(self) -> None:
         with self._lock:
@@ -436,6 +508,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             self._closed = True
             music_source, self.music_source = self.music_source, None
             self._on_music_end = None
+            self._encoder_update = None
             overlays = list(self._overlays)
             self._overlays.clear()
         if music_source is not None:

@@ -90,7 +90,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.54"
+AGENT_VERSION = "0.3.55"
 STARTED_AT = time.time()
 
 
@@ -145,7 +145,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.ffmpeg_executable = os.getenv("MUSIC_AGENT_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
         self.ffmpeg_before_options = os.getenv(
             "MUSIC_AGENT_FFMPEG_BEFORE_OPTIONS",
-            "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_on_network_error 1 -reconnect_on_http_error 403,404,408,429,5xx -reconnect_delay_max 5 -rw_timeout 15000000",
+            "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_on_http_error 408,5xx -reconnect_delay_max 2 -rw_timeout 8000000",
         )
         self.ffmpeg_options = os.getenv("MUSIC_AGENT_FFMPEG_OPTIONS", "-vn -sn -dn -loglevel warning")
         # Resampling de qualidade só entra quando a fonte conhecida não é 48 kHz.
@@ -186,6 +186,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.metadata_cache_ttl = max(0.0, env_float("MUSIC_AGENT_METADATA_CACHE_TTL_SECONDS", 21600.0))
         self.stream_cache_ttl = max(0.0, env_float("MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS", min(max(legacy_cache_ttl, 1.0), 300.0)))
         self.resolve_cache_ttl = self.stream_cache_ttl
+        self.stream_max_age_seconds = max(60.0, min(3600.0, env_float("MUSIC_AGENT_STREAM_MAX_AGE_SECONDS", 1800.0)))
+        self.stream_expiry_margin_seconds = max(15.0, min(180.0, env_float("MUSIC_AGENT_STREAM_EXPIRY_MARGIN_SECONDS", 60.0)))
         self.prefetch_enabled = truthy(os.getenv("MUSIC_AGENT_PREFETCH_ENABLED"), True)
         self.prefetch_timeout = max(3.0, env_float("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", 18.0))
         # Prefetch de seleção é especulativo: quando a guild está ociosa ele
@@ -215,6 +217,9 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.resolve_max_concurrency = max(1, env_int("MUSIC_AGENT_RESOLVE_MAX_CONCURRENCY", 1))
         self._resolve_active = 0
         self._resolve_waiters: list[tuple[int, int, asyncio.Future]] = []
+        self._resolve_waiter_keys: dict[asyncio.Future, str] = {}
+        self._resolve_priorities: dict[str, int] = {}
+        self._resolve_running: dict[str, asyncio.Task] = {}
         self._resolve_waiter_sequence = 0
         self._resolve_scheduler_lock = asyncio.Lock()
         self._resolve_thread_local = threading.local()
@@ -231,6 +236,17 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         # Uma troca de faixa pode aproveitar somente o primeiro caso.
         self._prefetch_resolving: set[str] = set()
         self._active_resolve_tasks: dict[int, asyncio.Task] = {}
+        self.pcm_buffer_enabled = truthy(os.getenv("MUSIC_AGENT_PCM_BUFFER_ENABLED"), True)
+        self.pcm_buffer_max_frames = max(10, min(150, env_int("MUSIC_AGENT_PCM_BUFFER_MAX_FRAMES", 75)))
+        self.pcm_buffer_stall_seconds = max(2.0, min(30.0, env_float("MUSIC_AGENT_PCM_BUFFER_STALL_SECONDS", 12.0)))
+        self.next_audio_prepare_enabled = truthy(os.getenv("MUSIC_AGENT_NEXT_AUDIO_PREPARE_ENABLED"), True)
+        self.next_audio_prepare_lead_seconds = max(2.0, min(30.0, env_float("MUSIC_AGENT_NEXT_AUDIO_PREPARE_LEAD_SECONDS", 12.0)))
+        self.next_audio_prepare_frames = max(1, min(self.pcm_buffer_max_frames, env_int("MUSIC_AGENT_NEXT_AUDIO_PREPARE_FRAMES", 15)))
+        self.next_audio_prepare_max_sources = max(1, min(2, env_int("MUSIC_AGENT_NEXT_AUDIO_PREPARE_MAX_SOURCES", 1)))
+        self._audio_prepare_tasks: dict[int, asyncio.Task] = {}
+        self._audio_prepare_keys: dict[int, str] = {}
+        self._prepared_audio: dict[int, Any] = {}
+        self._starting_pcm: dict[int, Any] = {}
         # Retry de transporte VPS -> Phone Worker pode reenviar o mesmo POST
         # depois de uma troca de rota/Tailscale. command_id garante que ações
         # mutáveis (play/enqueue/skip...) sejam executadas uma única vez.
@@ -348,6 +364,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 users.pop(key, None)
                 if locks.get(key) is lock:
                     locks.pop(key, None)
+                if locks is self._resolve_locks:
+                    self._resolve_priorities.pop(key, None)
 
 
 
@@ -762,7 +780,12 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._last_maintenance_monotonic = now_mono
 
         metadata_removed = self._prune_expired_cache_entries(self._metadata_cache, self.metadata_cache_ttl, now_mono)
-        stream_removed = self._prune_expired_cache_entries(self._resolve_cache, self.stream_cache_ttl, now_mono)
+        stream_removed = 0
+        for key, (created, data) in list(self._resolve_cache.items()):
+            if self.stream_cache_ttl <= 0 or now_mono >= self._stream_deadline(data.get("stream_url", ""), created, self.stream_cache_ttl):
+                # Cache disabled também deve liberar as entradas anteriores.
+                self._resolve_cache.pop(key, None)
+                stream_removed += 1
 
         state_removed = 0
         now_wall = time.time()
@@ -1016,12 +1039,17 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 + list(self._voice_presence_disconnect_tasks.values())
                 + list(self._prefetch_tasks.values())
                 + list(self._voice_runtime_recovery_tasks.values())
+                + list(self._audio_prepare_tasks.values())
             )
             self._idle_disconnect_tasks.clear()
             self._voice_presence_disconnect_tasks.clear()
             self._prefetch_tasks.clear()
             self._voice_runtime_recovery_tasks.clear()
             await cancel_tasks(background)
+            for guild_id in list(self._prepared_audio):
+                self._cancel_audio_preparation(guild_id)
+            self._audio_prepare_tasks.clear()
+            self._audio_prepare_keys.clear()
 
             players: list[Any] = []
             seen_players: set[int] = set()

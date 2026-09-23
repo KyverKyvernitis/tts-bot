@@ -19,6 +19,7 @@ from .ciclo_vida import consume_task_result, remove_owned_task
 from .correspondencia import avaliar_correspondencia, busca_alternativa
 from .estado import AgentTrack
 from .ytdlp_quente import WarmYTDLPResolver
+from .validade_stream import prazo_stream
 from .utilitarios import (
     _duration_from_ytdlp,
     _float_or_none,
@@ -27,21 +28,40 @@ from .utilitarios import (
     _select_stream_info,
     safe_id,
     short_text,
+    select_playback_stream,
 )
 
 _LOCAL_SEARCH_PREFIXES = ("ytsearch", "ytmsearch")
 
 
 class ResolucaoMixin:
-    async def _acquire_resolve_slot(self, priority: int) -> None:
+    async def _promote_resolution(self, key: str, priority: int) -> None:
+        async with self._resolve_scheduler_lock:
+            if key in self._resolve_lock_users:
+                self._resolve_priorities[key] = min(priority, self._resolve_priorities.get(key, priority))
+                self._resolve_waiters = [
+                    (min(p, priority) if self._resolve_waiter_keys.get(waiter) == key else p, seq, waiter)
+                    for p, seq, waiter in self._resolve_waiters
+                ]
+                self._resolve_waiters.sort(key=lambda item: (item[0], item[1]))
+            if priority <= 0 and self._resolve_active >= self.resolve_max_concurrency:
+                for other_key, task in list(self._resolve_running.items()):
+                    if other_key != key and self._resolve_priorities.get(other_key, 0) > 0 and not task.done():
+                        task.cancel()
+                        self.log("resolve_background_preempted", query=other_key[:90])
+                        break
+
+    async def _acquire_resolve_slot(self, priority: int, *, key: str = "") -> None:
         loop = asyncio.get_running_loop()
         waiter: asyncio.Future | None = None
         async with self._resolve_scheduler_lock:
+            priority = min(priority, self._resolve_priorities.get(key, priority))
             if self._resolve_active < self.resolve_max_concurrency and not self._resolve_waiters:
                 self._resolve_active += 1
                 return
             self._resolve_waiter_sequence += 1
             waiter = loop.create_future()
+            self._resolve_waiter_keys[waiter] = key
             self._resolve_waiters.append((int(priority), self._resolve_waiter_sequence, waiter))
             self._resolve_waiters.sort(key=lambda item: (item[0], item[1]))
         try:
@@ -62,6 +82,8 @@ class ResolucaoMixin:
             if granted:
                 await self._release_resolve_slot()
             raise
+        finally:
+            self._resolve_waiter_keys.pop(waiter, None)
 
     async def _release_resolve_slot(self) -> None:
         async with self._resolve_scheduler_lock:
@@ -74,11 +96,17 @@ class ResolucaoMixin:
             self._resolve_active = max(0, self._resolve_active - 1)
 
     @contextlib.asynccontextmanager
-    async def _resolve_slot(self, priority: int = 0):
-        await self._acquire_resolve_slot(priority)
+    async def _resolve_slot(self, priority: int = 0, *, key: str = ""):
+        started = time.monotonic()
+        await self._acquire_resolve_slot(priority, key=key)
+        if key:
+            self._resolve_running[key] = asyncio.current_task()
+            self.log("resolve_slot_acquired", priority=self._resolve_priorities.get(key, priority), wait_ms=round((time.monotonic() - started) * 1000, 1))
         try:
             yield
         finally:
+            if key:
+                self._resolve_running.pop(key, None)
             await self._release_resolve_slot()
 
     def _terminate_process_tree(self, proc: subprocess.Popen) -> None:
@@ -287,7 +315,7 @@ class ResolucaoMixin:
         if not item:
             return None
         created, data = item
-        if time.monotonic() - created > self.stream_cache_ttl:
+        if time.monotonic() >= self._stream_deadline(data.get("stream_url", ""), created, self.stream_cache_ttl):
             self._resolve_cache.pop(media_key, None)
             return None
         if str(data.get("_media_cache_key") or "") != media_key:
@@ -325,6 +353,13 @@ class ResolucaoMixin:
             media_key = self._media_cache_key(stable)
         self._invalidate_stream_cache(media_key)
 
+    def _stream_deadline(self, url: str, resolved_at: float, fallback: float) -> float:
+        return prazo_stream(
+            url, resolved_at, fallback,
+            max_age_seconds=getattr(self, "stream_max_age_seconds", 1800.0),
+            margin_seconds=getattr(self, "stream_expiry_margin_seconds", 60.0),
+        )
+
     def _track_stream_needs_refresh(self, track: AgentTrack | None) -> bool:
         if track is None or not str(track.stream_url or "").startswith(("http://", "https://")):
             return False
@@ -333,7 +368,9 @@ class ResolucaoMixin:
             # URLs externas sem timestamp conhecido continuam válidas até falhar;
             # o recovery cobre esse caso sem adivinhar a idade do link.
             return False
-        return time.monotonic() - resolved_at >= self.stream_refresh_before_play_seconds
+        return time.monotonic() >= self._stream_deadline(
+            track.stream_url, resolved_at, self.stream_refresh_before_play_seconds,
+        )
 
     def _agent_track_from_resolved(self, resolved: dict[str, Any], *, query: str, track_meta: dict[str, Any], body: dict[str, Any], cached: bool = False) -> AgentTrack:
         title_hint = _metadata_text(track_meta.get("title") or body.get("title"), limit=160)
@@ -407,6 +444,7 @@ class ResolucaoMixin:
             audio_abr=int(float(resolved.get("audio_abr") or resolved.get("abr") or 0) or 0),
             audio_sample_rate=int(float(resolved.get("audio_sample_rate") or resolved.get("asr") or 0) or 0),
             audio_channels=int(float(resolved.get("audio_channels") or resolved.get("channels") or 0) or 0),
+            is_live=bool(resolved.get("is_live")),
             start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
             stream_resolved_monotonic=max(0.0, float(resolved.get("_stream_resolved_monotonic") or time.monotonic())),
             queue_item_id=str(track_meta.get("queue_item_id") or ""),
@@ -506,6 +544,7 @@ class ResolucaoMixin:
             audio_abr=int(float(track_meta.get("resolved_audio_abr") or track_meta.get("audio_abr") or 0) or 0),
             audio_sample_rate=int(float(track_meta.get("resolved_audio_sample_rate") or track_meta.get("audio_sample_rate") or track_meta.get("asr") or 0) or 0),
             audio_channels=int(float(track_meta.get("resolved_audio_channels") or track_meta.get("audio_channels") or track_meta.get("channels") or 0) or 0),
+            is_live=bool(track_meta.get("is_live")),
             start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
             queue_item_id=str(track_meta.get("queue_item_id") or ""),
         )
@@ -565,6 +604,7 @@ class ResolucaoMixin:
                 audio_abr=int(float(track_meta.get("resolved_audio_abr") or track_meta.get("audio_abr") or 0) or 0),
                 audio_sample_rate=int(float(track_meta.get("resolved_audio_sample_rate") or track_meta.get("audio_sample_rate") or track_meta.get("asr") or 0) or 0),
                 audio_channels=int(float(track_meta.get("resolved_audio_channels") or track_meta.get("audio_channels") or track_meta.get("channels") or 0) or 0),
+                is_live=bool(track_meta.get("is_live")),
                 start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
                 stream_resolved_monotonic=time.monotonic(),
                 queue_item_id=str(track_meta.get("queue_item_id") or ""),
@@ -593,7 +633,9 @@ class ResolucaoMixin:
                 query=query[:90],
                 direct_refresh=bool(stable_target),
             )
+        await self._promote_resolution(logical_key, priority)
         async with self._registry_lock(self._resolve_locks, self._resolve_lock_users, logical_key):
+            self._resolve_priorities[logical_key] = min(priority, self._resolve_priorities.get(logical_key, priority))
             cached = self._cached_resolved_get(logical_key)
             if cached:
                 self.log("resolve_stream_cache_hit_after_wait", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
@@ -605,7 +647,7 @@ class ResolucaoMixin:
                 if latest_target:
                     resolve_target = latest_target
             started = time.time()
-            async with self._resolve_slot(priority):
+            async with self._resolve_slot(priority, key=logical_key):
                 # The blocking resolver runs in a worker thread, but cancellation
                 # propagates through this Event so an active yt-dlp process (and
                 # its JS-runtime children) is terminated instead of leaking.
@@ -710,42 +752,43 @@ class ResolucaoMixin:
             base_cmd += ["--js-runtimes", self.js_runtimes]
         base_cmd += ["--no-playlist", "--no-warnings", "--socket-timeout", "12", "--format-sort", self.ytdlp_sort]
         self.log("yt_dlp_resolve", query=query, target=target, js=self.js_runtimes)
+        warm_enabled = str(os.getenv("MUSIC_AGENT_YTDLP_WARM_HELPER_ENABLED", "true") or "true").strip().lower() in {"1", "true", "yes", "on", "sim"}
+        if warm_enabled and remaining() > 1.0:
+            client = getattr(self, "_ytdlp_warm_client", None)
+            if client is None:
+                client = WarmYTDLPResolver()
+                self._ytdlp_warm_client = client
+            cancel_event = getattr(self._resolve_thread_local, "cancel_event", None)
+            hot_started = time.time()
+            try:
+                hot = client.resolve(
+                    target,
+                    format_selector=self.ytdlp_format,
+                    format_sort=self.ytdlp_sort,
+                    cookiefile=str(cookies) if cookies.exists() and cookies.stat().st_size > 0 else "",
+                    js_runtimes=self.js_runtimes,
+                    socket_timeout=12,
+                    timeout=min(10.0, remaining()),
+                    cancel_event=cancel_event,
+                    **({"expected_metadata": expected_metadata} if expected_metadata is not None else {}),
+                )
+            except RuntimeError as exc:
+                if "cancelada" in str(exc).lower():
+                    raise
+                hot = None
+            if hot and str(hot.get("stream_url") or "").startswith(("http://", "https://")):
+                self.log(
+                    "yt_dlp_warm_url_ok" if _looks_like_url(query) else "yt_dlp_warm_search_ok",
+                    elapsed_ms=round((time.time() - hot_started) * 1000.0, 1),
+                    helper_elapsed_ms=hot.get("elapsed_ms"),
+                    title=bool(hot.get("title")),
+                )
+                hot.pop("ok", None)
+                hot.pop("id", None)
+                hot.pop("elapsed_ms", None)
+                return hot
+            self.log("yt_dlp_warm_url_fallback" if _looks_like_url(query) else "yt_dlp_warm_search_fallback", elapsed_ms=round((time.time() - hot_started) * 1000.0, 1))
         if _looks_like_url(query):
-            warm_enabled = str(os.getenv("MUSIC_AGENT_YTDLP_WARM_HELPER_ENABLED", "true") or "true").strip().lower() in {"1", "true", "yes", "on", "sim"}
-            if warm_enabled and remaining() > 1.0:
-                client = getattr(self, "_ytdlp_warm_client", None)
-                if client is None:
-                    client = WarmYTDLPResolver()
-                    self._ytdlp_warm_client = client
-                cancel_event = getattr(self._resolve_thread_local, "cancel_event", None)
-                hot_started = time.time()
-                try:
-                    hot = client.resolve(
-                        target,
-                        format_selector=self.ytdlp_format,
-                        format_sort=self.ytdlp_sort,
-                        cookiefile=str(cookies) if cookies.exists() and cookies.stat().st_size > 0 else "",
-                        js_runtimes=self.js_runtimes,
-                        socket_timeout=12,
-                        timeout=min(10.0, remaining()),
-                        cancel_event=cancel_event,
-                    )
-                except RuntimeError as exc:
-                    if "cancelada" in str(exc).lower():
-                        raise
-                    hot = None
-                if hot and str(hot.get("stream_url") or "").startswith(("http://", "https://")):
-                    self.log(
-                        "yt_dlp_warm_url_ok",
-                        elapsed_ms=round((time.time() - hot_started) * 1000.0, 1),
-                        helper_elapsed_ms=hot.get("elapsed_ms"),
-                        title=bool(hot.get("title")),
-                    )
-                    hot.pop("ok", None)
-                    hot.pop("id", None)
-                    hot.pop("elapsed_ms", None)
-                    return hot
-                self.log("yt_dlp_warm_url_fallback", elapsed_ms=round((time.time() - hot_started) * 1000.0, 1))
             fast_cmd = base_cmd + [
                 "-f", self.ytdlp_format,
                 "--print", "__title__:%(title)s",
@@ -759,6 +802,8 @@ class ResolucaoMixin:
                 "--print", "__abr__:%(abr)s",
                 "--print", "__asr__:%(asr)s",
                 "--print", "__audio_channels__:%(audio_channels)s",
+                "--print", "__is_live__:%(is_live)s",
+                "--print", "__formats__:%(formats)j",
                 "-g", target,
             ]
             fast_started = time.time()
@@ -799,7 +844,7 @@ class ResolucaoMixin:
                     uploader=bool(uploader_hint),
                     duration=bool(duration_hint),
                 )
-                return {
+                result = {
                     "title": title_hint or query,
                     "uploader": uploader_hint,
                     "duration": _duration_from_ytdlp(duration_hint),
@@ -812,7 +857,19 @@ class ResolucaoMixin:
                     "audio_abr": metric(abr_hint),
                     "audio_sample_rate": metric(asr_hint),
                     "audio_channels": metric(channels_hint),
+                    "is_live": marker("is_live").lower() == "true",
                 }
+                try:
+                    formats = json.loads(marker("formats") or "[]")
+                except (ValueError, TypeError):
+                    formats = []
+                result.update(select_playback_stream({
+                    "url": result["stream_url"], "format_id": format_hint,
+                    "ext": ext_hint, "acodec": codec_hint, "abr": metric(abr_hint),
+                    "asr": metric(asr_hint), "audio_channels": metric(channels_hint),
+                    "formats": formats,
+                }, format_selector=self.ytdlp_format, format_sort=self.ytdlp_sort))
+                return result
             self.log("yt_dlp_fast_url_fallback", rc=fast.returncode, error=short_text(fast.stderr, 160))
         cmd = base_cmd + ["-f", self.ytdlp_format, "-J", target]
         proc = self._run_ytdlp_command(cmd, timeout=remaining())
@@ -834,7 +891,7 @@ class ResolucaoMixin:
                 data = next(iter(entries), {})
         if not isinstance(data, dict) or not data:
             raise RuntimeError("yt-dlp não retornou mídia")
-        stream_info = _select_stream_info(data)
+        stream_info = select_playback_stream(data, format_selector=self.ytdlp_format, format_sort=self.ytdlp_sort)
         stream_url = str(stream_info.get("stream_url") or "")
         if not stream_url:
             raise RuntimeError("yt-dlp não retornou stream_url")
@@ -843,6 +900,7 @@ class ResolucaoMixin:
             "uploader": data.get("uploader") or data.get("channel") or data.get("creator") or "",
             "duration": data.get("duration"),
             "thumbnail": data.get("thumbnail") or "",
+            "is_live": bool(data.get("is_live")),
             "webpage_url": data.get("webpage_url") or data.get("original_url") or query,
             **stream_info,
         }

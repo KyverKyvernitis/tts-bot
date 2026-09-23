@@ -453,7 +453,7 @@ class FluxoTocar:
 
         operation_generation = self.router.current_music_operation_generation(ctx.guild.id)
         loading_reaction = MusicLoadingReaction(getattr(ctx, "message", None))
-        await loading_reaction.start()
+        loading_reaction.start_background()
         finish_loading_reaction = True
         try:
             if getattr(self.router, "music_worker_only_enabled", lambda: False)():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import asyncio
 import logging
 from typing import Any
 
@@ -30,6 +31,20 @@ class MusicLoadingReaction:
         self.message = message
         self.emoji = str(emoji or MUSIC_LOADING_REACTION_EMOJI).strip()
         self.active = False
+        self._start_task: asyncio.Task | None = None
+
+    def start_background(self) -> None:
+        """A latência da reação do Discord não faz parte do caminho do áudio."""
+        if self._start_task is None:
+            self._start_task = asyncio.create_task(self._start_bounded())
+
+    async def _start_bounded(self) -> None:
+        try:
+            await asyncio.wait_for(self.start(), timeout=3.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        except Exception:
+            logger.debug("[music] reação de carregamento indisponível", exc_info=True)
 
     async def start(self) -> None:
         if self.active or not self.message or not self.emoji:
@@ -42,6 +57,10 @@ class MusicLoadingReaction:
             self.active = True
 
     async def finish(self) -> None:
+        task, self._start_task = self._start_task, None
+        if task is not None and task is not asyncio.current_task():
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         if not self.active or not self.message or not self.emoji:
             return
         remove_reaction = getattr(self.message, "remove_reaction", None)

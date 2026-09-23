@@ -45,13 +45,13 @@ def test_cache_em_duas_camadas_separa_musica_logica_de_stream() -> None:
     home_resolved = {
         "title": "Cavetown - Home",
         "webpage_url": "https://youtu.be/home123?si=tracking",
-        "stream_url": "https://rr1.googlevideo.com/videoplayback?expire=1",
+        "stream_url": "https://rr1.googlevideo.com/videoplayback?fixture=1",
         "audio_format_id": "251",
     }
     sweet_resolved = {
         "title": "Cavetown - Sweet Tooth",
         "webpage_url": "https://www.youtube.com/watch?v=sweet456&feature=share",
-        "stream_url": "https://rr2.googlevideo.com/videoplayback?expire=2",
+        "stream_url": "https://rr2.googlevideo.com/videoplayback?fixture=2",
         "audio_format_id": "251",
     }
     resolver._metadata_cache_put(home_logical, home_resolved)
@@ -122,6 +122,9 @@ def test_stream_expirado_atualiza_por_video_id_sem_refazer_busca() -> None:
             self.resolve_max_concurrency = 1
             self._resolve_active = 0
             self._resolve_waiters = []
+            self._resolve_priorities = {}
+            self._resolve_waiter_keys = {}
+            self._resolve_running = {}
             self._resolve_waiter_sequence = 0
             self._resolve_scheduler_lock = asyncio.Lock()
             self._resolve_thread_local = threading.local()
