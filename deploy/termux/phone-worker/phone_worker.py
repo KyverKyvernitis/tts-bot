@@ -130,7 +130,15 @@ JOBS_STARTED = 0
 JOBS_FAILED = 0
 _PING_CACHE: dict[str, Any] = {}
 _ANDROID_TTS_STATUS_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
-_CORE_WORKER_NETWORK_STATE: dict[str, Any] = {"last_ok_at": 0.0, "last_error_at": 0.0, "last_error": "", "last_error_kind": ""}
+_CORE_WORKER_NETWORK_STATE: dict[str, Any] = {
+    "last_ok_at": 0.0, "last_error_at": 0.0, "last_error": "", "last_error_kind": "",
+    "failure_streak": 0, "backoff_until": 0.0,
+}
+_CORE_WORKER_NETWORK_LOCK = threading.RLock()
+_CORE_WORKER_HTTP_LOCK = threading.Lock()
+_CORE_WORKER_NETWORK_AUDIT: dict[str, dict[str, Any]] = {}
+_CONTROL_PLANE_SNAPSHOT_CACHE: dict[str, dict[str, Any]] = {}
+_CONTROL_PLANE_SNAPSHOT_CACHE_LOCK = threading.RLock()
 _CORE_JOB_LOCK = threading.RLock()
 _CORE_JOB_ACTIVE: dict[str, Any] = {}
 _CORE_JOB_LAST_RESULT: dict[str, Any] = {}
@@ -146,7 +154,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.13"
+PHONE_WORKER_VERSION = "1.11.14"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -939,35 +947,136 @@ def _classify_core_worker_network_error(exc: BaseException | str) -> str:
         return "dns_failed"
     if "connection refused" in text:
         return "connection_refused"
+    if "connection reset" in text or "errno 104" in text:
+        return "connection_reset"
+    if "connection abort" in text or "connection aborted" in text or "errno 103" in text:
+        return "connection_aborted"
+    if "remote end closed" in text or "remote disconnected" in text:
+        return "remote_closed"
+    if "ssl" in text or "tls" in text or "certificate verify failed" in text:
+        return "tls_error"
     return "request_failed"
 
 
+def _core_worker_network_backoff_max_seconds() -> float:
+    return max(5.0, min(300.0, _env_float("CORE_WORKER_NETWORK_BACKOFF_MAX_SECONDS", 60.0)))
+
+
 def _remember_core_worker_network_ok() -> None:
-    _CORE_WORKER_NETWORK_STATE.update({
-        "last_ok_at": time.time(),
-        "last_error": "",
-        "last_error_kind": "",
-    })
+    now = time.time()
+    with _CORE_WORKER_NETWORK_LOCK:
+        _CORE_WORKER_NETWORK_STATE.update({
+            "last_ok_at": now,
+            "last_error": "",
+            "last_error_kind": "",
+            "failure_streak": 0,
+            "backoff_until": 0.0,
+        })
 
 
 def _remember_core_worker_network_error(exc: BaseException | str) -> None:
-    _CORE_WORKER_NETWORK_STATE.update({
-        "last_error_at": time.time(),
-        "last_error": _short_text(exc, limit=160),
-        "last_error_kind": _classify_core_worker_network_error(exc),
-    })
+    now = time.time()
+    kind = _classify_core_worker_network_error(exc)
+    with _CORE_WORKER_NETWORK_LOCK:
+        previous_error_at = float(_CORE_WORKER_NETWORK_STATE.get("last_error_at") or 0.0)
+        previous_kind = str(_CORE_WORKER_NETWORK_STATE.get("last_error_kind") or "")
+        # Uma janela longa sem falha reinicia a exponencial; trocar de classe de
+        # erro também reinicia para não herdar penalidade de um incidente antigo.
+        if previous_kind != kind or not previous_error_at or now - previous_error_at > 180.0:
+            streak = 1
+        else:
+            streak = max(1, int(_CORE_WORKER_NETWORK_STATE.get("failure_streak") or 0) + 1)
+        backoff = min(_core_worker_network_backoff_max_seconds(), 2.0 ** min(6, max(0, streak - 1)))
+        _CORE_WORKER_NETWORK_STATE.update({
+            "last_error_at": now,
+            "last_error": _short_text(exc, limit=160),
+            "last_error_kind": kind,
+            "failure_streak": streak,
+            "backoff_until": now + backoff,
+        })
+
+
+def _core_worker_network_retry_delay() -> float:
+    with _CORE_WORKER_NETWORK_LOCK:
+        until = float(_CORE_WORKER_NETWORK_STATE.get("backoff_until") or 0.0)
+    return max(0.0, until - time.time())
+
+
+def _audit_core_worker_network_failure(source: str, exc: BaseException | str, *, elapsed_ms: float = 0.0) -> None:
+    kind = _classify_core_worker_network_error(exc)
+    now = time.time()
+    interval = max(15.0, min(600.0, _env_float("CORE_WORKER_NETWORK_ERROR_LOG_INTERVAL_SECONDS", 120.0)))
+    with _CORE_WORKER_NETWORK_LOCK:
+        item = _CORE_WORKER_NETWORK_AUDIT.setdefault(source, {"kind": "", "logged_at": 0.0, "suppressed": 0})
+        should_log = item.get("kind") != kind or now - float(item.get("logged_at") or 0.0) >= interval
+        if not should_log:
+            item["suppressed"] = int(item.get("suppressed") or 0) + 1
+            return
+        suppressed = int(item.get("suppressed") or 0)
+        item.update({"kind": kind, "logged_at": now, "suppressed": 0})
+        streak = int(_CORE_WORKER_NETWORK_STATE.get("failure_streak") or 0)
+        backoff = max(0.0, float(_CORE_WORKER_NETWORK_STATE.get("backoff_until") or 0.0) - now)
+    suffix = f" suppressed={suppressed}" if suppressed else ""
+    print(
+        f"[core-worker-network] falha source={source} kind={kind} elapsed_ms={round(elapsed_ms, 1)} "
+        f"streak={streak} backoff_seconds={round(backoff, 1)}{suffix}: "
+        f"{type(exc).__name__ if isinstance(exc, BaseException) else 'Error'}: {_short_text(exc, limit=120)}",
+        flush=True,
+    )
+
+
+def _audit_core_worker_network_success(source: str, *, elapsed_ms: float = 0.0) -> None:
+    with _CORE_WORKER_NETWORK_LOCK:
+        item = _CORE_WORKER_NETWORK_AUDIT.get(source)
+        if not item or not item.get("kind"):
+            return
+        previous = str(item.get("kind") or "")
+        suppressed = int(item.get("suppressed") or 0)
+        item.update({"kind": "", "logged_at": time.time(), "suppressed": 0})
+    suffix = f" suppressed={suppressed}" if suppressed else ""
+    print(
+        f"[core-worker-network] recuperado source={source} previous={previous} elapsed_ms={round(elapsed_ms, 1)}{suffix}",
+        flush=True,
+    )
+
+
+def _audit_core_worker_slow_payload(*, prepare_ms: float, request_ms: float, total_ms: float) -> None:
+    now = time.time()
+    interval = max(30.0, min(3600.0, _env_float("CORE_WORKER_SLOW_PAYLOAD_LOG_INTERVAL_SECONDS", 300.0)))
+    with _CORE_WORKER_NETWORK_LOCK:
+        item = _CORE_WORKER_NETWORK_AUDIT.setdefault("payload", {"logged_at": 0.0, "suppressed": 0})
+        if now - float(item.get("logged_at") or 0.0) < interval:
+            item["suppressed"] = int(item.get("suppressed") or 0) + 1
+            return
+        suppressed = int(item.get("suppressed") or 0)
+        item.update({"logged_at": now, "suppressed": 0})
+    suffix = f" suppressed={suppressed}" if suppressed else ""
+    print(
+        f"[core-worker-heartbeat] payload_lento prepare_ms={round(prepare_ms, 1)} "
+        f"request_ms={round(request_ms, 1)} total_ms={round(total_ms, 1)}{suffix}",
+        flush=True,
+    )
 
 
 def _core_worker_network_runtime_snapshot() -> dict[str, Any]:
     now = time.time()
-    last_ok = float(_CORE_WORKER_NETWORK_STATE.get("last_ok_at") or 0.0)
-    last_error = float(_CORE_WORKER_NETWORK_STATE.get("last_error_at") or 0.0)
-    return {
+    with _CORE_WORKER_NETWORK_LOCK:
+        state = dict(_CORE_WORKER_NETWORK_STATE)
+    last_ok = float(state.get("last_ok_at") or 0.0)
+    last_error = float(state.get("last_error_at") or 0.0)
+    result = {
         "last_ok_age_seconds": round(now - last_ok, 3) if last_ok else None,
         "last_error_age_seconds": round(now - last_error, 3) if last_error else None,
-        "last_error_kind": _CORE_WORKER_NETWORK_STATE.get("last_error_kind") or "",
-        "last_error": _CORE_WORKER_NETWORK_STATE.get("last_error") or "",
+        "last_error_kind": state.get("last_error_kind") or "",
+        "last_error": state.get("last_error") or "",
     }
+    streak = int(state.get("failure_streak") or 0)
+    backoff = max(0.0, float(state.get("backoff_until") or 0.0) - now)
+    if streak:
+        result["failure_streak"] = streak
+    if backoff > 0:
+        result["backoff_seconds"] = round(backoff, 3)
+    return result
 
 
 def _post_json_url(url: str, payload: dict[str, Any], *, token: str = "", timeout: float = 8.0) -> tuple[int, dict[str, Any]]:
@@ -1133,11 +1242,43 @@ def _download_url_to_file(
     return {"ok": True, "status": status, "path": str(target), "bytes": total, "sha256": digest.hexdigest()}
 
 
-def _post_core_worker_json(path: str, payload: dict[str, Any], *, timeout: float = 8.0) -> tuple[int, dict[str, Any]]:
+def _post_core_worker_json(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 8.0,
+    respect_network_backoff: bool = False,
+) -> tuple[int, dict[str, Any]]:
     base_url, token, _worker_id = _core_worker_auth_parts()
     if not base_url or not token:
         return 0, {"ok": False, "error": "Core Worker não configurado"}
-    return _post_json_url(f"{base_url}{path}", payload, token=token, timeout=timeout)
+    wait_started = time.perf_counter()
+    with _CORE_WORKER_HTTP_LOCK:
+        wait_ms = (time.perf_counter() - wait_started) * 1000.0
+        if wait_ms >= 500.0:
+            now = time.time()
+            interval = max(30.0, min(600.0, _env_float("CORE_WORKER_NETWORK_ERROR_LOG_INTERVAL_SECONDS", 120.0)))
+            with _CORE_WORKER_NETWORK_LOCK:
+                item = _CORE_WORKER_NETWORK_AUDIT.setdefault("serialized_http", {"logged_at": 0.0, "suppressed": 0})
+                if now - float(item.get("logged_at") or 0.0) >= interval:
+                    suppressed = int(item.get("suppressed") or 0)
+                    item.update({"logged_at": now, "suppressed": 0})
+                    suffix = f" suppressed={suppressed}" if suppressed else ""
+                    print(
+                        f"[core-worker-network] request_serialized path={path!r} wait_ms={round(wait_ms, 1)}{suffix}",
+                        flush=True,
+                    )
+                else:
+                    item["suppressed"] = int(item.get("suppressed") or 0) + 1
+        if respect_network_backoff:
+            retry_delay = _core_worker_network_retry_delay()
+            if retry_delay > 0:
+                return 0, {
+                    "ok": False,
+                    "error": "network_backoff",
+                    "retry_after_seconds": round(retry_delay, 3),
+                }
+        return _post_json_url(f"{base_url}{path}", payload, token=token, timeout=timeout)
 
 
 
@@ -1199,7 +1340,7 @@ def _store_pending_core_job_result(payload: dict[str, Any]) -> None:
 
 
 def _post_core_worker_job_result_payload_status(payload: dict[str, Any], *, timeout: float = 8.0) -> tuple[bool, int, dict[str, Any]]:
-    code, data = _post_core_worker_json("/core-worker/jobs/result", payload, timeout=timeout)
+    code, data = _post_core_worker_json("/core-worker/jobs/result", payload, timeout=timeout, respect_network_backoff=True)
     ok = bool(200 <= code < 300 and data.get("ok", True))
     if ok:
         return True, int(code), data
@@ -1398,6 +1539,21 @@ def _control_plane_snapshot(name: str, callback, default: dict[str, Any]) -> dic
     return _safe_telemetry(name, read, default)
 
 
+def _cached_control_plane_snapshot(name: str, callback, default: dict[str, Any], *, ttl: float) -> dict[str, Any]:
+    now = time.monotonic()
+    ttl = max(0.0, float(ttl or 0.0))
+    with _CONTROL_PLANE_SNAPSHOT_CACHE_LOCK:
+        cached = _CONTROL_PLANE_SNAPSHOT_CACHE.get(name)
+        if cached and now - float(cached.get("at") or 0.0) <= ttl:
+            data = cached.get("data")
+            if isinstance(data, dict):
+                return dict(data)
+    data = _control_plane_snapshot(name, callback, default)
+    with _CONTROL_PLANE_SNAPSHOT_CACHE_LOCK:
+        _CONTROL_PLANE_SNAPSHOT_CACHE[name] = {"at": now, "data": dict(data)}
+    return data
+
+
 def _phone_worker_control_plane_module() -> Any:
     global _PHONE_WORKER_CONTROL_PLANE_MODULE
     if _PHONE_WORKER_CONTROL_PLANE_MODULE is not None:
@@ -1484,15 +1640,25 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     }
     try:
         module = _phone_worker_control_plane_module()
+        telemetry_ttl = max(2.0, min(60.0, _env_float("CORE_WORKER_TELEMETRY_CACHE_SECONDS", 10.0)))
+        # Disponibilidade do Music Agent muda rapidamente (crash/autorecovery) e
+        # altera roles/capabilities. Leia-a em toda emissão; o restante da
+        # telemetria pesada pode ser reutilizado por poucos segundos.
+        music_agent = _control_plane_snapshot(
+            "music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}
+        )
+        system_snapshot = _cached_control_plane_snapshot(
+            "system", _system_status, {"ok": False}, ttl=telemetry_ttl
+        )
         payload = module.build_payload(payload,
-            system=_control_plane_snapshot("system", _system_status, {"ok": False}),
-            battery=_control_plane_snapshot("battery", _battery_snapshot, _empty_battery_snapshot()),
-            network=_control_plane_snapshot("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}),
+            system=system_snapshot,
+            battery=_cached_control_plane_snapshot("battery", _battery_snapshot, _empty_battery_snapshot(), ttl=max(telemetry_ttl, 30.0)),
+            network=_cached_control_plane_snapshot("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}, ttl=telemetry_ttl),
             updater=_bootstrap_updater_snapshot())
         return _phone_worker_music_bridge_module("control_plane").estender_payload(
             payload,
             music_node=_inactive_music_node_snapshot(),
-            music_agent=_control_plane_snapshot("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}),
+            music_agent=music_agent,
         )
     except Exception as exc:
         print(f"[phone-worker] payload de recuperação: {type(exc).__name__}: {_short_text(exc, limit=100)}", flush=True)
@@ -1586,19 +1752,35 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
     if not _base_url or not _token or not worker_id:
         return False
     started = time.perf_counter()
+    prepare_started = started
     try:
         payload = _core_worker_payload(host=host, port=port)
+        prepare_ms = (time.perf_counter() - prepare_started) * 1000.0
+        request_started = time.perf_counter()
         status, data = _post_core_worker_json("/core-worker/heartbeat", payload, timeout=timeout)
+        request_ms = (time.perf_counter() - request_started) * 1000.0
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
         if 200 <= status < 300 and data.get("ok", True):
+            _audit_core_worker_network_success("heartbeat", elapsed_ms=request_ms)
             _write_runtime_status(control_plane_alive=True, heartbeat_ok=True, reason="heartbeat_ok")
+            if prepare_ms >= max(750.0, _env_float("CORE_WORKER_SLOW_PAYLOAD_LOG_MS", 1500.0)):
+                _audit_core_worker_slow_payload(prepare_ms=prepare_ms, request_ms=request_ms, total_ms=elapsed_ms)
             with contextlib.suppress(Exception):
                 _flush_pending_core_worker_job_results(timeout=min(5.0, max(1.0, timeout)))
             return True
-        print(f"[core-worker-heartbeat] HTTP {status} em {elapsed_ms}ms: {_short_text(data.get('error') or data, limit=180)}", flush=True)
+        error = RuntimeError(f"HTTP {status}: {_short_text(data.get('error') or data, limit=180)}")
+        _remember_core_worker_network_error(error)
+        _audit_core_worker_network_failure("heartbeat", error, elapsed_ms=request_ms)
     except Exception as exc:
+        # _post_json_url registra o erro de rede; registrar novamente é idempotente
+        # para conteúdo, mas aumentaria artificialmente a streak. Só complete caso
+        # a exceção tenha ocorrido na construção do payload, antes do request.
+        with _CORE_WORKER_NETWORK_LOCK:
+            has_network_error = bool(_CORE_WORKER_NETWORK_STATE.get("last_error_kind"))
+        if not has_network_error:
+            _remember_core_worker_network_error(exc)
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
-        print(f"[core-worker-heartbeat] falhou endpoint=/core-worker/heartbeat elapsed_ms={elapsed_ms}: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+        _audit_core_worker_network_failure("heartbeat", exc, elapsed_ms=elapsed_ms)
     _write_runtime_status(control_plane_alive=True, heartbeat_ok=False, reason="heartbeat_failed")
     return False
 
@@ -1698,7 +1880,7 @@ def _start_core_worker_heartbeat(*, host: str, port: int) -> None:
 
     def loop() -> None:
         while True:
-            _send_core_worker_heartbeat_once(host=host, port=port, timeout=max(6.0, min(20.0, _env_float("CORE_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 12.0))))
+            _send_core_worker_heartbeat_once(host=host, port=port, timeout=max(3.0, min(15.0, _env_float("CORE_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 6.0))))
             time.sleep(interval)
 
     thread = threading.Thread(target=loop, name="core-worker-heartbeat", daemon=True)
@@ -3741,7 +3923,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 if not pair_result.get("ok"):
                     _json_response(self, HTTPStatus.BAD_REQUEST, pair_result)
                     return
-                heartbeat_ok = _send_core_worker_heartbeat_once(host=host, port=port, timeout=max(6.0, min(20.0, _env_float("CORE_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 12.0))))
+                heartbeat_ok = _send_core_worker_heartbeat_once(host=host, port=port, timeout=max(3.0, min(15.0, _env_float("CORE_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 6.0))))
                 result = _local_agent_status_payload(host=host, port=port)
                 result.update(pair_result)
                 result["profile"] = profile_result.get("profile")
@@ -3763,7 +3945,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             try:
                 host, port = self._bind_host_port()
                 result = _local_agent_status_payload(host=host, port=port)
-                result["synced_to_vps"] = _send_core_worker_heartbeat_once(host=host, port=port, timeout=max(6.0, min(20.0, _env_float("CORE_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 12.0)))) if _heartbeat_configured() else False
+                result["synced_to_vps"] = _send_core_worker_heartbeat_once(host=host, port=port, timeout=max(3.0, min(15.0, _env_float("CORE_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 6.0)))) if _heartbeat_configured() else False
                 result["message"] = "heartbeat solicitado ao worker local"
                 _json_response(self, HTTPStatus.OK, result)
             except Exception as exc:
@@ -9833,7 +10015,9 @@ def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max
     if _pending_core_job_result_count():
         return False
     payload = _core_worker_payload(host=host, port=port)
-    code, data = _post_core_worker_json("/core-worker/jobs/poll", payload, timeout=timeout)
+    code, data = _post_core_worker_json("/core-worker/jobs/poll", payload, timeout=timeout, respect_network_backoff=True)
+    if code == 0 and str(data.get("error") or "") == "network_backoff":
+        return False
     if not (200 <= code < 300):
         print(f"[core-worker-jobs] poll HTTP {code}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
         return False
@@ -9870,22 +10054,42 @@ def _start_core_worker_jobs(*, host: str, port: int, max_body_bytes: int, max_ou
         print("[core-worker-jobs] desativado ou incompleto; habilite CORE_WORKER_HEARTBEAT_ENABLED/JOBS e configure URL, ID e TOKEN", flush=True)
         return
     interval = max(3.0, min(120.0, _env_float("CORE_WORKER_JOB_POLL_INTERVAL_SECONDS", DEFAULT_JOB_POLL_INTERVAL_SECONDS)))
+    http_timeout = max(2.0, min(15.0, _env_float("CORE_WORKER_JOB_HTTP_TIMEOUT_SECONDS", 5.0)))
 
     def loop() -> None:
+        was_backing_off = False
         while True:
+            delay = _core_worker_network_retry_delay()
+            if delay > 0:
+                if not was_backing_off:
+                    snapshot = _core_worker_network_runtime_snapshot()
+                    print(
+                        f"[core-worker-jobs] polling pausado por backoff de rede; kind={snapshot.get('last_error_kind') or 'unknown'} "
+                        f"retry_in={round(delay, 1)}s streak={snapshot.get('failure_streak') or 0}",
+                        flush=True,
+                    )
+                was_backing_off = True
+                time.sleep(max(0.5, min(delay, interval)))
+                continue
+            if was_backing_off:
+                print("[core-worker-jobs] backoff encerrado; retomando polling", flush=True)
+                was_backing_off = False
             try:
+                started = time.perf_counter()
                 ran_job = _poll_core_worker_job_once(
                     host=host,
                     port=port,
                     max_body_bytes=max_body_bytes,
                     max_output_bytes=max_output_bytes,
                     job_timeout=job_timeout,
-                    timeout=8.0,
+                    timeout=http_timeout,
                 )
+                _audit_core_worker_network_success("jobs", elapsed_ms=(time.perf_counter() - started) * 1000.0)
                 time.sleep(0.5 if ran_job else interval)
             except Exception as exc:
-                print(f"[core-worker-jobs] loop falhou: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
-                time.sleep(interval)
+                # O helper HTTP já atualizou o breaker compartilhado.
+                _audit_core_worker_network_failure("jobs", exc, elapsed_ms=(time.perf_counter() - started) * 1000.0)
+                time.sleep(max(interval, min(_core_worker_network_retry_delay(), _core_worker_network_backoff_max_seconds())))
 
     thread = threading.Thread(target=loop, name="core-worker-jobs", daemon=True)
     thread.start()

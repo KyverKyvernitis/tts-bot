@@ -18,6 +18,8 @@ from ..agente.utilitarios import DEFAULT_YTDLP_AUDIO_FORMAT, select_stream_info
 
 _WARM_YDL_POOL_LOCK = threading.Lock()
 _WARM_YDL_POOL: list[dict[str, Any]] = []
+_METADATA_PROVIDER_AUDIT_LOCK = threading.Lock()
+_METADATA_PROVIDER_AUDIT: dict[str, dict[str, Any]] = {}
 
 
 def _warm_ydl_pool_limit() -> int:
@@ -115,6 +117,42 @@ def _reset_warm_ytdlp_pool_for_tests() -> None:
     for slot in slots:
         _close_warm_ydl(slot.get("ydl"))
 
+def _audit_metadata_provider_block(provider: str, path: str) -> None:
+    now = time.monotonic()
+    with _METADATA_PROVIDER_AUDIT_LOCK:
+        item = _METADATA_PROVIDER_AUDIT.setdefault(provider, {"at": 0.0, "suppressed": 0})
+        if now - float(item.get("at") or 0.0) < 60.0:
+            item["suppressed"] = int(item.get("suppressed") or 0) + 1
+            return
+        suppressed = int(item.get("suppressed") or 0)
+        item.update({"at": now, "suppressed": 0})
+    suffix = f" suppressed={suppressed}" if suppressed else ""
+    print(
+        f"[music-ytdlp] metadata_provider_url_blocked provider={provider} path={path!r}{suffix}",
+        flush=True,
+    )
+
+
+def _metadata_provider_url_kind(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(text if "://" in text else f"https://{text}")
+    except Exception:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host == "open.spotify.com" or host.endswith(".spotify.com"):
+        return "spotify"
+    if host == "deezer.com" or host.endswith(".deezer.com"):
+        return "deezer"
+    if host == "music.apple.com" or host.endswith(".music.apple.com"):
+        return "apple"
+    return ""
+
+
 def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
     query = str(body.get("query") or body.get("url") or body.get("q") or "").strip()
     if not query:
@@ -126,6 +164,34 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
     metadata_only = str(body.get("metadata_only") if body.get("metadata_only") is not None else body.get("search_only") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
     fast_search = str(body.get("fast_search") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
     allow_playlist = str(body.get("allow_playlist") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
+    metadata_provider = _metadata_provider_url_kind(query)
+    if metadata_provider:
+        # Spotify/Deezer/Apple fornecem identidade/metadados, não o áudio usado
+        # pelo player. Enviar a URL crua ao yt-dlp só produz DRM/requests inúteis.
+        # A camada acima deve transformar título/artista em ytsearch1/scsearch.
+        safe_path = "/"
+        safe_query = query
+        try:
+            parsed_provider = urllib.parse.urlsplit(query)
+            safe_path = parsed_provider.path[:96] or "/"
+            safe_query = urllib.parse.urlunsplit((
+                parsed_provider.scheme, parsed_provider.netloc, parsed_provider.path, "", ""
+            ))
+        except Exception:
+            pass
+        _audit_metadata_provider_block(metadata_provider, safe_path)
+        return {
+            "ok": False,
+            "error": "metadata_provider_url_blocked",
+            "message": f"URL {metadata_provider} é metadata-only; resolva título/artista antes do yt-dlp",
+            "provider": metadata_provider,
+            "query": safe_query,
+            "tracks": [],
+            "tracks_found": 0,
+            "metadata_only": bool(metadata_only),
+            "allow_playlist": bool(allow_playlist),
+            "blocked_before_ytdlp": True,
+        }
 
     def _default_search_prefix() -> str:
         raw = str(

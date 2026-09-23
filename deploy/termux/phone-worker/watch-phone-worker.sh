@@ -26,6 +26,7 @@ STATUS_FILE="${PHONE_WORKER_STATUS_FILE:-$WORKER_DIR/phone-worker.status}"
 MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
 SSHD_AUTO_START="${PHONE_WORKER_SSHD_AUTO_START:-true}"
 SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
+LAST_SSHD_STATE=""
 RUNTIME_ROOT="${PHONE_WORKER_RUNTIME_ROOT:-$HOME/.core-worker-runtime}"
 BOOTSTRAP_INTERVAL="${PHONE_WORKER_BOOTSTRAP_INTERVAL_SECONDS:-300}"
 BOOTSTRAP_JITTER="${PHONE_WORKER_BOOTSTRAP_JITTER_SECONDS:-30}"
@@ -91,13 +92,23 @@ ensure_sshd_running() {
   truthy "$SSHD_AUTO_START" || return 0
   command -v sshd >/dev/null 2>&1 || return 0
   if sshd_listening; then
+    if [[ -n "$LAST_SSHD_STATE" && "$LAST_SSHD_STATE" != "listening" ]]; then
+      log "sshd recuperado; porta ${SSHD_PORT} ouvindo"
+    fi
+    LAST_SSHD_STATE="listening"
     return 0
   fi
   if command -v pgrep >/dev/null 2>&1 && pgrep -f 'sshd' >/dev/null 2>&1; then
-    log "sshd rodando, mas porta ${SSHD_PORT} não apareceu; mantendo processo existente"
+    if [[ "$LAST_SSHD_STATE" != "process_without_listener" ]]; then
+      log "sshd rodando, mas porta ${SSHD_PORT} não apareceu; mantendo processo existente"
+    fi
+    LAST_SSHD_STATE="process_without_listener"
     return 0
   fi
-  log "sshd parado; tentando iniciar porta ${SSHD_PORT}"
+  if [[ "$LAST_SSHD_STATE" != "starting" ]]; then
+    log "sshd parado; tentando iniciar porta ${SSHD_PORT}"
+  fi
+  LAST_SSHD_STATE="starting"
   sshd -p "$SSHD_PORT" >/dev/null 2>&1 || sshd >/dev/null 2>&1 || true
 }
 
@@ -181,6 +192,7 @@ while true; do
   current_start="$(active_start_script)"
   if [[ -f "$current_start" ]]; then
     PHONE_WORKER_RELEASE_DIR="$(dirname "$current_start")" \
+    PHONE_WORKER_QUIET_HEALTHY=1 \
       /data/data/com.termux/files/usr/bin/bash "$current_start" >> "$WATCH_LOG" 2>&1
     start_rc=$?
     if [[ "$start_rc" -eq 0 ]]; then

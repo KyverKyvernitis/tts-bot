@@ -2216,3 +2216,31 @@ def test_runtime_voice_recovery_retries_same_track_until_success(music, monkeypa
         assert current.start_offset_seconds > 10.0
 
     run(scenario())
+
+
+def test_watchdog_music_health_check_is_quiet_but_keeps_transition_logs():
+    integration = (ROOT / "cogs/musica/runtime_telefone/termux/integracao-worker.sh").read_text(encoding="utf-8")
+    supervisor = (ROOT / "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh").read_text(encoding="utf-8")
+    block = integration.split("musica_ensure_agent_if_needed()", 1)[1].split("\n}\n", 1)[0]
+    assert "MUSIC_AGENT_QUIET_HEALTHY=1" in block
+    assert 'log "garantindo Music Agent do worker' not in block
+    assert 'MUSIC_AGENT_QUIET_HEALTHY' in supervisor
+    assert 'log "Music Agent iniciado com sucesso; pid=$pid"' in supervisor
+    assert 'log "Music Agent online está desatualizado' in supervisor
+
+
+def test_phone_worker_env_upsert_avoids_identical_rewrite():
+    source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
+    block = source.split("upsert_env_value()", 1)[1].split("\n}\n", 1)[0]
+    assert 'grep -Fxq "${key}=${value}"' in block
+    assert 'export "$key=$value"' in block
+    assert "return 0" in block
+
+
+def test_music_agent_start_rotates_log_and_marks_new_session():
+    source = (ROOT / "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh").read_text(encoding="utf-8")
+    assert 'MUSIC_AGENT_LOG_MAX_BYTES' in source
+    assert 'rotate_agent_log_if_needed' in source
+    assert '${LOG_FILE}.1' in source
+    assert '[music-agent-session] start' in source
+    assert 'mark_agent_session' in source

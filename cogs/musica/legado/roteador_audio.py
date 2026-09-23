@@ -2385,7 +2385,7 @@ class AudioRouter:
             # A busca textual em worker-only agora é leve: ela traz apenas
             # metadados para montar 5 opções rapidamente. Só ao tocar a faixa
             # escolhida resolvemos stream real, endpoint PCM e FFmpeg no celular.
-            source = str(getattr(track, "webpage_url", "") or getattr(track, "original_url", "") or getattr(track, "title", "") or "").strip()
+            source = str(getattr(track, "query", "") or getattr(track, "webpage_url", "") or getattr(track, "original_url", "") or getattr(track, "title", "") or "").strip()
             if not source:
                 raise MusicExtractionError("A música não tem origem para resolver no worker.")
             batch = await _resolve_music_tracks_on_worker(

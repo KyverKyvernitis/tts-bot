@@ -29,9 +29,11 @@ musica_ensure_worker_env_if_needed() {
     cookies="$WORKER_DIR/secrets/youtube-cookies.txt"
   fi
   if [[ -s "$cookies" ]]; then
+    local cookies_changed=0
+    [[ "${PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE:-}" == "$cookies" ]] || cookies_changed=1
     upsert_env_value PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE "$cookies"
     upsert_env_value MUSIC_WORKER_YTDLP_COOKIES_FILE "$cookies"
-    log "perfil turbo: cookies yt-dlp do worker configurados"
+    [[ "$cookies_changed" == "0" ]] || log "perfil turbo: cookies yt-dlp do worker configurados"
   else
     mkdir -p "$(dirname "$cookies")" 2>/dev/null || true
     log "perfil turbo: cookies yt-dlp do worker não encontrados em $cookies; worker tentará sem cookies"
@@ -105,11 +107,11 @@ musica_ensure_agent_if_needed() {
   if [[ -z "${MUSIC_AGENT_TOKEN:-}" && -n "${PHONE_WORKER_TOKEN:-}" ]]; then
     upsert_env_value MUSIC_AGENT_TOKEN "$PHONE_WORKER_TOKEN"
   fi
-  log "garantindo Music Agent do worker; release=$release"
   local rc=0
   PHONE_WORKER_RELEASE_DIR="$release" \
   PHONE_WORKER_DIR="$WORKER_DIR" \
   MUSIC_AGENT_ENV="$MUSIC_AGENT_ENV_FILE" \
+  MUSIC_AGENT_QUIET_HEALTHY=1 \
     "$start_command" || rc=$?
   if [[ "$rc" -ne 0 ]]; then
     log "não consegui iniciar Music Agent automaticamente; rc=$rc; música direta no worker pode ficar indisponível"

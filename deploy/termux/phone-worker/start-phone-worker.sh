@@ -96,10 +96,14 @@ ensure_sshd_running() {
     return 0
   fi
   if command -v pgrep >/dev/null 2>&1 && pgrep -f 'sshd' >/dev/null 2>&1; then
-    log "sshd rodando, mas porta ${SSHD_PORT} não apareceu; mantendo processo existente"
+    if ! truthy "${PHONE_WORKER_QUIET_HEALTHY:-false}"; then
+      log "sshd rodando, mas porta ${SSHD_PORT} não apareceu; mantendo processo existente"
+    fi
     return 0
   fi
-  log "sshd parado; tentando iniciar porta ${SSHD_PORT}"
+  if ! truthy "${PHONE_WORKER_QUIET_HEALTHY:-false}"; then
+    log "sshd parado; tentando iniciar porta ${SSHD_PORT}"
+  fi
   sshd -p "$SSHD_PORT" >/dev/null 2>&1 || sshd >/dev/null 2>&1 || true
 }
 
@@ -331,6 +335,12 @@ upsert_env_value() {
   local key="$1"
   local value="$2"
   mkdir -p "$(dirname "$ENV_FILE")"
+  # O watchdog roda periodicamente. Não reescreva o .env/flash do Android
+  # quando o valor já é exatamente o desejado.
+  if [[ -f "$ENV_FILE" ]] && grep -Fxq "${key}=${value}" "$ENV_FILE" 2>/dev/null; then
+    export "$key=$value"
+    return 0
+  fi
   if [[ -f "$ENV_FILE" ]] && grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
     local tmp="${ENV_FILE}.tmp.$$"
     awk -v k="$key" -v v="$value" 'BEGIN{done=0} $0 ~ "^" k "=" {print k "=" v; done=1; next} {print} END{if(!done) print k "=" v}' "$ENV_FILE" > "$tmp" && mv -f "$tmp" "$ENV_FILE"
@@ -772,7 +782,9 @@ if [[ -n "$existing_pid" && "$count" -le 1 ]] && worker_healthy_for_pid "$existi
   else
     ensure_runtime_companions
     run_post_start_maintenance_async
-    log "worker Termux já saudável; pid=$existing_pid"
+    if ! truthy "${PHONE_WORKER_QUIET_HEALTHY:-false}"; then
+      log "worker Termux já saudável; pid=$existing_pid"
+    fi
     write_status "ok already_online pid=$existing_pid $(now_iso)"
     exit 0
   fi

@@ -1,4 +1,6 @@
 """Control-plane contracts, with optional services and all sends controlled locally."""
+import threading
+import time
 import importlib.util
 import copy
 from concurrent.futures import ThreadPoolExecutor
@@ -352,3 +354,150 @@ assert "phone_worker" not in sys.modules and "music_agent" not in sys.modules an
         str(PHONE.parent / "phone_worker_runtime/control_plane.py")], env=env, cwd=tmp_path,
         capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_network_backoff_tracks_failure_streak_and_resets_on_success(control, monkeypatch):
+    monkeypatch.setenv("CORE_WORKER_NETWORK_BACKOFF_MAX_SECONDS", "16")
+    control._CORE_WORKER_NETWORK_STATE.clear()
+    control._CORE_WORKER_NETWORK_STATE.update({
+        "last_ok_at": 0.0, "last_error_at": 0.0, "last_error": "", "last_error_kind": "",
+        "failure_streak": 0, "backoff_until": 0.0,
+    })
+    control._remember_core_worker_network_error(TimeoutError("timed out"))
+    first = control._core_worker_network_runtime_snapshot()
+    assert first["last_error_kind"] == "timeout"
+    assert first["failure_streak"] == 1
+    assert 0 < first["backoff_seconds"] <= 1.1
+
+    control._remember_core_worker_network_error(TimeoutError("timed out again"))
+    second = control._core_worker_network_runtime_snapshot()
+    assert second["failure_streak"] == 2
+    assert 1.0 < second["backoff_seconds"] <= 2.1
+
+    control._remember_core_worker_network_ok()
+    recovered = control._core_worker_network_runtime_snapshot()
+    assert recovered["last_error_kind"] == ""
+    assert "failure_streak" not in recovered
+    assert "backoff_seconds" not in recovered
+
+
+def test_control_plane_payload_reuses_heavy_snapshot_inside_cache_window(control, monkeypatch):
+    configure(monkeypatch)
+    monkeypatch.setenv("CORE_WORKER_TELEMETRY_CACHE_SECONDS", "30")
+    control._CONTROL_PLANE_SNAPSHOT_CACHE.clear()
+    calls = {"system": 0, "battery": 0, "network": 0, "music": 0}
+
+    def system():
+        calls["system"] += 1
+        return {
+            "ok": True, "pid": 123, "ffmpeg": True, "ffprobe": True,
+            "scripts": {"complete": True}, "boot": {"ok": True},
+            "supervisor": {"supervisor_ok": True},
+            "music_agent": {"ok": True, "available": True},
+        }
+
+    def battery():
+        calls["battery"] += 1
+        return {"available": True, "level": 50}
+
+    def network():
+        calls["network"] += 1
+        return {"type": "wifi", "source": "fixture"}
+
+    def music():
+        calls["music"] += 1
+        return {"ok": True, "available": True}
+
+    monkeypatch.setattr(control, "_system_status", system)
+    monkeypatch.setattr(control, "_battery_snapshot", battery)
+    monkeypatch.setattr(control, "_network_snapshot", network)
+    monkeypatch.setattr(control, "_music_agent_snapshot", music)
+    first = control._core_worker_payload(host="127.0.0.1", port=8766)
+    second = control._core_worker_payload(host="127.0.0.1", port=8766)
+    assert first["status"]["music_agent"]["available"] and second["status"]["music_agent"]["available"]
+    assert calls == {"system": 1, "battery": 1, "network": 1, "music": 2}
+
+
+def test_network_failure_audit_rate_limits_repeated_same_kind(control, monkeypatch, capsys):
+    monkeypatch.setenv("CORE_WORKER_NETWORK_ERROR_LOG_INTERVAL_SECONDS", "600")
+    control._CORE_WORKER_NETWORK_AUDIT.clear()
+    control._CORE_WORKER_NETWORK_STATE.update({"failure_streak": 2, "backoff_until": control.time.time() + 5})
+    error = TimeoutError("timed out")
+    control._audit_core_worker_network_failure("jobs", error, elapsed_ms=5000)
+    control._audit_core_worker_network_failure("jobs", error, elapsed_ms=5000)
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "source=jobs" in lines[0] and "kind=timeout" in lines[0]
+
+
+def test_core_worker_http_posts_are_serialized(monkeypatch):
+    module = load_worker()
+    monkeypatch.setattr(module, "_core_worker_auth_parts", lambda: ("http://vps.invalid", "token", "worker"))
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def fake_post(url, payload, *, token="", timeout=8.0):
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.04)
+        with guard:
+            active -= 1
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(module, "_post_json_url", fake_post)
+    threads = [
+        threading.Thread(target=module._post_core_worker_json, args=(f"/t/{index}", {"i": index}))
+        for index in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1.0)
+    assert peak == 1
+
+
+def test_watchdog_quiet_probe_suppresses_duplicate_sshd_start_logs():
+    root = Path(__file__).resolve().parents[1]
+    start = (root / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
+    watch = (root / "deploy/termux/phone-worker/watch-phone-worker.sh").read_text(encoding="utf-8")
+    assert 'PHONE_WORKER_QUIET_HEALTHY=1' in watch
+    assert 'if ! truthy "${PHONE_WORKER_QUIET_HEALTHY:-false}"; then' in start
+
+
+def test_job_post_rechecks_network_backoff_after_http_lock(monkeypatch):
+    module = load_worker()
+    monkeypatch.setattr(module, "_core_worker_auth_parts", lambda: ("http://vps.invalid", "token", "worker"))
+    monkeypatch.setattr(module, "_core_worker_network_retry_delay", lambda: 12.5)
+    called = []
+    monkeypatch.setattr(module, "_post_json_url", lambda *args, **kwargs: called.append((args, kwargs)) or (200, {"ok": True}))
+
+    code, data = module._post_core_worker_json(
+        "/core-worker/jobs/poll", {"worker_id": "worker"}, respect_network_backoff=True
+    )
+    assert code == 0
+    assert data["error"] == "network_backoff"
+    assert data["retry_after_seconds"] == 12.5
+    assert called == []
+
+    code, data = module._post_core_worker_json(
+        "/core-worker/heartbeat", {"worker_id": "worker"}, respect_network_backoff=False
+    )
+    assert code == 200
+    assert data["ok"] is True
+    assert len(called) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (ConnectionResetError(104, "Connection reset by peer"), "connection_reset"),
+        (OSError(103, "Software caused connection abort"), "connection_aborted"),
+        (RuntimeError("Remote end closed connection without response"), "remote_closed"),
+        (RuntimeError("SSL: CERTIFICATE_VERIFY_FAILED"), "tls_error"),
+    ],
+)
+def test_network_audit_classifies_transport_failures(control, error, kind):
+    assert control._classify_core_worker_network_error(error) == kind

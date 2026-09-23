@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -89,18 +90,42 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.49"
+AGENT_VERSION = "0.3.50"
 STARTED_AT = time.time()
 
 
 bootstrap_env()
 
 
+_AUDIT_URL_FIELDS = {"query", "url", "webpage_url", "original_url", "target"}
+_AUDIT_DROP_QUERY_KEYS = {
+    "si", "fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "feature",
+}
 
-
-
-
-
+def _audit_value(key: str, value: Any) -> Any:
+    """Sanitiza apenas a representação de log; nunca altera o comando real."""
+    if key not in _AUDIT_URL_FIELDS or not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text.lower().startswith(("http://", "https://")):
+        return value
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        kept: list[tuple[str, str]] = []
+        for name, item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+            low = name.lower()
+            if low.startswith("utm_") or low in _AUDIT_DROP_QUERY_KEYS:
+                continue
+            if any(token in low for token in ("token", "auth", "signature", "secret")):
+                kept.append((name, "<redacted>"))
+                continue
+            kept.append((name, item))
+        return urllib.parse.urlunsplit((
+            parsed.scheme, parsed.netloc, parsed.path,
+            urllib.parse.urlencode(kept, doseq=True), "",
+        ))
+    except Exception:
+        return value
 
 
 class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
@@ -232,7 +257,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._wire_discord_events()
 
     def log(self, event: str, *, guild_id: int = 0, **fields: Any) -> None:
-        details = " ".join(f"{key}={short_text(value, 220)!r}" for key, value in fields.items() if value is not None and value != "")
+        details = " ".join(f"{key}={short_text(_audit_value(key, value), 220)!r}" for key, value in fields.items() if value is not None and value != "")
         gid = f" guild={guild_id}" if guild_id else ""
         print(f"[music-agent] {event}{gid}{(' ' + details) if details else ''}", flush=True)
 

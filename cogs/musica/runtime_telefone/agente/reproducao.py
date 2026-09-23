@@ -978,7 +978,7 @@ class ReproducaoMixin:
         player = st.player
         if not track.stream_url:
             try:
-                track = await self.resolve_track(track.webpage_url or track.query or track.title, track_meta=track.public(), body=body)
+                track = await self.resolve_track(track.query or track.webpage_url or track.title, track_meta=track.public(), body=body)
                 st.current = track
             except Exception as exc:
                 return {"ok": False, "error": f"não consegui preparar seek: {short_text(exc, 180)}", "state": st.public()}

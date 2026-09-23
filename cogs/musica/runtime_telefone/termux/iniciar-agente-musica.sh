@@ -50,12 +50,35 @@ PYTOKEN
   export MUSIC_AGENT_TOKEN="$TOKEN"
 fi
 LOG_FILE="${MUSIC_AGENT_LOG_FILE:-$WORKER_DIR/music_agent.log}"
+LOG_MAX_BYTES="${MUSIC_AGENT_LOG_MAX_BYTES:-${PHONE_WORKER_LOG_MAX_BYTES:-1048576}}"
 PID_FILE="${MUSIC_AGENT_PID_FILE:-$WORKER_DIR/music_agent.pid}"
 START_WAIT="${MUSIC_AGENT_START_WAIT_SECONDS:-5}"
 KILL_DUPLICATES="${MUSIC_AGENT_KILL_DUPLICATES:-true}"
 DEPS_STATE_DIR="${MUSIC_AGENT_DEPS_STATE_DIR:-$WORKER_DIR/.dependency-install}"
 
 log() { printf '[music-agent-start] %s\n' "$*"; }
+
+rotate_agent_log_if_needed() {
+  [[ -f "$LOG_FILE" ]] || return 0
+  [[ "$LOG_MAX_BYTES" =~ ^[0-9]+$ ]] || return 0
+  [[ "$LOG_MAX_BYTES" -gt 0 ]] || return 0
+  local size
+  size="$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[0-9]+$ ]] || size=0
+  if [[ "$size" -gt "$LOG_MAX_BYTES" ]]; then
+    rm -f "${LOG_FILE}.1" 2>/dev/null || true
+    mv -f "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
+  fi
+}
+
+mark_agent_session() {
+  local runtime_label version_label
+  runtime_label="$(basename "$RUNTIME_DIR" 2>/dev/null || printf '%s' "$RUNTIME_DIR")"
+  version_label="$(file_version 2>/dev/null || true)"
+  printf '[music-agent-session] start at=%s version=%s runtime=%s pid_pending=true\n' \
+    "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date)" \
+    "${version_label:-?}" "$runtime_label" >> "$LOG_FILE" 2>/dev/null || true
+}
 truthy() {
   local value="${1:-}"
   value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
@@ -325,7 +348,9 @@ if health_ok; then
     log "Music Agent online está desatualizado; runtime=$running_ver arquivo=$file_ver; reiniciando"
     kill_agent
   else
-    log "Music Agent já está online em $HOST:$PORT versão=${running_ver:-?}"
+    if ! truthy "${MUSIC_AGENT_QUIET_HEALTHY:-false}"; then
+      log "Music Agent já está online em $HOST:$PORT versão=${running_ver:-?}"
+    fi
     exit 0
   fi
 fi
@@ -340,6 +365,8 @@ if truthy "$KILL_DUPLICATES"; then
   kill_agent
 fi
 
+rotate_agent_log_if_needed
+mark_agent_session
 log "iniciando Music Agent em $HOST:$PORT"
 (
   cd "$RUNTIME_DIR" || exit 1
