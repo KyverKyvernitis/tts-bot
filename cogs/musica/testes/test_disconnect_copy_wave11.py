@@ -44,17 +44,21 @@ def test_uncertain_disconnect_preserves_state_and_does_not_accuse_someone():
     assert "Ainda não consegui confirmar se a reprodução continua no canal" in source
     assert "A faixa e a fila continuam preservadas enquanto faço uma nova verificação" in source
     assert "não há registro de quem o removeu nem de uma saída automática" in source
-    assert "Motivo: causa não determinada" in source
+    assert "Motivo:" not in source
+    assert "Estado: confirmação pendente" not in source
 
 
-def test_idle_reasons_have_compact_audit_notes():
+def test_disconnect_cards_do_not_render_redundant_reason_lines():
     source = _source()
+    assert "Motivo:" not in source
+    assert "Estado: confirmação pendente" not in source
+    # A causa continua expressa pelo título e pela descrição principal.
     for text in (
-        "Motivo: canal sem usuários · 120 s",
-        "Motivo: sem nova música · 120 s",
-        "Motivo: canal sem usuários · 2 s",
-        "Motivo: conexão de voz perdida",
-        "Motivo: remoção manual",
-        "Estado: confirmação pendente",
+        "Saí do canal por ficar sozinho",
+        "Fila encerrada",
+        "Canal vazio",
+        "Não consegui voltar ao canal",
+        "Confirmando estado do player",
+        "Removido do canal",
     ):
         assert text in source

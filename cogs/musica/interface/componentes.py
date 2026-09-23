@@ -958,42 +958,42 @@ def _idle_player_text(state) -> str:
     actor_name = str(getattr(state, "idle_actor_name", "") or "")
     channel_name = str(getattr(state, "idle_channel_name", "") or "")
     if reason == "queue_finished":
-        return "A última música terminou e não há mais nada na fila.\n-# Motivo: fila concluída"
+        return "A última música terminou e não há mais nada na fila."
     if reason == "track_failed":
         title = _escape(actor_name or "essa música", limit=64)
         detail = _escape(channel_name, limit=120) if channel_name else ""
         return f"Falhei antes do áudio começar em **{title}**." + (f"\n-# {detail}" if detail else "")
     if reason == "manual_stop":
-        return "A reprodução foi encerrada pelo controle do player. A faixa atual e a fila foram limpas.\n-# Motivo: encerramento pelo controle do player"
+        return "A reprodução foi encerrada pelo controle do player. A faixa atual e a fila foram limpas."
     if reason == "music_alone_timeout":
-        return "Fiquei 2 minutos sem ninguém no canal de voz, então encerrei a reprodução e saí.\n-# Motivo: canal sem usuários · 120 s"
+        return "Fiquei 2 minutos sem ninguém no canal de voz, então encerrei a reprodução e saí."
     if reason == "music_idle_timeout":
-        return "A última música terminou e nenhuma outra começou nos 2 minutos seguintes, então saí do canal.\n-# Motivo: sem nova música · 120 s"
+        return "A última música terminou e nenhuma outra começou nos 2 minutos seguintes, então saí do canal."
     if reason == "voice_idle_empty":
-        return "O canal ficou sem usuários. Esperei 2 segundos para confirmar e saí.\n-# Motivo: canal sem usuários · 2 s"
+        return "O canal ficou sem usuários. Esperei 2 segundos para confirmar e saí."
     if reason == "voice_connection_lost":
-        return "A conexão com o canal de voz caiu sem registro de remoção manual. Não consegui recuperar a sessão, então encerrei o player.\n-# Motivo: conexão de voz perdida"
+        return "A conexão com o canal de voz caiu sem registro de remoção manual. Não consegui recuperar a sessão, então encerrei o player."
     if reason == "worker_unreachable":
-        return "Ainda não consegui confirmar se a reprodução continua no canal. A faixa e a fila continuam preservadas enquanto faço uma nova verificação.\n-# Estado: confirmação pendente"
+        return "Ainda não consegui confirmar se a reprodução continua no canal. A faixa e a fila continuam preservadas enquanto faço uma nova verificação."
     if reason == "unknown_disconnect":
         where = f" **{_escape(channel_name, limit=48)}**" if channel_name else ""
-        return f"O Discord confirmou que o bot saiu do canal{where}, mas não há registro de quem o removeu nem de uma saída automática.\n-# Motivo: causa não determinada"
+        return f"O Discord confirmou que o bot saiu do canal{where}, mas não há registro de quem o removeu nem de uma saída automática."
     if reason == "external_disconnect":
         where = f" do canal **{_escape(channel_name, limit=48)}**" if channel_name else " do canal de voz"
         if actor_id:
             who = f"<@{int(actor_id)}>"
-            return f"{who} desconectou o bot{where}.\n-# Motivo: remoção manual"
+            return f"{who} desconectou o bot{where}."
         if actor_name:
             who = _escape(actor_name, limit=48)
-            return f"{who} desconectou o bot{where}.\n-# Motivo: remoção manual"
-        return f"O Discord confirmou que o bot saiu{where}, mas não há registro suficiente para atribuir a saída a uma pessoa.\n-# Motivo: causa não determinada"
+            return f"{who} desconectou o bot{where}."
+        return f"O Discord confirmou que o bot saiu{where}, mas não há registro suficiente para atribuir a saída a uma pessoa."
     if reason == "external_move":
         destination = f" **{_escape(channel_name, limit=48)}**" if channel_name else " outro canal de voz"
         if actor_id:
-            return f"<@{int(actor_id)}> moveu o bot para{destination}.\n-# Motivo: movimentação manual"
+            return f"<@{int(actor_id)}> moveu o bot para{destination}."
         if actor_name:
-            return f"{_escape(actor_name, limit=48)} moveu o bot para{destination}.\n-# Motivo: movimentação manual"
-        return f"O bot foi movido para{destination}.\n-# Motivo: movimentação de canal"
+            return f"{_escape(actor_name, limit=48)} moveu o bot para{destination}."
+        return f"O bot foi movido para{destination}."
     return "Use `_play <link ou pesquisa>` para adicionar uma música."
 
 
@@ -1172,7 +1172,6 @@ def build_player_embeds(state) -> list[discord.Embed]:
         if reason == "queue_finished":
             embed.set_author(name="Fila concluída", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
             embed.description = "A última música terminou e não há mais nada na fila."
-            embed.set_footer(text="Motivo: fila concluída")
         elif reason == "track_failed":
             embed.set_author(name="Não consegui iniciar", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
             failed_title = _escape(actor_name or "essa música", limit=64)
@@ -1185,58 +1184,45 @@ def build_player_embeds(state) -> list[discord.Embed]:
         elif reason == "manual_stop":
             embed.set_author(name="Reprodução encerrada", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
             embed.description = "A reprodução foi encerrada pelo controle do player. A faixa atual e a fila foram limpas."
-            embed.set_footer(text="Motivo: encerramento pelo controle do player")
         elif reason == "music_alone_timeout":
             embed.set_author(name="Saí do canal por ficar sozinho", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
             embed.description = "Fiquei 2 minutos sem ninguém no canal de voz, então encerrei a reprodução e saí."
-            embed.set_footer(text="Motivo: canal sem usuários · 120 s")
         elif reason == "music_idle_timeout":
             embed.set_author(name="Fila encerrada", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
             embed.description = "A última música terminou e nenhuma outra começou nos 2 minutos seguintes, então saí do canal."
-            embed.set_footer(text="Motivo: sem nova música · 120 s")
         elif reason == "voice_idle_empty":
             embed.set_author(name="Canal vazio", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
             embed.description = "O canal ficou sem usuários. Esperei 2 segundos para confirmar e saí."
-            embed.set_footer(text="Motivo: canal sem usuários · 2 s")
         elif reason == "voice_connection_lost":
             embed.set_author(name="Não consegui voltar ao canal", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
             embed.description = "A conexão com o canal de voz caiu sem registro de remoção manual. Não consegui recuperar a sessão, então encerrei o player."
-            embed.set_footer(text="Motivo: conexão de voz perdida")
         elif reason == "worker_unreachable":
             embed.set_author(name="Confirmando estado do player", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
             embed.description = "Ainda não consegui confirmar se a reprodução continua no canal. A faixa e a fila continuam preservadas enquanto faço uma nova verificação."
-            embed.set_footer(text="Estado: confirmação pendente")
         elif reason == "unknown_disconnect":
             embed.set_author(name="Bot saiu do canal", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
             where = f" **{_escape(channel_name, limit=48)}**" if channel_name else ""
             embed.description = f"O Discord confirmou que o bot saiu do canal{where}, mas não há registro de quem o removeu nem de uma saída automática."
-            embed.set_footer(text="Motivo: causa não determinada")
         elif reason == "external_disconnect":
             where = f" do canal **{_escape(channel_name, limit=48)}**" if channel_name else " do canal de voz"
             if actor_id:
                 embed.set_author(name="Removido do canal", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
                 embed.description = f"<@{int(actor_id)}> desconectou o bot{where}."
-                embed.set_footer(text="Motivo: remoção manual")
             elif actor_name:
                 embed.set_author(name="Removido do canal", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
                 embed.description = f"{_escape(actor_name, limit=48)} desconectou o bot{where}."
-                embed.set_footer(text="Motivo: remoção manual")
             else:
                 embed.set_author(name="Bot saiu do canal", icon_url="https://cdn.discordapp.com/emojis/1215703754471268414.png")
                 embed.description = f"O Discord confirmou que o bot saiu{where}, mas não há registro suficiente para atribuir a saída a uma pessoa."
-                embed.set_footer(text="Motivo: causa não determinada")
         elif reason == "external_move":
             embed.set_author(name="Movido para outro canal", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
             destination = f" **{_escape(channel_name, limit=48)}**" if channel_name else " outro canal de voz"
             if actor_id:
                 embed.description = f"<@{int(actor_id)}> moveu o bot para{destination}."
-                embed.set_footer(text="Motivo: movimentação manual")
             elif actor_name:
                 embed.description = f"{_escape(actor_name, limit=48)} moveu o bot para{destination}."
-                embed.set_footer(text="Motivo: movimentação manual")
             else:
                 embed.description = f"O bot foi movido para{destination}."
-                embed.set_footer(text="Motivo: movimentação de canal")
         else:
             embed.set_author(name="Nada tocando agora", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
             embed.description = "Use `_play <link ou pesquisa>` para adicionar uma música."

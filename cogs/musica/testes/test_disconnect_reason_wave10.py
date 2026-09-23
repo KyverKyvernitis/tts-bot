@@ -25,7 +25,7 @@ def test_player_has_distinct_disconnect_messages():
         "external_disconnect",
     ):
         assert reason in source
-    assert "Motivo: causa não determinada" in source
+    assert "Motivo:" not in source
     assert "não há registro de quem o removeu nem de uma saída automática" in source
 
 
