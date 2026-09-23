@@ -176,6 +176,7 @@ def test_worker_only_nao_materializa_extrator_so_para_classificar_url() -> None:
 def test_runtime_musical_do_phone_worker_tem_fonte_canonica_na_cog() -> None:
     assert (ROOT / "cogs/musica/runtime_telefone/agente/configuracao.py").is_file()
     assert (ROOT / "cogs/musica/runtime_telefone/agente/ciclo_vida.py").is_file()
+    assert (ROOT / "cogs/musica/runtime_telefone/agente/correspondencia.py").is_file()
     assert (ROOT / "cogs/musica/runtime_telefone/agente/utilitarios.py").is_file()
     assert (ROOT / "cogs/musica/runtime_telefone/agente/estado.py").is_file()
     assert (ROOT / "cogs/musica/runtime_telefone/agente/mixer_pcm.py").is_file()
@@ -204,6 +205,7 @@ def test_publisher_do_worker_distribui_runtime_musical_a_partir_da_cog() -> None
     texto = _texto("scripts/core-worker-automation.py")
     assert '"cogs/musica/runtime_telefone/agente/configuracao.py"' in texto
     assert '"cogs/musica/runtime_telefone/agente/ciclo_vida.py"' in texto
+    assert '"cogs/musica/runtime_telefone/agente/correspondencia.py"' in texto
     assert '"cogs/musica/runtime_telefone/agente/reproducao.py"' in texto
     assert '"cogs/musica/runtime_telefone/agente/tts.py"' in texto
     assert '"cogs/musica/runtime_telefone/agente/servidor.py"' in texto

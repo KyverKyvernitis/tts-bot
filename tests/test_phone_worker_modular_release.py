@@ -24,6 +24,7 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/agente/__init__.py",
              "cogs/musica/runtime_telefone/agente/configuracao.py",
              "cogs/musica/runtime_telefone/agente/ciclo_vida.py",
+             "cogs/musica/runtime_telefone/agente/correspondencia.py",
              "cogs/musica/runtime_telefone/agente/utilitarios.py",
              "cogs/musica/runtime_telefone/agente/estado.py",
              "cogs/musica/runtime_telefone/agente/mixer_pcm.py",
@@ -81,6 +82,16 @@ def source_copy(tmp_path, monkeypatch, publisher):
     monkeypatch.setattr(publisher, "ROOT", root)
     monkeypatch.setattr(publisher, "PHONE_WORKER_CANONICAL_ROOT", phone.resolve())
     return phone
+
+
+def test_music_agent_release_list_covers_every_canonical_python_module(publisher):
+    prefix = "cogs/musica/runtime_telefone/agente/"
+    canonical = {
+        str(path.relative_to(ROOT)).replace(os.sep, "/")
+        for path in (ROOT / prefix).glob("*.py")
+    }
+    published = {name for name, _mode in publisher.PHONE_WORKER_FILES if name.startswith(prefix) and name.endswith(".py")}
+    assert published == canonical
 
 
 def test_complete_modular_release_is_accepted_by_original_bootstrap(publisher, tmp_path):
@@ -147,6 +158,21 @@ assert worker._TETO_RENDERER is None and worker._APK_IDENTITY_MODULE is None
     help_result = subprocess.run([sys.executable, "-S", str(staging / "phone_worker.py"), "--help"],
                                  env=env, cwd=tmp_path, capture_output=True, text=True, timeout=10)
     assert help_result.returncode == 0, help_result.stdout + help_result.stderr
+
+    # Import a runtime module from the extracted release with the source tree
+    # unavailable. This catches local dependencies omitted from PHONE_WORKER_FILES.
+    resolver_code = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin
+from cogs.musica.runtime_telefone.agente.correspondencia import avaliar_correspondencia
+assert ResolucaoMixin is not None and callable(avaliar_correspondencia)
+'''
+    resolver_result = subprocess.run(
+        [sys.executable, "-S", "-c", resolver_code, str(staging)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=10,
+    )
+    assert resolver_result.returncode == 0, resolver_result.stdout + resolver_result.stderr
 
 
 @pytest.mark.parametrize("module_file", ["config.py", "telemetry.py", "control_plane.py", "voice_state.py", "tts_policy.py", "tts_cache.py", "tts_android.py", "tts_providers.py", "pcm_io.py"])

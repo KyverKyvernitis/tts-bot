@@ -146,7 +146,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.11"
+PHONE_WORKER_VERSION = "1.11.12"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -9135,6 +9135,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "cogs/musica/runtime_telefone/agente/__init__.py": ("worker", "cogs/musica/runtime_telefone/agente/__init__.py", 0o644),
     "cogs/musica/runtime_telefone/agente/configuracao.py": ("worker", "cogs/musica/runtime_telefone/agente/configuracao.py", 0o644),
     "cogs/musica/runtime_telefone/agente/ciclo_vida.py": ("worker", "cogs/musica/runtime_telefone/agente/ciclo_vida.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/correspondencia.py": ("worker", "cogs/musica/runtime_telefone/agente/correspondencia.py", 0o644),
     "cogs/musica/runtime_telefone/agente/utilitarios.py": ("worker", "cogs/musica/runtime_telefone/agente/utilitarios.py", 0o644),
     "cogs/musica/runtime_telefone/agente/estado.py": ("worker", "cogs/musica/runtime_telefone/agente/estado.py", 0o644),
     "cogs/musica/runtime_telefone/agente/mixer_pcm.py": ("worker", "cogs/musica/runtime_telefone/agente/mixer_pcm.py", 0o644),
