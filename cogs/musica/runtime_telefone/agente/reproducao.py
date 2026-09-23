@@ -77,6 +77,24 @@ class ReproducaoMixin:
             return bool(getattr(voice_client, "is_connected", lambda: False)())
         return False
 
+    def _registered_voice_client_for_guild(self, guild_id: int, guild: Any | None = None) -> Any | None:
+        """Retorna o VoiceClient registrado mesmo durante estados parciais do cache.
+
+        ``guild.voice_client`` normalmente consulta o mesmo registry do discord.py,
+        mas durante cleanup/reconnect rápidos já vimos janelas onde a referência da
+        guild e ``client.voice_clients`` ficam temporariamente divergentes. O fallback
+        evita abrir uma segunda sessão ou perder a chance de limpar um cliente stale.
+        """
+        candidate = getattr(guild, "voice_client", None) if guild is not None else None
+        if candidate is not None:
+            return candidate
+        for voice_client in list(getattr(self.client, "voice_clients", []) or []):
+            owner = getattr(voice_client, "guild", None)
+            owner_id = safe_id(getattr(owner, "id", 0))
+            if owner_id == int(guild_id or 0):
+                return voice_client
+        return None
+
     def _resume_offset_for_track(self, track: AgentTrack, *, played_for: float) -> float:
         base_offset = max(0.0, float(getattr(track, "start_offset_seconds", 0.0) or 0.0))
         resume_offset = max(
@@ -1378,7 +1396,7 @@ class ReproducaoMixin:
             # O canal pode ter mudado enquanto aguardávamos o lock.
             requested_channel_id = int(st.voice_channel_id or requested_channel_id)
             guild, channel = await self._resolve_guild_and_channel(guild_id, requested_channel_id)
-            existing = guild.voice_client
+            existing = self._registered_voice_client_for_guild(guild_id, guild)
 
             if existing is not None and not getattr(existing, "is_connected", lambda: False)():
                 grace = max(0.0, min(2.0, env_float("MUSIC_AGENT_VOICE_RECONNECT_GRACE_SECONDS", 0.6)))
@@ -1387,7 +1405,7 @@ class ReproducaoMixin:
                     deadline = time.monotonic() + grace
                     while time.monotonic() < deadline:
                         await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-                        current = guild.voice_client
+                        current = self._registered_voice_client_for_guild(guild_id, guild)
                         if current is not None and getattr(current, "is_connected", lambda: False)():
                             existing = current
                             self.log(
@@ -1408,7 +1426,7 @@ class ReproducaoMixin:
                         guild_id=guild_id,
                         reason="stale_client",
                     )
-                    existing = guild.voice_client
+                    existing = self._registered_voice_client_for_guild(guild_id, guild)
 
             if existing is None or not getattr(existing, "is_connected", lambda: False)():
                 self.log("voice_connecting", guild_id=guild_id, channel=requested_channel_id, transport="direct")
@@ -1419,7 +1437,7 @@ class ReproducaoMixin:
                         timeout=connect_timeout,
                     )
                 except (asyncio.TimeoutError, TimeoutError) as exc:
-                    recovered = guild.voice_client
+                    recovered = self._registered_voice_client_for_guild(guild_id, guild)
                     if recovered is not None and self._voice_client_is_connected(recovered):
                         self.log(
                             "voice_connect_timeout_recovered",
@@ -1444,12 +1462,12 @@ class ReproducaoMixin:
                     # discord.py pode registrar o VoiceClient um instante antes
                     # de a coroutine concorrente devolver. Releia o registro em
                     # vez de tratar isso como falha da música.
-                    recovered = guild.voice_client
+                    recovered = self._registered_voice_client_for_guild(guild_id, guild)
                     if recovered is not None:
                         deadline = time.monotonic() + max(0.1, min(1.5, env_float("MUSIC_AGENT_VOICE_RACE_RECOVERY_SECONDS", 0.8)))
                         while time.monotonic() < deadline and not getattr(recovered, "is_connected", lambda: False)():
                             await asyncio.sleep(0.04)
-                            recovered = guild.voice_client or recovered
+                            recovered = self._registered_voice_client_for_guild(guild_id, guild) or recovered
                     if recovered is not None and getattr(recovered, "is_connected", lambda: False)():
                         self.log(
                             "voice_connect_race_recovered",
@@ -1466,6 +1484,17 @@ class ReproducaoMixin:
                                     timeout=self._voice_operation_timeout_seconds(),
                                 )
                             except Exception as move_exc:
+                                self.log(
+                                    "voice_move_failed_cleanup",
+                                    guild_id=guild_id,
+                                    channel=requested_channel_id,
+                                    from_channel=current_channel_id,
+                                    phase="race_recovery",
+                                    error=f"{type(move_exc).__name__}: {short_text(move_exc, 180)}",
+                                )
+                                await self._disconnect_voice_client_bounded(
+                                    voice_client, guild_id=guild_id, reason="move_failed_after_race"
+                                )
                                 raise VoiceSessionError(f"falha ao mover voz após corrida: {type(move_exc).__name__}: {short_text(move_exc, 220)}") from move_exc
                         return voice_client, False
                     raise VoiceSessionError(f"corrida de conexão de voz não recuperada: {type(exc).__name__}: {short_text(exc, 220)}") from exc
@@ -1482,6 +1511,20 @@ class ReproducaoMixin:
                         timeout=self._voice_operation_timeout_seconds(),
                     )
                 except Exception as exc:
+                    self.log(
+                        "voice_move_failed_cleanup",
+                        guild_id=guild_id,
+                        channel=requested_channel_id,
+                        from_channel=current_channel_id,
+                        phase="move",
+                        error=f"{type(exc).__name__}: {short_text(exc, 180)}",
+                    )
+                    # Não reutilize indefinidamente uma sessão que falhou ao
+                    # mover. Limpe o registro e deixe o retry seguinte conectar
+                    # do zero ao canal solicitado.
+                    await self._disconnect_voice_client_bounded(
+                        voice_client, guild_id=guild_id, reason="move_failed"
+                    )
                     raise VoiceSessionError(f"falha ao mover sessão de voz: {type(exc).__name__}: {short_text(exc, 220)}") from exc
             else:
                 self.log("voice_reused", guild_id=guild_id, channel=requested_channel_id, transport="direct")
@@ -2171,11 +2214,10 @@ class ReproducaoMixin:
 
         if error:
             log_summary("error")
-            callback_voice_failure = self._is_voice_transport_error(error, phase="") or not self._voice_client_is_connected(st.player)
-            if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_error"):
-                return
-            recovery_voice_failure = str(getattr(st, "last_error_category", "") or "") == "voice_transport"
-            if st.current is not None and (callback_voice_failure or recovery_voice_failure):
+            callback_voice_failure = self._is_voice_transport_error(error, phase="") or (
+                st.player is not None and not self._voice_client_is_connected(st.player)
+            )
+            if st.current is not None and callback_voice_failure:
                 message = f"{type(error).__name__}: {short_text(error, 260)}"
                 st.last_error_category = "voice_transport"
                 st.last_error_phase = "runtime_playback"
@@ -2186,10 +2228,39 @@ class ReproducaoMixin:
                     title=getattr(st.current, "title", ""),
                     queue_size=len(st.queue),
                     error=message,
+                    stream_refresh_skipped=True,
+                )
+                # Queda de Discord Voice não invalida a URL do stream. Tentar
+                # yt-dlp primeiro acrescentava 3-7 s justamente durante uma
+                # oscilação de rede e ainda podia mascarar a causa real.
+                if self._schedule_voice_runtime_recovery(
+                    guild_id,
+                    played_for=played_for,
+                    reason="direct_after_error",
+                    error=message,
+                ):
+                    return
+                self._set_status(st, "failed", event="voice_runtime_recovery_unavailable", error=message)
+                return
+            if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_error"):
+                return
+            recovery_voice_failure = str(getattr(st, "last_error_category", "") or "") == "voice_transport"
+            if st.current is not None and recovery_voice_failure:
+                message = str(getattr(st, "last_error", "") or f"{type(error).__name__}: {short_text(error, 260)}")
+                st.last_error_category = "voice_transport"
+                st.last_error_phase = "runtime_playback"
+                self.log(
+                    "voice_transport_playback_preserved",
+                    guild_id=guild_id,
+                    played_for=round(played_for, 2),
+                    title=getattr(st.current, "title", ""),
+                    queue_size=len(st.queue),
+                    error=message,
+                    stream_refresh_skipped=False,
                 )
                 if self._schedule_voice_runtime_recovery(
                     guild_id,
-                    played_for=0.0 if recovery_voice_failure else played_for,
+                    played_for=0.0,
                     reason="direct_after_error",
                     error=message,
                 ):
@@ -2209,11 +2280,8 @@ class ReproducaoMixin:
         # entre as durações fornecidas pelo site e pelo player.
         if early_unexpected:
             log_summary("early_end")
-            voice_was_lost = not self._voice_client_is_connected(st.player)
-            if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_early_end"):
-                return
-            recovery_voice_failure = str(getattr(st, "last_error_category", "") or "") == "voice_transport"
-            if st.current is not None and (voice_was_lost or recovery_voice_failure):
+            voice_was_lost = st.player is not None and not self._voice_client_is_connected(st.player)
+            if st.current is not None and voice_was_lost:
                 message = (
                     f"áudio encerrou cedo após perda de voz ({played_for:.1f}s; restantes {remaining_after_play:.1f}s)"
                     if remaining_after_play is not None
@@ -2227,10 +2295,39 @@ class ReproducaoMixin:
                     played_for=round(played_for, 2),
                     title=getattr(st.current, "title", ""),
                     queue_size=len(st.queue),
+                    stream_refresh_skipped=True,
                 )
                 if self._schedule_voice_runtime_recovery(
                     guild_id,
-                    played_for=0.0 if recovery_voice_failure else played_for,
+                    played_for=played_for,
+                    reason="direct_after_early_end",
+                    error=message,
+                ):
+                    return
+                self._set_status(st, "failed", event="voice_runtime_recovery_unavailable", error=message)
+                return
+            if await self._recover_current_stream(guild_id, played_for=played_for, reason="direct_after_early_end"):
+                return
+            recovery_voice_failure = str(getattr(st, "last_error_category", "") or "") == "voice_transport"
+            if st.current is not None and recovery_voice_failure:
+                message = (
+                    f"áudio encerrou cedo e a retomada encontrou perda de voz ({played_for:.1f}s; restantes {remaining_after_play:.1f}s)"
+                    if remaining_after_play is not None
+                    else f"áudio encerrou cedo e a retomada encontrou perda de voz ({played_for:.1f}s)"
+                )
+                st.last_error_category = "voice_transport"
+                st.last_error_phase = "runtime_playback"
+                self.log(
+                    "voice_transport_early_end_preserved",
+                    guild_id=guild_id,
+                    played_for=round(played_for, 2),
+                    title=getattr(st.current, "title", ""),
+                    queue_size=len(st.queue),
+                    stream_refresh_skipped=False,
+                )
+                if self._schedule_voice_runtime_recovery(
+                    guild_id,
+                    played_for=0.0,
                     reason="direct_after_early_end",
                     error=message,
                 ):

@@ -457,3 +457,17 @@ async def test_monitor_rebind_periodico_sobrevive_outage_e_recupera(monkeypatch)
     assert unbinds.count(101) >= 2
     assert "playing" in synced
     assert state.agent_monitor_recoveries == 1
+
+
+def test_assinatura_painel_muda_quando_tentativa_de_recovery_de_voz_avanca() -> None:
+    base = {
+        "status": "preparing",
+        "current": {"title": "Faixa", "webpage_url": "https://example.invalid/a"},
+        "queue": [],
+        "queue_size": 0,
+        "voice_runtime_recovery_pending": True,
+        "voice_runtime_recovery_last_error": "voice lost",
+    }
+    first = monitor._assinatura_painel_remoto({**base, "voice_runtime_recovery_attempts": 1})
+    second = monitor._assinatura_painel_remoto({**base, "voice_runtime_recovery_attempts": 2})
+    assert first != second

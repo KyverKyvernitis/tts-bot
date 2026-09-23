@@ -136,6 +136,10 @@ _CORE_WORKER_NETWORK_STATE: dict[str, Any] = {
 }
 _CORE_WORKER_NETWORK_LOCK = threading.RLock()
 _CORE_WORKER_HTTP_LOCK = threading.Lock()
+_CORE_WORKER_HTTP_STATE: dict[str, Any] = {
+    "last_ok_at": 0.0, "last_error_at": 0.0, "last_status": 0,
+    "last_source": "", "last_error": "", "failure_streak": 0,
+}
 _CORE_WORKER_NETWORK_AUDIT: dict[str, dict[str, Any]] = {}
 _CONTROL_PLANE_SNAPSHOT_CACHE: dict[str, dict[str, Any]] = {}
 _CONTROL_PLANE_SNAPSHOT_CACHE_LOCK = threading.RLock()
@@ -154,7 +158,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.14"
+PHONE_WORKER_VERSION = "1.11.15"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1026,6 +1030,10 @@ def _audit_core_worker_network_failure(source: str, exc: BaseException | str, *,
 
 
 def _audit_core_worker_network_success(source: str, *, elapsed_ms: float = 0.0) -> None:
+    # Uma resposta HTTP (inclusive 4xx/5xx) prova que a rota até a VPS está
+    # funcional. Limpe de verdade o breaker; antes este helper só limpava a
+    # supressão de logs e deixava jobs bloqueados por um incidente já recuperado.
+    _remember_core_worker_network_ok()
     with _CORE_WORKER_NETWORK_LOCK:
         item = _CORE_WORKER_NETWORK_AUDIT.get(source)
         if not item or not item.get("kind"):
@@ -1036,6 +1044,50 @@ def _audit_core_worker_network_success(source: str, *, elapsed_ms: float = 0.0) 
     suffix = f" suppressed={suppressed}" if suppressed else ""
     print(
         f"[core-worker-network] recuperado source={source} previous={previous} elapsed_ms={round(elapsed_ms, 1)}{suffix}",
+        flush=True,
+    )
+
+
+def _remember_core_worker_http_success(source: str) -> None:
+    now = time.time()
+    with _CORE_WORKER_NETWORK_LOCK:
+        _CORE_WORKER_HTTP_STATE["last_ok_at"] = now
+        if not source or str(_CORE_WORKER_HTTP_STATE.get("last_source") or "") == str(source):
+            _CORE_WORKER_HTTP_STATE["failure_streak"] = 0
+
+
+def _audit_core_worker_http_failure(source: str, status: int, detail: object, *, elapsed_ms: float = 0.0) -> None:
+    """Audita falha HTTP sem confundi-la com queda de rede/Tailscale."""
+    now = time.time()
+    status = int(status or 0)
+    detail_text = _short_text(detail, limit=160)
+    key = f"http:{source}:{status}"
+    interval = max(15.0, min(600.0, _env_float("CORE_WORKER_HTTP_ERROR_LOG_INTERVAL_SECONDS", 120.0)))
+    with _CORE_WORKER_NETWORK_LOCK:
+        previous_source = str(_CORE_WORKER_HTTP_STATE.get("last_source") or "")
+        previous_status = int(_CORE_WORKER_HTTP_STATE.get("last_status") or 0)
+        streak = int(_CORE_WORKER_HTTP_STATE.get("failure_streak") or 0)
+        if previous_source == str(source) and previous_status == status:
+            streak += 1
+        else:
+            streak = 1
+        _CORE_WORKER_HTTP_STATE.update({
+            "last_error_at": now,
+            "last_status": status,
+            "last_source": str(source or ""),
+            "last_error": detail_text,
+            "failure_streak": streak,
+        })
+        item = _CORE_WORKER_NETWORK_AUDIT.setdefault(key, {"logged_at": 0.0, "suppressed": 0})
+        if now - float(item.get("logged_at") or 0.0) < interval:
+            item["suppressed"] = int(item.get("suppressed") or 0) + 1
+            return
+        suppressed = int(item.get("suppressed") or 0)
+        item.update({"logged_at": now, "suppressed": 0})
+    suffix = f" suppressed={suppressed}" if suppressed else ""
+    print(
+        f"[core-worker-http] falha source={source} status={status} elapsed_ms={round(elapsed_ms, 1)} "
+        f"streak={streak}{suffix}: {detail_text}",
         flush=True,
     )
 
@@ -1076,6 +1128,20 @@ def _core_worker_network_runtime_snapshot() -> dict[str, Any]:
         result["failure_streak"] = streak
     if backoff > 0:
         result["backoff_seconds"] = round(backoff, 3)
+    with _CORE_WORKER_NETWORK_LOCK:
+        http_state = dict(_CORE_WORKER_HTTP_STATE)
+    http_error_at = float(http_state.get("last_error_at") or 0.0)
+    http_ok_at = float(http_state.get("last_ok_at") or 0.0)
+    if http_error_at:
+        result["last_http_error_age_seconds"] = round(now - http_error_at, 3)
+        result["last_http_status"] = int(http_state.get("last_status") or 0)
+        result["last_http_source"] = str(http_state.get("last_source") or "")
+        result["last_http_error"] = str(http_state.get("last_error") or "")
+    if http_ok_at:
+        result["last_http_ok_age_seconds"] = round(now - http_ok_at, 3)
+    http_streak = int(http_state.get("failure_streak") or 0)
+    if http_streak:
+        result["http_failure_streak"] = http_streak
     return result
 
 
@@ -1340,11 +1406,30 @@ def _store_pending_core_job_result(payload: dict[str, Any]) -> None:
 
 
 def _post_core_worker_job_result_payload_status(payload: dict[str, Any], *, timeout: float = 8.0) -> tuple[bool, int, dict[str, Any]]:
-    code, data = _post_core_worker_json("/core-worker/jobs/result", payload, timeout=timeout, respect_network_backoff=True)
+    started = time.perf_counter()
+    try:
+        code, data = _post_core_worker_json(
+            "/core-worker/jobs/result", payload, timeout=timeout, respect_network_backoff=True
+        )
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        # Não deixe uma queda entre "job terminou" e "resultado enviado"
+        # escapar como exceção. O chamador precisa receber False para persistir
+        # o resultado e reenviá-lo quando o plano de controle voltar.
+        _audit_core_worker_network_failure("job_result", exc, elapsed_ms=elapsed_ms)
+        return False, 0, {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=140)}"}
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if code == 0 and str(data.get("error") or "") == "network_backoff":
+        return False, 0, data
+    if code:
+        _audit_core_worker_network_success("job_result", elapsed_ms=elapsed_ms)
     ok = bool(200 <= code < 300 and data.get("ok", True))
     if ok:
+        _remember_core_worker_http_success("job_result")
         return True, int(code), data
-    print(f"[core-worker-jobs] falha ao enviar resultado HTTP {code}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
+    _audit_core_worker_http_failure(
+        "job_result", int(code), data.get("error") or data, elapsed_ms=elapsed_ms
+    )
     return False, int(code), data
 
 
@@ -1762,15 +1847,20 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
         if 200 <= status < 300 and data.get("ok", True):
             _audit_core_worker_network_success("heartbeat", elapsed_ms=request_ms)
+            _remember_core_worker_http_success("heartbeat")
             _write_runtime_status(control_plane_alive=True, heartbeat_ok=True, reason="heartbeat_ok")
             if prepare_ms >= max(750.0, _env_float("CORE_WORKER_SLOW_PAYLOAD_LOG_MS", 1500.0)):
                 _audit_core_worker_slow_payload(prepare_ms=prepare_ms, request_ms=request_ms, total_ms=elapsed_ms)
             with contextlib.suppress(Exception):
                 _flush_pending_core_worker_job_results(timeout=min(5.0, max(1.0, timeout)))
             return True
-        error = RuntimeError(f"HTTP {status}: {_short_text(data.get('error') or data, limit=180)}")
-        _remember_core_worker_network_error(error)
-        _audit_core_worker_network_failure("heartbeat", error, elapsed_ms=request_ms)
+        # O servidor respondeu: a rota de rede está saudável. HTTP 4xx/5xx é
+        # falha de protocolo/autorização/servidor e não deve abrir o breaker de
+        # Tailscale nem pausar jobs por até 60 s.
+        _audit_core_worker_network_success("heartbeat", elapsed_ms=request_ms)
+        _audit_core_worker_http_failure(
+            "heartbeat", status, data.get("error") or data, elapsed_ms=request_ms
+        )
     except Exception as exc:
         # _post_json_url registra o erro de rede; registrar novamente é idempotente
         # para conteúdo, mas aumentaria artificialmente a streak. Só complete caso
@@ -10015,12 +10105,18 @@ def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max
     if _pending_core_job_result_count():
         return False
     payload = _core_worker_payload(host=host, port=port)
+    request_started = time.perf_counter()
     code, data = _post_core_worker_json("/core-worker/jobs/poll", payload, timeout=timeout, respect_network_backoff=True)
+    request_ms = (time.perf_counter() - request_started) * 1000.0
     if code == 0 and str(data.get("error") or "") == "network_backoff":
         return False
+    if code:
+        # Qualquer resposta HTTP comprova conectividade, inclusive 4xx/5xx.
+        _audit_core_worker_network_success("jobs", elapsed_ms=request_ms)
     if not (200 <= code < 300):
-        print(f"[core-worker-jobs] poll HTTP {code}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
+        _audit_core_worker_http_failure("jobs", code, data.get("error") or data, elapsed_ms=request_ms)
         return False
+    _remember_core_worker_http_success("jobs")
     job = data.get("job") if isinstance(data.get("job"), dict) else None
     if not job:
         return False
@@ -10084,7 +10180,6 @@ def _start_core_worker_jobs(*, host: str, port: int, max_body_bytes: int, max_ou
                     job_timeout=job_timeout,
                     timeout=http_timeout,
                 )
-                _audit_core_worker_network_success("jobs", elapsed_ms=(time.perf_counter() - started) * 1000.0)
                 time.sleep(0.5 if ran_job else interval)
             except Exception as exc:
                 # O helper HTTP já atualizou o breaker compartilhado.

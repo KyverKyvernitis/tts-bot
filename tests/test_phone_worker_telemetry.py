@@ -37,7 +37,7 @@ def battery_env(tmp_path, monkeypatch):
     # whitespace, limits and permission errors. No probe touches the host /sys.
     monkeypatch.setattr(worker, "_read_text_file", lambda path, **kw: real_read(local(path), **kw))
     monkeypatch.setattr(worker, "_safe_path_exists", lambda path: real_exists(local(path)))
-    monkeypatch.setattr(Path, "glob", lambda path, pattern: real_glob(local(path), pattern))
+    monkeypatch.setattr(Path, "glob", lambda path, pattern, **kwargs: real_glob(local(path), pattern, **kwargs))
     monkeypatch.setattr(worker, "_run_json_command", lambda *a, **kw: {})
 
     def battery(name="battery", **fields):
@@ -89,10 +89,10 @@ def test_sysfs_enumeration_failure_keeps_already_discovered_battery(battery_env,
         battery(capacity=64)
     real_glob = Path.glob
 
-    def glob(path, pattern):
+    def glob(path, pattern, **kwargs):
         if path == SYSFS:
             raise error
-        return real_glob(path, pattern)
+        return real_glob(path, pattern, **kwargs)
 
     monkeypatch.setattr(Path, "glob", glob)
     result = worker._sysfs_battery_snapshot()

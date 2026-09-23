@@ -141,6 +141,9 @@ class MusicGuildState:
     voice_status_pause_position_seconds: float = -1.0
     voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     agent_playback_token: int = -1
+    agent_voice_recovery_pending: bool = False
+    agent_voice_recovery_attempts: int = 0
+    agent_voice_recovery_last_error: str = ""
     agent_monitor_task: Optional[asyncio.Task] = None
     agent_monitor_failures: int = 0
     agent_monitor_last_error: str = ""

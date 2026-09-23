@@ -237,6 +237,10 @@ async def sincronizar_estado_agente(
             router._set_current_status(state, mapped)
 
     state.current_backend = "agent"
+    state.agent_voice_recovery_pending = bool(remote.get("voice_runtime_recovery_pending"))
+    with contextlib.suppress(Exception):
+        state.agent_voice_recovery_attempts = max(0, int(remote.get("voice_runtime_recovery_attempts") or 0))
+    state.agent_voice_recovery_last_error = str(remote.get("voice_runtime_recovery_last_error") or "")[:260]
     state.agent_monitor_failures = 0
     state.agent_monitor_last_error = ""
     state.agent_monitor_reconnecting_since = 0.0
@@ -284,10 +288,26 @@ async def sincronizar_estado_agente(
         state.voice_status_pause_position_seconds = -1.0
     state.music_session_active = bool(state.current or raw_status in {"preparing", "starting", "playing", "paused", "queued"})
     if raw_status and raw_status not in {"failed", "error"}:
-        state.current_status_detail = raw_status
+        if state.agent_voice_recovery_pending:
+            attempt = max(0, int(getattr(state, "agent_voice_recovery_attempts", 0) or 0))
+            state.current_status_detail = f"voice_recovery:{attempt}" if attempt else "voice_recovery"
+        else:
+            state.current_status_detail = raw_status
     active_statuses = {"resolving", "starting", "reconnecting", "playing", "paused", "queued"}
     new_panel_key = router._panel_key_for_track(state.current)
-    active_started_signal = bool(remote_status_original == "playing" and state.current is not None)
+    # Payloads atuais do agente possuem confirmação explícita de voz/player.
+    # Não trate apenas `status=playing` como início confirmado nesses payloads:
+    # durante uma reconexão pode existir um snapshot transitório ainda marcado
+    # como playing sem áudio realmente ativo. O fallback simples permanece só
+    # para agentes legados que não publicavam os campos de confirmação.
+    has_playback_confirmation = any(
+        key in remote for key in ("confirmed_playing", "voice_connected", "player_present")
+    )
+    active_started_signal = bool(
+        remote_status_original == "playing"
+        and state.current is not None
+        and not has_playback_confirmation
+    )
     active_confirmed = bool(raw_status == "playing" and confirmed_playing and state.current is not None)
     if state.current is not None or tem_pendentes(state) or state.current_status in active_statuses:
         router._reactivate_panel_controls_now(guild_id)
@@ -310,11 +330,22 @@ async def sincronizar_estado_agente(
     if remote_playback_token is not None:
         state.agent_playback_token = remote_playback_token
     if just_started_agent_track:
+        same_track_restart = bool(previous_started_key and previous_started_key == new_panel_key)
         state.agent_started_track_key = new_panel_key
         if remote_playback_token is not None:
             state.agent_started_playback_token = remote_playback_token
         state.current_started_at_monotonic = time.monotonic()
-        state.current_start_offset_seconds = 0.0
+        # O Worker é autoritativo também no primeiro snapshot que a VPS recebe.
+        # Isso cobre recovery/seek da mesma faixa e também restart/rebind da VPS
+        # quando ela reencontra uma música que já estava, por exemplo, em 0:42.
+        # Para uma faixa realmente nova `position_ms` naturalmente estará perto
+        # de zero, então usar a posição remota é seguro e evita saltos visuais.
+        remote_resume_offset = remote_position_seconds
+        if remote_resume_offset is None:
+            with contextlib.suppress(Exception):
+                if current_payload.get("start_offset_seconds") is not None:
+                    remote_resume_offset = max(0.0, float(current_payload.get("start_offset_seconds") or 0.0))
+        state.current_start_offset_seconds = max(0.0, float(remote_resume_offset or 0.0))
         state.voice_status_pause_position_seconds = -1.0
         # Se esta faixa nasceu de um link direto, o título real só fica
         # disponível depois que o Music Agent resolve o stream. Aprenda aqui,

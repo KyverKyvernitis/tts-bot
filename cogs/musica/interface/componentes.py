@@ -819,6 +819,8 @@ def _player_status_presentation(state) -> tuple[str, str, discord.Colour]:
         return "Pulando música", "⏭️", discord.Color.gold()
     if status == "reconnecting":
         return "Reconectando ao player", "🔄", discord.Color.gold()
+    if bool(getattr(state, "agent_voice_recovery_pending", False)):
+        return "Reconectando ao canal de voz", "🔄", discord.Color.gold()
     if status in {"resolving", "starting"}:
         return "Preparando áudio", PLAYER_STATUS_ANIMATED_EMOJI, discord.Color.gold()
     if paused:
@@ -861,7 +863,11 @@ def _player_track_text(state, track: MusicTrack) -> str:
     origin = str(getattr(track, "fallback_reason", "") or "").strip()
     requester_line = f"-# Pedido por {requester}" + (f" · via {_escape(origin, limit=32)}" if origin else "")
     lines = [f"### {title}", f"-# {source}", " · ".join(metadata), requester_line]
-    if str(getattr(state, "current_status", "") or "").lower() == "reconnecting":
+    if bool(getattr(state, "agent_voice_recovery_pending", False)):
+        attempts = max(0, int(getattr(state, "agent_voice_recovery_attempts", 0) or 0))
+        suffix = f" · tentativa {attempts}" if attempts else ""
+        lines.append(f"-# 🔄 Reconectando ao canal de voz sem descartar a faixa ou a fila{suffix}.")
+    elif str(getattr(state, "current_status", "") or "").lower() == "reconnecting":
         failures = max(0, int(getattr(state, "agent_monitor_failures", 0) or 0))
         deferred_attempts = max(0, int(getattr(state, "agent_deferred_command_attempts", 0) or 0))
         deferred_status = str(getattr(state, "agent_deferred_command_status", "") or "").lower()

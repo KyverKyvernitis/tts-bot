@@ -2244,3 +2244,208 @@ def test_music_agent_start_rotates_log_and_marks_new_session():
     assert '${LOG_FILE}.1' in source
     assert '[music-agent-session] start' in source
     assert 'mark_agent_session' in source
+
+
+def test_runtime_voice_loss_bypasses_stream_reresolve(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 2201
+        current = music.AgentTrack(title="current", query="current", stream_url="https://media/current", duration=200)
+        st = music.GuildMusicState(
+            guild_id=gid,
+            current=current,
+            queue=[music.AgentTrack(title="next", query="next", stream_url="https://media/next")],
+            status="playing",
+        )
+        st.playback_token = 4
+        st.started_monotonic = music.time.monotonic() - 12.0
+        st.player = object()  # sem is_connected -> sessão perdida
+        agent.states[gid] = st
+        recover_calls = []
+        stream_calls = []
+        events = []
+
+        async def recover_stream(*args, **kwargs):
+            stream_calls.append((args, kwargs))
+            raise AssertionError("queda de voz não deve re-resolver stream antes da reconexão")
+
+        def schedule(guild_id, **kwargs):
+            recover_calls.append((guild_id, kwargs))
+            return True
+
+        agent._recover_current_stream = recover_stream
+        agent._schedule_voice_runtime_recovery = schedule
+        agent.log = lambda event, **fields: events.append((event, fields))
+
+        await agent._direct_after(gid, RuntimeError("voice websocket closed"), 4)
+
+        assert stream_calls == []
+        assert len(recover_calls) == 1
+        assert recover_calls[0][0] == gid
+        assert recover_calls[0][1]["played_for"] > 10.0
+        assert st.current is current
+        assert st.queue[0].title == "next"
+        preserve = [fields for event, fields in events if event == "voice_transport_playback_preserved"]
+        assert preserve and preserve[-1]["stream_refresh_skipped"] is True
+
+    run(scenario())
+
+
+def test_early_end_after_voice_loss_bypasses_stream_reresolve(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 2202
+        current = music.AgentTrack(title="current", query="current", stream_url="https://media/current", duration=180)
+        st = music.GuildMusicState(guild_id=gid, current=current, status="playing")
+        st.playback_token = 9
+        st.started_monotonic = music.time.monotonic() - 8.0
+        st.player = object()
+        agent.states[gid] = st
+        stream_calls = []
+        recovery = []
+
+        async def recover_stream(*args, **kwargs):
+            stream_calls.append((args, kwargs))
+            return False
+
+        agent._recover_current_stream = recover_stream
+        agent._schedule_voice_runtime_recovery = lambda guild_id, **kwargs: recovery.append((guild_id, kwargs)) or True
+        agent.log = lambda *args, **kwargs: None
+
+        await agent._direct_after(gid, None, 9)
+
+        assert stream_calls == []
+        assert recovery and recovery[0][1]["reason"] == "direct_after_early_end"
+        assert st.current is current
+
+    run(scenario())
+
+
+def test_failed_voice_move_cleans_client_so_next_retry_can_reconnect(music, monkeypatch):
+    monkeypatch.setenv("MUSIC_AGENT_VOICE_RECONNECT_GRACE_SECONDS", "0")
+
+    class Channel:
+        def __init__(self, channel_id):
+            self.id = channel_id
+            self.guild = None
+            self.connect_calls = 0
+
+        async def connect(self, self_deaf=True):
+            self.connect_calls += 1
+            voice = FreshVoice(self.guild, self)
+            self.guild.voice_client = voice
+            return voice
+
+    class BrokenVoice:
+        def __init__(self, guild, channel):
+            self.guild = guild
+            self.channel = channel
+            self.disconnected = False
+
+        def is_connected(self):
+            return True
+
+        async def move_to(self, channel):
+            raise RuntimeError("move failed")
+
+        async def disconnect(self, force=False):
+            self.disconnected = True
+            self.guild.voice_client = None
+
+    class FreshVoice:
+        def __init__(self, guild, channel):
+            self.guild = guild
+            self.channel = channel
+
+        def is_connected(self):
+            return True
+
+    class Guild:
+        id = 2203
+
+        def __init__(self, old_channel, target):
+            self.old_channel = old_channel
+            self.target = target
+            self.voice_client = BrokenVoice(self, old_channel)
+
+        def get_channel(self, channel_id):
+            if channel_id == self.target.id:
+                return self.target
+            if channel_id == self.old_channel.id:
+                return self.old_channel
+            return None
+
+    async def scenario():
+        agent = music.MusicAgent()
+        old = Channel(3001)
+        target = Channel(3002)
+        guild = Guild(old, target)
+        old.guild = guild
+        target.guild = guild
+        broken = guild.voice_client
+        agent.states[guild.id] = music.GuildMusicState(guild_id=guild.id, voice_channel_id=target.id)
+        agent.client.get_guild = lambda value: guild if value == guild.id else None
+        agent.client.get_channel = lambda value: target if value == target.id else None
+        events = []
+        agent.log = lambda event, **fields: events.append(event)
+
+        with pytest.raises(RuntimeError, match="falha ao mover sessão de voz"):
+            await agent._ensure_direct_voice_client(guild.id)
+        assert broken.disconnected is True
+        assert guild.voice_client is None
+        assert "voice_move_failed_cleanup" in events
+
+        voice, created = await agent._ensure_direct_voice_client(guild.id)
+        assert created is True
+        assert voice.channel is target
+        assert target.connect_calls == 1
+
+    run(scenario())
+
+
+def test_voice_registry_fallback_reuses_client_when_guild_cache_is_temporarily_empty(music):
+    class Voice:
+        def __init__(self, guild, channel):
+            self.guild = guild
+            self.channel = channel
+
+        def is_connected(self):
+            return True
+
+    class Channel:
+        id = 3102
+
+        def __init__(self):
+            self.connect_calls = 0
+
+        async def connect(self, self_deaf=True):
+            self.connect_calls += 1
+            raise AssertionError("não deve abrir segunda conexão")
+
+    class Guild:
+        id = 3101
+        voice_client = None
+
+        def __init__(self, channel):
+            self.channel = channel
+
+        def get_channel(self, channel_id):
+            return self.channel if channel_id == self.channel.id else None
+
+    async def scenario():
+        agent = music.MusicAgent()
+        channel = Channel()
+        guild = Guild(channel)
+        voice = Voice(guild, channel)
+        agent.client.voice_clients = [voice]
+        agent.client.get_guild = lambda value: guild if value == guild.id else None
+        agent.client.get_channel = lambda value: channel if value == channel.id else None
+        agent.states[guild.id] = music.GuildMusicState(guild_id=guild.id, voice_channel_id=channel.id)
+        agent.log = lambda *args, **kwargs: None
+
+        found, created = await agent._ensure_direct_voice_client(guild.id)
+        assert found is voice
+        assert created is False
+        assert channel.connect_calls == 0
+
+    run(scenario())

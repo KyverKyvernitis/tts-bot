@@ -501,3 +501,155 @@ def test_job_post_rechecks_network_backoff_after_http_lock(monkeypatch):
 )
 def test_network_audit_classifies_transport_failures(control, error, kind):
     assert control._classify_core_worker_network_error(error) == kind
+
+
+def test_heartbeat_http_error_does_not_open_network_breaker(control, monkeypatch):
+    configure(monkeypatch)
+    control._CORE_WORKER_NETWORK_STATE.clear()
+    control._CORE_WORKER_NETWORK_STATE.update({
+        "last_ok_at": 0.0, "last_error_at": 0.0, "last_error": "", "last_error_kind": "",
+        "failure_streak": 0, "backoff_until": 0.0,
+    })
+    monkeypatch.setattr(control, "_core_worker_payload", lambda **kwargs: {"worker_id": "worker"})
+    monkeypatch.setattr(control, "_post_core_worker_json", lambda *args, **kwargs: (401, {"ok": False, "error": "token inválido"}))
+    http_events = []
+    monkeypatch.setattr(control, "_audit_core_worker_http_failure", lambda source, status, detail, **kwargs: http_events.append((source, status, str(detail))))
+    monkeypatch.setattr(control, "_write_runtime_status", lambda **kwargs: None)
+
+    assert control._send_core_worker_heartbeat_once(host="127.0.0.1", port=8766, timeout=2.0) is False
+    snapshot = control._core_worker_network_runtime_snapshot()
+    assert snapshot.get("last_error_kind", "") == ""
+    assert "backoff_seconds" not in snapshot
+    assert http_events == [("heartbeat", 401, "token inválido")]
+
+
+def test_jobs_http_error_is_application_audit_not_network_failure(control, monkeypatch):
+    configure(monkeypatch)
+    monkeypatch.setattr(control, "_flush_pending_core_worker_job_results", lambda **kwargs: None)
+    monkeypatch.setattr(control, "_pending_core_job_result_count", lambda: 0)
+    monkeypatch.setattr(control, "_core_worker_payload", lambda **kwargs: {"worker_id": "worker"})
+    monkeypatch.setattr(control, "_post_core_worker_json", lambda *args, **kwargs: (503, {"ok": False, "error": "maintenance"}))
+    network_success = []
+    http_events = []
+    monkeypatch.setattr(control, "_audit_core_worker_network_success", lambda source, **kwargs: network_success.append(source))
+    monkeypatch.setattr(control, "_audit_core_worker_http_failure", lambda source, status, detail, **kwargs: http_events.append((source, status, str(detail))))
+
+    assert control._poll_core_worker_job_once(
+        host="127.0.0.1", port=8766, max_body_bytes=1000, max_output_bytes=1000, job_timeout=10, timeout=2.0
+    ) is False
+    assert network_success == ["jobs"]
+    assert http_events == [("jobs", 503, "maintenance")]
+
+
+def test_http_failure_audit_rate_limits_repeated_same_status(control, monkeypatch, capsys):
+    monkeypatch.setenv("CORE_WORKER_HTTP_ERROR_LOG_INTERVAL_SECONDS", "600")
+    control._CORE_WORKER_NETWORK_AUDIT.clear()
+    control._audit_core_worker_http_failure("heartbeat", 401, "token inválido", elapsed_ms=12)
+    control._audit_core_worker_http_failure("heartbeat", 401, "token inválido", elapsed_ms=13)
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "[core-worker-http]" in lines[0]
+    assert "status=401" in lines[0]
+
+
+def test_http_failure_state_is_visible_without_opening_network_breaker(control, monkeypatch):
+    monkeypatch.setenv("CORE_WORKER_HTTP_ERROR_LOG_INTERVAL_SECONDS", "600")
+    control._CORE_WORKER_NETWORK_AUDIT.clear()
+    control._CORE_WORKER_HTTP_STATE.clear()
+    control._CORE_WORKER_HTTP_STATE.update({
+        "last_ok_at": 0.0, "last_error_at": 0.0, "last_status": 0,
+        "last_source": "", "last_error": "", "failure_streak": 0,
+    })
+
+    control._audit_core_worker_http_failure("heartbeat", 503, "maintenance", elapsed_ms=20)
+    snapshot = control._core_worker_network_runtime_snapshot()
+
+    assert snapshot["last_http_status"] == 503
+    assert snapshot["last_http_source"] == "heartbeat"
+    assert snapshot["last_http_error"] == "maintenance"
+    assert snapshot["http_failure_streak"] == 1
+    assert snapshot.get("last_error_kind", "") == ""
+    assert "backoff_seconds" not in snapshot
+
+
+def test_http_success_resets_same_source_failure_streak(control):
+    control._CORE_WORKER_HTTP_STATE.clear()
+    control._CORE_WORKER_HTTP_STATE.update({
+        "last_ok_at": 0.0, "last_error_at": 0.0, "last_status": 503,
+        "last_source": "heartbeat", "last_error": "maintenance", "failure_streak": 4,
+    })
+    control._remember_core_worker_http_success("heartbeat")
+    snapshot = control._core_worker_network_runtime_snapshot()
+    assert snapshot.get("http_failure_streak", 0) == 0
+    assert snapshot["last_http_ok_age_seconds"] >= 0
+
+
+def test_http_response_clears_existing_network_breaker(control):
+    control._CORE_WORKER_NETWORK_STATE.clear()
+    control._CORE_WORKER_NETWORK_STATE.update({
+        "last_ok_at": 0.0, "last_error_at": 0.0,
+        "last_error": "timed out", "last_error_kind": "timeout",
+        "failure_streak": 4, "backoff_until": control.time.time() + 60.0,
+    })
+    control._CORE_WORKER_NETWORK_AUDIT.clear()
+    control._CORE_WORKER_NETWORK_AUDIT["heartbeat"] = {
+        "kind": "timeout", "logged_at": 0.0, "suppressed": 3,
+    }
+
+    control._audit_core_worker_network_success("heartbeat", elapsed_ms=25.0)
+    snapshot = control._core_worker_network_runtime_snapshot()
+
+    assert snapshot.get("last_error_kind", "") == ""
+    assert snapshot.get("failure_streak", 0) == 0
+    assert "backoff_seconds" not in snapshot
+
+
+def test_job_result_network_exception_is_returned_for_durable_retry(control, monkeypatch):
+    configure(monkeypatch)
+    stored = []
+    monkeypatch.setattr(
+        control,
+        "_post_core_worker_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("timed out")),
+    )
+    monkeypatch.setattr(control, "_store_pending_core_job_result", lambda payload: stored.append(dict(payload)))
+    monkeypatch.setattr(control, "_audit_core_worker_network_failure", lambda *args, **kwargs: None)
+
+    ok = control._send_core_worker_job_result(
+        job_id="job-voice-1", status="succeeded", result={"summary": "feito"}, timeout=1.0
+    )
+
+    assert ok is False
+    assert len(stored) == 1
+    assert stored[0]["job_id"] == "job-voice-1"
+    assert stored[0]["status"] == "succeeded"
+
+
+def test_job_result_http_failure_uses_http_audit_and_not_raw_spam(control, monkeypatch, capsys):
+    configure(monkeypatch)
+    network_success = []
+    http_events = []
+    monkeypatch.setattr(
+        control,
+        "_post_core_worker_json",
+        lambda *args, **kwargs: (503, {"ok": False, "error": "maintenance"}),
+    )
+    monkeypatch.setattr(
+        control, "_audit_core_worker_network_success",
+        lambda source, **kwargs: network_success.append(source),
+    )
+    monkeypatch.setattr(
+        control, "_audit_core_worker_http_failure",
+        lambda source, status, detail, **kwargs: http_events.append((source, status, str(detail))),
+    )
+
+    ok, code, data = control._post_core_worker_job_result_payload_status(
+        {"job_id": "j1", "status": "succeeded"}, timeout=1.0
+    )
+
+    assert ok is False
+    assert code == 503
+    assert data["error"] == "maintenance"
+    assert network_success == ["job_result"]
+    assert http_events == [("job_result", 503, "maintenance")]
+    assert "falha ao enviar resultado HTTP" not in capsys.readouterr().out

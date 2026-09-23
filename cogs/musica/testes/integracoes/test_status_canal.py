@@ -627,3 +627,242 @@ def test_finalizador_central_restaura_bitrate_e_status() -> None:
     source = _audio_router_method_source("_restore_music_session_side_effects")
     assert "await self._restore_auto_bitrate_for_state" in source
     assert "await self._restore_voice_status_for_state" in source
+
+
+@pytest.mark.asyncio
+async def test_music_agent_recovery_mesma_faixa_preserva_posicao_visual() -> None:
+    from cogs.musica.nucleo.estado import MusicGuildState
+    from cogs.musica.reproducao.sincronizacao import sincronizar_estado_agente
+
+    state = MusicGuildState()
+
+    class Router:
+        def get_state(self, _guild_id):
+            return state
+
+        @staticmethod
+        def _panel_key_for_track(track):
+            return str(getattr(track, "title", "") or "") if track is not None else ""
+
+        @staticmethod
+        def _set_current_status(st, status):
+            st.current_status = status
+
+        @staticmethod
+        def _reactivate_panel_controls_now(_guild_id):
+            return None
+
+        @staticmethod
+        def _schedule_agent_playback_started_effects(_guild_id, _key):
+            return None
+
+        @staticmethod
+        def _mark_voice_status_track_change(_state):
+            return None
+
+        @staticmethod
+        def _schedule_voice_status_track_sync(_guild_id, **_kwargs):
+            return None
+
+        @staticmethod
+        def start_music_agent_monitor(*_args, **_kwargs):
+            return None
+
+        async def update_panel(self, *_args, **_kwargs):
+            return None
+
+    base = {
+        "status": "playing",
+        "confirmed_playing": True,
+        "voice_connected": True,
+        "player_present": True,
+        "voice_channel_id": 22,
+        "text_channel_id": 33,
+        "current": {
+            "title": "Faixa recuperada",
+            "webpage_url": "https://example.invalid/a",
+            "requester_id": 1,
+            "duration": 180,
+            "source": "worker-agent",
+        },
+        "queue": [],
+        "queue_size": 0,
+    }
+
+    await sincronizar_estado_agente(
+        Router(), 11, agent_state={**base, "playback_token": 10, "position_ms": 42_000}, create_panel=False
+    )
+    # Mesmo no primeiro bind da VPS, o Worker já pode estar no meio da faixa.
+    assert state.current_start_offset_seconds == pytest.approx(42.0)
+
+    # O mesmo track volta com token novo após reconexão e o Worker informa a
+    # posição autoritativa. A VPS deve rebasear o relógio nessa posição, não 0:00.
+    await sincronizar_estado_agente(
+        Router(),
+        11,
+        agent_state={
+            **base,
+            "playback_token": 11,
+            "position_ms": 47_500,
+            "voice_runtime_recovery_pending": False,
+            "voice_runtime_recovery_attempts": 2,
+        },
+        create_panel=False,
+    )
+    assert state.current_start_offset_seconds == pytest.approx(47.5)
+    assert state.agent_voice_recovery_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_music_agent_espelha_auditoria_de_recovery_de_voz() -> None:
+    from cogs.musica.nucleo.estado import MusicGuildState
+    from cogs.musica.reproducao.sincronizacao import sincronizar_estado_agente
+
+    state = MusicGuildState()
+
+    class Router:
+        def get_state(self, _guild_id): return state
+        @staticmethod
+        def _panel_key_for_track(track): return str(getattr(track, "title", "") or "") if track else ""
+        @staticmethod
+        def _set_current_status(st, status): st.current_status = status
+        @staticmethod
+        def _reactivate_panel_controls_now(_guild_id): return None
+        @staticmethod
+        def _schedule_agent_playback_started_effects(_guild_id, _key): return None
+        @staticmethod
+        def _mark_voice_status_track_change(_state): return None
+        @staticmethod
+        def _schedule_voice_status_track_sync(_guild_id, **_kwargs): return None
+        @staticmethod
+        def start_music_agent_monitor(*_args, **_kwargs): return None
+        async def update_panel(self, *_args, **_kwargs): return None
+
+    await sincronizar_estado_agente(
+        Router(),
+        11,
+        agent_state={
+            "status": "preparing",
+            "playback_token": 20,
+            "voice_runtime_recovery_pending": True,
+            "voice_runtime_recovery_attempts": 3,
+            "voice_runtime_recovery_last_error": "VoiceSessionError: rota caiu",
+            "current": {
+                "title": "Faixa",
+                "webpage_url": "https://example.invalid/a",
+                "requester_id": 1,
+                "source": "worker-agent",
+            },
+            "queue": [],
+            "queue_size": 0,
+        },
+        create_panel=False,
+    )
+
+    assert state.agent_voice_recovery_pending is True
+    assert state.agent_voice_recovery_attempts == 3
+    assert "rota caiu" in state.agent_voice_recovery_last_error
+    assert state.current_status_detail == "voice_recovery:3"
+
+
+@pytest.mark.asyncio
+async def test_music_agent_playing_nao_confirmado_nao_dispara_inicio_em_payload_atual() -> None:
+    from cogs.musica.nucleo.estado import MusicGuildState
+    from cogs.musica.reproducao.sincronizacao import sincronizar_estado_agente
+
+    state = MusicGuildState()
+    started: list[str] = []
+
+    class Router:
+        def get_state(self, _guild_id): return state
+        @staticmethod
+        def _panel_key_for_track(track): return str(getattr(track, "title", "") or "") if track else ""
+        @staticmethod
+        def _set_current_status(st, status): st.current_status = status
+        @staticmethod
+        def _reactivate_panel_controls_now(_guild_id): return None
+        @staticmethod
+        def _schedule_agent_playback_started_effects(_guild_id, key): started.append(key)
+        @staticmethod
+        def _mark_voice_status_track_change(_state): return None
+        @staticmethod
+        def _schedule_voice_status_track_sync(_guild_id, **_kwargs): return None
+        @staticmethod
+        def start_music_agent_monitor(*_args, **_kwargs): return None
+        async def update_panel(self, *_args, **_kwargs): return None
+
+    await sincronizar_estado_agente(
+        Router(),
+        11,
+        agent_state={
+            "status": "playing",
+            "confirmed_playing": False,
+            "voice_connected": False,
+            "player_present": True,
+            "playback_token": 7,
+            "position_ms": 12_000,
+            "current": {
+                "title": "Faixa ainda reconectando",
+                "webpage_url": "https://example.invalid/a",
+                "requester_id": 1,
+                "source": "worker-agent",
+            },
+            "queue": [],
+            "queue_size": 0,
+        },
+        create_panel=False,
+    )
+
+    assert state.current_status == "starting"
+    assert started == []
+    assert state.agent_started_playback_token == -1
+
+
+@pytest.mark.asyncio
+async def test_music_agent_payload_legado_sem_confirmacao_ainda_pode_sinalizar_playing() -> None:
+    from cogs.musica.nucleo.estado import MusicGuildState
+    from cogs.musica.reproducao.sincronizacao import sincronizar_estado_agente
+
+    state = MusicGuildState()
+    started: list[str] = []
+
+    class Router:
+        def get_state(self, _guild_id): return state
+        @staticmethod
+        def _panel_key_for_track(track): return str(getattr(track, "title", "") or "") if track else ""
+        @staticmethod
+        def _set_current_status(st, status): st.current_status = status
+        @staticmethod
+        def _reactivate_panel_controls_now(_guild_id): return None
+        @staticmethod
+        def _schedule_agent_playback_started_effects(_guild_id, key): started.append(key)
+        @staticmethod
+        def _mark_voice_status_track_change(_state): return None
+        @staticmethod
+        def _schedule_voice_status_track_sync(_guild_id, **_kwargs): return None
+        @staticmethod
+        def start_music_agent_monitor(*_args, **_kwargs): return None
+        async def update_panel(self, *_args, **_kwargs): return None
+
+    await sincronizar_estado_agente(
+        Router(),
+        11,
+        agent_state={
+            "status": "playing",
+            "playback_token": 2,
+            "position_ms": 9_000,
+            "current": {
+                "title": "Agente legado",
+                "webpage_url": "https://example.invalid/a",
+                "requester_id": 1,
+                "source": "worker-agent",
+            },
+            "queue": [],
+            "queue_size": 0,
+        },
+        create_panel=False,
+    )
+
+    assert state.current_status == "starting" or state.current_status == "playing"
+    assert started == ["Agente legado"]
+    assert state.current_start_offset_seconds == pytest.approx(9.0)
