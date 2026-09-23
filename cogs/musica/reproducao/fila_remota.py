@@ -10,7 +10,16 @@ from ..agente_telefone.conversao import faixa_do_payload
 from ..agente_telefone.estado import atualizar_estado_controle_remoto
 from ..nucleo.estado import MusicGuildState
 from ..nucleo.modelos import LoopMode, MusicTrack
-from .controle_remoto import alternar_repeticao, anterior, embaralhar
+from .playlist_virtual import cancel_playlist_refill
+from .controle_remoto import (
+    alternar_repeticao,
+    anterior,
+    embaralhar,
+    limpar_fila,
+    mover_item_fila,
+    remover_item_fila,
+    tocar_posicao_fila,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,3 +183,71 @@ async def voltar_historico_worker(router: Any, guild_id: int, state: MusicGuildS
         create_panel=True,
     )
     return True
+
+
+async def tocar_posicao_fila_worker(router: Any, guild_id: int, state: MusicGuildState, position: int) -> bool:
+    """Toca uma posição usando exclusivamente a fila autoritativa do Phone Worker."""
+    try:
+        result = await tocar_posicao_fila(
+            router,
+            int(guild_id),
+            int(position),
+            track=state.current,
+            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+        )
+        return bool(result.get("ok", True))
+    except Exception:
+        logger.warning("[music/agent] falha ao tocar posição remota | guild=%s pos=%s", guild_id, position, exc_info=True)
+        return False
+
+
+async def mover_item_fila_worker(router: Any, guild_id: int, state: MusicGuildState, from_pos: int, to_pos: int) -> bool:
+    try:
+        result = await mover_item_fila(
+            router,
+            int(guild_id),
+            int(from_pos),
+            int(to_pos),
+            track=state.current,
+            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+        )
+        return bool(result.get("ok", True))
+    except Exception:
+        logger.warning("[music/agent] falha ao mover item remoto | guild=%s de=%s para=%s", guild_id, from_pos, to_pos, exc_info=True)
+        return False
+
+
+async def remover_item_fila_worker(router: Any, guild_id: int, state: MusicGuildState, position: int) -> MusicTrack | None:
+    try:
+        result = await remover_item_fila(
+            router,
+            int(guild_id),
+            int(position),
+            track=state.current,
+            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+        )
+        payload = result.get("removed") if isinstance(result, dict) and isinstance(result.get("removed"), dict) else {}
+        return faixa_do_payload(payload) if payload else None
+    except Exception:
+        logger.warning("[music/agent] falha ao remover item remoto | guild=%s pos=%s", guild_id, position, exc_info=True)
+        return None
+
+
+async def limpar_fila_worker(router: Any, guild_id: int, state: MusicGuildState) -> bool:
+    """Limpa pendentes/cursor no Phone Worker sem interromper a faixa atual."""
+    cancel_playlist_refill(state)
+    try:
+        result = await limpar_fila(
+            router,
+            int(guild_id),
+            track=state.current,
+            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+        )
+        return bool(result.get("ok", True))
+    except Exception:
+        logger.warning("[music/agent] falha ao limpar fila remota | guild=%s", guild_id, exc_info=True)
+        return False

@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import quote
 
 from .spotify_publico_parser import (
+    count_embed_rows,
     html_meta,
     html_title,
     json_script_blobs,
@@ -201,6 +202,14 @@ class SpotifyPublicoMixin:
                 number = as_count(match.group(1))
                 if number is not None:
                     return number
+
+        # Alguns embeds não publicam ``totalCount`` nem descrição com a
+        # contagem, mas já entregam todas as linhas server-rendered no mesmo
+        # HTML. Conte-as sem materializar objetos. Exatamente 25 é ambíguo
+        # (pode ser o recorte padrão do Spotify), então não o trate como total.
+        rendered_rows = count_embed_rows(content or "")
+        if rendered_rows >= minimum and rendered_rows != 25:
+            return rendered_rows
 
         candidates: list[tuple[int, int]] = []
         blocked_path = {"followers", "following", "likes", "users", "owners", "owner"}

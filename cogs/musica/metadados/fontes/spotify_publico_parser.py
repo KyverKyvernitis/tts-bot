@@ -270,3 +270,55 @@ def parse_embed_document(content: str, *, limit: int = 100, offset: int = 0) -> 
         document.title = html_title(content)
     document.thumbnail = html_meta(content, "og:image", "twitter:image")
     return document
+
+
+class _SpotifyEmbedRowCounter(HTMLParser):
+    """Conta linhas de faixa sem construir objetos para a playlist inteira."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._heading = ""
+        self._parts: list[str] = []
+        self._pending_title = False
+        self.count = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[override]
+        tag = str(tag or "").lower()
+        if tag in {"h3", "h4"}:
+            self._heading = tag
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:  # type: ignore[override]
+        if self._heading:
+            value = _clean_text(data)
+            if value:
+                self._parts.append(value)
+
+    def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
+        tag = str(tag or "").lower()
+        if tag != self._heading:
+            return
+        value = _clean_text(" ".join(self._parts))
+        if tag == "h3":
+            self._pending_title = bool(value)
+        elif tag == "h4" and self._pending_title and value:
+            self.count += 1
+            self._pending_title = False
+        self._heading = ""
+        self._parts = []
+
+
+def count_embed_rows(content: str) -> int:
+    """Conta faixas server-rendered em O(n) e memória O(1).
+
+    Serve apenas como fallback para total da playlist quando o HTML não publica
+    ``totalCount``. Não cria candidatos, thumbnails ou listas de milhares de
+    itens; portanto não desfaz o modelo de playlist virtual.
+    """
+    parser = _SpotifyEmbedRowCounter()
+    try:
+        parser.feed(content or "")
+        parser.close()
+    except Exception:
+        pass
+    return max(0, int(parser.count))

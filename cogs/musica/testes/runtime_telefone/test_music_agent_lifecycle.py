@@ -1396,7 +1396,7 @@ def test_play_next_waits_on_virtual_cursor_without_ending_session(music):
     run(scenario())
 
 
-def test_shuffle_does_not_materialize_or_reorder_virtual_playlist(music):
+def test_shuffle_virtual_com_um_item_pronto_nao_atravessa_marker(music):
     async def scenario():
         agent = music.MusicAgent()
         gid = 806
@@ -1408,9 +1408,10 @@ def test_shuffle_does_not_materialize_or_reorder_virtual_playlist(music):
 
         result = await agent.cmd_shuffle({"guild_id": gid})
 
-        assert result["ok"] is False
+        assert result["ok"] is True
+        assert result["shuffled"] is True
         assert st.queue == [before, marker, after]
-        assert "carregada" in result["error"]
+        assert st.virtual_shuffle_active is True
 
     run(scenario())
 
@@ -1762,3 +1763,110 @@ def test_mixer_persistente_carrega_tts_na_troca_de_faixa(music, monkeypatch):
         mixer.cleanup()
 
     run(scenario())
+
+
+def test_queue_remote_mutations_preserve_virtual_marker(music):
+    async def scenario():
+        agent = music.MusicAgent(); gid = 901
+        marker = music.AgentTrack(
+            title="Playlist",
+            source="playlist-virtual",
+            transport_hint="playlist-cursor",
+            virtual_playlist_cursor={"provider": "spotify_public", "source_url": "https://open.spotify.com/playlist/x", "next_offset": 25},
+        )
+        manual = music.AgentTrack(title="manual", query="manual")
+        st = music.GuildMusicState(guild_id=gid)
+        st.queue = [
+            music.AgentTrack(title="a", query="a"),
+            music.AgentTrack(title="b", query="b"),
+            music.AgentTrack(title="c", query="c"),
+            marker,
+            manual,
+        ]
+        agent.states[gid] = st
+        agent._schedule_next_queue_prefetch = lambda *a, **k: None
+
+        moved = await agent.cmd_queue_move({"guild_id": gid, "from_position": 3, "to_position": 1})
+        assert moved["ok"] is True
+        assert [item.title for item in st.queue] == ["c", "a", "b", "Playlist", "manual"]
+
+        removed = await agent.cmd_queue_remove({"guild_id": gid, "position": 2})
+        assert removed["ok"] is True
+        assert removed["removed"]["title"] == "a"
+        assert [item.title for item in st.queue] == ["c", "b", "Playlist", "manual"]
+    run(scenario())
+
+
+def test_queue_play_now_is_authoritative_and_does_not_drop_cursor(music):
+    async def scenario():
+        agent = music.MusicAgent(); gid = 902
+        marker = music.AgentTrack(
+            title="Playlist",
+            source="playlist-virtual",
+            transport_hint="playlist-cursor",
+            virtual_playlist_cursor={"provider": "spotify_public", "source_url": "https://open.spotify.com/playlist/x", "next_offset": 25},
+        )
+        st = music.GuildMusicState(guild_id=gid)
+        st.current = music.AgentTrack(title="current", query="current")
+        st.status = "playing"
+        st.queue = [music.AgentTrack(title="a", query="a"), music.AgentTrack(title="b", query="b"), marker]
+        agent.states[gid] = st
+        agent._guard_distinct_next_stream = lambda *a, **k: False
+        agent._next_resolving_prefetch_keys = lambda *a, **k: set()
+        async def fake_next(_gid, preserve_current_to_history=True):
+            st.current = st.queue.pop(0)
+            st.status = "playing"
+        agent._play_next = fake_next
+
+        result = await agent.cmd_queue_play_now({"guild_id": gid, "position": 2})
+        assert result["ok"] is True
+        assert st.current.title == "b"
+        assert [item.title for item in st.queue] == ["a", "Playlist"]
+        assert st.queue[-1].is_virtual_playlist_marker
+        assert [item.title for item in st.history][-1:] == ["current"]
+    run(scenario())
+
+
+def test_queue_clear_remote_keeps_current_but_removes_virtual_tail(music):
+    async def scenario():
+        agent = music.MusicAgent(); gid = 903
+        marker = music.AgentTrack(title="Playlist", transport_hint="playlist-cursor", virtual_playlist_cursor={"next_offset": 25})
+        st = music.GuildMusicState(guild_id=gid, current=music.AgentTrack(title="current", query="current"))
+        st.queue = [music.AgentTrack(title="next", query="next"), marker]
+        st.virtual_shuffle_active = True
+        agent.states[gid] = st
+        result = await agent.cmd_queue_clear({"guild_id": gid})
+        assert result["ok"] is True
+        assert result["removed_count"] == 1
+        assert st.current.title == "current"
+        assert st.queue == []
+        assert st.virtual_shuffle_active is False
+    run(scenario())
+
+
+def test_virtual_playlist_shuffle_works_without_materializing_collection(music):
+    async def scenario():
+        agent = music.MusicAgent(); gid = 904
+        marker = music.AgentTrack(
+            title="Playlist",
+            transport_hint="playlist-cursor",
+            virtual_playlist_cursor={"provider": "spotify_public", "source_url": "https://open.spotify.com/playlist/x", "next_offset": 25},
+        )
+        st = music.GuildMusicState(guild_id=gid)
+        st.queue = [music.AgentTrack(title=str(i), query=str(i)) for i in range(8)] + [marker]
+        agent.states[gid] = st
+        agent._schedule_next_queue_prefetch = lambda *a, **k: None
+        result = await agent.cmd_shuffle({"guild_id": gid})
+        assert result["ok"] is True and result["shuffled"] is True and result.get("virtual") is True
+        assert st.virtual_shuffle_active is True
+        assert st.queue[-1] is marker
+        assert sorted(item.title for item in st.queue[:-1]) == [str(i) for i in range(8)]
+    run(scenario())
+
+
+def test_remote_public_queue_preview_covers_virtual_window(music):
+    st = music.GuildMusicState(guild_id=905)
+    st.queue = [music.AgentTrack(title=str(i), query=str(i)) for i in range(25)]
+    payload = st.public()
+    assert len(payload["queue"]) == 25
+    assert payload["queue_size"] == 25

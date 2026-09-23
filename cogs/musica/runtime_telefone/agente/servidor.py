@@ -515,6 +515,14 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             return await self.cmd_previous(body)
         if action == "volume":
             return await self.cmd_volume(body)
+        if action in {"queue_play_now", "play_queue_position", "queue_jump"}:
+            return await self.cmd_queue_play_now(body)
+        if action in {"queue_move", "move_queue_item"}:
+            return await self.cmd_queue_move(body)
+        if action in {"queue_remove", "remove_queue_item"}:
+            return await self.cmd_queue_remove(body)
+        if action in {"queue_clear", "clear_queue"}:
+            return await self.cmd_queue_clear(body)
         if action in {"shuffle", "shuffle_queue", "mix_queue"}:
             return await self.cmd_shuffle(body)
         if action in {"loop", "repeat", "cycle_loop", "repeat_mode"}:

@@ -39,3 +39,23 @@ def test_fila_worker_remota_nao_fica_implementada_no_legado() -> None:
 
     for proibido in ("yt_dlp", "FFmpegPCMAudio", "play_lavalink_track"):
         assert proibido not in remoto
+
+
+def test_controlador_de_fila_worker_muta_a_fila_remota_em_vez_do_player_local() -> None:
+    remoto = (MUSICA / "reproducao" / "fila_remota.py").read_text(encoding="utf-8")
+    legado = (MUSICA / "legado" / "roteador_audio.py").read_text(encoding="utf-8")
+    servidor = (MUSICA / "runtime_telefone" / "agente" / "servidor.py").read_text(encoding="utf-8")
+
+    for nome in (
+        "tocar_posicao_fila_worker",
+        "mover_item_fila_worker",
+        "remover_item_fila_worker",
+        "limpar_fila_worker",
+    ):
+        assert f"async def {nome}" in remoto
+        assert f"{nome}(self" in legado
+
+    for action in ("queue_play_now", "queue_move", "queue_remove", "queue_clear"):
+        assert action in servidor
+
+    assert "replace_queue local ignorado em sessão remota" in legado

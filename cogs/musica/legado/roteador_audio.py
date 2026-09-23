@@ -30,7 +30,15 @@ from ..nucleo.estado import ControlVote, MusicGuildState
 from ..metadados.provedores import describe_url
 from ..reproducao.sincronizacao import sincronizar_estado_agente
 from ..reproducao.playlist_virtual import cancel_playlist_refill
-from ..reproducao.fila_remota import alternar_repeticao_worker, embaralhar_fila_worker, voltar_historico_worker
+from ..reproducao.fila_remota import (
+    alternar_repeticao_worker,
+    embaralhar_fila_worker,
+    limpar_fila_worker,
+    mover_item_fila_worker,
+    remover_item_fila_worker,
+    tocar_posicao_fila_worker,
+    voltar_historico_worker,
+)
 from ..reproducao.controle_remoto import ajustar_volume, buscar_momento
 from ..agente_telefone.monitor import iniciar_monitor_music_agent
 from ..agente_telefone.estado import atualizar_estado_controle_remoto, usar_controles_fila_remota
@@ -5335,6 +5343,11 @@ class AudioRouter:
         self._schedule_panel_update(guild_id, create=False)
         return mode
 
+    async def refresh_queue_controller(self, guild_id: int) -> None:
+        state = self.get_state(guild_id)
+        if usar_controles_fila_remota(self, state):
+            await atualizar_estado_controle_remoto(self, guild_id, create_panel=False)
+
     def snapshot_queue(self, guild_id: int) -> list[MusicTrack]:
         return snapshot_fila(self.get_state(guild_id))
 
@@ -5414,6 +5427,8 @@ class AudioRouter:
 
     async def skip_to(self, guild_id: int, index_1based: int) -> bool:
         state = self.get_state(guild_id)
+        if usar_controles_fila_remota(self, state):
+            return await tocar_posicao_fila_worker(self, guild_id, state, index_1based)
         items = self.snapshot_queue(guild_id)
         idx = int(index_1based) - 1
         if idx < 0 or idx >= len(items):
@@ -5431,6 +5446,16 @@ class AudioRouter:
 
     async def replace_queue(self, guild_id: int, tracks: list[MusicTrack]) -> None:
         state = self.get_state(guild_id)
+        if usar_controles_fila_remota(self, state):
+            # No modo Worker-only a VPS nunca substitui o espelho local como se
+            # fosse a fila real. O único uso público de replace([]) é limpar a
+            # fila; essa mutação precisa acontecer no Phone Worker.
+            if not tracks:
+                await limpar_fila_worker(self, guild_id, state)
+                self._schedule_panel_update(guild_id, create=False)
+            else:
+                logger.warning("[music/agent] replace_queue local ignorado em sessão remota | guild=%s tracks=%s", guild_id, len(tracks))
+            return
         # Qualquer mutação manual da fila invalida a posição lógica usada por
         # um refill em andamento. Cancele só o carregamento virtual; não mate a
         # resolução/áudio atual apenas porque o usuário moveu ou limpou a fila.
@@ -5445,6 +5470,9 @@ class AudioRouter:
         self._schedule_panel_update(guild_id, create=bool(state.now_message or state.current or tracks))
 
     async def remove_at(self, guild_id: int, index_1based: int) -> Optional[MusicTrack]:
+        state = self.get_state(guild_id)
+        if usar_controles_fila_remota(self, state):
+            return await remover_item_fila_worker(self, guild_id, state, index_1based)
         items = self.snapshot_queue(guild_id)
         idx = int(index_1based) - 1
         if idx < 0 or idx >= len(items):
@@ -5454,6 +5482,9 @@ class AudioRouter:
         return removed
 
     async def move(self, guild_id: int, from_pos: int, to_pos: int) -> bool:
+        state = self.get_state(guild_id)
+        if usar_controles_fila_remota(self, state):
+            return await mover_item_fila_worker(self, guild_id, state, from_pos, to_pos)
         items = self.snapshot_queue(guild_id)
         src = int(from_pos) - 1
         dst = int(to_pos) - 1

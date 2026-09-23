@@ -12,6 +12,9 @@ class FluxoFila:
     async def _run_queue(self, ctx: commands.Context) -> None:
         if not await self._ensure_music_action_voice(ctx):
             return
+        refresh = getattr(self.router, "refresh_queue_controller", None)
+        if callable(refresh):
+            await refresh(ctx.guild.id)
         await self._reply(
             ctx,
             view=QueueView(self.router, ctx.guild.id, 0, owner_id=ctx.author.id),

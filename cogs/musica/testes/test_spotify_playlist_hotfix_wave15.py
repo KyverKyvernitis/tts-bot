@@ -91,3 +91,10 @@ def test_components_v2_usa_total_exato_e_link_publico_spotify() -> None:
     assert 'profile.platform == "spotify" and profile.resource_type == "track"' in source
     assert 'return f"[{label}]({url})"' in source
 
+
+
+def test_contagem_total_fallback_conta_linhas_sem_materializar_objetos() -> None:
+    provider = object.__new__(SpotifyPublicoMixin)
+    rows = "".join(f"<h3>Faixa {i}</h3><h4>Artista</h4><span>03:00</span>" for i in range(61))
+    html = f"<h1>Playlist</h1>{rows}"
+    assert provider._spotify_public_total_tracks_from_content(html, minimum=25) == 61

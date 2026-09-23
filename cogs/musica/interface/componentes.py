@@ -1765,6 +1765,9 @@ class MoveSelectedModal(discord.ui.Modal):
         ok = await self.router.move(self.guild_id, self.from_pos, to_pos)
         await interaction.response.send_message("`↪️` Música movida." if ok else "Não consegui mover: confira a posição na fila.", ephemeral=True)
         if ok and self.message is not None:
+            refresh = getattr(self.router, "refresh_queue_controller", None)
+            if callable(refresh):
+                await refresh(self.guild_id)
             view = QueueView(self.router, self.guild_id, self.page, owner_id=self.owner_id)
             with contextlib.suppress(Exception):
                 await self.message.edit(content=None, embeds=[], attachments=[], view=view)
@@ -1816,6 +1819,9 @@ class QueueConfirmView(discord.ui.LayoutView):
     async def _refresh_parent(self) -> None:
         if self.message is None:
             return
+        refresh = getattr(self.router, "refresh_queue_controller", None)
+        if callable(refresh):
+            await refresh(self.guild_id)
         view = QueueView(self.router, self.guild_id, self.page, owner_id=self.owner_id)
         with contextlib.suppress(Exception):
             await self.message.edit(content=None, embeds=[], attachments=[], view=view)
@@ -1890,8 +1896,8 @@ class QueueView(discord.ui.LayoutView):
         virtual = _virtual_playlist_info(state)
         if not items:
             if virtual:
-                return "# 📜 Fila\nCarregando próximas músicas…"
-            return "# 📜 Fila\nA fila está vazia.\n-# Use `_play <nome ou link>` para adicionar músicas."
+                return "## 📜 Fila\nCarregando próximas músicas…"
+            return "## 📜 Fila\nA fila está vazia.\n-# Use `_play <nome ou link>` para adicionar músicas."
         max_page = self._max_page(items)
         start = self.page * QUEUE_PAGE_SIZE
         chunk = items[start : start + QUEUE_PAGE_SIZE]
@@ -1900,12 +1906,19 @@ class QueueView(discord.ui.LayoutView):
             total_known = virtual.get("total_tracks") not in (None, "")
             suffix = "" if total_known else "+"
             count = f"{total}{suffix} música{'s' if total != 1 else ''}"
-            lines = [f"# 📜 Fila · {count}{page_label}"]
+            lines = [f"## 📜 Fila · {count}"]
+            # As páginas cobrem somente a janela já materializada no Phone
+            # Worker. Não cole "página 1/3" ao total lógico da playlist, pois
+            # isso fazia parecer que três páginas continham 50+ músicas.
+            if max_page:
+                lines.append(f"-# Próximas {len(items)} prontas{page_label}")
             title = _escape(str(virtual.get("title") or ""), limit=80)
             if title and title.lower() != "playlist":
                 lines.append(f"-# {title}")
         else:
-            lines = [f"# 📜 Fila · {total} música{'s' if total != 1 else ''}{page_label}"]
+            lines = [f"## 📜 Fila · {total} música{'s' if total != 1 else ''}"]
+            if max_page:
+                lines.append(f"-# Página {self.page + 1}/{max_page + 1}")
         current = getattr(state, "current", None)
         if current is not None:
             lines.extend([f"-# Tocando agora: {_track_link_v2(current, title_limit=64)}", ""])
@@ -1913,8 +1926,6 @@ class QueueView(discord.ui.LayoutView):
             index = start + offset
             marker = "▶" if self.selected_position == index else f"{index:02d}"
             lines.append(f"**{marker}**  {_track_link_v2(track, title_limit=62)}  ·  {track.duration_label}")
-            requester = _escape(track.requester_name, limit=42) if track.requester_name else f"<@{track.requester_id}>"
-            lines.append(f"-# pedido por {requester}")
         if not virtual:
             lines.extend(["", f"-# Duração aproximada: {_queue_duration_label(items)}"] )
         return "\n".join(lines)
@@ -1984,6 +1995,16 @@ class QueueView(discord.ui.LayoutView):
             return
         ok = await self.router.skip_to(self.guild_id, self.selected_position)
         await interaction.response.send_message("`▶️` Tocando a música selecionada." if ok else "Não consegui tocar essa posição na fila.", ephemeral=True)
+        if ok:
+            refresh = getattr(self.router, "refresh_queue_controller", None)
+            if callable(refresh):
+                await refresh(self.guild_id)
+            self.selected_position = None
+            self.page = min(self.page, self._max_page())
+            self._refresh_components()
+            with contextlib.suppress(Exception):
+                if getattr(interaction, "message", None) is not None:
+                    await interaction.message.edit(content=None, embeds=[], attachments=[], view=self)
 
     async def move_selected(self, interaction: discord.Interaction):
         if not self.selected_position:
@@ -2518,6 +2539,9 @@ class MusicPlayerView(discord.ui.LayoutView):
         except discord.NotFound:
             return
         try:
+            refresh = getattr(self.router, "refresh_queue_controller", None)
+            if callable(refresh):
+                await refresh(self.guild_id)
             await interaction.followup.send(
                 view=QueueView(
                     self.router,

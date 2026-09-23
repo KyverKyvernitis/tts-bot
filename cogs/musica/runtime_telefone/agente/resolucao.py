@@ -609,10 +609,13 @@ class ResolucaoMixin:
 
                 def _run() -> dict[str, Any]:
                     self._resolve_thread_local.cancel_event = cancel_event
-                    self._resolve_thread_local.deadline = time.monotonic() + max(1.0, float(self.ytdlp_timeout))
+                    self._resolve_thread_local.deadline = time.monotonic() + max(1.0, float(getattr(self, "ytdlp_timeout", 20.0) or 20.0))
                     try:
+                        def _resolve_primary_target() -> dict[str, Any]:
+                            return self._resolve_with_ytdlp(resolve_target)
+
                         try:
-                            resolved = self._resolve_with_ytdlp(resolve_target)
+                            resolved = _resolve_primary_target()
                         except Exception:
                             if resolve_target == query:
                                 raise
@@ -674,7 +677,7 @@ class ResolucaoMixin:
         # sucessivas não podem multiplicar o timeout de uma ação de play/skip.
         deadline = getattr(self._resolve_thread_local, "deadline", None)
         if deadline is None:
-            deadline = time.monotonic() + max(1.0, float(self.ytdlp_timeout))
+            deadline = time.monotonic() + max(1.0, float(getattr(self, "ytdlp_timeout", 20.0) or 20.0))
 
         def remaining() -> float:
             left = float(deadline) - time.monotonic()

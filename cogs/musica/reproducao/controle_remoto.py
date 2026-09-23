@@ -117,3 +117,46 @@ async def alternar_repeticao(router: Any, guild_id: int, **kwargs: Any) -> dict[
 
 async def anterior(router: Any, guild_id: int, **kwargs: Any) -> dict[str, Any]:
     return await enviar_controle_remoto(router, "previous", guild_id=guild_id, **kwargs)
+
+
+async def tocar_posicao_fila(router: Any, guild_id: int, position: int, **kwargs: Any) -> dict[str, Any]:
+    return await enviar_controle_remoto(
+        router,
+        "queue_play_now",
+        guild_id=guild_id,
+        position=int(position),
+        **kwargs,
+    )
+
+
+async def mover_item_fila(router: Any, guild_id: int, from_pos: int, to_pos: int, **kwargs: Any) -> dict[str, Any]:
+    return await enviar_controle_remoto(
+        router,
+        "queue_move",
+        guild_id=guild_id,
+        from_position=int(from_pos),
+        to_position=int(to_pos),
+        create_panel=False,
+        **kwargs,
+    )
+
+
+async def remover_item_fila(router: Any, guild_id: int, position: int, **kwargs: Any) -> dict[str, Any]:
+    return await enviar_controle_remoto(
+        router,
+        "queue_remove",
+        guild_id=guild_id,
+        position=int(position),
+        create_panel=False,
+        **kwargs,
+    )
+
+
+async def limpar_fila(router: Any, guild_id: int, **kwargs: Any) -> dict[str, Any]:
+    return await enviar_controle_remoto(
+        router,
+        "queue_clear",
+        guild_id=guild_id,
+        create_panel=False,
+        **kwargs,
+    )

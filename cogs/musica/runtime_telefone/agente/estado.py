@@ -94,6 +94,11 @@ class GuildMusicState:
     playback_token: int = 0
     shuffle: bool = False
     loop_mode: str = "off"
+    # Shuffle virtual: embaralha cada janela materializada da playlist sem
+    # carregar a coleção inteira em memória. O seed mantém o comportamento
+    # determinístico durante a sessão e é descartado quando o cursor termina.
+    virtual_shuffle_active: bool = False
+    virtual_shuffle_seed: int = 0
 
     def _first_virtual_marker(self) -> tuple[int, AgentTrack] | None:
         for index, item in enumerate(self.queue):
@@ -109,7 +114,10 @@ class GuildMusicState:
                 # virtual; não os faça parecer anteriores ao restante da playlist.
                 break
             preview.append(item.public())
-            if len(preview) >= 10:
+            # A janela virtual padrão tem até 25 itens. Expor até 50 mantém o
+            # controlador de fila coerente com toda a janela materializada sem
+            # transformar o snapshot em uma cópia da playlist inteira.
+            if len(preview) >= 50:
                 break
         return preview
 
@@ -190,7 +198,7 @@ class GuildMusicState:
             "volume_percent": self.volume_percent,
             "normal_volume_percent": self.normal_volume_percent,
             "ducked": self.ducked,
-            "shuffle": False,
+            "shuffle": bool(self.shuffle or self.virtual_shuffle_active),
             "loop_mode": self.loop_mode,
             "repeat": self.loop_mode,
             "queue": self._public_queue_preview(),
