@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import shutil
 import subprocess
 import time
@@ -47,6 +48,50 @@ def test_filtro_nightcore_com_bassboost_preserva_saida_48k_e_acelera(tmp_path: P
         agent._ffmpeg_options_for_source(48000, effects=(True, False))
     agent.ffmpeg_options = "-vn -sn -dn -loglevel warning"
     assert agent._ffmpeg_options_for_source(48000, effects=(False, True), is_live=True)[0] == agent.ffmpeg_options
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg ausente")
+def test_bassboost_reforca_graves_sem_abafar_medios_e_limita_picos(tmp_path: Path, monkeypatch) -> None:
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    options, _ = agent._ffmpeg_options_for_source(48000, effects=(True, False))
+    filters = options.split("-af ", 1)[1]
+    rate = 48000
+
+    def render(bass_level: float, mid_level: float, name: str) -> array:
+        source, result = tmp_path / f"{name}-source.wav", tmp_path / f"{name}-bass.wav"
+        samples = array("h", (
+            int(32767 * (bass_level * math.sin(2 * math.pi * 80 * i / rate)
+                         + mid_level * math.sin(2 * math.pi * 1000 * i / rate)))
+            for i in range(rate)
+        ))
+        with wave.open(str(source), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(rate)
+            output.writeframes(samples.tobytes())
+        subprocess.run([
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source), "-af", filters, "-c:a", "pcm_s16le", str(result),
+        ], check=True, timeout=10)
+        with wave.open(str(result), "rb") as decoded:
+            assert decoded.getframerate() == rate
+            return array("h", decoded.readframes(decoded.getnframes()))
+
+    def amplitude(samples: array, frequency: int) -> float:
+        start, end = rate // 4, 3 * rate // 4
+        window = samples[start:end]
+        sine = sum(value * math.sin(2 * math.pi * frequency * (i + start) / rate)
+                   for i, value in enumerate(window))
+        cosine = sum(value * math.cos(2 * math.pi * frequency * (i + start) / rate)
+                     for i, value in enumerate(window))
+        return 2 * math.hypot(sine, cosine) / len(window) / 32767
+
+    quiet = render(0.10, 0.10, "quiet")
+    assert amplitude(quiet, 80) >= 0.22  # acima do grave de 0,10 da origem
+    assert amplitude(quiet, 1000) >= 0.09  # médios continuam audíveis
+    loud = render(0.39, 0.36, "loud")
+    assert max(map(abs, loud)) / 32768 <= 0.96
 
 
 @pytest.mark.asyncio

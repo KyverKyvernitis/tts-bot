@@ -17,6 +17,8 @@ def filtros(*, bassboost: bool, nightcore: bool, is_live: bool = False, resample
             parts.append("aresample=48000")
         parts.extend(("asetrate=60000", "aresample=48000"))
     if bassboost:
-        # Headroom antes da conversão s16 evita saturar o PCM com o ganho de graves.
-        parts.extend(("bass=g=6:f=90", "volume=-6dB"))
+        # A atenuação global antiga (-6 dB) anulava o ganho no grave e deixava
+        # toda a música mais baixa. O shelf alcança o grave perceptível em
+        # caixas pequenas; o limiter protege os picos antes do PCM s16.
+        parts.extend(("bass=g=10:f=150", "alimiter=limit=0.95:level=0"))
     return ",".join(parts)

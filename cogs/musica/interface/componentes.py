@@ -895,13 +895,20 @@ def _player_track_text(state, track: MusicTrack) -> str:
         state_bits.append(f"🔁 {loop_label}")
     if getattr(state, "shuffle", False):
         state_bits.append("🔀 embaralhado")
-    if getattr(state, "bassboost", False):
-        state_bits.append("🎚️ bassboost")
-    if getattr(state, "nightcore", False):
-        state_bits.append("🌙 nightcore" + (" (próxima faixa)" if track.is_live else " 1,25×"))
     if state_bits:
         lines.append("-# " + " · ".join(state_bits))
     return "\n".join(lines)
+
+
+def _player_audio_modes_text(state, track: MusicTrack) -> str:
+    """Mostra os modos ativos em uma linha legível no painel do celular."""
+    modes: list[str] = []
+    if getattr(state, "bassboost", False):
+        modes.append("**🔊 Bassboost**")
+    if getattr(state, "nightcore", False):
+        label = "Nightcore na próxima faixa" if track.is_live else "Nightcore 1,25×"
+        modes.append(f"**🌙 {label}**")
+    return " · ".join(modes)
 
 
 def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None = None, page: int = 0) -> str:
@@ -2588,8 +2595,16 @@ class PlayerOptionsSelect(discord.ui.Select):
             discord.SelectOption(label="Selecionar momento", emoji="💠", value="seek", description="Ir para um tempo específico da música."),
             discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/fila."),
             discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Embaralhar a fila uma vez."),
-            discord.SelectOption(label=f"Bassboost: {'ligado' if getattr(state, 'bassboost', False) else 'desligado'}", emoji="🎚️", value="bassboost", description="Reforçar os graves da música."),
-            discord.SelectOption(label=f"Nightcore: {'ligado' if getattr(state, 'nightcore', False) else 'desligado'}", emoji="🌙", value="nightcore", description="Acelerar música e elevar o tom em 1,25×."),
+            discord.SelectOption(
+                label="Desativar Bassboost" if getattr(state, "bassboost", False) else "Ativar Bassboost",
+                emoji="🔊", value="bassboost",
+                description="Voltar aos graves originais." if getattr(state, "bassboost", False) else "Graves mais fortes, sem baixar o volume.",
+            ),
+            discord.SelectOption(
+                label="Desativar Nightcore" if getattr(state, "nightcore", False) else "Ativar Nightcore",
+                emoji="🌙", value="nightcore",
+                description="Voltar ao ritmo original." if getattr(state, "nightcore", False) else "Mais rápido e agudo · 1,25×.",
+            ),
         ]
         super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, custom_id="music:options")
         self.router = router
@@ -2712,6 +2727,9 @@ class MusicPlayerView(discord.ui.LayoutView):
                 )
             else:
                 container.add_item(track_text)
+            audio_modes = _player_audio_modes_text(state, current)
+            if audio_modes:
+                container.add_item(discord.ui.TextDisplay(audio_modes))
         elif queue:
             first = queue[0]
             next_text = discord.ui.TextDisplay(
