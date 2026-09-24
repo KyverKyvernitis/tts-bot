@@ -316,7 +316,7 @@ def schedule_playlist_refill_if_needed(router: Any, guild_id: int, remote: dict[
                 resource_id=provider_next.resource_id or cursor.resource_id,
                 next_offset=next_offset,
                 total_tracks=provider_next.total_tracks if provider_next.total_tracks is not None else cursor.total_tracks,
-                exhausted=bool(block_exhausted or provider_next.exhausted or not batch.tracks),
+                exhausted=bool(block_exhausted or provider_next.exhausted or (not batch.tracks and next_offset <= cursor.next_offset)),
                 instance_id=cursor.instance_id,
                 block_end_offset=block_end,
                 shuffle_seed=cursor.shuffle_seed,

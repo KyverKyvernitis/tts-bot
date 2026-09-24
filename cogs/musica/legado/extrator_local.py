@@ -1295,6 +1295,14 @@ class MusicExtractor:
             ) from exc
 
         if not api_batch or not api_batch.tracks:
+            # Um endpoint público pode retornar uma página vazia mesmo havendo
+            # faixas restantes segundo o total já conhecido. Encerrar o cursor
+            # aqui perderia o resto da playlist; deixe o refill tentar de novo.
+            if cursor.total_tracks is not None and cursor.next_offset < cursor.total_tracks:
+                raise MusicExtractionError(
+                    "Não consegui carregar a próxima parte dessa playlist agora.",
+                    detail=f"provider={cursor.provider} offset={cursor.next_offset} total={cursor.total_tracks}",
+                )
             finished = cursor.advanced(0, exhausted=True)
             return ExtractedBatch(
                 tracks=[],
@@ -1327,11 +1335,14 @@ class MusicExtractor:
                 next_cursor.total_tracks = cursor.total_tracks
             if not next_cursor.title:
                 next_cursor.title = api_batch.title or cursor.title
+            if next_cursor.total_tracks is not None and next_cursor.next_offset < next_cursor.total_tracks:
+                next_cursor.exhausted = False
         if next_cursor is None:
             # O offset representa itens consumidos da fonte, não só itens que
             # passaram pelo filtro de segurança. Caso contrário uma faixa
             # descartada faria a próxima janela voltar para a mesma posição.
-            next_cursor = cursor.advanced(raw_count, exhausted=len(api_batch.tracks) < window_limit)
+            still_known = cursor.total_tracks is not None and cursor.next_offset + raw_count < cursor.total_tracks
+            next_cursor = cursor.advanced(raw_count, exhausted=len(api_batch.tracks) < window_limit and not still_known)
         elif not next_cursor.exhausted and int(next_cursor.next_offset or 0) <= int(cursor.next_offset or 0):
             # Defesa contra provider público sem progresso. Um cursor estagnado
             # criaria refill infinito/repetido. Avance pelo número bruto lido;

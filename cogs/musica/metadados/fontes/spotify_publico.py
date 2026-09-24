@@ -179,8 +179,9 @@ class SpotifyPublicoMixin:
                 return None
             return number
 
-        # Caminho mais barato: as chaves explícitas aparecem literalmente no
-        # HTML/JSON serializado e não exigem decodificar/traversar o payload.
+        # Recolha as chaves explícitas sem depender da estrutura do framework.
+        # Elas podem representar só a janela visível; compare com o total do
+        # JSON antes de escolher um valor.
         explicit: list[int] = []
         for match in re.finditer(
             r'["\'](?:numTracks|numberOfTracks|trackCount|tracksCount|totalTracks|totalTrackCount)["\']\s*:\s*["\']?(\d{1,7})',
@@ -190,26 +191,15 @@ class SpotifyPublicoMixin:
             number = as_count(match.group(1))
             if number is not None:
                 explicit.append(number)
-        if explicit:
-            return max(explicit)
-
-        # Muitas páginas públicas já dizem "137 songs" na descrição. Também é
-        # uma leitura local e evita percorrer hydration JSON grande.
+        # Muitas páginas públicas já dizem "137 songs" na descrição.
         description = html_meta(content, "description", "og:description", "twitter:description")
+        described: list[int] = []
         for text in (description, html_title(content)):
             match = re.search(r"\b(\d{1,7})\s+(?:songs?|tracks?|músicas?|faixas?)\b", text or "", re.IGNORECASE)
             if match:
                 number = as_count(match.group(1))
                 if number is not None:
-                    return number
-
-        # Alguns embeds não publicam ``totalCount`` nem descrição com a
-        # contagem, mas já entregam todas as linhas server-rendered no mesmo
-        # HTML. Conte-as sem materializar objetos. Exatamente 25 é ambíguo
-        # (pode ser o recorte padrão do Spotify), então não o trate como total.
-        rendered_rows = count_embed_rows(content or "")
-        if rendered_rows >= minimum and rendered_rows != 25:
-            return rendered_rows
+                    described.append(number)
 
         candidates: list[tuple[int, int]] = []
         blocked_path = {"followers", "following", "likes", "users", "owners", "owner"}
@@ -245,10 +235,20 @@ class SpotifyPublicoMixin:
 
         for blob in json_script_blobs(content):
             walk(blob)
-        if not candidates:
-            return None
-        best_score = max(score for score, _ in candidates)
-        return max(number for score, number in candidates if score == best_score)
+        # Um mesmo documento pode publicar o total da coleção e o tamanho da
+        # janela em campos diferentes. Nunca deixe as linhas visíveis ocultarem
+        # o total publicado no JSON/metatags.
+        published = [number for _score, number in candidates] + explicit + described
+        if published:
+            return max(published)
+        # Conte as linhas só quando o documento não fornece um total. Além de
+        # preservar a prioridade da metadata, evita parsear o HTML duas vezes
+        # em playlists cujos dados estruturados já informam a contagem.
+        rendered_rows = count_embed_rows(content or "")
+        # Exatamente 25 é ambíguo: costuma ser o recorte inicial do Spotify.
+        if rendered_rows >= minimum and rendered_rows != 25:
+            return rendered_rows
+        return None
 
     def _spotify_complete_public_track_urls(
         self,
@@ -721,6 +721,7 @@ class SpotifyPublicoMixin:
                         # o primeiro recorte; nesse caso mantemos continuação aberta
                         # e a etapa lazy confirma o fim ao pedir o próximo offset.
                         maybe_embed_window = len(window) >= 25
+                        known_remainder = total_tracks is not None and total_tracks > offset + len(window)
                         cursor = PlaylistCursor(
                             provider="spotify_public",
                             source_url=original_url,
@@ -729,7 +730,7 @@ class SpotifyPublicoMixin:
                             resource_id=item_id,
                             next_offset=offset + len(window),
                             total_tracks=total_tracks,
-                            exhausted=not (has_more_in_document or maybe_embed_window),
+                            exhausted=not (has_more_in_document or maybe_embed_window or known_remainder),
                         )
                     return ApiTrackBatch(
                         tracks=window,
@@ -774,4 +775,3 @@ class SpotifyPublicoMixin:
             limit=limit,
             original_url=url,
         )
-

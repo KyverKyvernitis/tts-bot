@@ -2147,7 +2147,8 @@ class QueueView(discord.ui.LayoutView):
         start = self.page * QUEUE_PAGE_SIZE
         if virtual:
             virtuals = _virtual_playlists_info(state)
-            count = f"{total} música{'s' if total != 1 else ''}"
+            unknown_total = any(info.get("total_tracks") in (None, "") for info in virtuals)
+            count = f"{total}{'+' if unknown_total else ''} música{'s' if total != 1 else ''}"
             lines = [f"## 📜 Fila · {count}"]
             lines.append(f"-# Página {self.page + 1}/{max_page + 1}")
             if len(virtuals) == 1:
