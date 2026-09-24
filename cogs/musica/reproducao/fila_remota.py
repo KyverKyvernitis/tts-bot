@@ -267,7 +267,6 @@ async def agir_item_virtual_fila_worker(
             source_url=str(getattr(track, "virtual_source_url", "") or ""),
             track_payload=payload,
             to_position=to_position,
-            track=state.current,
             voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
             text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
         )

@@ -17,7 +17,7 @@ async def enviar_controle_remoto(
     requester_name: str = "",
     voice_channel_id: int | None = None,
     text_channel_id: int | None = None,
-    track: MusicTrack | None = None,
+    track: MusicTrack | dict[str, Any] | None = None,
     query: str = "",
     create_panel: bool = True,
     **extra: Any,
@@ -58,9 +58,12 @@ async def enviar_controle_remoto(
     if remote:
         sync = getattr(router, "sync_music_agent_state", None)
         if callable(sync):
+            # Ações virtuais enviam um dict da faixa selecionada em `track`.
+            # O espelho local deve usar o `current` autoritativo do Worker,
+            # nunca esse dict como fallback da música atual.
             await sync(
                 int(guild_id),
-                track,
+                track if isinstance(track, MusicTrack) else None,
                 remote,
                 voice_channel_id=int(remote.get("voice_channel_id") or voice_channel_id or 0) or None,
                 text_channel_id=int(remote.get("text_channel_id") or text_channel_id or 0) or None,
@@ -181,14 +184,16 @@ async def agir_item_virtual_fila(
         "instance_id": str(instance_id or ""),
         "provider": str(provider or ""),
         "source_url": str(source_url or ""),
-        "track": dict(track_payload or {}),
     }
     if to_position is not None:
         extra["to_position"] = int(to_position)
+    # O protocolo possui um único campo `track`: a entrada virtual escolhida.
+    # A faixa que está tocando vem no snapshot retornado pelo Phone Worker.
     return await enviar_controle_remoto(
         router,
         "queue_virtual_action",
         guild_id=guild_id,
+        track=dict(track_payload or {}),
         create_panel=False,
         **extra,
         **kwargs,
