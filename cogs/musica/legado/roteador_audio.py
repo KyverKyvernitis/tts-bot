@@ -4026,10 +4026,11 @@ class AudioRouter:
             return ""
 
     def should_route_tts_to_music_agent(self, guild_id: int | None, channel_id: int | None = None) -> bool:
-        """Retorna se o TTS deve seguir pelo worker dono da sessão musical.
+        """Retorna se o TTS deve seguir pela sessão musical remota.
 
-        Quando o Music Agent está tocando, a VPS não deve entrar na call pelo
-        caminho normal de TTS, porque isso interrompe o player remoto.
+        O espelho local pode ficar alguns segundos desatualizado durante troca de
+        rede/rebind. Nessa janela é mais seguro preservar a posse remota da voz e
+        tentar a rota musical do que abrir um VoiceClient local concorrente.
         """
         if not MUSIC_AGENT_TTS_ROUTE_ENABLED:
             return False
@@ -4039,19 +4040,79 @@ class AudioRouter:
             return False
         if str(getattr(state, "current_backend", "") or "").lower() != "agent":
             return False
+        status = str(getattr(state, "current_status", "") or "").lower()
+        monitor_task = getattr(state, "agent_monitor_task", None)
+        monitor_dead = bool(monitor_task is None or monitor_task.done())
+        monitor_last_cycle = float(getattr(state, "agent_monitor_last_cycle_at", 0.0) or 0.0)
+        monitor_stale_after = max(10.0, float(getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0) or 5.0) * 2.0)
+        monitor_stale = bool(monitor_last_cycle > 0.0 and time.monotonic() - monitor_last_cycle > monitor_stale_after)
+        uncertain = bool(
+            int(getattr(state, "agent_monitor_failures", 0) or 0) > 0
+            or float(getattr(state, "agent_monitor_reconnecting_since", 0.0) or 0.0) > 0.0
+            or status == "reconnecting"
+            or monitor_dead
+            or monitor_stale
+        )
         active = bool(
             getattr(state, "music_session_active", False)
             or getattr(state, "current", None) is not None
-            or str(getattr(state, "current_status", "") or "") in {"resolving", "starting", "playing", "paused", "queued"}
+            or status in {"resolving", "starting", "playing", "paused", "queued", "reconnecting"}
+            or (monitor_task is not None and not monitor_task.done())
+            or str(getattr(state, "agent_voice_session_mode", "") or "") in {"music_active", "music_idle_grace"}
         )
         if not active:
             return False
         try:
-            if channel_id and getattr(state, "last_voice_channel_id", 0):
-                return int(channel_id) == int(getattr(state, "last_voice_channel_id", 0) or 0)
+            remembered_channel = int(getattr(state, "last_voice_channel_id", 0) or 0)
+            requested_channel = int(channel_id or 0)
+            if requested_channel and remembered_channel and requested_channel != remembered_channel:
+                # Se o monitor está degradado, o canal lembrado também pode estar
+                # stale. Preserve a rota remota; o agente autoritativo valida o
+                # canal no comando e evita que o TTS local roube a conexão.
+                return uncertain
         except Exception:
             return active
         return active
+
+    async def revalidate_tts_music_agent_route(self, guild_id: int, channel_id: int) -> bool:
+        """Força um snapshot curto quando a decisão de TTS pode estar stale."""
+        guild_id = int(guild_id or 0)
+        channel_id = int(channel_id or 0)
+        if self.should_route_tts_to_music_agent(guild_id, channel_id):
+            return True
+        try:
+            state = self.get_state(guild_id)
+        except Exception:
+            return False
+        if str(getattr(state, "current_backend", "") or "").lower() != "agent":
+            return False
+        status = str(getattr(state, "current_status", "") or "").lower()
+        maybe_active = bool(
+            getattr(state, "music_session_active", False)
+            or getattr(state, "current", None) is not None
+            or status in {"resolving", "starting", "playing", "paused", "queued", "reconnecting"}
+            or int(getattr(state, "agent_monitor_failures", 0) or 0) > 0
+        )
+        if not maybe_active:
+            return False
+        remote = await atualizar_estado_controle_remoto(
+            self,
+            guild_id,
+            # TTS é caminho de latência. Revalide o estado autoritativo sem
+            # esperar uma edição do Discord; o monitor reconcilia painel/status.
+            create_panel=False,
+            timeout_seconds=min(2.0, float(getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0) or 5.0)),
+        )
+        if not remote:
+            # Mantenha um watcher vivo para que a decisão se corrija assim que a
+            # rota voltar. Não converta indisponibilidade transitória em posse local.
+            self.start_music_agent_monitor(
+                guild_id,
+                voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or channel_id or 0) or None,
+                text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+            )
+            return self.should_route_tts_to_music_agent(guild_id, channel_id)
+        return self.should_route_tts_to_music_agent(guild_id, channel_id)
 
     _supports_tts_cached_audio = True
 
@@ -4076,7 +4137,17 @@ class AudioRouter:
         tts_request_id: str = "",
     ) -> dict[str, Any]:
         if not self.should_route_tts_to_music_agent(guild_id, channel_id):
-            return {"ok": False, "tts_agent_route": False, "reason": "agent_not_owner"}
+            if not await self.revalidate_tts_music_agent_route(guild_id, channel_id):
+                return {"ok": False, "tts_agent_route": False, "reason": "agent_not_owner"}
+        # Qualquer TTS durante uma sessão remota também funciona como watchdog:
+        # se o watcher morreu/cancelou silenciosamente, relance-o antes do comando.
+        # ``start_music_agent_monitor`` é idempotente quando já existe task viva.
+        state = self.get_state(int(guild_id))
+        self.start_music_agent_monitor(
+            int(guild_id),
+            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or channel_id or 0) or None,
+            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+        )
         started = time.monotonic()
         auto_leave_enabled = await self._music_auto_leave_enabled(int(guild_id))
         result = await _music_agent_command(

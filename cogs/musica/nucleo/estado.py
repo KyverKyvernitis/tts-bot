@@ -155,6 +155,12 @@ class MusicGuildState:
     agent_monitor_last_error: str = ""
     agent_monitor_reconnecting_since: float = 0.0
     agent_monitor_recoveries: int = 0
+    # Heartbeat do espelho remoto. Estes campos não participam da UI diretamente;
+    # permitem detectar monitor morto/stale sem inferir isso pela faixa exibida.
+    agent_monitor_last_cycle_at: float = 0.0
+    agent_monitor_last_success_at: float = 0.0
+    agent_monitor_last_full_sync_at: float = 0.0
+    agent_monitor_restart_count: int = 0
     agent_deferred_command_status: str = ""
     agent_deferred_command_attempts: int = 0
     agent_deferred_command_error: str = ""

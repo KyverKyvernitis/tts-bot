@@ -120,6 +120,18 @@ def deve_rotear_tts_para_agente(bot: Any, guild_id: int, channel_id: int) -> boo
     return False
 
 
+
+
+async def revalidar_rota_tts_agente(bot: Any, guild_id: int, channel_id: int) -> bool:
+    """Revalida a posse remota somente quando o espelho local pode estar stale."""
+    router = _roteador(bot)
+    metodo = getattr(router, "revalidate_tts_music_agent_route", None)
+    if not callable(metodo):
+        return deve_rotear_tts_para_agente(bot, guild_id, channel_id)
+    with contextlib.suppress(Exception):
+        return bool(await metodo(int(guild_id), int(channel_id)))
+    return deve_rotear_tts_para_agente(bot, guild_id, channel_id)
+
 def suporta_cache_tts_agente(bot: Any) -> bool:
     return bool(getattr(_roteador(bot), "_supports_tts_cached_audio", False))
 
@@ -221,7 +233,10 @@ async def rotear_item_tts_para_musica(
     channel_id = int(getattr(item, "channel_id", 0) or 0)
     if bool(getattr(item, "_skip_music_agent_tts_route", False)):
         return False, audio_task
-    if not deve_rotear_tts_para_agente(bot, guild_id, channel_id):
+    route_music = deve_rotear_tts_para_agente(bot, guild_id, channel_id)
+    if not route_music:
+        route_music = await revalidar_rota_tts_agente(bot, guild_id, channel_id)
+    if not route_music:
         return False, audio_task
 
     if audio_task is not None and not audio_task.done():
@@ -262,6 +277,21 @@ async def rotear_item_tts_para_musica(
             pitch=getattr(item, "pitch", "+0Hz"),
             timeout=owner._estimate_playback_timeout(item),
         )
+        # Resposta HTTP bem-sucedida não significa que o overlay tocou. Antes
+        # esse caso era marcado como consumido mesmo quando o agente respondia
+        # ``ok=false`` (por exemplo, espelho stale e sessão já encerrada), fazendo
+        # o TTS sumir. Transforme falha lógica em exceção para reutilizar a
+        # política segura de fallback logo abaixo.
+        if isinstance(playback_result, dict) and playback_result.get("ok") is False:
+            worker_result = playback_result.get("worker_result")
+            worker_error = (worker_result or {}).get("error") if isinstance(worker_result, dict) else ""
+            detail = str(
+                worker_error
+                or playback_result.get("error")
+                or playback_result.get("reason")
+                or "falha na sessão musical TTS"
+            )
+            raise RuntimeError(detail)
         item._tts_remote_active = False
         playback_started_at = (
             float(playback_result.get("playback_started_at", time.monotonic()) or time.monotonic())
@@ -397,9 +427,19 @@ async def preparar_cliente_voz_tts(owner: Any, guild: Any, item: Any, state: Any
     logger = logging.getLogger("cogs.musica.integracoes.tts")
     guild_id = int(getattr(guild, "id", 0) or 0)
     item_channel_id = int(getattr(item, "channel_id", 0) or 0)
+    bot = getattr(owner, "bot", None)
+
+    # A decisão síncrona é barata, mas pode estar stale exatamente durante uma
+    # queda/rebind do monitor. Antes de conectar ou desconectar qualquer cliente
+    # local, dê ao estado autoritativo uma chance curta de confirmar a posse da
+    # sessão musical. Isso fecha a janela em que o TTS roubava a call e perdia
+    # o overlay/ducking enquanto painel/status também estavam congelados.
+    block_local = deve_bloquear_voz_tts_local(bot, guild_id)
+    if not block_local:
+        block_local = await revalidar_rota_tts_agente(bot, guild_id, item_channel_id)
 
     if cliente_voz_pertence_musica(vc):
-        if not deve_bloquear_voz_tts_local(getattr(owner, "bot", None), guild_id):
+        if not block_local:
             with contextlib.suppress(Exception):
                 await vc.disconnect(force=True)
             return False, None
@@ -432,7 +472,7 @@ async def preparar_cliente_voz_tts(owner: Any, guild: Any, item: Any, state: Any
         )
         return True, vc
 
-    if deve_bloquear_voz_tts_local(getattr(owner, "bot", None), guild_id):
+    if block_local:
         now = time.monotonic()
         if _permitir_log_voz(guild_id, "aguardando_sessao", agora=now):
             logger.info(

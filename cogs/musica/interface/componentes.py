@@ -1302,7 +1302,11 @@ class VolumeModal(discord.ui.Modal):
         self.add_item(self.value)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+        # O interaction ACK não pode depender de healthcheck/seleção remota.
+        # O próprio comando de volume valida a disponibilidade depois do defer.
+        if not await _require_music_voice_interaction(
+            interaction, self.router, self.guild_id, check_worker=False
+        ):
             return
         if not self.router.is_music_staff(getattr(interaction, "user", None)):
             await interaction.response.send_message("Apenas staff pode alterar volumes do player.", ephemeral=True)
@@ -1314,8 +1318,9 @@ class VolumeModal(discord.ui.Modal):
             await interaction.response.send_message("Envie apenas um número válido.", ephemeral=True)
             return
         value = max(0, min(150, value))
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await self.router.set_volume(self.guild_id, value)
-        await interaction.response.send_message(f"🔊 Volume da música: `{value}%`.", ephemeral=True)
+        await interaction.followup.send(f"🔊 Volume da música: `{value}%`.", ephemeral=True)
 
 
 def _parse_seek_seconds(raw: str) -> int | None:
@@ -1360,7 +1365,9 @@ class SeekModal(discord.ui.Modal):
         self.add_item(self.value)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+        if not await _require_music_voice_interaction(
+            interaction, self.router, self.guild_id, check_worker=False
+        ):
             return
         state = self.router.get_state(self.guild_id)
         requester_id = _current_track_requester_id(state)
@@ -1550,7 +1557,9 @@ class AddSongModal(discord.ui.Modal):
             return
 
         state = self.router.get_state(self.guild_id)
-        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+        if not await _require_music_voice_interaction(
+            interaction, self.router, self.guild_id, check_worker=False
+        ):
             return
         voice_channel = _interaction_user_voice_channel(interaction)
         text_channel = None
@@ -1843,7 +1852,9 @@ class MoveSelectedModal(discord.ui.Modal):
         self.add_item(self.to_pos)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+        if not await _require_music_voice_interaction(
+            interaction, self.router, self.guild_id, check_worker=False
+        ):
             return
         try:
             to_pos = int(str(self.to_pos.value).strip())
@@ -1856,8 +1867,12 @@ class MoveSelectedModal(discord.ui.Modal):
         if to_pos == self.from_pos:
             await interaction.response.send_message("Essa música já está nessa posição.", ephemeral=True)
             return
+        # ACK vem antes de qualquer operação remota. O Discord expira a
+        # interação em poucos segundos, enquanto mover a fila pode depender de
+        # rede/sincronização.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         ok = await self.router.move(self.guild_id, self.from_pos, to_pos)
-        await interaction.response.send_message("`↪️` Música movida." if ok else "Não consegui mover: confira a posição na fila.", ephemeral=True)
+        await interaction.followup.send("`↪️` Música movida." if ok else "Não consegui mover: confira a posição na fila.", ephemeral=True)
         if ok and self.message is not None:
             refresh = getattr(self.router, "refresh_queue_controller", None)
             if callable(refresh):
@@ -1888,6 +1903,7 @@ class QueueConfirmView(discord.ui.LayoutView):
         self.page = max(0, int(page))
         self.position = int(position or 0)
         self.message = message
+        self.confirm_message = None
         prompt = "Limpar todas as músicas da fila?" if action == "clear" else "Remover esta música da fila?"
         confirm = discord.ui.Button(label="Confirmar", emoji="✅", style=discord.ButtonStyle.danger, custom_id=f"music:queue:confirm:{action}")
         confirm.callback = self.confirm
@@ -1921,9 +1937,16 @@ class QueueConfirmView(discord.ui.LayoutView):
             await self.message.edit(content=None, embeds=[], attachments=[], view=view)
 
     async def confirm(self, interaction: discord.Interaction):
+        # ACK imediato: replace/remove podem atravessar a rede e nunca devem
+        # ficar na frente da confirmação da interação do Discord.
+        if not interaction.response.is_done():
+            # Em componente, defer sem ``thinking`` confirma a atualização da
+            # própria mensagem (inclusive ephemeral). Depois podemos usar
+            # edit_original_response sem criar um segundo card de resposta.
+            await interaction.response.defer()
         if self.action == "clear":
             await self.router.replace_queue(self.guild_id, [])
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=None, embeds=[], attachments=[],
                 view=StaticMusicMessageView("### 🧹 Fila limpa", accent_color=discord.Color.green()),
             )
@@ -1939,7 +1962,7 @@ class QueueConfirmView(discord.ui.LayoutView):
             else:
                 text = f"### 🗑️ Removido da fila\n{_escape(removed.short_title, limit=80)}"
                 color = discord.Color.green()
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=None, embeds=[], attachments=[],
                 view=StaticMusicMessageView(text, accent_color=color),
             )
@@ -1947,11 +1970,32 @@ class QueueConfirmView(discord.ui.LayoutView):
             self.stop()
             return
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=None, embeds=[], attachments=[],
             view=StaticMusicMessageView("### Ação desconhecida", accent_color=discord.Color.red()),
         )
         self.stop()
+
+    async def on_timeout(self) -> None:
+        # Confirmações podem expirar; nesse caso remova os botões visivelmente
+        # em vez de deixar componentes que parecem clicáveis sem callback.
+        message = self.confirm_message
+        if message is not None:
+            with contextlib.suppress(Exception):
+                await message.edit(
+                    content=None, embeds=[], attachments=[],
+                    view=StaticMusicMessageView("### Confirmação expirada", accent_color=discord.Color.dark_grey()),
+                )
+        self.stop()
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        logger.error(
+            "[music/queue] confirmação falhou | guild=%s action=%s",
+            self.guild_id,
+            self.action,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await _send_interaction_notice(interaction, "Não consegui concluir essa ação. Tente novamente.")
 
     async def cancel(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
@@ -1963,7 +2007,10 @@ class QueueConfirmView(discord.ui.LayoutView):
 
 class QueueView(discord.ui.LayoutView):
     def __init__(self, router, guild_id: int, page: int = 0, *, owner_id: int | None = None, selected_position: int | None = None) -> None:
-        super().__init__(timeout=300)
+        # O controlador de fila não pode morrer silenciosamente enquanto seus
+        # botões continuam visíveis. Ele permanece ativo durante a vida do
+        # processo; confirmações destrutivas continuam com timeout próprio.
+        super().__init__(timeout=None)
         self.router = router
         self.guild_id = int(guild_id)
         self.page = max(0, int(page))
@@ -1977,6 +2024,16 @@ class QueueView(discord.ui.LayoutView):
             return False
         # Não faça healthcheck/seleção de worker no interaction_check.
         return await _require_music_voice_interaction(interaction, self.router, self.guild_id, check_worker=False)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        logger.error(
+            "[music/queue] interação falhou | guild=%s page=%s item=%s",
+            self.guild_id,
+            self.page,
+            getattr(item, "custom_id", type(item).__name__),
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await _send_interaction_notice(interaction, "Não consegui atualizar a fila agora. Tente novamente.")
 
     def _queue_items(self) -> list[MusicTrack]:
         return self.router.snapshot_queue(self.guild_id)
@@ -2142,14 +2199,17 @@ class QueueView(discord.ui.LayoutView):
         # o deadline da interação em páginas ainda não cacheadas.
         if not interaction.response.is_done():
             await interaction.response.defer()
-        await self._prepare_page()
-        self._refresh_components()
-        message = getattr(interaction, "message", None)
-        if message is not None:
-            await message.edit(content=None, embeds=[], attachments=[], view=self)
-        else:
-            with contextlib.suppress(Exception):
+        try:
+            await self._prepare_page()
+            self._refresh_components()
+            message = getattr(interaction, "message", None)
+            if message is not None:
+                await message.edit(content=None, embeds=[], attachments=[], view=self)
+            else:
                 await interaction.edit_original_response(content=None, embeds=[], attachments=[], view=self)
+        except Exception:
+            logger.exception("[music/queue] redraw falhou | guild=%s page=%s", self.guild_id, self.page)
+            await _send_interaction_notice(interaction, "Não consegui carregar esta página agora. Tente novamente.")
 
     async def previous_page(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)
@@ -2169,8 +2229,9 @@ class QueueView(discord.ui.LayoutView):
         if not self.selected_position:
             await interaction.response.send_message("Selecione uma música primeiro.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         ok = await self.router.skip_to(self.guild_id, self.selected_position)
-        await interaction.response.send_message("`▶️` Tocando a música selecionada." if ok else "Não consegui tocar essa posição na fila.", ephemeral=True)
+        await interaction.followup.send("`▶️` Tocando a música selecionada." if ok else "Não consegui tocar essa posição na fila.", ephemeral=True)
         if ok:
             refresh = getattr(self.router, "refresh_queue_controller", None)
             if callable(refresh):
@@ -2201,18 +2262,18 @@ class QueueView(discord.ui.LayoutView):
         if not self.selected_position:
             await interaction.response.send_message("Selecione uma música primeiro.", ephemeral=True)
             return
-        await interaction.response.send_message(
-            view=QueueConfirmView(
-                self.router,
-                self.guild_id,
-                action="remove",
-                owner_id=self.owner_id,
-                page=self.page,
-                position=self.selected_position,
-                message=getattr(interaction, "message", None),
-            ),
-            ephemeral=True,
+        confirm_view = QueueConfirmView(
+            self.router,
+            self.guild_id,
+            action="remove",
+            owner_id=self.owner_id,
+            page=self.page,
+            position=self.selected_position,
+            message=getattr(interaction, "message", None),
         )
+        await interaction.response.send_message(view=confirm_view, ephemeral=True)
+        with contextlib.suppress(Exception):
+            confirm_view.confirm_message = await interaction.original_response()
 
     async def reload(self, interaction: discord.Interaction):
         await self._redraw(interaction)
@@ -2222,17 +2283,17 @@ class QueueView(discord.ui.LayoutView):
         if not self._queue_items() and not _virtual_playlist_info(state):
             await interaction.response.send_message("A fila já está vazia.", ephemeral=True)
             return
-        await interaction.response.send_message(
-            view=QueueConfirmView(
-                self.router,
-                self.guild_id,
-                action="clear",
-                owner_id=self.owner_id,
-                page=0,
-                message=getattr(interaction, "message", None),
-            ),
-            ephemeral=True,
+        confirm_view = QueueConfirmView(
+            self.router,
+            self.guild_id,
+            action="clear",
+            owner_id=self.owner_id,
+            page=0,
+            message=getattr(interaction, "message", None),
         )
+        await interaction.response.send_message(view=confirm_view, ephemeral=True)
+        with contextlib.suppress(Exception):
+            confirm_view.confirm_message = await interaction.original_response()
 
 
 class VoiceStatusTemplateModal(discord.ui.Modal):
