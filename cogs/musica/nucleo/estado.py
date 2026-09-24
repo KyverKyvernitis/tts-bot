@@ -173,6 +173,15 @@ class MusicGuildState:
     # a playlist inteira: apenas cursor/contagem suficientes para a UI explicar
     # que ainda existem faixas sendo carregadas sob demanda.
     agent_virtual_playlist: dict[str, Any] = field(default_factory=dict)
+    # Todas as coleções/blocos virtuais presentes na fila autoritativa. O campo
+    # singular acima permanece por compatibilidade com código antigo que olha
+    # apenas o primeiro cursor próximo da reprodução.
+    agent_virtual_playlists: list[dict[str, Any]] = field(default_factory=list)
+    # Layout lógico leve enviado pelo Music Agent: faixas já materializadas e
+    # segmentos virtuais, na ordem exata da fila. Permite paginação/seleção de
+    # várias playlists sem baixar a coleção inteira nem confundir posições.
+    agent_queue_layout: list[dict[str, Any]] = field(default_factory=list)
+    agent_remote_materialized_queue_size: int = 0
     # Cache exclusivamente visual de páginas da coleção virtual. O player
     # continua materializando somente a janela curta no Phone Worker; páginas
     # distantes são metadata sob demanda para o controlador de fila.

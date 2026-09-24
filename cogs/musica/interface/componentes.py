@@ -652,39 +652,26 @@ def _queue_total_count(state, items: list[MusicTrack]) -> int:
     total = len(items)
     with contextlib.suppress(Exception):
         total = max(total, int(state.queue_size()))
-    remote_queue_size = 0
     with contextlib.suppress(Exception):
-        remote_queue_size = max(0, int(getattr(state, "agent_remote_queue_size", 0) or 0))
-        total = max(total, remote_queue_size)
-
-    # Playlist virtual: ``queue_size`` contém apenas a janela materializada. Se
-    # o provider publicou ``total_tracks``, derive a quantidade lógica restante
-    # sem carregar o restante da coleção. ``next_offset - materialized_before``
-    # é quantas faixas da playlist já saíram da fila (tocadas/atuais). Itens
-    # manuais depois do marker continuam incluídos em ``remote_queue_size``.
-    info = _virtual_playlist_info(state)
-    if info:
-        exact = logical_virtual_queue_count(
-            total_tracks=info.get("total_tracks"),
-            next_offset=info.get("next_offset") or 0,
-            materialized_before=info.get("materialized_before") or 0,
-            remote_queue_size=remote_queue_size,
-        )
-        if exact is not None:
-            # Quando o cursor conhece o total, ele é a autoridade da coleção
-            # virtual. ``queue_size`` é somente a janela materializada e pode
-            # ficar um snapshot atrasado durante a promoção current<-queue.
-            # Nunca deixe essa janela stale manter +1 e contar a faixa atual
-            # novamente. Preserve apenas o mínimo já visível no espelho.
-            total = max(len(items), exact)
+        total = max(total, int(getattr(state, "agent_remote_queue_size", 0) or 0))
     return max(0, total)
 
 
-def _virtual_playlist_info(state) -> dict:
+def _virtual_playlists_info(state) -> list[dict]:
+    values = getattr(state, "agent_virtual_playlists", None)
+    if isinstance(values, list):
+        normalized = [value for value in values if isinstance(value, dict) and bool(value.get("active"))]
+        if normalized:
+            return normalized
     value = getattr(state, "agent_virtual_playlist", None)
-    if not isinstance(value, dict) or not bool(value.get("active")):
-        return {}
-    return value
+    if isinstance(value, dict) and bool(value.get("active")):
+        return [value]
+    return []
+
+
+def _virtual_playlist_info(state) -> dict:
+    values = _virtual_playlists_info(state)
+    return values[0] if values else {}
 
 
 def _virtual_playlist_total_label(state) -> str:
@@ -1832,8 +1819,41 @@ class QueueSelect(discord.ui.Select):
         await interaction.response.defer()
 
 
+class JumpQueuePageModal(discord.ui.Modal):
+    def __init__(self, view: "QueueView", *, max_page: int) -> None:
+        super().__init__(title="Ir para página")
+        self.queue_view = view
+        self.max_page = max(0, int(max_page))
+        self.page_value = discord.ui.TextInput(
+            label=f"Página (1 a {self.max_page + 1})",
+            placeholder=str(min(self.max_page + 1, self.queue_view.page + 1)),
+            min_length=1,
+            max_length=max(1, len(str(self.max_page + 1))),
+            required=True,
+        )
+        self.add_item(self.page_value)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            page = int(str(self.page_value.value).strip())
+        except Exception:
+            await interaction.response.send_message("Digite apenas o número da página.", ephemeral=True)
+            return
+        if page < 1 or page > self.max_page + 1:
+            await interaction.response.send_message(
+                f"Escolha uma página entre 1 e {self.max_page + 1}.",
+                ephemeral=True,
+            )
+            return
+        await self.queue_view._redraw(
+            interaction,
+            absolute_page=page - 1,
+            selected_position=None,
+        )
+
+
 class MoveSelectedModal(discord.ui.Modal):
-    def __init__(self, router, guild_id: int, from_pos: int, *, page: int = 0, owner_id: int | None = None, message=None) -> None:
+    def __init__(self, router, guild_id: int, from_pos: int, *, page: int = 0, owner_id: int | None = None, message=None, selected_track: MusicTrack | None = None) -> None:
         super().__init__(title="Mover música selecionada")
         self.router = router
         self.guild_id = int(guild_id)
@@ -1841,6 +1861,7 @@ class MoveSelectedModal(discord.ui.Modal):
         self.page = max(0, int(page))
         self.owner_id = int(owner_id or 0)
         self.message = message
+        self.selected_track = selected_track
         self.to_pos = discord.ui.TextInput(
             label="Nova posição na fila",
             placeholder="Exemplo: 1",
@@ -1866,19 +1887,34 @@ class MoveSelectedModal(discord.ui.Modal):
         if to_pos == self.from_pos:
             await interaction.response.send_message("Essa música já está nessa posição.", ephemeral=True)
             return
-        # ACK vem antes de qualquer operação remota. O Discord expira a
-        # interação em poucos segundos, enquanto mover a fila pode depender de
-        # rede/sincronização.
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        ok = await self.router.move(self.guild_id, self.from_pos, to_pos)
-        await interaction.followup.send("`↪️` Música movida." if ok else "Não consegui mover: confira a posição na fila.", ephemeral=True)
-        if ok and self.message is not None:
+        # ACK como atualização da mensagem original. Funciona também para
+        # painéis ephemeral e mantém toda a operação remota fora dos 3 s.
+        await interaction.response.defer()
+        virtual = bool(
+            self.selected_track is not None
+            and int(getattr(self.selected_track, "virtual_source_index", -1)) >= 0
+        )
+        if virtual:
+            result = await self.router.virtual_queue_action(
+                self.guild_id,
+                "move",
+                self.selected_track,
+                to_position=to_pos,
+            )
+            ok = bool(result.get("ok"))
+        else:
+            ok = await self.router.move(self.guild_id, self.from_pos, to_pos)
+        await interaction.followup.send(
+            "`↪️` Música movida." if ok else "Não consegui mover: a fila mudou ou a posição não existe mais.",
+            ephemeral=True,
+        )
+        if ok:
             refresh = getattr(self.router, "refresh_queue_controller", None)
             if callable(refresh):
                 await refresh(self.guild_id)
             view = QueueView(self.router, self.guild_id, self.page, owner_id=self.owner_id)
             with contextlib.suppress(Exception):
-                await self.message.edit(content=None, embeds=[], attachments=[], view=view)
+                await interaction.edit_original_response(content=None, embeds=[], attachments=[], view=view)
 
 
 class StaticMusicMessageView(discord.ui.LayoutView):
@@ -1893,7 +1929,7 @@ class StaticMusicMessageView(discord.ui.LayoutView):
 
 
 class QueueConfirmView(discord.ui.LayoutView):
-    def __init__(self, router, guild_id: int, *, action: str, owner_id: int | None = None, page: int = 0, position: int | None = None, message=None) -> None:
+    def __init__(self, router, guild_id: int, *, action: str, owner_id: int | None = None, page: int = 0, position: int | None = None, message=None, selected_track: MusicTrack | None = None) -> None:
         super().__init__(timeout=45)
         self.router = router
         self.guild_id = int(guild_id)
@@ -1902,6 +1938,7 @@ class QueueConfirmView(discord.ui.LayoutView):
         self.page = max(0, int(page))
         self.position = int(position or 0)
         self.message = message
+        self.selected_track = selected_track
         self.confirm_message = None
         prompt = "Limpar todas as músicas da fila?" if action == "clear" else "Remover esta música da fila?"
         confirm = discord.ui.Button(label="Confirmar", emoji="✅", style=discord.ButtonStyle.danger, custom_id=f"music:queue:confirm:{action}")
@@ -1954,9 +1991,19 @@ class QueueConfirmView(discord.ui.LayoutView):
             return
 
         if self.action == "remove":
-            removed = await self.router.remove_at(self.guild_id, self.position)
+            is_virtual = bool(
+                self.selected_track is not None
+                and int(getattr(self.selected_track, "virtual_source_index", -1)) >= 0
+            )
+            if is_virtual:
+                result = await self.router.virtual_queue_action(
+                    self.guild_id, "remove", self.selected_track
+                )
+                removed = self.selected_track if bool(result.get("ok")) else None
+            else:
+                removed = await self.router.remove_at(self.guild_id, self.position)
             if removed is None:
-                text = "### Essa posição não existe mais na fila."
+                text = "### Essa música não existe mais nessa posição da fila."
                 color = discord.Color.red()
             else:
                 text = f"### 🗑️ Removido da fila\n{_escape(removed.short_title, limit=80)}"
@@ -2048,16 +2095,18 @@ class QueueView(discord.ui.LayoutView):
         return max(0, (total - 1) // QUEUE_PAGE_SIZE)
 
     def _page_items(self, state, items: list[MusicTrack]) -> tuple[list[MusicTrack], bool]:
-        """Retorna itens da página e se vieram do cache virtual de UI."""
-        start = self.page * QUEUE_PAGE_SIZE
-        end = start + QUEUE_PAGE_SIZE
-        if end <= len(items) or (start < len(items) and not _virtual_playlist_info(state)):
-            return items[start:end], False
+        """Retorna itens da página e se vieram do layout lógico/cache virtual."""
         pages = getattr(state, "agent_virtual_playlist_pages", None)
         if isinstance(pages, dict):
             cached = pages.get(self.page)
             if isinstance(cached, list):
                 return list(cached), True
+        start = self.page * QUEUE_PAGE_SIZE
+        end = start + QUEUE_PAGE_SIZE
+        if not _virtual_playlists_info(state):
+            return items[start:end], False
+        # Antes do primeiro browse assíncrono, preserve a janela materializada
+        # já espelhada. Páginas virtuais serão preenchidas por _prepare_page().
         return items[start:end], False
 
     async def _prepare_page(self) -> None:
@@ -2073,8 +2122,8 @@ class QueueView(discord.ui.LayoutView):
         self.page = max(0, min(self.page, self._max_page(items, state)))
         start = self.page * QUEUE_PAGE_SIZE
         end = start + QUEUE_PAGE_SIZE
-        virtual = _virtual_playlist_info(state)
-        if virtual and end > len(items):
+        virtuals = _virtual_playlists_info(state)
+        if virtuals:
             await carregar_pagina_fila_virtual(
                 self.router,
                 self.guild_id,
@@ -2097,18 +2146,21 @@ class QueueView(discord.ui.LayoutView):
         max_page = self._max_page(items, state)
         start = self.page * QUEUE_PAGE_SIZE
         if virtual:
-            total_known = virtual.get("total_tracks") not in (None, "")
-            suffix = "" if total_known else "+"
-            count = f"{total}{suffix} música{'s' if total != 1 else ''}"
+            virtuals = _virtual_playlists_info(state)
+            count = f"{total} música{'s' if total != 1 else ''}"
             lines = [f"## 📜 Fila · {count}"]
-            page_line = f"Página {self.page + 1}/{max_page + 1}"
-            if from_virtual_cache:
-                lines.append(f"-# {page_line} · metadata carregada sob demanda")
-            else:
-                lines.append(f"-# {page_line} · {len(items)} próxima{'s' if len(items) != 1 else ''} pronta{'s' if len(items) != 1 else ''} no player")
-            title = _escape(str(virtual.get("title") or ""), limit=80)
-            if title and title.lower() != "playlist":
-                lines.append(f"-# {title}")
+            lines.append(f"-# Página {self.page + 1}/{max_page + 1}")
+            if len(virtuals) == 1:
+                title = _escape(str(virtual.get("title") or ""), limit=80)
+                if title and title.lower() != "playlist":
+                    lines.append(f"-# {title}")
+            elif len(virtuals) > 1:
+                # Não exponha cursor/janela/materialização na UI. Só informe que
+                # a fila contém mais de uma coleção quando isso for útil.
+                instances = {str(info.get("instance_id") or info.get("source_url") or "") for info in virtuals}
+                instances.discard("")
+                if len(instances) > 1:
+                    lines.append(f"-# {len(instances)} playlists na fila")
         else:
             lines = [f"## 📜 Fila · {total} música{'s' if total != 1 else ''}"]
             if max_page:
@@ -2138,25 +2190,22 @@ class QueueView(discord.ui.LayoutView):
         self.page = max(0, min(self.page, max_page))
         page_items, from_virtual_cache = self._page_items(state, items)
 
-        # Só itens materializados no Worker são editáveis hoje. Páginas
-        # distantes continuam totalmente visíveis, mas não fingem que move/remove
-        # já conseguem atravessar o cursor virtual.
-        selected_materialized = bool(
-            self.selected_position
-            and 1 <= int(self.selected_position) <= len(items)
-        )
         if self.selected_position and not (
             1 <= int(self.selected_position) <= max(1, _queue_total_count(state, items))
         ):
             self.selected_position = None
-            selected_materialized = False
+
+        start = self.page * QUEUE_PAGE_SIZE
+        selected_track: MusicTrack | None = None
+        if self.selected_position and start < int(self.selected_position) <= start + len(page_items):
+            selected_track = page_items[int(self.selected_position) - start - 1]
 
         virtual = _virtual_playlist_info(state)
         container = discord.ui.Container(accent_color=discord.Color.blurple() if (items or page_items or virtual) else discord.Color.dark_grey())
         container.add_item(discord.ui.TextDisplay(self._queue_text(state, items)))
 
         start = self.page * QUEUE_PAGE_SIZE
-        if page_items and not from_virtual_cache and start < len(items):
+        if page_items:
             container.add_item(discord.ui.Separator())
             container.add_item(
                 discord.ui.ActionRow(
@@ -2170,10 +2219,8 @@ class QueueView(discord.ui.LayoutView):
                     )
                 )
             )
-        elif page_items and from_virtual_cache:
-            container.add_item(discord.ui.TextDisplay("-# Esta página é visualização da playlist virtual; ela entra na janela editável conforme a reprodução avança."))
 
-        if selected_materialized:
+        if selected_track is not None:
             play = discord.ui.Button(label="Tocar agora", emoji="▶️", style=discord.ButtonStyle.primary, custom_id="music:queue:play")
             play.callback = self.play_selected
             move = discord.ui.Button(label="Mover", emoji="↪️", style=discord.ButtonStyle.secondary, custom_id="music:queue:move")
@@ -2185,7 +2232,8 @@ class QueueView(discord.ui.LayoutView):
         if max_page > 0:
             previous = discord.ui.Button(emoji="⬅️", style=discord.ButtonStyle.secondary, disabled=self.page <= 0, custom_id="music:queue:previous")
             previous.callback = self.previous_page
-            page_label = discord.ui.Button(label=f"Página {self.page + 1}/{max_page + 1}", style=discord.ButtonStyle.secondary, disabled=True, custom_id="music:queue:page")
+            page_label = discord.ui.Button(label=f"Página {self.page + 1}/{max_page + 1}", style=discord.ButtonStyle.secondary, custom_id="music:queue:page")
+            page_label.callback = self.jump_page
             next_button = discord.ui.Button(emoji="➡️", style=discord.ButtonStyle.secondary, disabled=self.page >= max_page, custom_id="music:queue:next")
             next_button.callback = self.next_page
             container.add_item(discord.ui.ActionRow(previous, page_label, next_button))
@@ -2202,6 +2250,7 @@ class QueueView(discord.ui.LayoutView):
         interaction: discord.Interaction,
         *,
         page_delta: int = 0,
+        absolute_page: int | None = None,
         selected_position: int | None | object = ...,
     ) -> bool:
         # ACK primeiro. Para componentes, defer() sem thinking usa
@@ -2215,7 +2264,9 @@ class QueueView(discord.ui.LayoutView):
         async with self._interaction_lock:
             old_page = self.page
             old_selected = self.selected_position
-            if page_delta:
+            if absolute_page is not None:
+                self.page = max(0, int(absolute_page))
+            elif page_delta:
                 self.page = max(0, self.page + int(page_delta))
             if selected_position is not ...:
                 self.selected_position = selected_position
@@ -2250,6 +2301,12 @@ class QueueView(discord.ui.LayoutView):
     async def next_page(self, interaction: discord.Interaction):
         await self._redraw(interaction, page_delta=1, selected_position=None)
 
+    async def jump_page(self, interaction: discord.Interaction):
+        items = self._queue_items()
+        state = self.router.get_state(self.guild_id)
+        max_page = self._max_page(items, state)
+        await interaction.response.send_modal(JumpQueuePageModal(self, max_page=max_page))
+
     async def cancel_selection(self, interaction: discord.Interaction):
         await self._redraw(interaction, selected_position=None)
 
@@ -2257,24 +2314,45 @@ class QueueView(discord.ui.LayoutView):
         if not self.selected_position:
             await interaction.response.send_message("Selecione uma música primeiro.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        ok = await self.router.skip_to(self.guild_id, self.selected_position)
-        await interaction.followup.send("`▶️` Tocando a música selecionada." if ok else "Não consegui tocar essa posição na fila.", ephemeral=True)
+        state = self.router.get_state(self.guild_id)
+        items = self._queue_items()
+        page_items, _from_virtual = self._page_items(state, items)
+        start = self.page * QUEUE_PAGE_SIZE
+        selected_track = None
+        if start < int(self.selected_position) <= start + len(page_items):
+            selected_track = page_items[int(self.selected_position) - start - 1]
+        await interaction.response.defer()
+        if selected_track is not None and int(getattr(selected_track, "virtual_source_index", -1)) >= 0:
+            result = await self.router.virtual_queue_action(self.guild_id, "play_now", selected_track)
+            ok = bool(result.get("ok"))
+        else:
+            ok = await self.router.skip_to(self.guild_id, self.selected_position)
+        await interaction.followup.send(
+            "`▶️` Tocando a música selecionada." if ok else "Não consegui tocar essa música; a fila pode ter mudado.",
+            ephemeral=True,
+        )
         if ok:
             refresh = getattr(self.router, "refresh_queue_controller", None)
             if callable(refresh):
                 await refresh(self.guild_id)
             self.selected_position = None
             self.page = min(self.page, self._max_page())
+            await self._prepare_page()
             self._refresh_components()
             with contextlib.suppress(Exception):
-                if getattr(interaction, "message", None) is not None:
-                    await interaction.message.edit(content=None, embeds=[], attachments=[], view=self)
+                await interaction.edit_original_response(content=None, embeds=[], attachments=[], view=self)
 
     async def move_selected(self, interaction: discord.Interaction):
         if not self.selected_position:
             await interaction.response.send_message("Selecione uma música primeiro.", ephemeral=True)
             return
+        state = self.router.get_state(self.guild_id)
+        items = self._queue_items()
+        page_items, _from_virtual = self._page_items(state, items)
+        start = self.page * QUEUE_PAGE_SIZE
+        selected_track = None
+        if start < int(self.selected_position) <= start + len(page_items):
+            selected_track = page_items[int(self.selected_position) - start - 1]
         await interaction.response.send_modal(
             MoveSelectedModal(
                 self.router,
@@ -2283,6 +2361,7 @@ class QueueView(discord.ui.LayoutView):
                 page=self.page,
                 owner_id=self.owner_id,
                 message=getattr(interaction, "message", None),
+                selected_track=selected_track,
             )
         )
 
@@ -2290,6 +2369,13 @@ class QueueView(discord.ui.LayoutView):
         if not self.selected_position:
             await interaction.response.send_message("Selecione uma música primeiro.", ephemeral=True)
             return
+        state = self.router.get_state(self.guild_id)
+        items = self._queue_items()
+        page_items, _from_virtual = self._page_items(state, items)
+        start = self.page * QUEUE_PAGE_SIZE
+        selected_track = None
+        if start < int(self.selected_position) <= start + len(page_items):
+            selected_track = page_items[int(self.selected_position) - start - 1]
         confirm_view = QueueConfirmView(
             self.router,
             self.guild_id,
@@ -2298,6 +2384,7 @@ class QueueView(discord.ui.LayoutView):
             page=self.page,
             position=self.selected_position,
             message=getattr(interaction, "message", None),
+            selected_track=selected_track,
         )
         await interaction.response.send_message(view=confirm_view, ephemeral=True)
         with contextlib.suppress(Exception):
@@ -2807,14 +2894,14 @@ class MusicPlayerView(discord.ui.LayoutView):
             refresh = getattr(self.router, "refresh_queue_controller", None)
             if callable(refresh):
                 await refresh(self.guild_id)
-            await interaction.followup.send(
-                view=QueueView(
-                    self.router,
-                    self.guild_id,
-                    0,
-                    owner_id=getattr(interaction.user, "id", None),
-                ),
-                ephemeral=True,
+            view = QueueView(
+                self.router,
+                self.guild_id,
+                0,
+                owner_id=getattr(interaction.user, "id", None),
             )
+            await view._prepare_page()
+            view._refresh_components()
+            await interaction.followup.send(view=view, ephemeral=True)
         except discord.NotFound:
             return

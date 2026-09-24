@@ -10,7 +10,7 @@ from ..agente_telefone.conversao import faixa_do_payload
 from ..agente_telefone.estado import atualizar_estado_controle_remoto
 from ..nucleo.estado import MusicGuildState
 from ..nucleo.modelos import LoopMode, MusicTrack
-from .playlist_virtual import cancel_playlist_refill
+from .playlist_virtual import cancel_playlist_refill, payload_faixa_agent
 from .controle_remoto import (
     alternar_repeticao,
     anterior,
@@ -19,6 +19,7 @@ from .controle_remoto import (
     mover_item_fila,
     remover_item_fila,
     tocar_posicao_fila,
+    agir_item_virtual_fila,
 )
 
 logger = logging.getLogger(__name__)
@@ -234,6 +235,49 @@ async def remover_item_fila_worker(router: Any, guild_id: int, state: MusicGuild
     except Exception:
         logger.warning("[music/agent] falha ao remover item remoto | guild=%s pos=%s", guild_id, position, exc_info=True)
         return None
+
+
+async def agir_item_virtual_fila_worker(
+    router: Any,
+    guild_id: int,
+    state: MusicGuildState,
+    *,
+    operation: str,
+    track: MusicTrack,
+    to_position: int | None = None,
+) -> dict[str, Any]:
+    """Aplica ação a uma entrada ainda virtual usando identidade de origem.
+
+    A metadata da faixa selecionada vem do browse sob demanda da VPS; o Agent
+    remove a referência virtual original antes de tocar/mover, evitando duplicação.
+    """
+    try:
+        payload = payload_faixa_agent(
+            track,
+            requester_id=int(getattr(track, "requester_id", 0) or 0),
+            requester_name=str(getattr(track, "requester_name", "") or ""),
+        )
+        result = await agir_item_virtual_fila(
+            router,
+            int(guild_id),
+            operation=operation,
+            source_index=int(getattr(track, "virtual_source_index", -1)),
+            instance_id=str(getattr(track, "virtual_playlist_instance_id", "") or ""),
+            provider=str(getattr(track, "virtual_provider", "") or ""),
+            source_url=str(getattr(track, "virtual_source_url", "") or ""),
+            track_payload=payload,
+            to_position=to_position,
+            track=state.current,
+            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+        )
+        return result if isinstance(result, dict) else {"ok": False}
+    except Exception:
+        logger.warning(
+            "[music/agent] falha em ação de item virtual | guild=%s op=%s idx=%s",
+            guild_id, operation, getattr(track, "virtual_source_index", -1), exc_info=True,
+        )
+        return {"ok": False}
 
 
 async def limpar_fila_worker(router: Any, guild_id: int, state: MusicGuildState) -> bool:

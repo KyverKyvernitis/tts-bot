@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import time
+import uuid
 from typing import Any
 
 from cogs.musica import configuracao as config
@@ -18,7 +19,14 @@ logger = logging.getLogger(__name__)
 
 
 def _cursor_retry_key(cursor: PlaylistCursor) -> str:
-    return f"{cursor.provider}|{cursor.source_url}|{max(0, int(cursor.next_offset))}"
+    return "|".join((
+        str(cursor.instance_id or ""),
+        str(cursor.provider or ""),
+        str(cursor.source_url or ""),
+        str(cursor.block_end_offset if cursor.block_end_offset is not None else ""),
+        str(max(0, int(cursor.shuffle_seed or 0))),
+        str(max(0, int(cursor.next_offset))),
+    ))
 
 
 def _reset_refill_backoff(state: Any, cursor: PlaylistCursor | None = None) -> None:
@@ -117,6 +125,8 @@ def payload_cursor_playlist(
     por uma nova janela + marker atualizado, sem materializar a coleção inteira.
     """
 
+    if not str(cursor.instance_id or "").strip():
+        cursor.instance_id = uuid.uuid4().hex
     return {
         "title": cursor.title or "Playlist",
         "webpage_url": cursor.source_url,
@@ -145,6 +155,11 @@ def cursor_playlist_do_payload(value: Any) -> PlaylistCursor | None:
         next_offset = max(0, int(value.get("next_offset") or 0))
     except Exception:
         next_offset = 0
+    block_raw = value.get("block_end_offset")
+    try:
+        block_end = None if block_raw in (None, "") else max(0, int(block_raw))
+    except Exception:
+        block_end = None
     return PlaylistCursor(
         provider=provider,
         source_url=source_url,
@@ -154,6 +169,9 @@ def cursor_playlist_do_payload(value: Any) -> PlaylistCursor | None:
         next_offset=next_offset,
         total_tracks=total_tracks,
         exhausted=bool(value.get("exhausted")),
+        instance_id=str(value.get("instance_id") or "").strip(),
+        block_end_offset=block_end,
+        shuffle_seed=max(0, int(value.get("shuffle_seed") or 0)),
     )
 
 
@@ -220,6 +238,14 @@ def schedule_playlist_refill_if_needed(router: Any, guild_id: int, remote: dict[
     refill_limit = policy.refill_limit(materialized)
     if waiting:
         refill_limit = max(refill_limit, policy.high_watermark)
+    if cursor.block_end_offset is not None:
+        block_remaining = max(0, int(cursor.block_end_offset) - int(cursor.next_offset))
+        if cursor.shuffle_seed:
+            # O bloco precisa chegar completo para a mesma permutação ser usada
+            # no playback e na UI. Blocos do shuffle são sempre <= 100.
+            refill_limit = min(100, block_remaining)
+        else:
+            refill_limit = min(refill_limit, block_remaining)
     refill_limit = max(1, refill_limit)
 
     async def runner() -> None:
@@ -278,7 +304,23 @@ def schedule_playlist_refill_if_needed(router: Any, guild_id: int, remote: dict[
                 with contextlib.suppress(Exception):
                     registrar_lote_link_busca(batch.tracks)
 
-            next_cursor = batch.playlist_cursor or cursor.advanced(len(batch.tracks), exhausted=not batch.tracks)
+            provider_next = batch.playlist_cursor or cursor.advanced(len(batch.tracks), exhausted=not batch.tracks)
+            next_offset = max(int(cursor.next_offset), int(getattr(provider_next, "next_offset", cursor.next_offset + len(batch.tracks)) or 0))
+            block_end = cursor.block_end_offset
+            block_exhausted = bool(block_end is not None and next_offset >= int(block_end))
+            next_cursor = PlaylistCursor(
+                provider=provider_next.provider or cursor.provider,
+                source_url=provider_next.source_url or cursor.source_url,
+                title=provider_next.title or cursor.title,
+                resource_type=provider_next.resource_type or cursor.resource_type,
+                resource_id=provider_next.resource_id or cursor.resource_id,
+                next_offset=next_offset,
+                total_tracks=provider_next.total_tracks if provider_next.total_tracks is not None else cursor.total_tracks,
+                exhausted=bool(block_exhausted or provider_next.exhausted or not batch.tracks),
+                instance_id=cursor.instance_id,
+                block_end_offset=block_end,
+                shuffle_seed=cursor.shuffle_seed,
+            )
             tracks_payload = [
                 payload_faixa_agent(
                     track,
@@ -392,6 +434,12 @@ def virtual_playlist_consumed_count(info: dict[str, Any]) -> int:
 def virtual_playlist_remaining_count(info: dict[str, Any]) -> int | None:
     if not isinstance(info, dict):
         return None
+    block_end = info.get("block_end_offset")
+    if block_end not in (None, ""):
+        try:
+            return max(0, int(block_end) - int(info.get("next_offset") or 0))
+        except Exception:
+            return None
     total = info.get("total_tracks")
     if total in (None, ""):
         return None
@@ -421,96 +469,223 @@ async def carregar_pagina_fila_virtual(
     *,
     page_size: int,
 ) -> list[MusicTrack]:
-    """Carrega somente metadata de uma página distante da fila virtual.
+    """Carrega uma página da fila lógica, inclusive várias playlists virtuais.
 
-    Isto é browse/UI, não refill de playback: não altera cursor do Worker, não
-    resolve áudio e não materializa a playlist inteira. O cache é invalidado
-    automaticamente quando a posição lógica avança ou a coleção muda.
+    ``agent_queue_layout`` descreve a ordem exata como uma sequência de faixas
+    já materializadas e segmentos virtuais. Somente os pedaços da página pedida
+    são consultados no provider; áudio/yt-dlp continuam completamente lazy.
     """
     state = router.get_state(int(guild_id))
-    info = getattr(state, "agent_virtual_playlist", None)
-    if not isinstance(info, dict) or not bool(info.get("active")):
-        return []
-
     page = max(0, int(page))
     page_size = max(1, min(25, int(page_size)))
-    expected_key = _virtual_browse_state_key(info)
-    if not expected_key:
-        return []
-    if str(getattr(state, "agent_virtual_playlist_browse_key", "") or "") != expected_key:
-        state.agent_virtual_playlist_pages.clear()
-        state.agent_virtual_playlist_browse_key = expected_key
-        state.agent_virtual_playlist_browse_error = ""
+    expected_key = str(getattr(state, "agent_virtual_playlist_browse_key", "") or "")
 
-    cached = state.agent_virtual_playlist_pages.get(page)
-    if isinstance(cached, list):
-        return list(cached)
+    if expected_key:
+        cached = state.agent_virtual_playlist_pages.get(page)
+        if isinstance(cached, list):
+            return list(cached)
 
-    total_remaining = virtual_playlist_remaining_count(info)
+    layout = getattr(state, "agent_queue_layout", None)
+    if not isinstance(layout, list) or not layout:
+        # Compatibilidade com snapshots antigos (Wave 8–14): o cursor singular
+        # representa a coleção inteira restante, enquanto ``materialized_before``
+        # informa quantas faixas da janela já aparecem antes do marker.
+        info = getattr(state, "agent_virtual_playlist", None)
+        if isinstance(info, dict) and bool(info.get("active")):
+            cached = state.agent_virtual_playlist_pages.get(page)
+            if isinstance(cached, list):
+                return list(cached)
+            total_remaining = virtual_playlist_remaining_count(info)
+            logical_start = page * page_size
+            if total_remaining is not None and logical_start >= total_remaining:
+                state.agent_virtual_playlist_pages[page] = []
+                return []
+            source_offset = virtual_playlist_consumed_count(info) + logical_start
+            cursor = PlaylistCursor(
+                provider=str(info.get("provider") or "").strip(),
+                source_url=str(info.get("source_url") or "").strip(),
+                title=str(info.get("title") or "").strip(),
+                resource_type=str(info.get("resource_type") or "playlist").strip() or "playlist",
+                resource_id=str(info.get("resource_id") or "").strip(),
+                next_offset=source_offset,
+                total_tracks=(None if info.get("total_tracks") in (None, "") else int(info.get("total_tracks"))),
+                exhausted=False,
+                instance_id=str(info.get("instance_id") or "").strip(),
+                block_end_offset=(None if info.get("block_end_offset") in (None, "") else int(info.get("block_end_offset"))),
+                shuffle_seed=max(0, int(info.get("shuffle_seed") or 0)),
+            )
+            if not cursor.provider or not cursor.source_url:
+                return []
+            try:
+                batch = await router.extractor.continue_playlist_window(
+                    cursor,
+                    requester_id=int(info.get("requester_id") or 0),
+                    requester_name=str(info.get("requester_name") or ""),
+                    limit=page_size,
+                )
+                tracks = list(batch.tracks[:page_size]) if batch is not None else []
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                state.agent_virtual_playlist_browse_error = f"{type(exc).__name__}: {exc}"[:220]
+                return []
+            for local_index, track in enumerate(tracks):
+                track.virtual_playlist_instance_id = str(info.get("instance_id") or "")
+                track.virtual_source_index = source_offset + local_index
+                track.virtual_provider = cursor.provider
+                track.virtual_source_url = cursor.source_url
+            state.agent_virtual_playlist_pages[page] = list(tracks)
+            state.agent_virtual_playlist_browse_error = ""
+            return tracks
+        layout = []
+        with contextlib.suppress(Exception):
+            for track in list(getattr(state, "forward_queue", []) or []):
+                layout.append({"kind": "track", "track": track})
+
     logical_start = page * page_size
-    if total_remaining is not None and logical_start >= total_remaining:
-        state.agent_virtual_playlist_pages[page] = []
+    logical_end = logical_start + page_size
+    logical_pos = 0
+    pieces: list[tuple[str, Any, int, int]] = []
+
+    def segment_length(info: dict[str, Any]) -> int | None:
+        remaining = info.get("remaining")
+        if remaining not in (None, ""):
+            with contextlib.suppress(Exception):
+                return max(0, int(remaining))
+        try:
+            begin = max(0, int(info.get("next_offset") or 0))
+        except Exception:
+            begin = 0
+        raw_end = info.get("block_end_offset")
+        if raw_end in (None, ""):
+            raw_end = info.get("total_tracks")
+        if raw_end in (None, ""):
+            return None
+        try:
+            return max(0, int(raw_end) - begin)
+        except Exception:
+            return None
+
+    for entry in layout:
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind") or "").strip().lower()
+        if kind == "track":
+            length = 1
+            seg_end = logical_pos + length
+            if logical_pos < logical_end and seg_end > logical_start:
+                pieces.append(("track", entry.get("track"), 0, 1))
+            logical_pos = seg_end
+            if logical_pos >= logical_end:
+                break
+            continue
+        if kind != "virtual" or not isinstance(entry.get("virtual"), dict):
+            continue
+        info = entry["virtual"]
+        length = segment_length(info)
+        if length is None:
+            # Total desconhecido: esse segmento absorve a página atual. Não há
+            # como posicionar segmentos posteriores até o provider publicar o total.
+            length = max(page_size, logical_end - logical_pos)
+        seg_end = logical_pos + length
+        if logical_pos < logical_end and seg_end > logical_start:
+            overlap_start = max(logical_start, logical_pos) - logical_pos
+            overlap_end = min(logical_end, seg_end) - logical_pos
+            pieces.append(("virtual", info, int(overlap_start), int(overlap_end - overlap_start)))
+        logical_pos = seg_end
+        if logical_pos >= logical_end:
+            break
+
+    if not pieces:
+        if expected_key:
+            state.agent_virtual_playlist_pages[page] = []
         return []
 
-    source_offset = virtual_playlist_consumed_count(info) + logical_start
-    cursor = PlaylistCursor(
-        provider=str(info.get("provider") or "").strip(),
-        source_url=str(info.get("source_url") or "").strip(),
-        title=str(info.get("title") or "").strip(),
-        resource_type=str(info.get("resource_type") or "playlist").strip() or "playlist",
-        resource_id=str(info.get("resource_id") or "").strip(),
-        next_offset=source_offset,
-        total_tracks=(None if info.get("total_tracks") in (None, "") else int(info.get("total_tracks"))),
-        exhausted=False,
-    )
-    if not cursor.provider or not cursor.source_url:
-        return []
-
-    requester_id = 0
-    requester_name = ""
-    # O snapshot público simplificado não precisa carregar requester, mas os
-    # metadados exibidos na fila ficam melhores quando preservamos o atual.
-    with contextlib.suppress(Exception):
-        if getattr(state, "current", None) is not None:
-            requester_id = int(getattr(state.current, "requester_id", 0) or 0)
-            requester_name = str(getattr(state.current, "requester_name", "") or "")
-
+    result: list[MusicTrack] = []
     try:
-        batch = await router.extractor.continue_playlist_window(
-            cursor,
-            requester_id=requester_id,
-            requester_name=requester_name,
-            limit=page_size,
-        )
-        tracks = list(batch.tracks[:page_size]) if batch is not None else []
+        for kind, value, offset_in_segment, count in pieces:
+            if len(result) >= page_size:
+                break
+            if kind == "track":
+                if isinstance(value, MusicTrack):
+                    result.append(value)
+                continue
+            info = value if isinstance(value, dict) else {}
+            provider = str(info.get("provider") or "").strip()
+            source_url = str(info.get("source_url") or "").strip()
+            if not provider or not source_url or count <= 0:
+                continue
+            segment_start = max(0, int(info.get("next_offset") or 0))
+            shuffle_seed = max(0, int(info.get("shuffle_seed") or 0))
+            source_index = segment_start + max(0, int(offset_in_segment))
+            fetch_start = segment_start if shuffle_seed else source_index
+            fetch_limit = min(count, page_size - len(result))
+            if shuffle_seed:
+                segment_len = segment_length(info)
+                if segment_len is not None:
+                    fetch_limit = max(1, min(100, int(segment_len)))
+            cursor = PlaylistCursor(
+                provider=provider,
+                source_url=source_url,
+                title=str(info.get("title") or "").strip(),
+                resource_type=str(info.get("resource_type") or "playlist").strip() or "playlist",
+                resource_id=str(info.get("resource_id") or "").strip(),
+                next_offset=fetch_start,
+                total_tracks=(None if info.get("total_tracks") in (None, "") else int(info.get("total_tracks"))),
+                exhausted=False,
+                instance_id=str(info.get("instance_id") or "").strip(),
+                block_end_offset=(None if info.get("block_end_offset") in (None, "") else int(info.get("block_end_offset"))),
+                shuffle_seed=shuffle_seed,
+            )
+            batch = await router.extractor.continue_playlist_window(
+                cursor,
+                requester_id=int(info.get("requester_id") or 0),
+                requester_name=str(info.get("requester_name") or ""),
+                limit=fetch_limit,
+            )
+            fetched = list(batch.tracks[:fetch_limit]) if batch is not None else []
+            indexed = [(fetch_start + local_index, track) for local_index, track in enumerate(fetched)]
+            if shuffle_seed and len(indexed) > 1:
+                import random as _random
+                _random.Random(shuffle_seed).shuffle(indexed)
+                begin = max(0, int(offset_in_segment))
+                indexed = indexed[begin:begin + count]
+            else:
+                indexed = indexed[:count]
+            for actual_source_index, track in indexed:
+                # A identidade virtual viaja com a opção do select. Assim uma
+                # página distante pode tocar/remover/mover sem materializar os
+                # outros itens da playlist.
+                track.virtual_playlist_instance_id = str(info.get("instance_id") or "")
+                track.virtual_source_index = actual_source_index
+                track.virtual_provider = provider
+                track.virtual_source_url = source_url
+                result.append(track)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         state.agent_virtual_playlist_browse_error = f"{type(exc).__name__}: {exc}"[:220]
         logger.debug(
-            "[music/playlist] página virtual da fila não pôde ser carregada | guild=%s page=%s offset=%s",
+            "[music/playlist] página lógica da fila não pôde ser carregada | guild=%s page=%s",
             guild_id,
             page,
-            source_offset,
             exc_info=True,
         )
         return []
 
-    # Não grave resultado se a faixa avançou enquanto o I/O estava em curso.
     current = router.get_state(int(guild_id))
-    current_info = getattr(current, "agent_virtual_playlist", None)
-    if _virtual_browse_state_key(current_info if isinstance(current_info, dict) else {}) != expected_key:
+    if expected_key and str(getattr(current, "agent_virtual_playlist_browse_key", "") or "") != expected_key:
         return []
-    current.agent_virtual_playlist_pages[page] = list(tracks)
+    current.agent_virtual_playlist_pages[page] = list(result)
     current.agent_virtual_playlist_browse_error = ""
     logger.info(
-        "[music/playlist] página virtual pronta para UI | guild=%s page=%s offset=%s tracks=%s",
+        "[music/playlist] página lógica pronta para UI | guild=%s page=%s tracks=%s",
         guild_id,
         page + 1,
-        source_offset,
-        len(tracks),
+        len(result),
     )
-    return tracks
+    return result
+
 
 def cancel_playlist_refill(state: Any) -> None:
     task = getattr(state, "virtual_playlist_refill_task", None)

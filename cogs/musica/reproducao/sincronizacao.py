@@ -13,11 +13,8 @@ from ..nucleo.modelos import MusicTrack
 logger = logging.getLogger(__name__)
 
 
-def _playlist_virtual_publica(remote: dict[str, Any]) -> dict[str, Any]:
-    """Normaliza somente metadata leve da playlist virtual para a UI local."""
-
-    virtual = remote.get("virtual_playlist") if isinstance(remote.get("virtual_playlist"), dict) else None
-    if not virtual:
+def _normalizar_playlist_virtual(virtual: Any) -> dict[str, Any]:
+    if not isinstance(virtual, dict):
         return {}
     cursor = virtual.get("cursor") if isinstance(virtual.get("cursor"), dict) else None
     if not cursor or bool(cursor.get("exhausted")):
@@ -34,6 +31,11 @@ def _playlist_virtual_publica(remote: dict[str, Any]) -> dict[str, Any]:
         total_tracks = None if total_raw in (None, "") else max(0, int(total_raw))
     except Exception:
         total_tracks = None
+    block_raw = cursor.get("block_end_offset")
+    try:
+        block_end = None if block_raw in (None, "") else max(0, int(block_raw))
+    except Exception:
+        block_end = None
 
     return {
         "active": True,
@@ -42,12 +44,49 @@ def _playlist_virtual_publica(remote: dict[str, Any]) -> dict[str, Any]:
         "title": str(cursor.get("title") or "").strip(),
         "resource_type": str(cursor.get("resource_type") or "playlist").strip() or "playlist",
         "resource_id": str(cursor.get("resource_id") or "").strip(),
+        "instance_id": str(cursor.get("instance_id") or "").strip(),
         "next_offset": inteiro(cursor.get("next_offset")),
         "total_tracks": total_tracks,
+        "block_end_offset": block_end,
+        "shuffle_seed": inteiro(cursor.get("shuffle_seed")),
         "materialized_before": inteiro(virtual.get("materialized_before")),
+        "physical_index": inteiro(virtual.get("physical_index")),
         "waiting": bool(virtual.get("waiting")),
+        "requester_id": inteiro(virtual.get("requester_id")),
+        "requester_name": str(virtual.get("requester_name") or ""),
+        "remaining": (None if virtual.get("remaining") in (None, "") else inteiro(virtual.get("remaining"))),
     }
 
+
+def _playlists_virtuais_publicas(remote: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = remote.get("virtual_playlists")
+    values: list[dict[str, Any]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            normalized = _normalizar_playlist_virtual(item)
+            if normalized:
+                values.append(normalized)
+    if not values:
+        single = _normalizar_playlist_virtual(remote.get("virtual_playlist"))
+        if single:
+            values.append(single)
+    return values
+
+
+def _playlist_virtual_legada(info: dict[str, Any]) -> dict[str, Any]:
+    """Shape singular preservado para clientes/testes anteriores à Wave 15."""
+    if not isinstance(info, dict) or not info:
+        return {}
+    keys = (
+        "active", "provider", "source_url", "title", "resource_type",
+        "resource_id", "next_offset", "total_tracks", "materialized_before", "waiting",
+    )
+    return {key: info.get(key) for key in keys}
+
+
+def _playlist_virtual_publica(remote: dict[str, Any]) -> dict[str, Any]:
+    values = _playlists_virtuais_publicas(remote)
+    return _playlist_virtual_legada(values[0]) if values else {}
 
 
 def _virtual_playlist_browse_key(info: dict[str, Any]) -> str:
@@ -61,10 +100,31 @@ def _virtual_playlist_browse_key(info: dict[str, Any]) -> str:
         (
             str(info.get("provider") or "").strip(),
             str(info.get("source_url") or "").strip(),
+            str(info.get("instance_id") or ""),
+            str(info.get("block_end_offset") if info.get("block_end_offset") not in (None, "") else "?"),
+            str(info.get("shuffle_seed") or 0),
+            # Preserve consumed|total at the tail for compatibility with the
+            # existing browse-key contract/tests.
             str(consumed),
             str(info.get("total_tracks") if info.get("total_tracks") not in (None, "") else "?"),
         )
     )
+
+def _virtual_layout_browse_key(playlists: list[dict[str, Any]], layout: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for info in playlists:
+        parts.append(_virtual_playlist_browse_key(info))
+    for entry in layout:
+        kind = str(entry.get("kind") or "") if isinstance(entry, dict) else ""
+        if kind == "track":
+            track = entry.get("track") if isinstance(entry, dict) else None
+            parts.append(f"t:{getattr(track, 'queue_item_id', '')}")
+        elif kind == "virtual":
+            info = entry.get("virtual") if isinstance(entry, dict) else None
+            if isinstance(info, dict):
+                parts.append(f"v:{_virtual_playlist_browse_key(info)}")
+    return "||".join(parts)
+
 
 def sincronizar_fila_remota(
     state: Any,
@@ -95,11 +155,35 @@ def sincronizar_fila_remota(
 
     # Atualize o cursor mesmo quando o Worker omitir o preview da fila. Isso
     # evita a UI dizer "fila vazia" enquanto está parada exatamente no marker.
-    virtual_info = _playlist_virtual_publica(remote)
-    state.agent_virtual_playlist = virtual_info
+    virtual_playlists = _playlists_virtuais_publicas(remote)
+    virtual_info = virtual_playlists[0] if virtual_playlists else {}
+    state.agent_virtual_playlist = _playlist_virtual_legada(virtual_info)
+    state.agent_virtual_playlists = list(virtual_playlists)
+
+    layout: list[dict[str, Any]] = []
+    raw_layout = remote.get("queue_layout")
+    if isinstance(raw_layout, list):
+        for entry in raw_layout:
+            if not isinstance(entry, dict):
+                continue
+            kind = str(entry.get("kind") or "").strip().lower()
+            if kind == "track" and isinstance(entry.get("track"), dict):
+                track_value = faixa_do_payload(entry.get("track"))
+                if track_value is not None:
+                    layout.append({"kind": "track", "track": track_value})
+            elif kind == "virtual":
+                normalized = _normalizar_playlist_virtual({
+                    "cursor": entry.get("cursor") if isinstance(entry.get("cursor"), dict) else {},
+                    "requester_id": entry.get("requester_id"),
+                    "requester_name": entry.get("requester_name"),
+                    "remaining": entry.get("remaining"),
+                })
+                if normalized:
+                    layout.append({"kind": "virtual", "virtual": normalized})
+    state.agent_queue_layout = layout
 
     def commit_virtual_browse_state() -> None:
-        browse_key = _virtual_playlist_browse_key(virtual_info)
+        browse_key = _virtual_layout_browse_key(virtual_playlists, layout)
         previous_browse_key = str(getattr(state, "agent_virtual_playlist_browse_key", "") or "")
         if browse_key != previous_browse_key:
             # As posições lógicas mudaram (nova playlist ou a faixa atual avançou).
@@ -109,10 +193,18 @@ def sincronizar_fila_remota(
             state.agent_virtual_playlist_browse_key = browse_key
 
     remote_queue = remote.get("queue")
+    has_logical_queue_size = remote.get("logical_queue_size") not in (None, "")
     try:
-        state.agent_remote_queue_size = max(0, int(remote.get("queue_size") or 0))
+        state.agent_remote_materialized_queue_size = max(0, int(remote.get("queue_size") or 0))
     except Exception:
-        state.agent_remote_queue_size = 0
+        state.agent_remote_materialized_queue_size = 0
+    try:
+        state.agent_remote_queue_size = max(
+            state.agent_remote_materialized_queue_size,
+            int(remote.get("logical_queue_size") or 0),
+        )
+    except Exception:
+        state.agent_remote_queue_size = state.agent_remote_materialized_queue_size
 
     if remote_queue is None and remote.get("queue_size") in (0, "0"):
         remote_queue = []
@@ -141,7 +233,9 @@ def sincronizar_fila_remota(
             if track is not None:
                 mirrored.append(track)
     if mirrored_duplicate_repairs:
-        state.agent_remote_queue_size = max(0, state.agent_remote_queue_size - mirrored_duplicate_repairs)
+        state.agent_remote_materialized_queue_size = max(0, state.agent_remote_materialized_queue_size - mirrored_duplicate_repairs)
+        if not has_logical_queue_size:
+            state.agent_remote_queue_size = max(0, state.agent_remote_queue_size - mirrored_duplicate_repairs)
         state.agent_queue_snapshot_repairs = max(0, int(getattr(state, "agent_queue_snapshot_repairs", 0) or 0)) + mirrored_duplicate_repairs
         repair_signature = f"{current_queue_item_id}:{mirrored_duplicate_repairs}"
         if repair_signature != str(getattr(state, "agent_queue_last_repair_signature", "") or ""):
@@ -160,7 +254,7 @@ def sincronizar_fila_remota(
                 0,
                 int(virtual_info.get("materialized_before") or 0) - mirrored_duplicate_repairs,
             )
-            state.agent_virtual_playlist = virtual_info
+            state.agent_virtual_playlist = _playlist_virtual_legada(virtual_info)
 
     if not mirrored_duplicate_repairs:
         state.agent_queue_last_repair_signature = ""

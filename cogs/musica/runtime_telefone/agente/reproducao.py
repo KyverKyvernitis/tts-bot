@@ -504,15 +504,26 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         expected = body.get("expected_cursor") if isinstance(body.get("expected_cursor"), dict) else {}
         next_cursor = body.get("next_cursor") if isinstance(body.get("next_cursor"), dict) else {}
 
-        def _cursor_key(value: dict[str, Any]) -> tuple[str, str, int]:
+        def _cursor_key(value: dict[str, Any]) -> tuple[str, str, str, int, int, int]:
             try:
                 offset = max(0, int(value.get("next_offset") or 0))
             except Exception:
                 offset = 0
+            try:
+                block_end = -1 if value.get("block_end_offset") in (None, "") else max(0, int(value.get("block_end_offset")))
+            except Exception:
+                block_end = -1
+            try:
+                shuffle_seed = max(0, int(value.get("shuffle_seed") or 0))
+            except Exception:
+                shuffle_seed = 0
             return (
+                str(value.get("instance_id") or "").strip(),
                 str(value.get("provider") or "").strip(),
                 str(value.get("source_url") or "").strip(),
                 offset,
+                block_end,
+                shuffle_seed,
             )
 
         expected_key = _cursor_key(expected)
@@ -524,7 +535,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 marker = item
                 break
         if marker is None:
-            self.log("playlist_refill_ignored", guild_id=guild_id, reason="stale_cursor", expected_offset=expected_key[2])
+            self.log("playlist_refill_ignored", guild_id=guild_id, reason="stale_cursor", expected_offset=expected_key[3])
             return {"ok": True, "ignored": True, "added": 0, "state": st.public()}
 
         incoming: list[AgentTrack] = []
@@ -547,12 +558,19 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             )
 
         exhausted = bool(next_cursor.get("exhausted")) if next_cursor else not incoming
-        if st.virtual_shuffle_active and len(incoming) > 1:
+        marker_shuffle_seed = max(0, int(marker.virtual_playlist_cursor.get("shuffle_seed") or 0))
+        if len(incoming) > 1 and (marker_shuffle_seed or st.virtual_shuffle_active):
             import random as _random
-            # Misture cada janela futura com seed derivado do offset. Não há
-            # materialização global nem novas pesquisas; o refill continua
-            # bounded e determinístico durante esta sessão.
-            refill_seed = int(st.virtual_shuffle_seed or 0) ^ int(expected_key[2] or 0)
+            import zlib as _zlib
+            if marker_shuffle_seed:
+                # Bloco de shuffle global conhecido: a UI usa exatamente esta
+                # mesma seed, então ordem exibida e ordem reproduzida coincidem.
+                refill_seed = marker_shuffle_seed
+            else:
+                # Compatibilidade para providers que ainda não publicam total.
+                # Cada janela futura é embaralhada determinísticamente.
+                identity = "|".join((expected_key[0], expected_key[1], expected_key[2])).encode("utf-8", "ignore")
+                refill_seed = int(st.virtual_shuffle_seed or 0) ^ int(expected_key[3] or 0) ^ _zlib.crc32(identity)
             _random.Random(refill_seed).shuffle(incoming)
         replacement: list[AgentTrack] = list(incoming)
         if next_cursor and not exhausted:
@@ -568,7 +586,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
 
         # Preserva tudo que foi enfileirado manualmente depois do marker.
         st.queue[marker_index:marker_index + 1] = replacement
-        if exhausted:
+        if st.virtual_shuffle_active and exhausted and not any(item.is_virtual_playlist_marker for item in st.queue):
             st.virtual_shuffle_active = False
             st.virtual_shuffle_seed = 0
         st.updated_at = time.time()
@@ -577,8 +595,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             guild_id=guild_id,
             added=len(incoming),
             exhausted=exhausted,
-            expected_offset=expected_key[2],
-            next_offset=_cursor_key(next_cursor)[2] if next_cursor else expected_key[2],
+            expected_offset=expected_key[3],
+            next_offset=_cursor_key(next_cursor)[3] if next_cursor else expected_key[3],
             queue_size=len(st.queue),
         )
 
@@ -827,6 +845,243 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         self.log("previous_started", guild_id=guild_id, title=getattr(previous, "title", ""), queue_size=len(st.queue), history_size=len(st.history))
         return {"ok": True, "previous": previous.public(), "state": st.public()}
 
+    @staticmethod
+    def _virtual_cursor_bounds(item: AgentTrack) -> tuple[int, int | None]:
+        cursor = item.virtual_playlist_cursor if isinstance(item.virtual_playlist_cursor, dict) else {}
+        try:
+            start = max(0, int(cursor.get("next_offset") or 0))
+        except Exception:
+            start = 0
+        raw_end = cursor.get("block_end_offset")
+        if raw_end in (None, ""):
+            raw_end = cursor.get("total_tracks")
+        if raw_end in (None, ""):
+            return start, None
+        try:
+            return start, max(start, int(raw_end))
+        except Exception:
+            return start, None
+
+    @staticmethod
+    def _virtual_marker_matches(item: AgentTrack, *, instance_id: str, provider: str, source_url: str) -> bool:
+        if not item.is_virtual_playlist_marker:
+            return False
+        cursor = item.virtual_playlist_cursor if isinstance(item.virtual_playlist_cursor, dict) else {}
+        marker_instance = str(cursor.get("instance_id") or "").strip()
+        if instance_id and marker_instance:
+            return marker_instance == instance_id
+        return (
+            str(cursor.get("provider") or "").strip() == provider
+            and str(cursor.get("source_url") or "").strip() == source_url
+        )
+
+    @staticmethod
+    def _marker_with_range(marker: AgentTrack, start: int, end: int | None, *, preserve_unbounded_end: bool = False) -> AgentTrack | None:
+        start = max(0, int(start))
+        if end is not None and int(end) <= start:
+            return None
+        cursor = dict(marker.virtual_playlist_cursor)
+        cursor["next_offset"] = start
+        cursor["exhausted"] = False
+        if end is None or preserve_unbounded_end:
+            cursor.pop("block_end_offset", None)
+        else:
+            cursor["block_end_offset"] = max(start, int(end))
+        return replace(marker, virtual_playlist_cursor=cursor, queue_item_id="")
+
+    def _remove_virtual_source_entry(
+        self,
+        st: GuildMusicState,
+        *,
+        instance_id: str,
+        provider: str,
+        source_url: str,
+        source_index: int,
+    ) -> tuple[bool, int]:
+        source_index = max(0, int(source_index))
+        for physical_index, marker in enumerate(st.queue):
+            if not self._virtual_marker_matches(
+                marker, instance_id=instance_id, provider=provider, source_url=source_url
+            ):
+                continue
+            start, end = self._virtual_cursor_bounds(marker)
+            if end is None or not (start <= source_index < end):
+                continue
+            had_bounded_end = marker.virtual_playlist_cursor.get("block_end_offset") not in (None, "")
+            replacement: list[AgentTrack] = []
+            before = self._marker_with_range(marker, start, source_index)
+            if before is not None:
+                replacement.append(before)
+            after = self._marker_with_range(
+                marker,
+                source_index + 1,
+                end,
+                preserve_unbounded_end=not had_bounded_end,
+            )
+            if after is not None:
+                replacement.append(after)
+            st.queue[physical_index:physical_index + 1] = replacement
+            return True, physical_index
+        return False, -1
+
+    def _logical_queue_size(self, st: GuildMusicState) -> int:
+        total = 0
+        for item in st.queue:
+            if item.is_virtual_playlist_marker:
+                start, end = self._virtual_cursor_bounds(item)
+                if end is not None:
+                    total += max(0, end - start)
+            else:
+                total += 1
+        return total
+
+    def _insert_track_at_logical_position(self, st: GuildMusicState, track: AgentTrack, position: int) -> bool:
+        total = self._logical_queue_size(st)
+        position = int(position)
+        if position < 1 or position > total + 1:
+            return False
+        logical = 1
+        for physical_index, item in enumerate(list(st.queue)):
+            if not item.is_virtual_playlist_marker:
+                if logical == position:
+                    st.queue.insert(physical_index, track)
+                    return True
+                logical += 1
+                continue
+            start, end = self._virtual_cursor_bounds(item)
+            if end is None:
+                if logical == position:
+                    st.queue.insert(physical_index, track)
+                    return True
+                continue
+            length = max(0, end - start)
+            if position <= logical + length - 1:
+                offset = max(0, position - logical)
+                if offset == 0:
+                    st.queue.insert(physical_index, track)
+                    return True
+                split_source = start + offset
+                had_bounded_end = item.virtual_playlist_cursor.get("block_end_offset") not in (None, "")
+                left = self._marker_with_range(item, start, split_source)
+                right = self._marker_with_range(
+                    item, split_source, end, preserve_unbounded_end=not had_bounded_end
+                )
+                replacement = [part for part in (left, track, right) if part is not None]
+                st.queue[physical_index:physical_index + 1] = replacement
+                return True
+            logical += length
+        if position == total + 1:
+            st.queue.append(track)
+            return True
+        return False
+
+    async def _play_selected_queue_track(self, guild_id: int, st: GuildMusicState, selected: AgentTrack) -> None:
+        selected.start_offset_seconds = 0.0
+        st.queue.insert(0, selected)
+        previous = st.current
+        self._push_history(st, previous)
+        contaminated = self._guard_distinct_next_stream(st, previous)
+        keep = set() if contaminated else self._next_resolving_prefetch_keys(st)
+        self._bump_playback_generation(st, reason="queue_play_now", keep_prefetch_task_keys=keep)
+        player = st.player
+        mixed = getattr(player, "source", None)
+        if isinstance(mixed, AgentMixedAudioSource) and mixed.persistent and getattr(player, "is_playing", lambda: False)():
+            mixed.stop_music()
+        else:
+            await self._stop_player_instance(player, disconnect=False)
+        st.current = None
+        st.paused = False
+        st.last_action = "queue_play_now"
+        await self._play_next(guild_id, preserve_current_to_history=False)
+
+    async def cmd_queue_virtual_action(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = safe_id(body.get("guild_id"))
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        action = str(body.get("virtual_action") or body.get("operation") or "").strip().lower()
+        instance_id = str(body.get("instance_id") or "").strip()
+        provider = str(body.get("provider") or "").strip()
+        source_url = str(body.get("source_url") or "").strip()
+        try:
+            source_index = max(0, int(body.get("source_index")))
+        except Exception:
+            return {"ok": False, "error": "índice virtual inválido", "state": st.public()}
+        if action not in {"remove", "play_now", "move"}:
+            return {"ok": False, "error": "ação virtual desconhecida", "state": st.public()}
+
+        to_position: int | None = None
+        if action == "move":
+            try:
+                to_position = int(body.get("to_position") or body.get("to_pos") or 0)
+            except Exception:
+                to_position = 0
+            total_before = self._logical_queue_size(st)
+            if to_position < 1 or to_position > total_before:
+                return {"ok": False, "error": "posição de destino inválida", "state": st.public()}
+
+        track_meta = body.get("track") if isinstance(body.get("track"), dict) else {}
+        selected = self._agent_track_from_metadata(track_meta, body=body, fallback_query="") if track_meta else None
+        if action in {"play_now", "move"} and (
+            selected is None or not (selected.query or selected.webpage_url or selected.stream_url)
+        ):
+            return {"ok": False, "error": "metadata da entrada virtual ausente", "state": st.public()}
+
+        removed, _physical_index = self._remove_virtual_source_entry(
+            st,
+            instance_id=instance_id,
+            provider=provider,
+            source_url=source_url,
+            source_index=source_index,
+        )
+        if not removed:
+            return {"ok": False, "error": "entrada virtual não está mais nessa posição", "stale": True, "state": st.public()}
+
+        if action == "remove":
+            st.last_action = "queue_remove_virtual"
+            st.updated_at = time.time()
+            self._cancel_prefetch_tasks(guild_id)
+            self._schedule_next_queue_prefetch(guild_id, reason="queue_remove_virtual")
+            return {"ok": True, "removed": track_meta, "state": st.public()}
+
+        if action == "play_now":
+            self._cancel_prefetch_tasks(guild_id)
+            await self._play_selected_queue_track(guild_id, st, selected)
+            return {"ok": True, "selected": selected.public(), "state": st.public()}
+
+        if action == "move":
+            assert to_position is not None
+            if not self._insert_track_at_logical_position(st, selected, to_position):
+                # A posição já foi validada antes da remoção. Se o layout mudar
+                # dentro desta operação, preserve a faixa em vez de perdê-la.
+                st.queue.append(selected)
+                st.updated_at = time.time()
+                return {"ok": False, "error": "fila mudou durante a operação; tente novamente", "stale": True, "state": st.public()}
+            self._cancel_prefetch_tasks(guild_id)
+            st.last_action = "queue_move_virtual"
+            st.updated_at = time.time()
+            self._schedule_next_queue_prefetch(guild_id, reason="queue_move_virtual")
+            return {"ok": True, "moved": True, "track": selected.public(), "state": st.public()}
+
+
+    def _physical_track_index_at_logical_position(self, st: GuildMusicState, position: int) -> int | None:
+        position = int(position)
+        if position < 1:
+            return None
+        logical = 1
+        for physical_index, item in enumerate(st.queue):
+            if not item.is_virtual_playlist_marker:
+                if logical == position:
+                    return physical_index
+                logical += 1
+                continue
+            start, end = self._virtual_cursor_bounds(item)
+            if end is None:
+                return None
+            length = max(0, end - start)
+            if logical <= position < logical + length:
+                return None
+            logical += length
+        return None
+
     def _queue_materialized_indices(self, st: GuildMusicState) -> list[int]:
         """Índices editáveis antes do cursor virtual.
 
@@ -851,10 +1106,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             position = int(body.get("position") or body.get("index") or 0)
         except Exception:
             position = 0
-        indices = self._queue_materialized_indices(st)
-        if position < 1 or position > len(indices):
-            return {"ok": False, "error": "posição fora da fila pronta", "state": st.public()}
-        removed = st.queue.pop(indices[position - 1])
+        physical_index = self._physical_track_index_at_logical_position(st, position)
+        if physical_index is None:
+            return {"ok": False, "error": "posição virtual ou inexistente", "state": st.public()}
+        removed = st.queue.pop(physical_index)
         self._cancel_prefetch_tasks(guild_id)
         st.last_action = "queue_remove"
         st.updated_at = time.time()
@@ -869,15 +1124,18 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             to_pos = int(body.get("to_position") or body.get("to_pos") or 0)
         except Exception:
             from_pos = to_pos = 0
-        indices = self._queue_materialized_indices(st)
-        count = len(indices)
-        if from_pos < 1 or from_pos > count or to_pos < 1 or to_pos > count:
-            return {"ok": False, "error": "posição fora da fila pronta", "state": st.public()}
+        total_before = self._logical_queue_size(st)
+        if from_pos < 1 or from_pos > total_before or to_pos < 1 or to_pos > total_before:
+            return {"ok": False, "error": "posição fora da fila", "state": st.public()}
         if from_pos == to_pos:
             return {"ok": True, "moved": False, "state": st.public()}
-        # Antes do marker os índices físicos coincidem com as posições lógicas.
-        track = st.queue.pop(from_pos - 1)
-        st.queue.insert(to_pos - 1, track)
+        physical_index = self._physical_track_index_at_logical_position(st, from_pos)
+        if physical_index is None:
+            return {"ok": False, "error": "origem virtual; use ação virtual", "state": st.public()}
+        track = st.queue.pop(physical_index)
+        if not self._insert_track_at_logical_position(st, track, to_pos):
+            st.queue.insert(min(physical_index, len(st.queue)), track)
+            return {"ok": False, "error": "posição de destino inválida", "state": st.public()}
         self._cancel_prefetch_tasks(guild_id)
         st.last_action = "queue_move"
         st.updated_at = time.time()
@@ -904,69 +1162,143 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             position = int(body.get("position") or body.get("index") or 0)
         except Exception:
             position = 0
-        indices = self._queue_materialized_indices(st)
-        if position < 1 or position > len(indices):
-            return {"ok": False, "error": "posição fora da fila pronta", "state": st.public()}
-
-        selected = st.queue.pop(indices[position - 1])
-        selected.start_offset_seconds = 0.0
-        st.queue.insert(0, selected)
-        previous = st.current
-        self._push_history(st, previous)
-        contaminated = self._guard_distinct_next_stream(st, previous)
-        keep = set() if contaminated else self._next_resolving_prefetch_keys(st)
-        self._bump_playback_generation(st, reason="queue_play_now", keep_prefetch_task_keys=keep)
-        player = st.player
-        mixed = getattr(player, "source", None)
-        if isinstance(mixed, AgentMixedAudioSource) and mixed.persistent and getattr(player, "is_playing", lambda: False)():
-            mixed.stop_music()
-        else:
-            await self._stop_player_instance(player, disconnect=False)
-        st.current = None
-        st.paused = False
-        st.last_action = "queue_play_now"
-        await self._play_next(guild_id, preserve_current_to_history=False)
+        physical_index = self._physical_track_index_at_logical_position(st, position)
+        if physical_index is None:
+            return {"ok": False, "error": "posição virtual ou inexistente", "state": st.public()}
+        selected = st.queue.pop(physical_index)
+        await self._play_selected_queue_track(guild_id, st, selected)
         return {"ok": True, "selected": selected.public(), "state": st.public()}
 
     async def cmd_shuffle(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.last_action = "shuffle"
-        # Shuffle é uma ação única para embaralhar a fila atual, não um modo
-        # persistente ligado/desligado. Não altere playback_token aqui: ele é
-        # usado pelo callback do áudio atual; mudar esse token faria a faixa
-        # atual terminar sem avançar a queue. Cancele apenas o prefetch antigo.
         self._cancel_prefetch_tasks(guild_id)
-        marker_index = next((index for index, item in enumerate(st.queue) if item.is_virtual_playlist_marker), -1)
-        if marker_index >= 0:
-            # Playlist virtual: embaralhe toda a janela pronta agora e marque a
-            # sessão para que CADA refill futuro também chegue embaralhado. Isso
-            # preserva RAM/latência (não materializa a coleção inteira) e evita
-            # o comportamento antigo em que shuffle simplesmente falhava.
-            import random as _random
-            ready = list(st.queue[:marker_index])
+
+        import math as _math
+        import random as _random
+
+        markers = [(index, item, *self._virtual_cursor_bounds(item)) for index, item in enumerate(st.queue) if item.is_virtual_playlist_marker]
+        unknown_markers = [(index, item) for index, item, _begin, finish in markers if finish is None]
+        if unknown_markers:
+            # Sem total não existe como permutar globalmente referências que
+            # ainda não têm domínio conhecido. Preserve a semântica lazy antiga:
+            # embaralhe a janela pronta antes do primeiro marker e marque os
+            # refills futuros para shuffle determinístico. Assim o botão segue
+            # útil sem inventar posições ou materializar a coleção inteira.
+            first_marker_index = unknown_markers[0][0]
+            ready = list(st.queue[:first_marker_index])
             seed = int(time.time_ns() & 0x7FFFFFFF)
             if len(ready) > 1:
                 _random.Random(seed).shuffle(ready)
-                st.queue[:marker_index] = ready
+                st.queue[:first_marker_index] = ready
             st.virtual_shuffle_active = True
             st.virtual_shuffle_seed = seed
             st.shuffle = False
             st.updated_at = time.time()
-            self._schedule_next_queue_prefetch(guild_id, reason="shuffle_virtual")
-            self.log("queue_virtual_shuffled", guild_id=guild_id, queue_size=len(ready), seed=seed)
-            return {"ok": True, "shuffled": True, "enabled": False, "virtual": True, "queue_size": len(ready), "state": st.public()}
-        if len(st.queue) > 1:
-            import random as _random
-            _random.shuffle(st.queue)
+            self._schedule_next_queue_prefetch(guild_id, reason="shuffle_virtual_unknown_total")
+            self.log(
+                "queue_virtual_shuffle_fallback",
+                guild_id=guild_id,
+                queue_size=len(ready),
+                virtual_markers=len(markers),
+                reason="unknown_total",
+                seed=seed,
+            )
+            return {
+                "ok": True,
+                "shuffled": True,
+                "enabled": False,
+                "virtual": True,
+                "queue_size": self._logical_queue_size(st),
+                "shuffle_mode": "windowed_unknown_total",
+                "state": st.public(),
+            }
+
+        virtual_total = 0
+        for item in st.queue:
+            if item.is_virtual_playlist_marker:
+                begin, finish = self._virtual_cursor_bounds(item)
+                if finish is not None:
+                    virtual_total += max(0, finish - begin)
+        # Mantenha no máximo ~128 blocos virtuais mesmo com fila de 10 mil,
+        # mas use a janela normal (25) em playlists menores. Cada bloco continua
+        # metadata-only e é materializado JIT quando chega perto da reprodução.
+        block_size = max(25, int(_math.ceil(virtual_total / 128.0))) if virtual_total else 25
+        seed = int(time.time_ns() & 0x7FFFFFFF) or 1
+        units: list[AgentTrack] = []
+        for item in st.queue:
+            if not item.is_virtual_playlist_marker:
+                units.append(item)
+                continue
+            begin, finish = self._virtual_cursor_bounds(item)
+            if finish is None or finish <= begin:
+                units.append(item)
+                continue
+            cursor_was_bounded = item.virtual_playlist_cursor.get("block_end_offset") not in (None, "")
+            pos = begin
+            while pos < finish:
+                block_end = min(finish, pos + block_size)
+                block = self._marker_with_range(item, pos, block_end)
+                if block is not None:
+                    import zlib as _zlib
+                    identity = "|".join((
+                        str(block.virtual_playlist_cursor.get("instance_id") or ""),
+                        str(block.virtual_playlist_cursor.get("provider") or ""),
+                        str(block.virtual_playlist_cursor.get("source_url") or ""),
+                        str(pos),
+                        str(block_end),
+                    )).encode("utf-8", "ignore")
+                    block_seed = (seed ^ _zlib.crc32(identity) ^ pos ^ block_end) & 0x7FFFFFFF
+                    block.virtual_playlist_cursor["shuffle_seed"] = block_seed or 1
+                    units.append(block)
+                pos = block_end
+            # ``cursor_was_bounded`` só documenta que um shuffle anterior já
+            # havia segmentado a coleção; os novos blocos substituem esse plano.
+            _ = cursor_was_bounded
+
+        logical_count = 0
+        for item in units:
+            if not item.is_virtual_playlist_marker:
+                logical_count += 1
+                continue
+            begin, finish = self._virtual_cursor_bounds(item)
+            logical_count += max(1, finish - begin) if finish is not None else 1
+        if logical_count <= 1:
             st.shuffle = False
+            st.virtual_shuffle_active = False
+            st.virtual_shuffle_seed = 0
             st.updated_at = time.time()
-            self._schedule_next_queue_prefetch(guild_id, reason="shuffle")
-            self.log("queue_shuffled", guild_id=guild_id, queue_size=len(st.queue))
-            return {"ok": True, "shuffled": True, "enabled": False, "queue_size": len(st.queue), "state": st.public()}
+            return {"ok": True, "shuffled": False, "enabled": False, "queue_size": logical_count, "state": st.public()}
+
+        _random.Random(seed).shuffle(units)
+        st.queue[:] = units
+        # Shuffle continua sendo ação única. A ordem aleatória agora está
+        # materializada como faixas prontas + blocos virtuais reordenados; não
+        # existe modo persistente que possa desligar no fim da primeira playlist.
         st.shuffle = False
+        st.virtual_shuffle_active = False
+        st.virtual_shuffle_seed = 0
         st.updated_at = time.time()
-        return {"ok": True, "shuffled": False, "enabled": False, "queue_size": len(st.queue), "state": st.public()}
+        self._schedule_next_queue_prefetch(guild_id, reason="shuffle_global_virtual")
+        self.log(
+            "queue_logical_shuffled",
+            guild_id=guild_id,
+            logical_queue_size=logical_count,
+            physical_units=len(units),
+            virtual_items=virtual_total,
+            block_size=block_size,
+            seed=seed,
+        )
+        return {
+            "ok": True,
+            "shuffled": True,
+            "enabled": False,
+            "virtual": bool(virtual_total),
+            "queue_size": logical_count,
+            "shuffle_block_size": block_size,
+            "state": st.public(),
+        }
 
     async def cmd_loop(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))

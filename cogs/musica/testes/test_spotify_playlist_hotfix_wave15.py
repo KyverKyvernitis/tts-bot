@@ -83,11 +83,14 @@ def test_contagem_logica_da_fila_virtual_usa_total_real() -> None:
     ) == 135
 
 
-def test_components_v2_usa_total_exato_e_link_publico_spotify() -> None:
+def test_components_v2_usa_total_logico_remoto_e_link_publico_spotify() -> None:
     source = (Path(__file__).resolve().parents[1] / "interface" / "componentes.py").read_text(encoding="utf-8")
-    assert "logical_virtual_queue_count(" in source
-    assert 'total_text = str(total) if (not virtual or virtual_total_known) else f"{total}+"' in source
-    assert 'if not virtual and duration and duration != "desconhecida"' in source
+    # Wave 15 recebe o total lógico autoritativo do agente em vez de
+    # reconstruí-lo a partir de um único cursor virtual. Isso também cobre
+    # múltiplas playlists e layouts embaralhados.
+    assert 'getattr(state, "agent_remote_queue_size", 0)' in source
+    assert "def _virtual_playlists_info" in source
+    assert 'count = f"{total} música' in source
     assert 'profile.platform == "spotify" and profile.resource_type == "track"' in source
     assert 'return f"[{label}]({url})"' in source
 

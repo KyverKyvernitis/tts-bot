@@ -160,11 +160,29 @@ class GuildMusicState:
             self.updated_at = time.time()
         return removed
 
+    @staticmethod
+    def _virtual_marker_remaining(marker: AgentTrack) -> int | None:
+        cursor = marker.virtual_playlist_cursor if isinstance(marker.virtual_playlist_cursor, dict) else {}
+        try:
+            start = max(0, int(cursor.get("next_offset") or 0))
+        except Exception:
+            start = 0
+        raw_end = cursor.get("block_end_offset")
+        if raw_end in (None, ""):
+            raw_end = cursor.get("total_tracks")
+        if raw_end in (None, ""):
+            return None
+        try:
+            return max(0, int(raw_end) - start)
+        except Exception:
+            return None
+
+    def _virtual_markers(self) -> list[tuple[int, AgentTrack]]:
+        return [(index, item) for index, item in enumerate(self.queue) if item.is_virtual_playlist_marker]
+
     def _first_virtual_marker(self) -> tuple[int, AgentTrack] | None:
-        for index, item in enumerate(self.queue):
-            if item.is_virtual_playlist_marker:
-                return index, item
-        return None
+        markers = self._virtual_markers()
+        return markers[0] if markers else None
 
     def _public_queue_preview(self) -> list[dict[str, Any]]:
         preview: list[dict[str, Any]] = []
@@ -181,18 +199,51 @@ class GuildMusicState:
                 break
         return preview
 
+    def _public_virtual_playlists(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        playable_before = 0
+        for physical_index, item in enumerate(self.queue):
+            if not item.is_virtual_playlist_marker:
+                playable_before += 1
+                continue
+            cursor = dict(item.virtual_playlist_cursor)
+            result.append({
+                "cursor": cursor,
+                "materialized_before": playable_before,
+                "physical_index": physical_index,
+                "waiting": bool(playable_before == 0 and self.current is None),
+                "requester_id": item.requester_id,
+                "requester_name": item.requester_name,
+                "remaining": self._virtual_marker_remaining(item),
+            })
+        return result
+
     def _public_virtual_playlist(self) -> dict[str, Any] | None:
-        found = self._first_virtual_marker()
-        if found is None:
-            return None
-        index, marker = found
-        return {
-            "cursor": dict(marker.virtual_playlist_cursor),
-            "materialized_before": sum(1 for item in self.queue[:index] if not item.is_virtual_playlist_marker),
-            "waiting": bool(index == 0 and self.current is None),
-            "requester_id": marker.requester_id,
-            "requester_name": marker.requester_name,
-        }
+        values = self._public_virtual_playlists()
+        return values[0] if values else None
+
+    def _public_queue_layout(self) -> list[dict[str, Any]]:
+        layout: list[dict[str, Any]] = []
+        for item in self.queue:
+            if item.is_virtual_playlist_marker:
+                layout.append({
+                    "kind": "virtual",
+                    "cursor": dict(item.virtual_playlist_cursor),
+                    "requester_id": item.requester_id,
+                    "requester_name": item.requester_name,
+                    "remaining": self._virtual_marker_remaining(item),
+                })
+            else:
+                layout.append({"kind": "track", "track": item.public()})
+        return layout
+
+    def _logical_queue_size(self) -> int:
+        total = sum(1 for item in self.queue if not item.is_virtual_playlist_marker)
+        for _index, marker in self._virtual_markers():
+            remaining = self._virtual_marker_remaining(marker)
+            if remaining is not None:
+                total += remaining
+        return max(0, total)
 
     def state_revision(self) -> str:
         return f"{self.updated_at:.6f}:{self.playback_token}"
@@ -270,6 +321,7 @@ class GuildMusicState:
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": sum(1 for item in self.queue if not item.is_virtual_playlist_marker),
+            "logical_queue_size": self._logical_queue_size(),
             "history_size": len(self.history),
             "previous_available": bool(self.history),
             "volume_percent": self.volume_percent,
@@ -279,5 +331,7 @@ class GuildMusicState:
             "loop_mode": self.loop_mode,
             "repeat": self.loop_mode,
             "queue": self._public_queue_preview(),
+            "queue_layout": self._public_queue_layout(),
             "virtual_playlist": self._public_virtual_playlist(),
+            "virtual_playlists": self._public_virtual_playlists(),
         }

@@ -69,6 +69,12 @@ class MusicTrack:
     # legítimas da mesma música de um mesmo item acidentalmente espelhado em
     # ``current`` e ``queue`` ao mesmo tempo.
     queue_item_id: str = ""
+    # Referência leve para uma entrada ainda virtual da playlist. Estes campos
+    # são usados apenas pela UI/control plane; áudio continua resolvido JIT.
+    virtual_playlist_instance_id: str = ""
+    virtual_source_index: int = -1
+    virtual_provider: str = ""
+    virtual_source_url: str = ""
 
     @property
     def display_url(self) -> str:
@@ -110,6 +116,16 @@ class PlaylistCursor:
     next_offset: int = 0
     total_tracks: Optional[int] = None
     exhausted: bool = False
+    # Identidade da ocorrência da playlist na fila. Duas inserções do mesmo
+    # link precisam continuar distinguíveis para seleção/refill/mutações.
+    instance_id: str = ""
+    # Quando definido, o cursor representa somente [next_offset, block_end).
+    # Shuffle usa blocos leves para misturar toda a fila sem materializar
+    # milhares de metadados/streams.
+    block_end_offset: Optional[int] = None
+    # Seed opcional de shuffle dentro deste bloco virtual. Permite que todos os
+    # itens participem do embaralhamento sem criar um objeto por faixa.
+    shuffle_seed: int = 0
 
     def advanced(self, count: int, *, exhausted: Optional[bool] = None) -> "PlaylistCursor":
         return PlaylistCursor(
@@ -121,6 +137,9 @@ class PlaylistCursor:
             next_offset=max(0, int(self.next_offset) + max(0, int(count))),
             total_tracks=self.total_tracks,
             exhausted=self.exhausted if exhausted is None else bool(exhausted),
+            instance_id=self.instance_id,
+            block_end_offset=self.block_end_offset,
+            shuffle_seed=self.shuffle_seed,
         )
 
     def public(self) -> dict[str, Any]:
@@ -133,6 +152,9 @@ class PlaylistCursor:
             "next_offset": max(0, int(self.next_offset)),
             "total_tracks": self.total_tracks,
             "exhausted": bool(self.exhausted),
+            "instance_id": self.instance_id,
+            "block_end_offset": self.block_end_offset,
+            "shuffle_seed": int(self.shuffle_seed or 0),
         }
 
 

@@ -68,6 +68,9 @@ def bounded_initial_window(
         next_offset=base_offset + len(selected),
         total_tracks=cursor.total_tracks,
         exhausted=bool(cursor.exhausted and len(selected) >= len(tracks)),
+        instance_id=cursor.instance_id,
+        block_end_offset=cursor.block_end_offset,
+        shuffle_seed=cursor.shuffle_seed,
     )
     return selected, next_cursor
 

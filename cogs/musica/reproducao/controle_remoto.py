@@ -160,3 +160,36 @@ async def limpar_fila(router: Any, guild_id: int, **kwargs: Any) -> dict[str, An
         create_panel=False,
         **kwargs,
     )
+
+
+async def agir_item_virtual_fila(
+    router: Any,
+    guild_id: int,
+    *,
+    operation: str,
+    source_index: int,
+    instance_id: str = "",
+    provider: str = "",
+    source_url: str = "",
+    track_payload: dict[str, Any] | None = None,
+    to_position: int | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    extra: dict[str, Any] = {
+        "virtual_action": str(operation or ""),
+        "source_index": int(source_index),
+        "instance_id": str(instance_id or ""),
+        "provider": str(provider or ""),
+        "source_url": str(source_url or ""),
+        "track": dict(track_payload or {}),
+    }
+    if to_position is not None:
+        extra["to_position"] = int(to_position)
+    return await enviar_controle_remoto(
+        router,
+        "queue_virtual_action",
+        guild_id=guild_id,
+        create_panel=False,
+        **extra,
+        **kwargs,
+    )

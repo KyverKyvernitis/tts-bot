@@ -32,6 +32,7 @@ from ..reproducao.sincronizacao import sincronizar_estado_agente
 from ..reproducao.playlist_virtual import cancel_playlist_refill
 from ..reproducao.fila_remota import (
     alternar_repeticao_worker,
+    agir_item_virtual_fila_worker,
     embaralhar_fila_worker,
     limpar_fila_worker,
     mover_item_fila_worker,
@@ -5572,6 +5573,29 @@ class AudioRouter:
             self.ensure_music_worker(guild_id)
         self._schedule_panel_update(guild_id, create=True)
         return True
+
+    async def virtual_queue_action(
+        self,
+        guild_id: int,
+        operation: str,
+        track: MusicTrack,
+        *,
+        to_position: int | None = None,
+    ) -> dict[str, Any]:
+        state = self.get_state(guild_id)
+        if not usar_controles_fila_remota(self, state):
+            return {"ok": False, "error": "fila virtual indisponível"}
+        result = await agir_item_virtual_fila_worker(
+            self,
+            guild_id,
+            state,
+            operation=operation,
+            track=track,
+            to_position=to_position,
+        )
+        if bool(result.get("ok")):
+            self._schedule_panel_update(guild_id, create=False)
+        return result
 
     async def replace_queue(self, guild_id: int, tracks: list[MusicTrack]) -> None:
         state = self.get_state(guild_id)

@@ -90,7 +90,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.55"
+AGENT_VERSION = "0.3.56"
 STARTED_AT = time.time()
 
 
@@ -887,6 +887,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             return await self.cmd_volume(body)
         if action in {"queue_play_now", "play_queue_position", "queue_jump"}:
             return await self.cmd_queue_play_now(body)
+        if action in {"queue_virtual_action", "virtual_queue_action"}:
+            return await self.cmd_queue_virtual_action(body)
         if action in {"queue_move", "move_queue_item"}:
             return await self.cmd_queue_move(body)
         if action in {"queue_remove", "remove_queue_item"}:
