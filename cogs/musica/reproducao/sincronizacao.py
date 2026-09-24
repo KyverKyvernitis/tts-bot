@@ -299,6 +299,7 @@ async def sincronizar_estado_agente(
     state = router.get_state(guild_id)
     remote = agent_state if isinstance(agent_state, dict) else {}
     previous_status = str(getattr(state, "current_status", "") or "")
+    previous_speed = float(getattr(state, "playback_speed", 1.0) or 1.0)
     previous_current = getattr(state, "current", None)
     previous_current_key = router._panel_key_for_track(previous_current) if previous_current is not None else ""
 
@@ -449,6 +450,16 @@ async def sincronizar_estado_agente(
     with contextlib.suppress(Exception):
         if remote.get("volume_percent") is not None:
             state.volume = max(0.0, min(1.5, float(remote.get("volume_percent") or 0.0) / 100.0))
+    if "bassboost" in remote:
+        state.bassboost = bool(remote["bassboost"])
+    if "nightcore" in remote:
+        state.nightcore = bool(remote["nightcore"])
+    with contextlib.suppress(Exception):
+        if remote.get("speed_multiplier") is not None:
+            state.playback_speed = max(1.0, min(1.25, float(remote["speed_multiplier"])))
+    with contextlib.suppress(Exception):
+        if remote.get("effects_revision") is not None:
+            state.effects_revision = max(0, int(remote["effects_revision"]))
     state.shuffle = False
     if state.current is not None:
         # O estado nasce com defaults usados pelo player legado. No backend do
@@ -477,7 +488,7 @@ async def sincronizar_estado_agente(
         if remote_position_seconds is not None:
             state.voice_status_pause_position_seconds = remote_position_seconds
     else:
-        if previous_status == "paused" and raw_status == "playing" and remote_position_seconds is not None:
+        if (previous_status == "paused" or state.playback_speed != previous_speed) and raw_status == "playing" and remote_position_seconds is not None:
             # Rebaseia o relógio local para que {elapsed}/{position} não conte o
             # tempo em que o Music Agent permaneceu pausado.
             state.current_start_offset_seconds = remote_position_seconds
@@ -525,6 +536,12 @@ async def sincronizar_estado_agente(
         and new_panel_key
         and (started_generation_changed or legacy_track_changed)
     )
+    if str(remote.get("last_event") or "") == "audio_effect" and new_panel_key == previous_started_key:
+        # Troca de filtro reinicia o PCM, mas não é início de outra música.
+        just_started_agent_track = False
+        state.agent_started_track_key = new_panel_key
+        if remote_playback_token is not None:
+            state.agent_started_playback_token = remote_playback_token
     if remote_playback_token is not None:
         state.agent_playback_token = remote_playback_token
     if just_started_agent_track:

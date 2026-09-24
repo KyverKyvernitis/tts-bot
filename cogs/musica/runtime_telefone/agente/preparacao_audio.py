@@ -11,7 +11,7 @@ import discord
 
 from .buffer_pcm import BufferedPCMSource
 from .ciclo_vida import remove_owned_task
-from .estado import AgentTrack
+from .estado import AgentTrack, GuildMusicState
 
 
 @dataclass
@@ -22,11 +22,14 @@ class AudioPreparado:
     source: BufferedPCMSource
     created_at: float
     ready: bool = False
+    effects: tuple[bool, bool] = (False, False)
 
 
 class PreparacaoAudioMixin:
     async def _prepare_current_pcm(self, guild_id: int, track: AgentTrack, playback_token: int) -> Any:
-        source = self._take_prepared_audio(guild_id, track) or self._create_pcm_source(track)
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        effects = (st.bassboost, st.nightcore)
+        source = self._take_prepared_audio(guild_id, track) or self._create_pcm_source(track, effects=effects)
         self._starting_pcm[guild_id] = source
         try:
             if isinstance(source, BufferedPCMSource):
@@ -39,8 +42,10 @@ class PreparacaoAudioMixin:
             if self._starting_pcm.get(guild_id) is source:
                 self._starting_pcm.pop(guild_id, None)
 
-    def _create_pcm_source(self, track: AgentTrack) -> Any:
-        options, _mode = self._ffmpeg_options_for_source(track.audio_sample_rate)
+    def _create_pcm_source(self, track: AgentTrack, *, effects: tuple[bool, bool] = (False, False)) -> Any:
+        options, _mode = self._ffmpeg_options_for_source(
+            track.audio_sample_rate, effects=effects, is_live=track.is_live,
+        )
         before = self._ffmpeg_before_options_for_offset(track.start_offset_seconds)
         # EOF é normal em músicas. Transmissões ao vivo mantêm a reconexão.
         if track.is_live and "-reconnect_at_eof" not in before:
@@ -62,7 +67,9 @@ class PreparacaoAudioMixin:
             task.cancel()
         self._audio_prepare_keys.pop(guild_id, None)
         prepared = self._prepared_audio.get(guild_id)
-        if prepared is not None and not (prepared.ready and prepared.item_id == keep_item_id):
+        st = self.states.get(guild_id)
+        effects = (st.bassboost, st.nightcore) if st else (False, False)
+        if prepared is not None and not (prepared.ready and prepared.item_id == keep_item_id and prepared.effects == effects):
             self._prepared_audio.pop(guild_id, None)
             prepared.source.cleanup()
 
@@ -73,6 +80,7 @@ class PreparacaoAudioMixin:
             return None
         if (
             prepared.ready and prepared.item_id == track.queue_item_id
+            and prepared.effects == (self.states[guild_id].bassboost, self.states[guild_id].nightcore)
             and prepared.stream_url == track.stream_url
             and abs(prepared.offset - track.start_offset_seconds) < 0.01
             and time.monotonic() - prepared.created_at <= 45.0
@@ -93,21 +101,24 @@ class PreparacaoAudioMixin:
             self._cancel_audio_preparation(guild_id)
             return
         item_id = st.queue[0].queue_item_id
+        effects = (st.bassboost, st.nightcore)
+        prepare_key = f"{item_id}:{int(effects[0])}:{int(effects[1])}"
         task = self._audio_prepare_tasks.get(guild_id)
-        if task is not None and not task.done() and self._audio_prepare_keys.get(guild_id) == item_id:
+        if task is not None and not task.done() and self._audio_prepare_keys.get(guild_id) == prepare_key:
             return
         prepared = self._prepared_audio.get(guild_id)
-        if prepared is not None and prepared.item_id == item_id and prepared.ready:
+        if prepared is not None and prepared.item_id == item_id and prepared.effects == effects and prepared.ready:
             return
         self._cancel_audio_preparation(guild_id)
         token = st.playback_token
-        elapsed = max(0.0, time.monotonic() - st.started_monotonic) + st.current.start_offset_seconds
-        delay = max(0.0, st.current.duration - elapsed - getattr(self, "next_audio_prepare_lead_seconds", 12.0))
+        remaining = max(0.0, st.current.duration - st.source_position_seconds()) / st.playback_speed
+        delay = max(0.0, remaining - getattr(self, "next_audio_prepare_lead_seconds", 12.0))
 
         def still_next() -> bool:
             current = self.states.get(guild_id)
             return bool(
                 current is st and current.playback_token == token and not current.paused
+                and (current.bassboost, current.nightcore) == effects
                 and current.queue and current.queue[0].queue_item_id == item_id
             )
 
@@ -137,8 +148,8 @@ class PreparacaoAudioMixin:
                 # por padrão em todo o aparelho, além das músicas já tocando.
                 if len(self._prepared_audio) >= getattr(self, "next_audio_prepare_max_sources", 1):
                     return
-                source = self._create_pcm_source(track)
-                owned = AudioPreparado(item_id, track.stream_url, track.start_offset_seconds, source, time.monotonic())
+                source = self._create_pcm_source(track, effects=effects)
+                owned = AudioPreparado(item_id, track.stream_url, track.start_offset_seconds, source, time.monotonic(), effects=effects)
                 self._prepared_audio[guild_id] = owned
                 await source.wait_ready(
                     timeout=min(12.0, self.prepare_timeout),
@@ -162,5 +173,5 @@ class PreparacaoAudioMixin:
                     self._audio_prepare_keys.pop(guild_id, None)
                 remove_owned_task(self._audio_prepare_tasks, guild_id, current_task)
 
-        self._audio_prepare_keys[guild_id] = item_id
+        self._audio_prepare_keys[guild_id] = prepare_key
         self._audio_prepare_tasks[guild_id] = asyncio.create_task(prepare())

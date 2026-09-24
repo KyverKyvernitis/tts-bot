@@ -12,6 +12,7 @@ import discord
 from .ciclo_vida import remove_owned_task, stop_player_instance
 from .configuracao import env_float, env_int
 from .estado import AgentTrack, GuildMusicState
+from .efeitos import filtros
 from .mixer_pcm import AgentMixedAudioSource, AgentTelemetryAudioSource, PCM_FRAME_BYTES
 from .buffer_pcm import BufferedPCMSource
 from .preparacao_audio import PreparacaoAudioMixin
@@ -97,11 +98,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 return voice_client
         return None
 
-    def _resume_offset_for_track(self, track: AgentTrack, *, played_for: float) -> float:
+    def _resume_offset_for_track(self, track: AgentTrack, *, played_for: float, speed: float = 1.0) -> float:
         base_offset = max(0.0, float(getattr(track, "start_offset_seconds", 0.0) or 0.0))
         resume_offset = max(
             0.0,
-            base_offset + max(0.0, float(played_for or 0.0)) - self.stream_recovery_backtrack_seconds,
+            base_offset + max(0.0, float(played_for or 0.0)) * speed - self.stream_recovery_backtrack_seconds,
         )
         if track.duration is not None:
             with contextlib.suppress(Exception):
@@ -250,9 +251,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             if metadata_playlist_next:
                 delay = 0.0
             elif current is not None and current.duration and st.started_monotonic:
-                base = max(0.0, float(getattr(current, "start_offset_seconds", 0.0) or 0.0))
-                elapsed = base + max(0.0, time.monotonic() - float(st.started_monotonic))
-                remaining = max(0.0, float(current.duration) - elapsed)
+                remaining = max(0.0, float(current.duration) - st.source_position_seconds()) / st.playback_speed
                 # Se a faixa já está dentro da janela de prefetch, resolva agora.
                 # O mínimo antigo de 2s atrasava desnecessariamente faixas curtas.
                 delay = max(0.0, remaining - env_float("MUSIC_AGENT_PREFETCH_BEFORE_END_SECONDS", 45.0))
@@ -775,6 +774,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         st.history.clear()
         st.virtual_shuffle_active = False
         st.virtual_shuffle_seed = 0
+        st.bassboost = False
+        st.nightcore = False
+        st.effects_revision += 1
         player = st.player
         st.player = None
         st.current = None
@@ -1405,6 +1407,106 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             await self._apply_player_volume(st, volume)
         return {"ok": True, "volume": st.volume_percent, "normal_volume": st.normal_volume_percent, "ducked": st.ducked, "state": st.public()}
 
+    async def cmd_audio_effect(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = safe_id(body.get("guild_id"))
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        effect = str(body.get("effect") or "").strip().lower()
+        enabled = body.get("enabled")
+        if effect not in {"bassboost", "nightcore"} or not isinstance(enabled, bool):
+            return {"ok": False, "error": "efeito ou estado inválido", "state": st.public()}
+
+        async with st.effects_lock:
+            expected = body.get("expected_revision")
+            if expected is not None and str(expected) != str(st.effects_revision):
+                return {"ok": False, "error": "os efeitos mudaram; tente novamente", "state": st.public()}
+            previous = (st.bassboost, st.nightcore)
+            desired = (enabled if effect == "bassboost" else st.bassboost,
+                       enabled if effect == "nightcore" else st.nightcore)
+            if desired == previous:
+                return {"ok": True, "state": st.public()}
+            if any(desired) and self._ffmpeg_has_custom_audio_filter(self.ffmpeg_options):
+                return {"ok": False, "error": "filtro FFmpeg personalizado incompatível com os efeitos", "state": st.public()}
+
+            track = st.current
+            if track is not None and st.status in {"starting", "resolving", "preparing"}:
+                return {"ok": False, "error": "aguarde a música começar antes de alterar os efeitos", "state": st.public()}
+            player = st.player
+            mixer = getattr(player, "source", None)
+            playing = bool(player and (getattr(player, "is_playing", lambda: False)() or
+                                       getattr(player, "is_paused", lambda: False)()))
+            if track is not None and playing:
+                if track.is_live:
+                    return {"ok": False, "error": "não é possível trocar efeitos durante uma transmissão ao vivo", "state": st.public()}
+                if not isinstance(mixer, AgentMixedAudioSource) or not mixer.persistent or not track.stream_url:
+                    return {"ok": False, "error": "o player atual não permite trocar efeitos durante a música", "state": st.public()}
+                token = st.playback_token
+                self._cancel_audio_preparation(guild_id)
+                offset = st.source_position_seconds()
+                selected = replace(track, start_offset_seconds=offset)
+                candidate = None
+                swapped = False
+                try:
+                    candidate = self._create_pcm_source(selected, effects=desired)
+                    if not isinstance(candidate, BufferedPCMSource):
+                        candidate = BufferedPCMSource(candidate, max_frames=10,
+                                                      stall_seconds=self.pcm_buffer_stall_seconds)
+                    await candidate.wait_ready(timeout=min(4.0, self.prepare_timeout), min_frames=1)
+                    if (st.current is not track or st.playback_token != token or st.player is not player or
+                            getattr(player, "source", None) is not mixer or mixer.music_ended):
+                        return {"ok": False, "error": "a música mudou durante a troca do efeito", "state": st.public()}
+
+                    loop = self._loop or asyncio.get_running_loop()
+                    next_token = token + 1
+
+                    def on_music_end(error: Exception | None, metrics: dict[str, Any]) -> None:
+                        if not loop.is_closed():
+                            asyncio.run_coroutine_threadsafe(
+                                self._direct_after(guild_id, error, next_token, audio_metrics=metrics), loop,
+                            )
+
+                    # O mixer mantém voz/TTS. A fonte anterior continua tocando
+                    # até a nova produzir PCM, e só então é substituída.
+                    mixer.replace_music_source(candidate, volume=st.volume_percent / 100.0,
+                                               on_music_end=on_music_end)
+                    candidate = None  # propriedade transferida ao mixer
+                    swapped = True
+                except Exception as exc:
+                    self.log("audio_effect_failed", guild_id=guild_id, effect=effect, error=short_text(exc, 180))
+                    return {"ok": False, "error": f"não consegui preparar o efeito: {short_text(exc, 150)}", "state": st.public()}
+                finally:
+                    if candidate is not None:
+                        with contextlib.suppress(Exception):
+                            candidate.cleanup()
+                    if not swapped and st.playback_token == token and st.current is track and not st.paused:
+                        self._schedule_audio_prepare(guild_id)
+
+                # A partir daqui a nova fonte já foi entregue ao mixer; erros
+                # de telemetria/prefetch não podem reportar uma troca concluída
+                # como falha nem tentar restaurar uma fonte já encerrada.
+                self._bump_playback_generation(st, reason="audio_effect")
+                st.bassboost, st.nightcore = desired
+                st.effects_revision += 1
+                track.start_offset_seconds = offset
+                now = time.monotonic()
+                st.started_monotonic = now
+                st.paused_monotonic = now if st.paused else 0.0
+                st.last_action = "audio_effect"
+                self._set_status(st, "paused" if st.paused else "playing", event="audio_effect")
+                if not st.paused:
+                    with contextlib.suppress(Exception):
+                        self._schedule_next_queue_prefetch(guild_id, reason="audio_effect")
+                with contextlib.suppress(Exception):
+                    self.log("audio_effect_changed", guild_id=guild_id, effect=effect,
+                             enabled=enabled, bassboost=st.bassboost, nightcore=st.nightcore)
+                return {"ok": True, "state": st.public()}
+
+            self._cancel_audio_preparation(guild_id)
+            st.bassboost, st.nightcore = desired
+            st.effects_revision += 1
+            st.last_action = "audio_effect"
+            st.updated_at = time.time()
+            return {"ok": True, "state": st.public()}
+
     async def cmd_duck(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
@@ -1436,6 +1538,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             if st.current is not None:
                 self._push_history(st, st.current)
             st.current = None
+            st.bassboost = False
+            st.nightcore = False
+            st.effects_revision += 1
             st.paused = False
             self._set_status(st, "idle", event="queue_empty")
             self._finish_mixer_when_idle(st)
@@ -2038,7 +2143,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             voice_client.stop()
         opus_bitrate_kbps, channel_bitrate_kbps = self._discord_opus_bitrate_kbps(voice_client, track)
         source_rate = max(0, int(getattr(track, "audio_sample_rate", 0) or 0))
-        _audio_options, resample_mode = self._ffmpeg_options_for_source(source_rate)
+        effects = (st.bassboost, st.nightcore)
+        _audio_options, resample_mode = self._ffmpeg_options_for_source(
+            source_rate, effects=effects, is_live=track.is_live,
+        )
         st.player = voice_client
         st.transport = "direct"
         st.playback_token += 1
@@ -2060,6 +2168,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             "opus_bitrate_kbps": opus_bitrate_kbps,
             "volume_percent": int(st.volume_percent),
             "volume_mode": "soft_limited_boost" if int(st.volume_percent) > 100 else "linear",
+            "bassboost": st.bassboost,
+            "nightcore": st.nightcore and not track.is_live,
         }
         self.log(
             "audio_source_selected",
@@ -2114,6 +2224,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 on_music_end=on_music_end if self.direct_pcm_volume_enabled else None,
                 reuse_mixer=existing_source if reusable else None,
                 pcm_source=pcm_source,
+                effects=effects,
+                is_live=track.is_live,
             )
         except BaseException:
             if pcm_source is not None:
@@ -2265,12 +2377,30 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             for marker in (" -af ", " -af=", " -filter:a", " -filter_complex ", " -filter_complex=")
         )
 
-    def _ffmpeg_options_for_source(self, source_sample_rate: int = 0) -> tuple[str, str]:
+    def _ffmpeg_options_for_source(
+        self, source_sample_rate: int = 0, *, effects: tuple[bool, bool] = (False, False),
+        is_live: bool = False,
+    ) -> tuple[str, str]:
         base = str(self.ffmpeg_options or "").strip()
+        effects = (bool(effects[0]), bool(effects[1]) and not is_live)
         try:
             rate = max(0, int(source_sample_rate or 0))
         except Exception:
             rate = 0
+        if any(effects):
+            if self._ffmpeg_has_custom_audio_filter(base):
+                raise ValueError("efeitos de áudio incompatíveis com o filtro FFmpeg personalizado")
+            resample = ""
+            if rate not in (0, 48000) and bool(getattr(self, "resample_quality_enabled", True)):
+                filter_size = max(16, min(64, int(getattr(self, "resample_filter_size", 32) or 32)))
+                phase_shift = max(8, min(12, int(getattr(self, "resample_phase_shift", 10) or 10)))
+                resample = (
+                    "aresample=48000:resampler=swr"
+                    f":filter_size={filter_size}:phase_shift={phase_shift}"
+                    ":linear_interp=0:exact_rational=1"
+                )
+            chain = filtros(bassboost=effects[0], nightcore=effects[1], is_live=is_live, resample=resample)
+            return f"{base} -af {chain}".strip(), "effects"
         if rate == 48000:
             return base, "native_48k"
         if rate <= 0:
@@ -2299,15 +2429,19 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         on_music_end: Any = None,
         reuse_mixer: AgentMixedAudioSource | None = None,
         pcm_source: Any = None,
+        effects: tuple[bool, bool] = (False, False),
+        is_live: bool = False,
     ) -> Any:
         volume = max(0.0, min(1.5, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
         before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
-        ffmpeg_options, _resample_mode = self._ffmpeg_options_for_source(source_sample_rate)
+        ffmpeg_options, _resample_mode = self._ffmpeg_options_for_source(
+            source_sample_rate, effects=effects, is_live=is_live,
+        )
         if self.direct_pcm_volume_enabled:
             pcm = pcm_source if pcm_source is not None else self._create_pcm_source(AgentTrack(
                 stream_url=stream_url, audio_sample_rate=source_sample_rate,
-                start_offset_seconds=start_offset_seconds,
-            ))
+                start_offset_seconds=start_offset_seconds, is_live=is_live,
+            ), effects=effects)
             loop = self._loop or asyncio.get_running_loop()
             if reuse_mixer is not None:
                 reuse_mixer.replace_music_source(pcm, volume=volume, on_music_end=on_music_end)
@@ -2379,7 +2513,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         if existing is not None and not existing.done():
             return True
 
-        resume_offset = self._resume_offset_for_track(track, played_for=played_for)
+        resume_offset = self._resume_offset_for_track(track, played_for=played_for, speed=st.playback_speed)
         track.start_offset_seconds = resume_offset
         st.voice_runtime_recovery_pending = True
         st.voice_runtime_recovery_attempts = 0
@@ -2516,7 +2650,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         # o tempo efetivamente tocado. Um pequeno backtrack reduz o risco de
         # cortar áudio no ponto de reconexão sem reiniciar a música inteira.
         base_offset = max(0.0, float(getattr(track, "start_offset_seconds", 0.0) or 0.0))
-        resume_offset = max(0.0, base_offset + max(0.0, float(played_for or 0.0)) - self.stream_recovery_backtrack_seconds)
+        resume_offset = max(0.0, base_offset + max(0.0, float(played_for or 0.0)) * st.playback_speed - self.stream_recovery_backtrack_seconds)
         if track.duration is not None:
             with contextlib.suppress(Exception):
                 resume_offset = min(resume_offset, max(0.0, float(track.duration) - 0.05))
@@ -2609,8 +2743,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             with contextlib.suppress(Exception):
                 remaining_expected = max(
                     0.0,
-                    float(st.current.duration)
-                    - max(0.0, float(getattr(st.current, "start_offset_seconds", 0.0) or 0.0)),
+                    (float(st.current.duration)
+                     - max(0.0, float(getattr(st.current, "start_offset_seconds", 0.0) or 0.0))) / st.playback_speed,
                 )
         remaining_after_play = (
             max(0.0, remaining_expected - played_for)

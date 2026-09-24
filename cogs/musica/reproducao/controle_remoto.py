@@ -100,6 +100,17 @@ async def ajustar_volume(router: Any, guild_id: int, volume_percent: int, **kwar
     )
 
 
+async def ajustar_efeito(
+    router: Any, guild_id: int, effect: str, enabled: bool, *, expected_revision: int,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return await enviar_controle_remoto(
+        router, "audio_effect", guild_id=guild_id, effect=effect,
+        enabled=bool(enabled), expected_revision=int(expected_revision),
+        create_panel=False, **kwargs,
+    )
+
+
 async def buscar_momento(router: Any, guild_id: int, position_seconds: float, **kwargs: Any) -> dict[str, Any]:
     return await enviar_controle_remoto(
         router,

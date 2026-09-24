@@ -9410,6 +9410,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "cogs/musica/runtime_telefone/agente/correspondencia.py": ("worker", "cogs/musica/runtime_telefone/agente/correspondencia.py", 0o644),
     "cogs/musica/runtime_telefone/agente/utilitarios.py": ("worker", "cogs/musica/runtime_telefone/agente/utilitarios.py", 0o644),
     "cogs/musica/runtime_telefone/agente/estado.py": ("worker", "cogs/musica/runtime_telefone/agente/estado.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/efeitos.py": ("worker", "cogs/musica/runtime_telefone/agente/efeitos.py", 0o644),
     "cogs/musica/runtime_telefone/agente/mixer_pcm.py": ("worker", "cogs/musica/runtime_telefone/agente/mixer_pcm.py", 0o644),
     "cogs/musica/runtime_telefone/agente/buffer_pcm.py": ("worker", "cogs/musica/runtime_telefone/agente/buffer_pcm.py", 0o644),
     "cogs/musica/runtime_telefone/agente/preparacao_audio.py": ("worker", "cogs/musica/runtime_telefone/agente/preparacao_audio.py", 0o644),

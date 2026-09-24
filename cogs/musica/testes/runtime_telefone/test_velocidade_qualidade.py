@@ -202,7 +202,7 @@ def test_buffer_falha_inicial_e_cancelamento_liberam_decoder(runtime):
         agent = runtime.music.MusicAgent()
         raw = PCM([])
         source = runtime.buffer.BufferedPCMSource(raw)
-        agent._create_pcm_source = lambda track: source
+        agent._create_pcm_source = lambda track, **_kw: source
         with pytest.raises(RuntimeError, match="sem produzir"):
             await agent._prepare_current_pcm(1, runtime.music.AgentTrack(), 0)
         assert raw.cleaned and not agent._starting_pcm
@@ -243,7 +243,7 @@ def test_proxima_faixa_reutiliza_pcm_e_limita_ffmpeg_adicional(runtime):
         m = runtime.music
         agent = m.MusicAgent()
         created = []
-        def create(track):
+        def create(track, **_kw):
             source = runtime.buffer.BufferedPCMSource(PCM([frame()] * 20))
             created.append(source)
             return source
@@ -317,7 +317,7 @@ def test_bitrate_muda_na_thread_de_audio_sem_recriar_sessao(runtime):
                 self.plays += 1
                 self.initial = kwargs["bitrate"]
         voice = Voice()
-        agent._create_pcm_source = lambda track: runtime.buffer.BufferedPCMSource(PCM([frame()] * 10))
+        agent._create_pcm_source = lambda track, **_kw: runtime.buffer.BufferedPCMSource(PCM([frame()] * 10))
         async def confirm(voice, source, **kwargs):
             await asyncio.to_thread(source.read)
             return 0
@@ -367,7 +367,7 @@ def test_seek_durante_preparo_nao_deixa_erro_antigo_afetar_nova_reproducao(runti
                 super().cleanup()
                 gate.set()
         raw = Blocked()
-        agent._create_pcm_source = lambda track: runtime.buffer.BufferedPCMSource(raw)
+        agent._create_pcm_source = lambda track, **_kw: runtime.buffer.BufferedPCMSource(raw)
         track = m.AgentTrack(stream_url="https://cdn/one")
         state = m.GuildMusicState(guild_id=1, voice_channel_id=9, current=track)
         agent.states[1] = state

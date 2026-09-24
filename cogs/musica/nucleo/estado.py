@@ -42,6 +42,10 @@ class MusicGuildState:
     last_text_channel_id: Optional[int] = None
     last_voice_channel_id: Optional[int] = None
     volume: float = MUSIC_DEFAULT_VOLUME
+    bassboost: bool = False
+    nightcore: bool = False
+    playback_speed: float = 1.0
+    effects_revision: int = 0
     loop_mode: LoopMode = LoopMode.OFF
     shuffle: bool = False
     stop_requested: bool = False

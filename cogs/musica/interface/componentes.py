@@ -895,6 +895,10 @@ def _player_track_text(state, track: MusicTrack) -> str:
         state_bits.append(f"🔁 {loop_label}")
     if getattr(state, "shuffle", False):
         state_bits.append("🔀 embaralhado")
+    if getattr(state, "bassboost", False):
+        state_bits.append("🎚️ bassboost")
+    if getattr(state, "nightcore", False):
+        state_bits.append("🌙 nightcore" + (" (próxima faixa)" if track.is_live else " 1,25×"))
     if state_bits:
         lines.append("-# " + " · ".join(state_bits))
     return "\n".join(lines)
@@ -2584,6 +2588,8 @@ class PlayerOptionsSelect(discord.ui.Select):
             discord.SelectOption(label="Selecionar momento", emoji="💠", value="seek", description="Ir para um tempo específico da música."),
             discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/fila."),
             discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Embaralhar a fila uma vez."),
+            discord.SelectOption(label=f"Bassboost: {'ligado' if getattr(state, 'bassboost', False) else 'desligado'}", emoji="🎚️", value="bassboost", description="Reforçar os graves da música."),
+            discord.SelectOption(label=f"Nightcore: {'ligado' if getattr(state, 'nightcore', False) else 'desligado'}", emoji="🌙", value="nightcore", description="Acelerar música e elevar o tom em 1,25×."),
         ]
         super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, custom_id="music:options")
         self.router = router
@@ -2607,6 +2613,18 @@ class PlayerOptionsSelect(discord.ui.Select):
                 await interaction.response.send_message("Apenas staff pode alterar o volume do player.", ephemeral=True)
                 return
             await interaction.response.send_modal(VolumeModal(self.router, self.guild_id))
+            return
+        if value in {"bassboost", "nightcore"}:
+            if not self.router.is_music_staff(getattr(interaction, "user", None)):
+                await interaction.response.send_message("Apenas staff pode alterar os efeitos do player.", ephemeral=True)
+                return
+            if state.current is None:
+                await interaction.response.send_message("Não há música tocando agora.", ephemeral=True)
+                return
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True, thinking=True)
+            _ok, message = await self.router.set_audio_effect(self.guild_id, value, not bool(getattr(state, value)))
+            await _safe_interaction_followup(interaction, message, ephemeral=True)
             return
         if value == "shuffle":
             if not interaction.response.is_done():

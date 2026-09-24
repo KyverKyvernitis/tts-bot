@@ -90,7 +90,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.56"
+AGENT_VERSION = "0.3.57"
 STARTED_AT = time.time()
 
 
@@ -517,6 +517,9 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 st.virtual_shuffle_active = False
                 st.virtual_shuffle_seed = 0
                 st.current = None
+                st.bassboost = False
+                st.nightcore = False
+                st.effects_revision += 1
                 st.paused = False
                 self._bump_playback_generation(st, reason="voice_alone_timeout")
                 event = "voice_alone_timeout_disconnect"
@@ -885,6 +888,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             return await self.cmd_previous(body)
         if action == "volume":
             return await self.cmd_volume(body)
+        if action == "audio_effect":
+            return await self.cmd_audio_effect(body)
         if action in {"queue_play_now", "play_queue_position", "queue_jump"}:
             return await self.cmd_queue_play_now(body)
         if action in {"queue_virtual_action", "virtual_queue_action"}:

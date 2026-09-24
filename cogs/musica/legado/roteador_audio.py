@@ -40,7 +40,7 @@ from ..reproducao.fila_remota import (
     tocar_posicao_fila_worker,
     voltar_historico_worker,
 )
-from ..reproducao.controle_remoto import ajustar_volume, buscar_momento
+from ..reproducao.controle_remoto import ajustar_efeito, ajustar_volume, buscar_momento
 from ..agente_telefone.monitor import iniciar_monitor_music_agent
 from ..agente_telefone.estado import atualizar_estado_controle_remoto, usar_controles_fila_remota
 from ..integracoes.status_canal import VoiceStatusController
@@ -1437,7 +1437,8 @@ class AudioRouter:
         started = float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0)
         if not started:
             return offset
-        return max(0.0, offset + (time.monotonic() - started))
+        speed = max(1.0, min(1.25, float(getattr(state, "playback_speed", 1.0) or 1.0)))
+        return max(0.0, offset + (time.monotonic() - started) * speed)
 
     def render_voice_status(self, guild_id: int, track: MusicTrack | None = None, *, template: str | None = None) -> str:
         state = self.get_state(guild_id)
@@ -5361,6 +5362,27 @@ class AudioRouter:
             self._schedule_voice_status_track_sync(guild_id, repeat_after=0.0, reason="volume")
         self._schedule_panel_update(guild_id, create=False)
         return volume
+
+    async def set_audio_effect(self, guild_id: int, effect: str, enabled: bool) -> tuple[bool, str]:
+        state = self.get_state(guild_id)
+        if state.current_backend != "agent" or state.current is None:
+            return False, "Não há música tocando no Phone Worker."
+        try:
+            result = await ajustar_efeito(
+                self, guild_id, effect, enabled,
+                expected_revision=state.effects_revision,
+                voice_channel_id=state.last_voice_channel_id,
+                text_channel_id=state.last_text_channel_id,
+            )
+        except Exception:
+            logger.warning("[music/effects] falha ao ajustar %s | guild=%s", effect, guild_id, exc_info=True)
+            return False, "Não consegui falar com o Phone Worker agora."
+        if isinstance(result, dict) and isinstance(result.get("state"), dict):
+            self._schedule_panel_update(guild_id, create=False)
+        if not isinstance(result, dict) or not result.get("ok"):
+            detail = str(result.get("error") or "não consegui alterar o efeito") if isinstance(result, dict) else "não consegui alterar o efeito"
+            return False, detail
+        return True, f"{effect.capitalize()}: {'ligado' if enabled else 'desligado'}."
 
     async def request_skip(self, guild_id: int, member) -> tuple[bool, str]:
         allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "skip")

@@ -27,6 +27,7 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/agente/correspondencia.py",
              "cogs/musica/runtime_telefone/agente/utilitarios.py",
              "cogs/musica/runtime_telefone/agente/estado.py",
+             "cogs/musica/runtime_telefone/agente/efeitos.py",
              "cogs/musica/runtime_telefone/agente/mixer_pcm.py",
              "cogs/musica/runtime_telefone/agente/buffer_pcm.py",
              "cogs/musica/runtime_telefone/agente/preparacao_audio.py",
@@ -169,7 +170,9 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin
 from cogs.musica.runtime_telefone.agente.correspondencia import avaliar_correspondencia
+from cogs.musica.runtime_telefone.agente.efeitos import velocidade
 assert ResolucaoMixin is not None and callable(avaliar_correspondencia)
+assert velocidade(nightcore=True) == 1.25
 '''
     resolver_result = subprocess.run(
         [sys.executable, "-S", "-c", resolver_code, str(staging)],

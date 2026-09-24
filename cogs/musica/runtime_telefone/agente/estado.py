@@ -1,11 +1,14 @@
 """Modelos de estado do Music Agent executado no Phone Worker."""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+from .efeitos import velocidade
 
 
 @dataclass
@@ -104,6 +107,10 @@ class GuildMusicState:
     playback_token: int = 0
     shuffle: bool = False
     loop_mode: str = "off"
+    bassboost: bool = False
+    nightcore: bool = False
+    effects_revision: int = 0
+    effects_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     # Shuffle virtual: embaralha cada janela materializada da playlist sem
     # carregar a coleção inteira em memória. O seed mantém o comportamento
     # determinístico durante a sessão e é descartado quando o cursor termina.
@@ -248,6 +255,24 @@ class GuildMusicState:
     def state_revision(self) -> str:
         return f"{self.updated_at:.6f}:{self.playback_token}"
 
+    @property
+    def playback_speed(self) -> float:
+        return velocidade(nightcore=self.nightcore, is_live=bool(self.current and self.current.is_live))
+
+    def source_position_seconds(self, *, now: float | None = None) -> float:
+        if self.current is None:
+            return 0.0
+        base = max(0.0, float(self.current.start_offset_seconds or 0.0))
+        if self.status not in {"playing", "paused"} or not self.started_monotonic:
+            return base
+        clock = float(now if now is not None else time.monotonic())
+        if self.paused and self.paused_monotonic:
+            clock = self.paused_monotonic
+        position = base + max(0.0, clock - self.started_monotonic) * self.playback_speed
+        if self.current.duration is not None:
+            position = min(position, max(0.0, float(self.current.duration)))
+        return position
+
     def public(self) -> dict[str, Any]:
         self._repair_current_queue_alias()
         player = self.player
@@ -270,12 +295,10 @@ class GuildMusicState:
                 playing = bool(playing or getattr(player, "playing", False))
             with contextlib.suppress(Exception):
                 position_ms = int(float(getattr(player, "position", 0) or 0))
-        if position_ms <= 0 and self.current is not None and self.status in {"playing", "paused"} and self.started_monotonic:
-            with contextlib.suppress(Exception):
-                base = max(0.0, float(getattr(self.current, "start_offset_seconds", 0.0) or 0.0))
-                clock = float(self.paused_monotonic or time.monotonic()) if self.paused else time.monotonic()
-                elapsed = max(0.0, clock - float(self.started_monotonic))
-                position_ms = int(max(0.0, base + elapsed) * 1000)
+        if self.current is not None and self.transport == "direct":
+            position_ms = int(self.source_position_seconds() * 1000)
+        elif position_ms <= 0 and self.current is not None and self.status in {"playing", "paused"}:
+            position_ms = int(self.source_position_seconds() * 1000)
         status_age = max(0.0, time.time() - float(self.updated_at or time.time()))
         return {
             "guild_id": self.guild_id,
@@ -325,6 +348,10 @@ class GuildMusicState:
             "history_size": len(self.history),
             "previous_available": bool(self.history),
             "volume_percent": self.volume_percent,
+            "bassboost": self.bassboost,
+            "nightcore": self.nightcore,
+            "speed_multiplier": self.playback_speed,
+            "effects_revision": self.effects_revision,
             "normal_volume_percent": self.normal_volume_percent,
             "ducked": self.ducked,
             "shuffle": bool(self.shuffle or self.virtual_shuffle_active),
