@@ -1827,8 +1827,7 @@ class QueueSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
         if isinstance(view, QueueView):
-            view.selected_position = int(self.values[0])
-            await view._redraw(interaction)
+            await view._redraw(interaction, selected_position=int(self.values[0]))
             return
         await interaction.response.defer()
 
@@ -2016,6 +2015,10 @@ class QueueView(discord.ui.LayoutView):
         self.page = max(0, int(page))
         self.owner_id = int(owner_id or 0)
         self.selected_position = selected_position
+        # Uma mesma view pode receber cliques consecutivos antes de o redraw
+        # anterior terminar. Serialize mudanças de página/seleção para não
+        # aplicar respostas fora de ordem nem pular páginas em double-click.
+        self._interaction_lock = asyncio.Lock()
         self._refresh_components()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -2194,36 +2197,61 @@ class QueueView(discord.ui.LayoutView):
 
         self.add_item(container)
 
-    async def _redraw(self, interaction: discord.Interaction) -> None:
-        # Defer antes de qualquer consulta pública de metadata para não estourar
-        # o deadline da interação em páginas ainda não cacheadas.
+    async def _redraw(
+        self,
+        interaction: discord.Interaction,
+        *,
+        page_delta: int = 0,
+        selected_position: int | None | object = ...,
+    ) -> bool:
+        # ACK primeiro. Para componentes, defer() sem thinking usa
+        # DEFERRED_MESSAGE_UPDATE; edit_original_response() é então a rota
+        # correta (e necessária para mensagens ephemeral) para editar o próprio
+        # painel que originou o clique. interaction.message.edit() pode tentar a
+        # rota normal de mensagem e falhar em painéis ephemeral.
         if not interaction.response.is_done():
             await interaction.response.defer()
-        try:
-            await self._prepare_page()
-            self._refresh_components()
-            message = getattr(interaction, "message", None)
-            if message is not None:
-                await message.edit(content=None, embeds=[], attachments=[], view=self)
-            else:
-                await interaction.edit_original_response(content=None, embeds=[], attachments=[], view=self)
-        except Exception:
-            logger.exception("[music/queue] redraw falhou | guild=%s page=%s", self.guild_id, self.page)
-            await _send_interaction_notice(interaction, "Não consegui carregar esta página agora. Tente novamente.")
+
+        async with self._interaction_lock:
+            old_page = self.page
+            old_selected = self.selected_position
+            if page_delta:
+                self.page = max(0, self.page + int(page_delta))
+            if selected_position is not ...:
+                self.selected_position = selected_position
+            try:
+                await self._prepare_page()
+                self._refresh_components()
+                await interaction.edit_original_response(
+                    content=None, embeds=[], attachments=[], view=self
+                )
+                return True
+            except Exception:
+                # Se o Discord rejeitar a edição, não deixe o objeto da view
+                # avançado para uma página que nunca foi mostrada. Isso evita
+                # que um segundo clique pule 1/11 -> 3/11 depois de uma falha.
+                self.page = old_page
+                self.selected_position = old_selected
+                self._refresh_components()
+                logger.exception(
+                    "[music/queue] redraw falhou | guild=%s page=%s",
+                    self.guild_id,
+                    old_page,
+                )
+                await _send_interaction_notice(
+                    interaction,
+                    "Não consegui carregar esta página agora. Tente novamente.",
+                )
+                return False
 
     async def previous_page(self, interaction: discord.Interaction):
-        self.page = max(0, self.page - 1)
-        self.selected_position = None
-        await self._redraw(interaction)
+        await self._redraw(interaction, page_delta=-1, selected_position=None)
 
     async def next_page(self, interaction: discord.Interaction):
-        self.page = min(self._max_page(), self.page + 1)
-        self.selected_position = None
-        await self._redraw(interaction)
+        await self._redraw(interaction, page_delta=1, selected_position=None)
 
     async def cancel_selection(self, interaction: discord.Interaction):
-        self.selected_position = None
-        await self._redraw(interaction)
+        await self._redraw(interaction, selected_position=None)
 
     async def play_selected(self, interaction: discord.Interaction):
         if not self.selected_position:
