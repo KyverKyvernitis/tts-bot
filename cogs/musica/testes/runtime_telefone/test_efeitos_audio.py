@@ -56,10 +56,10 @@ def test_bassboost_no_mixer_reforca_graves_apos_volume_sem_reduzir_medios(monkey
     music = _load_music_agent(monkeypatch)
     rate = 48000
 
-    async def render(bass_level: float, mid_level: float, enabled: bool) -> array:
+    async def render(bass_level: float, mid_level: float, enabled: bool, bass_frequency: int = 80) -> array:
         samples = array("h")
         for i in range(rate):
-            value = int(32767 * (bass_level * math.sin(2 * math.pi * 80 * i / rate)
+            value = int(32767 * (bass_level * math.sin(2 * math.pi * bass_frequency * i / rate)
                                  + mid_level * math.sin(2 * math.pi * 1000 * i / rate)))
             samples.extend((value, value))
 
@@ -95,8 +95,11 @@ def test_bassboost_no_mixer_reforca_graves_apos_volume_sem_reduzir_medios(monkey
     async def scenario() -> None:
         normal = await render(0.10, 0.10, False)
         boosted = await render(0.10, 0.10, True)
-        assert amplitude(boosted, 80) > amplitude(normal, 80) * 2.0
+        assert amplitude(boosted, 80) > amplitude(normal, 80) * 3.0
         assert amplitude(boosted, 1000) >= amplitude(normal, 1000) * 0.9
+        midbass_normal = await render(0.10, 0.10, False, bass_frequency=160)
+        midbass_boosted = await render(0.10, 0.10, True, bass_frequency=160)
+        assert amplitude(midbass_boosted, 160) > amplitude(midbass_normal, 160) * 2.7
         loud_normal = await render(0.39, 0.36, False)
         loud = await render(0.39, 0.36, True)
         assert amplitude(loud, 1000) >= amplitude(loud_normal, 1000) * 0.9

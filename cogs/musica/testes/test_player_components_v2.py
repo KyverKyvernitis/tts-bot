@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,3 +148,52 @@ def test_estado_ocioso_nao_repete_bloco_de_fila_vazia() -> None:
     queue_add = 'container.add_item(discord.ui.TextDisplay(_queue_preview_text(state, limit=4)))'
     assert queue_add in build
     assert build.index("if current is not None or queue:") < build.index(queue_add)
+
+
+def test_efeitos_confirmam_no_painel_sem_ephemeral_de_sucesso() -> None:
+    callback_source = textwrap.dedent(_method_source(COMPONENTS, "PlayerOptionsSelect", "callback"))
+    events: list[tuple] = []
+
+    async def followup(_interaction, message, *, ephemeral):
+        events.append(("followup", message, ephemeral))
+
+    scope: dict = {"_safe_interaction_followup": followup}
+    exec("from __future__ import annotations\n" + callback_source, scope)
+    callback = scope["callback"]
+
+    class Response:
+        def is_done(self):
+            return False
+
+        async def defer(self, **kwargs):
+            events.append(("defer", kwargs))
+
+        async def send_message(self, *args, **kwargs):
+            events.append(("message", args, kwargs))
+
+    async def scenario():
+        for effect in ("bassboost", "nightcore"):
+            for enabled in (False, True):
+                for succeeds in (False, True):
+                    events.clear()
+                    state = SimpleNamespace(current=object(), bassboost=enabled, nightcore=enabled)
+
+                    async def set_effect(_guild_id, selected, target):
+                        assert selected == effect and target is not enabled
+                        return succeeds, "erro ao alterar o modo"
+
+                    router = SimpleNamespace(
+                        get_state=lambda _guild_id: state,
+                        is_music_staff=lambda _user: True,
+                        set_audio_effect=set_effect,
+                    )
+                    select = SimpleNamespace(values=[effect], guild_id=42, router=router)
+                    interaction = SimpleNamespace(response=Response(), user=object())
+                    await callback(select, interaction)
+                    assert events[0] == ("defer", {"thinking": False})
+                    if succeeds:
+                        assert len(events) == 1
+                    else:
+                        assert events[1] == ("followup", "erro ao alterar o modo", True)
+
+    asyncio.run(scenario())

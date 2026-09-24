@@ -21,8 +21,8 @@ PCM_FRAME_BYTES = 3840
 MAX_MUSIC_VOLUME = 1.5
 PCM_PEAK = 32767
 PCM_BOOST_KNEE = int(PCM_PEAK * 0.95)
-BASS_ALPHA = 1.0 - math.exp(-2.0 * math.pi * 180.0 / 48000.0)
-BASS_GAIN = 2.2
+BASS_ALPHA = 1.0 - math.exp(-2.0 * math.pi * 190.0 / 48000.0)
+BASS_GAIN = 3.5
 
 
 class _AudioReadTelemetry:

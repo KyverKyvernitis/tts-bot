@@ -906,7 +906,7 @@ def _player_audio_modes_text(state, track: MusicTrack) -> str:
     if getattr(state, "bassboost", False):
         modes.append("**🔊 Bassboost**")
     if getattr(state, "nightcore", False):
-        label = "Nightcore na próxima faixa" if track.is_live else "Nightcore 1,25×"
+        label = "Nightcore na próxima faixa" if track.is_live else "Nightcore"
         modes.append(f"**🌙 {label}**")
     return " · ".join(modes)
 
@@ -2603,7 +2603,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             discord.SelectOption(
                 label="Desativar Nightcore" if getattr(state, "nightcore", False) else "Ativar Nightcore",
                 emoji="🌙", value="nightcore",
-                description="Voltar ao ritmo original." if getattr(state, "nightcore", False) else "Mais rápido e agudo · 1,25×.",
+                description="Voltar ao ritmo original." if getattr(state, "nightcore", False) else "Música mais rápida e aguda.",
             ),
         ]
         super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, custom_id="music:options")
@@ -2637,9 +2637,10 @@ class PlayerOptionsSelect(discord.ui.Select):
                 await interaction.response.send_message("Não há música tocando agora.", ephemeral=True)
                 return
             if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True, thinking=True)
-            _ok, message = await self.router.set_audio_effect(self.guild_id, value, not bool(getattr(state, value)))
-            await _safe_interaction_followup(interaction, message, ephemeral=True)
+                await interaction.response.defer(thinking=False)
+            ok, message = await self.router.set_audio_effect(self.guild_id, value, not bool(getattr(state, value)))
+            if not ok:
+                await _safe_interaction_followup(interaction, message, ephemeral=True)
             return
         if value == "shuffle":
             if not interaction.response.is_done():
