@@ -1,4 +1,4 @@
-"""Efeitos leves aplicados somente ao PCM musical no Phone Worker."""
+"""Filtros de velocidade; o reforço de graves atua no mixer após o volume."""
 from __future__ import annotations
 
 NIGHTCORE_SPEED = 1.25
@@ -16,9 +16,6 @@ def filtros(*, bassboost: bool, nightcore: bool, is_live: bool = False, resample
         if not resample:
             parts.append("aresample=48000")
         parts.extend(("asetrate=60000", "aresample=48000"))
-    if bassboost:
-        # A atenuação global antiga (-6 dB) anulava o ganho no grave e deixava
-        # toda a música mais baixa. O shelf alcança o grave perceptível em
-        # caixas pequenas; o limiter protege os picos antes do PCM s16.
-        parts.extend(("bass=g=10:f=150", "alimiter=limit=0.95:level=0"))
+    # Bassboost preserva o áudio original aqui: o mixer aplica o ganho somente
+    # ao grave depois do volume, usando a folga disponível no PCM de saída.
     return ",".join(parts)

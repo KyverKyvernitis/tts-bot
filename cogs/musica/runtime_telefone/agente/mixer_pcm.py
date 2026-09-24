@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import threading
 import time
 from array import array
@@ -20,6 +21,8 @@ PCM_FRAME_BYTES = 3840
 MAX_MUSIC_VOLUME = 1.5
 PCM_PEAK = 32767
 PCM_BOOST_KNEE = int(PCM_PEAK * 0.95)
+BASS_ALPHA = 1.0 - math.exp(-2.0 * math.pi * 180.0 / 48000.0)
+BASS_GAIN = 2.2
 
 
 class _AudioReadTelemetry:
@@ -150,6 +153,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         stall_threshold_ms: float = 80.0,
         on_music_end: Callable[[Exception | None, dict[str, Any]], None] | None = None,
         persistent: bool = False,
+        bassboost: bool = False,
     ) -> None:
         self.loop = loop
         self.music_source = music_source
@@ -166,6 +170,9 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self._music_gain = self.normal_music_volume
         self._mix_gain = 1.0
         self._mix_limited_frames = 0
+        self.bassboost_enabled = bool(bassboost)
+        self._bass_mix = 0.0
+        self._bass_low = [0.0, 0.0]
         self._started_monotonic = time.monotonic()
         self.first_frame_ms: float | None = None
         self.first_frame_monotonic: float | None = None
@@ -180,6 +187,10 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
 
     def set_music_volume(self, volume: float) -> None:
         self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(volume)))
+
+    def set_bassboost(self, enabled: bool) -> None:
+        with self._lock:
+            self.bassboost_enabled = bool(enabled)
 
     def set_duck_factor(self, factor: float) -> None:
         self.duck_factor = max(0.0, min(1.0, float(factor)))
@@ -200,6 +211,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         *,
         volume: float,
         on_music_end: Callable[[Exception | None, dict[str, Any]], None] | None,
+        bassboost: bool | None = None,
     ) -> None:
         """Mantém overlays TTS e a sessão de voz durante a troca da música."""
         with self._lock:
@@ -213,6 +225,10 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(volume)))
             self._music_gain = self.normal_music_volume
             self._mix_limited_frames = 0
+            if bassboost is not None:
+                self.bassboost_enabled = bool(bassboost)
+            self._bass_low = [0.0, 0.0]
+            self._bass_mix = 0.0
             self._started_monotonic = time.monotonic()
             self.first_frame_ms = None
             self.first_frame_monotonic = None
@@ -385,6 +401,48 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             for i in range(4)
         )
 
+    def _enhance_music_bass(self, frame: bytes) -> bytes:
+        """Reforça só a música após o volume, sem atenuar voz e médios.
+
+        O processamento só roda enquanto o efeito está ativo (ou na breve
+        saída suave). O grave extra usa a folga de cada amostra; se a música
+        já está perto do limite, comprimimos só o grave acrescentado.
+        """
+        with self._lock:
+            target = float(self.bassboost_enabled)
+            current = self._bass_mix
+            if not target and current < 0.003:
+                self._bass_mix = 0.0
+                return frame
+            if target and current == 0.0:
+                self._bass_low = [0.0, 0.0]
+            current += (target - current) * 0.5
+            self._bass_mix = current
+            gain = BASS_GAIN * current
+            low = self._bass_low
+            alpha = BASS_ALPHA
+            samples = array("h")
+            samples.frombytes(frame)
+            for index, dry in enumerate(samples):
+                channel = index & 1  # PCM s16le, 48 kHz estéreo
+                filtered = low[channel] + alpha * (int(dry) - low[channel])
+                low[channel] = filtered
+                added = gain * filtered
+                enhanced = dry + added
+                if -25000 <= enhanced <= 25000:
+                    samples[index] = int(enhanced)
+                    continue
+                room = (PCM_PEAK - dry) if added >= 0 else (32768 + dry)
+                magnitude = abs(added)
+                knee = 0.8 * room
+                if magnitude > knee:
+                    remaining = room - knee
+                    excess = magnitude - knee
+                    magnitude = knee + remaining * excess / (excess + remaining)
+                    added = magnitude if added >= 0 else -magnitude
+                samples[index] = max(-32768, min(PCM_PEAK, int(round(dry + added))))
+            return samples.tobytes()
+
     def _safe_mix_gain(self, frames: list[tuple[bytes, float]]) -> float:
         # Estima um limite superior do pico da soma antes de audioop.add:
         # nenhuma parcela é saturada antes de aplicar a proteção comum.
@@ -459,14 +517,14 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         music_volume = self.normal_music_volume * (self.duck_factor if overlays else 1.0)
         music_has_audio = bool(music_frame and getattr(music_source, "last_read_had_audio", True))
         if music_frame and not overlays:
-            output = self._smooth_music(music_frame, music_volume)
+            output = self._enhance_music_bass(self._smooth_music(music_frame, music_volume))
             if self._mix_gain < 0.999:
                 output = self._scale_frame(output, self._safe_mix_gain([(output, 1.0)]))
             else:
                 self._mix_gain = 1.0
             return self._mark_first_frame(output) if music_has_audio else output
         if music_frame:
-            base = self._smooth_music(music_frame, music_volume)
+            base = self._enhance_music_bass(self._smooth_music(music_frame, music_volume))
         else:
             base = b"\x00" * PCM_FRAME_BYTES
         overlay_frames: list[tuple[bytes, float]] = []

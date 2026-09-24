@@ -2598,7 +2598,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             discord.SelectOption(
                 label="Desativar Bassboost" if getattr(state, "bassboost", False) else "Ativar Bassboost",
                 emoji="🔊", value="bassboost",
-                description="Voltar aos graves originais." if getattr(state, "bassboost", False) else "Graves mais fortes, sem baixar o volume.",
+                description="Voltar aos graves originais." if getattr(state, "bassboost", False) else "Reforçar os graves da música.",
             ),
             discord.SelectOption(
                 label="Desativar Nightcore" if getattr(state, "nightcore", False) else "Ativar Nightcore",

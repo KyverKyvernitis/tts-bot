@@ -90,7 +90,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.57"
+AGENT_VERSION = "0.3.58"
 STARTED_AT = time.time()
 
 

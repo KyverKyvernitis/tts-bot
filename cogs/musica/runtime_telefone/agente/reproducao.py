@@ -1424,8 +1424,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                        enabled if effect == "nightcore" else st.nightcore)
             if desired == previous:
                 return {"ok": True, "state": st.public()}
-            if any(desired) and self._ffmpeg_has_custom_audio_filter(self.ffmpeg_options):
+            if desired[1] and self._ffmpeg_has_custom_audio_filter(self.ffmpeg_options):
                 return {"ok": False, "error": "filtro FFmpeg personalizado incompatível com os efeitos", "state": st.public()}
+            if effect == "bassboost" and not self.direct_pcm_volume_enabled:
+                return {"ok": False, "error": "Bassboost requer o mixer PCM do player", "state": st.public()}
 
             track = st.current
             if track is not None and st.status in {"starting", "resolving", "preparing"}:
@@ -1435,10 +1437,20 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             playing = bool(player and (getattr(player, "is_playing", lambda: False)() or
                                        getattr(player, "is_paused", lambda: False)()))
             if track is not None and playing:
-                if track.is_live:
+                if track.is_live and effect == "nightcore":
                     return {"ok": False, "error": "não é possível trocar efeitos durante uma transmissão ao vivo", "state": st.public()}
-                if not isinstance(mixer, AgentMixedAudioSource) or not mixer.persistent or not track.stream_url:
+                if not isinstance(mixer, AgentMixedAudioSource) or not mixer.persistent:
                     return {"ok": False, "error": "o player atual não permite trocar efeitos durante a música", "state": st.public()}
+                if effect == "bassboost":
+                    # Ajuste local ao mixer: não reinicia FFmpeg, TTS ou relógio.
+                    mixer.set_bassboost(enabled)
+                    st.bassboost = enabled
+                    st.effects_revision += 1
+                    st.last_action = "audio_effect"
+                    self._set_status(st, "paused" if st.paused else "playing", event="audio_effect")
+                    return {"ok": True, "state": st.public()}
+                if not track.stream_url:
+                    return {"ok": False, "error": "não há stream para retomar a música", "state": st.public()}
                 token = st.playback_token
                 self._cancel_audio_preparation(guild_id)
                 offset = st.source_position_seconds()
@@ -1467,7 +1479,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                     # O mixer mantém voz/TTS. A fonte anterior continua tocando
                     # até a nova produzir PCM, e só então é substituída.
                     mixer.replace_music_source(candidate, volume=st.volume_percent / 100.0,
-                                               on_music_end=on_music_end)
+                                               on_music_end=on_music_end, bassboost=desired[0])
                     candidate = None  # propriedade transferida ao mixer
                     swapped = True
                 except Exception as exc:
@@ -2382,7 +2394,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         is_live: bool = False,
     ) -> tuple[str, str]:
         base = str(self.ffmpeg_options or "").strip()
-        effects = (bool(effects[0]), bool(effects[1]) and not is_live)
+        # O Bassboost usa a folga depois do volume no mixer PCM; não aplica
+        # redução/limiter global ao decoder, mesmo que Nightcore esteja ativo.
+        effects = (False, bool(effects[1]) and not is_live)
         try:
             rate = max(0, int(source_sample_rate or 0))
         except Exception:
@@ -2444,7 +2458,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             ), effects=effects)
             loop = self._loop or asyncio.get_running_loop()
             if reuse_mixer is not None:
-                reuse_mixer.replace_music_source(pcm, volume=volume, on_music_end=on_music_end)
+                reuse_mixer.replace_music_source(pcm, volume=volume, on_music_end=on_music_end,
+                                                 bassboost=effects[0])
                 return reuse_mixer
             return AgentMixedAudioSource(
                 loop=loop,
@@ -2455,6 +2470,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 stall_threshold_ms=float(getattr(self, "audio_stall_threshold_ms", 80.0)),
                 on_music_end=on_music_end,
                 persistent=on_music_end is not None,
+                bassboost=effects[0],
             )
         opus_cls = getattr(discord, "FFmpegOpusAudio", None)
         if opus_cls is not None:
