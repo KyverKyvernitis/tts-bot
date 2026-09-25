@@ -4027,6 +4027,24 @@ class AudioRouter:
         except Exception:
             return ""
 
+    def _music_agent_claims_voice(self, state: MusicGuildState) -> bool:
+        """Somente uma faixa/fila em andamento pode reservar a voz para o agente."""
+        resolve_task = getattr(state, "current_resolve_task", None)
+        if resolve_task is not None and not resolve_task.done():
+            return True
+        status = str(getattr(state, "current_status", "") or "").lower()
+        if status in {"idle", "stopped", "failed", "error"}:
+            return False
+        try:
+            remote_queue_size = max(0, int(getattr(state, "agent_remote_queue_size", 0) or 0))
+        except (TypeError, ValueError):
+            remote_queue_size = 0
+        return bool(
+            getattr(state, "current", None) is not None
+            or self._has_pending_track(state)
+            or remote_queue_size > 0
+        )
+
     def should_route_tts_to_music_agent(self, guild_id: int | None, channel_id: int | None = None) -> bool:
         """Retorna se o TTS deve seguir pela sessão musical remota.
 
@@ -4055,14 +4073,9 @@ class AudioRouter:
             or monitor_dead
             or monitor_stale
         )
-        active = bool(
-            getattr(state, "music_session_active", False)
-            or getattr(state, "current", None) is not None
-            or status in {"resolving", "starting", "playing", "paused", "queued", "reconnecting"}
-            or (monitor_task is not None and not monitor_task.done())
-            or str(getattr(state, "agent_voice_session_mode", "") or "") in {"music_active", "music_idle_grace"}
-        )
-        if not active:
+        # Monitor e janela de saída da call podem sobreviver ao fim da fila.
+        # Eles não reservam a conexão: `_join` e TTS podem entrar normalmente.
+        if not self._music_agent_claims_voice(state):
             return False
         try:
             remembered_channel = int(getattr(state, "last_voice_channel_id", 0) or 0)
@@ -4073,8 +4086,8 @@ class AudioRouter:
                 # canal no comando e evita que o TTS local roube a conexão.
                 return uncertain
         except Exception:
-            return active
-        return active
+            return True
+        return True
 
     async def revalidate_tts_music_agent_route(self, guild_id: int, channel_id: int) -> bool:
         """Força um snapshot curto quando a decisão de TTS pode estar stale."""
@@ -4088,14 +4101,7 @@ class AudioRouter:
             return False
         if str(getattr(state, "current_backend", "") or "").lower() != "agent":
             return False
-        status = str(getattr(state, "current_status", "") or "").lower()
-        maybe_active = bool(
-            getattr(state, "music_session_active", False)
-            or getattr(state, "current", None) is not None
-            or status in {"resolving", "starting", "playing", "paused", "queued", "reconnecting"}
-            or int(getattr(state, "agent_monitor_failures", 0) or 0) > 0
-        )
-        if not maybe_active:
+        if not self._music_agent_claims_voice(state):
             return False
         remote = await atualizar_estado_controle_remoto(
             self,

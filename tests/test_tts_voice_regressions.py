@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -347,6 +350,88 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
 
 
 
+
+
+class MusicAgentVoiceOwnershipRegressionTests(unittest.TestCase):
+    @staticmethod
+    def _router(state):
+        source = (ROOT / "cogs" / "musica" / "legado" / "roteador_audio.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        router_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AudioRouter")
+        selected = [
+            node for node in router_class.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in {
+                "_music_agent_claims_voice",
+                "should_route_tts_to_music_agent",
+                "revalidate_tts_music_agent_route",
+                "should_block_tts_local_voice",
+            }
+        ]
+        namespace = {
+            "MUSIC_AGENT_TTS_ROUTE_ENABLED": True,
+            "config": SimpleNamespace(MUSIC_AGENT_STATUS_TIMEOUT_SECONDS=5.0),
+            "time": time,
+        }
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "<music-voice-route>", "exec"), namespace)
+        router_type = type("VoiceRouter", (), {node.name: namespace[node.name] for node in selected})
+        router = router_type()
+        router.get_state = lambda _guild_id: state
+        router._has_pending_track = lambda st: bool(getattr(st, "pending", False))
+        router._reset_stale_resolving_state = lambda *_args, **_kwargs: None
+        router._lavalink_tts_active = lambda _state: False
+        router._lavalink_resume_grace_active = lambda _state: False
+        return router
+
+    @staticmethod
+    def _state(**changes):
+        values = dict(
+            current_backend="agent", current_status="idle", current=None,
+            agent_remote_queue_size=0, agent_monitor_task=SimpleNamespace(done=lambda: False),
+            agent_monitor_last_cycle_at=time.monotonic(), agent_monitor_failures=0,
+            agent_monitor_reconnecting_since=0.0, agent_voice_session_mode="music_idle_grace",
+            music_session_active=True, current_resolve_task=None,
+            last_voice_channel_id=55, pending=False,
+        )
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_empty_remote_queue_allows_join_and_tts_even_with_monitor_alive(self):
+        state = self._state()
+        router = self._router(state)
+        self.assertFalse(router.should_route_tts_to_music_agent(1, 55))
+        self.assertFalse(router.should_block_tts_local_voice(1))
+        self.assertFalse(asyncio.run(router.revalidate_tts_music_agent_route(1, 55)))
+
+        # A contagem espelhada pode ficar atrasada em relação ao estado idle.
+        state.agent_remote_queue_size = 2
+        self.assertFalse(router.should_route_tts_to_music_agent(1, 55))
+        state.agent_remote_queue_size = 0
+
+        state.current_status = "reconnecting"
+        state.agent_monitor_failures = 3
+        self.assertFalse(router.should_route_tts_to_music_agent(1, 55))
+        self.assertFalse(asyncio.run(router.revalidate_tts_music_agent_route(1, 55)))
+
+    def test_active_track_stays_with_music_agent_during_monitor_failure(self):
+        state = self._state(
+            current_status="playing", current=object(),
+            agent_monitor_task=SimpleNamespace(done=lambda: True), agent_monitor_failures=2,
+        )
+        router = self._router(state)
+        self.assertTrue(router.should_route_tts_to_music_agent(1, 99))
+        self.assertTrue(router.should_block_tts_local_voice(1))
+
+        state.current = None
+        state.current_status = "queued"
+        state.agent_remote_queue_size = 2
+        self.assertTrue(router.should_route_tts_to_music_agent(1, 55))
+
+    def test_failed_track_without_queue_does_not_hold_voice(self):
+        state = self._state(current_status="failed", current=object())
+        router = self._router(state)
+        self.assertFalse(router.should_route_tts_to_music_agent(1, 55))
+        self.assertFalse(router.should_block_tts_local_voice(1))
 
 
 if __name__ == "__main__":
