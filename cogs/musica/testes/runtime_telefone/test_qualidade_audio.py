@@ -220,9 +220,14 @@ def test_wave_d_resample_seletivo_so_para_fonte_nao_48k(monkeypatch) -> None:
     options, mode = agent._ffmpeg_options_for_source(44100)
     assert mode == "swr_quality"
     assert "-af aresample=48000:resampler=swr" in options
-    assert ":filter_size=32" in options
+    assert ":filter_size=64" in options
     assert ":phase_shift=10" in options
-    assert ":linear_interp=0" in options
+    assert ":linear_interp=1" in options
+    assert ":filter_type=kaiser" in options
+
+    agent.resample_filter_size = 32
+    reduced, _ = agent._ffmpeg_options_for_source(44100)
+    assert ":filter_size=32" in reduced
     assert ":exact_rational=1" in options
 
     unknown_options, unknown_mode = agent._ffmpeg_options_for_source(0)

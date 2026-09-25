@@ -90,7 +90,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.59"
+AGENT_VERSION = "0.3.60"
 STARTED_AT = time.time()
 
 
@@ -148,11 +148,11 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_on_http_error 408,5xx -reconnect_delay_max 2 -rw_timeout 8000000",
         )
         self.ffmpeg_options = os.getenv("MUSIC_AGENT_FFMPEG_OPTIONS", "-vn -sn -dn -loglevel warning")
-        # Resampling de qualidade só entra quando a fonte conhecida não é 48 kHz.
-        # Mantemos o filter_size padrão do SWR para não aumentar CPU; a melhoria
-        # vem de evitar interpolação linear entre fases e usar a razão exata.
+        # Fontes nativas 48 kHz seguem sem filtro; Nightcore faz uma conversão
+        # 60 -> 48 kHz e recebe a mesma proteção contra aliasing.
         self.resample_quality_enabled = truthy(os.getenv("MUSIC_AGENT_RESAMPLE_QUALITY_ENABLED"), True)
-        self.resample_filter_size = max(16, min(64, env_int("MUSIC_AGENT_RESAMPLE_FILTER_SIZE", 32)))
+        self.resample_filter_size = max(16, min(64, env_int("MUSIC_AGENT_RESAMPLE_FILTER_SIZE", 64)))
+        self.nightcore_resample_filter_size = max(16, min(64, env_int("MUSIC_AGENT_NIGHTCORE_RESAMPLE_FILTER_SIZE", 64)))
         self.resample_phase_shift = max(8, min(12, env_int("MUSIC_AGENT_RESAMPLE_PHASE_SHIFT", 10)))
         # Telemetria de qualidade mede apenas o tempo de leitura do source.
         # Nenhum sample PCM é analisado, então o custo no hot path é mínimo.

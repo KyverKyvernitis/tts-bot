@@ -52,6 +52,44 @@ def test_filtro_nightcore_com_bassboost_preserva_saida_48k_e_acelera(tmp_path: P
     assert agent._ffmpeg_options_for_source(48000, effects=(False, True), is_live=True)[0] == agent.ffmpeg_options
 
 
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg ausente")
+def test_nightcore_rejeita_aliasing_sem_filtrar_musica_nativa(monkeypatch) -> None:
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    clean, mode = agent._ffmpeg_options_for_source(48000)
+    assert clean == agent.ffmpeg_options and mode == "native_48k"
+    options, _ = agent._ffmpeg_options_for_source(48000, effects=(False, True))
+    assert options.count("-af ") == 1
+    assert "asetrate=60000,aresample=48000:resampler=swr:filter_size=64" in options
+
+    def alias_amplitude(chain: str) -> float:
+        pcm = subprocess.check_output([
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "aevalsrc=0.5*sin(2*PI*20000*t):s=48000:d=1",
+            "-af", chain, "-ar", "48000", "-ac", "1", "-f", "f32le", "-",
+        ], timeout=10)
+        samples = array("f", pcm)
+        window = samples[4800:33600]
+        sine = sum(value * math.sin(2 * math.pi * 23000 * i / 48000)
+                   for i, value in enumerate(window))
+        cosine = sum(value * math.cos(2 * math.pi * 23000 * i / 48000)
+                     for i, value in enumerate(window))
+        return 2 * math.hypot(sine, cosine) / len(window)
+
+    original = alias_amplitude("aresample=48000,asetrate=60000,aresample=48000")
+    improved = alias_amplitude(options.split("-af ", 1)[1])
+    assert improved < original * 0.1
+
+    agent.resample_filter_size = 32  # configuração antiga continua no ambiente
+    legacy, _ = agent._ffmpeg_options_for_source(48000, effects=(False, True))
+    assert ":filter_size=64" in legacy
+    assert alias_amplitude(legacy.split("-af ", 1)[1]) < original * 0.1
+
+    agent.resample_quality_enabled = False
+    fallback, _ = agent._ffmpeg_options_for_source(48000, effects=(False, True))
+    assert fallback.endswith("-af aresample=48000,asetrate=60000,aresample=48000")
+
+
 def test_bassboost_no_mixer_reforca_graves_apos_volume_sem_reduzir_medios(monkeypatch) -> None:
     music = _load_music_agent(monkeypatch)
     rate = 48000

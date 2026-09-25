@@ -2389,6 +2389,18 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             for marker in (" -af ", " -af=", " -filter:a", " -filter_complex ", " -filter_complex=")
         )
 
+    def _ffmpeg_quality_resample_filter(self, *, nightcore: bool = False) -> str:
+        # FFmpeg SWR está disponível sem dependência opcional. Janela maior
+        # preserva melhor o topo da banda e rejeita aliasing no Nightcore.
+        setting = "nightcore_resample_filter_size" if nightcore else "resample_filter_size"
+        size = max(16, min(64, int(getattr(self, setting, 64) or 64)))
+        phase = max(8, min(12, int(getattr(self, "resample_phase_shift", 10) or 10)))
+        return (
+            "aresample=48000:resampler=swr"
+            f":filter_size={size}:phase_shift={phase}"
+            ":linear_interp=1:exact_rational=1:filter_type=kaiser"
+        )
+
     def _ffmpeg_options_for_source(
         self, source_sample_rate: int = 0, *, effects: tuple[bool, bool] = (False, False),
         is_live: bool = False,
@@ -2401,35 +2413,26 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             rate = max(0, int(source_sample_rate or 0))
         except Exception:
             rate = 0
+        quality_enabled = bool(getattr(self, "resample_quality_enabled", True))
         if any(effects):
             if self._ffmpeg_has_custom_audio_filter(base):
                 raise ValueError("efeitos de áudio incompatíveis com o filtro FFmpeg personalizado")
-            resample = ""
-            if rate not in (0, 48000) and bool(getattr(self, "resample_quality_enabled", True)):
-                filter_size = max(16, min(64, int(getattr(self, "resample_filter_size", 32) or 32)))
-                phase_shift = max(8, min(12, int(getattr(self, "resample_phase_shift", 10) or 10)))
-                resample = (
-                    "aresample=48000:resampler=swr"
-                    f":filter_size={filter_size}:phase_shift={phase_shift}"
-                    ":linear_interp=0:exact_rational=1"
-                )
-            chain = filtros(bassboost=effects[0], nightcore=effects[1], is_live=is_live, resample=resample)
+            quality = self._ffmpeg_quality_resample_filter(nightcore=True) if quality_enabled else "aresample=48000"
+            resample = self._ffmpeg_quality_resample_filter() if rate not in (0, 48000) and quality_enabled else ""
+            chain = filtros(
+                bassboost=effects[0], nightcore=effects[1], is_live=is_live,
+                resample=resample, nightcore_resample=quality,
+            )
             return f"{base} -af {chain}".strip(), "effects"
         if rate == 48000:
             return base, "native_48k"
         if rate <= 0:
             return base, "ffmpeg_auto_unknown"
-        if not bool(getattr(self, "resample_quality_enabled", True)):
+        if not quality_enabled:
             return base, "ffmpeg_auto"
         if self._ffmpeg_has_custom_audio_filter(base):
             return base, "custom_filter"
-        filter_size = max(16, min(64, int(getattr(self, "resample_filter_size", 32) or 32)))
-        phase_shift = max(8, min(12, int(getattr(self, "resample_phase_shift", 10) or 10)))
-        resample = (
-            "aresample=48000:resampler=swr"
-            f":filter_size={filter_size}:phase_shift={phase_shift}"
-            ":linear_interp=0:exact_rational=1"
-        )
+        resample = self._ffmpeg_quality_resample_filter()
         return f"{base} -af {resample}".strip(), "swr_quality"
 
     def _build_ffmpeg_source(

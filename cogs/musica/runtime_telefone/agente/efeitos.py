@@ -9,13 +9,16 @@ def velocidade(*, nightcore: bool, is_live: bool = False) -> float:
     return NIGHTCORE_SPEED if nightcore and not is_live else 1.0
 
 
-def filtros(*, bassboost: bool, nightcore: bool, is_live: bool = False, resample: str = "") -> str:
+def filtros(
+    *, bassboost: bool, nightcore: bool, is_live: bool = False,
+    resample: str = "", nightcore_resample: str = "aresample=48000",
+) -> str:
     parts: list[str] = [resample] if resample else []
     if nightcore and not is_live:
         # Normalize a entrada antes de elevar a taxa; a origem pode ser 44,1 kHz.
         if not resample:
             parts.append("aresample=48000")
-        parts.extend(("asetrate=60000", "aresample=48000"))
+        parts.extend(("asetrate=60000", nightcore_resample))
     # Bassboost preserva o áudio original aqui: o mixer aplica o ganho somente
     # ao grave depois do volume, usando a folga disponível no PCM de saída.
     return ",".join(parts)
