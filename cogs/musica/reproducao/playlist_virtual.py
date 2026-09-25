@@ -109,6 +109,7 @@ def payload_faixa_agent(
         "requester_id": requester_id or track.requester_id,
         "requester_name": requester_name or track.requester_name,
         "queue_item_id": str(getattr(track, "queue_item_id", "") or ""),
+        "attachment_ref": dict(getattr(track, "attachment_ref", {}) or {}),
     }
 
 

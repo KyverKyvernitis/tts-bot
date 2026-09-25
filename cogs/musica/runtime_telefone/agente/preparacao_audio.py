@@ -46,6 +46,10 @@ class PreparacaoAudioMixin:
         options, _mode = self._ffmpeg_options_for_source(
             track.audio_sample_rate, effects=effects, is_live=track.is_live,
         )
+        if track.attachment_ref and track.audio_stream_index >= 0:
+            # Decodifica apenas a trilha confirmada pelo ffprobe, mesmo quando
+            # o arquivo tem vídeo, múltiplas trilhas ou capa embutida.
+            options = f"-map 0:{track.audio_stream_index} {options}"
         before = self._ffmpeg_before_options_for_offset(track.start_offset_seconds)
         # EOF é normal em músicas. Transmissões ao vivo mantêm a reconexão.
         if track.is_live and "-reconnect_at_eof" not in before:

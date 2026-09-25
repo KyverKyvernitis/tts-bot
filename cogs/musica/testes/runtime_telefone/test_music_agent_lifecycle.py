@@ -72,6 +72,145 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def test_discord_video_is_verified_before_queue_and_retries_do_not_duplicate(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.prefetch_enabled = False
+        agent.next_audio_prepare_enabled = False
+        st = agent.states.setdefault(123, music.GuildMusicState(guild_id=123))
+        st.current = music.AgentTrack(title="tocando", query="https://youtu.be/abcdefghijk", duration=240)
+        st.status = "playing"
+        reference = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        body = {
+            "action": "enqueue_discord_attachment", "guild_id": 123, "voice_channel_id": 9,
+            "command_id": "discord-video:123:1000:10", "requester_id": 7,
+            "track": {"title": "Vídeo enviado", "source": "Discord", "attachment_ref": reference},
+        }
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        resolution = sys.modules["cogs.musica.runtime_telefone.agente.resolucao"]
+
+        async def fetch(_client, ref):
+            assert ref == reference
+            return {"url": "https://cdn.discordapp.com/attachments/456/10/video.mp4?ex=ffffffff&hm=signed"}
+
+        async def probe(_url, **_kwargs):
+            return {"duration": 87.25, "audio_stream_index": 1, "audio_codec": "aac",
+                    "audio_abr": 160, "audio_sample_rate": 48000, "audio_channels": 2}
+
+        monkeypatch.setattr(playback, "fetch_discord_attachment", fetch)
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        monkeypatch.setattr(resolution, "fetch_discord_attachment", fetch)
+        first = await agent.dispatch(body)
+        assert first["ok"] and first["queued"] and first["track"]["duration"] == 87.25
+        assert len(st.queue) == 1 and st.queue[0].stream_url == ""
+        assert st.queue[0].queue_item_id == body["command_id"]
+        second = await agent.dispatch(body)
+        assert second["deduplicated"] and len(st.queue) == 1
+        resolved = await agent.resolve_track(st.queue[0].query, track_meta=st.queue[0].public(), body={"guild_id": 123})
+        assert resolved.audio_stream_index == 1 and resolved.duration == 87.25
+        assert resolved.stream_url.startswith("https://cdn.discordapp.com/attachments/")
+
+        async def no_audio(_url, **_kwargs):
+            raise playback.DiscordAttachmentError("Este vídeo não contém áudio")
+
+        monkeypatch.setattr(playback, "probe_discord_audio", no_audio)
+        with pytest.raises(playback.DiscordAttachmentError):
+            await agent.dispatch({**body, "command_id": "discord-video:123:1001:10"})
+        assert len(st.queue) == 1
+
+        waiting = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_probe(_url, **_kwargs):
+            waiting.set()
+            await release.wait()
+            return await probe(_url)
+
+        monkeypatch.setattr(playback, "probe_discord_audio", slow_probe)
+        task = asyncio.create_task(agent.dispatch({**body, "command_id": "discord-video:123:1002:10"}))
+        await waiting.wait()
+        # O fim natural ou skip muda o token da faixa, mas não limpa a fila.
+        st.playback_token += 1
+        st.current = music.AgentTrack(title="tocando agora", query="outra faixa", duration=120)
+        st.last_action = "direct_after"
+        release.set()
+        accepted = await task
+        assert accepted["ok"] and accepted["queued"] and len(st.queue) == 2
+
+        waiting.clear()
+        release.clear()
+        task = asyncio.create_task(agent.dispatch({**body, "command_id": "discord-video:123:1003:10"}))
+        await waiting.wait()
+        await agent.cmd_stop({"guild_id": 123})
+        release.set()
+        cancelled = await task
+        assert cancelled["cancelled"] and len(st.queue) == 0
+
+        waiting.clear()
+        release.clear()
+        st.current = music.AgentTrack(title="tocando", query="outra faixa")
+        st.status = "playing"
+        task = asyncio.create_task(agent.dispatch({**body, "command_id": "discord-video:123:1004:10"}))
+        await waiting.wait()
+        await agent.cmd_queue_clear({"guild_id": 123})
+        release.set()
+        assert (await task)["cancelled"] and len(st.queue) == 0
+
+    run(scenario())
+
+
+def test_discord_video_seek_cancelled_if_stopped_during_url_refresh(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 123
+        st = agent.states.setdefault(gid, music.GuildMusicState(guild_id=gid))
+        track = music.AgentTrack(
+            title="Vídeo", duration=80, query="https://discord.com/channels/123/456/789",
+            attachment_ref={"guild_id": gid, "channel_id": 456, "message_id": 789, "attachment_id": 10},
+            audio_stream_index=1,
+        )
+        st.current = track
+        st.status = "playing"
+        entered = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def resolve(_query, **_kwargs):
+            entered.set()
+            await resume.wait()
+            return track
+
+        agent.resolve_track = resolve
+        seek = asyncio.create_task(agent.cmd_seek({"guild_id": gid, "position_seconds": 20}))
+        await entered.wait()
+        st.current = None
+        st.playback_token += 1
+        resume.set()
+        result = await seek
+        assert result["cancelled"] is True and st.current is None
+
+    run(scenario())
+
+
+def test_discord_video_effects_map_only_verified_audio_stream(music, monkeypatch):
+    agent = music.MusicAgent()
+    agent.pcm_buffer_enabled = False
+    created = []
+    monkeypatch.setattr(music.discord, "FFmpegPCMAudio", lambda url, **kwargs: created.append((url, kwargs)) or object())
+    track = music.AgentTrack(
+        title="Vídeo", stream_url="https://cdn.discordapp.com/attachments/456/10/video.mp4",
+        attachment_ref={"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10},
+        audio_stream_index=1, audio_sample_rate=44100,
+    )
+    agent._create_pcm_source(track, effects=(True, True, False))
+    _, options = created[-1]
+    assert "-map 0:1" in options["options"]
+    assert "-vn" in options["options"]
+    assert "-af" in options["options"]
+    agent._create_pcm_source(track, effects=(True, False, True))
+    assert "-map 0:1" in created[-1][1]["options"]
+    assert "-af" in created[-1][1]["options"]
+
+
 def test_idle_cancelled_task_cannot_remove_replacement(music, monkeypatch):
     async def scenario():
         agent = music.MusicAgent(); gate = asyncio.Event(); gid = 10

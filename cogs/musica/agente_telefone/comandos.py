@@ -464,7 +464,7 @@ async def music_agent_command(
         if "music agent" in lower or "configure music_agent" in lower or "sem token" in lower:
             message = str(getattr(config, "MUSIC_AGENT_MISSING_TOKEN_MESSAGE", MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE) or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE)
         raise MusicWorkerEngineUnavailable(message[:260])
-    if int(guild_id or 0) > 0 and action_normalized in {"play", "enqueue_many", "playlist_refill"}:
+    if int(guild_id or 0) > 0 and action_normalized in {"play", "enqueue_many", "playlist_refill", "enqueue_discord_attachment"}:
         if action_normalized in _DEFERRED_PLAY_ACTIONS:
             _cancelar_comando_diferido(int(guild_id), reason="immediate_delivery_succeeded")
         vincular_guild_worker(int(guild_id), destino)

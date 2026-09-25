@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
 from dataclasses import replace
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 import discord
 
 from .ciclo_vida import remove_owned_task, stop_player_instance
+from .validade_stream import fetch_discord_attachment, normalize_reference, probe_discord_audio, DiscordAttachmentError
 from .configuracao import env_float, env_int
 from .estado import AgentTrack, GuildMusicState
 from .efeitos import filtros
@@ -470,6 +472,91 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             accepted += 1
         return {"ok": True, "accepted": accepted, "cache_size": len(self._resolve_cache), "metadata_cache_size": len(self._metadata_cache)}
 
+    async def cmd_enqueue_discord_attachment(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Confirma áudio e duração antes de tocar na fila autoritativa.
+
+        O lock por guild preserva a ordem de chegada também quando um probe
+        demora mais que outro. Não há placeholder reproduzível durante o probe.
+        """
+        guild_id = safe_id(body.get("guild_id"))
+        voice_channel_id = safe_id(body.get("voice_channel_id"))
+        meta = body.get("track") if isinstance(body.get("track"), dict) else {}
+        if not guild_id or not voice_channel_id:
+            raise DiscordAttachmentError("Entre em uma call antes de adicionar o vídeo.")
+        ref = normalize_reference(meta.get("attachment_ref"), guild_id)
+        request_id = str(body.get("command_id") or "").strip()
+        if not request_id.startswith(f"discord-video:{guild_id}:") or len(request_id) > 96:
+            raise DiscordAttachmentError("Identificador do pedido de vídeo inválido.")
+
+        if not hasattr(self, "_discord_enqueue_locks"):
+            self._discord_enqueue_locks = {}
+            self._discord_seen_requests = {}
+        lock = self._discord_enqueue_locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+            existing = next((item for item in ([st.current] if st.current else []) + st.queue + st.history
+                             if item.queue_item_id == request_id), None)
+            if existing:
+                if existing is not st.current and existing not in st.queue:
+                    return {"ok": False, "error": "Esse pedido de vídeo já foi reproduzido. Envie um novo comando para repetir."}
+                return {"ok": True, "deduplicated": True, "queued": existing in st.queue,
+                        "track": existing.public(), "state": st.public()}
+            seen = self._discord_seen_requests.setdefault(guild_id, {})
+            now = time.monotonic()
+            for key, when in list(seen.items()):
+                if now - when > 86400:
+                    seen.pop(key, None)
+            if request_id in seen:
+                return {"ok": False, "error": "Esse pedido de vídeo já foi processado. Envie um novo comando para repetir."}
+            queue_generation = int(st.queue_reset_generation)
+            attachment = await fetch_discord_attachment(self.client, ref)
+            async with self._discord_probe_semaphore:
+                probe = await probe_discord_audio(
+                    attachment["url"], executable=getattr(self, "ffprobe_executable", "ffprobe"), timeout=10.0,
+                )
+            if self.states.get(guild_id) is not st or st.queue_reset_generation != queue_generation:
+                return {"ok": False, "cancelled": True, "error": "pedido cancelado durante a verificação"}
+            hint = meta.get("attachment_duration_hint")
+            try:
+                hinted = float(hint)
+                if math.isfinite(hinted) and abs(hinted - probe["duration"]) > max(2.0, probe["duration"] * 0.02):
+                    self.log("discord_duration_corrected", guild_id=guild_id, attachment=ref["attachment_id"],
+                             hint=round(hinted, 2), actual=round(probe["duration"], 2))
+            except (TypeError, ValueError):
+                pass
+            confirmed = dict(meta)
+            confirmed.pop("attachment_url", None)
+            confirmed.pop("attachment_duration_hint", None)
+            confirmed.update(probe)
+            confirmed.update({
+                "attachment_ref": ref,
+                "source": "Discord",
+                "webpage_url": f"https://discord.com/channels/{guild_id}/{ref['channel_id']}/{ref['message_id']}",
+                "stream_url": "",  # URL curta só existe dentro do worker, resolvida perto do play.
+                "queue_item_id": request_id,
+                "is_live": False,
+            })
+            title = str(confirmed.get("title") or "").strip()
+            if not title or title.casefold() == "música":
+                filename = str(attachment.get("filename") or "").strip()[:140]
+                title = f"Vídeo: {filename or ref['attachment_id']}"
+            confirmed["title"] = title[:160]
+            play_body = dict(body)
+            play_body["track"] = confirmed
+            play_body["query"] = confirmed["webpage_url"]
+            result = await self.cmd_play(play_body)
+            if result.get("ok"):
+                seen[request_id] = time.monotonic()
+                if len(seen) > 2048:
+                    for key in list(seen)[:len(seen) - 2048]:
+                        seen.pop(key, None)
+            result["track"] = next(
+                (item.public() for item in ([st.current] if st.current else []) + st.queue
+                 if item.queue_item_id == request_id),
+                self._agent_track_from_metadata(confirmed, body=play_body).public(),
+            )
+            return result
+
     async def cmd_play(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         voice_channel_id = safe_id(body.get("voice_channel_id"))
@@ -849,6 +936,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
     async def cmd_stop(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        st.queue_reset_generation += 1
         st.last_action = "stop"
         self._cancel_youtube_queue_metadata(guild_id)
         self._cancel_prefetch_tasks(guild_id)
@@ -1232,6 +1320,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
     async def cmd_queue_clear(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        st.queue_reset_generation += 1
         removed = sum(1 for item in st.queue if not item.is_virtual_playlist_marker)
         st.queue.clear()
         st.virtual_shuffle_active = False
@@ -1431,9 +1520,12 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 pass
         st.last_action = "seek"
         player = st.player
-        if not track.stream_url:
+        if not track.stream_url or (track.attachment_ref and self._track_stream_needs_refresh(track)):
+            generation = st.playback_token
             try:
                 track = await self.resolve_track(track.query or track.webpage_url or track.title, track_meta=track.public(), body=body)
+                if st.playback_token != generation or st.current is None or st.current.queue_item_id != track.queue_item_id:
+                    return {"ok": False, "cancelled": True, "error": "a música mudou durante o seek", "state": st.public()}
                 st.current = track
             except Exception as exc:
                 return {"ok": False, "error": f"não consegui preparar seek: {short_text(exc, 180)}", "state": st.public()}
@@ -1548,6 +1640,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 candidate = None
                 swapped = False
                 try:
+                    if selected.attachment_ref and self._track_stream_needs_refresh(selected):
+                        refreshed = await self._resolve_discord_attachment(track_meta=selected.public(), body={"guild_id": guild_id})
+                        selected.stream_url = refreshed.stream_url
+                        selected.stream_resolved_monotonic = refreshed.stream_resolved_monotonic
                     candidate = self._create_pcm_source(selected, effects=desired)
                     if not isinstance(candidate, BufferedPCMSource):
                         candidate = BufferedPCMSource(candidate, max_frames=10,
@@ -1589,6 +1685,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 st.bassboost, st.nightcore, st.slowed_reverb = desired
                 st.effects_revision += 1
                 track.start_offset_seconds = offset
+                if selected.attachment_ref:
+                    track.stream_url = selected.stream_url
+                    track.stream_resolved_monotonic = selected.stream_resolved_monotonic
                 now = time.monotonic()
                 st.started_monotonic = now
                 st.paused_monotonic = now if st.paused else 0.0
@@ -2218,6 +2317,12 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         direct_start_monotonic = time.monotonic()
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         requested_token = st.playback_token
+        if track.attachment_ref and (not track.stream_url or self._track_stream_needs_refresh(track)):
+            refreshed = await self._resolve_discord_attachment(track_meta=track.public(), body={"guild_id": guild_id})
+            if requested_token != st.playback_token:
+                return
+            track.stream_url = refreshed.stream_url
+            track.stream_resolved_monotonic = refreshed.stream_resolved_monotonic
         if not track.stream_url:
             raise RuntimeError("track sem stream_url direto")
         voice_client = prepared_voice[0] if prepared_voice is not None else None

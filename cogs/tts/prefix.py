@@ -190,6 +190,19 @@ async def dispatch_prefix_control_command(cog: Any, message: Any, command: Prefi
         await cog._prefix_set_lang(message, command.argument)
         return True
     if kind == "panel_user":
+        # `_p` puro abre o painel, exceto quando responde a um vídeo real. A
+        # decisão fica aqui (um só dispatcher), sem dois on_message competindo.
+        if not command.argument and command.alias.lower().endswith("p") and getattr(message, "reference", None):
+            from cogs.musica.nucleo.anexo_discord import video_respondido
+            selection = await video_respondido(message)
+            if selection.status in {"video", "multiplos", "inacessivel"}:
+                music = cog.bot.get_cog("Music")
+                if music is None:
+                    await message.channel.send("O player de música está indisponível.")
+                else:
+                    ctx = await cog.bot.get_context(message)
+                    await music._run_play_discord_attachment(ctx, selection)
+                return True
         return bool(await cog._send_prefix_panel(
             message,
             panel_type="user",

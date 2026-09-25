@@ -38,6 +38,8 @@ class AgentTrack:
     stream_resolved_monotonic: float = 0.0
     virtual_playlist_cursor: dict[str, Any] = field(default_factory=dict)
     queue_item_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    attachment_ref: dict[str, int] = field(default_factory=dict)
+    audio_stream_index: int = -1
 
     def __post_init__(self) -> None:
         if not str(self.queue_item_id or "").strip():
@@ -77,6 +79,8 @@ class AgentTrack:
             "start_offset_seconds": self.start_offset_seconds,
             "virtual_playlist_cursor": dict(self.virtual_playlist_cursor) if self.virtual_playlist_cursor else {},
             "queue_item_id": self.queue_item_id,
+            "attachment_ref": dict(self.attachment_ref),
+            "audio_stream_index": self.audio_stream_index,
         }
 
 
@@ -105,6 +109,8 @@ class GuildMusicState:
     normal_volume_percent: int = 55
     ducked: bool = False
     playback_token: int = 0
+    # Só stop/limpar fila invalidam inserções cujo áudio ainda está em prova.
+    queue_reset_generation: int = 0
     shuffle: bool = False
     loop_mode: str = "off"
     bassboost: bool = False

@@ -59,6 +59,7 @@ from cogs.musica.runtime_telefone.agente.configuracao import (  # noqa: E402
 )
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState  # noqa: E402
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin  # noqa: E402
+from cogs.musica.runtime_telefone.agente.validade_stream import DiscordAttachmentError  # noqa: E402
 from cogs.musica.runtime_telefone.agente.reproducao import ReproducaoMixin  # noqa: E402
 from cogs.musica.runtime_telefone.agente.tts import TTSMixin, _TimedTTSSource  # noqa: E402
 from cogs.musica.runtime_telefone.agente.utilitarios import (  # noqa: E402
@@ -90,14 +91,14 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.64"
+AGENT_VERSION = "0.3.65"
 STARTED_AT = time.time()
 
 
 bootstrap_env()
 
 
-_AUDIT_URL_FIELDS = {"query", "url", "webpage_url", "original_url", "target"}
+_AUDIT_URL_FIELDS = {"query", "url", "webpage_url", "original_url", "target", "stream_url"}
 _AUDIT_DROP_QUERY_KEYS = {
     "si", "fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "feature",
 }
@@ -111,6 +112,8 @@ def _audit_value(key: str, value: Any) -> Any:
         return value
     try:
         parsed = urllib.parse.urlsplit(text)
+        if parsed.hostname in {"cdn.discordapp.com", "media.discordapp.net"}:
+            return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
         kept: list[tuple[str, str]] = []
         for name, item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
             low = name.lower()
@@ -143,6 +146,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.direct_audio_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_AUDIO_ENABLED"), True)
         self.direct_youtube_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_YOUTUBE_ENABLED"), True)
         self.ffmpeg_executable = os.getenv("MUSIC_AGENT_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
+        self.ffprobe_executable = os.getenv("MUSIC_AGENT_FFPROBE") or shutil.which("ffprobe") or "ffprobe"
         self.ffmpeg_before_options = os.getenv(
             "MUSIC_AGENT_FFMPEG_BEFORE_OPTIONS",
             "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_on_http_error 408,5xx -reconnect_delay_max 2 -rw_timeout 8000000",
@@ -263,9 +267,13 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._command_results: dict[str, tuple[float, dict[str, Any]]] = {}
         self._command_locks: dict[str, asyncio.Lock] = {}
         self._command_lock_users: dict[str, int] = {}
+        self._discord_probe_semaphore = asyncio.Semaphore(2)
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
+        # A leitura REST do anexo precisa da mesma permissão de conteúdo
+        # já usada pelo bot para receber o comando por prefixo.
+        intents.message_content = True
         self.client = discord.Client(intents=intents)
         self.states: dict[int, GuildMusicState] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -719,7 +727,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             return web.json_response(result)
         except Exception as exc:
             self.log("command_error", action=body.get("action"), error=f"{type(exc).__name__}: {exc}")
-            return web.json_response({"ok": False, "error": f"{type(exc).__name__}: {short_text(exc, 300)}", "status": self.status_payload()}, status=400)
+            detail = str(exc) if isinstance(exc, DiscordAttachmentError) else f"{type(exc).__name__}: {short_text(exc, 300)}"
+            return web.json_response({"ok": False, "error": detail, "status": self.status_payload()}, status=400)
 
     def voice_dependencies_payload(self, *, force: bool = False) -> dict[str, Any]:
         now = time.monotonic()
@@ -811,6 +820,10 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 continue
             if self.states.get(guild_id) is st:
                 self.states.pop(guild_id, None)
+                lock = getattr(self, "_discord_enqueue_locks", {}).get(guild_id)
+                if lock is None or not lock.locked():
+                    getattr(self, "_discord_enqueue_locks", {}).pop(guild_id, None)
+                    getattr(self, "_discord_seen_requests", {}).pop(guild_id, None)
                 state_removed += 1
 
         if metadata_removed or stream_removed or state_removed:
@@ -875,6 +888,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             )
         if action in {"playlist_refill", "refill_playlist"}:
             return await self.cmd_playlist_refill(body)
+        if action == "enqueue_discord_attachment":
+            return await self.cmd_enqueue_discord_attachment(body)
         if action in {"play", "enqueue", "play_direct", "enqueue_many", "queue_many", "add_many", "playlist"}:
             body = dict(body)
             body["_agent_action"] = action

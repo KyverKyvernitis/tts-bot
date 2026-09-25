@@ -178,6 +178,11 @@ async def post_json_worker(
                 remaining,
                 max(0.75, min(6.0, remaining / attempts_left * 1.5)),
             )
+            if str(payload.get("action") or "").strip().lower() == "enqueue_discord_attachment":
+                # O probe e o primeiro start ocorrem antes do ACK. Cortar o
+                # socket a cada 6 s criaria retries simultâneos e uma falha
+                # aparente mesmo após a faixa entrar corretamente na fila.
+                per_attempt = remaining
             return await _post_json_once(
                 session=session,
                 url=url,

@@ -102,6 +102,9 @@ def faixa_do_payload(payload: dict[str, Any], fallback: MusicTrack | None = None
         or (getattr(fallback, "queue_item_id", "") if fallback is not None else "")
         or ""
     ).strip()
+    attachment_ref = payload.get("attachment_ref")
+    if isinstance(attachment_ref, dict):
+        track.attachment_ref = {key: int(attachment_ref[key]) for key in ("guild_id", "channel_id", "message_id", "attachment_id") if str(attachment_ref.get(key) or "").isdigit()}
     return track
 
 

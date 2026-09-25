@@ -17,6 +17,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from .ciclo_vida import consume_task_result, remove_owned_task
+from .validade_stream import fetch_discord_attachment, normalize_reference
 from .correspondencia import avaliar_correspondencia, busca_alternativa
 from .estado import AgentTrack
 from .ytdlp_quente import WarmYTDLPResolver
@@ -504,6 +505,12 @@ class ResolucaoMixin:
 
     def _query_from_track_meta(self, track_meta: dict[str, Any] | None, *, fallback_query: Any = "") -> str:
         meta = track_meta or {}
+        if meta.get("attachment_ref"):
+            try:
+                ref = meta["attachment_ref"]
+                return f"https://discord.com/channels/{int(ref['guild_id'])}/{int(ref['channel_id'])}/{int(ref['message_id'])}"
+            except (TypeError, ValueError, KeyError):
+                return ""
         source_kind = self._metadata_source_kind(meta)
         raw_query = str(meta.get("query") or fallback_query or "").strip()
         direct = str(meta.get("stream_url") or meta.get("direct_url") or "").strip()
@@ -582,7 +589,23 @@ class ResolucaoMixin:
             is_live=bool(track_meta.get("is_live")),
             start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
             queue_item_id=str(track_meta.get("queue_item_id") or ""),
+            attachment_ref=dict(track_meta.get("attachment_ref") or {}),
+            audio_stream_index=int(track_meta.get("audio_stream_index", -1)),
         )
+
+    async def _resolve_discord_attachment(self, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
+        guild_id = safe_id(body.get("guild_id"))
+        ref = normalize_reference(track_meta.get("attachment_ref"), guild_id)
+        attachment = await fetch_discord_attachment(self.client, ref)
+        track = self._agent_track_from_metadata(track_meta, body=body)
+        if not track.title or track.title.casefold() == "música":
+            raise ValueError("O vídeo está sem título verificado.")
+        if track.duration is None or track.duration <= 0 or track.audio_stream_index < 0:
+            raise ValueError("O vídeo está sem áudio ou duração verificados.")
+        track.stream_url = attachment["url"]
+        track.transport_hint = "discord-attachment"
+        track.stream_resolved_monotonic = time.monotonic()
+        return track
 
     async def _prefetch_track(self, body: dict[str, Any], track_meta: dict[str, Any], query: str, cache_key: str) -> None:
         task_key = self._guild_prefetch_key(safe_id(body.get("guild_id")), cache_key)
@@ -613,6 +636,9 @@ class ResolucaoMixin:
                 remove_owned_task(self._prefetch_tasks, key, current_task)
 
     async def resolve_track(self, query: str, *, track_meta: dict[str, Any], body: dict[str, Any], priority: int = 0) -> AgentTrack:
+        if track_meta.get("attachment_ref"):
+            # O permalink da mensagem não é mídia nem uma busca textual.
+            return await self._resolve_discord_attachment(track_meta=track_meta, body=body)
         direct = str(track_meta.get("stream_url") or body.get("stream_url") or "").strip()
         title_hint = _metadata_text(track_meta.get("title") or body.get("title"), limit=160)
         requester_id = safe_id(body.get("requester_id") or track_meta.get("requester_id"))
