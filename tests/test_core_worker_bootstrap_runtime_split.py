@@ -570,6 +570,35 @@ def test_same_version_source_hash_difference_still_requires_agent_update() -> No
     assert module._registered_workers_need_agent_version({"workers": [worker]}, "1.10.39", expected) is True
 
 
+def test_post_update_publishes_music_agent_change_without_phone_worker_version_bump(monkeypatch) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "core_worker_music_agent_update_test", ROOT / "scripts/core-worker-automation.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    monkeypatch.setenv("CORE_WORKER_CHANGED_FILES", "cogs/musica/runtime_telefone/agente/servidor.py")
+    monkeypatch.setattr(module, "_load_registry_snapshot", lambda: {"workers": []})
+    monkeypatch.setattr(module, "_current_fingerprints", lambda: {
+        "phone_worker_version": "1.11.18", "phone_worker_hash": "a" * 64,
+        "apk_versionCode": 1, "apk_source_hash": "b" * 64,
+    })
+    monkeypatch.setattr(module, "_load_state", lambda: {})
+    monkeypatch.setattr(module, "_apk_needs_build", lambda *_args: False)
+    monkeypatch.setattr(module, "_public_base_url", lambda: "http://127.0.0.1")
+    monkeypatch.setattr(module, "queue_boot_repairs", lambda: {"ok": True})
+    monkeypatch.setattr(module, "_save_state", lambda _state: None)
+    monkeypatch.setattr(module, "write_status", lambda _status: None)
+    updates = []
+    monkeypatch.setattr(module, "queue_agent_updates", lambda *, force: updates.append(force) or {"ok": True})
+
+    assert module.after_update() == 0
+    assert updates == [True]
+
+
 def test_legacy_agent_requires_one_time_repair_but_target_stays_published(tmp_path: Path, monkeypatch) -> None:
     import importlib.util
 

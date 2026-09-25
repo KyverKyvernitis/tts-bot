@@ -87,6 +87,19 @@ printf '%s %s %s %s %s %s %s\\n' "$VPS_SYSTEMD_UNITS_CHANGED" "$FRONT_CHANGED" "
     assert result.stdout.strip() == '1 0 0 0 0 0 0'
 
 
+def test_music_agent_source_change_requests_termux_release_without_legacy_sync():
+    script = '''
+source <(awk '/^classify_changed_files[(][)]/{f=1} /^fast_reload_modules_for_changed_files[(][)]/{f=0} f' "$CORE_SOURCE")
+classify_changed_files
+printf '%s %s %s\\n' "$BOT_CHANGED" "$PHONE_WORKER_SYNC_REQUIRED" "$CORE_WORKER_AUTOMATION_REQUIRED"
+'''
+    result = subprocess.run(['bash', '-euc', script], capture_output=True, text=True,
+                            env={**os.environ, 'CORE_SOURCE': str(caminho_fonte_core()),
+                                 'CHANGED_FILES_RAW': 'cogs/musica/runtime_telefone/agente/servidor.py'})
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == '1 0 1'
+
+
 def test_final_layout_has_only_canonical_infrastructure_and_helpers():
     assert {p.name for p in (ROOT / 'updater/sistema').iterdir() if p.is_file()} == {
         'README.md', 'instalar.sh', 'bot-updater.service', 'bot-updater.timer',

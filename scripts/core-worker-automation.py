@@ -2898,6 +2898,7 @@ def after_update(force_agent: bool = False) -> int:
     apk_hash_changed = bool(previous.get("apk_source_hash") and previous.get("apk_source_hash") != current.get("apk_source_hash"))
     phone_source_changed = (
         _has_changed(changed, "deploy/termux/phone-worker/")
+        or any(path in PHONE_WORKER_DOMAIN_SOURCE_TARGETS for path in changed)
         or force_agent
         or phone_hash_changed
     )

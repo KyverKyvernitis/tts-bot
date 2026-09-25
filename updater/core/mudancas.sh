@@ -184,6 +184,9 @@ classify_changed_files() {
         PHONE_WORKER_SYNC_REQUIRED=1
         CORE_WORKER_AUTOMATION_REQUIRED=1
         ;;
+      cogs/__init__.py|cogs/musica/__init__.py|cogs/musica/runtime_telefone/__init__.py|cogs/musica/runtime_telefone/agente/*|cogs/musica/runtime_telefone/ponte_worker/*|cogs/musica/runtime_telefone/termux/*)
+        CORE_WORKER_AUTOMATION_REQUIRED=1
+        ;;
       android/core-worker-app/*)
         CORE_WORKER_APK_CHANGED=1
         CORE_WORKER_AUTOMATION_REQUIRED=1
