@@ -425,6 +425,11 @@ class ResolucaoMixin:
             or track_meta.get("thumbnail"),
             500,
         )
+        # Links diretos chegam à fila com um título provisório ("YouTube").
+        # Depois de resolver a mídia, esse rótulo não pode esconder o título
+        # verdadeiro, inclusive nas leituras seguintes do cache de streams.
+        if title_hint.casefold() in {"youtube", "link", "música", "musica", "desconhecida", "unknown"}:
+            title_hint = ""
         track = AgentTrack(
             title=title_hint or resolved_title or short_text(query, 160) or "Música",
             requester_id=requester_id,

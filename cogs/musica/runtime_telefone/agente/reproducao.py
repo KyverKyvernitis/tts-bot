@@ -235,7 +235,17 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             return
         cache_key = self._resolve_cache_key(query, meta)
         task_key = self._guild_prefetch_key(guild_id, cache_key)
-        if self._cached_resolved_get(cache_key):
+        first_item_id = st.queue[0].queue_item_id
+        # Um link do YouTube enviado à fila ainda não tem título. Resolva a
+        # primeira entrada logo após o enqueue para preencher o painel, mesmo
+        # que a música atual esteja longe de terminar. O stream é revalidado
+        # no play caso expire enquanto aguarda na fila.
+        needs_title = (
+            self._metadata_source_kind(meta) == "youtube"
+            and str(meta.get("title") or "").strip().casefold() in {"youtube", "link", "música", "musica"}
+            and query.startswith(("http://", "https://"))
+        )
+        if self._cached_resolved_get(cache_key) and not needs_title:
             return
         current_task = self._prefetch_tasks.get(task_key)
         if current_task is not None and not current_task.done():
@@ -250,6 +260,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         try:
             if metadata_playlist_next:
                 delay = 0.0
+            elif needs_title:
+                delay = 0.0
             elif current is not None and current.duration and st.started_monotonic:
                 remaining = max(0.0, float(current.duration) - st.source_position_seconds()) / st.playback_speed
                 # Se a faixa já está dentro da janela de prefetch, resolva agora.
@@ -263,7 +275,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 if delay > 0:
                     await asyncio.sleep(delay)
                 latest = self.states.setdefault(int(guild_id or 0), GuildMusicState(guild_id=int(guild_id or 0)))
-                if int(getattr(latest, "playback_token", 0) or 0) != token or not latest.queue:
+                if int(getattr(latest, "playback_token", 0) or 0) != token or not latest.queue or latest.queue[0].queue_item_id != first_item_id:
                     return
                 current_first = latest.queue[0]
                 current_key = self._resolve_cache_key(
@@ -285,7 +297,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 self._prefetch_resolving.add(task_key)
                 resolved = await asyncio.wait_for(self.resolve_track(query, track_meta=current_first.public(), body=body, priority=20), timeout=self.prefetch_timeout)
                 latest2 = self.states.setdefault(int(guild_id or 0), GuildMusicState(guild_id=int(guild_id or 0)))
-                if int(getattr(latest2, "playback_token", 0) or 0) == token and latest2.queue:
+                if int(getattr(latest2, "playback_token", 0) or 0) == token and latest2.queue and latest2.queue[0].queue_item_id == first_item_id:
                     check_key = self._resolve_cache_key(
                         self._query_from_track_meta(latest2.queue[0].public(), fallback_query=latest2.queue[0].query or latest2.queue[0].webpage_url or latest2.queue[0].title),
                         latest2.queue[0].public(),
@@ -325,6 +337,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                             )
                         else:
                             latest2.queue[0] = resolved
+                            latest2.updated_at = time.time()
                 self.log("next_prefetch_ready", guild_id=guild_id, reason=reason, elapsed_ms=round((time.time() - started) * 1000.0, 1), title=getattr(resolved, "title", ""))
             except asyncio.CancelledError:
                 return

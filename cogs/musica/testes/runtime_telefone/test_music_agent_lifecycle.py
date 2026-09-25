@@ -2484,3 +2484,103 @@ def test_queue_item_identity_survives_stream_resolution(music):
         assert resolved.queue_item_id == "queue-entry-456"
 
     run(scenario())
+
+
+def test_youtube_direct_resolution_replaces_placeholder_but_keeps_real_titles(music):
+    agent = music.MusicAgent()
+    resolved = {
+        "title": "Heaven Pierce Her - Unstoppable Force",
+        "uploader": "Heaven Pierce Her - Topic",
+        "webpage_url": "https://www.youtube.com/watch?v=tkLVbpOlH_E",
+        "stream_url": "https://media.example.invalid/opus",
+        "duration": 241,
+    }
+    direct = agent._agent_track_from_resolved(
+        resolved,
+        query="https://www.youtube.com/watch?v=tkLVbpOlH_E",
+        track_meta={"title": "YouTube", "source": "YouTube", "queue_item_id": "youtube-entry"},
+        body={"guild_id": 7},
+    )
+    assert direct.title == "Heaven Pierce Her - Unstoppable Force"
+    assert direct.uploader == "Heaven Pierce Her - Topic"
+    assert direct.queue_item_id == "youtube-entry"
+    assert direct.webpage_url == "https://www.youtube.com/watch?v=tkLVbpOlH_E"
+
+    editorial = agent._agent_track_from_resolved(
+        resolved,
+        query="ytsearch1:Requested version",
+        track_meta={"title": "Artist - Requested version", "source": "Spotify"},
+        body={"guild_id": 7},
+    )
+    assert editorial.title == "Artist - Requested version"
+
+
+def test_youtube_link_in_queue_resolves_title_immediately_and_updates_revision(music):
+    async def scenario():
+        import time
+
+        agent = music.MusicAgent()
+        agent._schedule_audio_prepare = lambda *_args, **_kwargs: None
+        agent.log = lambda *_args, **_kwargs: None
+        guild_id = 778
+        url = "https://www.youtube.com/watch?v=tkLVbpOlH_E"
+        current = music.AgentTrack(title="Current", query="current", duration=360)
+        queued = music.AgentTrack(title="YouTube", query=url, webpage_url=url, source="YouTube")
+        st = music.GuildMusicState(guild_id=guild_id, status="playing", current=current, queue=[queued])
+        st.started_monotonic = time.monotonic()
+        agent.states[guild_id] = st
+        old_revision = st.state_revision()
+        calls = []
+
+        async def resolve(query, *, track_meta, body, priority):
+            calls.append(query)
+            return agent._agent_track_from_resolved(
+                {"title": "Heaven Pierce Her - Unstoppable Force", "webpage_url": url, "stream_url": "https://media.example.invalid/opus"},
+                query=query, track_meta=track_meta, body=body,
+            )
+
+        agent.resolve_track = resolve
+        agent._schedule_next_queue_prefetch(guild_id)
+        await asyncio.gather(*agent._prefetch_tasks.values())
+
+        assert calls == [url]
+        assert st.queue[0].title == "Heaven Pierce Her - Unstoppable Force"
+        assert st.queue[0].queue_item_id == queued.queue_item_id
+        assert st.state_revision() != old_revision
+        assert st.public()["queue"][0]["title"] == st.queue[0].title
+
+    run(scenario())
+
+
+def test_youtube_prefetch_does_not_overwrite_moved_duplicate(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent._schedule_audio_prepare = lambda *_args, **_kwargs: None
+        agent.log = lambda *_args, **_kwargs: None
+        guild_id = 779
+        url = "https://www.youtube.com/watch?v=tkLVbpOlH_E"
+        first = music.AgentTrack(title="YouTube", query=url, webpage_url=url, source="YouTube")
+        second = music.AgentTrack(title="YouTube", query=url, webpage_url=url, source="YouTube")
+        st = music.GuildMusicState(guild_id=guild_id, status="playing", queue=[first, second])
+        agent.states[guild_id] = st
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def resolve(query, *, track_meta, body, priority):
+            started.set()
+            await finish.wait()
+            return agent._agent_track_from_resolved(
+                {"title": "Resolved first", "webpage_url": url, "stream_url": "https://media.example.invalid/opus"},
+                query=query, track_meta=track_meta, body=body,
+            )
+
+        agent.resolve_track = resolve
+        agent._schedule_next_queue_prefetch(guild_id)
+        tasks = list(agent._prefetch_tasks.values())
+        await started.wait()
+        st.queue.pop(0)
+        finish.set()
+        await asyncio.gather(*tasks)
+        assert st.queue == [second]
+        assert second.title == "YouTube"
+
+    run(scenario())

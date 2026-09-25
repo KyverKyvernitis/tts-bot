@@ -279,6 +279,39 @@ class FluxoTocar:
                 await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.")
         if loading_reaction is not None:
             await loading_reaction.finish()
+
+    async def _watch_queued_music_agent_title(self, message, guild_id: int, track: MusicTrack, queue_item_id: str) -> None:
+        """Substitui a confirmação provisória quando o título do link chegar."""
+        if not queue_item_id:
+            return
+        limit = float(getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
+        deadline = asyncio.get_running_loop().time() + max(5.0, limit)
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.75)
+            try:
+                if monitor_music_agent_ativo(self.router, guild_id):
+                    state = estado_local_music_agent(self.router, guild_id)
+                else:
+                    payload = await music_agent_status(
+                        timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5),
+                        guild_id=guild_id,
+                    )
+                    state = self._music_agent_guild_state(payload, guild_id)
+                queue = state.get("queue") if isinstance(state.get("queue"), list) else []
+                current = state.get("current") if isinstance(state.get("current"), dict) else {}
+                for item in [*queue, current]:
+                    if not isinstance(item, dict) or str(item.get("queue_item_id") or "") != queue_item_id:
+                        continue
+                    content = self._music_agent_play_message(track, {"queued": True, "track": item})
+                    if "Carregando detalhes..." not in content:
+                        await message.edit(content=content)
+                        return
+                    break
+            except Exception:
+                logger.debug("[music/agent] falha ao atualizar título da fila", exc_info=True)
+        with contextlib.suppress(Exception):
+            await message.edit(content="`🎶` **Música adicionada ao queue.**")
+
     def _is_lavalink_real_enabled(self, guild_id: int | None) -> bool:
         try:
             return bool(self.router.backends.should_use_lavalink_real(guild_id))
@@ -807,7 +840,13 @@ class FluxoTocar:
                                 f"`📑` **Playlist adicionada ao queue:** `{added}` {count_label}{label}.\n`🎧` Preparando a primeira faixa...",
                             )
                 else:
-                    msg = await self._reply(ctx, self._music_agent_play_message(track, result))
+                    confirmation = self._music_agent_play_message(track, result)
+                    msg = await self._reply(ctx, confirmation)
+                    if msg is not None and result.get("queued") and "Carregando detalhes..." in confirmation:
+                        queued_track = result.get("track") if isinstance(result.get("track"), dict) else {}
+                        queue_item_id = str(queued_track.get("queue_item_id") or "")
+                        if queue_item_id:
+                            asyncio.create_task(self._watch_queued_music_agent_title(msg, ctx.guild.id, track, queue_item_id))
                 state = result.get("state") if isinstance(result.get("state"), dict) else {}
                 status = str(state.get("status") or "").lower()
                 confirmed = self._music_agent_confirmed_playing(state)
