@@ -21,8 +21,32 @@ PCM_FRAME_BYTES = 3840
 MAX_MUSIC_VOLUME = 1.5
 PCM_PEAK = 32767
 PCM_BOOST_KNEE = int(PCM_PEAK * 0.95)
-BASS_ALPHA = 1.0 - math.exp(-2.0 * math.pi * 190.0 / 48000.0)
-BASS_GAIN = 3.5
+BASS_PEAK_CEILING = 32000
+# Low shelf biquad (Audio EQ Cookbook), 48 kHz. O antigo passa-baixa de
+# primeira ordem reforçava 1 kHz e o ramo paralelo criava cancelamentos nos
+# médios. O shelf mantém a resposta acima dos graves próxima de 1:1.
+# Remover <25 Hz do ramo reforçado evita amplificar DC/rumble inaudível.
+BASS_SHELF_GAIN_DB = 14.0
+BASS_SHELF_HZ = 220.0
+BASS_SUB_ALPHA = 1.0 - math.exp(-2.0 * math.pi * 25.0 / 48000.0)
+
+
+def _bass_shelf_coefficients() -> tuple[float, float, float, float, float]:
+    omega = 2.0 * math.pi * BASS_SHELF_HZ / 48000.0
+    cosine = math.cos(omega)
+    strength = 10.0 ** (BASS_SHELF_GAIN_DB / 40.0)
+    alpha = math.sin(omega) / math.sqrt(2.0)  # shelf slope S = 1
+    slope = 2.0 * math.sqrt(strength) * alpha
+    a0 = (strength + 1.0) + (strength - 1.0) * cosine + slope
+    b0 = strength * ((strength + 1.0) - (strength - 1.0) * cosine + slope)
+    b1 = 2.0 * strength * ((strength - 1.0) - (strength + 1.0) * cosine)
+    b2 = strength * ((strength + 1.0) - (strength - 1.0) * cosine - slope)
+    a1 = -2.0 * ((strength - 1.0) + (strength + 1.0) * cosine)
+    a2 = (strength + 1.0) + (strength - 1.0) * cosine - slope
+    return b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
+
+
+BASS_SHELF = _bass_shelf_coefficients()
 
 
 class _AudioReadTelemetry:
@@ -172,7 +196,10 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self._mix_limited_frames = 0
         self.bassboost_enabled = bool(bassboost)
         self._bass_mix = 0.0
-        self._bass_low = [0.0, 0.0]
+        self._bass_limiter_gain = 1.0
+        # Por canal: [entrada anterior, entrada anterior-2,
+        #             saída anterior, saída anterior-2, subgrave].
+        self._bass_filter = [[0.0] * 5 for _ in range(2)]
         self._started_monotonic = time.monotonic()
         self.first_frame_ms: float | None = None
         self.first_frame_monotonic: float | None = None
@@ -227,8 +254,9 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             self._mix_limited_frames = 0
             if bassboost is not None:
                 self.bassboost_enabled = bool(bassboost)
-            self._bass_low = [0.0, 0.0]
+            self._bass_filter = [[0.0] * 5 for _ in range(2)]
             self._bass_mix = 0.0
+            self._bass_limiter_gain = 1.0
             self._started_monotonic = time.monotonic()
             self.first_frame_ms = None
             self.first_frame_monotonic = None
@@ -402,11 +430,11 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         )
 
     def _enhance_music_bass(self, frame: bytes) -> bytes:
-        """Reforça só a música após o volume, sem atenuar voz e médios.
+        """Reforça graves úteis da música após o volume, preservando os médios.
 
         O processamento só roda enquanto o efeito está ativo (ou na breve
-        saída suave). O grave extra usa a folga de cada amostra; se a música
-        já está perto do limite, comprimimos só o grave acrescentado.
+        saída suave). Limitamos o ramo extra de forma uniforme em cada quadro,
+        preservando a forma e o volume do áudio original (inclusive os médios).
         """
         with self._lock:
             target = float(self.bassboost_enabled)
@@ -415,32 +443,39 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                 self._bass_mix = 0.0
                 return frame
             if target and current == 0.0:
-                self._bass_low = [0.0, 0.0]
+                self._bass_filter = [[0.0] * 5 for _ in range(2)]
+                self._bass_limiter_gain = 1.0
             current += (target - current) * 0.5
             self._bass_mix = current
-            gain = BASS_GAIN * current
-            low = self._bass_low
-            alpha = BASS_ALPHA
+            states = self._bass_filter
+            b0, b1, b2, a1, a2 = BASS_SHELF
+            sub_alpha = BASS_SUB_ALPHA
             samples = array("h")
             samples.frombytes(frame)
+            wet = array("f")
+            wet_scale = 1.0
             for index, dry in enumerate(samples):
                 channel = index & 1  # PCM s16le, 48 kHz estéreo
-                filtered = low[channel] + alpha * (int(dry) - low[channel])
-                low[channel] = filtered
-                added = gain * filtered
-                enhanced = dry + added
-                if -25000 <= enhanced <= 25000:
-                    samples[index] = int(enhanced)
-                    continue
-                room = (PCM_PEAK - dry) if added >= 0 else (32768 + dry)
-                magnitude = abs(added)
-                knee = 0.8 * room
-                if magnitude > knee:
-                    remaining = room - knee
-                    excess = magnitude - knee
-                    magnitude = knee + remaining * excess / (excess + remaining)
-                    added = magnitude if added >= 0 else -magnitude
-                samples[index] = max(-32768, min(PCM_PEAK, int(round(dry + added))))
+                state = states[channel]
+                filtered = (b0 * dry + b1 * state[0] + b2 * state[1]
+                            - a1 * state[2] - a2 * state[3])
+                state[1], state[0] = state[0], float(dry)
+                state[3], state[2] = state[2], filtered
+                enhanced_low = filtered - dry
+                sub = state[4] + sub_alpha * (enhanced_low - state[4])
+                state[4] = sub
+                added = current * (enhanced_low - sub)
+                wet.append(added)
+                if added > 0 and dry + added > BASS_PEAK_CEILING:
+                    wet_scale = min(wet_scale, max(0.0, (BASS_PEAK_CEILING - dry) / added))
+                elif added < 0 and dry + added < -BASS_PEAK_CEILING:
+                    wet_scale = min(wet_scale, max(0.0, (-BASS_PEAK_CEILING - dry) / added))
+            # Ataque imediato evita clip; recuperação em ~120 ms evita que
+            # pequenos transientes façam o grave pulsar a cada 20 ms.
+            self._bass_limiter_gain = min(wet_scale, self._bass_limiter_gain + 0.16)
+            actual_gain = self._bass_limiter_gain
+            for index, dry in enumerate(samples):
+                samples[index] = self._limit(round(dry + wet[index] * actual_gain))
             return samples.tobytes()
 
     def _safe_mix_gain(self, frames: list[tuple[bytes, float]]) -> float:

@@ -133,16 +133,73 @@ def test_bassboost_no_mixer_reforca_graves_apos_volume_sem_reduzir_medios(monkey
     async def scenario() -> None:
         normal = await render(0.10, 0.10, False)
         boosted = await render(0.10, 0.10, True)
-        assert amplitude(boosted, 80) > amplitude(normal, 80) * 3.0
-        assert amplitude(boosted, 1000) >= amplitude(normal, 1000) * 0.9
+        assert amplitude(boosted, 80) > amplitude(normal, 80) * 4.2
+        assert 0.95 <= amplitude(boosted, 1000) / amplitude(normal, 1000) <= 1.12
         midbass_normal = await render(0.10, 0.10, False, bass_frequency=160)
         midbass_boosted = await render(0.10, 0.10, True, bass_frequency=160)
-        assert amplitude(midbass_boosted, 160) > amplitude(midbass_normal, 160) * 2.7
+        assert amplitude(midbass_boosted, 160) > amplitude(midbass_normal, 160) * 3.1
+        inaudible_normal = await render(0.10, 0.10, False, bass_frequency=12)
+        inaudible_boosted = await render(0.10, 0.10, True, bass_frequency=12)
+        assert (amplitude(inaudible_boosted, 12) / amplitude(inaudible_normal, 12)
+                < amplitude(boosted, 80) / amplitude(normal, 80) * 0.65)
         loud_normal = await render(0.39, 0.36, False)
         loud = await render(0.39, 0.36, True)
-        assert amplitude(loud, 1000) >= amplitude(loud_normal, 1000) * 0.9
+        assert amplitude(loud, 80) >= amplitude(loud_normal, 80) * 3.2
+        assert amplitude(loud, 1000) >= amplitude(loud_normal, 1000) * 0.95
         assert sum(value * value for value in loud) >= sum(value * value for value in loud_normal)
-        assert max(map(abs, loud)) <= 32767
+        assert max(map(abs, loud)) <= 32000
+
+    asyncio.run(scenario())
+
+
+def test_bassboost_nao_vaza_para_outro_canal_nem_altera_tts(monkeypatch) -> None:
+    music = _load_music_agent(monkeypatch)
+    rate = 48000
+    song = array("h")
+    voice = array("h")
+    for index in range(rate):
+        bass = int(32767 * 0.20 * math.sin(2 * math.pi * 80 * index / rate))
+        speech = int(32767 * 0.12 * math.sin(2 * math.pi * 1000 * index / rate))
+        song.extend((bass, 0))
+        voice.extend((speech, speech))
+
+    async def render(enabled: bool) -> array:
+        class Frames(music.discord.AudioSource):
+            def __init__(self, data): self.data, self.position = data, 0
+            def read(self):
+                start = self.position * 1920
+                self.position += 1
+                return self.data[start:start + 1920].tobytes()
+            def cleanup(self): pass
+
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(), music_source=Frames(song),
+            music_volume=0.55, persistent=True, bassboost=enabled,
+        )
+        mixer.add_tts(Frames(voice), volume=1.0)
+        output = array("h")
+        try:
+            for _ in range(50):
+                output.frombytes(mixer.read())
+        finally:
+            mixer.cleanup()
+        return output
+
+    def amplitude(samples: array, frequency: int, channel: int) -> float:
+        start, end = rate // 4, 3 * rate // 4
+        window = samples[start * 2 + channel : end * 2 + channel : 2]
+        sine = sum(value * math.sin(2 * math.pi * frequency * (i + start) / rate)
+                   for i, value in enumerate(window))
+        cosine = sum(value * math.cos(2 * math.pi * frequency * (i + start) / rate)
+                     for i, value in enumerate(window))
+        return 2 * math.hypot(sine, cosine) / len(window) / 32767
+
+    async def scenario() -> None:
+        normal, boosted = await render(False), await render(True)
+        assert amplitude(boosted, 80, 0) > amplitude(normal, 80, 0) * 3.5
+        assert amplitude(boosted, 80, 1) < 0.001
+        assert 0.97 <= amplitude(boosted, 1000, 0) / amplitude(normal, 1000, 0) <= 1.03
+        assert 0.97 <= amplitude(boosted, 1000, 1) / amplitude(normal, 1000, 1) <= 1.03
 
     asyncio.run(scenario())
 
