@@ -19,7 +19,7 @@ from ..interface.componentes import SearchResultView
 from ..metadados.modelos import PlayInputKind
 from ..metadados.provedores import classify_play_input, describe_url
 from ..nucleo.erros import MusicExtractionError
-from ..nucleo.anexo_discord import VideoRespondido, metadados_video, video_respondido
+from ..nucleo.anexo_discord import VideoRespondido, metadados_midia, midia_respondida
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 from ..nucleo.playlist_virtual import bounded_initial_window
 from ..reproducao.playlist_virtual import (
@@ -57,15 +57,15 @@ class FluxoTocar:
         return bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)()
 
     async def _run_play_discord_attachment(self, ctx: commands.Context, selection: VideoRespondido | None = None) -> None:
-        selected = selection or await video_respondido(ctx.message)
+        selected = selection or await midia_respondida(ctx.message)
         if selected.status == "inacessivel":
             await self._reply(ctx, "Não consegui ler a mensagem respondida. Confira o acesso ao canal e tente novamente.")
             return
         if selected.status == "multiplos":
-            await self._reply(ctx, "A mensagem contém vários vídeos. Responda a uma mensagem com apenas um vídeo para escolher o áudio certo.")
+            await self._reply(ctx, "A mensagem contém várias mídias. Responda a uma mensagem com apenas um vídeo ou áudio.")
             return
-        if selected.status != "video":
-            await self._reply(ctx, "Responda a uma mensagem que contenha um vídeo, ou use `_play <link ou pesquisa>`.")
+        if selected.status not in {"video", "audio"}:
+            await self._reply(ctx, "Responda a um vídeo, áudio ou mensagem de voz, ou use `_play <link ou pesquisa>`.")
             return
         if not self._music_agent_default_enabled():
             await self._reply(ctx, "Reprodução de anexos indisponível neste modo de música.")
@@ -74,17 +74,15 @@ class FluxoTocar:
         if voice is None:
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return
-        metadata = metadados_video(selected, ctx.message)
+        metadata = metadados_midia(selected, ctx.message)
         attachment_id = metadata["attachment_ref"]["attachment_id"]
-        request_id = f"discord-video:{ctx.guild.id}:{ctx.message.id}:{attachment_id}"
+        request_id = f"discord-media:{ctx.guild.id}:{ctx.message.id}:{attachment_id}"
         generation = self.router.current_music_operation_generation(ctx.guild.id)
         loading = MusicLoadingReaction(getattr(ctx, "message", None))
         loading.start_background()
         try:
-            selection_worker = await self.router.ensure_music_worker_available()
-            if not getattr(selection_worker, "available", False):
-                await self._reply(ctx, getattr(selection_worker, "message", "") or "Sistema de música indisponível no momento.")
-                return
+            # music_agent_command já escolhe/verifica o worker. Uma checagem
+            # adicional aqui duplicava a consulta de saúde antes do probe.
             result = await music_agent_command(
                 "enqueue_discord_attachment",
                 guild_id=ctx.guild.id,
@@ -102,7 +100,7 @@ class FluxoTocar:
             payload = result.get("track") if isinstance(result.get("track"), dict) else {}
             track = faixa_do_payload(payload)
             if track is None or track.duration is None:
-                raise RuntimeError("o vídeo não retornou metadados de áudio confirmados")
+                raise RuntimeError("o anexo não retornou metadados de áudio confirmados")
             await self._sync_music_agent_panel(
                 ctx.guild.id, track, result, voice_channel_id=voice.id,
                 text_channel_id=ctx.channel.id, queued=bool(result.get("queued")),
@@ -111,7 +109,7 @@ class FluxoTocar:
         except Exception as exc:
             if generation != self.router.current_music_operation_generation(ctx.guild.id):
                 return
-            logger.warning("[music/discord] anexo rejeitado | guild=%s video=%s error=%s", ctx.guild.id, attachment_id, type(exc).__name__)
+            logger.warning("[music/discord] anexo rejeitado | guild=%s attachment=%s error=%s", ctx.guild.id, attachment_id, type(exc).__name__)
             await self._reply(ctx, self._music_error_message(exc))
         finally:
             await loading.finish()

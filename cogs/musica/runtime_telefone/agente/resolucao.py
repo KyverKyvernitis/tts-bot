@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from .ciclo_vida import consume_task_result, remove_owned_task
-from .validade_stream import fetch_discord_attachment, normalize_reference
+from .validade_stream import fetch_discord_attachment, normalize_reference, valid_cdn_url
 from .correspondencia import avaliar_correspondencia, busca_alternativa
 from .estado import AgentTrack
 from .ytdlp_quente import WarmYTDLPResolver
@@ -596,13 +596,17 @@ class ResolucaoMixin:
     async def _resolve_discord_attachment(self, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
         guild_id = safe_id(body.get("guild_id"))
         ref = normalize_reference(track_meta.get("attachment_ref"), guild_id)
-        attachment = await fetch_discord_attachment(self.client, ref)
         track = self._agent_track_from_metadata(track_meta, body=body)
         if not track.title or track.title.casefold() == "música":
-            raise ValueError("O vídeo está sem título verificado.")
+            raise ValueError("A mídia está sem título verificado.")
         if track.duration is None or track.duration <= 0 or track.audio_stream_index < 0:
-            raise ValueError("O vídeo está sem áudio ou duração verificados.")
-        track.stream_url = attachment["url"]
+            raise ValueError("A mídia está sem áudio ou duração verificados.")
+        item = self._discord_verified_urls.pop(track.queue_item_id, None)
+        if item and item[1] > time.monotonic() + 5.0:
+            track.stream_url = valid_cdn_url(item[0])
+        else:
+            attachment = await fetch_discord_attachment(self.client, ref)
+            track.stream_url = attachment["url"]
         track.transport_hint = "discord-attachment"
         track.stream_resolved_monotonic = time.monotonic()
         return track

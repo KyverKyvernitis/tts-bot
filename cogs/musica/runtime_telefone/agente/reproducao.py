@@ -11,7 +11,7 @@ from typing import Any
 import discord
 
 from .ciclo_vida import remove_owned_task, stop_player_instance
-from .validade_stream import fetch_discord_attachment, normalize_reference, probe_discord_audio, DiscordAttachmentError
+from .validade_stream import fetch_discord_attachment, normalize_reference, probe_discord_audio, prazo_stream, DiscordAttachmentError
 from .configuracao import env_float, env_int
 from .estado import AgentTrack, GuildMusicState
 from .efeitos import filtros
@@ -482,11 +482,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         voice_channel_id = safe_id(body.get("voice_channel_id"))
         meta = body.get("track") if isinstance(body.get("track"), dict) else {}
         if not guild_id or not voice_channel_id:
-            raise DiscordAttachmentError("Entre em uma call antes de adicionar o vídeo.")
+            raise DiscordAttachmentError("Entre em uma call antes de adicionar a mídia.")
         ref = normalize_reference(meta.get("attachment_ref"), guild_id)
         request_id = str(body.get("command_id") or "").strip()
-        if not request_id.startswith(f"discord-video:{guild_id}:") or len(request_id) > 96:
-            raise DiscordAttachmentError("Identificador do pedido de vídeo inválido.")
+        if not request_id.startswith((f"discord-video:{guild_id}:", f"discord-media:{guild_id}:")) or len(request_id) > 96:
+            raise DiscordAttachmentError("Identificador do pedido de mídia inválido.")
 
         if not hasattr(self, "_discord_enqueue_locks"):
             self._discord_enqueue_locks = {}
@@ -498,7 +498,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                              if item.queue_item_id == request_id), None)
             if existing:
                 if existing is not st.current and existing not in st.queue:
-                    return {"ok": False, "error": "Esse pedido de vídeo já foi reproduzido. Envie um novo comando para repetir."}
+                    return {"ok": False, "error": "Essa mídia já foi reproduzida. Envie um novo comando para repetir."}
                 return {"ok": True, "deduplicated": True, "queued": existing in st.queue,
                         "track": existing.public(), "state": st.public()}
             seen = self._discord_seen_requests.setdefault(guild_id, {})
@@ -507,7 +507,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 if now - when > 86400:
                     seen.pop(key, None)
             if request_id in seen:
-                return {"ok": False, "error": "Esse pedido de vídeo já foi processado. Envie um novo comando para repetir."}
+                return {"ok": False, "error": "Essa mídia já foi processada. Envie um novo comando para repetir."}
             queue_generation = int(st.queue_reset_generation)
             attachment = await fetch_discord_attachment(self.client, ref)
             async with self._discord_probe_semaphore:
@@ -539,12 +539,31 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             title = str(confirmed.get("title") or "").strip()
             if not title or title.casefold() == "música":
                 filename = str(attachment.get("filename") or "").strip()[:140]
-                title = f"Vídeo: {filename or ref['attachment_id']}"
+                title = f"Mídia: {filename or ref['attachment_id']}"
             confirmed["title"] = title[:160]
+            # Reaproveita a URL que o ffprobe acabou de verificar quando esta
+            # mídia começa imediatamente. Faixas que esperam na fila fazem
+            # novo GET perto do playback, após a validade curta expirar.
+            verified_at = time.monotonic()
+            expires = prazo_stream(attachment["url"], verified_at, 30.0)
+            self._discord_verified_urls = {
+                key: value for key, value in self._discord_verified_urls.items()
+                if value[1] > verified_at + 5.0
+            }
+            if expires > verified_at + 5.0:
+                self._discord_verified_urls[request_id] = (attachment["url"], expires)
+            while len(self._discord_verified_urls) > 32:
+                self._discord_verified_urls.pop(next(iter(self._discord_verified_urls)))
             play_body = dict(body)
             play_body["track"] = confirmed
             play_body["query"] = confirmed["webpage_url"]
-            result = await self.cmd_play(play_body)
+            try:
+                result = await self.cmd_play(play_body)
+            except BaseException:
+                self._discord_verified_urls.pop(request_id, None)
+                raise
+            if not result.get("ok"):
+                self._discord_verified_urls.pop(request_id, None)
             if result.get("ok"):
                 seen[request_id] = time.monotonic()
                 if len(seen) > 2048:

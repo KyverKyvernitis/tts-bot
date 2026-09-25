@@ -223,6 +223,7 @@ MUSIC_AUTO_BITRATE_MIN_GAIN = max(0, _parse_int(os.getenv("MUSIC_AUTO_BITRATE_MI
 MUSIC_PANEL_UPDATE_THROTTLE_SECONDS = max(0.05, _parse_float(os.getenv("MUSIC_PANEL_UPDATE_THROTTLE_SECONDS", "2.0"), 2.0))
 MUSIC_PANEL_REPOST_ON_TRACK_CHANGE = _parse_bool(os.getenv("MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", "true"), True)
 MUSIC_SOURCE_EMOJIS = {
+    "discord": "🎧",
     "youtube": "<:YouTube:1502490543891021827>",
     "spotify": "<:Spotify:1502490573205016676>",
     "deezer": "<:Deezer:1502490958997094420>",

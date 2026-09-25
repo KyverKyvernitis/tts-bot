@@ -738,8 +738,13 @@ def _source_key_for_track(track: MusicTrack | None) -> str:
     # efetivamente reproduzida pelo YouTube/yt-dlp.
     primary = " ".join(
         str(getattr(track, attr, "") or "").strip().lower()
-        for attr in ("display_source", "source", "extractor")
+        for attr in ("display_source", "source")
     )
+    # O conversor legado preenche extractor='worker-ytdlp' até para anexos;
+    # a fonte confirmada pelo worker tem prioridade sobre esse valor genérico.
+    if "discord" in primary or getattr(track, "attachment_ref", None):
+        return "discord"
+    primary += " " + str(getattr(track, "extractor", "") or "").strip().lower()
     if "youtube" in primary or "yt-dlp" in primary or "ytdlp" in primary:
         return "youtube"
     if "soundcloud" in primary or "sound cloud" in primary:
@@ -768,6 +773,7 @@ def _source_badge_for_track(track: MusicTrack | None) -> tuple[str, str]:
     key = _source_key_for_track(track)
     emoji = config.MUSIC_SOURCE_EMOJIS.get(key) or config.MUSIC_SOURCE_EMOJI_FALLBACK
     label = {
+        "discord": "Discord",
         "youtube": "YouTube",
         "spotify": "Spotify",
         "deezer": "Deezer",

@@ -69,7 +69,7 @@ def faixa_do_payload(payload: dict[str, Any], fallback: MusicTrack | None = None
         uploader=uploader,
         thumbnail=thumbnail,
         source=source,
-        extractor=str(payload.get("extractor") or "worker-ytdlp"),
+        extractor=str(payload.get("extractor") or ("discord" if payload.get("attachment_ref") else "worker-ytdlp")),
         is_live=bool(payload.get("is_live") or (getattr(fallback, "is_live", False) if fallback is not None else False)),
     )
     track.display_source = "YouTube" if "youtube" in track.source.lower() or "ytdlp" in track.source.lower() else track.source

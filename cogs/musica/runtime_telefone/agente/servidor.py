@@ -91,7 +91,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.66"
+AGENT_VERSION = "0.3.67"
 STARTED_AT = time.time()
 
 
@@ -268,6 +268,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._command_locks: dict[str, asyncio.Lock] = {}
         self._command_lock_users: dict[str, int] = {}
         self._discord_probe_semaphore = asyncio.Semaphore(2)
+        # URLs assinadas são temporárias e ficam só na memória do worker.
+        self._discord_verified_urls: dict[str, tuple[str, float]] = {}
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True

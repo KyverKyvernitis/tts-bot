@@ -1363,6 +1363,8 @@ class AudioRouter:
                 if value:
                     fields.append(value)
         text = " ".join(fields)
+        if str(getattr(track, "source", "") or "").strip().lower() == "discord" or getattr(track, "attachment_ref", None):
+            return "discord"
         # Prioridade nos links/fontes originais: quando um link Spotify/Deezer
         # cai em fallback tocável do YouTube, o status ainda deve mostrar o
         # emoji da plataforma que o usuário pediu, não um ícone genérico.

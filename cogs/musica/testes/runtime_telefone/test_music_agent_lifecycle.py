@@ -159,6 +159,53 @@ def test_discord_video_is_verified_before_queue_and_retries_do_not_duplicate(mus
     run(scenario())
 
 
+def test_discord_voice_audio_fast_start_reuses_verified_url(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.prefetch_enabled = False
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        url = "https://cdn.discordapp.com/attachments/456/10/voice-message.ogg?ex=ffffffff&hm=signed"
+        calls = []
+
+        async def fetch(_client, reference):
+            assert reference == ref
+            calls.append("rest")
+            return {"url": url, "filename": "voice-message.ogg", "content_type": "audio/ogg"}
+
+        async def probe(value, **_kwargs):
+            assert value == url
+            calls.append("probe")
+            return {"duration": 5.1, "audio_stream_index": 0, "audio_codec": "opus",
+                    "audio_abr": 32, "audio_sample_rate": 48000, "audio_channels": 1}
+
+        async def start(body):
+            meta = body["track"]
+            assert meta["stream_url"] == "" and meta["duration"] == 5.1
+            resolved = await agent.resolve_track(meta["webpage_url"], track_meta=meta, body=body)
+            assert resolved.stream_url == url and resolved.audio_stream_index == 0
+            st = agent.states[123]
+            st.current = resolved
+            st.status = "playing"
+            return {"ok": True, "queued": False, "state": st.public()}
+
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        resolution = sys.modules["cogs.musica.runtime_telefone.agente.resolucao"]
+        monkeypatch.setattr(playback, "fetch_discord_attachment", fetch)
+        monkeypatch.setattr(resolution, "fetch_discord_attachment", fetch)
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        agent.cmd_play = start
+        result = await agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9, "command_id": "discord-media:123:1000:10",
+            "track": {"title": "Mensagem de voz", "source": "Discord", "attachment_ref": ref},
+        })
+        assert result["ok"] and result["track"]["duration"] == 5.1
+        assert result["track"]["source"] == "Discord"
+        assert calls == ["rest", "probe"]  # O primeiro play não exige um segundo GET.
+        assert not agent._discord_verified_urls
+
+    run(scenario())
+
+
 def test_discord_video_seek_cancelled_if_stopped_during_url_refresh(music):
     async def scenario():
         agent = music.MusicAgent()
