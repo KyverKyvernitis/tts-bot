@@ -551,3 +551,207 @@ async def test_acao_vps_envia_estado_explicito_e_sincroniza_resposta(monkeypatch
     assert calls[0][1]["effect"] == "bassboost" and calls[0][1]["enabled"] is True
     assert calls[0][1]["expected_revision"] == 1
     assert synced == [(123, None, result["state"])]
+
+
+def test_niveis_de_nightcore_e_reverb_escalam_o_padrao_sem_inverter_o_efeito() -> None:
+    from cogs.musica.runtime_telefone.agente.efeitos import filtros, velocidade
+
+    assert velocidade(nightcore=True, nightcore_level=1) == 1.25
+    assert velocidade(nightcore=True, nightcore_level=2) == 1.50
+    assert velocidade(nightcore=True, nightcore_level=3) == 1.75
+    assert velocidade(nightcore=False, slowed_reverb=True, slowed_reverb_level=1) == 0.80
+    assert velocidade(nightcore=False, slowed_reverb=True, slowed_reverb_level=2) == 0.60
+    assert velocidade(nightcore=False, slowed_reverb=True, slowed_reverb_level=3) == 0.40
+
+    night2 = filtros(bassboost=False, nightcore=True, nightcore_level=2)
+    night3 = filtros(bassboost=False, nightcore=True, nightcore_level=3)
+    assert "asetrate=72000" in night2
+    assert "asetrate=84000" in night3
+
+    reverb2 = filtros(bassboost=False, nightcore=False, slowed_reverb=True, slowed_reverb_level=2)
+    reverb3 = filtros(bassboost=False, nightcore=False, slowed_reverb=True, slowed_reverb_level=3)
+    assert "asetrate=28800" in reverb2
+    assert "0.54|0.40|0.28|0.18" in reverb2
+    assert "asetrate=19200" in reverb3
+    assert "0.81|0.60|0.42|0.27" in reverb3
+    assert "volume=3.04" not in reverb2 and "volume=4.56" not in reverb3
+
+
+@pytest.mark.asyncio
+async def test_comando_de_efeito_aceita_niveis_e_preserva_protocolo_booleano(monkeypatch) -> None:
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    st = music.GuildMusicState(guild_id=777)
+    agent.states[777] = st
+
+    night = await agent.cmd_audio_effect({
+        "guild_id": 777, "effect": "nightcore", "level": 2, "expected_revision": 0,
+    })
+    assert night["ok"]
+    assert st.nightcore and st.nightcore_level == 2 and st.playback_speed == 1.5
+    assert night["state"]["nightcore_level"] == 2
+
+    reverb = await agent.cmd_audio_effect({
+        "guild_id": 777, "effect": "slowed_reverb", "level": 3, "expected_revision": 1,
+    })
+    assert reverb["ok"]
+    assert not st.nightcore and st.nightcore_level == 0
+    assert st.slowed_reverb and st.slowed_reverb_level == 3 and st.playback_speed == 0.4
+
+    bass = await agent.cmd_audio_effect({
+        "guild_id": 777, "effect": "bassboost", "level": 3, "expected_revision": 2,
+    })
+    assert bass["ok"] and st.bassboost and st.bassboost_level == 3
+
+    legacy_off = await agent.cmd_audio_effect({
+        "guild_id": 777, "effect": "bassboost", "enabled": False, "expected_revision": 3,
+    })
+    assert legacy_off["ok"] and not st.bassboost and st.bassboost_level == 0
+
+    legacy_on = await agent.cmd_audio_effect({
+        "guild_id": 777, "effect": "nightcore", "enabled": True, "expected_revision": 4,
+    })
+    assert legacy_on["ok"] and st.nightcore_level == 1 and st.playback_speed == 1.25
+
+    invalid = await agent.cmd_audio_effect({
+        "guild_id": 777, "effect": "nightcore", "level": 4, "expected_revision": 5,
+    })
+    assert not invalid["ok"] and st.effects_revision == 5 and st.nightcore_level == 1
+
+
+@pytest.mark.asyncio
+async def test_bassboost_nivel_muda_no_mixer_sem_reiniciar_decoder(monkeypatch) -> None:
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    agent._loop = asyncio.get_running_loop()
+
+    class PCM(music.discord.AudioSource):
+        def read(self): return b"\x01\x00" * 1920
+        def cleanup(self): pass
+
+    source = PCM()
+    mixer = music.AgentMixedAudioSource(
+        loop=agent._loop, music_source=source, music_volume=0.55, persistent=True,
+    )
+
+    class Voice:
+        source = mixer
+        def is_playing(self): return True
+        def is_paused(self): return False
+
+    st = music.GuildMusicState(
+        guild_id=778, current=music.AgentTrack(stream_url="https://cdn.invalid/song"),
+        player=Voice(), status="playing", transport="direct",
+        started_monotonic=time.monotonic() - 4, playback_token=9,
+    )
+    agent.states[778] = st
+    agent._create_pcm_source = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("decoder reiniciado"))
+    try:
+        for revision, level in enumerate((1, 2, 3)):
+            result = await agent.cmd_audio_effect({
+                "guild_id": 778, "effect": "bassboost", "level": level,
+                "expected_revision": revision,
+            })
+            assert result["ok"] and st.bassboost_level == level and mixer.bassboost_level == level
+            assert mixer.music_source is source and st.playback_token == 9
+    finally:
+        mixer.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_sincroniza_niveis_2_e_3_e_velocidades_extremas() -> None:
+    router = _RouterSyncFalso()
+    current = {"title": "faixa", "webpage_url": "https://example.invalid/faixa", "duration": 100}
+    base = {"status": "playing", "confirmed_playing": True, "voice_connected": True,
+            "player_present": True, "current": current}
+
+    await sincronizar_estado_agente(router, 42, agent_state={
+        **base, "playback_token": 1, "position_ms": 10000,
+        "nightcore": True, "nightcore_level": 3,
+        "speed_multiplier": 1.75, "effects_revision": 1,
+    }, create_panel=False)
+    st = router.state
+    assert st.nightcore and st.nightcore_level == 3 and st.playback_speed == 1.75
+
+    await sincronizar_estado_agente(router, 42, agent_state={
+        **base, "playback_token": 2, "position_ms": 12000,
+        "nightcore": False, "nightcore_level": 0,
+        "slowed_reverb": True, "slowed_reverb_level": 3,
+        "speed_multiplier": 0.4, "effects_revision": 2,
+    }, create_panel=False)
+    assert not st.nightcore and st.nightcore_level == 0
+    assert st.slowed_reverb and st.slowed_reverb_level == 3 and st.playback_speed == 0.4
+
+
+@pytest.mark.asyncio
+async def test_controle_remoto_envia_nivel_e_flag_compativel(monkeypatch) -> None:
+    calls = []
+
+    async def command(name, **kwargs):
+        calls.append((name, kwargs))
+        return {"ok": True, "state": {"status": "playing", "nightcore": True,
+                                       "nightcore_level": 3, "effects_revision": 8}}
+
+    async def sync(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(controle_remoto, "music_agent_command", command)
+    result = await controle_remoto.ajustar_efeito(
+        SimpleNamespace(sync_music_agent_state=sync), 123, "nightcore", True,
+        level=3, expected_revision=7,
+    )
+    assert result["ok"]
+    assert calls[0][0] == "audio_effect"
+    assert calls[0][1]["level"] == 3 and calls[0][1]["enabled"] is True
+    assert calls[0][1]["expected_revision"] == 7
+
+
+def test_bassboost_niveis_escalam_intensidade_sem_clipping(monkeypatch) -> None:
+    music = _load_music_agent(monkeypatch)
+    rate = 48000
+    tone = array("h")
+    for i in range(rate):
+        value = int(32767 * 0.02 * math.sin(2 * math.pi * 80 * i / rate))
+        tone.extend((value, value))
+
+    async def render(level: int) -> array:
+        class Source(music.discord.AudioSource):
+            def __init__(self): self.index = 0
+            def read(self):
+                start = self.index * 1920
+                self.index += 1
+                return tone[start : start + 1920].tobytes()
+            def cleanup(self): pass
+
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(), music_source=Source(), music_volume=0.55,
+            persistent=True, bassboost_level=level,
+        )
+        output = array("h")
+        try:
+            for _ in range(50):
+                output.frombytes(mixer.read())
+        finally:
+            mixer.cleanup()
+        return output
+
+    def amplitude(samples: array) -> float:
+        start, end = rate // 2, rate
+        window = samples[start * 2 : end * 2 : 2]
+        sine = sum(value * math.sin(2 * math.pi * 80 * (i + start) / rate)
+                   for i, value in enumerate(window))
+        cosine = sum(value * math.cos(2 * math.pi * 80 * (i + start) / rate)
+                     for i, value in enumerate(window))
+        return 2 * math.hypot(sine, cosine) / len(window)
+
+    async def scenario() -> None:
+        levels = [await render(level) for level in range(4)]
+        amplitudes = [amplitude(samples) for samples in levels]
+        assert amplitudes[0] < amplitudes[1] < amplitudes[2] < amplitudes[3]
+        # O ramo reforçado é 1x/2x/3x; o sinal seco continua presente em todos os níveis.
+        added = [amplitudes[index] - amplitudes[0] for index in (1, 2, 3)]
+        assert 1.85 <= added[1] / added[0] <= 2.15
+        assert 2.80 <= added[2] / added[0] <= 3.20
+        assert max(max(map(abs, samples)) for samples in levels) <= 32000
+
+    asyncio.run(scenario())

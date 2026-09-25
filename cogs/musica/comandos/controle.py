@@ -59,6 +59,43 @@ class FluxoControle:
         volume = await self.router.set_volume(ctx.guild.id, value)
         await self._reply(ctx, f"`🔊` Volume da música ajustado para `{int(round(volume * 100))}%`.")
 
+
+    async def _run_audio_effect(self, ctx: commands.Context, effect: str, level: str = "") -> None:
+        if not await self._ensure_music_action_voice(ctx):
+            return
+        if not self.router.is_music_staff(ctx.author):
+            await self._reply(ctx, "Apenas staff pode alterar os efeitos do player.")
+            return
+        state = self.router.get_state(ctx.guild.id)
+        if state.current is None:
+            await self._reply(ctx, "Não há música tocando agora.")
+            return
+        raw = str(level or "").strip()
+        try:
+            current_level = int(getattr(state, f"{effect}_level", 0) or 0)
+        except (TypeError, ValueError):
+            current_level = 0
+        if current_level <= 0 and bool(getattr(state, effect, False)):
+            current_level = 1
+        current_level = max(0, min(3, current_level))
+        if raw:
+            try:
+                target_level = int(raw)
+            except ValueError:
+                target_level = -1
+            if target_level not in {1, 2, 3}:
+                command = "reverb" if effect == "slowed_reverb" else effect
+                await self._reply(ctx, f"Use `_{command}`, `_{command} 1`, `_{command} 2` ou `_{command} 3`.")
+                return
+        else:
+            target_level = 0 if current_level > 0 else 1
+        ok, message = await self.router.set_audio_effect(ctx.guild.id, effect, level=target_level)
+        if ok:
+            emoji = {"bassboost": "🔊", "nightcore": "🌙", "slowed_reverb": "🌧️"}[effect]
+            await self._reply(ctx, f"`{emoji}` {message}")
+        else:
+            await self._reply(ctx, message)
+
     async def _run_shuffle(self, ctx: commands.Context) -> None:
         if not await self._ensure_music_action_voice(ctx):
             return

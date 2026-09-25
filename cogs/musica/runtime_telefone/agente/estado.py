@@ -116,6 +116,9 @@ class GuildMusicState:
     bassboost: bool = False
     nightcore: bool = False
     slowed_reverb: bool = False
+    bassboost_level: int = 0
+    nightcore_level: int = 0
+    slowed_reverb_level: int = 0
     effects_revision: int = 0
     effects_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     # Shuffle virtual: embaralha cada janela materializada da playlist sem
@@ -262,10 +265,34 @@ class GuildMusicState:
     def state_revision(self) -> str:
         return f"{self.updated_at:.6f}:{self.playback_token}"
 
+    def effect_level(self, effect: str) -> int:
+        flag = bool(getattr(self, effect, False))
+        raw = getattr(self, f"{effect}_level", 0)
+        try:
+            level = int(raw or 0)
+        except (TypeError, ValueError):
+            level = 0
+        if level <= 0 and flag:
+            level = 1
+        return max(0, min(3, level))
+
+    def effect_signature(self) -> tuple[int, int, int]:
+        return (self.effect_level("bassboost"), self.effect_level("nightcore"),
+                self.effect_level("slowed_reverb"))
+
+    def apply_effect_signature(self, levels: tuple[int, int, int]) -> None:
+        bass, night, slow = (max(0, min(3, int(value or 0))) for value in levels)
+        self.bassboost_level, self.nightcore_level, self.slowed_reverb_level = bass, night, slow
+        self.bassboost, self.nightcore, self.slowed_reverb = bass > 0, night > 0, slow > 0
+
     @property
     def playback_speed(self) -> float:
-        return velocidade(nightcore=self.nightcore, slowed_reverb=self.slowed_reverb,
-                          is_live=bool(self.current and self.current.is_live))
+        return velocidade(
+            nightcore=self.nightcore, slowed_reverb=self.slowed_reverb,
+            nightcore_level=self.effect_level("nightcore"),
+            slowed_reverb_level=self.effect_level("slowed_reverb"),
+            is_live=bool(self.current and self.current.is_live),
+        )
 
     def source_position_seconds(self, *, now: float | None = None) -> float:
         if self.current is None:
@@ -356,9 +383,12 @@ class GuildMusicState:
             "history_size": len(self.history),
             "previous_available": bool(self.history),
             "volume_percent": self.volume_percent,
-            "bassboost": self.bassboost,
-            "nightcore": self.nightcore,
-            "slowed_reverb": self.slowed_reverb,
+            "bassboost": self.effect_level("bassboost") > 0,
+            "nightcore": self.effect_level("nightcore") > 0,
+            "slowed_reverb": self.effect_level("slowed_reverb") > 0,
+            "bassboost_level": self.effect_level("bassboost"),
+            "nightcore_level": self.effect_level("nightcore"),
+            "slowed_reverb_level": self.effect_level("slowed_reverb"),
             "speed_multiplier": self.playback_speed,
             "effects_revision": self.effects_revision,
             "normal_volume_percent": self.normal_volume_percent,

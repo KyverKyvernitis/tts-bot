@@ -45,6 +45,9 @@ class MusicGuildState:
     bassboost: bool = False
     nightcore: bool = False
     slowed_reverb: bool = False
+    bassboost_level: int = 0
+    nightcore_level: int = 0
+    slowed_reverb_level: int = 0
     playback_speed: float = 1.0
     effects_revision: int = 0
     loop_mode: LoopMode = LoopMode.OFF

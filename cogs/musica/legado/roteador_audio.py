@@ -1439,7 +1439,7 @@ class AudioRouter:
         started = float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0)
         if not started:
             return offset
-        speed = max(0.8, min(1.25, float(getattr(state, "playback_speed", 1.0) or 1.0)))
+        speed = max(0.4, min(1.75, float(getattr(state, "playback_speed", 1.0) or 1.0)))
         return max(0.0, offset + (time.monotonic() - started) * speed)
 
     def render_voice_status(self, guild_id: int, track: MusicTrack | None = None, *, template: str | None = None) -> str:
@@ -5371,26 +5371,39 @@ class AudioRouter:
         self._schedule_panel_update(guild_id, create=False)
         return volume
 
-    async def set_audio_effect(self, guild_id: int, effect: str, enabled: bool) -> tuple[bool, str]:
+    async def set_audio_effect(
+        self, guild_id: int, effect: str, enabled: bool | None = None, *, level: int | None = None,
+    ) -> tuple[bool, str]:
         state = self.get_state(guild_id)
         if state.current_backend != "agent" or state.current is None:
-            return False, "Não há música tocando no Phone Worker."
+            return False, "Não há música tocando agora."
+        if effect not in {"bassboost", "nightcore", "slowed_reverb"}:
+            return False, "Efeito inválido."
+        if level is None:
+            level = 1 if bool(enabled) else 0
+        try:
+            level = int(level)
+        except (TypeError, ValueError):
+            return False, "O nível deve ser 0, 1, 2 ou 3."
+        if level not in {0, 1, 2, 3}:
+            return False, "O nível deve ser 0, 1, 2 ou 3."
         try:
             result = await ajustar_efeito(
-                self, guild_id, effect, enabled,
+                self, guild_id, effect, level > 0, level=level,
                 expected_revision=state.effects_revision,
                 voice_channel_id=state.last_voice_channel_id,
                 text_channel_id=state.last_text_channel_id,
             )
         except Exception:
-            logger.warning("[music/effects] falha ao ajustar %s | guild=%s", effect, guild_id, exc_info=True)
-            return False, "Não consegui falar com o Phone Worker agora."
+            logger.warning("[music/effects] falha ao ajustar %s nível=%s | guild=%s", effect, level, guild_id, exc_info=True)
+            return False, "Não consegui alterar o efeito agora."
         if isinstance(result, dict) and isinstance(result.get("state"), dict):
             self._schedule_panel_update(guild_id, create=False)
         if not isinstance(result, dict) or not result.get("ok"):
             detail = str(result.get("error") or "não consegui alterar o efeito") if isinstance(result, dict) else "não consegui alterar o efeito"
             return False, detail
-        return True, f"{effect.capitalize()}: {'ligado' if enabled else 'desligado'}."
+        label = {"bassboost": "Bassboost", "nightcore": "Nightcore", "slowed_reverb": "Reverb"}[effect]
+        return True, f"{label}: {'desligado' if level == 0 else f'nível {level}'}."
 
     async def request_skip(self, guild_id: int, member) -> tuple[bool, str]:
         allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "skip")

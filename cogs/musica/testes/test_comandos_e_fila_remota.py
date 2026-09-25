@@ -59,3 +59,17 @@ def test_controlador_de_fila_worker_muta_a_fila_remota_em_vez_do_player_local() 
         assert action in servidor
 
     assert "replace_queue local ignorado em sessão remota" in legado
+
+
+def test_comandos_de_efeito_estao_registrados_e_delegam_para_fluxo() -> None:
+    modulo = (MUSICA / "modulo.py").read_text(encoding="utf-8")
+    controle = (MUSICA / "comandos" / "controle.py").read_text(encoding="utf-8")
+
+    assert '@commands.command(name="nightcore")' in modulo
+    assert '@commands.command(name="bassboost")' in modulo
+    assert '@commands.command(name="reverb")' in modulo
+    assert 'await self._run_audio_effect(ctx, "nightcore", level)' in modulo
+    assert 'await self._run_audio_effect(ctx, "bassboost", level)' in modulo
+    assert 'await self._run_audio_effect(ctx, "slowed_reverb", level)' in modulo
+    assert 'target_level = 0 if current_level > 0 else 1' in controle
+    assert 'if target_level not in {1, 2, 3}' in controle

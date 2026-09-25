@@ -929,17 +929,30 @@ def _player_track_text(state, track: MusicTrack) -> str:
     return "\n".join(lines)
 
 
+def _player_effect_level(state, effect: str) -> int:
+    try:
+        level = int(getattr(state, f"{effect}_level", 0) or 0)
+    except (TypeError, ValueError):
+        level = 0
+    if level <= 0 and bool(getattr(state, effect, False)):
+        level = 1
+    return max(0, min(3, level))
+
+
 def _player_audio_modes_text(state, track: MusicTrack) -> str:
-    """Mostra os modos ativos em uma linha legível no painel do celular."""
+    """Mostra os modos ativos e seus níveis no painel do celular."""
     modes: list[str] = []
-    if getattr(state, "bassboost", False):
-        modes.append("**🔊 Bassboost**")
-    if getattr(state, "nightcore", False):
+    bass_level = _player_effect_level(state, "bassboost")
+    night_level = _player_effect_level(state, "nightcore")
+    reverb_level = _player_effect_level(state, "slowed_reverb")
+    if bass_level:
+        modes.append(f"**🔊 Bassboost {bass_level}**")
+    if night_level:
         label = "Nightcore na próxima faixa" if track.is_live else "Nightcore"
-        modes.append(f"**🌙 {label}**")
-    if getattr(state, "slowed_reverb", False):
+        modes.append(f"**🌙 {label} {night_level}**")
+    if reverb_level:
         label = "Slowed + Reverb na próxima faixa" if track.is_live else "Slowed + Reverb"
-        modes.append(f"**🌧️ {label}**")
+        modes.append(f"**🌧️ {label} {reverb_level}**")
     return " · ".join(modes)
 
 
@@ -2639,19 +2652,22 @@ class PlayerOptionsSelect(discord.ui.Select):
             discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/fila."),
             discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Embaralhar a fila uma vez."),
             discord.SelectOption(
-                label="Desativar Bassboost" if getattr(state, "bassboost", False) else "Ativar Bassboost",
+                label=(f"Desativar Bassboost (nível {_player_effect_level(state, 'bassboost')})"
+                       if getattr(state, "bassboost", False) else "Ativar Bassboost"),
                 emoji="🔊", value="bassboost",
-                description="Voltar aos graves originais." if getattr(state, "bassboost", False) else "Reforçar os graves da música.",
+                description="Voltar aos graves originais." if getattr(state, "bassboost", False) else "Reforçar os graves da música no nível 1.",
             ),
             discord.SelectOption(
-                label="Desativar Nightcore" if getattr(state, "nightcore", False) else "Ativar Nightcore",
+                label=(f"Desativar Nightcore (nível {_player_effect_level(state, 'nightcore')})"
+                       if getattr(state, "nightcore", False) else "Ativar Nightcore"),
                 emoji="🌙", value="nightcore",
-                description="Voltar ao ritmo original." if getattr(state, "nightcore", False) else "Música mais rápida e aguda.",
+                description="Voltar ao ritmo original." if getattr(state, "nightcore", False) else "Música mais rápida e aguda no nível 1.",
             ),
             discord.SelectOption(
-                label="Desativar Slowed + Reverb" if getattr(state, "slowed_reverb", False) else "Ativar Slowed + Reverb",
+                label=(f"Desativar Slowed + Reverb (nível {_player_effect_level(state, 'slowed_reverb')})"
+                       if getattr(state, "slowed_reverb", False) else "Ativar Slowed + Reverb"),
                 emoji="🌧️", value="slowed_reverb",
-                description="Voltar ao ritmo original." if getattr(state, "slowed_reverb", False) else "Música mais lenta, grave e com ambiência.",
+                description="Voltar ao ritmo original." if getattr(state, "slowed_reverb", False) else "Música mais lenta, grave e com ambiência no nível 1.",
             ),
         ]
         super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, custom_id="music:options")

@@ -453,15 +453,22 @@ async def sincronizar_estado_agente(
     with contextlib.suppress(Exception):
         if remote.get("volume_percent") is not None:
             state.volume = max(0.0, min(1.5, float(remote.get("volume_percent") or 0.0) / 100.0))
-    if "bassboost" in remote:
-        state.bassboost = bool(remote["bassboost"])
-    if "nightcore" in remote:
-        state.nightcore = bool(remote["nightcore"])
-    if "slowed_reverb" in remote:
-        state.slowed_reverb = bool(remote["slowed_reverb"])
+    for effect in ("bassboost", "nightcore", "slowed_reverb"):
+        level_key = f"{effect}_level"
+        if level_key in remote:
+            try:
+                level = max(0, min(3, int(remote.get(level_key) or 0)))
+            except (TypeError, ValueError):
+                level = 1 if bool(remote.get(effect)) else 0
+            setattr(state, level_key, level)
+            setattr(state, effect, level > 0)
+        elif effect in remote:
+            enabled = bool(remote[effect])
+            setattr(state, effect, enabled)
+            setattr(state, level_key, 1 if enabled else 0)
     with contextlib.suppress(Exception):
         if remote.get("speed_multiplier") is not None:
-            state.playback_speed = max(0.8, min(1.25, float(remote["speed_multiplier"])))
+            state.playback_speed = max(0.4, min(1.75, float(remote["speed_multiplier"])))
     with contextlib.suppress(Exception):
         if remote.get("effects_revision") is not None:
             state.effects_revision = max(0, int(remote["effects_revision"]))

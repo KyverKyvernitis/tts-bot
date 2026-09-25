@@ -101,12 +101,15 @@ async def ajustar_volume(router: Any, guild_id: int, volume_percent: int, **kwar
 
 
 async def ajustar_efeito(
-    router: Any, guild_id: int, effect: str, enabled: bool, *, expected_revision: int,
-    **kwargs: Any,
+    router: Any, guild_id: int, effect: str, enabled: bool | None = None, *,
+    level: int | None = None, expected_revision: int, **kwargs: Any,
 ) -> dict[str, Any]:
+    if level is None:
+        level = 1 if bool(enabled) else 0
+    level = max(0, min(3, int(level)))
     return await enviar_controle_remoto(
         router, "audio_effect", guild_id=guild_id, effect=effect,
-        enabled=bool(enabled), expected_revision=int(expected_revision),
+        enabled=level > 0, level=level, expected_revision=int(expected_revision),
         create_panel=False, **kwargs,
     )
 

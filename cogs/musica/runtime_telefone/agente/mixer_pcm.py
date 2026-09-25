@@ -178,6 +178,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         on_music_end: Callable[[Exception | None, dict[str, Any]], None] | None = None,
         persistent: bool = False,
         bassboost: bool = False,
+        bassboost_level: int | None = None,
     ) -> None:
         self.loop = loop
         self.music_source = music_source
@@ -194,7 +195,9 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self._music_gain = self.normal_music_volume
         self._mix_gain = 1.0
         self._mix_limited_frames = 0
-        self.bassboost_enabled = bool(bassboost)
+        requested_bass_level = int(bassboost_level) if bassboost_level is not None else (1 if bassboost else 0)
+        self.bassboost_level = max(0, min(3, requested_bass_level))
+        self.bassboost_enabled = self.bassboost_level > 0
         self._bass_mix = 0.0
         self._bass_limiter_gain = 1.0
         # Por canal: [entrada anterior, entrada anterior-2,
@@ -216,8 +219,12 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(volume)))
 
     def set_bassboost(self, enabled: bool) -> None:
+        self.set_bassboost_level(1 if enabled else 0)
+
+    def set_bassboost_level(self, level: int) -> None:
         with self._lock:
-            self.bassboost_enabled = bool(enabled)
+            self.bassboost_level = max(0, min(3, int(level or 0)))
+            self.bassboost_enabled = self.bassboost_level > 0
 
     def set_duck_factor(self, factor: float) -> None:
         self.duck_factor = max(0.0, min(1.0, float(factor)))
@@ -239,6 +246,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         volume: float,
         on_music_end: Callable[[Exception | None, dict[str, Any]], None] | None,
         bassboost: bool | None = None,
+        bassboost_level: int | None = None,
     ) -> None:
         """Mantém overlays TTS e a sessão de voz durante a troca da música."""
         with self._lock:
@@ -252,8 +260,12 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(volume)))
             self._music_gain = self.normal_music_volume
             self._mix_limited_frames = 0
-            if bassboost is not None:
-                self.bassboost_enabled = bool(bassboost)
+            if bassboost_level is not None:
+                self.bassboost_level = max(0, min(3, int(bassboost_level or 0)))
+                self.bassboost_enabled = self.bassboost_level > 0
+            elif bassboost is not None:
+                self.bassboost_level = 1 if bassboost else 0
+                self.bassboost_enabled = self.bassboost_level > 0
             self._bass_filter = [[0.0] * 5 for _ in range(2)]
             self._bass_mix = 0.0
             self._bass_limiter_gain = 1.0
@@ -437,7 +449,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         intacto e só o ramo reforçado usa a folga disponível em cada amostra.
         """
         with self._lock:
-            target = float(self.bassboost_enabled)
+            target = float(self.bassboost_level)
             current = self._bass_mix
             if not target and current < 0.003:
                 self._bass_mix = 0.0

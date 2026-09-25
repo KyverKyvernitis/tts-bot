@@ -85,6 +85,22 @@ class Music(FluxoTocar, FluxoControle, FluxoFila, FluxoConfiguracoes, BaseComand
     async def volume(self, ctx: commands.Context, value: Optional[int] = None):
         await self._run_volume(ctx, value)
 
+
+    @commands.command(name="nightcore")
+    @commands.guild_only()
+    async def nightcore(self, ctx: commands.Context, level: str = ""):
+        await self._run_audio_effect(ctx, "nightcore", level)
+
+    @commands.command(name="bassboost")
+    @commands.guild_only()
+    async def bassboost(self, ctx: commands.Context, level: str = ""):
+        await self._run_audio_effect(ctx, "bassboost", level)
+
+    @commands.command(name="reverb")
+    @commands.guild_only()
+    async def reverb(self, ctx: commands.Context, level: str = ""):
+        await self._run_audio_effect(ctx, "slowed_reverb", level)
+
     @commands.command(name="shuffle", aliases=["sh", "embaralhar"])
     @commands.guild_only()
     async def shuffle(self, ctx: commands.Context):

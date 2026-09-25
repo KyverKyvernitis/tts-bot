@@ -529,9 +529,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 st.virtual_shuffle_active = False
                 st.virtual_shuffle_seed = 0
                 st.current = None
-                st.bassboost = False
-                st.nightcore = False
-                st.slowed_reverb = False
+                st.apply_effect_signature((0, 0, 0))
                 st.effects_revision += 1
                 st.paused = False
                 self._bump_playback_generation(st, reason="voice_alone_timeout")
