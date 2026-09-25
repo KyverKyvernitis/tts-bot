@@ -688,24 +688,6 @@ def _virtual_playlist_total_label(state) -> str:
     return ""
 
 
-def _queue_duration_label(items: list[MusicTrack]) -> str:
-    total = 0
-    unknown = False
-    for track in items:
-        if track.is_live or track.duration is None:
-            unknown = True
-            continue
-        total += max(0, int(track.duration))
-    if not total and unknown:
-        return "desconhecida"
-    hours, rem = divmod(total, 3600)
-    minutes, seconds = divmod(rem, 60)
-    label = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
-    if unknown:
-        label += "+"
-    return label
-
-
 def _queue_duration_for_panel(state, items: list[MusicTrack], total: int) -> str:
     # O preview remoto pode conter apenas as primeiras 50 faixas. O layout
     # preserva todas as faixas materializadas, inclusive após um cursor virtual.
@@ -716,19 +698,35 @@ def _queue_duration_for_panel(state, items: list[MusicTrack], total: int) -> str
         if isinstance(layout, list) else []
     )
     materialized = layout_tracks or items
-    if not any(track.duration is not None and not track.is_live for track in materialized):
-        return "duração pendente"
-    duration = _queue_duration_label(materialized)
-    def has_remaining(info: dict) -> bool:
+    from cogs.musica.reproducao.duracao_fila import virtual_duration, virtual_track_count
+
+    virtual_seconds, pending, unavailable = virtual_duration(state)
+    seconds = virtual_seconds
+    for track in materialized:
+        if track.is_live:
+            unavailable = True
+            continue
+        if track.duration is None:
+            pending = True
+            continue
         try:
-            return info.get("remaining") in (None, "") or int(info["remaining"]) > 0
+            value = float(track.duration)
         except (TypeError, ValueError):
-            return True
-    remaining_virtual = any(has_remaining(info) for info in _virtual_playlists_info(state))
-    incomplete = remaining_virtual or total > len(materialized) or duration.endswith("+")
-    if duration == "desconhecida":
-        return "duração pendente"
-    return f"≥ {duration.rstrip('+')}" if incomplete else duration
+            unavailable = True
+            continue
+        if not math.isfinite(value) or value < 0:
+            unavailable = True
+            continue
+        seconds += value
+    if unavailable:
+        return "duração indisponível"
+    virtual_count = virtual_track_count(state)
+    if pending or virtual_count is None or total > len(materialized) + virtual_count:
+        return "calculando duração…"
+    elapsed = max(0, int(seconds))
+    hours, rem = divmod(elapsed, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
 def _source_key_for_track(track: MusicTrack | None) -> str:
@@ -940,9 +938,18 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
     items = _queue_items(state)
     total = _queue_total_count(state, items)
     virtual = _virtual_playlist_info(state)
+    from cogs.musica.reproducao.duracao_fila import virtual_track_count
+
+    virtual_count = virtual_track_count(state)
+    layout = getattr(state, "agent_queue_layout", None)
+    if virtual_count is not None and isinstance(layout, list) and layout:
+        physical = sum(1 for entry in layout if isinstance(entry, dict) and entry.get("kind") == "track")
+        total = max(total, physical + virtual_count)
     if not items:
         if virtual:
-            return "**Fila** · carregando próximas…"
+            duration = _queue_duration_for_panel(state, items, total)
+            count_text = str(total) if virtual_count is not None else f"{total}+"
+            return f"**Fila** · {count_text} músicas · {duration}\n-# Carregando próximas…"
         return "**Fila** · vazia\n-# Use `_play <nome ou link>` para adicionar músicas."
 
     page = max(0, int(page))
@@ -953,12 +960,10 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
         preview = items[: max(1, int(limit))]
 
     duration = _queue_duration_for_panel(state, items, total)
-    virtual_total_known = bool(virtual and virtual.get("total_tracks") not in (None, ""))
+    virtual_total_known = virtual_count is not None
     total_text = str(total) if (not virtual or virtual_total_known) else f"{total}+"
     count_label = "música" if total == 1 else "músicas"
     header = f"**Fila** · {total_text} {count_label}"
-    # A soma parcial é marcada como limite inferior quando ainda faltam
-    # janelas da playlist ou faixas sem duração conhecida.
     if duration:
         header += f" · {duration}"
 
@@ -1130,8 +1135,7 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
             mini_lines.append(f"-# `{n:02}) [{item.duration_label}]` {_track_link(item, title_limit=42)}")
         if remaining_count:
             mini_lines.append(f"-# `+ {remaining_count} restante(s)`")
-        duration_prefix = "preview" if int(queue_total or len(queue)) > len(queue) else "queue"
-        mini_lines.append(f"-# `⌛ Duração aproximada do {duration_prefix}: {_queue_duration_label(queue)}`")
+        mini_lines.append(f"-# `⌛ Duração da fila: {_queue_duration_for_panel(state, queue, queue_total)}`")
         mini.description = "\n".join(mini_lines)
         mini.set_image(url=PLAYER_BAR_URL)
         embeds.append(mini)
@@ -1172,10 +1176,9 @@ def build_player_embeds(state) -> list[discord.Embed]:
         preview_limit = 5
         preview_items = queue[:preview_limit]
         remaining_count = max(0, int(queue_total or len(queue)) - len(preview_items))
-        duration_prefix = "preview" if int(queue_total or len(queue)) > len(queue) else "queue"
         lines = [
             f"> -# 🎶 **⠂** `{int(queue_total or len(queue))} música{'s' if int(queue_total or len(queue)) != 1 else ''} aguardando`",
-            f"> -# ⌛ **⠂** `Duração aproximada do {duration_prefix}: {_queue_duration_label(queue)}`",
+            f"> -# ⌛ **⠂** `Duração da fila: {_queue_duration_for_panel(state, queue, queue_total)}`",
         ]
         for n, item in enumerate(preview_items, start=1):
             lines.append(f"-# `{n:02}) [{item.duration_label}]` {_track_link(item, title_limit=48)}")
@@ -1277,8 +1280,12 @@ def build_queue_embed(state, page: int = 0, *, selected_position: int | None = N
         lines.append("")
 
     if not items:
-        lines.append("`📭` **O queue está vazio.**")
-        lines.append("-# Use `_play <nome ou link>` para adicionar músicas.")
+        if _virtual_playlist_info(state):
+            lines.append("`🎶` **Carregando próximas músicas…**")
+            lines.append(f"-# ⏳ Duração da fila: `{_queue_duration_for_panel(state, items, queue_total)}`")
+        else:
+            lines.append("`📭` **O queue está vazio.**")
+            lines.append("-# Use `_play <nome ou link>` para adicionar músicas.")
     else:
         lines.append("**Queue:**")
         for offset, track in enumerate(chunk, start=1):
@@ -1289,10 +1296,9 @@ def build_queue_embed(state, page: int = 0, *, selected_position: int | None = N
             lines.append(f"-# `{track.duration_label}` • pedido por {requester}")
 
         lines.append("")
-        duration_prefix = "preview" if int(queue_total or len(items)) > len(items) else "queue"
         if int(queue_total or len(items)) > len(items):
             lines.append(f"-# `+ {int(queue_total or len(items)) - len(items)} item(ns) fora deste preview`")
-        lines.append(f"-# ⏳ Duração aproximada do {duration_prefix}: `{_queue_duration_label(items)}`")
+        lines.append(f"-# ⏳ Duração da fila: `{_queue_duration_for_panel(state, items, queue_total)}`")
 
     embed.description = "\n".join(lines)
     if selected_position and 1 <= selected_position <= len(items):
@@ -2172,10 +2178,15 @@ class QueueView(discord.ui.LayoutView):
         page_items, from_virtual_cache = self._page_items(state, items)
         if not items and not page_items:
             if virtual:
+                from cogs.musica.reproducao.duracao_fila import virtual_track_count
+
+                count = virtual_track_count(state)
+                count_text = str(max(total, count or 0)) if count is not None else f"{total}+"
+                header = f"## 📜 Fila · {count_text} músicas\n-# Duração da fila: {_queue_duration_for_panel(state, items, total)}"
                 error = str(getattr(state, "agent_virtual_playlist_browse_error", "") or "").strip()
                 if error:
-                    return "## 📜 Fila\nNão consegui carregar esta página agora.\n-# Tente navegar novamente em alguns segundos."
-                return "## 📜 Fila\nCarregando próximas músicas…"
+                    return header + "\nNão consegui carregar esta página agora.\n-# Tente navegar novamente em alguns segundos."
+                return header + "\nCarregando próximas músicas…"
             return "## 📜 Fila\nA fila está vazia.\n-# Use `_play <nome ou link>` para adicionar músicas."
 
         max_page = self._max_page(items, state)
@@ -2214,8 +2225,7 @@ class QueueView(discord.ui.LayoutView):
                 marker = "▶" if self.selected_position == index else f"{index:02d}"
                 lines.append(f"**{marker}**  {_track_link_v2(track, title_limit=62)}  ·  {track.duration_label}")
 
-        if not virtual:
-            lines.extend(["", f"-# Duração aproximada: {_queue_duration_label(items)}"])
+        lines.extend(["", f"-# Duração da fila: {_queue_duration_for_panel(state, items, total)}"])
         return "\n".join(lines)
 
     def _refresh_components(self) -> None:

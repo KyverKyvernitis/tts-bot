@@ -339,6 +339,9 @@ async def sincronizar_estado_agente(
             registrar_historico(state, previous_current)
     last_error = str(remote.get("last_error") or "").strip()
     sincronizar_fila_remota(state, remote, limite_fila=MUSIC_QUEUE_MAXSIZE, limite_historico=MUSIC_HISTORY_MAXSIZE)
+    from .duracao_fila import schedule_virtual_duration_scan
+
+    schedule_virtual_duration_scan(router, guild_id, state)
     with contextlib.suppress(Exception):
         state.agent_remote_history_size = max(0, int(remote.get("history_size") or 0))
     had_active_agent_session = bool(

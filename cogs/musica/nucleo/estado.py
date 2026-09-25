@@ -192,6 +192,13 @@ class MusicGuildState:
     agent_virtual_playlist_pages: dict[int, list[MusicTrack]] = field(default_factory=dict)
     agent_virtual_playlist_browse_key: str = ""
     agent_virtual_playlist_browse_error: str = ""
+    # A VPS soma apenas segundos por posição da fonte em segundo plano. O
+    # Worker continua dono da ordem, dos skips e da janela de reprodução.
+    agent_virtual_duration_cache: dict[tuple[str, str, str], dict[int, float]] = field(default_factory=dict)
+    agent_virtual_duration_unknown: set[tuple[tuple[str, str, str], int]] = field(default_factory=set)
+    agent_virtual_duration_ends: dict[tuple[str, str, str], int] = field(default_factory=dict)
+    agent_virtual_duration_failed_until: dict[tuple[str, str, str], float] = field(default_factory=dict)
+    agent_virtual_duration_task: Optional[asyncio.Task] = None
     # Auditoria das invariantes current/queue. O primeiro contador vem do
     # Worker; o segundo mede snapshots legados reparados defensivamente na VPS.
     agent_queue_invariant_repairs: int = 0
