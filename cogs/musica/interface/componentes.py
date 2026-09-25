@@ -931,6 +931,9 @@ def _player_audio_modes_text(state, track: MusicTrack) -> str:
     if getattr(state, "nightcore", False):
         label = "Nightcore na próxima faixa" if track.is_live else "Nightcore"
         modes.append(f"**🌙 {label}**")
+    if getattr(state, "slowed_reverb", False):
+        label = "Slowed + Reverb na próxima faixa" if track.is_live else "Slowed + Reverb"
+        modes.append(f"**🌧️ {label}**")
     return " · ".join(modes)
 
 
@@ -2639,6 +2642,11 @@ class PlayerOptionsSelect(discord.ui.Select):
                 emoji="🌙", value="nightcore",
                 description="Voltar ao ritmo original." if getattr(state, "nightcore", False) else "Música mais rápida e aguda.",
             ),
+            discord.SelectOption(
+                label="Desativar Slowed + Reverb" if getattr(state, "slowed_reverb", False) else "Ativar Slowed + Reverb",
+                emoji="🌧️", value="slowed_reverb",
+                description="Voltar ao ritmo original." if getattr(state, "slowed_reverb", False) else "Música mais lenta, grave e com ambiência.",
+            ),
         ]
         super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, custom_id="music:options")
         self.router = router
@@ -2663,7 +2671,7 @@ class PlayerOptionsSelect(discord.ui.Select):
                 return
             await interaction.response.send_modal(VolumeModal(self.router, self.guild_id))
             return
-        if value in {"bassboost", "nightcore"}:
+        if value in {"bassboost", "nightcore", "slowed_reverb"}:
             if not self.router.is_music_staff(getattr(interaction, "user", None)):
                 await interaction.response.send_message("Apenas staff pode alterar os efeitos do player.", ephemeral=True)
                 return

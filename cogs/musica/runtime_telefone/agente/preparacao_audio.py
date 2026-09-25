@@ -22,13 +22,13 @@ class AudioPreparado:
     source: BufferedPCMSource
     created_at: float
     ready: bool = False
-    effects: tuple[bool, bool] = (False, False)
+    effects: tuple[bool, bool, bool] = (False, False, False)
 
 
 class PreparacaoAudioMixin:
     async def _prepare_current_pcm(self, guild_id: int, track: AgentTrack, playback_token: int) -> Any:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
-        effects = (False, st.nightcore)  # só Nightcore altera a fonte FFmpeg
+        effects = (False, st.nightcore, st.slowed_reverb)  # Bassboost atua somente no mixer
         source = self._take_prepared_audio(guild_id, track) or self._create_pcm_source(track, effects=effects)
         self._starting_pcm[guild_id] = source
         try:
@@ -42,7 +42,7 @@ class PreparacaoAudioMixin:
             if self._starting_pcm.get(guild_id) is source:
                 self._starting_pcm.pop(guild_id, None)
 
-    def _create_pcm_source(self, track: AgentTrack, *, effects: tuple[bool, bool] = (False, False)) -> Any:
+    def _create_pcm_source(self, track: AgentTrack, *, effects: tuple[bool, ...] = (False, False, False)) -> Any:
         options, _mode = self._ffmpeg_options_for_source(
             track.audio_sample_rate, effects=effects, is_live=track.is_live,
         )
@@ -68,7 +68,7 @@ class PreparacaoAudioMixin:
         self._audio_prepare_keys.pop(guild_id, None)
         prepared = self._prepared_audio.get(guild_id)
         st = self.states.get(guild_id)
-        effects = (False, st.nightcore) if st else (False, False)
+        effects = (False, st.nightcore, st.slowed_reverb) if st else (False, False, False)
         if prepared is not None and not (prepared.ready and prepared.item_id == keep_item_id and prepared.effects == effects):
             self._prepared_audio.pop(guild_id, None)
             prepared.source.cleanup()
@@ -80,7 +80,7 @@ class PreparacaoAudioMixin:
             return None
         if (
             prepared.ready and prepared.item_id == track.queue_item_id
-            and prepared.effects == (False, self.states[guild_id].nightcore)
+            and prepared.effects == (False, self.states[guild_id].nightcore, self.states[guild_id].slowed_reverb)
             and prepared.stream_url == track.stream_url
             and abs(prepared.offset - track.start_offset_seconds) < 0.01
             and time.monotonic() - prepared.created_at <= 45.0
@@ -101,8 +101,8 @@ class PreparacaoAudioMixin:
             self._cancel_audio_preparation(guild_id)
             return
         item_id = st.queue[0].queue_item_id
-        effects = (False, st.nightcore)
-        prepare_key = f"{item_id}:{int(effects[0])}:{int(effects[1])}"
+        effects = (False, st.nightcore, st.slowed_reverb)
+        prepare_key = f"{item_id}:{int(effects[1])}:{int(effects[2])}"
         task = self._audio_prepare_tasks.get(guild_id)
         if task is not None and not task.done() and self._audio_prepare_keys.get(guild_id) == prepare_key:
             return
@@ -118,7 +118,7 @@ class PreparacaoAudioMixin:
             current = self.states.get(guild_id)
             return bool(
                 current is st and current.playback_token == token and not current.paused
-                and (False, current.nightcore) == effects
+                and (False, current.nightcore, current.slowed_reverb) == effects
                 and current.queue and current.queue[0].queue_item_id == item_id
             )
 

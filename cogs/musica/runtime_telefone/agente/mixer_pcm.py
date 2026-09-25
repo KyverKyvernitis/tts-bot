@@ -26,8 +26,8 @@ BASS_PEAK_CEILING = 32000
 # primeira ordem reforçava 1 kHz e o ramo paralelo criava cancelamentos nos
 # médios. O shelf mantém a resposta acima dos graves próxima de 1:1.
 # Remover <25 Hz do ramo reforçado evita amplificar DC/rumble inaudível.
-BASS_SHELF_GAIN_DB = 14.0
-BASS_SHELF_HZ = 220.0
+BASS_SHELF_GAIN_DB = 16.0
+BASS_SHELF_HZ = 280.0
 BASS_SUB_ALPHA = 1.0 - math.exp(-2.0 * math.pi * 25.0 / 48000.0)
 
 
@@ -430,11 +430,11 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         )
 
     def _enhance_music_bass(self, frame: bytes) -> bytes:
-        """Reforça graves úteis da música após o volume, preservando os médios.
+        """Reforça graves da música, limitando o acréscimo apenas perto dos picos.
 
-        O processamento só roda enquanto o efeito está ativo (ou na breve
-        saída suave). Limitamos o ramo extra de forma uniforme em cada quadro,
-        preservando a forma e o volume do áudio original (inclusive os médios).
+        Um pico no quadro de 20 ms não pode reduzir todo o grave: em músicas
+        masterizadas isso anulava o efeito por completo. O sinal original fica
+        intacto e só o ramo reforçado usa a folga disponível em cada amostra.
         """
         with self._lock:
             target = float(self.bassboost_enabled)
@@ -453,7 +453,6 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             samples = array("h")
             samples.frombytes(frame)
             wet = array("f")
-            wet_scale = 1.0
             for index, dry in enumerate(samples):
                 channel = index & 1  # PCM s16le, 48 kHz estéreo
                 state = states[channel]
@@ -466,16 +465,40 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                 state[4] = sub
                 added = current * (enhanced_low - sub)
                 wet.append(added)
-                if added > 0 and dry + added > BASS_PEAK_CEILING:
-                    wet_scale = min(wet_scale, max(0.0, (BASS_PEAK_CEILING - dry) / added))
-                elif added < 0 and dry + added < -BASS_PEAK_CEILING:
-                    wet_scale = min(wet_scale, max(0.0, (-BASS_PEAK_CEILING - dry) / added))
-            # Ataque imediato evita clip; recuperação em ~120 ms evita que
-            # pequenos transientes façam o grave pulsar a cada 20 ms.
-            self._bass_limiter_gain = min(wet_scale, self._bass_limiter_gain + 0.16)
-            actual_gain = self._bass_limiter_gain
-            for index, dry in enumerate(samples):
-                samples[index] = self._limit(round(dry + wet[index] * actual_gain))
+            # Blocos de 1 ms evitam que um único pico suprima os graves dos 20 ms
+            # inteiros, sem modular o reforço na frequência dos médios/agudos.
+            # O ganho comum aos dois canais preserva o panorama da música.
+            previous_gain = self._bass_limiter_gain
+            gain = previous_gain
+            block_gains: list[float] = []
+            for block in range(0, len(samples), 96):
+                allowed = 1.0
+                for index in range(block, min(block + 96, len(samples))):
+                    dry = samples[index]
+                    added = wet[index]
+                    if added > 0 and dry + added > BASS_PEAK_CEILING:
+                        allowed = min(allowed, max(0.0, (BASS_PEAK_CEILING - dry) / added))
+                    elif added < 0 and dry + added < -BASS_PEAK_CEILING:
+                        allowed = min(allowed, max(0.0, (-BASS_PEAK_CEILING - dry) / added))
+                gain = min(allowed, gain + 0.5)
+                block_gains.append(gain)
+            # Pequena rampa em cada fronteira evita estalos quando a folga muda.
+            # A rampa sempre reduz o ganho antes de um pico ou o restaura
+            # depois dele: nunca ultrapassa o teto calculado para o bloco.
+            for block_index, block_gain in enumerate(block_gains):
+                start = block_index * 96
+                before = block_gains[block_index - 1] if block_index else previous_gain
+                after = block_gains[block_index + 1] if block_index + 1 < len(block_gains) else block_gain
+                for frame_index in range(min(48, (len(samples) - start) // 2)):
+                    actual = block_gain
+                    if before < block_gain and frame_index < 12:
+                        actual = before + (block_gain - before) * (frame_index + 1) / 12
+                    elif after < block_gain and frame_index >= 36:
+                        actual = block_gain + (after - block_gain) * (frame_index - 35) / 12
+                    index = start + frame_index * 2
+                    samples[index] = self._limit(round(samples[index] + wet[index] * actual))
+                    samples[index + 1] = self._limit(round(samples[index + 1] + wet[index + 1] * actual))
+            self._bass_limiter_gain = gain
             return samples.tobytes()
 
     def _safe_mix_gain(self, frames: list[tuple[bytes, float]]) -> float:

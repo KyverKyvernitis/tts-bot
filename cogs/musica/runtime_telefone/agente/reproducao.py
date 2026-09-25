@@ -860,6 +860,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         st.virtual_shuffle_seed = 0
         st.bassboost = False
         st.nightcore = False
+        st.slowed_reverb = False
         st.effects_revision += 1
         player = st.player
         st.player = None
@@ -1496,19 +1497,24 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         effect = str(body.get("effect") or "").strip().lower()
         enabled = body.get("enabled")
-        if effect not in {"bassboost", "nightcore"} or not isinstance(enabled, bool):
+        if effect not in {"bassboost", "nightcore", "slowed_reverb"} or not isinstance(enabled, bool):
             return {"ok": False, "error": "efeito ou estado inválido", "state": st.public()}
 
         async with st.effects_lock:
             expected = body.get("expected_revision")
             if expected is not None and str(expected) != str(st.effects_revision):
                 return {"ok": False, "error": "os efeitos mudaram; tente novamente", "state": st.public()}
-            previous = (st.bassboost, st.nightcore)
+            previous = (st.bassboost, st.nightcore, st.slowed_reverb)
             desired = (enabled if effect == "bassboost" else st.bassboost,
-                       enabled if effect == "nightcore" else st.nightcore)
+                       enabled if effect == "nightcore" else st.nightcore,
+                       enabled if effect == "slowed_reverb" else st.slowed_reverb)
+            if enabled and effect == "nightcore":
+                desired = (desired[0], True, False)
+            elif enabled and effect == "slowed_reverb":
+                desired = (desired[0], False, True)
             if desired == previous:
                 return {"ok": True, "state": st.public()}
-            if desired[1] and self._ffmpeg_has_custom_audio_filter(self.ffmpeg_options):
+            if (desired[1] or desired[2]) and self._ffmpeg_has_custom_audio_filter(self.ffmpeg_options):
                 return {"ok": False, "error": "filtro FFmpeg personalizado incompatível com os efeitos", "state": st.public()}
             if effect == "bassboost" and not self.direct_pcm_volume_enabled:
                 return {"ok": False, "error": "Bassboost requer o mixer PCM do player", "state": st.public()}
@@ -1521,7 +1527,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             playing = bool(player and (getattr(player, "is_playing", lambda: False)() or
                                        getattr(player, "is_paused", lambda: False)()))
             if track is not None and playing:
-                if track.is_live and effect == "nightcore":
+                if track.is_live and effect in {"nightcore", "slowed_reverb"}:
                     return {"ok": False, "error": "não é possível trocar efeitos durante uma transmissão ao vivo", "state": st.public()}
                 if not isinstance(mixer, AgentMixedAudioSource) or not mixer.persistent:
                     return {"ok": False, "error": "o player atual não permite trocar efeitos durante a música", "state": st.public()}
@@ -1580,7 +1586,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 # de telemetria/prefetch não podem reportar uma troca concluída
                 # como falha nem tentar restaurar uma fonte já encerrada.
                 self._bump_playback_generation(st, reason="audio_effect")
-                st.bassboost, st.nightcore = desired
+                st.bassboost, st.nightcore, st.slowed_reverb = desired
                 st.effects_revision += 1
                 track.start_offset_seconds = offset
                 now = time.monotonic()
@@ -1593,11 +1599,12 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                         self._schedule_next_queue_prefetch(guild_id, reason="audio_effect")
                 with contextlib.suppress(Exception):
                     self.log("audio_effect_changed", guild_id=guild_id, effect=effect,
-                             enabled=enabled, bassboost=st.bassboost, nightcore=st.nightcore)
+                             enabled=enabled, bassboost=st.bassboost, nightcore=st.nightcore,
+                             slowed_reverb=st.slowed_reverb)
                 return {"ok": True, "state": st.public()}
 
             self._cancel_audio_preparation(guild_id)
-            st.bassboost, st.nightcore = desired
+            st.bassboost, st.nightcore, st.slowed_reverb = desired
             st.effects_revision += 1
             st.last_action = "audio_effect"
             st.updated_at = time.time()
@@ -1636,6 +1643,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             st.current = None
             st.bassboost = False
             st.nightcore = False
+            st.slowed_reverb = False
             st.effects_revision += 1
             st.paused = False
             self._set_status(st, "idle", event="queue_empty")
@@ -2239,7 +2247,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             voice_client.stop()
         opus_bitrate_kbps, channel_bitrate_kbps = self._discord_opus_bitrate_kbps(voice_client, track)
         source_rate = max(0, int(getattr(track, "audio_sample_rate", 0) or 0))
-        effects = (st.bassboost, st.nightcore)
+        effects = (st.bassboost, st.nightcore, st.slowed_reverb)
         _audio_options, resample_mode = self._ffmpeg_options_for_source(
             source_rate, effects=effects, is_live=track.is_live,
         )
@@ -2266,6 +2274,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             "volume_mode": "soft_limited_boost" if int(st.volume_percent) > 100 else "linear",
             "bassboost": st.bassboost,
             "nightcore": st.nightcore and not track.is_live,
+            "slowed_reverb": st.slowed_reverb and not track.is_live,
         }
         self.log(
             "audio_source_selected",
@@ -2486,13 +2495,14 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         )
 
     def _ffmpeg_options_for_source(
-        self, source_sample_rate: int = 0, *, effects: tuple[bool, bool] = (False, False),
+        self, source_sample_rate: int = 0, *, effects: tuple[bool, ...] = (False, False, False),
         is_live: bool = False,
     ) -> tuple[str, str]:
         base = str(self.ffmpeg_options or "").strip()
         # O Bassboost usa a folga depois do volume no mixer PCM; não aplica
         # redução/limiter global ao decoder, mesmo que Nightcore esteja ativo.
-        effects = (False, bool(effects[1]) and not is_live)
+        effects = (False, bool(effects[1]) and not is_live,
+                   bool(effects[2]) and not is_live if len(effects) > 2 else False)
         try:
             rate = max(0, int(source_sample_rate or 0))
         except Exception:
@@ -2504,7 +2514,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             quality = self._ffmpeg_quality_resample_filter(nightcore=True) if quality_enabled else "aresample=48000"
             resample = self._ffmpeg_quality_resample_filter() if rate not in (0, 48000) and quality_enabled else ""
             chain = filtros(
-                bassboost=effects[0], nightcore=effects[1], is_live=is_live,
+                bassboost=effects[0], nightcore=effects[1], slowed_reverb=effects[2], is_live=is_live,
                 resample=resample, nightcore_resample=quality,
             )
             return f"{base} -af {chain}".strip(), "effects"
@@ -2530,7 +2540,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         on_music_end: Any = None,
         reuse_mixer: AgentMixedAudioSource | None = None,
         pcm_source: Any = None,
-        effects: tuple[bool, bool] = (False, False),
+        effects: tuple[bool, ...] = (False, False, False),
         is_live: bool = False,
     ) -> Any:
         volume = max(0.0, min(1.5, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))

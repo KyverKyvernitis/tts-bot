@@ -151,6 +151,10 @@ def test_estado_ocioso_nao_repete_bloco_de_fila_vazia() -> None:
 
 
 def test_efeitos_confirmam_no_painel_sem_ephemeral_de_sucesso() -> None:
+    options = _class_source(COMPONENTS, "PlayerOptionsSelect")
+    modes = COMPONENTS.read_text(encoding="utf-8")
+    assert 'value="slowed_reverb"' in options
+    assert 'Slowed + Reverb' in modes
     callback_source = textwrap.dedent(_method_source(COMPONENTS, "PlayerOptionsSelect", "callback"))
     events: list[tuple] = []
 
@@ -172,11 +176,12 @@ def test_efeitos_confirmam_no_painel_sem_ephemeral_de_sucesso() -> None:
             events.append(("message", args, kwargs))
 
     async def scenario():
-        for effect in ("bassboost", "nightcore"):
+        for effect in ("bassboost", "nightcore", "slowed_reverb"):
             for enabled in (False, True):
                 for succeeds in (False, True):
                     events.clear()
-                    state = SimpleNamespace(current=object(), bassboost=enabled, nightcore=enabled)
+                    state = SimpleNamespace(current=object(), bassboost=enabled,
+                                            nightcore=enabled, slowed_reverb=enabled)
 
                     async def set_effect(_guild_id, selected, target):
                         assert selected == effect and target is not enabled

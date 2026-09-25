@@ -90,7 +90,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.63"
+AGENT_VERSION = "0.3.64"
 STARTED_AT = time.time()
 
 
@@ -521,6 +521,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 st.current = None
                 st.bassboost = False
                 st.nightcore = False
+                st.slowed_reverb = False
                 st.effects_revision += 1
                 st.paused = False
                 self._bump_playback_generation(st, reason="voice_alone_timeout")

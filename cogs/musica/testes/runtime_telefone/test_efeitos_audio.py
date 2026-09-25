@@ -90,6 +90,32 @@ def test_nightcore_rejeita_aliasing_sem_filtrar_musica_nativa(monkeypatch) -> No
     assert fallback.endswith("-af aresample=48000,asetrate=60000,aresample=48000")
 
 
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="FFmpeg ausente")
+def test_slowed_reverb_abaixa_tom_e_deixa_cauda_sem_clipping(tmp_path: Path, monkeypatch) -> None:
+    agent = _load_music_agent(monkeypatch).MusicAgent()
+    options, _mode = agent._ffmpeg_options_for_source(44100, effects=(True, False, True))
+    chain = options.split("-af ", 1)[1]
+    assert options.count("-af ") == 1
+    assert "asetrate=38400" in chain and "aecho=" in chain and "alimiter=" in chain
+    assert "bass=" not in chain  # o grave fica no mixer PCM, depois do decoder
+    audio = tmp_path / "slowed.wav"
+    subprocess.run([
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=1:sample_rate=44100",
+        "-af", chain, "-ar", "48000", str(audio),
+    ], check=True, timeout=10)
+    with wave.open(str(audio), "rb") as decoded:
+        assert decoded.getframerate() == 48000
+        assert decoded.getnframes() / 48000 > 1.7  # 1,25 s mais a cauda da ambiência
+        assert decoded.getnchannels() == 1
+        samples = array("h", decoded.readframes(decoded.getnframes()))
+    region = samples[48000 // 4 : 48000]
+    crossings = sum(region[i - 1] <= 0 < region[i] for i in range(1, len(region)))
+    assert 342 < crossings / 0.75 < 362  # 440 Hz cai para ~352 Hz
+    assert max(abs(sample) for sample in samples[round(1.45 * 48000) : round(1.65 * 48000)]) > 100
+    assert max(map(abs, samples)) <= 32000
+
+
 def test_bassboost_no_mixer_reforca_graves_apos_volume_sem_reduzir_medios(monkeypatch) -> None:
     music = _load_music_agent(monkeypatch)
     rate = 48000
@@ -148,6 +174,56 @@ def test_bassboost_no_mixer_reforca_graves_apos_volume_sem_reduzir_medios(monkey
         assert amplitude(loud, 1000) >= amplitude(loud_normal, 1000) * 0.95
         assert sum(value * value for value in loud) >= sum(value * value for value in loud_normal)
         assert max(map(abs, loud)) <= 32000
+
+    asyncio.run(scenario())
+
+
+def test_bassboost_nao_some_por_picos_de_faixa_masterizada(monkeypatch) -> None:
+    music = _load_music_agent(monkeypatch)
+    rate = 48000
+    song = array("h")
+    for i in range(rate):
+        value = (0.25 * math.sin(2 * math.pi * 80 * i / rate)
+                 + 0.4 * math.sin(2 * math.pi * 1000 * i / rate)
+                 + 0.6 * math.sin(2 * math.pi * 6500 * i / rate))
+        if i % 960 in range(142, 150):
+            value += 0.6  # um pico curto em cada quadro de 20 ms
+        value = max(-1.0, min(1.0, value))
+        song.extend((round(32767 * value), round(32767 * value)))
+
+    async def render(enabled: bool, volume: float) -> array:
+        class Frames(music.discord.AudioSource):
+            def __init__(self): self.position = 0
+            def read(self):
+                start = self.position * 1920
+                self.position += 1
+                return song[start:start + 1920].tobytes()
+            def cleanup(self): pass
+
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(), music_source=Frames(),
+            music_volume=volume, persistent=True, bassboost=enabled,
+        )
+        output = array("h")
+        try:
+            for _ in range(50): output.frombytes(mixer.read())
+        finally:
+            mixer.cleanup()
+        return output
+
+    def bass_amplitude(samples: array) -> float:
+        segment = samples[rate // 2 : 3 * rate // 2 : 2]
+        return abs(sum(value * complex(
+            math.cos(2 * math.pi * 80 * index / rate),
+            math.sin(2 * math.pi * 80 * index / rate),
+        ) for index, value in enumerate(segment)))
+
+    async def scenario() -> None:
+        for volume, minimum in ((0.55, 3.8), (0.8, 2.0)):
+            dry = await render(False, volume)
+            boosted = await render(True, volume)
+            assert bass_amplitude(boosted) / bass_amplitude(dry) > minimum
+            assert max(map(abs, boosted)) <= 32767
 
     asyncio.run(scenario())
 
@@ -244,7 +320,7 @@ async def test_troca_efeitos_preserva_mixer_fila_e_ponto_da_faixa(monkeypatch) -
                                started_monotonic=time.monotonic() - 10)
     agent.states[gid] = st
 
-    def create(_track, *, effects=(False, False)):
+    def create(_track, *, effects=(False, False, False)):
         emitted.append((effects, PCM()))
         return BufferedPCMSource(emitted[-1][1], max_frames=10)
 
@@ -256,7 +332,7 @@ async def test_troca_efeitos_preserva_mixer_fila_e_ponto_da_faixa(monkeypatch) -
         assert first["ok"] and st.playback_speed == 1.25
         assert 9.5 <= st.current.start_offset_seconds <= 11.0
         assert st.queue == [queued] and st.current is current and st.player.source is mixer
-        assert initial.cleaned and emitted[0][0] == (False, True)
+        assert initial.cleaned and emitted[0][0] == (False, True, False)
 
         st.paused = True
         st.status = "paused"
@@ -276,6 +352,24 @@ async def test_troca_efeitos_preserva_mixer_fila_e_ponto_da_faixa(monkeypatch) -
                                               "expected_revision": 0})
         assert not stale["ok"] and len(emitted) == 1 and st.nightcore
         assert st.source_position_seconds() >= st.current.start_offset_seconds
+
+        slowed = await agent.cmd_audio_effect({"guild_id": gid, "effect": "slowed_reverb", "enabled": True,
+                                               "expected_revision": 2})
+        assert slowed["ok"] and st.slowed_reverb and not st.nightcore
+        assert st.playback_speed == 0.8 and st.paused and st.queue == [queued]
+        assert len(emitted) == 2 and emitted[-1][0] == (True, False, True)
+        assert emitted[0][1].cleaned and st.player.source is mixer
+
+        nightcore = await agent.cmd_audio_effect({"guild_id": gid, "effect": "nightcore", "enabled": True,
+                                                  "expected_revision": 3})
+        assert nightcore["ok"] and st.nightcore and not st.slowed_reverb
+        assert st.playback_speed == 1.25 and emitted[-1][0] == (True, True, False)
+
+        plain = await agent.cmd_audio_effect({"guild_id": gid, "effect": "nightcore", "enabled": False,
+                                              "expected_revision": 4})
+        assert plain["ok"] and st.playback_speed == 1.0
+        assert not st.nightcore and not st.slowed_reverb
+        assert emitted[-1][0] == (True, False, False)
     finally:
         mixer.cleanup()
 
@@ -310,6 +404,9 @@ async def test_bassboost_altera_transmissao_ao_vivo_sem_reiniciar_decoder(monkey
         assert response["ok"] and st.bassboost and mixer.bassboost_enabled
         assert st.player.source is mixer and mixer.music_source is stream and st.playback_token == 5
         assert st.current.start_offset_seconds == 0
+        rejected = await agent.cmd_audio_effect({"guild_id": 99, "effect": "slowed_reverb", "enabled": True,
+                                                 "expected_revision": 1})
+        assert not rejected["ok"] and not st.slowed_reverb and st.playback_token == 5
     finally:
         mixer.cleanup()
 
@@ -372,6 +469,13 @@ async def test_snapshot_do_worker_atualiza_painel_e_relogio_sem_nova_faixa() -> 
     assert st.agent_started_playback_token == 2
     assert 22.5 <= st.current_start_offset_seconds < 23
 
+    await sincronizar_estado_agente(router, 42, agent_state={**base, "playback_token": 3,
+                                                             "last_event": "audio_effect", "position_ms": 24000,
+                                                             "bassboost": True, "nightcore": False,
+                                                             "slowed_reverb": True, "speed_multiplier": 0.8,
+                                                             "effects_revision": 2}, create_panel=False)
+    assert st.slowed_reverb and not st.nightcore and st.playback_speed == 0.8
+
 
 @pytest.mark.asyncio
 async def test_fonte_preparada_com_modo_antigo_eh_descartada(monkeypatch) -> None:
@@ -393,7 +497,7 @@ async def test_fonte_preparada_com_modo_antigo_eh_descartada(monkeypatch) -> Non
     source = BufferedPCMSource(raw, max_frames=2)
     await source.wait_ready(timeout=1)
     agent._prepared_audio[51] = AudioPreparado(track.queue_item_id, track.stream_url, 0,
-                                                source, time.monotonic(), True, (False, False))
+                                                source, time.monotonic(), True, (False, False, False))
     assert agent._take_prepared_audio(51, track) is None
     assert raw.cleaned
     st.nightcore = False
@@ -402,10 +506,18 @@ async def test_fonte_preparada_com_modo_antigo_eh_descartada(monkeypatch) -> Non
     prepared = BufferedPCMSource(keep, max_frames=2)
     await prepared.wait_ready(timeout=1)
     agent._prepared_audio[51] = AudioPreparado(track.queue_item_id, track.stream_url, 0,
-                                                prepared, time.monotonic(), True, (False, False))
+                                                prepared, time.monotonic(), True, (False, False, False))
     assert agent._take_prepared_audio(51, track) is prepared
     assert not keep.cleaned
     prepared.cleanup()
+    st.slowed_reverb = True
+    stale = PCM()
+    stale_prepared = BufferedPCMSource(stale, max_frames=2)
+    await stale_prepared.wait_ready(timeout=1)
+    agent._prepared_audio[51] = AudioPreparado(track.queue_item_id, track.stream_url, 0,
+                                                stale_prepared, time.monotonic(), True, (False, False, False))
+    assert agent._take_prepared_audio(51, track) is None
+    assert stale.cleaned
 
 
 def test_relogio_nightcore_congela_pausado_e_recupera_no_tempo_da_fonte(monkeypatch) -> None:

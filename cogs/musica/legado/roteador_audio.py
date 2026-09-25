@@ -1437,7 +1437,7 @@ class AudioRouter:
         started = float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0)
         if not started:
             return offset
-        speed = max(1.0, min(1.25, float(getattr(state, "playback_speed", 1.0) or 1.0)))
+        speed = max(0.8, min(1.25, float(getattr(state, "playback_speed", 1.0) or 1.0)))
         return max(0.0, offset + (time.monotonic() - started) * speed)
 
     def render_voice_status(self, guild_id: int, track: MusicTrack | None = None, *, template: str | None = None) -> str:

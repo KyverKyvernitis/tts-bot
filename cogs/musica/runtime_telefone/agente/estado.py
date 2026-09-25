@@ -109,6 +109,7 @@ class GuildMusicState:
     loop_mode: str = "off"
     bassboost: bool = False
     nightcore: bool = False
+    slowed_reverb: bool = False
     effects_revision: int = 0
     effects_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     # Shuffle virtual: embaralha cada janela materializada da playlist sem
@@ -257,7 +258,8 @@ class GuildMusicState:
 
     @property
     def playback_speed(self) -> float:
-        return velocidade(nightcore=self.nightcore, is_live=bool(self.current and self.current.is_live))
+        return velocidade(nightcore=self.nightcore, slowed_reverb=self.slowed_reverb,
+                          is_live=bool(self.current and self.current.is_live))
 
     def source_position_seconds(self, *, now: float | None = None) -> float:
         if self.current is None:
@@ -350,6 +352,7 @@ class GuildMusicState:
             "volume_percent": self.volume_percent,
             "bassboost": self.bassboost,
             "nightcore": self.nightcore,
+            "slowed_reverb": self.slowed_reverb,
             "speed_multiplier": self.playback_speed,
             "effects_revision": self.effects_revision,
             "normal_volume_percent": self.normal_volume_percent,
