@@ -2584,3 +2584,103 @@ def test_youtube_prefetch_does_not_overwrite_moved_duplicate(music):
         assert second.title == "YouTube"
 
     run(scenario())
+
+
+def test_youtube_quick_metadata_reads_only_oembed(music, monkeypatch):
+    from cogs.musica.runtime_telefone.agente import resolucao
+
+    urls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self, size):
+            assert size <= 16384
+            return b'{"title":"Unstoppable Force","author_name":"Heaven Pierce Her - Topic","thumbnail_url":"https://i.ytimg.com/vi/tkLVbpOlH_E/hqdefault.jpg"}'
+
+    def fake_urlopen(request, timeout):
+        urls.append(request.full_url)
+        assert timeout <= 2.5
+        return Response()
+
+    monkeypatch.setattr(resolucao, "urlopen", fake_urlopen)
+    agent = music.MusicAgent()
+    data = agent._youtube_quick_metadata("https://youtu.be/tkLVbpOlH_E?si=tracking")
+    assert data["title"] == "Unstoppable Force"
+    assert data["uploader"] == "Heaven Pierce Her - Topic"
+    assert data["webpage_url"] == "https://www.youtube.com/watch?v=tkLVbpOlH_E"
+    assert len(urls) == 1 and urls[0].startswith("https://www.youtube.com/oembed?")
+    assert agent._youtube_quick_metadata("https://evil-youtube.com/watch?v=tkLVbpOlH_E") == {}
+    assert len(urls) == 1
+
+
+def test_youtube_quick_metadata_enriches_track_behind_virtual_marker(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.log = lambda *_args, **_kwargs: None
+        guild_id = 990
+        url = "https://www.youtube.com/watch?v=tkLVbpOlH_E"
+        marker = music.AgentTrack(
+            title="Playlist", query="", transport_hint="playlist-cursor",
+            virtual_playlist_cursor={"provider": "spotify", "source_url": "https://open.spotify.com/playlist/abc", "next_offset": 25, "total_tracks": 50},
+        )
+        track = music.AgentTrack(title="YouTube", query=url, webpage_url=url, source="YouTube")
+        st = music.GuildMusicState(guild_id=guild_id, queue=[marker, track])
+        agent.states[guild_id] = st
+        before = st.state_revision()
+        urls = []
+
+        def quick_metadata(value):
+            urls.append(value)
+            return {"title": "Unstoppable Force", "uploader": "Heaven Pierce Her - Topic", "thumbnail": "https://i.ytimg.com/test.jpg", "webpage_url": url}
+
+        agent._youtube_quick_metadata = quick_metadata
+        agent._schedule_youtube_queue_metadata(guild_id, track)
+        await asyncio.gather(*agent._youtube_metadata_tasks.values())
+        assert urls == [url]
+        assert st.queue[0] is marker and st.queue[1] is track
+        assert track.title == "Unstoppable Force"
+        assert track.uploader == "Heaven Pierce Her - Topic"
+        assert st.public()["queue_layout"][1]["track"]["title"] == "Unstoppable Force"
+        assert st.state_revision() != before
+        assert not agent._youtube_metadata_tasks
+
+        cached = music.AgentTrack(title="YouTube", query=url, webpage_url=url, source="YouTube")
+        st.queue.append(cached)
+        agent._youtube_quick_metadata = lambda value: (_ for _ in ()).throw(AssertionError("não repetir rede"))
+        agent._schedule_youtube_queue_metadata(guild_id, cached)
+        await asyncio.gather(*agent._youtube_metadata_tasks.values())
+        assert cached.title == "Unstoppable Force"
+
+    run(scenario())
+
+
+def test_youtube_queued_play_starts_light_metadata_without_waiting_for_audio(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.log = lambda *_args, **_kwargs: None
+        agent._schedule_next_queue_prefetch = lambda *_args, **_kwargs: None
+        url = "https://www.youtube.com/watch?v=tkLVbpOlH_E"
+        st = music.GuildMusicState(
+            guild_id=991, status="playing",
+            current=music.AgentTrack(title="Atual", query="https://example.com/current", duration=360),
+        )
+        agent.states[991] = st
+        agent._youtube_quick_metadata = lambda value: {
+            "title": "Unstoppable Force", "webpage_url": url, "uploader": "Heaven Pierce Her - Topic",
+        }
+
+        result = await agent.cmd_play({
+            "guild_id": 991, "voice_channel_id": 99, "text_channel_id": 100,
+            "query": url, "track": {"title": "YouTube", "webpage_url": url, "source": "YouTube"},
+        })
+        assert result["queued"] is True
+        await asyncio.gather(*agent._youtube_metadata_tasks.values())
+        assert len(st.queue) == 1
+        assert st.queue[0].title == "Unstoppable Force"
+        assert st.current.title == "Atual"
+        assert st.queue[0].stream_url == ""  # O caminho leve não precisa de stream.
+
+    run(scenario())

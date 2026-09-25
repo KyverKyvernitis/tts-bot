@@ -706,6 +706,31 @@ def _queue_duration_label(items: list[MusicTrack]) -> str:
     return label
 
 
+def _queue_duration_for_panel(state, items: list[MusicTrack], total: int) -> str:
+    # O preview remoto pode conter apenas as primeiras 50 faixas. O layout
+    # preserva todas as faixas materializadas, inclusive após um cursor virtual.
+    layout = getattr(state, "agent_queue_layout", None)
+    layout_tracks = (
+        [entry["track"] for entry in layout
+         if isinstance(entry, dict) and entry.get("kind") == "track" and isinstance(entry.get("track"), MusicTrack)]
+        if isinstance(layout, list) else []
+    )
+    materialized = layout_tracks or items
+    if not any(track.duration is not None and not track.is_live for track in materialized):
+        return "duração pendente"
+    duration = _queue_duration_label(materialized)
+    def has_remaining(info: dict) -> bool:
+        try:
+            return info.get("remaining") in (None, "") or int(info["remaining"]) > 0
+        except (TypeError, ValueError):
+            return True
+    remaining_virtual = any(has_remaining(info) for info in _virtual_playlists_info(state))
+    incomplete = remaining_virtual or total > len(materialized) or duration.endswith("+")
+    if duration == "desconhecida":
+        return "duração pendente"
+    return f"≥ {duration.rstrip('+')}" if incomplete else duration
+
+
 def _source_key_for_track(track: MusicTrack | None) -> str:
     if track is None:
         return ""
@@ -927,15 +952,14 @@ def _queue_preview_text(state, *, limit: int = 4, selected_position: int | None 
     else:
         preview = items[: max(1, int(limit))]
 
-    duration = _queue_duration_label(items)
+    duration = _queue_duration_for_panel(state, items, total)
     virtual_total_known = bool(virtual and virtual.get("total_tracks") not in (None, ""))
     total_text = str(total) if (not virtual or virtual_total_known) else f"{total}+"
     count_label = "música" if total == 1 else "músicas"
     header = f"**Fila** · {total_text} {count_label}"
-    # Em playlist virtual a duração calculada é somente da janela em memória,
-    # não da coleção inteira. Omiti-la evita apresentar ``34:20+`` como se fosse
-    # uma duração total. Quando a coleção deixa de ser virtual, volta ao normal.
-    if not virtual and duration and duration != "desconhecida":
+    # A soma parcial é marcada como limite inferior quando ainda faltam
+    # janelas da playlist ou faixas sem duração conhecida.
+    if duration:
         header += f" · {duration}"
 
     lines = [header]

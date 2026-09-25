@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 from .ciclo_vida import consume_task_result, remove_owned_task
 from .correspondencia import avaliar_correspondencia, busca_alternativa
@@ -371,6 +372,35 @@ class ResolucaoMixin:
         return time.monotonic() >= self._stream_deadline(
             track.stream_url, resolved_at, self.stream_refresh_before_play_seconds,
         )
+
+    def _youtube_quick_metadata(self, value: str) -> dict[str, Any]:
+        """Lê apenas título/canal/capa; yt-dlp continua responsável pelo áudio."""
+        try:
+            host = (urlparse(value).hostname or "").lower()
+        except ValueError:
+            return {}
+        if host not in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}:
+            return {}
+        canonical = self._normalize_public_media_url(value)
+        parsed = urlparse(canonical)
+        video_id = next((val for key, val in parse_qsl(parsed.query) if key == "v"), "")
+        if parsed.hostname != "www.youtube.com" or parsed.path != "/watch" or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            return {}
+        endpoint = "https://www.youtube.com/oembed?" + urlencode({"url": canonical, "format": "json"})
+        request = Request(endpoint, headers={"User-Agent": "Mozilla/5.0 (compatible; OsakaMusicBot/1.0)"})
+        with urlopen(request, timeout=2.5) as response:
+            data = json.loads(response.read(16384))
+        if not isinstance(data, dict):
+            return {}
+        title = _metadata_text(data.get("title"), limit=160)
+        if not title or title.casefold() in {"youtube", "link", "música", "musica"}:
+            return {}
+        return {
+            "title": title,
+            "uploader": _metadata_text(data.get("author_name"), limit=120),
+            "thumbnail": short_text(data.get("thumbnail_url"), 500),
+            "webpage_url": canonical,
+        }
 
     def _agent_track_from_resolved(self, resolved: dict[str, Any], *, query: str, track_meta: dict[str, Any], body: dict[str, Any], cached: bool = False) -> AgentTrack:
         title_hint = _metadata_text(track_meta.get("title") or body.get("title"), limit=160)

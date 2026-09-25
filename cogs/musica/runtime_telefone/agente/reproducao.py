@@ -201,6 +201,72 @@ class ReproducaoMixin(PreparacaoAudioMixin):
     def _guild_prefetch_key(self, guild_id: int, cache_key: str) -> str:
         return f"{int(guild_id or 0)}:{cache_key}"
 
+    def _schedule_youtube_queue_metadata(self, guild_id: int, track: AgentTrack) -> None:
+        if (
+            str(track.title or "").strip().casefold() not in {"youtube", "link", "música", "musica"}
+            or self._metadata_source_kind(track.public()) != "youtube"
+            or len(self._youtube_metadata_tasks) >= 64
+        ):
+            return
+        query = self._query_from_track_meta(track.public(), fallback_query=track.query or track.webpage_url)
+        if not query.startswith(("http://", "https://")):
+            return
+        item_id = track.queue_item_id
+        task_key = (guild_id, item_id)
+        if task_key in self._youtube_metadata_tasks:
+            return
+        cache_key = self._resolve_cache_key(query, track.public())
+
+        async def _runner() -> None:
+            try:
+                cached = self._metadata_cache_get(cache_key)
+                if cached and str(cached.get("title") or "").strip().casefold() not in {"", "youtube", "link", "música", "musica"}:
+                    details = cached
+                else:
+                    async with self._youtube_metadata_semaphore:
+                        # A resolução completa de áudio pode ter terminado
+                        # enquanto aguardávamos uma vaga de rede.
+                        details = self._metadata_cache_get(cache_key)
+                        if not details or str(details.get("title") or "").strip().casefold() in {"", "youtube", "link", "música", "musica"}:
+                            details = await asyncio.to_thread(self._youtube_quick_metadata, query)
+                            if details and not self._metadata_cache_get(cache_key):
+                                self._metadata_cache_put(cache_key, details)
+                title = str((details or {}).get("title") or "").strip()
+                if not title or title.casefold() in {"youtube", "link", "música", "musica"}:
+                    return
+                st = self.states.get(guild_id)
+                if st is None:
+                    return
+                target = next((item for item in st.queue if item.queue_item_id == item_id), None)
+                if target is None and st.current is not None and st.current.queue_item_id == item_id:
+                    target = st.current
+                if target is None or str(target.title or "").strip().casefold() not in {"youtube", "link", "música", "musica"}:
+                    return
+                target.title = title
+                target.uploader = target.uploader or str(details.get("uploader") or "")
+                target.thumbnail = target.thumbnail or str(details.get("thumbnail") or "")
+                if target.duration is None and details.get("duration") is not None:
+                    with contextlib.suppress(TypeError, ValueError):
+                        target.duration = max(0.0, float(details["duration"]))
+                st.updated_at = time.time()
+                self.log("youtube_queue_metadata_ready", guild_id=guild_id, title=title)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                # Link privado/sem embed ainda pode tocar: yt-dlp completo
+                # continua sendo a fonte autoritativa quando chegar sua vez.
+                self.log("youtube_queue_metadata_failed", guild_id=guild_id, error=short_text(exc, 140))
+            finally:
+                remove_owned_task(self._youtube_metadata_tasks, task_key, asyncio.current_task())
+
+        self._youtube_metadata_tasks[task_key] = asyncio.create_task(_runner())
+
+    def _cancel_youtube_queue_metadata(self, guild_id: int) -> None:
+        for key, task in list(self._youtube_metadata_tasks.items()):
+            if key[0] == guild_id:
+                self._youtube_metadata_tasks.pop(key, None)
+                task.cancel()
+
     def _next_resolving_prefetch_keys(self, st: GuildMusicState) -> set[str]:
         """Preserva apenas a resolução já iniciada da próxima faixa da fila."""
         if not st.queue or st.queue[0].is_virtual_playlist_marker:
@@ -455,6 +521,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 self._cancel_prefetch_tasks(guild_id)
             st.queue.extend(tracks)
             st.updated_at = time.time()
+            for item in tracks:
+                self._schedule_youtube_queue_metadata(guild_id, item)
             self.log(
                 "queued_many",
                 guild_id=guild_id,
@@ -493,10 +561,12 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         if st.current and st.status in {"playing", "starting", "preparing", "paused"}:
             st.queue.append(track)
             st.updated_at = time.time()
+            self._schedule_youtube_queue_metadata(guild_id, track)
             self._schedule_next_queue_prefetch(guild_id, reason="enqueue")
             self.log("queued_lazy", guild_id=guild_id, title=track.title, queue_size=len(st.queue))
             return {"ok": True, "queued": True, "track": track.public(), "state": st.public()}
         st.queue.append(track)
+        self._schedule_youtube_queue_metadata(guild_id, track)
         await self._play_next(guild_id)
         if st.status in {"failed", "error"}:
             return {"ok": False, "queued": False, "error": st.last_error or "falha ao iniciar playback", "state": st.public()}
@@ -780,6 +850,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.last_action = "stop"
+        self._cancel_youtube_queue_metadata(guild_id)
         self._cancel_prefetch_tasks(guild_id)
         self._cancel_idle_disconnect(guild_id)
         self._cancel_voice_presence_disconnect(guild_id)

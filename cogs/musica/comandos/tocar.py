@@ -299,7 +299,9 @@ class FluxoTocar:
                     state = self._music_agent_guild_state(payload, guild_id)
                 queue = state.get("queue") if isinstance(state.get("queue"), list) else []
                 current = state.get("current") if isinstance(state.get("current"), dict) else {}
-                for item in [*queue, current]:
+                layout = state.get("queue_layout") if isinstance(state.get("queue_layout"), list) else []
+                remaining = [entry.get("track") for entry in layout if isinstance(entry, dict) and entry.get("kind") == "track"]
+                for item in [*queue, *remaining, current]:
                     if not isinstance(item, dict) or str(item.get("queue_item_id") or "") != queue_item_id:
                         continue
                     content = self._music_agent_play_message(track, {"queued": True, "track": item})

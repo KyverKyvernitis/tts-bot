@@ -90,7 +90,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.61"
+AGENT_VERSION = "0.3.62"
 STARTED_AT = time.time()
 
 
@@ -232,6 +232,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._voice_dependencies_cache: tuple[float, dict[str, Any]] | None = None
         self._voice_dependencies_cache_ttl = max(0.0, env_float("MUSIC_AGENT_DEPENDENCY_CACHE_TTL_SECONDS", 30.0))
         self._prefetch_tasks: dict[str, asyncio.Task] = {}
+        self._youtube_metadata_tasks: dict[tuple[int, str], asyncio.Task] = {}
+        self._youtube_metadata_semaphore = asyncio.Semaphore(2)
         # Distingue uma resolução já iniciada de um prefetch que ainda dorme.
         # Uma troca de faixa pode aproveitar somente o primeiro caso.
         self._prefetch_resolving: set[str] = set()
@@ -1045,12 +1047,14 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 list(self._idle_disconnect_tasks.values())
                 + list(self._voice_presence_disconnect_tasks.values())
                 + list(self._prefetch_tasks.values())
+                + list(self._youtube_metadata_tasks.values())
                 + list(self._voice_runtime_recovery_tasks.values())
                 + list(self._audio_prepare_tasks.values())
             )
             self._idle_disconnect_tasks.clear()
             self._voice_presence_disconnect_tasks.clear()
             self._prefetch_tasks.clear()
+            self._youtube_metadata_tasks.clear()
             self._voice_runtime_recovery_tasks.clear()
             await cancel_tasks(background)
             for guild_id in list(self._prepared_audio):
