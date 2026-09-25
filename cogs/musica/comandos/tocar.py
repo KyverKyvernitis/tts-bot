@@ -101,10 +101,15 @@ class FluxoTocar:
             track = faixa_do_payload(payload)
             if track is None or track.duration is None:
                 raise RuntimeError("o anexo não retornou metadados de áudio confirmados")
-            await self._sync_music_agent_panel(
-                ctx.guild.id, track, result, voice_channel_id=voice.id,
-                text_channel_id=ctx.channel.id, queued=bool(result.get("queued")),
-            )
+            try:
+                await self._sync_music_agent_panel(
+                    ctx.guild.id, track, result, voice_channel_id=voice.id,
+                    text_channel_id=ctx.channel.id, queued=bool(result.get("queued")),
+                )
+            except Exception:
+                # O ACK do worker já confirmou a fila. A falha de renderização
+                # não pode induzir o usuário a repetir `_play` e criar duplicata.
+                logger.warning("[music/discord] painel não sincronizado | guild=%s attachment=%s", ctx.guild.id, attachment_id, exc_info=True)
             await self._reply(ctx, self._music_agent_play_message(track, result), allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             if generation != self.router.current_music_operation_generation(ctx.guild.id):

@@ -48,16 +48,23 @@ async def midia_respondida(comando: Any) -> VideoRespondido:
     referencia = getattr(comando, "reference", None)
     if referencia is None or not getattr(referencia, "message_id", None):
         return VideoRespondido("sem_resposta")
+    canal = getattr(comando, "channel", None)
+    canal_id = int(getattr(canal, "id", 0) or 0)
+    referencia_canal_id = int(getattr(referencia, "channel_id", 0) or canal_id)
+    if canal_id and referencia_canal_id != canal_id:
+        return VideoRespondido("inacessivel")
     mensagem = getattr(referencia, "resolved", None) or getattr(referencia, "cached_message", None)
     if mensagem is None or not hasattr(mensagem, "attachments"):
         try:
-            canal = getattr(comando, "channel", None)
-            if int(getattr(canal, "id", 0) or 0) != int(getattr(referencia, "channel_id", 0) or 0):
-                # Referências entre canais não devem ler um canal arbitrário.
-                return VideoRespondido("inacessivel")
             mensagem = await asyncio.wait_for(canal.fetch_message(int(referencia.message_id)), timeout=6)
         except Exception:
             return VideoRespondido("inacessivel")
+    if (
+        int(getattr(mensagem, "id", 0) or 0) != int(referencia.message_id)
+        or (getattr(mensagem, "channel", None) is not None and
+            int(getattr(mensagem.channel, "id", 0) or 0) != referencia_canal_id)
+    ):
+        return VideoRespondido("inacessivel")
     anexos = [item for item in (getattr(mensagem, "attachments", None) or ()) if _is_video(item) or _is_audio(item)]
     if not anexos:
         return VideoRespondido("sem_midia", mensagem)

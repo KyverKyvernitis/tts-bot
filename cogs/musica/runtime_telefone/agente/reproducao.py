@@ -545,7 +545,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             # mídia começa imediatamente. Faixas que esperam na fila fazem
             # novo GET perto do playback, após a validade curta expirar.
             verified_at = time.monotonic()
-            expires = prazo_stream(attachment["url"], verified_at, 30.0)
+            expires = min(verified_at + 30.0, prazo_stream(attachment["url"], verified_at, 30.0))
             self._discord_verified_urls = {
                 key: value for key, value in self._discord_verified_urls.items()
                 if value[1] > verified_at + 5.0
@@ -562,18 +562,26 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             except BaseException:
                 self._discord_verified_urls.pop(request_id, None)
                 raise
+            current_is_requested = bool(st.current and st.current.queue_item_id == request_id)
+            if (self.states.get(guild_id) is not st or
+                    (st.queue_reset_generation != queue_generation and not current_is_requested)):
+                self._discord_verified_urls.pop(request_id, None)
+                return {"ok": False, "cancelled": True, "error": "pedido cancelado durante a reprodução", "state": st.public()}
             if not result.get("ok"):
                 self._discord_verified_urls.pop(request_id, None)
+            accepted = next(
+                (item for item in ([st.current] if st.current else []) + st.queue + st.history
+                 if item.queue_item_id == request_id), None,
+            )
+            if result.get("ok") and accepted is None:
+                self._discord_verified_urls.pop(request_id, None)
+                return {"ok": False, "error": st.last_error or "A mídia não chegou a tocar nem entrou na fila.", "state": st.public()}
             if result.get("ok"):
                 seen[request_id] = time.monotonic()
                 if len(seen) > 2048:
                     for key in list(seen)[:len(seen) - 2048]:
                         seen.pop(key, None)
-            result["track"] = next(
-                (item.public() for item in ([st.current] if st.current else []) + st.queue
-                 if item.queue_item_id == request_id),
-                self._agent_track_from_metadata(confirmed, body=play_body).public(),
-            )
+            result["track"] = (accepted.public() if accepted else self._agent_track_from_metadata(confirmed, body=play_body).public())
             return result
 
     async def cmd_play(self, body: dict[str, Any]) -> dict[str, Any]:

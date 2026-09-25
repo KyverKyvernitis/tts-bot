@@ -104,6 +104,9 @@ def test_discord_video_is_verified_before_queue_and_retries_do_not_duplicate(mus
         assert first["ok"] and first["queued"] and first["track"]["duration"] == 87.25
         assert len(st.queue) == 1 and st.queue[0].stream_url == ""
         assert st.queue[0].queue_item_id == body["command_id"]
+        # Mesmo que o Discord assine a URL por horas, a aceleração do primeiro
+        # play deve expirar logo: itens que esperam na fila renovam o link.
+        assert 0 < agent._discord_verified_urls[body["command_id"]][1] - playback.time.monotonic() <= 30.0
         second = await agent.dispatch(body)
         assert second["deduplicated"] and len(st.queue) == 1
         resolved = await agent.resolve_track(st.queue[0].query, track_meta=st.queue[0].public(), body={"guild_id": 123})
@@ -202,6 +205,69 @@ def test_discord_voice_audio_fast_start_reuses_verified_url(music, monkeypatch):
         assert result["track"]["source"] == "Discord"
         assert calls == ["rest", "probe"]  # O primeiro play não exige um segundo GET.
         assert not agent._discord_verified_urls
+
+    run(scenario())
+
+
+def test_discord_media_ack_is_cancelled_if_stopped_during_start(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+
+        async def fetch(_client, _ref):
+            return {"url": "https://cdn.discordapp.com/attachments/456/10/a.ogg?ex=ffffffff&hm=signed"}
+
+        async def probe(_url, **_kwargs):
+            return {"duration": 5.0, "audio_stream_index": 0, "audio_codec": "opus"}
+
+        async def stop_while_starting(_body):
+            await agent.cmd_stop({"guild_id": 123})
+            # Reprodução antiga pode responder sucesso depois de um stop;
+            # o enqueue precisa conferir a geração da fila novamente.
+            return {"ok": True, "queued": False, "state": agent.states[123].public()}
+
+        monkeypatch.setattr(playback, "fetch_discord_attachment", fetch)
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        agent.cmd_play = stop_while_starting
+        result = await agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9, "command_id": "discord-media:123:1000:10",
+            "track": {"title": "Áudio", "attachment_ref": ref},
+        })
+        assert result["cancelled"] and not result["ok"]
+        assert not agent._discord_verified_urls and not agent.states[123].queue
+
+    run(scenario())
+
+
+def test_clearing_queue_during_start_keeps_now_playing_ack(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+
+        async def fetch(_client, _ref):
+            return {"url": "https://cdn.discordapp.com/attachments/456/10/a.ogg?ex=ffffffff&hm=signed"}
+
+        async def probe(_url, **_kwargs):
+            return {"duration": 5.0, "audio_stream_index": 0, "audio_codec": "opus"}
+
+        async def start_then_clear(body):
+            st = agent.states[123]
+            st.current = agent._agent_track_from_metadata(body["track"], body=body)
+            st.status = "playing"
+            await agent.cmd_queue_clear({"guild_id": 123})
+            return {"ok": True, "queued": False, "state": st.public()}
+
+        monkeypatch.setattr(playback, "fetch_discord_attachment", fetch)
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        agent.cmd_play = start_then_clear
+        result = await agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9, "command_id": "discord-media:123:1000:10",
+            "track": {"title": "Áudio", "attachment_ref": ref},
+        })
+        assert result["ok"] and not result.get("cancelled")
+        assert result["track"]["queue_item_id"] == "discord-media:123:1000:10"
 
     run(scenario())
 

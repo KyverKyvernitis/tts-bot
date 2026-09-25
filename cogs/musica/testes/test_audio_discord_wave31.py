@@ -85,6 +85,20 @@ class AudioDiscordTests(unittest.IsolatedAsyncioTestCase):
         original.attachments = [types.SimpleNamespace(id=11, filename="capa.png", content_type="image/png"), voice]
         self.assertEqual((await mod.midia_respondida(command)).status, "audio")
 
+    async def test_cached_reply_from_another_channel_is_not_selected(self):
+        mod = seletor()
+        command = types.SimpleNamespace(
+            channel=types.SimpleNamespace(id=456),
+            reference=types.SimpleNamespace(
+                message_id=789, channel_id=999,
+                resolved=types.SimpleNamespace(
+                    id=789, channel=types.SimpleNamespace(id=999),
+                    attachments=[types.SimpleNamespace(id=10, filename="voice.ogg", content_type="audio/ogg")],
+                ),
+            ),
+        )
+        self.assertEqual((await mod.midia_respondida(command)).status, "inacessivel")
+
     async def test_api_checks_audio_identity_and_rejects_wrong_file(self):
         raw = {"guild_id": "123", "attachments": [{"id": "10", "filename": "voice-message.ogg",
                "content_type": "audio/ogg", "duration_secs": 5.0, "url": URL}]}
