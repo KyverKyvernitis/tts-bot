@@ -5395,6 +5395,15 @@ class AudioRouter:
                 voice_channel_id=state.last_voice_channel_id,
                 text_channel_id=state.last_text_channel_id,
             )
+        except MusicWorkerEngineUnavailable as exc:
+            detail = str(exc or "").strip()
+            logger.warning(
+                "[music/effects] agente rejeitou %s nível=%s | guild=%s erro=%s",
+                effect, level, guild_id, detail or type(exc).__name__,
+            )
+            if effect == "bassboost" and level > 3 and "entre 0 e 3" in detail.lower():
+                return False, "O player de música ainda está atualizando para Bassboost 1–6; tente novamente em alguns segundos."
+            return False, detail or "Não consegui alterar o efeito agora."
         except Exception:
             logger.warning("[music/effects] falha ao ajustar %s nível=%s | guild=%s", effect, level, guild_id, exc_info=True)
             return False, "Não consegui alterar o efeito agora."
