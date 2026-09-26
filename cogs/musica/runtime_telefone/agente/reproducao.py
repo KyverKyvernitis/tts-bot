@@ -1616,6 +1616,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         if effect not in {"bassboost", "nightcore", "slowed_reverb"}:
             return {"ok": False, "error": "efeito inválido", "state": st.public()}
 
+        max_level = 6 if effect == "bassboost" else 3
         raw_level = body.get("level")
         if raw_level is None:
             enabled = body.get("enabled")
@@ -1626,9 +1627,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             try:
                 target_level = int(raw_level)
             except (TypeError, ValueError):
-                return {"ok": False, "error": "nível do efeito deve ser 0, 1, 2 ou 3", "state": st.public()}
-            if target_level not in {0, 1, 2, 3}:
-                return {"ok": False, "error": "nível do efeito deve ser 0, 1, 2 ou 3", "state": st.public()}
+                return {"ok": False, "error": f"nível do efeito deve estar entre 0 e {max_level}", "state": st.public()}
+            if target_level not in range(0, max_level + 1):
+                return {"ok": False, "error": f"nível do efeito deve estar entre 0 e {max_level}", "state": st.public()}
         enabled = target_level > 0
 
         async with st.effects_lock:

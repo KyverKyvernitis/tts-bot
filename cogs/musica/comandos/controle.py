@@ -77,15 +77,17 @@ class FluxoControle:
             current_level = 0
         if current_level <= 0 and bool(getattr(state, effect, False)):
             current_level = 1
-        current_level = max(0, min(3, current_level))
+        max_level = 6 if effect == "bassboost" else 3
+        current_level = max(0, min(max_level, current_level))
         if raw:
             try:
                 target_level = int(raw)
             except ValueError:
                 target_level = -1
-            if target_level not in {1, 2, 3}:
+            if target_level not in range(1, max_level + 1):
                 command = "reverb" if effect == "slowed_reverb" else effect
-                await self._reply(ctx, f"Use `_{command}`, `_{command} 1`, `_{command} 2` ou `_{command} 3`.")
+                choices = ", ".join(f"`_{command} {value}`" for value in range(1, max_level + 1))
+                await self._reply(ctx, f"Use `_{command}` ou um nível válido: {choices}.")
                 return
         else:
             target_level = 0 if current_level > 0 else 1

@@ -457,7 +457,8 @@ async def sincronizar_estado_agente(
         level_key = f"{effect}_level"
         if level_key in remote:
             try:
-                level = max(0, min(3, int(remote.get(level_key) or 0)))
+                max_level = 6 if effect == "bassboost" else 3
+                level = max(0, min(max_level, int(remote.get(level_key) or 0)))
             except (TypeError, ValueError):
                 level = 1 if bool(remote.get(effect)) else 0
             setattr(state, level_key, level)

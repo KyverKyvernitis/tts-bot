@@ -936,7 +936,8 @@ def _player_effect_level(state, effect: str) -> int:
         level = 0
     if level <= 0 and bool(getattr(state, effect, False)):
         level = 1
-    return max(0, min(3, level))
+    max_level = 6 if effect == "bassboost" else 3
+    return max(0, min(max_level, level))
 
 
 def _player_audio_modes_text(state, track: MusicTrack) -> str:

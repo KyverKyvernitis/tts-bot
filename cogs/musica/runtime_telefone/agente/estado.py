@@ -274,14 +274,17 @@ class GuildMusicState:
             level = 0
         if level <= 0 and flag:
             level = 1
-        return max(0, min(3, level))
+        max_level = 6 if effect == "bassboost" else 3
+        return max(0, min(max_level, level))
 
     def effect_signature(self) -> tuple[int, int, int]:
         return (self.effect_level("bassboost"), self.effect_level("nightcore"),
                 self.effect_level("slowed_reverb"))
 
     def apply_effect_signature(self, levels: tuple[int, int, int]) -> None:
-        bass, night, slow = (max(0, min(3, int(value or 0))) for value in levels)
+        bass = max(0, min(6, int(levels[0] or 0)))
+        night = max(0, min(3, int(levels[1] or 0)))
+        slow = max(0, min(3, int(levels[2] or 0)))
         self.bassboost_level, self.nightcore_level, self.slowed_reverb_level = bass, night, slow
         self.bassboost, self.nightcore, self.slowed_reverb = bass > 0, night > 0, slow > 0
 

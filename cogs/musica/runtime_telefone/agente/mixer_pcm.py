@@ -196,7 +196,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self._mix_gain = 1.0
         self._mix_limited_frames = 0
         requested_bass_level = int(bassboost_level) if bassboost_level is not None else (1 if bassboost else 0)
-        self.bassboost_level = max(0, min(3, requested_bass_level))
+        self.bassboost_level = max(0, min(6, requested_bass_level))
         self.bassboost_enabled = self.bassboost_level > 0
         self._bass_mix = 0.0
         self._bass_limiter_gain = 1.0
@@ -223,7 +223,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
 
     def set_bassboost_level(self, level: int) -> None:
         with self._lock:
-            self.bassboost_level = max(0, min(3, int(level or 0)))
+            self.bassboost_level = max(0, min(6, int(level or 0)))
             self.bassboost_enabled = self.bassboost_level > 0
 
     def set_duck_factor(self, factor: float) -> None:
@@ -261,7 +261,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             self._music_gain = self.normal_music_volume
             self._mix_limited_frames = 0
             if bassboost_level is not None:
-                self.bassboost_level = max(0, min(3, int(bassboost_level or 0)))
+                self.bassboost_level = max(0, min(6, int(bassboost_level or 0)))
                 self.bassboost_enabled = self.bassboost_level > 0
             elif bassboost is not None:
                 self.bassboost_level = 1 if bassboost else 0

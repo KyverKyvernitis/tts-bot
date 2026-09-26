@@ -599,9 +599,14 @@ async def test_comando_de_efeito_aceita_niveis_e_preserva_protocolo_booleano(mon
     assert st.slowed_reverb and st.slowed_reverb_level == 3 and st.playback_speed == 0.4
 
     bass = await agent.cmd_audio_effect({
-        "guild_id": 777, "effect": "bassboost", "level": 3, "expected_revision": 2,
+        "guild_id": 777, "effect": "bassboost", "level": 6, "expected_revision": 2,
     })
-    assert bass["ok"] and st.bassboost and st.bassboost_level == 3
+    assert bass["ok"] and st.bassboost and st.bassboost_level == 6
+
+    invalid_bass = await agent.cmd_audio_effect({
+        "guild_id": 777, "effect": "bassboost", "level": 7, "expected_revision": 3,
+    })
+    assert not invalid_bass["ok"] and st.effects_revision == 3 and st.bassboost_level == 6
 
     legacy_off = await agent.cmd_audio_effect({
         "guild_id": 777, "effect": "bassboost", "enabled": False, "expected_revision": 3,
@@ -647,7 +652,7 @@ async def test_bassboost_nivel_muda_no_mixer_sem_reiniciar_decoder(monkeypatch) 
     agent.states[778] = st
     agent._create_pcm_source = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("decoder reiniciado"))
     try:
-        for revision, level in enumerate((1, 2, 3)):
+        for revision, level in enumerate((1, 2, 3, 4, 5, 6)):
             result = await agent.cmd_audio_effect({
                 "guild_id": 778, "effect": "bassboost", "level": level,
                 "expected_revision": revision,
@@ -682,6 +687,12 @@ async def test_snapshot_sincroniza_niveis_2_e_3_e_velocidades_extremas() -> None
     assert not st.nightcore and st.nightcore_level == 0
     assert st.slowed_reverb and st.slowed_reverb_level == 3 and st.playback_speed == 0.4
 
+    await sincronizar_estado_agente(router, 42, agent_state={
+        **base, "playback_token": 3, "position_ms": 13000,
+        "bassboost": True, "bassboost_level": 6, "effects_revision": 3,
+    }, create_panel=False)
+    assert st.bassboost and st.bassboost_level == 6
+
 
 @pytest.mark.asyncio
 async def test_controle_remoto_envia_nivel_e_flag_compativel(monkeypatch) -> None:
@@ -689,20 +700,20 @@ async def test_controle_remoto_envia_nivel_e_flag_compativel(monkeypatch) -> Non
 
     async def command(name, **kwargs):
         calls.append((name, kwargs))
-        return {"ok": True, "state": {"status": "playing", "nightcore": True,
-                                       "nightcore_level": 3, "effects_revision": 8}}
+        return {"ok": True, "state": {"status": "playing", "bassboost": True,
+                                       "bassboost_level": 6, "effects_revision": 8}}
 
     async def sync(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(controle_remoto, "music_agent_command", command)
     result = await controle_remoto.ajustar_efeito(
-        SimpleNamespace(sync_music_agent_state=sync), 123, "nightcore", True,
-        level=3, expected_revision=7,
+        SimpleNamespace(sync_music_agent_state=sync), 123, "bassboost", True,
+        level=6, expected_revision=7,
     )
     assert result["ok"]
     assert calls[0][0] == "audio_effect"
-    assert calls[0][1]["level"] == 3 and calls[0][1]["enabled"] is True
+    assert calls[0][1]["level"] == 6 and calls[0][1]["enabled"] is True
     assert calls[0][1]["expected_revision"] == 7
 
 
@@ -745,13 +756,14 @@ def test_bassboost_niveis_escalam_intensidade_sem_clipping(monkeypatch) -> None:
         return 2 * math.hypot(sine, cosine) / len(window)
 
     async def scenario() -> None:
-        levels = [await render(level) for level in range(4)]
+        levels = [await render(level) for level in range(7)]
         amplitudes = [amplitude(samples) for samples in levels]
-        assert amplitudes[0] < amplitudes[1] < amplitudes[2] < amplitudes[3]
-        # O ramo reforçado é 1x/2x/3x; o sinal seco continua presente em todos os níveis.
-        added = [amplitudes[index] - amplitudes[0] for index in (1, 2, 3)]
-        assert 1.85 <= added[1] / added[0] <= 2.15
-        assert 2.80 <= added[2] / added[0] <= 3.20
+        assert all(left < right for left, right in zip(amplitudes, amplitudes[1:]))
+        # O ramo reforçado cresce de 1x até 6x; o sinal seco continua presente.
+        added = [amplitudes[index] - amplitudes[0] for index in range(1, 7)]
+        for multiplier, value in enumerate(added, start=1):
+            ratio = value / added[0]
+            assert multiplier * 0.93 <= ratio <= multiplier * 1.07
         assert max(max(map(abs, samples)) for samples in levels) <= 32000
 
     asyncio.run(scenario())

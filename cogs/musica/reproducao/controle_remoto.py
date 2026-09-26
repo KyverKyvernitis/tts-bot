@@ -106,7 +106,8 @@ async def ajustar_efeito(
 ) -> dict[str, Any]:
     if level is None:
         level = 1 if bool(enabled) else 0
-    level = max(0, min(3, int(level)))
+    max_level = 6 if str(effect).strip().lower() == "bassboost" else 3
+    level = max(0, min(max_level, int(level)))
     return await enviar_controle_remoto(
         router, "audio_effect", guild_id=guild_id, effect=effect,
         enabled=level > 0, level=level, expected_revision=int(expected_revision),

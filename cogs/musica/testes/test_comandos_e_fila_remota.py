@@ -72,4 +72,5 @@ def test_comandos_de_efeito_estao_registrados_e_delegam_para_fluxo() -> None:
     assert 'await self._run_audio_effect(ctx, "bassboost", level)' in modulo
     assert 'await self._run_audio_effect(ctx, "slowed_reverb", level)' in modulo
     assert 'target_level = 0 if current_level > 0 else 1' in controle
-    assert 'if target_level not in {1, 2, 3}' in controle
+    assert 'max_level = 6 if effect == "bassboost" else 3' in controle
+    assert 'if target_level not in range(1, max_level + 1)' in controle

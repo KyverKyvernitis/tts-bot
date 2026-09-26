@@ -5381,12 +5381,13 @@ class AudioRouter:
             return False, "Efeito inválido."
         if level is None:
             level = 1 if bool(enabled) else 0
+        max_level = 6 if effect == "bassboost" else 3
         try:
             level = int(level)
         except (TypeError, ValueError):
-            return False, "O nível deve ser 0, 1, 2 ou 3."
-        if level not in {0, 1, 2, 3}:
-            return False, "O nível deve ser 0, 1, 2 ou 3."
+            return False, f"O nível deve estar entre 0 e {max_level}."
+        if level not in range(0, max_level + 1):
+            return False, f"O nível deve estar entre 0 e {max_level}."
         try:
             result = await ajustar_efeito(
                 self, guild_id, effect, level > 0, level=level,
