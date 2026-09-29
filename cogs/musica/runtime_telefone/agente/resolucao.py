@@ -15,9 +15,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
+from weakref import WeakValueDictionary
 
 from .ciclo_vida import consume_task_result, remove_owned_task
-from .validade_stream import _archive_metadata, fetch_discord_attachment, normalize_reference, valid_cdn_url
+from .validade_stream import (
+    DiscordAttachmentError, _archive_metadata, fetch_discord_attachment,
+    initial_discord_cdn_url, normalize_reference, valid_cdn_url,
+)
 from .correspondencia import avaliar_correspondencia, busca_alternativa
 from .estado import AgentTrack
 from .ytdlp_quente import WarmYTDLPResolver
@@ -37,6 +41,14 @@ _LOCAL_SEARCH_PREFIXES = ("ytsearch", "ytmsearch")
 
 
 class ResolucaoMixin:
+    @staticmethod
+    def _archive_cache_key(ref: dict, key: str) -> tuple:
+        try:
+            return (int(ref["guild_id"]), int(ref.get("forum_id") or 0), int(ref["channel_id"]),
+                    int(ref["message_id"]), int(ref["attachment_id"]), str(key))
+        except (TypeError, KeyError, ValueError):
+            return ()
+
     async def _promote_resolution(self, key: str, priority: int) -> None:
         async with self._resolve_scheduler_lock:
             if key in self._resolve_lock_users:
@@ -347,6 +359,9 @@ class ResolucaoMixin:
     def _invalidate_track_stream_cache(self, track: AgentTrack | None) -> None:
         if track is None:
             return
+        archive_key = self._archive_cache_key(track.archive_ref or {}, track.archive_key or "")
+        if archive_key:
+            getattr(self, "_archive_url_cache", {}).pop(archive_key, None)
         media_key = self._media_cache_key(track)
         if not media_key:
             meta = track.public()
@@ -596,14 +611,15 @@ class ResolucaoMixin:
             audio_stream_index=int(track_meta.get("audio_stream_index", -1)),
         )
 
-    async def _resolve_archive_attachment(self, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
+    async def _resolve_archive_attachment(self, *, track_meta: dict[str, Any], body: dict[str, Any],
+                                          force_refresh: bool = False) -> AgentTrack:
         ref = track_meta.get("archive_ref") or {}
         key = str(track_meta.get("archive_key") or "")
         if not re.fullmatch(r"[a-f0-9]{32}", key) or not isinstance(ref, dict):
             raise DiscordAttachmentError("Índice do arquivo inválido.")
         try:
             ref = {name: int(ref[name]) for name in ("guild_id", "channel_id", "message_id", "attachment_id")}
-            if min(ref.values()) <= 0:
+            if min(ref.values()) <= 0 or ref["guild_id"] != safe_id(body.get("guild_id")):
                 raise ValueError
             if track_meta["archive_ref"].get("forum_id") is not None:
                 ref["forum_id"] = int(track_meta["archive_ref"]["forum_id"])
@@ -611,8 +627,35 @@ class ResolucaoMixin:
                     raise ValueError
         except (KeyError, TypeError, ValueError):
             raise DiscordAttachmentError("Referência do arquivo inválida.") from None
-        raw = await self.client.http.get_message(ref["channel_id"], ref["message_id"])
-        meta = _archive_metadata(raw, key, int(self.client.user.id), ref)
+        cache_key = self._archive_cache_key(ref, key)
+        cache = getattr(self, "_archive_url_cache", None)
+        if cache is None:
+            cache = self._archive_url_cache = {}
+        locks = getattr(self, "_archive_url_locks", None)
+        if locks is None:
+            locks = self._archive_url_locks = WeakValueDictionary()
+        lock = locks.get(cache_key)
+        if lock is None:
+            lock = locks[cache_key] = asyncio.Lock()
+        async with lock:
+            cached = cache.get(cache_key)
+            if not force_refresh and cached and cached[0] > time.monotonic() + 10.0:
+                meta = dict(cached[1])
+                # dict preserva ordem de inserção, usada para o limite LRU.
+                cache.pop(cache_key, None)
+                cache[cache_key] = cached
+            else:
+                cache.pop(cache_key, None)
+                raw = await self.client.http.get_message(ref["channel_id"], ref["message_id"])
+                meta = _archive_metadata(raw, key, int(self.client.user.id), ref)
+                signed = initial_discord_cdn_url(meta["url"], ref, min_remaining_seconds=75.0)
+                if signed:
+                    now = time.monotonic()
+                    deadline = min(now + 90.0, self._stream_deadline(signed, now, 90.0))
+                    if deadline > now + 10.0:
+                        cache[cache_key] = (deadline, dict(meta))
+                        if len(cache) > 256:
+                            cache.pop(next(iter(cache)))
         track = self._agent_track_from_metadata(track_meta, body=body)
         track.archive_ref = dict(ref)
         track.attachment_ref = dict(ref)
@@ -630,9 +673,10 @@ class ResolucaoMixin:
         track.transport_hint = "discord-archive"
         return track
 
-    async def _resolve_discord_attachment(self, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
+    async def _resolve_discord_attachment(self, *, track_meta: dict[str, Any], body: dict[str, Any],
+                                          force_refresh: bool = False) -> AgentTrack:
         if track_meta.get("archive_ref"):
-            return await self._resolve_archive_attachment(track_meta=track_meta, body=body)
+            return await self._resolve_archive_attachment(track_meta=track_meta, body=body, force_refresh=force_refresh)
         guild_id = safe_id(body.get("guild_id"))
         ref = normalize_reference(track_meta.get("attachment_ref"), guild_id)
         track = self._agent_track_from_metadata(track_meta, body=body)

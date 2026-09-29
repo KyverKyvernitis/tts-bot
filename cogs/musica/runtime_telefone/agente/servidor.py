@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from weakref import WeakValueDictionary
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -92,7 +93,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.76"
+AGENT_VERSION = "0.3.77"
 STARTED_AT = time.time()
 
 
@@ -275,6 +276,8 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._discord_probe_semaphore = asyncio.Semaphore(2)
         # URLs assinadas são temporárias e ficam só na memória do worker.
         self._discord_verified_urls: dict[str, tuple[str, float]] = {}
+        self._archive_url_cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
+        self._archive_url_locks: WeakValueDictionary[tuple, asyncio.Lock] = WeakValueDictionary()
         self._archive_init()
         intents = discord.Intents.none()
         intents.guilds = True

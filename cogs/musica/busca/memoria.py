@@ -410,6 +410,7 @@ def _abrir_db() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute("CREATE INDEX IF NOT EXISTS escolhas_registradas ON escolhas(registrado_em, chave)")
     return conn
 
 

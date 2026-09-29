@@ -75,6 +75,11 @@ def _db() -> sqlite3.Connection:
     if db.execute("PRAGMA user_version").fetchone()[0] < 4:
         db.execute("ALTER TABLE arquivo_musicas ADD COLUMN aprendida_em REAL NOT NULL DEFAULT 0")
         db.execute("PRAGMA user_version=4")
+    if db.execute("PRAGMA user_version").fetchone()[0] < 5:
+        # Uma única vez na atualização: posts v4–v6 em backoff cosmético
+        # podem ser corrigidos já pelo agente novo, sem esperar mais uma hora.
+        db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE reference_json!='' AND apresentacao BETWEEN 4 AND 6")
+        db.execute("PRAGMA user_version=5")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_reproducoes (marcador TEXT PRIMARY KEY, registrado_em REAL NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_aliases (alias TEXT PRIMARY KEY, chave TEXT NOT NULL)")
     db.execute("""CREATE TABLE IF NOT EXISTS arquivo_limpezas (
@@ -188,6 +193,25 @@ def learned_page(after: str = "", limit: int = 128) -> tuple[str, list[tuple[dic
     return (rows[-1][0] if rows else after), parsed
 
 
+def learned_updates(after: tuple[float, str] = (0.0, ""), limit: int = 128) -> tuple[tuple[float, str], list[tuple[dict, float]]]:
+    """Retoma por data e alias; captura também alterações em escolhas antigas."""
+    from .memoria import _abrir_db
+    with _abrir_db() as db:
+        rows = db.execute("SELECT chave, track_json, registrado_em FROM escolhas "
+                          "WHERE registrado_em>? OR (registrado_em=? AND chave>?) "
+                          "ORDER BY registrado_em, chave LIMIT ?",
+                          (after[0], after[0], after[1], max(1, min(256, limit)))).fetchall()
+    parsed = []
+    for _alias, encoded, stamp in rows:
+        try:
+            payload = json.loads(encoded)
+            if isinstance(payload, dict):
+                parsed.append((payload, float(stamp)))
+        except (TypeError, ValueError):
+            continue
+    return ((float(rows[-1][2]), str(rows[-1][0])) if rows else after), parsed
+
+
 def _metadata_score(payload: dict) -> tuple[int, int, int, int]:
     url = str(payload.get("webpage_url") or "")
     try:
@@ -241,17 +265,18 @@ def register_learned_batch(items: list[tuple[dict, float]]) -> int:
     return len(candidates)
 
 
-def pending() -> dict | None:
+def pending(*, prefer_new: bool = True) -> dict | None:
     if channel() == (0, 0):
         return None
     version = 7 if channel_type() == "forum" else 2
     with _db() as db:
         row = db.execute("""SELECT chave, track_json, reference_json, estado FROM arquivo_musicas
-            WHERE (aprendida_em>0 OR tocadas>=2)
+            WHERE (aprendida_em>0 OR tocadas>=1)
             AND ((reference_json='' AND estado NOT IN ('too_large', 'ineligible'))
                 OR (reference_json!='' AND apresentacao<?)) AND tentativa_em<=?
-            ORDER BY CASE WHEN reference_json!='' THEN 0 ELSE 1 END,
-                     tentativa_em, aprendida_em DESC, chave LIMIT 1""", (version, time.time())).fetchone()
+            ORDER BY CASE WHEN (reference_json='')=? THEN 0 ELSE 1 END,
+                     tentativa_em, aprendida_em DESC, chave LIMIT 1""",
+                         (version, time.time(), int(prefer_new))).fetchone()
     if not row:
         return None
     try:
@@ -324,12 +349,17 @@ def counts() -> dict[str, int]:
     version = 7 if channel_type() == "forum" else 2
     with _db() as db:
         rows = db.execute("SELECT estado, COUNT(*) FROM arquivo_musicas GROUP BY estado").fetchall()
-        learned = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE aprendida_em>0").fetchone()[0]
+        learned = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE aprendida_em>0 OR tocadas>0").fetchone()[0]
+        unposted = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE (aprendida_em>0 OR tocadas>0) "
+                              "AND reference_json='' AND estado NOT IN ('too_large', 'ineligible')").fetchone()[0]
         one_play = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE tocadas=1").fetchone()[0]
         refresh = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE reference_json!='' AND apresentacao<?",
                              (version,)).fetchone()[0]
         cleanup = db.execute("SELECT COUNT(*) FROM arquivo_limpezas").fetchone()[0]
-    return {**dict(rows), "learned": int(learned), "one_play": int(one_play),
+    from .memoria import _abrir_db
+    with _abrir_db() as memory_db:
+        choices = memory_db.execute("SELECT COUNT(*) FROM escolhas").fetchone()[0]
+    return {**dict(rows), "learned": int(learned), "choices": int(choices), "unposted": int(unposted), "one_play": int(one_play),
             "refresh": int(refresh), "cleanup": int(cleanup)}
 
 

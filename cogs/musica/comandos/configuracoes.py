@@ -5,6 +5,8 @@ import asyncio
 import discord
 from discord.ext import commands
 
+from ..agente_telefone.comandos import music_agent_status
+from ..arquivo_coordenador import _archive_agent_ready
 from ..busca import arquivo
 from ..interface.componentes import VoiceStatusSettingsView
 
@@ -21,12 +23,20 @@ class FluxoConfiguracoes:
             await ctx.reply("Arquivo de músicas desativado.", mention_author=False)
             return
         if value in {"", "status"}:
-            _guild_id, channel_id = await asyncio.to_thread(arquivo.channel)
+            guild_id, channel_id = await asyncio.to_thread(arquivo.channel)
             kind = await asyncio.to_thread(arquivo.channel_type)
             counts = await asyncio.to_thread(arquivo.counts)
             channel_text = f"<#{channel_id}>" if channel_id else "desativado"
             mode = "fórum" if kind == "forum" else "canal antigo"
-            await ctx.reply(f"Arquivo ({mode}): {channel_text} · aprendidas únicas: {counts.get('learned', 0)} · pendentes: {counts.get('waiting', 0)} · enviadas: {counts.get('done', 0)} · atualizando posts: {counts.get('refresh', 0)} · limpando antigos: {counts.get('cleanup', 0)} · falhas: {counts.get('failed', 0)} · acima do limite: {counts.get('too_large', 0)}.",
+            agent_label = ""
+            if guild_id and kind == "forum":
+                try:
+                    agent = await music_agent_status(guild_id=guild_id, timeout_seconds=3.0)
+                    version = str(agent.get("version") or "?")
+                    agent_label = f" · agente: {version}" + ("" if _archive_agent_ready(agent) else " (aguardando 0.3.77)")
+                except Exception:
+                    agent_label = " · agente: indisponível"
+            await ctx.reply(f"Arquivo ({mode}): {channel_text} · escolhas na memória: {counts.get('choices', 0)} · músicas indexadas: {counts.get('learned', 0)} · aguardando envio: {counts.get('unposted', 0)} · enviadas: {counts.get('done', 0)} · atualizando posts: {counts.get('refresh', 0)} · falhas: {counts.get('failed', 0)} · acima do limite: {counts.get('too_large', 0)}{agent_label}.",
                             mention_author=False, allowed_mentions=discord.AllowedMentions.none())
             return
         try:

@@ -2608,7 +2608,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 previous_url = track.stream_url
                 try:
                     if track.archive_ref:
-                        refreshed = await self._resolve_discord_attachment(track_meta=track.public(), body={"guild_id": guild_id})
+                        refreshed = await self._resolve_discord_attachment(track_meta=track.public(), body={"guild_id": guild_id},
+                                                                            force_refresh=True)
                         fresh = {"url": refreshed.stream_url}
                         ref = track.archive_ref
                     else:

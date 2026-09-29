@@ -10,7 +10,7 @@ from .agente_telefone.comandos import music_agent_command, music_agent_status
 from .busca import arquivo
 
 log = logging.getLogger(__name__)
-_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 76)
+_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 77)
 
 
 def _archive_agent_ready(payload: dict) -> bool:
@@ -37,6 +37,8 @@ class ArchiveCoordinator:
         self.seed_task: asyncio.Task | None = None
         self.listening: dict[int, _Listening] = {}
         self._wake = asyncio.Event()
+        self._new_archive_streak = 0
+        self._cleanup_streak = 0
 
     def start(self) -> None:
         if self.task is None or self.task.done():
@@ -58,17 +60,22 @@ class ArchiveCoordinator:
     async def _seed_learned(self) -> None:
         await self.bot.wait_until_ready()
         seeded: tuple[int, int] = (0, 0)
+        last: tuple[float, str] = (0.0, "")
         while True:
             try:
                 target = await asyncio.to_thread(arquivo.channel)
                 kind = await asyncio.to_thread(arquivo.channel_type)
                 if kind != "forum" or target == (0, 0):
                     seeded = (0, 0)
-                elif target != seeded:
-                    cursor = ""
+                    last = (0.0, "")
+                else:
+                    # Na primeira passagem, leia tudo. Depois, releia apenas
+                    # dois segundos da cauda para absorver escritas feitas
+                    # durante a paginação, inclusive aliases sobrescritos.
+                    cursor = (0.0, "") if target != seeded else (max(0.0, last[0] - 2.0), "")
                     while True:
-                        next_cursor, items = await asyncio.to_thread(arquivo.learned_page, cursor)
-                        if not next_cursor or next_cursor == cursor:
+                        next_cursor, items = await asyncio.to_thread(arquivo.learned_updates, cursor)
+                        if next_cursor == cursor:
                             break
                         if items:
                             await asyncio.to_thread(arquivo.register_learned_batch, items)
@@ -76,6 +83,7 @@ class ArchiveCoordinator:
                         cursor = next_cursor
                         await asyncio.sleep(0.05)
                     seeded = target
+                    last = cursor
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -137,8 +145,9 @@ class ArchiveCoordinator:
                     self._wake.clear()
                     continue
                 await asyncio.to_thread(arquivo.flush_learned)
+                item = await asyncio.to_thread(arquivo.pending, prefer_new=self._new_archive_streak < 3)
                 cleanup = await asyncio.to_thread(arquivo.cleanup_pending)
-                if cleanup is not None:
+                if cleanup is not None and (item is None or self._cleanup_streak == 0):
                     try:
                         answer = await music_agent_command(
                             "archive_cleanup", guild_id=cleanup["reference"]["guild_id"],
@@ -150,8 +159,9 @@ class ArchiveCoordinator:
                     except Exception:
                         log.warning("[music/archive] limpeza adiada", exc_info=True)
                         await asyncio.to_thread(arquivo.mark_cleanup, cleanup["key"], cleanup["previous"], done=False)
+                    self._cleanup_streak = 1
                     continue
-                item = await asyncio.to_thread(arquivo.pending)
+                self._cleanup_streak = 0
                 if item is None:
                     try:
                         await asyncio.wait_for(self._wake.wait(), timeout=12)
@@ -194,6 +204,7 @@ class ArchiveCoordinator:
                     status = str(answer.get("status") or "")
                     if status in {"done", "too_large", "ineligible", "failed", "missing"}:
                         await asyncio.to_thread(arquivo.mark_result, key, answer)
+                        self._new_archive_streak = 0 if item["reference"] else self._new_archive_streak + 1
                         break
                 else:
                     await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed"})

@@ -835,17 +835,8 @@ class ArchiveMixin:
             raise ArchiveTooLarge("a melhor faixa compatível ultrapassa 20 MiB")
         raise RuntimeError("não consegui baixar um formato de áudio válido")
 
-    async def _archive_finish_cover(self, message, item: dict, cover_name: str = ""):
-        if cover_name:
-            cover = next((attachment for attachment in message.attachments
-                          if attachment.filename == cover_name), None)
-        else:
-            cover = next((attachment for attachment in message.attachments
-                          if Path(attachment.filename).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
-        if cover is None:
-            raise ValueError("Discord não confirmou a imagem enviada")
-        valid_cdn_url(cover.url)
-        embed = message.embeds[0].copy()
+    def _archive_compact_layout(self, original_embed, item: dict):
+        embed = original_embed.copy()
         fields = {field.name: str(field.value) for field in embed.fields}
         source = fields.get("Fonte", "")
         duration = fields.get("Duração", "")
@@ -862,6 +853,19 @@ class ArchiveMixin:
         embed.set_thumbnail(url=None)
         artist = re.sub(r"\s+", " ", str(item["track"].get("display_uploader") or item["track"].get("uploader") or "")).strip()[:100]
         preview = f"🎙️ {artist} · {duration}" if artist else f"{source} · {duration}"
+        return embed, preview
+
+    async def _archive_finish_cover(self, message, item: dict, cover_name: str = ""):
+        if cover_name:
+            cover = next((attachment for attachment in message.attachments
+                          if attachment.filename == cover_name), None)
+        else:
+            cover = next((attachment for attachment in message.attachments
+                          if Path(attachment.filename).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
+        if cover is None:
+            raise ValueError("Discord não confirmou a imagem enviada")
+        valid_cdn_url(cover.url)
+        embed, preview = self._archive_compact_layout(message.embeds[0], item)
         return await message.edit(content=preview, embed=embed, attachments=list(message.attachments),
                                   allowed_mentions=discord.AllowedMentions.none())
 
@@ -973,13 +977,14 @@ class ArchiveMixin:
             if audio_index != 0:
                 embed.add_field(name="Índice de áudio", value=str(audio_index), inline=True)
             embed.set_footer(text=_PUBLIC_FOOTER)
+            display_embed, preview = self._archive_compact_layout(embed, item) if cover is not None else (embed, None)
             await self._archive_wait_stable_voice()
             audio_name = _archive_audio_filename(title, audio.suffix)
             files = ([discord.File(cover, filename=cover.name)] if cover else []) + [discord.File(audio, filename=audio_name)]
             try:
                 tags = [forum.available_tags[0]] if forum.flags.require_tag else []
                 post = await forum.create_thread(name=self._archive_post_name(item["track"]),
-                                                 embed=embed, files=files, applied_tags=tags,
+                                                 content=preview, embed=display_embed, files=files, applied_tags=tags,
                                                  allowed_mentions=discord.AllowedMentions.none())
                 message, thread = post.message, post.thread
             finally:
@@ -990,14 +995,8 @@ class ArchiveMixin:
                 raise ValueError("Discord não confirmou o áudio enviado")
             ref = {"guild_id": forum.guild.id, "forum_id": forum.id, "channel_id": thread.id,
                    "message_id": message.id, "attachment_id": ref_attachment.id}
-            version = 3
-            if cover is not None:
-                try:
-                    message = await self._archive_finish_cover(message, item, cover.name)
-                    version = 7
-                except (discord.HTTPException, ValueError, IndexError) as exc:
-                    self.log("archive_cover_retry", key=item["key"], error=type(exc).__name__)
-            else:
+            version = 7 if cover is not None else 3
+            if cover is None:
                 self.log("archive_cover_missing", key=item["key"])
             raw = await self.client.http.get_message(thread.id, message.id)
             parsed = _archive_metadata(raw, item["key"], self.client.user.id, ref)
