@@ -59,8 +59,13 @@ def _db() -> sqlite3.Connection:
         chave TEXT PRIMARY KEY, track_json TEXT NOT NULL, tocadas INTEGER NOT NULL DEFAULT 0,
         reference_json TEXT NOT NULL DEFAULT '', emoji TEXT NOT NULL DEFAULT '',
         estado TEXT NOT NULL DEFAULT 'waiting', tentativa_em REAL NOT NULL DEFAULT 0,
-        falhas INTEGER NOT NULL DEFAULT 0
+        falhas INTEGER NOT NULL DEFAULT 0, apresentacao INTEGER NOT NULL DEFAULT 1
     )""")
+    if db.execute("PRAGMA user_version").fetchone()[0] < 2:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(arquivo_musicas)")}
+        if "apresentacao" not in columns:
+            db.execute("ALTER TABLE arquivo_musicas ADD COLUMN apresentacao INTEGER NOT NULL DEFAULT 1")
+        db.execute("PRAGMA user_version=2")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_reproducoes (marcador TEXT PRIMARY KEY, registrado_em REAL NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_aliases (alias TEXT PRIMARY KEY, chave TEXT NOT NULL)")
     return db
@@ -114,13 +119,15 @@ def pending() -> dict | None:
     if channel() == (0, 0):
         return None
     with _db() as db:
-        row = db.execute("""SELECT chave, track_json FROM arquivo_musicas WHERE tocadas>=2
-            AND reference_json='' AND estado NOT IN ('too_large', 'ineligible') AND tentativa_em<=?
+        row = db.execute("""SELECT chave, track_json, reference_json FROM arquivo_musicas WHERE tocadas>=2
+            AND ((reference_json='' AND estado NOT IN ('too_large', 'ineligible'))
+                OR (reference_json!='' AND apresentacao<2)) AND tentativa_em<=?
             ORDER BY tentativa_em, chave LIMIT 1""", (time.time(),)).fetchone()
     if not row:
         return None
     try:
-        return {"key": row[0], "track": json.loads(row[1])}
+        return {"key": row[0], "track": json.loads(row[1]),
+                "reference": json.loads(row[2]) if row[2] else {}}
     except (TypeError, ValueError):
         log.warning("[music/archive] metadados inválidos: %s", row[0])
         return None
@@ -132,8 +139,9 @@ def mark_result(key: str, result: dict) -> None:
     if (status == "done" and all(int(ref.get(field) or 0) > 0 for field in ("guild_id", "channel_id", "message_id", "attachment_id"))
             and (int(ref["guild_id"]), int(ref["channel_id"])) == channel()):
         with _db() as db:
-            db.execute("UPDATE arquivo_musicas SET reference_json=?, emoji=?, estado='done', tentativa_em=0 WHERE chave=?",
-                       (json.dumps(ref), str(result.get("emoji") or "")[:100], key))
+            version = max(1, min(2, int(result.get("presentation") or 1)))
+            db.execute("UPDATE arquivo_musicas SET reference_json=?, emoji=?, estado='done', apresentacao=?, tentativa_em=0 WHERE chave=?",
+                       (json.dumps(ref), str(result.get("emoji") or "")[:100], version, key))
         return
     with _db() as db:
         row = db.execute("SELECT falhas FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
@@ -166,4 +174,5 @@ def counts() -> dict[str, int]:
     with _db() as db:
         rows = db.execute("SELECT estado, COUNT(*) FROM arquivo_musicas WHERE tocadas>=2 GROUP BY estado").fetchall()
         one_play = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE tocadas=1").fetchone()[0]
-    return {**dict(rows), "one_play": int(one_play)}
+        refresh = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE reference_json!='' AND apresentacao<2").fetchone()[0]
+    return {**dict(rows), "one_play": int(one_play), "refresh": int(refresh)}

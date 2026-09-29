@@ -109,7 +109,8 @@ class ArchiveCoordinator:
                 emoji = config.MUSIC_SOURCE_EMOJIS.get(emoji_key, config.MUSIC_SOURCE_EMOJI_FALLBACK)
                 await music_agent_command(
                     "archive_enqueue", guild_id=guild_id, archive_channel_id=channel_id,
-                    archive_key=key, track=track, source_emoji=emoji, timeout_seconds=8.0,
+                    archive_key=key, archive_ref=item.get("reference") or {},
+                    track=track, source_emoji=emoji, timeout_seconds=8.0,
                 )
                 # A resposta HTTP do enqueue é imediata; o download e o upload
                 # continuam em segundo plano sem ocupar a ponte de comandos.

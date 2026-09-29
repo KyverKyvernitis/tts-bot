@@ -5,7 +5,9 @@ import pytest
 from cogs.musica.busca import arquivo
 from cogs.musica.nucleo.modelos import MusicTrack
 from cogs.musica.arquivo_coordenador import ArchiveCoordinator
-from cogs.musica.runtime_telefone.agente.validade_stream import ArchiveMixin, DiscordAttachmentError, _archive_metadata
+from cogs.musica.runtime_telefone.agente.validade_stream import (
+    ArchiveMixin, DiscordAttachmentError, _archive_audio_filename, _archive_metadata, _archive_url,
+)
 
 
 def _track(duration=240, *, webpage="https://www.youtube.com/watch?v=abc123", original=""):
@@ -79,6 +81,47 @@ def test_falha_de_upload_visivel_e_retentavel(tmp_path, monkeypatch):
     assert arquivo.pending() is None  # aguarda o backoff antes de tentar de novo
 
 
+def test_arquivo_antigo_entra_em_atualizacao_sem_nova_reproducao(tmp_path, monkeypatch):
+    monkeypatch.setattr(arquivo, "_db_path", lambda: tmp_path / "archive.sqlite3")
+    track = _track()
+    arquivo.set_channel(1, 2)
+    arquivo.record_play(track, "primeiro")
+    arquivo.record_play(track, "segundo")
+    key = arquivo.media_key(track)
+    old = {"guild_id": 1, "channel_id": 2, "message_id": 3, "attachment_id": 4}
+    arquivo.mark_result(key, {"status": "done", "reference": old, "emoji": "🎵"})
+    assert arquivo.pending()["reference"] == old
+    assert arquivo.counts()["refresh"] == 1
+    new = {**old, "attachment_id": 9}
+    arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 2})
+    assert arquivo.pending() is None
+    assert arquivo.archived(track)[0] == new
+
+
+def test_migracao_banco_antigo_preserva_referencia(tmp_path, monkeypatch):
+    import json
+    import sqlite3
+    from cogs.musica.busca.memoria import _track_payload
+
+    base = tmp_path / "escolhas.sqlite3"
+    monkeypatch.setattr(arquivo, "_db_path", lambda: base)
+    path = tmp_path / "escolhas-arquivo.sqlite3"
+    track = _track()
+    ref = {"guild_id": 1, "channel_id": 2, "message_id": 3, "attachment_id": 4}
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE arquivo_config (id INTEGER PRIMARY KEY, guild_id INTEGER, channel_id INTEGER)")
+        db.execute("INSERT INTO arquivo_config VALUES (1, 1, 2)")
+        db.execute("""CREATE TABLE arquivo_musicas (
+            chave TEXT PRIMARY KEY, track_json TEXT, tocadas INTEGER, reference_json TEXT,
+            emoji TEXT, estado TEXT, tentativa_em REAL, falhas INTEGER)""")
+        db.execute("INSERT INTO arquivo_musicas VALUES (?, ?, 2, ?, '🎵', 'done', 0, 0)",
+                   (arquivo.media_key(track), json.dumps(_track_payload(track)), json.dumps(ref)))
+    assert arquivo.pending()["reference"] == ref
+    assert arquivo.archived(track)[0] == ref
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT apresentacao FROM arquivo_musicas").fetchone()[0] == 1
+
+
 def test_mensagem_do_arquivo_fornece_emoji_e_exige_autoria():
     key = "a" * 32
     ref = {"guild_id": 1, "channel_id": 2, "message_id": 3, "attachment_id": 4}
@@ -90,6 +133,19 @@ def test_mensagem_do_arquivo_fornece_emoji_e_exige_autoria():
     result = _archive_metadata(raw, key, 5, ref)
     assert result["emoji"] == "<:YouTube:123>"
     assert result["audio_stream_index"] == 0
+    raw["embeds"][0] = {"url": _archive_url("https://www.youtube.com/watch?v=abc", key),
+                          "footer": {"text": "Arquivo de músicas"},
+                          "fields": [{"name": "Fonte", "value": "<:YouTube:123> YouTube"},
+                                     {"name": "Duração", "value": "3:55"},
+                                     {"name": "Formato", "value": "OPUS · OGG"}]}
+    raw["attachments"][0]["filename"] = "Arctic Monkeys - 505.ogg"
+    assert _archive_metadata(raw, key, 5, ref)["duration"] == 235.0
+    assert _archive_metadata(raw, key, 5, ref)["audio_stream_index"] == 0
+    assert _archive_audio_filename("Arctic Monkeys / 505", ".ogg") == "Arctic Monkeys 505.ogg"
+    raw["embeds"][0]["url"] = _archive_url("https://www.youtube.com/watch?v=abc", "b" * 32)
+    with pytest.raises(DiscordAttachmentError):
+        _archive_metadata(raw, key, 5, ref)
+    raw["embeds"][0]["url"] = _archive_url("https://www.youtube.com/watch?v=abc", key)
     raw["author"]["id"] = "6"
     try:
         _archive_metadata(raw, key, 5, ref)
@@ -204,3 +260,127 @@ async def test_monitor_conta_progresso_compacto_da_faixa_certa(monkeypatch):
     assert observed[0][0][1] is state.current
     assert observed[0][0][2]["position_ms"] == 20000
     assert observed[0][1] == {"confirmed": True}
+
+
+@pytest.mark.asyncio
+async def test_webm_opus_vira_ogg_sem_recodificar_e_capa_vira_jpeg(tmp_path):
+    import shutil
+    import subprocess
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("FFmpeg indisponível")
+    webm = tmp_path / "audio.webm"
+    image = tmp_path / "entrada.png"
+    try:
+        subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=1", "-c:a", "libopus", "-y", str(webm)],
+                       check=True, capture_output=True)
+        subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                        "color=c=red:s=64x64:d=1", "-frames:v", "1", "-y", str(image)],
+                       check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        pytest.skip("Encoders de teste indisponíveis")
+    class Worker(ArchiveMixin):
+        ffmpeg_executable = ffmpeg
+        ffprobe_executable = ffprobe
+
+    worker = Worker()
+    ready = await worker._archive_audio_ready(webm, tmp_path)
+    assert ready is not None
+    audio, duration, index, codec = ready
+    assert audio.suffix == ".ogg"
+    assert codec == "opus" and index == 0 and 0.9 < duration < 1.1
+    jpeg = await worker._archive_jpeg(image, tmp_path / "capa.jpg")
+    assert jpeg is not None and jpeg.read_bytes().startswith(b"\xff\xd8\xff")
+
+
+@pytest.mark.asyncio
+async def test_atualizacao_da_mensagem_antiga_mantem_id_e_muda_anexo(monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    # Um teste legado recarrega o módulo Discord durante a coleta. Use o
+    # módulo efetivamente associado ao ArchiveMixin sob teste.
+    discord = ArchiveMixin._archive_one.__globals__["discord"]
+
+    key = "a" * 32
+    original = "https://www.youtube.com/watch?v=abc"
+    old_embed = discord.Embed(title="Arctic Monkeys - 505", url=original)
+    old_embed.add_field(name="Fonte", value="🎵 YouTube")
+    old_embed.add_field(name="Duração", value="254.08")
+    old_embed.add_field(name="Índice de áudio", value="0")
+    old_embed.set_footer(text="music-archive:v1:" + key)
+
+    class Attachment:
+        id = 4
+        filename = "musica-" + key + ".webm"
+        size = 50
+
+        async def save(self, destination):
+            Path(destination).write_bytes(b"webm-opus")
+
+    class Message:
+        id = 3
+        author = SimpleNamespace(id=5)
+        embeds = [old_embed]
+        attachments = [Attachment()]
+
+        async def edit(self, *, embed, attachments, allowed_mentions):
+            self.embeds = [embed]
+            self.attachments = [SimpleNamespace(id=9, filename=attachments[0].filename)]
+            return self
+
+    message = Message()
+
+    class Channel:
+        id = 2
+        guild = SimpleNamespace(id=1)
+
+        async def fetch_message(self, message_id):
+            assert message_id == 3
+            return message
+
+    channel = Channel()
+    monkeypatch.setattr(discord, "TextChannel", Channel, raising=False)
+
+    async def ready():
+        pass
+
+    async def raw(channel_id, message_id):
+        attachment = message.attachments[0]
+        return {"author": {"id": "5"}, "guild_id": "1", "embeds": [message.embeds[0].to_dict()],
+                "attachments": [{"id": str(attachment.id), "filename": attachment.filename,
+                                 "url": f"https://cdn.discordapp.com/attachments/2/{attachment.id}/{attachment.filename}"}]}
+
+    class Worker(ArchiveMixin):
+        def __init__(self):
+            self.client = SimpleNamespace(wait_until_ready=ready, get_channel=lambda _: channel,
+                                          user=SimpleNamespace(id=5), http=SimpleNamespace(get_message=raw))
+            self.states = {}
+
+        async def _archive_wait_stable_voice(self):
+            pass
+
+        async def _archive_audio_ready(self, audio, folder):
+            output = folder / "audio.ogg"
+            output.write_bytes(audio.read_bytes())
+            return output, 254.08, 0, "opus"
+
+        async def _archive_cover(self, url, folder):
+            output = folder / "capa.jpg"
+            output.write_bytes(b"\xff\xd8\xff")
+            return output
+
+    item = {"key": key, "guild_id": 1, "channel_id": 2, "emoji": "🎵",
+            "existing_ref": {"guild_id": 1, "channel_id": 2, "message_id": 3, "attachment_id": 4},
+            "track": {"title": "Arctic Monkeys - 505", "source": "YouTube",
+                      "webpage_url": original, "thumbnail": "https://i.ytimg.com/vi/abc/hqdefault.jpg"}}
+    result = await Worker()._archive_one(item)
+    assert result["status"] == "done" and result["presentation"] == 2
+    assert result["reference"]["message_id"] == 3
+    assert result["reference"]["attachment_id"] == 9
+    assert message.attachments[0].filename == "Arctic Monkeys - 505.ogg"
+    assert message.embeds[0].footer.text == "Arquivo de músicas"
+    assert message.embeds[0].thumbnail.url == "attachment://capa.jpg"
+    assert [field.name for field in message.embeds[0].fields] == ["Fonte", "Duração", "Formato"]

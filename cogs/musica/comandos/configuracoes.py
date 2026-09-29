@@ -24,7 +24,7 @@ class FluxoConfiguracoes:
             _guild_id, channel_id = await asyncio.to_thread(arquivo.channel)
             counts = await asyncio.to_thread(arquivo.counts)
             channel_text = f"<#{channel_id}>" if channel_id else "desativado"
-            await ctx.reply(f"Arquivo: {channel_text} · 1 reprodução: {counts.get('one_play', 0)} · pendentes após 2: {counts.get('waiting', 0)} · enviadas: {counts.get('done', 0)} · falhas: {counts.get('failed', 0)} · acima do limite: {counts.get('too_large', 0)}.",
+            await ctx.reply(f"Arquivo: {channel_text} · 1 reprodução: {counts.get('one_play', 0)} · pendentes após 2: {counts.get('waiting', 0)} · enviadas: {counts.get('done', 0)} · atualizando apresentação: {counts.get('refresh', 0)} · falhas: {counts.get('failed', 0)} · acima do limite: {counts.get('too_large', 0)}.",
                             mention_author=False, allowed_mentions=discord.AllowedMentions.none())
             return
         try:
