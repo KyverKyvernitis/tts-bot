@@ -615,7 +615,9 @@ class ArchiveMixin:
     async def _archive_jpeg(self, source: Path, output: Path) -> Path | None:
         proc = await asyncio.create_subprocess_exec(
             self.ffmpeg_executable, "-nostdin", "-v", "error", "-threads", "1", "-y",
-            "-i", str(source), "-frames:v", "1", "-vf", "scale=768:768:force_original_aspect_ratio=decrease,format=yuvj420p",
+            # O decoder MJPEG padrão devolve sucesso e pinta de verde a área
+            # ausente até quando o JPEG cortado termina com o marcador EOI.
+            "-err_detect", "explode", "-i", str(source), "-frames:v", "1", "-vf", "scale=768:768:force_original_aspect_ratio=decrease,format=yuvj420p",
             "-q:v", "2", str(output), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         try:

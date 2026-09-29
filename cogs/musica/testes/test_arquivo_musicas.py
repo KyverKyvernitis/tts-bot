@@ -307,6 +307,18 @@ async def test_webm_opus_vira_ogg_sem_recodificar_e_capa_vira_jpeg(tmp_path):
                             check=True, capture_output=True, text=True)
     assert "pix_fmt=yuvj420p" in result.stdout
 
+    complete = tmp_path / "completa.jpg"
+    subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                    "testsrc2=s=768x768:d=1", "-frames:v", "1", "-q:v", "3", "-y", str(complete)],
+                   check=True, capture_output=True)
+    assert await worker._archive_jpeg(complete, tmp_path / "capa-integra.jpg") is not None
+    data = complete.read_bytes()
+    broken = tmp_path / "capa-corrompida-mas-com-eoi.jpg"
+    broken.write_bytes(data[:len(data) // 2] + b"\xff\xd9")
+    # O FFmpeg, sem verificação estrita, retorna sucesso e pinta de verde a
+    # metade ausente, mesmo com um marcador JPEG de fim presente.
+    assert await worker._archive_jpeg(broken, tmp_path / "capa-rejeitada.jpg") is None
+
 
 @pytest.mark.asyncio
 async def test_capa_tenta_outro_link_e_fallback_youtube(tmp_path):
