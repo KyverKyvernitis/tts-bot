@@ -140,7 +140,7 @@ def mark_result(key: str, result: dict) -> None:
         failures = int(row[0]) + 1 if row else 1
         delay = 86400 if status in {"too_large", "ineligible"} else min(3600, 15 * 2 ** min(8, failures - 1))
         db.execute("UPDATE arquivo_musicas SET falhas=?, estado=?, tentativa_em=? WHERE chave=?",
-                   (failures, status if status in {"too_large", "ineligible"} else "waiting", time.time() + delay, key))
+                   (failures, status, time.time() + delay, key))
 
 
 def archived(track) -> tuple[dict, str, str]:
@@ -165,4 +165,5 @@ def archived(track) -> tuple[dict, str, str]:
 def counts() -> dict[str, int]:
     with _db() as db:
         rows = db.execute("SELECT estado, COUNT(*) FROM arquivo_musicas WHERE tocadas>=2 GROUP BY estado").fetchall()
-    return dict(rows)
+        one_play = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE tocadas=1").fetchone()[0]
+    return {**dict(rows), "one_play": int(one_play)}

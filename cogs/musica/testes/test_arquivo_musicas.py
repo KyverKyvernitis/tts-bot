@@ -19,9 +19,11 @@ def test_duas_reproducoes_reais_limite_e_alias(tmp_path, monkeypatch):
     key = arquivo.media_key(track)
     arquivo.set_channel(77, 88)
     assert arquivo.record_play(track, "1:play-1:1")
+    assert arquivo.counts()["one_play"] == 1
     assert not arquivo.record_play(track, "1:play-1:1")
     assert arquivo.pending() is None
     assert arquivo.record_play(track, "1:play-2:2")
+    assert arquivo.counts()["waiting"] == 1
     assert arquivo.pending()["key"] == key
     ref = {"guild_id": 77, "channel_id": 88, "message_id": 99, "attachment_id": 100}
     arquivo.mark_result(key, {"status": "done", "reference": ref, "emoji": "<:YouTube:123>"})
@@ -41,26 +43,40 @@ def test_duas_reproducoes_reais_limite_e_alias(tmp_path, monkeypatch):
     assert arquivo.pending()["key"] == key
 
 
-def test_observador_nao_conta_snapshots_seek_e_pausa(tmp_path, monkeypatch):
+def test_observador_conta_dois_inicios_e_nao_conta_fila_snapshot_seek_ou_pausa(tmp_path, monkeypatch):
     monkeypatch.setattr(arquivo, "_db_path", lambda: tmp_path / "archive.sqlite3")
     monkeypatch.setattr("cogs.musica.busca.memoria.faixa_aprendida", lambda track: True)
     track = _track(duration=120)
     manager = ArchiveCoordinator(object())
-    clock = [100.0]
-    monkeypatch.setattr("cogs.musica.arquivo_coordenador.time.monotonic", lambda: clock[0])
-    for position, event in [(0, "direct_track_start_confirmed"), (10, "direct_track_start_confirmed"),
-                             (100, "seek"), (105, "seek")]:
-        clock[0] += 10
-        manager.observe(1, track, {"position_ms": position * 1000, "playback_token": 1, "last_event": event}, confirmed=True)
+    arquivo.set_channel(1, 2)
+    first = {"position_ms": 0, "playback_token": 1, "last_event": "direct_track_start_confirmed"}
+    manager.observe(1, track, first, confirmed=False)  # adicionado à fila
     with arquivo._db() as db:
         assert db.execute("SELECT COUNT(*) FROM arquivo_reproducoes").fetchone()[0] == 0
-    # Uma reprodução confirmada com progresso contínuo conta só uma vez.
-    manager.listening.clear()
-    for position in (0, 10, 20, 30, 40):
-        clock[0] += 10
-        manager.observe(1, track, {"position_ms": position * 1000, "playback_token": 2}, confirmed=True)
+    manager.observe(1, track, first, confirmed=True)  # tocou, mesmo que pause em seguida
+    for position, token, event, confirmed in ((0, 1, "direct_track_start_confirmed", True),
+                                               (100, 2, "seek", True), (100, 2, "pause", False)):
+        manager.observe(1, track, {"position_ms": position * 1000,
+                        "playback_token": token, "last_event": event}, confirmed=confirmed)
     with arquivo._db() as db:
         assert db.execute("SELECT tocadas FROM arquivo_musicas").fetchone()[0] == 1
+    track.queue_item_id = "play-2"
+    manager.observe(1, track, {"position_ms": 0, "playback_token": 3,
+                    "last_event": "direct_track_start_confirmed"}, confirmed=True)
+    assert arquivo.pending()["key"] == arquivo.media_key(track)
+    assert manager._wake.is_set()
+
+
+def test_falha_de_upload_visivel_e_retentavel(tmp_path, monkeypatch):
+    monkeypatch.setattr(arquivo, "_db_path", lambda: tmp_path / "archive.sqlite3")
+    track = _track()
+    arquivo.set_channel(1, 2)
+    arquivo.record_play(track, "play-1")
+    arquivo.record_play(track, "play-2")
+    key = arquivo.media_key(track)
+    arquivo.mark_result(key, {"status": "failed"})
+    assert arquivo.counts()["failed"] == 1
+    assert arquivo.pending() is None  # aguarda o backoff antes de tentar de novo
 
 
 def test_mensagem_do_arquivo_fornece_emoji_e_exige_autoria():
