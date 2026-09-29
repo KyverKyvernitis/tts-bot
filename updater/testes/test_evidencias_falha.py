@@ -52,6 +52,7 @@ printf 'ts=%s\n' "$(classify_failure_code 'build do frontend' 'npm run build' 'e
 printf 'npm=%s\n' "$(classify_failure_code 'dependências do frontend' 'npm ci' 'npm ERR! EUSAGE')"
 printf 'perm=%s\n' "$(classify_failure_code 'aplicação local do candidato' 'git add' 'Permission denied')"
 printf 'dirty=%s\n' "$(classify_failure_code 'verificação pós-build do repositório' 'return 1' '')"
+printf 'push=%s\n' "$(classify_failure_code 'push GitHub pós-validação' 'return 1' 'cannot lock ref')"
 """
     result = _run_bash(harness)
 
@@ -59,6 +60,7 @@ printf 'dirty=%s\n' "$(classify_failure_code 'verificação pós-build do reposi
     assert "npm=FRONTEND_NPM_CI_FAILED" in result.stdout
     assert "perm=CANDIDATE_PERMISSION_DENIED" in result.stdout
     assert "dirty=DIRTY_WORKTREE_AFTER_STAGE" in result.stdout
+    assert "push=GITHUB_PUSH_UNCONFIRMED" in result.stdout
 
 
 def test_primary_failure_is_write_once_and_rollback_failure_is_separate(tmp_path: Path) -> None:

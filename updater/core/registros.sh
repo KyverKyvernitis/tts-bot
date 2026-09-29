@@ -187,6 +187,8 @@ classify_failure_code() {
     printf 'CANDIDATE_INTEGRITY_FAILED'
   elif [[ "$stage_lc" == *"validação de segurança do zip"* ]]; then
     printf 'CANDIDATE_SECURITY_REJECTED'
+  elif [[ "$stage_lc" == *"push github pós-validação"* ]]; then
+    printf 'GITHUB_PUSH_UNCONFIRMED'
   elif [[ "$stage_lc" == *"aplicação local do candidato"* || "$stage_lc" == *"aplicação do candidato"* ]]; then
     if [[ "$excerpt_lc" == *"permission denied"* ]]; then
       printf 'CANDIDATE_PERMISSION_DENIED'

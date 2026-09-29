@@ -63,7 +63,11 @@ rollback_after_failure() {
     rollback_git_status="OK: repositório voltou para $(short_commit "$PREVIOUS_COMMIT")"
     if (( LOCAL_CANDIDATE_MODE == 1 )); then
       update_local_candidate_heartbeat "failed" "rollback após falha em $FAILED_STAGE" || true
-      ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); GitHub não foi alterado"
+      if [[ "$FAILED_STAGE" == "push GitHub pós-validação" ]]; then
+        ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); publicação do candidato não confirmada"
+      else
+        ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); GitHub não foi alterado"
+      fi
     elif (( REMOTE_CANDIDATE_MODE == 1 )); then
       mark_remote_commit_rejected "$REMOTE_COMMIT" "health falhou após aplicar; rollback para $(short_commit "$PREVIOUS_COMMIT")"
       ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); commit GitHub rejeitado"
@@ -181,8 +185,13 @@ rollback_after_failure() {
   if (( rollback_success == 1 )); then
     if (( LOCAL_CANDIDATE_MODE == 1 )); then
       title="Update revertido"
-      summary="O ZIP foi testado na VPS, falhou na validação e o bot voltou ao estado anterior. Nenhum commit foi enviado ao GitHub."
-      commit_dirty="não; GitHub não foi alterado"
+      if [[ "$FAILED_STAGE" == "push GitHub pós-validação" ]]; then
+        summary="O ZIP passou na validação, mas o push não foi confirmado. A VPS voltou ao commit anterior; confira o HEAD do GitHub antes de reenviar."
+        commit_dirty="publicação deste candidato não confirmada"
+      else
+        summary="O ZIP foi testado na VPS, falhou na validação e o bot voltou ao estado anterior. Nenhum commit foi enviado ao GitHub."
+        commit_dirty="não; GitHub não foi alterado"
+      fi
     elif (( REMOTE_CANDIDATE_MODE == 1 )); then
       title="Update do GitHub revertido"
       summary="O commit do GitHub falhou depois da aplicação. A VPS voltou ao último estado saudável e esse commit foi rejeitado."

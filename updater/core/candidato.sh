@@ -2927,7 +2927,23 @@ publish_local_candidate_after_validation() {
 
   STAGE="push GitHub pós-validação"
   zip_progress_publish "Publicando no GitHub..."
-  repo_git push origin "HEAD:$BRANCH"
+  local push_output="" remote_ref="" remote_head=""
+  if ! push_output="$(repo_git push origin "HEAD:$BRANCH" 2>&1)"; then
+    # Um push pode retornar erro de lock mesmo depois que a ref remota passou
+    # ao commit validado. Confirme o HEAD real antes de reverter a VPS.
+    [[ -z "$push_output" ]] || printf '%s\n' "$push_output" >&2
+    remote_ref="$(repo_git ls-remote --exit-code origin "refs/heads/$BRANCH" 2>/dev/null || true)"
+    remote_head="${remote_ref%%$'\t'*}"
+    if [[ "$remote_ref" != "$remote_head"$'\t'"refs/heads/$BRANCH" || "$remote_head" != "$live_head" ]]; then
+      LAST_ERROR_CODE="GITHUB_PUSH_UNCONFIRMED"
+      LAST_ERROR_STDERR="push não confirmado; GitHub em $(short_commit "$remote_head"), candidato validado $(short_commit "$live_head"). ${push_output:0:700}"
+      printf '%s\n' "$LAST_ERROR_STDERR" >&2
+      return 1
+    fi
+    logger -t "$LOG_TAG" "push relatou erro, mas o GitHub confirma $(short_commit "$live_head"); sem rollback" 2>/dev/null || true
+  elif [[ -n "$push_output" ]]; then
+    printf '%s\n' "$push_output" >&2
+  fi
   record_remote_fetch_state "$REMOTE_COMMIT" || true
   LOCAL_CANDIDATE_PUBLISHED=1
   # A partir daqui o remoto já contém o commit validado. Qualquer falha
