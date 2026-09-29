@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ipaddress
 import json
 import math
 import os
 import re
+import sys
+import tempfile
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+
+import aiohttp
+import discord
 
 
 class DiscordAttachmentError(ValueError):
@@ -249,3 +257,280 @@ def prazo_stream(
         return min(signed, float(resolved_at) + max(1.0, max_age_seconds))
     except (TypeError, ValueError, OverflowError):
         return fallback
+
+
+# Arquivo de músicas no módulo de validação de anexos já distribuído ao worker.
+MAX_AUDIO = 20 * 1024 * 1024
+_MARKER = "music-archive:v1:"
+_IMAGE_HOSTS = {"i.ytimg.com", "img.youtube.com", "i.scdn.co", "i1.sndcdn.com", "i2.sndcdn.com", "i3.sndcdn.com", "i4.sndcdn.com"}
+_AUDIO_EXTS = {".ogg", ".opus", ".webm", ".m4a", ".mp3", ".aac", ".flac", ".wav", ".weba"}
+
+
+class ArchiveTooLarge(ValueError):
+    pass
+
+
+class ArchiveDurationTooLong(ValueError):
+    pass
+
+
+def _archive_metadata(raw: dict, key: str, bot_id: int, ref: dict) -> dict:
+    if str((raw.get("author") or {}).get("id")) != str(bot_id):
+        raise DiscordAttachmentError("A mensagem do arquivo não foi enviada pelo bot.")
+    if str(raw.get("guild_id") or ref["guild_id"]) != str(ref["guild_id"]):
+        raise DiscordAttachmentError("O arquivo pertence a outro servidor.")
+    embeds = raw.get("embeds") or []
+    embed = embeds[0] if embeds and isinstance(embeds[0], dict) else {}
+    if str((embed.get("footer") or {}).get("text") or "") != _MARKER + key:
+        raise DiscordAttachmentError("A mensagem não pertence ao arquivo de música esperado.")
+    fields = {str(field.get("name") or ""): str(field.get("value") or "") for field in embed.get("fields") or [] if isinstance(field, dict)}
+    origin = fields.get("Fonte", "")
+    emoji = origin.split(" ", 1)[0][:100]
+    if not emoji or len(emoji) > 100:
+        raise DiscordAttachmentError("A origem do áudio está ausente no arquivo.")
+    try:
+        index = int(fields["Índice de áudio"])
+        duration = float(fields["Duração"])
+        if not 0 <= index <= 16 or not 0 < duration <= 600:
+            raise ValueError
+    except (KeyError, ValueError, TypeError):
+        raise DiscordAttachmentError("O arquivo não tem áudio e duração verificados.") from None
+    target = next((item for item in raw.get("attachments") or [] if str(item.get("id")) == str(ref["attachment_id"])), None)
+    if not isinstance(target, dict):
+        raise DiscordAttachmentError("O áudio do arquivo foi removido.")
+    name = str(target.get("filename") or "").lower()
+    if Path(name).suffix not in _AUDIO_EXTS:
+        raise DiscordAttachmentError("O anexo do arquivo não é áudio.")
+    return {"url": valid_cdn_url(target.get("url")), "emoji": emoji, "source": origin.split(" ", 1)[-1],
+            "filename": name, "audio_stream_index": index, "duration": duration}
+
+
+class ArchiveMixin:
+    def _archive_init(self) -> None:
+        self._archive_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=32)
+        self._archive_results: dict[str, dict] = {}
+        self._archive_task: asyncio.Task | None = None
+        self._archive_active = ""
+
+    async def cmd_archive_enqueue(self, body: dict) -> dict:
+        key = str(body.get("archive_key") or "")
+        track = body.get("track") if isinstance(body.get("track"), dict) else {}
+        try:
+            duration = float(track["duration"])
+            guild_id = int(body["guild_id"])
+            channel_id = int(body["archive_channel_id"])
+        except (TypeError, ValueError, KeyError):
+            raise ValueError("metadados incompletos para arquivar") from None
+        url = str(track.get("webpage_url") or "").strip()
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        try:
+            public_host = not ipaddress.ip_address(host).is_private
+        except ValueError:
+            public_host = host not in {"localhost", "localhost.localdomain"} and "." in host
+        if (not re.fullmatch(r"[a-f0-9]{32}", key) or not 0 < duration <= 600
+                or guild_id <= 0 or channel_id <= 0 or parsed.scheme != "https"
+                or not public_host or host.endswith(("discord.com", "discordapp.com"))):
+            raise ValueError("faixa inelegível para o arquivo")
+        if key in self._archive_results:
+            previous = self._archive_results[key]
+            ref = previous.get("reference") if isinstance(previous.get("reference"), dict) else {}
+            same_channel = int(ref.get("guild_id") or 0) == guild_id and int(ref.get("channel_id") or 0) == channel_id
+            if previous.get("status") == "done" and same_channel:
+                return {"ok": True, **previous}
+            self._archive_results.pop(key, None)
+        if key != self._archive_active and key not in {item.get("key") for item in list(self._archive_queue._queue)}:
+            self._archive_queue.put_nowait({"key": key, "track": track, "guild_id": guild_id,
+                                            "channel_id": channel_id, "emoji": str(body.get("source_emoji") or "🎵")[:100]})
+        if self._archive_task is None or self._archive_task.done():
+            self._archive_task = asyncio.create_task(self._archive_loop(), name="music-archive-upload")
+        return {"ok": True, "status": "queued"}
+
+    async def cmd_archive_status(self, body: dict) -> dict:
+        key = str(body.get("archive_key") or "")
+        if key in self._archive_results:
+            return {"ok": True, **self._archive_results[key]}
+        if key == self._archive_active or key in {item.get("key") for item in list(self._archive_queue._queue)}:
+            return {"ok": True, "status": "working"}
+        return {"ok": True, "status": "missing"}
+
+    async def _archive_loop(self) -> None:
+        while not self._archive_queue.empty():
+            item = await self._archive_queue.get()
+            key = item["key"]
+            self._archive_active = key
+            try:
+                result = await self._archive_one(item)
+                self._archive_results[key] = result
+                self.log("archive_finished", status=result["status"], key=key)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._archive_results[key] = {"status": "failed"}
+                self.log("archive_failed", key=key, error=f"{type(exc).__name__}: {str(exc)[:180]}")
+            finally:
+                self._archive_active = ""
+                self._archive_queue.task_done()
+                if len(self._archive_results) > 512:
+                    for old in list(self._archive_results)[:128]:
+                        self._archive_results.pop(old, None)
+
+    async def _archive_existing(self, channel, key: str) -> dict | None:
+        # Cobre upload concluído imediatamente antes de um restart do agente.
+        async for message in channel.history(limit=200):
+            if message.author.id != self.client.user.id or not message.embeds:
+                continue
+            if (getattr(getattr(message.embeds[0], "footer", None), "text", "") or "") != _MARKER + key:
+                continue
+            ref = next((attachment for attachment in message.attachments if Path(attachment.filename).suffix.lower() in _AUDIO_EXTS), None)
+            if ref:
+                return {"status": "done", "reference": {"guild_id": channel.guild.id, "channel_id": channel.id,
+                                                             "message_id": message.id, "attachment_id": ref.id},
+                        "emoji": str(next((field.value.split(" ", 1)[0] for field in message.embeds[0].fields if field.name == "Fonte"), ""))}
+        return None
+
+    async def _archive_cover(self, url: str, destination: Path) -> Path | None:
+        try:
+            parts = urlsplit(url)
+            if parts.scheme != "https" or (parts.hostname or "").lower() not in _IMAGE_HOSTS:
+                return None
+            timeout = aiohttp.ClientTimeout(total=8)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, allow_redirects=False) as response:
+                    if response.status != 200 or not response.headers.get("Content-Type", "").lower().startswith("image/"):
+                        return None
+                    kind = response.headers.get("Content-Type", "").lower()
+                    extension = ".webp" if "webp" in kind else ".png" if "png" in kind else ".jpg"
+                    image = await response.content.read(2 * 1024 * 1024 + 1)
+                    if not image or len(image) > 2 * 1024 * 1024:
+                        return None
+                    path = destination / ("capa" + extension)
+                    await asyncio.to_thread(path.write_bytes, image)
+                    return path
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            return None
+
+    async def _archive_wait_stable_voice(self) -> None:
+        for _ in range(45):
+            busy = any(
+                st.status in {"starting", "preparing", "reconnecting", "tts_direct"}
+                or bool(getattr(st, "voice_runtime_recovery_pending", False))
+                for st in self.states.values()
+            )
+            if not busy and not any(task and not task.done() for task in self._active_resolve_tasks.values()):
+                return
+            await asyncio.sleep(2)
+        raise RuntimeError("voz ocupada; arquivamento adiado")
+
+    async def _archive_download(self, item: dict, folder: Path) -> Path | None:
+        track = item["track"]
+        url = str(track["webpage_url"])
+        base = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist", "--no-warnings",
+                "--no-progress", "--no-part", "--max-filesize", "20M", "--limit-rate", "512K", "--socket-timeout", "12",
+                "--format-sort", str(getattr(self, "ytdlp_sort", "abr,acodec,asr")),
+                "--match-filter", "duration <= 600", "-o", str(folder / "audio.%(ext)s")]
+        cookies = str(getattr(self, "cookies_file", "") or "")
+        if cookies and os.path.isfile(cookies):
+            base += ["--cookies", cookies]
+        for runtime in str(getattr(self, "js_runtimes", "") or "").split(","):
+            if runtime.strip():
+                base += ["--js-runtimes", runtime.strip()]
+        oversized = False
+        for fmt in ("bestaudio[filesize<20M]/bestaudio[filesize_approx<20M]/bestaudio[abr<=256]/bestaudio",
+                    "bestaudio[abr<=192]"):
+            if self._archive_active != item["key"]:
+                return None
+            for stale in folder.glob("audio.*"):
+                stale.unlink(missing_ok=True)
+            cmd = [*base, "-f", fmt, url]
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL,
+                                                         stderr=asyncio.subprocess.PIPE)
+            try:
+                _out, err = await asyncio.wait_for(proc.communicate(), timeout=300)
+            except BaseException:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                raise
+            candidates = [path for path in folder.glob("audio.*") if path.is_file()]
+            if proc.returncode == 0 and len(candidates) == 1 and 0 < candidates[0].stat().st_size <= MAX_AUDIO:
+                return candidates[0]
+            oversized |= any(path.stat().st_size > MAX_AUDIO for path in candidates)
+            stderr = (err or b"").lower()
+            if b"does not pass filter duration <= 600" in stderr:
+                raise ArchiveDurationTooLong("música com mais de 10 minutos")
+            oversized |= b"larger than max-filesize" in stderr or b"file is larger" in stderr
+            self.log("archive_format_retry", key=item["key"], format=fmt[:32], error=(err or b"")[-160:].decode("utf-8", "replace"))
+        if oversized:
+            raise ArchiveTooLarge("a melhor faixa compatível ultrapassa 20 MiB")
+        raise RuntimeError("não consegui baixar um formato de áudio válido")
+
+    async def _archive_one(self, item: dict) -> dict:
+        await self.client.wait_until_ready()
+        channel = self.client.get_channel(item["channel_id"])
+        if channel is None:
+            channel = await self.client.fetch_channel(item["channel_id"])
+        if not isinstance(channel, discord.TextChannel) or channel.guild.id != item["guild_id"]:
+            raise ValueError("canal do arquivo inválido")
+        existing = await self._archive_existing(channel, item["key"])
+        if existing:
+            return existing
+        # Sem usar o scheduler de resolução do player, ffmpeg de playback ou
+        # o loop principal para tarefas de disco. A voz mantém prioridade.
+        await asyncio.sleep(3)
+        await self._archive_wait_stable_voice()
+        with tempfile.TemporaryDirectory(prefix="music-archive-") as location:
+            folder = Path(location)
+            try:
+                audio = await self._archive_download(item, folder)
+            except ArchiveTooLarge:
+                return {"status": "too_large"}
+            except ArchiveDurationTooLong:
+                return {"status": "ineligible"}
+            if audio is None:
+                return {"status": "failed"}
+            proc = await asyncio.create_subprocess_exec(self.ffprobe_executable, "-v", "error", "-show_entries",
+                 "format=duration:stream=index,codec_type", "-of", "json", str(audio), stdout=asyncio.subprocess.PIPE,
+                 stderr=asyncio.subprocess.DEVNULL)
+            try:
+                data, _ = await asyncio.wait_for(proc.communicate(), timeout=12)
+            except BaseException:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                raise
+            probe = json.loads(data) if proc.returncode == 0 else {}
+            duration = float((probe.get("format") or {}).get("duration") or 0)
+            streams = probe.get("streams") or []
+            if not 0 < duration <= 600 or not any(x.get("codec_type") == "audio" for x in streams) or any(x.get("codec_type") == "video" for x in streams):
+                return {"status": "ineligible"} if duration > 600 else {"status": "failed"}
+            audio_index = int(next(x["index"] for x in streams if x.get("codec_type") == "audio"))
+            cover = await self._archive_cover(str(item["track"].get("display_thumbnail") or item["track"].get("thumbnail") or ""), folder)
+            title = str(item["track"].get("display_title") or item["track"].get("title") or "Música")[:240]
+            source = str(item["track"].get("display_source") or item["track"].get("source") or "Áudio")[:80]
+            origin = str(item["track"].get("original_url") or item["track"].get("webpage_url") or "")[:500]
+            embed = discord.Embed(title=title, url=origin if origin.startswith("https://") else None)
+            embed.add_field(name="Fonte", value=f"{item['emoji']} {source}", inline=True)
+            embed.add_field(name="Duração", value=f"{duration:.2f}", inline=True)
+            embed.add_field(name="Índice de áudio", value=str(audio_index), inline=True)
+            embed.add_field(name="Formato", value=audio.suffix.lstrip(".").upper(), inline=True)
+            embed.set_footer(text=_MARKER + item["key"])
+            if cover:
+                embed.set_image(url="attachment://" + cover.name)
+            await self._archive_wait_stable_voice()
+            files = [discord.File(audio, filename=f"musica-{item['key']}{audio.suffix}")]
+            if cover:
+                files.append(discord.File(cover, filename=cover.name))
+            try:
+                message = await channel.send(embed=embed, files=files, allowed_mentions=discord.AllowedMentions.none())
+            finally:
+                for file in files:
+                    file.close()
+            ref_attachment = next((attachment for attachment in message.attachments if attachment.filename.startswith("musica-")), None)
+            if ref_attachment is None:
+                raise ValueError("Discord não confirmou o áudio enviado")
+            ref = {"guild_id": channel.guild.id, "channel_id": channel.id,
+                   "message_id": message.id, "attachment_id": ref_attachment.id}
+            raw = await self.client.http.get_message(channel.id, message.id)
+            parsed = _archive_metadata(raw, item["key"], self.client.user.id, ref)
+            return {"status": "done", "reference": ref, "emoji": parsed["emoji"]}

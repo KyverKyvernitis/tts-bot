@@ -588,6 +588,12 @@ async def sincronizar_estado_agente(
                 registrar_link_busca(state.current)
         router._schedule_agent_playback_started_effects(guild_id, new_panel_key)
 
+    # A observação só usa estado confirmado e posição avançando. Sem I/O de
+    # rede aqui: o download pertence ao coordenador de fundo no Android.
+    archive = getattr(router, "archive", None)
+    if archive is not None:
+        archive.observe(guild_id, state.current, remote, confirmed=bool(active_confirmed))
+
     status_transition = previous_status != state.current_status
     if (
         status_transition

@@ -1,0 +1,168 @@
+"""Índice leve do arquivo de músicas; os bytes vivem apenas no Discord."""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import sqlite3
+import time
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+from .memoria import _db_path, _track_payload
+
+log = logging.getLogger(__name__)
+
+
+def _url_key(url: str) -> str:
+    url = str(url or "").strip()
+    if not url:
+        return ""
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower().removeprefix("www.")
+        if parsed.scheme not in {"http", "https"} or not host or host.endswith("discord.com") or host.endswith("discordapp.com"):
+            return ""
+        path = parsed.path.rstrip("/")
+        if host in {"youtube.com", "m.youtube.com", "music.youtube.com"} and path == "/watch":
+            video_id = parse_qs(parsed.query).get("v", [""])[0]
+            if video_id:
+                url = "youtube:" + video_id
+        elif host == "youtu.be":
+            url = "youtube:" + path.lstrip("/")
+        else:
+            url = host + path
+    except ValueError:
+        return ""
+    return hashlib.sha256(url.lower().encode("utf-8")).hexdigest()[:32]
+
+
+def media_key(track) -> str:
+    if getattr(track, "is_live", False) or (getattr(track, "attachment_ref", None) and not getattr(track, "archive_ref", None)):
+        return ""
+    original = str(getattr(track, "original_url", "") or "")
+    if any(provider in original.lower() for provider in ("open.spotify.com/track/", "deezer.com/track/", "music.apple.com/")):
+        return _url_key(original)
+    return _url_key(getattr(track, "webpage_url", "")) or _url_key(original)
+
+
+def _db() -> sqlite3.Connection:
+    # O comando que limpa escolhas não pode apagar o canal configurado nem os
+    # IDs dos anexos já enviados. O sufixo preserva o isolamento de worktrees.
+    memory_path: Path = _db_path()
+    path = memory_path.with_name(memory_path.stem + "-arquivo.sqlite3")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path), timeout=2)
+    db.execute("PRAGMA busy_timeout=2000")
+    db.execute("CREATE TABLE IF NOT EXISTS arquivo_config (id INTEGER PRIMARY KEY CHECK (id=1), guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL)")
+    db.execute("""CREATE TABLE IF NOT EXISTS arquivo_musicas (
+        chave TEXT PRIMARY KEY, track_json TEXT NOT NULL, tocadas INTEGER NOT NULL DEFAULT 0,
+        reference_json TEXT NOT NULL DEFAULT '', emoji TEXT NOT NULL DEFAULT '',
+        estado TEXT NOT NULL DEFAULT 'waiting', tentativa_em REAL NOT NULL DEFAULT 0,
+        falhas INTEGER NOT NULL DEFAULT 0
+    )""")
+    db.execute("CREATE TABLE IF NOT EXISTS arquivo_reproducoes (marcador TEXT PRIMARY KEY, registrado_em REAL NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS arquivo_aliases (alias TEXT PRIMARY KEY, chave TEXT NOT NULL)")
+    return db
+
+
+def channel() -> tuple[int, int]:
+    with _db() as db:
+        row = db.execute("SELECT guild_id, channel_id FROM arquivo_config WHERE id=1").fetchone()
+    return (int(row[0]), int(row[1])) if row else (0, 0)
+
+
+def set_channel(guild_id: int, channel_id: int) -> None:
+    with _db() as db:
+        previous = db.execute("SELECT guild_id, channel_id FROM arquivo_config WHERE id=1").fetchone()
+        db.execute("INSERT INTO arquivo_config VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET guild_id=excluded.guild_id, channel_id=excluded.channel_id", (guild_id, channel_id))
+        if guild_id > 0 and channel_id > 0 and previous and tuple(previous) != (guild_id, channel_id):
+            # Um anexo no canal antigo não pode satisfazer o arquivo novo.
+            for key, encoded in db.execute("SELECT chave, reference_json FROM arquivo_musicas WHERE reference_json!=''"):
+                try:
+                    ref = json.loads(encoded)
+                    valid_here = (int(ref["guild_id"]), int(ref["channel_id"])) == (guild_id, channel_id)
+                except (ValueError, KeyError, TypeError):
+                    valid_here = False
+                if not valid_here:
+                    db.execute("UPDATE arquivo_musicas SET reference_json='', emoji='', estado='waiting', tentativa_em=0 WHERE chave=?", (key,))
+
+
+def record_play(track, marker: str) -> bool:
+    key = media_key(track)
+    try:
+        duration = float(track.duration)
+    except (TypeError, ValueError):
+        return False
+    if not key or not 0 < duration <= 600 or len(marker) > 128:
+        return False
+    with _db() as db:
+        if not db.execute("INSERT OR IGNORE INTO arquivo_reproducoes VALUES (?, ?)", (marker, time.time())).rowcount:
+            return False
+        db.execute("""INSERT INTO arquivo_musicas(chave, track_json, tocadas) VALUES (?, ?, 1)
+            ON CONFLICT(chave) DO UPDATE SET tocadas=MIN(2, tocadas+1), track_json=excluded.track_json""",
+            (key, json.dumps(_track_payload(track), ensure_ascii=False),))
+        for url in (getattr(track, "webpage_url", ""), getattr(track, "original_url", "")):
+            alias = _url_key(url)
+            if alias:
+                db.execute("INSERT OR REPLACE INTO arquivo_aliases VALUES (?, ?)", (alias, key))
+        db.execute("DELETE FROM arquivo_reproducoes WHERE registrado_em < ?", (time.time() - 90 * 86400,))
+    return True
+
+
+def pending() -> dict | None:
+    if channel() == (0, 0):
+        return None
+    with _db() as db:
+        row = db.execute("""SELECT chave, track_json FROM arquivo_musicas WHERE tocadas>=2
+            AND reference_json='' AND estado NOT IN ('too_large', 'ineligible') AND tentativa_em<=?
+            ORDER BY tentativa_em, chave LIMIT 1""", (time.time(),)).fetchone()
+    if not row:
+        return None
+    try:
+        return {"key": row[0], "track": json.loads(row[1])}
+    except (TypeError, ValueError):
+        log.warning("[music/archive] metadados inválidos: %s", row[0])
+        return None
+
+
+def mark_result(key: str, result: dict) -> None:
+    status = str(result.get("status") or "failed")
+    ref = result.get("reference") if isinstance(result.get("reference"), dict) else {}
+    if (status == "done" and all(int(ref.get(field) or 0) > 0 for field in ("guild_id", "channel_id", "message_id", "attachment_id"))
+            and (int(ref["guild_id"]), int(ref["channel_id"])) == channel()):
+        with _db() as db:
+            db.execute("UPDATE arquivo_musicas SET reference_json=?, emoji=?, estado='done', tentativa_em=0 WHERE chave=?",
+                       (json.dumps(ref), str(result.get("emoji") or "")[:100], key))
+        return
+    with _db() as db:
+        row = db.execute("SELECT falhas FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
+        failures = int(row[0]) + 1 if row else 1
+        delay = 86400 if status in {"too_large", "ineligible"} else min(3600, 15 * 2 ** min(8, failures - 1))
+        db.execute("UPDATE arquivo_musicas SET falhas=?, estado=?, tentativa_em=? WHERE chave=?",
+                   (failures, status if status in {"too_large", "ineligible"} else "waiting", time.time() + delay, key))
+
+
+def archived(track) -> tuple[dict, str, str]:
+    key = media_key(track)
+    if not key:
+        return {}, "", ""
+    with _db() as db:
+        row = db.execute("""SELECT chave, reference_json, emoji FROM arquivo_musicas
+            WHERE chave=COALESCE((SELECT chave FROM arquivo_aliases WHERE alias=?), ?)""", (key, key)).fetchone()
+    if not row or not row[0]:
+        return {}, "", ""
+    try:
+        ref = json.loads(row[1])
+        configured = channel()
+        if (int(ref["guild_id"]), int(ref["channel_id"])) != configured:
+            return {}, "", ""
+        return ref, row[2], row[0]
+    except (ValueError, TypeError, KeyError):
+        return {}, "", ""
+
+
+def counts() -> dict[str, int]:
+    with _db() as db:
+        rows = db.execute("SELECT estado, COUNT(*) FROM arquivo_musicas WHERE tocadas>=2 GROUP BY estado").fetchall()
+    return dict(rows)

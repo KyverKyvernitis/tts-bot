@@ -571,6 +571,25 @@ def recarregar_memoria_busca() -> None:
     _ensure_loaded()
 
 
+def faixa_aprendida(track: MusicTrack) -> bool:
+    """Consulta a memória real por identidade da mídia, sem busca aproximada."""
+    from .arquivo import _url_key, media_key
+
+    target = media_key(track)
+    origins = {_url_key(getattr(track, "original_url", "")), _url_key(getattr(track, "webpage_url", ""))}
+    origins.discard("")
+    if not target and not origins:
+        return False
+    _ensure_loaded()
+    with _LOCK:
+        return any(
+            media_key(item.track) == target or bool(
+                origins & {_url_key(item.track.original_url), _url_key(item.track.webpage_url)}
+            )
+            for item in _memoria.values()
+        )
+
+
 def _remover_sufixos_titulo(value: str) -> str:
     texto = str(value or "").strip()
     # Resultados de YouTube frequentemente terminam em ``(Official Video)`` ou

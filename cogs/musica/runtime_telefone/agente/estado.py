@@ -39,6 +39,9 @@ class AgentTrack:
     virtual_playlist_cursor: dict[str, Any] = field(default_factory=dict)
     queue_item_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     attachment_ref: dict[str, int] = field(default_factory=dict)
+    archive_ref: dict[str, int] = field(default_factory=dict)
+    archive_key: str = ""
+    source_emoji: str = ""
     audio_stream_index: int = -1
 
     def __post_init__(self) -> None:
@@ -80,6 +83,9 @@ class AgentTrack:
             "virtual_playlist_cursor": dict(self.virtual_playlist_cursor) if self.virtual_playlist_cursor else {},
             "queue_item_id": self.queue_item_id,
             "attachment_ref": dict(self.attachment_ref),
+            "archive_ref": dict(self.archive_ref),
+            "archive_key": self.archive_key,
+            "source_emoji": self.source_emoji,
             "audio_stream_index": self.audio_stream_index,
         }
 
@@ -310,6 +316,32 @@ class GuildMusicState:
         if self.current.duration is not None:
             position = min(position, max(0.0, float(self.current.duration)))
         return position
+
+    def archive_progress(self) -> dict[str, Any]:
+        """Progresso mínimo para observar escuta sem serializar a fila inteira."""
+        player = self.player
+        connected = False
+        playing = False
+        if player is not None:
+            with contextlib.suppress(Exception):
+                connected = bool(getattr(player, "connected", False))
+            with contextlib.suppress(Exception):
+                checker = getattr(player, "is_connected", None)
+                if callable(checker):
+                    connected = bool(checker())
+            with contextlib.suppress(Exception):
+                checker = getattr(player, "is_playing", None)
+                if callable(checker):
+                    playing = bool(checker())
+            with contextlib.suppress(Exception):
+                playing = bool(playing or getattr(player, "playing", False))
+        return {
+            "queue_item_id": self.current.queue_item_id if self.current else "",
+            "position_ms": int(self.source_position_seconds() * 1000),
+            "playback_token": int(self.playback_token),
+            "last_event": self.last_event,
+            "confirmed_playing": bool(self.status == "playing" and self.current and connected and playing),
+        }
 
     def public(self) -> dict[str, Any]:
         self._repair_current_queue_alias()

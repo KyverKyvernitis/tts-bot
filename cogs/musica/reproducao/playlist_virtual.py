@@ -92,6 +92,8 @@ def payload_faixa_agent(
     requester_name: str = "",
     fallback_query: str = "",
 ) -> dict[str, Any]:
+    from ..busca import arquivo
+    archive_ref, emoji, archive_key = arquivo.archived(track)
     return {
         "title": track.title,
         "webpage_url": track.webpage_url,
@@ -110,6 +112,9 @@ def payload_faixa_agent(
         "requester_name": requester_name or track.requester_name,
         "queue_item_id": str(getattr(track, "queue_item_id", "") or ""),
         "attachment_ref": dict(getattr(track, "attachment_ref", {}) or {}),
+        "archive_ref": archive_ref,
+        "archive_key": archive_key,
+        "source_emoji": emoji,
     }
 
 

@@ -60,7 +60,7 @@ from cogs.musica.runtime_telefone.agente.configuracao import (  # noqa: E402
 )
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState  # noqa: E402
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin  # noqa: E402
-from cogs.musica.runtime_telefone.agente.validade_stream import DiscordAttachmentError  # noqa: E402
+from cogs.musica.runtime_telefone.agente.validade_stream import ArchiveMixin, DiscordAttachmentError  # noqa: E402
 from cogs.musica.runtime_telefone.agente.reproducao import ReproducaoMixin  # noqa: E402
 from cogs.musica.runtime_telefone.agente.tts import TTSMixin, _TimedTTSSource  # noqa: E402
 from cogs.musica.runtime_telefone.agente.utilitarios import (  # noqa: E402
@@ -92,7 +92,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.72"
+AGENT_VERSION = "0.3.73"
 STARTED_AT = time.time()
 
 
@@ -132,7 +132,7 @@ def _audit_value(key: str, value: Any) -> Any:
         return value
 
 
-class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
+class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
     def __init__(self) -> None:
         self.host = os.getenv("MUSIC_AGENT_HOST", "127.0.0.1")
         self.port = env_int("MUSIC_AGENT_PORT", 8780)
@@ -275,6 +275,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._discord_probe_semaphore = asyncio.Semaphore(2)
         # URLs assinadas são temporárias e ficam só na memória do worker.
         self._discord_verified_urls: dict[str, tuple[str, float]] = {}
+        self._archive_init()
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
@@ -897,6 +898,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 # telemetria volátil novamente até ocorrer uma mudança real.
                 base["unchanged"] = True
                 base["guilds"] = {}
+                base["archive_progress"] = state.archive_progress()
                 return base
             base["guilds"] = {str(guild_id): state.public()}
             return base
@@ -916,6 +918,10 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         return base
 
     async def _dispatch_action(self, body: dict[str, Any], action: str) -> dict[str, Any]:
+        if action == "archive_enqueue":
+            return await self.cmd_archive_enqueue(body)
+        if action == "archive_status":
+            return await self.cmd_archive_status(body)
         if action in {"status", "get_state"}:
             guild_id = safe_id(body.get("guild_id"))
             return self.status_payload(
@@ -1097,6 +1103,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             await cancel_tasks(active_tts)
 
             background = (
+                ([self._archive_task] if self._archive_task is not None else [])
+                +
                 list(self._idle_disconnect_tasks.values())
                 + list(self._voice_presence_disconnect_tasks.values())
                 + list(self._prefetch_tasks.values())

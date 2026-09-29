@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from .ciclo_vida import consume_task_result, remove_owned_task
-from .validade_stream import fetch_discord_attachment, normalize_reference, valid_cdn_url
+from .validade_stream import _archive_metadata, fetch_discord_attachment, normalize_reference, valid_cdn_url
 from .correspondencia import avaliar_correspondencia, busca_alternativa
 from .estado import AgentTrack
 from .ytdlp_quente import WarmYTDLPResolver
@@ -590,10 +590,41 @@ class ResolucaoMixin:
             start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
             queue_item_id=str(track_meta.get("queue_item_id") or ""),
             attachment_ref=dict(track_meta.get("attachment_ref") or {}),
+            archive_ref=dict(track_meta.get("archive_ref") or {}),
+            archive_key=str(track_meta.get("archive_key") or ""),
+            source_emoji=str(track_meta.get("source_emoji") or "")[:100],
             audio_stream_index=int(track_meta.get("audio_stream_index", -1)),
         )
 
+    async def _resolve_archive_attachment(self, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
+        ref = track_meta.get("archive_ref") or {}
+        key = str(track_meta.get("archive_key") or "")
+        if not re.fullmatch(r"[a-f0-9]{32}", key) or not isinstance(ref, dict):
+            raise DiscordAttachmentError("Índice do arquivo inválido.")
+        try:
+            ref = {name: int(ref[name]) for name in ("guild_id", "channel_id", "message_id", "attachment_id")}
+            if min(ref.values()) <= 0:
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise DiscordAttachmentError("Referência do arquivo inválida.") from None
+        raw = await self.client.http.get_message(ref["channel_id"], ref["message_id"])
+        meta = _archive_metadata(raw, key, int(self.client.user.id), ref)
+        track = self._agent_track_from_metadata(track_meta, body=body)
+        track.archive_ref = dict(ref)
+        track.attachment_ref = dict(ref)
+        track.archive_key = key
+        track.source_emoji = meta["emoji"]
+        track.source = meta["source"] or track.source
+        track.audio_stream_index = meta["audio_stream_index"]
+        track.duration = meta["duration"]
+        track.stream_url = meta["url"]
+        track.stream_resolved_monotonic = time.monotonic()
+        track.transport_hint = "discord-archive"
+        return track
+
     async def _resolve_discord_attachment(self, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
+        if track_meta.get("archive_ref"):
+            return await self._resolve_archive_attachment(track_meta=track_meta, body=body)
         guild_id = safe_id(body.get("guild_id"))
         ref = normalize_reference(track_meta.get("attachment_ref"), guild_id)
         track = self._agent_track_from_metadata(track_meta, body=body)
@@ -640,6 +671,12 @@ class ResolucaoMixin:
                 remove_owned_task(self._prefetch_tasks, key, current_task)
 
     async def resolve_track(self, query: str, *, track_meta: dict[str, Any], body: dict[str, Any], priority: int = 0) -> AgentTrack:
+        if track_meta.get("archive_ref"):
+            try:
+                return await self._resolve_archive_attachment(track_meta=track_meta, body=body)
+            except Exception as exc:
+                self.log("archive_fallback_source", guild_id=safe_id(body.get("guild_id")), error=short_text(exc, 160))
+                track_meta = {**track_meta, "archive_ref": {}, "archive_key": "", "attachment_ref": {}}
         if track_meta.get("attachment_ref"):
             # O permalink da mensagem não é mídia nem uma busca textual.
             return await self._resolve_discord_attachment(track_meta=track_meta, body=body)

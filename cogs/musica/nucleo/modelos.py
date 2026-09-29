@@ -71,6 +71,9 @@ class MusicTrack:
     queue_item_id: str = ""
     # Identidade durável do vídeo do Discord, independente de URL CDN assinada.
     attachment_ref: dict[str, int] = field(default_factory=dict)
+    # Arquivo global configurado pelo dono; a fonte visual continua original.
+    archive_ref: dict[str, int] = field(default_factory=dict)
+    source_emoji: str = ""
     # Referência leve para uma entrada ainda virtual da playlist. Estes campos
     # são usados apenas pela UI/control plane; áudio continua resolvido JIT.
     virtual_playlist_instance_id: str = ""

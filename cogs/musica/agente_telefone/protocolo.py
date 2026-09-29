@@ -6,6 +6,7 @@ import uuid
 from cogs.musica import configuracao as config
 
 from ..nucleo.modelos import MusicTrack
+from ..busca import arquivo
 
 
 def faixa_para_payload(track: MusicTrack | Mapping[str, Any]) -> dict[str, Any]:
@@ -16,6 +17,7 @@ def faixa_para_payload(track: MusicTrack | Mapping[str, Any]) -> dict[str, Any]:
     """
     if isinstance(track, Mapping):
         return dict(track)
+    archive_ref, source_emoji, archive_key = arquivo.archived(track)
     return {
         "title": track.title,
         "display_title": getattr(track, "display_title", "") or track.title,
@@ -33,6 +35,9 @@ def faixa_para_payload(track: MusicTrack | Mapping[str, Any]) -> dict[str, Any]:
         "requester_name": track.requester_name,
         "queue_item_id": str(getattr(track, "queue_item_id", "") or ""),
         "attachment_ref": dict(getattr(track, "attachment_ref", {}) or {}),
+        "archive_ref": archive_ref,
+        "archive_key": archive_key,
+        "source_emoji": source_emoji or getattr(track, "source_emoji", ""),
         "resolved_audio_format_id": getattr(track, "resolved_audio_format_id", ""),
         "resolved_audio_ext": getattr(track, "resolved_audio_ext", ""),
         "resolved_audio_codec": getattr(track, "resolved_audio_codec", ""),

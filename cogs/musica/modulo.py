@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands
 
 from .legado.roteador_audio import AudioRouter
+from .arquivo_coordenador import ArchiveCoordinator
 from .comandos import BaseComandosMusica, FluxoConfiguracoes, FluxoControle, FluxoFila, FluxoTocar
 
 
@@ -25,10 +26,17 @@ class Music(FluxoTocar, FluxoControle, FluxoFila, FluxoConfiguracoes, BaseComand
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.router = _get_router(bot)
+        self.archive = ArchiveCoordinator(bot)
+        self.router.archive = self.archive
 
     async def cog_unload(self) -> None:
+        await self.archive.close()
         with contextlib.suppress(Exception):
             await self.router.close()
+
+    @commands.command(name="musicarquivo")
+    async def music_archive(self, ctx: commands.Context, *, option: str = ""):
+        await self._run_musicarquivo(ctx, option)
 
 
 
@@ -234,4 +242,6 @@ class Music(FluxoTocar, FluxoControle, FluxoFila, FluxoConfiguracoes, BaseComand
 
 async def setup(bot: commands.Bot):
     _get_router(bot)
-    await bot.add_cog(Music(bot))
+    cog = Music(bot)
+    await bot.add_cog(cog)
+    cog.archive.start()

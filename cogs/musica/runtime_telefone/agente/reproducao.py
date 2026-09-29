@@ -2607,8 +2607,13 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 # sem acrescentar um GET ao caminho normal de reprodução.
                 previous_url = track.stream_url
                 try:
-                    ref = normalize_reference(track.attachment_ref, guild_id)
-                    fresh = await fetch_discord_attachment(self.client, ref)
+                    if track.archive_ref:
+                        refreshed = await self._resolve_discord_attachment(track_meta=track.public(), body={"guild_id": guild_id})
+                        fresh = {"url": refreshed.stream_url}
+                        ref = track.archive_ref
+                    else:
+                        ref = normalize_reference(track.attachment_ref, guild_id)
+                        fresh = await fetch_discord_attachment(self.client, ref)
                 except DiscordAttachmentError:
                     raise prepare_error
                 if fresh["url"] == previous_url:

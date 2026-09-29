@@ -1363,7 +1363,7 @@ class AudioRouter:
                 if value:
                     fields.append(value)
         text = " ".join(fields)
-        if str(getattr(track, "source", "") or "").strip().lower() == "discord" or getattr(track, "attachment_ref", None):
+        if str(getattr(track, "source", "") or "").strip().lower() == "discord" or (getattr(track, "attachment_ref", None) and not getattr(track, "archive_ref", None)):
             return "discord"
         # Prioridade nos links/fontes originais: quando um link Spotify/Deezer
         # cai em fallback tocável do YouTube, o status ainda deve mostrar o
@@ -1379,6 +1379,8 @@ class AudioRouter:
         return ""
 
     def _source_emoji_for_track(self, track: MusicTrack | None) -> str:
+        if track is not None and getattr(track, "source_emoji", ""):
+            return str(track.source_emoji)
         source_key = self._source_key_for_track(track)
         return MUSIC_SOURCE_EMOJIS.get(source_key) or MUSIC_SOURCE_EMOJI_FALLBACK
 
