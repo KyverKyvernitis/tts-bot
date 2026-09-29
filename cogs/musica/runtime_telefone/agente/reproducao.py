@@ -11,7 +11,7 @@ from typing import Any
 import discord
 
 from .ciclo_vida import remove_owned_task, stop_player_instance
-from .validade_stream import fetch_discord_attachment, normalize_reference, probe_discord_audio, prazo_stream, DiscordAttachmentError
+from .validade_stream import fetch_discord_attachment, initial_discord_cdn_url, normalize_reference, probe_discord_audio, prazo_stream, DiscordAttachmentError
 from .configuracao import env_float, env_int
 from .estado import AgentTrack, GuildMusicState
 from .efeitos import filtros
@@ -509,12 +509,64 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             if request_id in seen:
                 return {"ok": False, "error": "Essa mídia já foi processada. Envie um novo comando para repetir."}
             queue_generation = int(st.queue_reset_generation)
-            attachment = await fetch_discord_attachment(self.client, ref)
-            async with self._discord_probe_semaphore:
-                probe = await probe_discord_audio(
-                    attachment["url"], executable=getattr(self, "ffprobe_executable", "ffprobe"), timeout=10.0,
+            prepare_started = time.monotonic()
+            url_hint = initial_discord_cdn_url(body.get("attachment_url_hint"), ref)
+            voice_prepare_task: asyncio.Task | None = None
+            if (
+                self.direct_audio_enabled
+                and not st.current
+                and st.status not in {"tts_direct", "starting", "preparing"}
+                and bool(getattr(self.client, "is_ready", lambda: False)())
+            ):
+                # O handshake de voz e a leitura do CDN são independentes.
+                # cmd_play reutiliza a sessão quando o probe terminar.
+                st.voice_channel_id = voice_channel_id
+                voice_prepare_task = asyncio.create_task(
+                    asyncio.wait_for(
+                        self._ensure_direct_voice_client(guild_id),
+                        timeout=max(5.0, self.prepare_timeout),
+                    )
                 )
+            try:
+                attachment = (
+                    {"url": url_hint, "filename": str(meta.get("attachment_filename") or "")}
+                    if url_hint else await fetch_discord_attachment(self.client, ref)
+                )
+                url_elapsed_ms = round((time.monotonic() - prepare_started) * 1000.0, 1)
+                probe_started = time.monotonic()
+                url_refreshed = False
+                try:
+                    async with self._discord_probe_semaphore:
+                        probe = await probe_discord_audio(
+                            attachment["url"], executable=getattr(self, "ffprobe_executable", "ffprobe"), timeout=10.0,
+                        )
+                except DiscordAttachmentError:
+                    if not url_hint:
+                        raise
+                    # Uma URL recebida pelo Gateway pode ter vencido enquanto
+                    # o comando viajava. Um único GET renova a assinatura; se
+                    # o Discord devolver a mesma URL, o erro é da própria mídia.
+                    refreshed = await fetch_discord_attachment(self.client, ref)
+                    if refreshed["url"] == url_hint:
+                        raise
+                    attachment = refreshed
+                    url_refreshed = True
+                    async with self._discord_probe_semaphore:
+                        probe = await probe_discord_audio(
+                            attachment["url"], executable=getattr(self, "ffprobe_executable", "ffprobe"), timeout=10.0,
+                        )
+                self.log(
+                    "discord_media_verified", guild_id=guild_id,
+                    url_hint_used=bool(url_hint), url_refreshed=url_refreshed,
+                    url_fetch_ms=url_elapsed_ms,
+                    probe_ms=round((time.monotonic() - probe_started) * 1000.0, 1),
+                    voice_parallel=bool(voice_prepare_task),
+                )
+            except BaseException:
+                await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
+                raise
             if self.states.get(guild_id) is not st or st.queue_reset_generation != queue_generation:
+                await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                 return {"ok": False, "cancelled": True, "error": "pedido cancelado durante a verificação"}
             hint = meta.get("attachment_duration_hint")
             try:
@@ -558,23 +610,33 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             play_body["track"] = confirmed
             play_body["query"] = confirmed["webpage_url"]
             try:
+                if voice_prepare_task is not None:
+                    await voice_prepare_task
+                    if self.states.get(guild_id) is not st or st.queue_reset_generation != queue_generation:
+                        await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
+                        self._discord_verified_urls.pop(request_id, None)
+                        return {"ok": False, "cancelled": True, "error": "pedido cancelado durante a conexão"}
                 result = await self.cmd_play(play_body)
             except BaseException:
                 self._discord_verified_urls.pop(request_id, None)
+                await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                 raise
             current_is_requested = bool(st.current and st.current.queue_item_id == request_id)
             if (self.states.get(guild_id) is not st or
                     (st.queue_reset_generation != queue_generation and not current_is_requested)):
                 self._discord_verified_urls.pop(request_id, None)
+                await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                 return {"ok": False, "cancelled": True, "error": "pedido cancelado durante a reprodução", "state": st.public()}
             if not result.get("ok"):
                 self._discord_verified_urls.pop(request_id, None)
+                await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
             accepted = next(
                 (item for item in ([st.current] if st.current else []) + st.queue + st.history
                  if item.queue_item_id == request_id), None,
             )
             if result.get("ok") and accepted is None:
                 self._discord_verified_urls.pop(request_id, None)
+                await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                 return {"ok": False, "error": st.last_error or "A mídia não chegou a tocar nem entrou na fila.", "state": st.public()}
             if result.get("ok"):
                 seen[request_id] = time.monotonic()
@@ -2150,11 +2212,22 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             if existing is None or not getattr(existing, "is_connected", lambda: False)():
                 self.log("voice_connecting", guild_id=guild_id, channel=requested_channel_id, transport="direct")
                 connect_timeout = self._voice_operation_timeout_seconds()
+                registered_before_connect = self._registered_voice_client_for_guild(guild_id, guild)
                 try:
                     voice_client = await asyncio.wait_for(
                         channel.connect(self_deaf=True),
                         timeout=connect_timeout,
                     )
+                except asyncio.CancelledError:
+                    # channel.connect pode registrar um VoiceClient antes de
+                    # completar o handshake. O probe cancelado não deve deixar
+                    # essa sessão parcial bloqueando o próximo comando.
+                    partial = self._registered_voice_client_for_guild(guild_id, guild)
+                    if partial is not None and partial is not registered_before_connect and st.player is not partial:
+                        await self._disconnect_voice_client_bounded(
+                            partial, guild_id=guild_id, reason="cancelled_preconnect",
+                        )
+                    raise
                 except (asyncio.TimeoutError, TimeoutError) as exc:
                     recovered = self._registered_voice_client_for_guild(guild_id, guild)
                     if recovered is not None and self._voice_client_is_connected(recovered):

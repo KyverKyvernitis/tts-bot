@@ -50,6 +50,38 @@ def valid_cdn_url(raw: Any) -> str:
     return url
 
 
+def initial_discord_cdn_url(raw: Any, reference: dict[str, int], *, min_remaining_seconds: float = 20.0) -> str:
+    """Use a fresh URL from the selected Discord message without another REST GET.
+
+    The hint is transient. A queued item still keeps only ``attachment_ref`` and
+    fetches a new signed URL when it reaches the front of the queue.
+    """
+    try:
+        url = valid_cdn_url(raw)
+        if len(url) > 4096:
+            return ""
+        parsed = urlsplit(url)
+        path = parsed.path.split("/", 4)
+        if (
+            len(path) != 5
+            or path[1] not in {"attachments", "ephemeral-attachments"}
+            or path[2] != str(reference["channel_id"])
+            or path[3] != str(reference["attachment_id"])
+            or not path[4]
+            or parsed.fragment
+        ):
+            return ""
+        params = parse_qs(parsed.query)
+        if not params.get("hm"):
+            return ""
+        expiry = int(params.get("ex", [""])[0], 16)
+        if expiry - time.time() < min_remaining_seconds:
+            return ""
+        return url
+    except (KeyError, ValueError, TypeError, OverflowError, DiscordAttachmentError):
+        return ""
+
+
 def _positive_duration(value: Any) -> float | None:
     try:
         result = float(value)

@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, patch
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin
 from cogs.musica.runtime_telefone.agente import validade_stream as media
+from cogs.musica.comandos.tocar import FluxoTocar
+from cogs.musica.nucleo.anexo_discord import VideoRespondido
 from cogs.tts.prefix import PrefixControlCommand, dispatch_prefix_control_command
 
 
@@ -35,6 +37,46 @@ def seletor():
 
 
 class AudioDiscordTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reply_forwards_selected_url_and_responds_before_panel(self):
+        events = []
+        channel = types.SimpleNamespace(id=456)
+        original = types.SimpleNamespace(
+            id=789, channel=channel, author=types.SimpleNamespace(display_name="Pessoa"),
+        )
+        attachment = types.SimpleNamespace(id=10, url=URL, filename="voice.ogg", content_type="audio/ogg")
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=123), channel=channel,
+            author=types.SimpleNamespace(id=7, display_name="Pessoa"),
+            message=types.SimpleNamespace(id=1000, guild=types.SimpleNamespace(id=123)),
+        )
+
+        class Router:
+            def music_worker_only_enabled(self): return True
+            def current_music_operation_generation(self, _guild_id): return 0
+
+        class Flow(FluxoTocar):
+            router = Router()
+            async def _voice_channel_from_ctx(self, _ctx):
+                return types.SimpleNamespace(id=9)
+            async def _reply(self, *_args, **_kwargs):
+                events.append("reply")
+            async def _sync_music_agent_panel(self, *_args, **_kwargs):
+                events.append("panel")
+            def _music_agent_play_message(self, *_args):
+                return "tocando"
+
+        async def worker(action, **body):
+            self.assertEqual(action, "enqueue_discord_attachment")
+            self.assertEqual(body["attachment_url_hint"], URL)
+            self.assertNotIn("stream_url", body["track"])
+            events.append("worker")
+            return {"ok": True, "queued": False, "track": {"title": "Áudio", "duration": 5.0,
+                    "webpage_url": "https://discord.com/channels/123/456/789"}, "state": {"status": "playing"}}
+
+        with patch("cogs.musica.comandos.tocar.music_agent_command", new=worker):
+            await Flow()._run_play_discord_attachment(ctx, VideoRespondido("audio", original, attachment))
+        self.assertEqual(events, ["worker", "reply", "panel"])
+
     async def test_short_p_reply_routes_voice_once_to_music(self):
         channel = types.SimpleNamespace(id=456)
         voice = types.SimpleNamespace(id=10, filename="voice-message.ogg", content_type="audio/ogg")
@@ -109,6 +151,15 @@ class AudioDiscordTests(unittest.IsolatedAsyncioTestCase):
         raw["attachments"][0]["content_type"] = "image/png"
         with self.assertRaises(media.DiscordAttachmentError):
             await media.fetch_discord_attachment(client, REF)
+
+    def test_initial_signed_url_matches_attachment_and_has_time_left(self):
+        self.assertEqual(media.initial_discord_cdn_url(URL, REF), URL)
+        self.assertEqual(media.initial_discord_cdn_url(URL.replace("/456/10/", "/456/11/"), REF), "")
+        self.assertEqual(media.initial_discord_cdn_url(URL.replace("/456/10/", "/999/10/"), REF), "")
+        self.assertEqual(media.initial_discord_cdn_url(URL.replace("ex=ffffffff", "ex=1"), REF), "")
+        self.assertEqual(media.initial_discord_cdn_url(URL.replace("&hm=signature", ""), REF), "")
+        self.assertEqual(media.initial_discord_cdn_url(URL.replace("cdn.discordapp.com", "example.com"), REF), "")
+        self.assertEqual(media.initial_discord_cdn_url(URL + "#frag", REF), "")
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg indisponível")
     async def test_ogg_opus_audio_probe_and_decode_using_confirmed_index(self):

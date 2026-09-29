@@ -209,6 +209,184 @@ def test_discord_voice_audio_fast_start_reuses_verified_url(music, monkeypatch):
     run(scenario())
 
 
+def test_discord_signed_hint_skips_rest_and_overlaps_voice_probe(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.client.is_ready = lambda: True
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        url = "https://cdn.discordapp.com/attachments/456/10/audio.ogg?ex=ffffffff&hm=signed"
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        probe_entered, voice_entered, release_probe, release_voice = (asyncio.Event() for _ in range(4))
+
+        async def unexpected_rest(*_args):
+            raise AssertionError("a URL válida já veio da mensagem")
+
+        async def probe(value, **_kwargs):
+            assert value == url
+            probe_entered.set()
+            await release_probe.wait()
+            return {"duration": 5.0, "audio_stream_index": 0, "audio_codec": "opus"}
+
+        async def prepare_voice(_guild_id):
+            voice_entered.set()
+            await release_voice.wait()
+            return types.SimpleNamespace(is_connected=lambda: True), False
+
+        async def start(body):
+            assert release_probe.is_set() and release_voice.is_set()
+            assert body["track"]["stream_url"] == ""
+            st = agent.states[123]
+            st.current = agent._agent_track_from_metadata(body["track"], body=body)
+            st.status = "playing"
+            return {"ok": True, "queued": False, "state": st.public()}
+
+        monkeypatch.setattr(playback, "fetch_discord_attachment", unexpected_rest)
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        agent._ensure_direct_voice_client = prepare_voice
+        agent.cmd_play = start
+        task = asyncio.create_task(agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9, "command_id": "discord-media:123:1000:10",
+            "attachment_url_hint": url, "track": {"title": "Áudio", "attachment_ref": ref},
+        }))
+        await asyncio.wait_for(asyncio.gather(probe_entered.wait(), voice_entered.wait()), 1.0)
+        assert not task.done()  # FFprobe e handshake de voz estão em andamento juntos.
+        release_probe.set()
+        await asyncio.sleep(0)
+        assert not task.done()  # A confirmação espera a conexão de voz.
+        release_voice.set()
+        result = await asyncio.wait_for(task, 1.0)
+        assert result["ok"] and result["track"]["duration"] == 5.0
+        assert "stream_url" not in result["track"] and url not in str(result["state"])
+
+    run(scenario())
+
+
+def test_discord_hint_probe_failure_refreshes_once(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        st = agent.states.setdefault(123, music.GuildMusicState(guild_id=123))
+        st.current = music.AgentTrack(title="tocando", query="x", duration=20)
+        st.status = "playing"
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        stale = "https://cdn.discordapp.com/attachments/456/10/audio.ogg?ex=ffffffff&hm=old"
+        fresh = stale.replace("hm=old", "hm=new")
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        calls = []
+
+        async def fetch(_client, reference):
+            assert reference == ref
+            calls.append("rest")
+            return {"url": fresh}
+
+        async def probe(value, **_kwargs):
+            calls.append(value)
+            if value == stale:
+                raise playback.DiscordAttachmentError("URL antiga")
+            return {"duration": 5.0, "audio_stream_index": 0, "audio_codec": "opus"}
+
+        monkeypatch.setattr(playback, "fetch_discord_attachment", fetch)
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        result = await agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9, "command_id": "discord-media:123:1000:10",
+            "attachment_url_hint": stale, "track": {"title": "Áudio", "attachment_ref": ref},
+        })
+        assert result["ok"] and result["queued"]
+        assert calls == [stale, "rest", fresh]
+        assert st.queue[0].stream_url == ""
+        assert agent._discord_verified_urls["discord-media:123:1000:10"][0] == fresh
+
+    run(scenario())
+
+
+def test_discord_rest_fetch_overlaps_voice_connect(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.client.is_ready = lambda: True
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        url = "https://cdn.discordapp.com/attachments/456/10/audio.ogg?ex=ffffffff&hm=signed"
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        fetching, connecting, release = (asyncio.Event() for _ in range(3))
+
+        async def fetch(_client, _reference):
+            fetching.set()
+            await release.wait()
+            return {"url": url}
+
+        async def prepare_voice(_guild_id):
+            connecting.set()
+            await release.wait()
+            return types.SimpleNamespace(is_connected=lambda: True), False
+
+        async def probe(_url, **_kwargs):
+            return {"duration": 5.0, "audio_stream_index": 0, "audio_codec": "opus"}
+
+        async def start(body):
+            st = agent.states[123]
+            st.current = agent._agent_track_from_metadata(body["track"], body=body)
+            st.status = "playing"
+            return {"ok": True, "queued": False, "state": st.public()}
+
+        monkeypatch.setattr(playback, "fetch_discord_attachment", fetch)
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        agent._ensure_direct_voice_client = prepare_voice
+        agent.cmd_play = start
+        task = asyncio.create_task(agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9, "command_id": "discord-media:123:1000:10",
+            "attachment_url_hint": url.replace("ex=ffffffff", "ex=1"),
+            "track": {"title": "Áudio", "attachment_ref": ref},
+        }))
+        await asyncio.wait_for(asyncio.gather(fetching.wait(), connecting.wait()), 1.0)
+        assert not task.done()
+        release.set()
+        assert (await asyncio.wait_for(task, 1.0))["ok"]
+
+    run(scenario())
+
+
+def test_discord_stop_during_probe_discards_speculative_voice(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.client.is_ready = lambda: True
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        url = "https://cdn.discordapp.com/attachments/456/10/audio.ogg?ex=ffffffff&hm=signed"
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        probing, release_probe, connected = (asyncio.Event() for _ in range(3))
+
+        class Voice:
+            disconnected = False
+            def is_connected(self):
+                return not self.disconnected
+            async def disconnect(self, force=False):
+                self.disconnected = True
+
+        voice = Voice()
+
+        async def prepare_voice(_guild_id):
+            connected.set()
+            return voice, True
+
+        async def probe(_url, **_kwargs):
+            probing.set()
+            await release_probe.wait()
+            return {"duration": 5.0, "audio_stream_index": 0, "audio_codec": "opus"}
+
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        agent._ensure_direct_voice_client = prepare_voice
+        task = asyncio.create_task(agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9, "command_id": "discord-media:123:1000:10",
+            "attachment_url_hint": url, "track": {"title": "Áudio", "attachment_ref": ref},
+        }))
+        await asyncio.wait_for(asyncio.gather(probing.wait(), connected.wait()), 1.0)
+        await agent.cmd_stop({"guild_id": 123})
+        release_probe.set()
+        result = await asyncio.wait_for(task, 1.0)
+        assert result["cancelled"] and not result["ok"]
+        assert voice.disconnected and not agent.states[123].queue
+        assert not agent._discord_verified_urls
+
+    run(scenario())
+
+
 def test_discord_media_ack_is_cancelled_if_stopped_during_start(music, monkeypatch):
     async def scenario():
         agent = music.MusicAgent()
@@ -2218,6 +2396,55 @@ def test_voice_connect_singleflight_serializes_concurrent_callers(music):
         assert sorted([result1[1], result2[1]]) == [False, True]
         assert agent._voice_connect_locks == {}
         assert agent._voice_connect_lock_users == {}
+
+    run(scenario())
+
+
+def test_cancelled_voice_connect_cleans_partial_registration(music):
+    class Voice:
+        def __init__(self, guild, channel):
+            self.guild, self.channel = guild, channel
+            self.disconnected = False
+        def is_connected(self):
+            return not self.disconnected
+        async def disconnect(self, force=False):
+            self.disconnected = True
+            self.guild.voice_client = None
+
+    class Guild:
+        id = 1905
+        voice_client = None
+        def __init__(self, channel):
+            self.channel = channel
+        def get_channel(self, channel_id):
+            return self.channel if channel_id == self.channel.id else None
+
+    class Channel:
+        id = 1906
+        def __init__(self):
+            self.entered = asyncio.Event()
+            self.guild = None
+        async def connect(self, self_deaf=True):
+            self.guild.voice_client = Voice(self.guild, self)
+            self.entered.set()
+            await asyncio.Event().wait()
+
+    async def scenario():
+        agent = music.MusicAgent()
+        channel = Channel()
+        guild = Guild(channel)
+        channel.guild = guild
+        agent.states[guild.id] = music.GuildMusicState(guild_id=guild.id, voice_channel_id=channel.id)
+        agent.client.get_guild = lambda value: guild if value == guild.id else None
+        agent.client.get_channel = lambda value: channel if value == channel.id else None
+        task = asyncio.create_task(agent._ensure_direct_voice_client(guild.id))
+        await asyncio.wait_for(channel.entered.wait(), 1.0)
+        partial = guild.voice_client
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert partial.disconnected and guild.voice_client is None
+        assert agent._voice_connect_locks == {}
 
     run(scenario())
 

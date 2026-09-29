@@ -83,6 +83,7 @@ class FluxoTocar:
         try:
             # music_agent_command já escolhe/verifica o worker. Uma checagem
             # adicional aqui duplicava a consulta de saúde antes do probe.
+            command_started = time.monotonic()
             result = await music_agent_command(
                 "enqueue_discord_attachment",
                 guild_id=ctx.guild.id,
@@ -93,14 +94,20 @@ class FluxoTocar:
                 requester_id=ctx.author.id,
                 requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
                 command_id=request_id,
+                attachment_url_hint=str(getattr(selected.anexo, "url", "") or ""),
                 timeout_seconds=60.0,
             )
+            worker_elapsed_ms = (time.monotonic() - command_started) * 1000.0
             if generation != self.router.current_music_operation_generation(ctx.guild.id) or result.get("cancelled"):
                 return
             payload = result.get("track") if isinstance(result.get("track"), dict) else {}
             track = faixa_do_payload(payload)
             if track is None or track.duration is None:
                 raise RuntimeError("o anexo não retornou metadados de áudio confirmados")
+            await self._reply(ctx, self._music_agent_play_message(track, result), allowed_mentions=discord.AllowedMentions.none())
+            logger.info("[music/discord] play confirmado | guild=%s attachment=%s worker_ms=%.1f total_ms=%.1f queued=%s",
+                        ctx.guild.id, attachment_id, worker_elapsed_ms,
+                        (time.monotonic() - command_started) * 1000.0, bool(result.get("queued")))
             try:
                 await self._sync_music_agent_panel(
                     ctx.guild.id, track, result, voice_channel_id=voice.id,
@@ -110,7 +117,6 @@ class FluxoTocar:
                 # O ACK do worker já confirmou a fila. A falha de renderização
                 # não pode induzir o usuário a repetir `_play` e criar duplicata.
                 logger.warning("[music/discord] painel não sincronizado | guild=%s attachment=%s", ctx.guild.id, attachment_id, exc_info=True)
-            await self._reply(ctx, self._music_agent_play_message(track, result), allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             if generation != self.router.current_music_operation_generation(ctx.guild.id):
                 return
@@ -874,14 +880,6 @@ class FluxoTocar:
                     # da janela em background sem competir com o start inicial.
                     if schedule_playlist_refill_from_result(self.router, ctx.guild.id, result):
                         logger.info("[music/playlist] refill start-first agendado | guild=%s", ctx.guild.id)
-                await self._sync_music_agent_panel(
-                    ctx.guild.id,
-                    track,
-                    result,
-                    voice_channel_id=voice_channel.id,
-                    text_channel_id=ctx.channel.id,
-                    queued=bool(result.get("queued")),
-                )
                 if is_multi:
                     added = int(result.get("added") or len(batch.tracks))
                     title = (batch.playlist_title or "playlist").strip()
@@ -923,6 +921,17 @@ class FluxoTocar:
                 if msg is not None and not result.get("queued") and not confirmed and status not in {"failed", "error"}:
                     finish_loading_reaction = False
                     asyncio.create_task(self._watch_music_agent_message(msg, ctx.guild.id, track, voice_channel_id=voice_channel.id, text_channel_id=ctx.channel.id, loading_reaction=loading_reaction))
+                try:
+                    await self._sync_music_agent_panel(
+                        ctx.guild.id,
+                        track,
+                        result,
+                        voice_channel_id=voice_channel.id,
+                        text_channel_id=ctx.channel.id,
+                        queued=bool(result.get("queued")),
+                    )
+                except Exception:
+                    logger.warning("[music/agent] painel não sincronizado após play | guild=%s", ctx.guild.id, exc_info=True)
                 logger.info("[music/timing] play enviado | guild=%s elapsed_ms=%.1f queued=%s confirmed=%s", ctx.guild.id, (time.monotonic() - command_started) * 1000.0, bool(result.get("queued")), confirmed)
                 return
 
