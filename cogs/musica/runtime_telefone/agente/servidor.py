@@ -91,7 +91,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.70"
+AGENT_VERSION = "0.3.71"
 STARTED_AT = time.time()
 
 
@@ -246,6 +246,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.pcm_buffer_enabled = truthy(os.getenv("MUSIC_AGENT_PCM_BUFFER_ENABLED"), True)
         self.pcm_buffer_max_frames = max(10, min(150, env_int("MUSIC_AGENT_PCM_BUFFER_MAX_FRAMES", 75)))
         self.pcm_buffer_stall_seconds = max(2.0, min(30.0, env_float("MUSIC_AGENT_PCM_BUFFER_STALL_SECONDS", 12.0)))
+        self.initial_audio_prepare_enabled = truthy(os.getenv("MUSIC_AGENT_INITIAL_AUDIO_PREPARE_ENABLED"), True)
+        self._initial_audio: dict[int, Any] = {}
         self.next_audio_prepare_enabled = truthy(os.getenv("MUSIC_AGENT_NEXT_AUDIO_PREPARE_ENABLED"), True)
         self.next_audio_prepare_lead_seconds = max(2.0, min(30.0, env_float("MUSIC_AGENT_NEXT_AUDIO_PREPARE_LEAD_SECONDS", 12.0)))
         self.next_audio_prepare_frames = max(1, min(self.pcm_buffer_max_frames, env_int("MUSIC_AGENT_NEXT_AUDIO_PREPARE_FRAMES", 15)))
@@ -1076,6 +1078,8 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             await cancel_tasks(background)
             for guild_id in list(self._prepared_audio):
                 self._cancel_audio_preparation(guild_id)
+            for guild_id in list(self._initial_audio):
+                self._cancel_initial_audio(guild_id)
             self._audio_prepare_tasks.clear()
             self._audio_prepare_keys.clear()
 

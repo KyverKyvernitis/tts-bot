@@ -88,10 +88,30 @@ class VideoMediaTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(media, "valid_cdn_url", side_effect=lambda value: value):
                 probe = await media.probe_discord_audio(audio_path)
                 self.assertEqual(probe["audio_stream_index"], 1)
+                self.assertEqual(probe["first_audio_stream_index"], 1)
                 self.assertEqual(probe["audio_codec"], "aac")
                 self.assertAlmostEqual(probe["duration"], 1.0, delta=0.1)
                 with self.assertRaisesRegex(media.DiscordAttachmentError, "não contém uma faixa"):
                     await media.probe_discord_audio(silent_path)
+
+    async def test_probe_distinguishes_first_audio_from_default_audio(self):
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("FFmpeg ausente")
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = str(Path(tmp) / "duas-faixas.mp4")
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=16x16:r=10:d=1",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
+                "-map", "0:v:0", "-map", "1:a:0", "-map", "2:a:0",
+                "-disposition:a:0", "0", "-disposition:a:1", "default",
+                "-c:v", "mpeg4", "-c:a", "aac", "-y", sample,
+            ], check=True)
+            with patch.object(media, "valid_cdn_url", side_effect=lambda value: value):
+                probe = await media.probe_discord_audio(sample)
+            self.assertEqual(probe["first_audio_stream_index"], 1)
+            self.assertEqual(probe["audio_stream_index"], 2)
 
     def test_signed_discord_url_expires_before_play(self):
         now = media.time.time()

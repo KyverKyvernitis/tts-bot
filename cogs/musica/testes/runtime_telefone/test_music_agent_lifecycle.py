@@ -327,6 +327,210 @@ def test_discord_signed_hint_skips_rest_and_overlaps_voice_probe(music, monkeypa
     run(scenario())
 
 
+@pytest.mark.parametrize("selected_index,sample_rate,expected_sources", [
+    (1, 48000, 1),  # Vídeo com stream 0 de vídeo e stream 1 de áudio.
+    (2, 48000, 2),  # O áudio default não é a primeira faixa de áudio.
+    (1, 44100, 2),  # O filtro de qualidade depende da taxa aferida.
+])
+def test_discord_initial_pcm_overlaps_probe_and_preserves_selected_stream(
+    music, monkeypatch, selected_index, sample_rate, expected_sources,
+):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.client.is_ready = lambda: True
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        url = "https://cdn.discordapp.com/attachments/456/10/video.mp4?ex=ffffffff&hm=signed"
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        buffer = sys.modules["cogs.musica.runtime_telefone.agente.buffer_pcm"]
+        probe_entered, voice_entered, release = (asyncio.Event() for _ in range(3))
+        sources = []
+
+        class PCM:
+            cleaned = False
+            def read(self): return b"\x01" * 3840
+            def cleanup(self): self.cleaned = True
+
+        def create(track, **options):
+            raw = PCM()
+            source = buffer.BufferedPCMSource(raw, max_frames=25)
+            sources.append((track, options, raw, source))
+            return source
+
+        async def probe(value, **_kwargs):
+            assert value == url
+            probe_entered.set()
+            await release.wait()
+            return {"duration": 5.0, "first_audio_stream_index": 1,
+                    "audio_stream_index": selected_index, "audio_codec": "aac",
+                    "audio_sample_rate": sample_rate}
+
+        async def connect(_guild_id):
+            voice_entered.set()
+            await release.wait()
+            return types.SimpleNamespace(is_connected=lambda: True), False
+
+        async def start(body):
+            track = await agent.resolve_track(body["query"], track_meta=body["track"], body=body)
+            st = agent.states[123]
+            st.current = track
+            st.playback_token += 1
+            played = await agent._prepare_current_pcm(123, track, st.playback_token)
+            assert played is sources[-1][3]
+            assert played.max_frames == agent.pcm_buffer_max_frames
+            played.cleanup()
+            st.status = "playing"
+            return {"ok": True, "queued": False, "state": st.public()}
+
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        agent._create_pcm_source = create
+        agent._ensure_direct_voice_client = connect
+        agent.cmd_play = start
+        task = asyncio.create_task(agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9,
+            "command_id": "discord-media:123:1000:10", "attachment_url_hint": url,
+            "track": {"title": "Vídeo", "attachment_ref": ref},
+        }))
+        await asyncio.wait_for(asyncio.gather(probe_entered.wait(), voice_entered.wait()), 1)
+        assert len(sources) == 1 and sources[0][1]["first_audio_stream"] is True
+        assert not task.done()
+        release.set()
+        result = await asyncio.wait_for(task, 2)
+        assert result["ok"] and result["track"]["audio_stream_index"] == selected_index
+        assert len(sources) == expected_sources and not agent._initial_audio
+        assert sources[0][2].cleaned
+        if expected_sources == 2:
+            assert sources[1][0].audio_stream_index == selected_index
+            assert sources[1][1]["first_audio_stream"] is False
+
+    run(scenario())
+
+
+def test_discord_initial_pcm_cancelled_while_probe_pending(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        agent.client.is_ready = lambda: True
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        url = "https://cdn.discordapp.com/attachments/456/10/video.mp4?ex=ffffffff&hm=signed"
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        buffer = sys.modules["cogs.musica.runtime_telefone.agente.buffer_pcm"]
+        probe_entered, release = asyncio.Event(), asyncio.Event()
+        sources = []
+
+        class PCM:
+            cleaned = False
+            def read(self): return b"\x01" * 3840
+            def cleanup(self): self.cleaned = True
+
+        def create(_track, **_kw):
+            raw = PCM()
+            sources.append(raw)
+            return buffer.BufferedPCMSource(raw, max_frames=25)
+
+        async def probe(_url, **_kwargs):
+            probe_entered.set()
+            await release.wait()
+            return {"duration": 5.0, "first_audio_stream_index": 1,
+                    "audio_stream_index": 1, "audio_sample_rate": 48000}
+
+        async def connect(_guild_id):
+            await release.wait()
+            return types.SimpleNamespace(is_connected=lambda: True), False
+
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        agent._create_pcm_source = create
+        agent._ensure_direct_voice_client = connect
+        task = asyncio.create_task(agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9,
+            "command_id": "discord-media:123:1000:10", "attachment_url_hint": url,
+            "track": {"title": "Vídeo", "attachment_ref": ref},
+        }))
+        await asyncio.wait_for(probe_entered.wait(), 1)
+        assert len(sources) == 1 and not sources[0].cleaned
+        await agent.cmd_stop({"guild_id": 123})
+        assert sources[0].cleaned and not agent._initial_audio
+        release.set()
+        assert (await asyncio.wait_for(task, 2))["cancelled"]
+
+    run(scenario())
+
+
+def test_resolved_stream_warms_pcm_during_voice_connect(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        buffer = sys.modules["cogs.musica.runtime_telefone.agente.buffer_pcm"]
+        track = music.AgentTrack(title="URL pronta", stream_url="https://example.org/audio", audio_sample_rate=48000)
+        st = agent.states.setdefault(123, music.GuildMusicState(guild_id=123, voice_channel_id=9, queue=[track]))
+        connecting, release = asyncio.Event(), asyncio.Event()
+        created = []
+
+        class PCM:
+            def read(self): return b"\x01" * 3840
+            def cleanup(self): pass
+
+        def create(*_args, **_kw):
+            source = buffer.BufferedPCMSource(PCM(), max_frames=25)
+            created.append(source)
+            return source
+
+        async def connect(_guild_id):
+            connecting.set()
+            await release.wait()
+            return types.SimpleNamespace(is_connected=lambda: True), False
+
+        async def play(guild_id, selected, *, prepared_voice=None):
+            assert prepared_voice is not None
+            st.playback_token += 1
+            source = await agent._prepare_current_pcm(guild_id, selected, st.playback_token)
+            assert source is created[0]
+            assert source.max_frames == agent.pcm_buffer_max_frames
+            source.cleanup()
+            st.status = "playing"
+
+        agent._create_pcm_source = create
+        agent._ensure_direct_voice_client = connect
+        agent._play_direct_voice = play
+        task = asyncio.create_task(agent._play_next(123))
+        await asyncio.wait_for(connecting.wait(), 1)
+        assert len(created) == 1 and 123 in agent._initial_audio and not task.done()
+        release.set()
+        await asyncio.wait_for(task, 2)
+        assert st.status == "playing" and not agent._initial_audio
+
+    run(scenario())
+
+
+def test_initial_pcm_failure_retries_confirmed_track_and_limits_decoders(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        buffer = sys.modules["cogs.musica.runtime_telefone.agente.buffer_pcm"]
+        track = music.AgentTrack(stream_url="https://example.org/audio", audio_sample_rate=48000)
+        other = music.AgentTrack(stream_url="https://example.org/other", audio_sample_rate=48000)
+        st = agent.states.setdefault(123, music.GuildMusicState(guild_id=123, voice_channel_id=9, current=track))
+        agent.states[124] = music.GuildMusicState(guild_id=124, voice_channel_id=10, current=other)
+        created = []
+
+        class PCM:
+            def __init__(self, fails): self.fails, self.cleaned = fails, False
+            def read(self): return b"" if self.fails else b"\x01" * 3840
+            def cleanup(self): self.cleaned = True
+
+        def create(*_args, **_kw):
+            raw = PCM(fails=not created)
+            created.append(raw)
+            return buffer.BufferedPCMSource(raw, max_frames=25)
+
+        agent._create_pcm_source = create
+        assert agent._begin_initial_audio(123, track)
+        assert not agent._begin_initial_audio(124, other)
+        st.playback_token += 1
+        source = await agent._prepare_current_pcm(123, track, st.playback_token)
+        assert len(created) == 2 and created[0].cleaned
+        source.cleanup()
+        assert created[1].cleaned and not agent._initial_audio
+
+    run(scenario())
+
+
 def test_discord_hint_probe_failure_refreshes_once(music, monkeypatch):
     async def scenario():
         agent = music.MusicAgent()

@@ -188,6 +188,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         pending_pcm = self._starting_pcm.pop(st.guild_id, None)
         if pending_pcm is not None:
             pending_pcm.cleanup()
+        self._cancel_initial_audio(st.guild_id)
         st.playback_token += 1
         keep_audio = st.queue[0].queue_item_id if st.queue and reason in {"skip", "direct_after", "queue_play_now"} else ""
         self._cancel_audio_preparation(st.guild_id, keep_item_id=keep_audio)
@@ -535,6 +536,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 url_elapsed_ms = round((time.monotonic() - prepare_started) * 1000.0, 1)
                 probe_started = time.monotonic()
                 url_refreshed = False
+                prepare_immediately = bool(voice_prepare_task is not None and not st.queue)
                 probe = (
                     discord_voice_audio_hint(meta, attachment, from_message=bool(url_hint))
                     if getattr(self, "discord_voice_metadata_fast_path", True) and self.direct_pcm_volume_enabled
@@ -542,6 +544,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 )
                 probe_mode = "voice_metadata" if probe is not None else "ffprobe"
                 if probe is None:
+                    if prepare_immediately:
+                        self._begin_initial_audio(guild_id, AgentTrack(
+                            queue_item_id=request_id, stream_url=attachment["url"],
+                            attachment_ref=ref,
+                        ), speculative_first_audio=True)
                     try:
                         async with self._discord_probe_semaphore:
                             probe = await probe_discord_audio(
@@ -555,12 +562,33 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                         refreshed = await fetch_discord_attachment(self.client, ref)
                         if refreshed["url"] == url_hint:
                             raise
+                        self._cancel_initial_audio(guild_id, item_id=request_id)
                         attachment = refreshed
                         url_refreshed = True
+                        if prepare_immediately:
+                            self._begin_initial_audio(guild_id, AgentTrack(
+                                queue_item_id=request_id, stream_url=attachment["url"],
+                                attachment_ref=ref,
+                            ), speculative_first_audio=True)
                         async with self._discord_probe_semaphore:
                             probe = await probe_discord_audio(
                                 attachment["url"], executable=getattr(self, "ffprobe_executable", "ffprobe"), timeout=10.0,
                             )
+                    self._confirm_initial_audio(
+                        guild_id, item_id=request_id, stream_url=attachment["url"],
+                        first_audio_stream_index=probe.get("first_audio_stream_index"),
+                        audio_stream_index=probe["audio_stream_index"],
+                        audio_sample_rate=int(probe.get("audio_sample_rate") or 0),
+                    )
+                    probe.pop("first_audio_stream_index", None)
+                if prepare_immediately and guild_id not in self._initial_audio:
+                    # Metadados de mensagem de voz já dão índice e taxa; mídias
+                    # sem decoder aproveitável ainda aquecem durante o handshake.
+                    self._begin_initial_audio(guild_id, AgentTrack(
+                        queue_item_id=request_id, stream_url=attachment["url"],
+                        attachment_ref=ref, audio_stream_index=int(probe["audio_stream_index"]),
+                        audio_sample_rate=int(probe.get("audio_sample_rate") or 0),
+                    ))
                 self.log(
                     "discord_media_verified", guild_id=guild_id,
                     probe_mode=probe_mode,
@@ -570,9 +598,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                     voice_parallel=bool(voice_prepare_task),
                 )
             except BaseException:
+                self._cancel_initial_audio(guild_id, item_id=request_id)
                 await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                 raise
             if self.states.get(guild_id) is not st or st.queue_reset_generation != queue_generation:
+                self._cancel_initial_audio(guild_id, item_id=request_id)
                 await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                 return {"ok": False, "cancelled": True, "error": "pedido cancelado durante a verificação"}
             hint = meta.get("attachment_duration_hint")
@@ -630,6 +660,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 self._discord_verified_urls.pop(request_id, None)
                 await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                 raise
+            finally:
+                self._cancel_initial_audio(guild_id, item_id=request_id)
             current_is_requested = bool(st.current and st.current.queue_item_id == request_id)
             if (self.states.get(guild_id) is not st or
                     (st.queue_reset_generation != queue_generation and not current_is_requested)):
@@ -1935,19 +1967,20 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 self._invalidate_track_stream_cache(st.current)
                 st.current.stream_url = ""
                 st.current.transport_hint = "metadata-lazy"
-            if st.current and not st.current.stream_url:
-                # A conexão do Discord e o yt-dlp são independentes. Faça os
-                # dois em paralelo para que o tempo de handshake de voz não
-                # seja somado ao tempo de resolução da faixa.
-                if self.direct_audio_enabled and st.voice_channel_id:
-                    failure_phase = "voice_preconnect"
-                    voice_prepare_task = asyncio.create_task(
-                        asyncio.wait_for(
-                            self._ensure_direct_voice_client(guild_id),
-                            timeout=max(5.0, self.prepare_timeout),
-                        )
+            if self.direct_audio_enabled and st.voice_channel_id:
+                # Também para URLs já resolvidas: o decoder pode receber os
+                # primeiros frames enquanto o Discord termina o handshake.
+                failure_phase = "voice_preconnect"
+                voice_prepare_task = asyncio.create_task(
+                    asyncio.wait_for(
+                        self._ensure_direct_voice_client(guild_id),
+                        timeout=max(5.0, self.prepare_timeout),
                     )
-                    self.log("voice_preconnect_started", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
+                )
+                self.log("voice_preconnect_started", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
+            if st.current and not st.current.stream_url:
+                # A conexão de voz já foi iniciada acima em paralelo à
+                # resolução, inclusive quando o stream estava em cache.
                 failure_phase = "resolve"
                 started = time.time()
                 meta = st.current.public()
@@ -1991,6 +2024,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 return
             if not self._should_use_direct_voice(st.current):
                 raise RuntimeError("playback direto do Music Agent indisponível para a faixa resolvida")
+            if voice_prepare_task is not None and not voice_prepare_task.done():
+                self._begin_initial_audio(guild_id, st.current)
             if voice_prepare_task is not None:
                 failure_phase = "voice_preconnect"
                 prepared_voice = await voice_prepare_task
@@ -2005,6 +2040,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 else self._play_direct_voice(guild_id, st.current)
             )
             await asyncio.wait_for(play_coro, timeout=max(5.0, self.prepare_timeout))
+        except asyncio.CancelledError:
+            await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
+            raise
         except Exception as exc:
             await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
             if st.current is not current_ref:
@@ -2107,6 +2145,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 await self._play_next(guild_id, preserve_current_to_history=False)
             else:
                 self._finish_mixer_when_idle(st)
+        finally:
+            self._cancel_initial_audio(guild_id, item_id=next_track.queue_item_id)
 
     @staticmethod
     def _finish_mixer_when_idle(st: GuildMusicState) -> None:

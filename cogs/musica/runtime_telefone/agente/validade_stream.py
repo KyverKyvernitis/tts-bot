@@ -181,11 +181,13 @@ async def probe_discord_audio(url: str, *, executable: str = "ffprobe", timeout:
         streams = payload.get("streams") if isinstance(payload, dict) else None
         audio_streams = [item for item in streams or () if isinstance(item, dict) and item.get("codec_type") == "audio"
                          and str(item.get("codec_name") or "").lower() not in {"", "none"}]
+        first_audio_stream_index = int(audio_streams[0]["index"]) if audio_streams else None
         audio = next((item for item in audio_streams if (item.get("disposition") or {}).get("default")), None)
         if audio is None:
             audio = audio_streams[0] if audio_streams else None
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, KeyError):
         audio = None
+        first_audio_stream_index = None
         payload = {}
     if not isinstance(audio, dict):
         raise DiscordAttachmentError("Esta mídia não contém uma faixa de áudio reproduzível.")
@@ -206,6 +208,7 @@ async def probe_discord_audio(url: str, *, executable: str = "ffprobe", timeout:
         bitrate, sample_rate, channels = 0, 0, 0
     return {
         "duration": duration,
+        "first_audio_stream_index": first_audio_stream_index,
         "audio_stream_index": stream_index,
         "audio_codec": str(audio["codec_name"])[:40],
         "audio_abr": bitrate,

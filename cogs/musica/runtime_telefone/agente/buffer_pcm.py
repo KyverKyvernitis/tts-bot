@@ -126,6 +126,12 @@ class BufferedPCMSource(discord.AudioSource):
                 "decoder_deadline_overruns": self._decoder_late_reads,
             }
 
+    def set_max_frames(self, max_frames: int) -> None:
+        """Aumenta o buffer após o aquecimento, sem reiniciar o decoder."""
+        with self._condition:
+            self.max_frames = max(1, min(150, int(max_frames)))
+            self._condition.notify_all()
+
     def cleanup(self) -> None:
         with self._condition:
             if self._closed:
