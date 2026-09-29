@@ -143,6 +143,8 @@ def test_mensagem_do_arquivo_fornece_emoji_e_exige_autoria():
     assert _archive_metadata(raw, key, 5, ref)["audio_stream_index"] == 0
     raw["embeds"][0]["url"] = _archive_url("https://www.youtube.com/watch?v=abc", key, version=4)
     assert _archive_metadata(raw, key, 5, {**ref, "forum_id": 7})["duration"] == 235.0
+    raw["embeds"][0]["url"] = _archive_url("https://www.youtube.com/watch?v=abc", key, version=5)
+    assert _archive_metadata(raw, key, 5, {**ref, "forum_id": 7})["duration"] == 235.0
     raw["embeds"][0]["thumbnail"] = {"url": "attachment://capa.jpg"}
     raw["attachments"].append({"id": "7", "filename": "capa.jpg",
                                  "url": "https://cdn.discordapp.com/attachments/2/7/capa.jpg?ex=ffff&hm=abc"})
@@ -327,6 +329,67 @@ async def test_capa_tenta_outro_link_e_fallback_youtube(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_capa_le_todos_os_blocos_e_rejeita_jpeg_incompleto(tmp_path, monkeypatch):
+    aiohttp = ArchiveMixin._archive_cover.__globals__["aiohttp"]
+    chunks = [b"\xff\xd8\xffprimeiro", b"restante", b"\xff\xd9"]
+    converted = []
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "image/jpeg"}
+
+        def __init__(self):
+            self.content = self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def iter_chunked(self, size):
+            assert size > 0
+            for chunk in chunks:
+                yield chunk
+
+        async def read(self, size):
+            raise AssertionError("read(n) poderia entregar só o primeiro bloco")
+
+    class Session:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def get(self, url, **kwargs):
+            assert url.startswith("https://i.ytimg.com/")
+            return Response()
+
+    class Worker(ArchiveMixin):
+        async def _archive_jpeg(self, source, output):
+            converted.append(source.read_bytes())
+            return output
+
+    monkeypatch.setattr(aiohttp, "ClientSession", Session)
+    worker = Worker()
+    url = "https://i.ytimg.com/vi/abc/hqdefault.jpg"
+    assert await worker._archive_cover(url, tmp_path) == tmp_path / "capa.jpg"
+    assert converted == [b"".join(chunks)]
+
+    chunks.pop()  # origem cortada no meio do JPEG: FFmpeg a pintaria de verde
+    assert await worker._archive_cover(url, tmp_path) is None
+    assert len(converted) == 1
+
+    chunks[:] = [b"\xff\xd8\xff", b"x" * (2 * 1024 * 1024), b"\xff\xd9"]
+    assert await worker._archive_cover(url, tmp_path) is None
+    assert len(converted) == 1
+
+
+@pytest.mark.asyncio
 async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monkeypatch):
     from pathlib import Path
     from types import SimpleNamespace
@@ -417,7 +480,7 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
         new_message.embeds = [embed]
         new_message.attachments = [attachment if hasattr(attachment, "id") else SimpleNamespace(
             id=10, filename=attachment.filename,
-            url="https://cdn.discordapp.com/attachments/40/10/capa-v4.jpg?ex=ffff&hm=abc")
+            url="https://cdn.discordapp.com/attachments/40/10/capa-v5.jpg?ex=ffff&hm=abc")
             for attachment in attachments]
         return new_message
 
@@ -470,7 +533,7 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
                       "webpage_url": original, "thumbnail": "https://i.ytimg.com/vi/abc/hqdefault.jpg"}}
     worker = Worker()
     result = await worker._archive_one(item)
-    assert result["status"] == "done" and result["presentation"] == 4
+    assert result["status"] == "done" and result["presentation"] == 5
     assert result["reference"]["forum_id"] == 20
     assert result["reference"]["channel_id"] == 40
     assert result["reference"]["message_id"] == 30
@@ -480,19 +543,29 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
     assert new_message.embeds[0].thumbnail.url == "https://cdn.discordapp.com/attachments/40/8/capa.jpg"
     assert edits[0][1] == [8, 9]
     assert message.attachments[0].id == 4  # migração só apaga depois de gravar o novo índice
-    assert (await worker._archive_existing(forum, {**item, "retry": True})) == (new_message, 4)
+    assert (await worker._archive_existing(forum, {**item, "retry": True})) == (new_message, 5)
     assert (await worker._archive_one({**item, "retry": True}))["reference"] == result["reference"]
     assert len(created) == 1
     assert len(edits) == 1
 
-    # O índice v3 provoca reparo no mesmo post, sem baixar nem reenviar o áudio.
-    new_message.embeds[0].url = _archive_url(original, key, version=3)
+    # O índice v4 provoca reparo no mesmo post, sem baixar nem reenviar o áudio.
+    new_message.embeds[0].url = _archive_url(original, key, version=4)
     new_message.embeds[0].set_thumbnail(url="attachment://capa.jpg")
     repaired = await worker._archive_one({**item, "existing_ref": result["reference"]})
-    assert repaired["reference"] == result["reference"] and repaired["presentation"] == 4
+    assert repaired["reference"] == result["reference"] and repaired["presentation"] == 5
     assert len(created) == 1 and len(edits) == 3
-    assert edits[1][1] == [9, "capa-v4.jpg"] and edits[2][1] == [9, 10]
-    assert new_message.embeds[0].thumbnail.url == "https://cdn.discordapp.com/attachments/40/10/capa-v4.jpg"
+    assert edits[1][1] == [9, "capa-v5.jpg"] and edits[2][1] == [9, 10]
+    assert new_message.embeds[0].thumbnail.url == "https://cdn.discordapp.com/attachments/40/10/capa-v5.jpg"
+
+    # Sem origem válida, a imagem antiga (possivelmente verde) não deve voltar.
+    async def missing_cover(url, folder):
+        return None
+
+    worker._archive_cover = missing_cover
+    new_message.embeds[0].url = _archive_url(original, key, version=4)
+    delayed = await worker._archive_one({**item, "existing_ref": result["reference"]})
+    assert delayed["presentation"] == 4 and delayed["reference"] == result["reference"]
+    assert len(edits) == 3
 
 
 def test_troca_para_forum_preserva_audio_ate_novo_post_validado(tmp_path, monkeypatch):
@@ -518,6 +591,11 @@ def test_troca_para_forum_preserva_audio_ate_novo_post_validado(tmp_path, monkey
         db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE chave=?", (key,))
     assert arquivo.pending()["reference"] == new
     arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 4})
+    assert arquivo.counts()["refresh"] == 1
+    with arquivo._db() as db:
+        db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE chave=?", (key,))
+    assert arquivo.pending()["reference"] == new
+    arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 5})
     assert arquivo.counts()["refresh"] == 0
     assert arquivo.cleanup_pending()["previous"] == old
     arquivo.mark_cleanup(key, old, done=True)
