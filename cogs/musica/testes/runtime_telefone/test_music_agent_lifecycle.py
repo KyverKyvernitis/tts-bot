@@ -1,5 +1,7 @@
 import asyncio
 import importlib.util
+import shlex
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -1013,6 +1015,29 @@ def test_music_agent_supervisor_runs_agent_from_active_release():
     assert 'AGENT_FILE="$RUNTIME_DIR/$AGENT_RELATIVE"' in source
     assert 'cd "$RUNTIME_DIR" || exit 1' in source
     assert 'exec "$PYTHON_BIN" -m "$AGENT_MODULE"' in source
+
+
+def test_music_agent_supervisor_detects_old_release_with_same_version(tmp_path):
+    source = (ROOT / "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh").read_text(encoding="utf-8")
+    function = "running_release_mismatch() {" + source.split("running_release_mismatch() {", 1)[1].split("\n}", 1)[0] + "\n}"
+    old = tmp_path / "old"
+    current = tmp_path / "current"
+    old.mkdir()
+    current.mkdir()
+    proc_root = tmp_path / "proc"
+    proc = proc_root / "123"
+    proc.mkdir(parents=True)
+    (proc / "cmdline").write_bytes(b"python\0-m\0cogs.musica.runtime_telefone.agente.servidor\0")
+    (proc / "cwd").symlink_to(old)
+    pid_file = tmp_path / "agent.pid"
+    pid_file.write_text("123")
+    common = (f"PID_FILE={shlex.quote(str(pid_file))}\n"
+              f"MUSIC_AGENT_PROC_ROOT={shlex.quote(str(proc_root))}\n"
+              "AGENT_MODULE=cogs.musica.runtime_telefone.agente.servidor\n")
+    for release, should_restart in ((old, False), (current, True)):
+        shell = common + f"RUNTIME_DIR={shlex.quote(str(release))}\n" + function + "\nrunning_release_mismatch\n"
+        actual = subprocess.run(["bash", "-c", shell], check=False, capture_output=True)
+        assert actual.returncode == (0 if should_restart else 1), actual.stderr
 
 
 def test_phone_worker_autostart_prefers_active_release_music_supervisor():

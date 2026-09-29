@@ -3,12 +3,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 
-from .agente_telefone.comandos import music_agent_command
+from .agente_telefone.comandos import music_agent_command, music_agent_status
 from .busca import arquivo
 
 log = logging.getLogger(__name__)
+_MIN_COVER_AGENT_VERSION = (0, 3, 75)
+
+
+def _archive_agent_ready(payload: dict) -> bool:
+    if not payload.get("available"):
+        return False
+    version = str(payload.get("version") or "")
+    if not re.fullmatch(r"\d+(?:\.\d+){2,3}", version):
+        return False
+    return tuple(int(part) for part in version.split(".")[:3]) >= _MIN_COVER_AGENT_VERSION
 
 
 @dataclass
@@ -116,6 +127,13 @@ class ArchiveCoordinator:
                     self._wake.clear()
                     continue
                 guild_id, channel_id = arquivo.channel()
+                # A release do bot pode entrar em produção antes do Android.
+                # Evite publicar v5 durante a troca e adiar a correção por 1 h.
+                agent = await music_agent_status(guild_id=guild_id, timeout_seconds=3.0)
+                if not _archive_agent_ready(agent):
+                    log.info("[music/archive] aguardando agente com capas v6 | versão=%s", agent.get("version"))
+                    await asyncio.sleep(12)
+                    continue
                 from .busca.arquivo import media_key
                 from .busca.memoria import _track_from_payload
                 metadata = item["track"]

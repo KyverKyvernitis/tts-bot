@@ -274,6 +274,18 @@ sys.exit(0 if parts(sys.argv[1]) < parts(sys.argv[2]) else 1)
 PYVERCMP
 }
 
+running_release_mismatch() {
+  local pid live expected command_line proc_root
+  proc_root="${MUSIC_AGENT_PROC_ROOT:-/proc}"
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ && -r "$proc_root/$pid/cmdline" ]] || return 1
+  command_line="$(tr '\0' ' ' < "$proc_root/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$command_line" == *"$AGENT_MODULE"* ]] || return 1
+  live="$(readlink "$proc_root/$pid/cwd" 2>/dev/null || true)"
+  expected="$(cd "$RUNTIME_DIR" 2>/dev/null && pwd -P || true)"
+  [[ -n "$live" && -n "$expected" && "$live" != "$expected" ]]
+}
+
 list_pids() {
   pgrep -f 'cogs\.musica\.runtime_telefone\.agente\.servidor|/agente/servidor\.py|music_agent\.py' 2>/dev/null || true
 }
@@ -344,8 +356,8 @@ fi
 if health_ok; then
   running_ver="$(running_version)"
   file_ver="$(file_version)"
-  if [[ -n "$running_ver" && -n "$file_ver" ]] && version_lt "$running_ver" "$file_ver"; then
-    log "Music Agent online está desatualizado; runtime=$running_ver arquivo=$file_ver; reiniciando"
+  if { [[ -n "$running_ver" && -n "$file_ver" ]] && version_lt "$running_ver" "$file_ver"; } || running_release_mismatch; then
+    log "Music Agent online está desatualizado; runtime=$running_ver arquivo=$file_ver release=$RUNTIME_DIR; reiniciando"
     kill_agent
   else
     if ! truthy "${MUSIC_AGENT_QUIET_HEALTHY:-false}"; then
