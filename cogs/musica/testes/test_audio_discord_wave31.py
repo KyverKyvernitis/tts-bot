@@ -122,6 +122,8 @@ class AudioDiscordTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["title"], "Mensagem de voz de Pessoa")
         self.assertEqual(meta["attachment_ref"], REF)
         self.assertEqual(meta["attachment_duration_hint"], 5.0)
+        self.assertIs(meta["attachment_is_voice_message"], True)
+        self.assertEqual(meta["attachment_content_type"], "audio/ogg")
         voice.content_type = "application/octet-stream"
         self.assertEqual((await mod.midia_respondida(command)).status, "audio")
         original.attachments = [types.SimpleNamespace(id=11, filename="capa.png", content_type="image/png"), voice]
@@ -160,6 +162,23 @@ class AudioDiscordTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(media.initial_discord_cdn_url(URL.replace("&hm=signature", ""), REF), "")
         self.assertEqual(media.initial_discord_cdn_url(URL.replace("cdn.discordapp.com", "example.com"), REF), "")
         self.assertEqual(media.initial_discord_cdn_url(URL + "#frag", REF), "")
+
+    def test_voice_metadata_fast_path_requires_discord_voice_evidence(self):
+        meta = {"attachment_is_voice_message": True, "attachment_duration_hint": 5.1,
+                "attachment_filename": "voice.ogg", "attachment_content_type": "audio/ogg"}
+        item = {"url": URL, "filename": "voice.ogg"}
+        probe = media.discord_voice_audio_hint(meta, item, from_message=True)
+        self.assertEqual(probe["audio_stream_index"], 0)
+        self.assertEqual(probe["audio_codec"], "opus")
+        self.assertEqual(probe["duration"], 5.1)
+        self.assertIsNone(media.discord_voice_audio_hint({**meta, "attachment_is_voice_message": False}, item, from_message=True))
+        self.assertIsNone(media.discord_voice_audio_hint({**meta, "attachment_duration_hint": 0}, item, from_message=True))
+        self.assertIsNone(media.discord_voice_audio_hint({**meta, "attachment_content_type": "video/mp4"}, item, from_message=True))
+        self.assertIsNone(media.discord_voice_audio_hint(meta, {**item, "filename": "video.mp4"}, from_message=True))
+        self.assertIsNone(media.discord_voice_audio_hint(meta, item, from_message=False))
+        remote = {**item, "duration_secs": 5.2, "waveform": "AA==", "content_type": "audio/ogg"}
+        self.assertEqual(media.discord_voice_audio_hint(meta, remote, from_message=False)["duration"], 5.2)
+        self.assertIsNone(media.discord_voice_audio_hint(meta, {**remote, "waveform": None}, from_message=False))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg indisponível")
     async def test_ogg_opus_audio_probe_and_decode_using_confirmed_index(self):

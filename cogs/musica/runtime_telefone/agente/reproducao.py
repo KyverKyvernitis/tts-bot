@@ -11,7 +11,7 @@ from typing import Any
 import discord
 
 from .ciclo_vida import remove_owned_task, stop_player_instance
-from .validade_stream import fetch_discord_attachment, initial_discord_cdn_url, normalize_reference, probe_discord_audio, prazo_stream, DiscordAttachmentError
+from .validade_stream import discord_voice_audio_hint, fetch_discord_attachment, initial_discord_cdn_url, normalize_reference, probe_discord_audio, prazo_stream, DiscordAttachmentError
 from .configuracao import env_float, env_int
 from .estado import AgentTrack, GuildMusicState
 from .efeitos import filtros
@@ -473,10 +473,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         return {"ok": True, "accepted": accepted, "cache_size": len(self._resolve_cache), "metadata_cache_size": len(self._metadata_cache)}
 
     async def cmd_enqueue_discord_attachment(self, body: dict[str, Any]) -> dict[str, Any]:
-        """Confirma áudio e duração antes de tocar na fila autoritativa.
+        """Confirma áudio e duração por ffprobe ou metadados de voz do Discord.
 
         O lock por guild preserva a ordem de chegada também quando um probe
-        demora mais que outro. Não há placeholder reproduzível durante o probe.
+        demora mais que outro. Não há placeholder reproduzível durante a prova.
         """
         guild_id = safe_id(body.get("guild_id"))
         voice_channel_id = safe_id(body.get("voice_channel_id"))
@@ -535,28 +535,35 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 url_elapsed_ms = round((time.monotonic() - prepare_started) * 1000.0, 1)
                 probe_started = time.monotonic()
                 url_refreshed = False
-                try:
-                    async with self._discord_probe_semaphore:
-                        probe = await probe_discord_audio(
-                            attachment["url"], executable=getattr(self, "ffprobe_executable", "ffprobe"), timeout=10.0,
-                        )
-                except DiscordAttachmentError:
-                    if not url_hint:
-                        raise
-                    # Uma URL recebida pelo Gateway pode ter vencido enquanto
-                    # o comando viajava. Um único GET renova a assinatura; se
-                    # o Discord devolver a mesma URL, o erro é da própria mídia.
-                    refreshed = await fetch_discord_attachment(self.client, ref)
-                    if refreshed["url"] == url_hint:
-                        raise
-                    attachment = refreshed
-                    url_refreshed = True
-                    async with self._discord_probe_semaphore:
-                        probe = await probe_discord_audio(
-                            attachment["url"], executable=getattr(self, "ffprobe_executable", "ffprobe"), timeout=10.0,
-                        )
+                probe = (
+                    discord_voice_audio_hint(meta, attachment, from_message=bool(url_hint))
+                    if getattr(self, "discord_voice_metadata_fast_path", True) and self.direct_pcm_volume_enabled
+                    and getattr(self, "pcm_buffer_enabled", True) else None
+                )
+                probe_mode = "voice_metadata" if probe is not None else "ffprobe"
+                if probe is None:
+                    try:
+                        async with self._discord_probe_semaphore:
+                            probe = await probe_discord_audio(
+                                attachment["url"], executable=getattr(self, "ffprobe_executable", "ffprobe"), timeout=10.0,
+                            )
+                    except DiscordAttachmentError:
+                        if not url_hint:
+                            raise
+                        # Uma URL recebida pelo Gateway pode ter vencido enquanto
+                        # o comando viajava. Um único GET renova a assinatura.
+                        refreshed = await fetch_discord_attachment(self.client, ref)
+                        if refreshed["url"] == url_hint:
+                            raise
+                        attachment = refreshed
+                        url_refreshed = True
+                        async with self._discord_probe_semaphore:
+                            probe = await probe_discord_audio(
+                                attachment["url"], executable=getattr(self, "ffprobe_executable", "ffprobe"), timeout=10.0,
+                            )
                 self.log(
                     "discord_media_verified", guild_id=guild_id,
+                    probe_mode=probe_mode,
                     url_hint_used=bool(url_hint), url_refreshed=url_refreshed,
                     url_fetch_ms=url_elapsed_ms,
                     probe_ms=round((time.monotonic() - probe_started) * 1000.0, 1),
@@ -579,6 +586,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             confirmed = dict(meta)
             confirmed.pop("attachment_url", None)
             confirmed.pop("attachment_duration_hint", None)
+            confirmed.pop("attachment_is_voice_message", None)
+            confirmed.pop("attachment_content_type", None)
             confirmed.update(probe)
             confirmed.update({
                 "attachment_ref": ref,
@@ -593,8 +602,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 filename = str(attachment.get("filename") or "").strip()[:140]
                 title = f"Mídia: {filename or ref['attachment_id']}"
             confirmed["title"] = title[:160]
-            # Reaproveita a URL que o ffprobe acabou de verificar quando esta
-            # mídia começa imediatamente. Faixas que esperam na fila fazem
+            # Reaproveita a URL atual quando esta mídia começa imediatamente.
+            # Faixas que esperam na fila fazem
             # novo GET perto do playback, após a validade curta expirar.
             verified_at = time.monotonic()
             expires = min(verified_at + 30.0, prazo_stream(attachment["url"], verified_at, 30.0))
@@ -2534,11 +2543,29 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             pcm_prepare_started = time.monotonic()
             try:
                 pcm_source = await self._prepare_current_pcm(guild_id, track, playback_token)
-            except Exception:
+            except Exception as prepare_error:
                 if playback_token != st.playback_token:
                     self.log("play_start_superseded", guild_id=guild_id, phase="pcm_prepare")
                     return
-                raise
+                if not track.attachment_ref:
+                    raise
+                # O CDN pode revogar a assinatura entre a seleção da mensagem
+                # e o primeiro frame. Uma única renovação recupera esse caso
+                # sem acrescentar um GET ao caminho normal de reprodução.
+                previous_url = track.stream_url
+                try:
+                    ref = normalize_reference(track.attachment_ref, guild_id)
+                    fresh = await fetch_discord_attachment(self.client, ref)
+                except DiscordAttachmentError:
+                    raise prepare_error
+                if fresh["url"] == previous_url:
+                    raise prepare_error
+                if playback_token != st.playback_token:
+                    return
+                track.stream_url = fresh["url"]
+                track.stream_resolved_monotonic = time.monotonic()
+                self.log("discord_stream_start_refreshed", guild_id=guild_id, attachment=ref["attachment_id"])
+                pcm_source = await self._prepare_current_pcm(guild_id, track, playback_token)
             if playback_token != st.playback_token:
                 pcm_source.cleanup()
                 self.log("play_start_superseded", guild_id=guild_id, phase="pcm_prepare")

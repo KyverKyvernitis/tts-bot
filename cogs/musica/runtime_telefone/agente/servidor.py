@@ -91,7 +91,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.69"
+AGENT_VERSION = "0.3.70"
 STARTED_AT = time.time()
 
 
@@ -144,6 +144,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.js_runtimes = os.getenv("MUSIC_AGENT_YTDLP_JS_RUNTIMES") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES") or "node"
         self.default_search = os.getenv("MUSIC_AGENT_YTDLP_DEFAULT_SEARCH") or "ytsearch3"
         self.direct_audio_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_AUDIO_ENABLED"), True)
+        self.discord_voice_metadata_fast_path = truthy(os.getenv("MUSIC_AGENT_DISCORD_VOICE_METADATA_FAST_PATH"), True)
         self.direct_youtube_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_YOUTUBE_ENABLED"), True)
         self.ffmpeg_executable = os.getenv("MUSIC_AGENT_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
         self.ffprobe_executable = os.getenv("MUSIC_AGENT_FFPROBE") or shutil.which("ffprobe") or "ffprobe"

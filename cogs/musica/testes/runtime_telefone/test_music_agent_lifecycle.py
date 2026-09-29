@@ -209,6 +209,72 @@ def test_discord_voice_audio_fast_start_reuses_verified_url(music, monkeypatch):
     run(scenario())
 
 
+def test_discord_voice_message_uses_duration_without_ffprobe(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        st = agent.states.setdefault(123, music.GuildMusicState(guild_id=123))
+        st.current = music.AgentTrack(title="tocando", query="x", duration=20)
+        st.status = "playing"
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        url = "https://cdn.discordapp.com/attachments/456/10/voice.ogg?ex=ffffffff&hm=signed"
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+
+        async def unexpected_probe(*_args, **_kwargs):
+            raise AssertionError("a duração da mensagem de voz já veio do Discord")
+
+        async def unexpected_rest(*_args):
+            raise AssertionError("a URL assinada já veio da mensagem")
+
+        monkeypatch.setattr(playback, "probe_discord_audio", unexpected_probe)
+        monkeypatch.setattr(playback, "fetch_discord_attachment", unexpected_rest)
+        result = await agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9, "command_id": "discord-media:123:1000:10",
+            "attachment_url_hint": url,
+            "track": {"title": "Mensagem de voz", "attachment_ref": ref,
+                      "attachment_filename": "voice.ogg", "attachment_content_type": "audio/ogg",
+                      "attachment_is_voice_message": True, "attachment_duration_hint": 5.1},
+        })
+        assert result["ok"] and result["queued"]
+        assert result["track"]["duration"] == 5.1
+        assert result["track"]["audio_stream_index"] == 0
+        assert st.queue[0].stream_url == ""
+        assert url not in str(result["state"])
+
+    run(scenario())
+
+
+def test_discord_voice_metadata_without_corrob_rest_uses_ffprobe(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        st = agent.states.setdefault(123, music.GuildMusicState(guild_id=123))
+        st.current = music.AgentTrack(title="tocando", query="x", duration=20)
+        st.status = "playing"
+        ref = {"guild_id": 123, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        url = "https://cdn.discordapp.com/attachments/456/10/voice.ogg?ex=ffffffff&hm=signed"
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        probes = []
+
+        async def fetch(_client, _ref):
+            return {"url": url, "filename": "voice.ogg", "content_type": "audio/ogg"}
+
+        async def probe(value, **_kwargs):
+            probes.append(value)
+            return {"duration": 5.4, "audio_stream_index": 0, "audio_codec": "opus"}
+
+        monkeypatch.setattr(playback, "fetch_discord_attachment", fetch)
+        monkeypatch.setattr(playback, "probe_discord_audio", probe)
+        result = await agent.cmd_enqueue_discord_attachment({
+            "guild_id": 123, "voice_channel_id": 9, "command_id": "discord-media:123:1000:10",
+            "track": {"title": "Mensagem de voz", "attachment_ref": ref,
+                      "attachment_filename": "voice.ogg", "attachment_content_type": "audio/ogg",
+                      "attachment_is_voice_message": True, "attachment_duration_hint": 5.1},
+        })
+        assert result["ok"] and result["queued"]
+        assert result["track"]["duration"] == 5.4 and probes == [url]
+
+    run(scenario())
+
+
 def test_discord_signed_hint_skips_rest_and_overlaps_voice_probe(music, monkeypatch):
     async def scenario():
         agent = music.MusicAgent()
@@ -1378,6 +1444,59 @@ def test_direct_start_confirmation_cannot_overwrite_callback_transition(music):
         await agent._play_direct_voice(gid, track, prepared_voice=(voice, False))
         assert st.status == "preparing"
         assert st.playback_token == 2
+
+    run(scenario())
+
+
+def test_discord_first_pcm_failure_refreshes_signed_url_once(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid, channel_id = 123, 9
+        old_url = "https://cdn.discordapp.com/attachments/456/10/voice.ogg?ex=ffffffff&hm=old"
+        new_url = old_url.replace("hm=old", "hm=new")
+        ref = {"guild_id": gid, "channel_id": 456, "message_id": 789, "attachment_id": 10}
+        track = music.AgentTrack(title="voz", duration=5.0, stream_url=old_url, attachment_ref=ref,
+                                 audio_stream_index=0, audio_codec="opus", stream_resolved_monotonic=music.time.monotonic())
+        st = music.GuildMusicState(guild_id=gid, voice_channel_id=channel_id, current=track)
+        agent.states[gid] = st
+        attempts = []
+        requests = []
+
+        class Voice:
+            channel = types.SimpleNamespace(id=channel_id)
+            source = None
+            def is_connected(self): return True
+            def is_playing(self): return self.source is not None
+            def is_paused(self): return False
+            def play(self, source, after=None, **_kwargs): self.source = source
+            def stop(self): self.source = None
+
+        class Source:
+            def is_opus(self): return False
+            def cleanup(self): pass
+
+        async def prepare(_guild_id, selected, _token):
+            attempts.append(selected.stream_url)
+            if len(attempts) == 1:
+                raise RuntimeError("FFmpeg encerrou sem produzir áudio")
+            return Source()
+
+        async def fetch(_client, reference):
+            requests.append(reference)
+            return {"url": new_url}
+
+        agent._prepare_current_pcm = prepare
+        agent._build_ffmpeg_source = lambda *_args, **_kwargs: Source()
+        async def confirm(*_args, **_kwargs): return 0.01
+        async def refresh_presence(*_args, **_kwargs): return None
+        agent._confirm_direct_playback = confirm
+        agent._refresh_voice_presence_policy = refresh_presence
+        playback = sys.modules["cogs.musica.runtime_telefone.agente.reproducao"]
+        monkeypatch.setattr(playback, "fetch_discord_attachment", fetch)
+        await agent._play_direct_voice(gid, track, prepared_voice=(Voice(), False))
+        assert attempts == [old_url, new_url]
+        assert requests == [ref]
+        assert track.stream_url == new_url and st.status == "playing"
 
     run(scenario())
 

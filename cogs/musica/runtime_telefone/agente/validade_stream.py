@@ -90,6 +90,43 @@ def _positive_duration(value: Any) -> float | None:
     return result if math.isfinite(result) and result > 0 else None
 
 
+def discord_voice_audio_hint(metadata: dict[str, Any], attachment: dict[str, Any], *, from_message: bool) -> dict[str, Any] | None:
+    """Use os metadados do Discord somente para mensagens de voz Ogg identificadas."""
+    if metadata.get("attachment_is_voice_message") is not True:
+        return None
+    duration = _positive_duration(metadata.get("attachment_duration_hint"))
+    if duration is None or duration > 1200.0:
+        return None
+    filename = str(attachment.get("filename") or metadata.get("attachment_filename") or "").lower()
+    mime = str(metadata.get("attachment_content_type") or "").lower()
+    if not filename.endswith(".ogg") or mime != "audio/ogg":
+        return None
+    if from_message:
+        if not urlsplit(str(attachment.get("url") or "")).path.lower().endswith(".ogg"):
+            return None
+    else:
+        remote_duration = _positive_duration(attachment.get("duration_secs"))
+        if (
+            str(attachment.get("content_type") or "").split(";", 1)[0].lower() != "audio/ogg"
+            or attachment.get("waveform") is None
+            or remote_duration is None
+            or abs(remote_duration - duration) > 2.0
+        ):
+            return None
+        duration = remote_duration
+    # Voice messages do Discord são Ogg/Opus; o primeiro frame PCM ainda é
+    # exigido antes do ACK quando esta faixa inicia imediatamente.
+    return {
+        "duration": duration,
+        "audio_stream_index": 0,
+        "audio_codec": "opus",
+        "audio_ext": "ogg",
+        "audio_abr": 0,
+        "audio_sample_rate": 48000,
+        "audio_channels": 0,
+    }
+
+
 async def fetch_discord_attachment(client: Any, reference: dict[str, int]) -> dict[str, Any]:
     # REST fornece uma URL assinada nova; o arquivo é transmitido direto do
     # CDN para o reprodutor e nunca é baixado na VPS.

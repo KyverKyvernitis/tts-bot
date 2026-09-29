@@ -103,6 +103,8 @@ def metadados_midia(resultado: VideoRespondido, comando: Any) -> dict[str, Any]:
         "attachment_ref": ids,
         "attachment_filename": filename[:160],
         "attachment_duration_hint": getattr(anexo, "duration", None),
+        "attachment_is_voice_message": voice,
+        "attachment_content_type": str(getattr(anexo, "content_type", "") or "").split(";", 1)[0].lower(),
     }
 
 

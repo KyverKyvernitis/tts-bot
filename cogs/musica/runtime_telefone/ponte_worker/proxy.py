@@ -3,11 +3,39 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+
+_READY_LOCK = threading.Lock()
+_READY_CACHE_KEY: tuple[str, str] | None = None
+_READY_CACHE_UNTIL = 0.0
+
+
+def _ready_check_cached(key: tuple[str, str]) -> bool:
+    with _READY_LOCK:
+        return _READY_CACHE_KEY == key and time.monotonic() < _READY_CACHE_UNTIL
+
+
+def _remember_ready_check(key: tuple[str, str], seconds: float) -> None:
+    global _READY_CACHE_KEY, _READY_CACHE_UNTIL
+    with _READY_LOCK:
+        _READY_CACHE_KEY = key
+        _READY_CACHE_UNTIL = time.monotonic() + seconds
+
+
+def _forget_ready_check(key: tuple[str, str]) -> None:
+    global _READY_CACHE_KEY, _READY_CACHE_UNTIL
+    with _READY_LOCK:
+        if _READY_CACHE_KEY == key:
+            _READY_CACHE_KEY = None
+            _READY_CACHE_UNTIL = 0.0
+
 
 def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any) -> dict[str, Any]:
     """Proxy authenticated /task requests to the local same-bot Music Agent."""
@@ -25,6 +53,14 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
         timeout_seconds = 18.0
     timeout_seconds = max(1.0, min(90.0, timeout_seconds))
     base = f"http://{host}:{port}"
+    cache_key = (base, token)
+    try:
+        ready_ttl = float(os.getenv("MUSIC_AGENT_COMMAND_READY_TTL_SECONDS") or 8.0)
+    except (TypeError, ValueError):
+        ready_ttl = 8.0
+    if not math.isfinite(ready_ttl):
+        ready_ttl = 8.0
+    ready_ttl = max(0.0, min(30.0, ready_ttl))
     agent_configured = bool(str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip())
 
     if action not in {"status", "get_state"} and not agent_configured:
@@ -75,17 +111,25 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
 
     attempted_prepare: dict[str, Any] | None = None
     try:
-        if action not in {"status", "get_state"}:
+        if action not in {"status", "get_state"} and not (ready_ttl and _ready_check_cached(cache_key)):
             snapshot = hooks.safe_telemetry("music_agent", hooks.snapshot, {"ok": False, "available": False, "configured": agent_configured})
             runtime_version = str(snapshot.get("version") or snapshot.get("runtime_version") or "").strip()
             file_version = str(snapshot.get("file_version") or "").strip()
             needs_restart = bool(snapshot.get("needs_restart") or (runtime_version and file_version and hooks.version_lt(runtime_version, file_version)))
             if needs_restart:
+                _forget_ready_check(cache_key)
                 attempted_prepare = hooks.run_service("music-agent", "restart")
             elif not bool(snapshot.get("available")):
+                _forget_ready_check(cache_key)
                 attempted_prepare = hooks.run_service("music-agent", "start")
+            elif ready_ttl:
+                # A verificação inclui dependências e versão. Uma nova consulta
+                # ocorre após o TTL, mesmo sob tráfego constante de comandos.
+                _remember_ready_check(cache_key, ready_ttl)
         data = _request_agent()
     except urllib.error.HTTPError as exc:
+        if exc.code != 400:
+            _forget_ready_check(cache_key)
         raw = ""
         with contextlib.suppress(Exception):
             raw = exc.read(2048).decode("utf-8", "replace")
@@ -97,6 +141,7 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
             "prepare": attempted_prepare,
         }
     except Exception as exc:
+        _forget_ready_check(cache_key)
         # Uma queda de conexão no primeiro comando normalmente significa
         # agent parado/desatualizado. Tenta um start uma vez antes de falhar.
         if action not in {"status", "get_state"} and attempted_prepare is None and agent_configured:
