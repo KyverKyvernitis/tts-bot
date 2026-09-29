@@ -153,6 +153,7 @@ class MusicGuildState:
     agent_voice_recovery_attempts: int = 0
     agent_voice_recovery_last_error: str = ""
     agent_voice_session_mode: str = ""
+    agent_voice_connected: bool = False
     agent_voice_presence_reason: str = ""
     agent_last_disconnect_reason: str = ""
     agent_last_disconnect_event: str = ""

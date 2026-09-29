@@ -4075,9 +4075,15 @@ class AudioRouter:
             or monitor_dead
             or monitor_stale
         )
-        # Monitor e janela de saída da call podem sobreviver ao fim da fila.
-        # Eles não reservam a conexão: `_join` e TTS podem entrar normalmente.
-        if not self._music_agent_claims_voice(state):
+        # Após o fim da fila, o worker ainda é dono da mesma conexão por até
+        # 120 s. Uma fala neste intervalo deve continuar no worker: abrir o
+        # VoiceClient da VPS com o mesmo bot derruba a sessão anterior.
+        idle_agent_owns_voice = bool(
+            getattr(state, "agent_voice_connected", False)
+            and str(getattr(state, "agent_voice_session_mode", "") or "")
+            in {"music_idle_grace", "voice_idle", "tts_active"}
+        )
+        if not self._music_agent_claims_voice(state) and not idle_agent_owns_voice:
             return False
         try:
             remembered_channel = int(getattr(state, "last_voice_channel_id", 0) or 0)
@@ -4103,7 +4109,9 @@ class AudioRouter:
             return False
         if str(getattr(state, "current_backend", "") or "").lower() != "agent":
             return False
-        if not self._music_agent_claims_voice(state):
+        if not self._music_agent_claims_voice(state) and str(getattr(state, "agent_voice_session_mode", "") or "") not in {
+            "music_idle_grace", "voice_idle", "tts_active"
+        }:
             return False
         remote = await atualizar_estado_controle_remoto(
             self,

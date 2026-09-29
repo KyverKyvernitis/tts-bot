@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import textwrap
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -100,6 +102,78 @@ def test_tts_keeps_remote_ownership_when_monitor_is_dead_and_mirror_channel_may_
     # em vez de liberar um VoiceClient local concorrente.
     assert "requested_channel != remembered_channel" in source
     assert "return uncertain" in source
+
+
+def test_tts_uses_worker_voice_during_music_idle_grace() -> None:
+    method = _method_source(ROUTER, "AudioRouter", "should_route_tts_to_music_agent")
+    scope = {
+        "MUSIC_AGENT_TTS_ROUTE_ENABLED": True,
+        "config": SimpleNamespace(MUSIC_AGENT_STATUS_TIMEOUT_SECONDS=5.0),
+        "time": time,
+    }
+    exec(textwrap.dedent(method), scope)
+    route = scope["should_route_tts_to_music_agent"]
+    state = SimpleNamespace(
+        current_backend="agent", current_status="idle", agent_voice_connected=True,
+        agent_voice_session_mode="music_idle_grace", last_voice_channel_id=88,
+        agent_monitor_task=SimpleNamespace(done=lambda: False),
+        agent_monitor_last_cycle_at=time.monotonic(), agent_monitor_failures=0,
+        agent_monitor_reconnecting_since=0.0,
+    )
+    router = SimpleNamespace(get_state=lambda _gid: state, _music_agent_claims_voice=lambda _st: False)
+    assert route(router, 77, 88) is True
+    state.agent_voice_connected = False
+    assert route(router, 77, 88) is False
+    state.agent_voice_connected = True
+    state.agent_voice_session_mode = "disconnected"
+    assert route(router, 77, 88) is False
+
+
+@pytest.mark.asyncio
+async def test_monitor_mantem_afinidade_na_espera_e_encerra_apos_desconexao(monkeypatch) -> None:
+    real_sleep = asyncio.sleep
+    state = SimpleNamespace(
+        agent_monitor_task=None, now_message=None,
+        current_backend="agent", current_status="idle", current=None,
+        agent_voice_connected=True, agent_voice_session_mode="music_idle_grace",
+        music_session_active=False, agent_monitor_failures=0,
+        agent_monitor_last_error="", agent_monitor_reconnecting_since=0.0,
+        agent_monitor_last_cycle_at=0.0, agent_monitor_last_success_at=0.0,
+        agent_monitor_last_full_sync_at=0.0,
+    )
+    calls, unbinds = [], []
+
+    class Router:
+        def get_state(self, gid): return state
+        async def sync_music_agent_state(self, gid, track, remote, **kwargs):
+            state.agent_voice_connected = bool(remote.get("voice_connected"))
+            state.agent_voice_session_mode = str(remote.get("voice_session_mode") or "disconnected")
+
+    async def status_fake(**kwargs):
+        calls.append(kwargs)
+        if len(calls) in {2, 3, 4, 5}:
+            return {"ok": False, "available": False, "error": "rota temporariamente indisponível"}
+        if len(calls) in {6, 7, 8, 10, 11}:
+            return {"ok": True, "unchanged": True}
+        connected = len(calls) < 9
+        return {"ok": True, "guilds": {"77": {
+            "status": "idle", "current": None, "queue": [],
+            "voice_connected": connected,
+            "voice_session_mode": "music_idle_grace" if connected else "disconnected",
+            "state_revision": "held" if connected else "gone",
+        }}}
+
+    async def yield_sleep(_delay): await real_sleep(0)
+    monkeypatch.setattr(monitor, "music_agent_status", status_fake)
+    monkeypatch.setattr(monitor, "schedule_playlist_refill_if_needed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(monitor, "desvincular_guild_worker", lambda gid: unbinds.append(gid))
+    monkeypatch.setattr(monitor.asyncio, "sleep", yield_sleep)
+
+    monitor.iniciar_monitor_music_agent(Router(), 77)
+    await asyncio.wait_for(state.agent_monitor_task, timeout=1.0)
+    assert len(calls) >= 11
+    assert unbinds == [77]
+    assert not state.agent_voice_connected
 
 
 @pytest.mark.asyncio

@@ -121,7 +121,32 @@ _TTS_MAINTENANCE_RUNNING = False
 _TTS_CACHE_TOUCHES = {}
 
 
+class _MixerUnavailable(RuntimeError):
+    """O mixer ficou indisponível antes da reserva do TTS."""
+
+
 class TTSMixin:
+    async def _finish_tts_voice_session(
+        self, guild_id: int, st: GuildMusicState, player: Any, *, previous_mode: str, source: str = "tts_end"
+    ) -> None:
+        """Restaura a política de saída só depois da última fala na sessão."""
+        if st.player is not player:
+            return
+        audio_source = getattr(player, "source", None)
+        pending = getattr(audio_source, "has_pending_tts", None)
+        if callable(pending) and pending():
+            return
+        if st.current is not None or st.queue:
+            self._set_voice_session_mode(st, "music_active", reason="tts_end_music_pending")
+        elif not self._voice_client_is_connected(player):
+            self._set_voice_session_mode(st, "disconnected", reason="tts_end_voice_lost")
+        elif previous_mode in {"music_active", "music_idle_grace"} and (self._voice_human_count(st) or 0) > 0:
+            # O prazo musical recomeça ao término da fala, para não cortá-la.
+            self._schedule_idle_disconnect(guild_id)
+        else:
+            self._set_voice_session_mode(st, "voice_idle", reason="tts_end")
+        await self._refresh_voice_presence_policy(guild_id, source=source)
+
     def _normalize_tts_language(self, value: Any) -> str:
         raw = str(value or "pt-br").strip().lower().replace("_", "-")
         if raw in {"pt", "ptbr", "pt-br", "br"}:
@@ -448,14 +473,24 @@ class TTSMixin:
                 timed.cleanup()
             raise
 
-    async def cmd_tts(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def cmd_tts(self, body: dict[str, Any], *, _allow_direct_fallback: bool = True) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         self._update_auto_leave_from_body(st, body)
         player = st.player
-        if not guild_id or player is None or st.current is None:
-            return {"ok": False, "error": "sem sessão musical ativa no worker", "state": st.public()}
-        source = getattr(player, "source", None)
+        source = getattr(player, "source", None) if player is not None else None
+        if st.current is None and guild_id and (
+            not isinstance(source, AgentMixedAudioSource)
+            or bool(getattr(source, "_closed", False))
+            or not bool(getattr(player, "is_playing", lambda: False)())
+        ):
+            # A música acabou, mas o agente ainda pode ser dono da call. TTS
+            # direto reaproveita essa sessão sem criar um VoiceClient na VPS.
+            if not _allow_direct_fallback:
+                raise _MixerUnavailable("mixer de voz encerrado antes do TTS")
+            return await self.cmd_voice_tts(body)
+        if not guild_id or player is None:
+            return {"ok": False, "error": "sem sessão de voz ativa no worker", "state": st.public()}
         if not isinstance(source, AgentMixedAudioSource):
             return {"ok": False, "error": "sessão atual não suporta TTS no worker sem interromper música", "state": st.public()}
         timeout = max(1.0, min(90.0, float(body.get("timeout_seconds") or 30.0)))
@@ -463,6 +498,23 @@ class TTSMixin:
         engine = "worker"
         tts_source = None
         future = None
+        reserved = False
+        previous_mode = str(st.voice_session_mode or "disconnected")
+        reserve = getattr(source, "reserve_tts", None)
+        if callable(reserve):
+            try:
+                reserve()
+            except RuntimeError as exc:
+                if st.current is None:
+                    if not _allow_direct_fallback:
+                        raise _MixerUnavailable("mixer de voz encerrado antes do TTS") from exc
+                    return await self.cmd_voice_tts(body)
+                raise
+            reserved = True
+        if st.current is None:
+            self._cancel_idle_disconnect(guild_id)
+            self._cancel_voice_presence_disconnect(guild_id)
+            self._set_voice_session_mode(st, "tts_active", reason="idle_overlay_tts_start")
         st.ducked = True
         st.updated_at = time.time()
         try:
@@ -496,14 +548,23 @@ class TTSMixin:
                 future = source.add_tts(tts_source, volume=max(0.0, min(2.0, env_float("MUSIC_AGENT_TTS_VOLUME", 1.0))))
                 self.log("tts_overlay_start", guild_id=guild_id, engine=engine, chars=len(str(body.get("text") or "")), prebuilt=bool(audio_url or audio_b64))
                 await asyncio.wait_for(future, timeout=timeout)
+        except Exception as exc:
+            self.log("tts_overlay_interrupted", guild_id=guild_id, error=f"{type(exc).__name__}: {short_text(exc, 180)}")
+            raise
         finally:
             if future is not None:
                 source.cancel_tts(future)
             if tts_source is not None:
                 tts_source.cleanup()
+            if reserved:
+                source.release_tts()
             has_tts = getattr(source, "has_tts", None)
             st.ducked = bool(has_tts()) if callable(has_tts) else False
             st.updated_at = time.time()
+            if st.current is None:
+                await self._finish_tts_voice_session(guild_id, st, player, previous_mode=previous_mode)
+            else:
+                await self._refresh_voice_presence_policy(guild_id, source="tts_end")
         elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
         self.log("tts_overlay_done", guild_id=guild_id, elapsed_ms=round(elapsed_ms, 1))
         return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "first_frame_observed": tts_source.first_frame_ms is not None, "first_frame_ms": tts_source.first_frame_ms, "state": st.public()}
@@ -531,8 +592,15 @@ class TTSMixin:
             # the overlay path so TTS and music do not fight over the same voice connection.
             player = st.player
             source = getattr(player, "source", None)
-            if st.current is not None and isinstance(source, AgentMixedAudioSource):
-                return await self.cmd_tts(body)
+            if isinstance(source, AgentMixedAudioSource) and not bool(getattr(source, "_closed", False)) and (
+                st.current is not None or bool(getattr(player, "is_playing", lambda: False)())
+            ):
+                try:
+                    return await self.cmd_tts(body, _allow_direct_fallback=False)
+                except _MixerUnavailable:
+                    # O mixer terminou entre a checagem e a reserva. A conexão
+                    # direta segue abaixo, sem readquirir este mesmo lock.
+                    pass
             if st.current is not None:
                 return {"ok": False, "error": "música ativa sem mixer TTS direto; evitando interromper player", "state": st.public()}
 
@@ -542,6 +610,7 @@ class TTSMixin:
             voice_client, _created = await self._ensure_direct_voice_client(guild_id)
             self._cancel_idle_disconnect(guild_id)
             self._cancel_voice_presence_disconnect(guild_id)
+            previous_mode = str(st.voice_session_mode or "disconnected")
             self._set_voice_session_mode(st, "tts_active", reason="direct_tts_start")
             st.player = voice_client
             st.transport = "worker_voice_direct_tts"
@@ -672,12 +741,6 @@ class TTSMixin:
                 if st.player is voice_client and st.current is None and st.status == "tts_direct":
                     self._set_status(st, "idle", event="voice_direct_tts_end")
                 if st.player is voice_client and st.current is None:
-                    if st.queue:
-                        self._set_voice_session_mode(st, "music_active", reason="direct_tts_end_queue_pending")
-                    else:
-                        # Um TTS reproduzido depois do fim da música transfere a
-                        # política de permanência: não reinicie os 120 s da
-                        # música. A partir daqui vale a saída normal de voz/TTS,
-                        # confirmada após ~2 s sem humanos.
-                        self._set_voice_session_mode(st, "voice_idle", reason="direct_tts_end")
-                    await self._refresh_voice_presence_policy(guild_id, source="direct_tts_end")
+                    await self._finish_tts_voice_session(
+                        guild_id, st, voice_client, previous_mode=previous_mode, source="direct_tts_end"
+                    )

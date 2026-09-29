@@ -235,6 +235,149 @@ def test_direct_tts_cancellation_transfers_to_short_voice_idle_policy(music, mon
     run(scenario())
 
 
+def test_tts_after_music_ends_uses_agent_voice_until_speech_finishes(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid, channel_id = 204, 905
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class Speech:
+            def __init__(self, *args, **kwargs):
+                self.frames = [b"\x03\x00" * 1920, b""]
+                self.first_frame_ms = 3.0
+            def read(self): return self.frames.pop(0)
+            def cleanup(self): pass
+
+        class MusicSource:
+            def read(self): return b""
+            def cleanup(self): pass
+
+        monkeypatch.setattr(music.discord, "FFmpegPCMAudio", Speech)
+        async def prepare(source, **kwargs):
+            entered.set()
+            await release.wait()
+            return source
+        agent._buffer_tts_source = prepare
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(), music_source=MusicSource(),
+            music_volume=0.55, persistent=True,
+        )
+        human = types.SimpleNamespace(bot=False)
+        channel = types.SimpleNamespace(id=channel_id, members=[human])
+
+        class Voice:
+            def __init__(self):
+                self.source = mixer
+                self.channel = channel
+            def is_connected(self): return True
+            def is_playing(self): return True
+
+        voice = Voice()
+        st = music.GuildMusicState(
+            guild_id=gid, voice_channel_id=channel_id, player=voice,
+            current=None, status="idle", voice_session_mode="music_idle_grace",
+        )
+        agent.states[gid] = st
+        idle = []
+        def schedule(value):
+            idle.append(value)
+            agent._set_voice_session_mode(st, "music_idle_grace", reason="test_idle")
+        agent._schedule_idle_disconnect = schedule
+        body = {
+            "guild_id": gid, "voice_channel_id": channel_id,
+            "audio_b64": base64.b64encode(b"speech").decode("ascii"),
+        }
+        speech_task = asyncio.create_task(agent.cmd_tts(body))
+        await entered.wait()
+        mixer.finish_when_idle()
+        assert mixer.read() == bytes(3840)  # a fala ainda está preparando
+        assert st.voice_session_mode == "tts_active" and idle == []
+        release.set()
+        for _ in range(20):
+            if mixer.has_tts(): break
+            await asyncio.sleep(0)
+        assert mixer.has_tts()
+        assert mixer.read() == b"\x03\x00" * 1920
+        mixer.read()
+        result = await speech_task
+        assert result["ok"] is True and result["first_frame_observed"] is True
+        assert idle == [gid] and st.voice_session_mode == "music_idle_grace"
+        assert mixer.read() == b""
+
+        # Depois de o mixer encerrar, a fala seguinte usa TTS direto no mesmo
+        # agente sem tentar uma segunda conexão a partir da VPS.
+        called = []
+        async def direct(payload):
+            called.append(payload)
+            return {"ok": True, "direct_tts": True}
+        agent.cmd_voice_tts = direct
+        next_result = await agent.cmd_tts(body)
+        assert next_result["direct_tts"] is True and called == [body]
+
+    run(scenario())
+
+
+def test_tts_direct_survives_mixer_closing_during_reservation(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid, channel_id = 205, 906
+        channel = types.SimpleNamespace(id=channel_id, members=[types.SimpleNamespace(bot=False)])
+
+        class MusicSource:
+            def read(self): return b""
+            def cleanup(self): pass
+
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(), music_source=MusicSource(),
+            music_volume=1.0, persistent=True,
+        )
+        def close_on_reserve():
+            mixer.cleanup()
+            raise RuntimeError("mixer encerrado")
+        mixer.reserve_tts = close_on_reserve
+
+        class Audio:
+            first_frame_ms = 0.0
+            def __init__(self, *args, **kwargs): pass
+            def cleanup(self): pass
+        monkeypatch.setattr(music.discord, "FFmpegPCMAudio", Audio)
+
+        class Voice:
+            def __init__(self): self.source, self.channel, self.playing = mixer, channel, True
+            def is_connected(self): return True
+            def is_playing(self): return self.playing
+            def is_paused(self): return False
+            def stop(self): self.playing = False
+            def play(self, source, after=None):
+                self.source, self.playing = source, False
+                after(None)
+
+        voice = Voice()
+        st = music.GuildMusicState(
+            guild_id=gid, voice_channel_id=channel_id, player=voice,
+            status="idle", voice_session_mode="music_idle_grace",
+        )
+        agent.states[gid] = st
+        async def ensure(_gid): return voice, False
+        agent._ensure_direct_voice_client = ensure
+        agent._schedule_idle_disconnect = lambda _gid: agent._set_voice_session_mode(st, "music_idle_grace", reason="test_idle")
+        body = {"guild_id": gid, "voice_channel_id": channel_id,
+                "audio_b64": base64.b64encode(b"speech").decode("ascii")}
+        response = await asyncio.wait_for(agent.cmd_voice_tts(body), timeout=1.0)
+        assert response["ok"] and response["direct_tts"]
+        assert st.voice_session_mode == "music_idle_grace"
+
+    run(scenario())
+
+
+def test_voice_mode_transition_updates_state_revision(music):
+    agent = music.MusicAgent()
+    st = music.GuildMusicState(guild_id=207, updated_at=1.0)
+    before = st.state_revision()
+    agent._set_voice_session_mode(st, "music_idle_grace", reason="queue_idle")
+    assert st.state_revision() != before
+
+
 def test_voice_idle_disconnects_after_two_second_no_human_confirmation(music, monkeypatch):
     async def scenario():
         agent = music.MusicAgent()

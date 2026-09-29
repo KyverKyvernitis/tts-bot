@@ -185,9 +185,11 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self.normal_music_volume = max(0.0, min(MAX_MUSIC_VOLUME, float(music_volume)))
         self.duck_factor = max(0.0, min(1.0, float(duck_factor)))
         self._overlays: list[dict[str, Any]] = []
+        self._tts_reservations = 0
         self._lock = threading.RLock()
         self._closed = False
         self._music_ended = False
+        self._music_paused = False
         self.persistent = bool(persistent)
         self._finish_when_idle = False
         self._on_music_end = on_music_end
@@ -239,6 +241,16 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         with self._lock:
             return self._music_ended
 
+    @property
+    def music_paused(self) -> bool:
+        with self._lock:
+            return self._music_paused
+
+    def set_music_paused(self, paused: bool) -> None:
+        """Pausa apenas a fonte musical; a thread de voz continua lendo TTS."""
+        with self._lock:
+            self._music_paused = bool(paused)
+
     def replace_music_source(
         self,
         source: discord.AudioSource,
@@ -287,6 +299,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             previous = self.music_source
             self.music_source = None
             self._music_ended = True
+            self._music_paused = False
             self._on_music_end = None
         if previous is not None:
             with contextlib.suppress(Exception):
@@ -303,6 +316,21 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                 raise RuntimeError("mixer de voz encerrado")
             self._overlays.append({"source": source, "volume": max(0.0, min(2.0, float(volume))), "future": future, "ended": False})
         return future
+
+    def reserve_tts(self) -> None:
+        """Mantém o mixer vivo enquanto uma fala é preparada no fim da faixa."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("mixer de voz encerrado")
+            self._tts_reservations += 1
+
+    def release_tts(self) -> None:
+        with self._lock:
+            self._tts_reservations = max(0, self._tts_reservations - 1)
+
+    def has_pending_tts(self) -> bool:
+        with self._lock:
+            return bool(self._overlays or self._tts_reservations)
 
     def has_tts(self) -> bool:
         with self._lock:
@@ -539,7 +567,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             return b""
         with self._lock:
             overlays = list(self._overlays)
-            music_source = None if self._music_ended else self.music_source
+            music_source = None if self._music_ended or self._music_paused else self.music_source
             encoder_update, self._encoder_update = self._encoder_update, None
         if encoder_update is not None:
             encoder_update()
@@ -578,7 +606,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             with self._lock:
                 # A decisão de encerrar precisa ser atômica com uma troca de
                 # faixa ou um overlay que entrou entre o snapshot e este ponto.
-                if self.music_source is not None or self._overlays:
+                if self.music_source is not None or self._overlays or self._tts_reservations:
                     return b"\x00" * PCM_FRAME_BYTES
                 if self.persistent and not self._finish_when_idle and not self._closed:
                     return b"\x00" * PCM_FRAME_BYTES
@@ -639,6 +667,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             self._encoder_update = None
             overlays = list(self._overlays)
             self._overlays.clear()
+            self._tts_reservations = 0
         if music_source is not None:
             with contextlib.suppress(Exception):
                 music_source.cleanup()
@@ -647,4 +676,6 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                 overlay.get("source").cleanup()
             future = overlay.get("future")
             if isinstance(future, asyncio.Future):
-                self._future_result(future, None)
+                # O fechamento da voz interrompeu a fala. Nunca anuncie um
+                # overlay incompleto como reprodução concluída com sucesso.
+                self._future_exception(future, RuntimeError("TTS interrompido: sessão de voz encerrada"))

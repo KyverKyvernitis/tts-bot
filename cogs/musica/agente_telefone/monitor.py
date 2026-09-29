@@ -257,6 +257,21 @@ def _sessao_local_exige_monitor(router: Any, guild_id: int) -> bool:
         getattr(state, "current", None) is not None
         or getattr(state, "music_session_active", False)
         or status in {"resolving", "starting", "playing", "paused", "queued", "reconnecting"}
+        or _voz_local_pertence_ao_worker(state)
+    )
+
+
+def _voz_local_pertence_ao_worker(state: Any) -> bool:
+    return bool(
+        getattr(state, "agent_voice_connected", False)
+        and str(getattr(state, "agent_voice_session_mode", "") or "").lower() != "disconnected"
+    )
+
+
+def _voz_remota_pertence_ao_worker(remote: dict[str, Any]) -> bool:
+    return bool(
+        remote.get("voice_connected")
+        and str(remote.get("voice_session_mode") or "").lower() != "disconnected"
     )
 
 
@@ -368,7 +383,7 @@ def iniciar_monitor_music_agent(
                             desvincular_guild_worker(guild_id)
                             return
                     rebind_every = max(1, int(getattr(config, "MUSIC_AGENT_MONITOR_REBIND_FAILURES", 4) or 4))
-                    if failure_seen % rebind_every == 0:
+                    if failure_seen % rebind_every == 0 and not _voz_local_pertence_ao_worker(router.get_state(guild_id)):
                         desvincular_guild_worker(guild_id)
                     max_failures = max(1, int(getattr(config, "MUSIC_AGENT_MONITOR_MAX_FAILURES", 30) or 30))
                     if failure_seen >= max_failures:
@@ -384,7 +399,8 @@ def iniciar_monitor_music_agent(
                                 guild_id,
                                 failure_seen,
                             )
-                            desvincular_guild_worker(guild_id)
+                            if not _voz_local_pertence_ao_worker(router.get_state(guild_id)):
+                                desvincular_guild_worker(guild_id)
                     continue
 
                 if not bool(payload.get("ok", True)) or (payload.get("available") is False and payload.get("error")):
@@ -416,7 +432,7 @@ def iniciar_monitor_music_agent(
                             desvincular_guild_worker(guild_id)
                             return
                     rebind_every = max(1, int(getattr(config, "MUSIC_AGENT_MONITOR_REBIND_FAILURES", 4) or 4))
-                    if failure_seen % rebind_every == 0:
+                    if failure_seen % rebind_every == 0 and not _voz_local_pertence_ao_worker(router.get_state(guild_id)):
                         desvincular_guild_worker(guild_id)
                     max_failures = max(1, int(getattr(config, "MUSIC_AGENT_MONITOR_MAX_FAILURES", 30) or 30))
                     if failure_seen >= max_failures:
@@ -430,7 +446,8 @@ def iniciar_monitor_music_agent(
                                 failure_seen,
                                 ultimo_erro_monitor or "-",
                             )
-                            desvincular_guild_worker(guild_id)
+                            if not _voz_local_pertence_ao_worker(router.get_state(guild_id)):
+                                desvincular_guild_worker(guild_id)
                     continue
 
                 recovered_after_failures = failure_seen > 0
@@ -467,7 +484,13 @@ def iniciar_monitor_music_agent(
                             except Exception:
                                 revisao_remota = ""
                                 logger.warning("[music/agent] resync pós-recovery falhou; monitor continuará | guild=%s", guild_id, exc_info=True)
-                    idle_seen = 0 if status_hint in {"preparing", "starting", "playing", "paused", "queued", "resolving"} else idle_seen
+                    if ultimo_estado_remoto and str(ultimo_estado_remoto.get("status") or "").lower() in {"idle", "stopped", "failed", "error"} and not ultimo_estado_remoto.get("current") and not _voz_remota_pertence_ao_worker(ultimo_estado_remoto):
+                        idle_seen += 1
+                        if idle_seen >= 3:
+                            desvincular_guild_worker(guild_id)
+                            return
+                    else:
+                        idle_seen = 0
                     continue
 
                 remote = estado_da_guild_no_payload(payload, guild_id)
@@ -575,7 +598,7 @@ def iniciar_monitor_music_agent(
                         ultimo_refresh_painel = agora
 
                 has_current = isinstance(remote.get("current"), dict) and bool(remote.get("current"))
-                idle_seen = idle_seen + 1 if status in {"idle", "stopped", "failed", "error"} and not has_current else 0
+                idle_seen = idle_seen + 1 if status in {"idle", "stopped", "failed", "error"} and not has_current and not _voz_remota_pertence_ao_worker(remote) else 0
                 if idle_seen >= 3:
                     desvincular_guild_worker(guild_id)
                     return

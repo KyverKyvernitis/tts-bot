@@ -30,6 +30,7 @@ import threading
 import time
 import urllib.parse
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -91,7 +92,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.71"
+AGENT_VERSION = "0.3.72"
 STARTED_AT = time.time()
 
 
@@ -213,6 +214,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._voice_connect_locks: dict[int, asyncio.Lock] = {}
         self._voice_connect_lock_users: dict[int, int] = {}
         self._voice_runtime_recovery_tasks: dict[int, asyncio.Task] = {}
+        self._voice_cleanup_pending: dict[int, float] = {}
         self._tts_direct_locks: dict[int, asyncio.Lock] = {}
         self._tts_direct_lock_users: dict[int, int] = {}
         self._metadata_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -293,9 +295,10 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._wire_discord_events()
 
     def log(self, event: str, *, guild_id: int = 0, **fields: Any) -> None:
+        stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
         details = " ".join(f"{key}={short_text(_audit_value(key, value), 220)!r}" for key, value in fields.items() if value is not None and value != "")
         gid = f" guild={guild_id}" if guild_id else ""
-        print(f"[music-agent] {event}{gid}{(' ' + details) if details else ''}", flush=True)
+        print(f"[music-agent] {event}{gid} at={stamp!r}{(' ' + details) if details else ''}", flush=True)
 
     def _wire_discord_events(self) -> None:
         @self.client.event
@@ -324,6 +327,10 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             bot_id = safe_id(getattr(self.client.user, "id", 0))
             member_id = safe_id(getattr(member, "id", 0))
             if bot_id and member_id == bot_id and before_id > 0 and after_id <= 0:
+                cleanup_deadline = self._voice_cleanup_pending.pop(guild_id, 0.0)
+                if cleanup_deadline > time.monotonic():
+                    self.log("voice_internal_cleanup_observed", guild_id=guild_id, channel=before_id)
+                    return
                 recent_internal = bool(
                     st.last_disconnect_at
                     and (time.time() - float(st.last_disconnect_at)) <= 15.0
@@ -331,6 +338,22 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 )
                 if not recent_internal:
                     humans = self._voice_human_count(st)
+                    self.log(
+                        "voice_state_disconnect_observed",
+                        guild_id=guild_id,
+                        channel=before_id,
+                        status=st.status,
+                        session_mode=st.voice_session_mode,
+                        player_connected=self._voice_client_is_connected(player) if player is not None else False,
+                        stream_ready=bool(getattr(st.current, "stream_url", "")),
+                        humans=humans,
+                    )
+                    # A preparação original já possui o preconnect e resolve a
+                    # URL. Recovery paralelo aqui reproduziria uma faixa lazy
+                    # ainda sem stream e disputaria a mesma conexão de voz.
+                    if st.current is not None and st.status in {"preparing", "starting"}:
+                        self.log("voice_loss_during_prepare", guild_id=guild_id, channel=before_id)
+                        return
                     self._record_voice_disconnect(
                         st,
                         reason="voice_transport_lost",
@@ -411,6 +434,9 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
         if reason:
             st.voice_presence_reason = short_text(reason, 120)
         if previous != mode:
+            # A revisão precisa mudar para o monitor receber transições de
+            # TTS/voz mesmo quando não houve uma nova faixa na fila.
+            st.updated_at = time.time()
             self.log(
                 "voice_session_mode_changed",
                 guild_id=st.guild_id,
@@ -516,6 +542,10 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             if humans is None or humans > 0:
                 return
             st.voice_human_count = int(humans)
+            pending_tts = getattr(getattr(st.player, "source", None), "has_pending_tts", None)
+            if callable(pending_tts) and pending_tts():
+                self.log("voice_presence_waiting_for_tts", guild_id=guild_id, reason=reason)
+                return
 
             if reason == "music_alone":
                 # Esta é a política de 2 minutos enquanto ainda existe música:
@@ -653,6 +683,10 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 return
             player = st.player
             if player is None:
+                return
+            pending_tts = getattr(getattr(player, "source", None), "has_pending_tts", None)
+            if callable(pending_tts) and pending_tts():
+                self.log("idle_disconnect_waiting_for_tts", guild_id=guild_id)
                 return
             humans = self._voice_human_count(st)
             st.player = None
@@ -1075,6 +1109,7 @@ class MusicAgent(TTSMixin, ReproducaoMixin, ResolucaoMixin):
             self._prefetch_tasks.clear()
             self._youtube_metadata_tasks.clear()
             self._voice_runtime_recovery_tasks.clear()
+            self._voice_cleanup_pending.clear()
             await cancel_tasks(background)
             for guild_id in list(self._prepared_audio):
                 self._cancel_audio_preparation(guild_id)

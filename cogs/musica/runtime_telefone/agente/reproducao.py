@@ -912,7 +912,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         player = st.player
         if player and hasattr(player, "pause"):
-            player.pause()
+            mixer = getattr(player, "source", None)
+            if isinstance(mixer, AgentMixedAudioSource) and mixer.persistent and getattr(player, "is_playing", lambda: False)():
+                mixer.set_music_paused(True)
+            else:
+                player.pause()
             if not st.paused_monotonic and st.started_monotonic:
                 st.paused_monotonic = time.monotonic()
             st.paused = True
@@ -934,7 +938,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 # e o prefetch não avançarem enquanto o VoiceClient está parado.
                 st.started_monotonic += max(0.0, now - float(st.paused_monotonic))
             st.paused_monotonic = 0.0
-            player.resume()
+            mixer = getattr(player, "source", None)
+            if isinstance(mixer, AgentMixedAudioSource) and mixer.persistent and mixer.music_paused:
+                mixer.set_music_paused(False)
+            else:
+                player.resume()
             st.paused = False
             self._set_status(st, "playing", event="resume")
             self._schedule_next_queue_prefetch(guild_id, reason="resume")
@@ -2251,6 +2259,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                         guild_id=guild_id,
                         channel=getattr(getattr(existing, "channel", None), "id", None),
                     )
+                    # disconnect(force=True) em um cliente stale gera o mesmo
+                    # evento de voice state que uma queda externa. Marque esta
+                    # saída antes de chamá-lo para não criar um recovery rival
+                    # enquanto a resolução/preconexão ainda está em curso.
+                    self._voice_cleanup_pending[guild_id] = time.monotonic() + 3.0
                     await self._disconnect_voice_client_bounded(
                         existing,
                         guild_id=guild_id,
@@ -2914,6 +2927,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         track = st.current
         if track is None:
+            return False
+        if not str(getattr(track, "stream_url", "") or "") and not getattr(track, "attachment_ref", None):
+            self.log("voice_runtime_recovery_waiting_for_stream", guild_id=guild_id, title=getattr(track, "title", ""))
             return False
         registry = getattr(self, "_voice_runtime_recovery_tasks", None)
         if not isinstance(registry, dict):

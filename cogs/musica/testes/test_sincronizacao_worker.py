@@ -8,6 +8,7 @@ import pytest
 from cogs.musica.agente_telefone.conversao import estado_da_guild_no_payload, faixa_do_payload
 from cogs.musica.nucleo.estado import MusicGuildState
 from cogs.musica.reproducao.sincronizacao import sincronizar_estado_agente, sincronizar_fila_remota
+from cogs.musica.reproducao import sincronizacao
 
 
 class FilaLocalFalsa:
@@ -158,3 +159,33 @@ async def test_agente_exibe_bitrate_somente_quando_worker_reporta_stream() -> No
 
     assert router.state.current_quality_kbps == 136
     assert router.state.current_quality_label == "Worker"
+
+
+@pytest.mark.asyncio
+async def test_fim_da_fila_mantem_worker_vinculado_ate_voz_desconectar(monkeypatch) -> None:
+    router = _RouterSyncFalso()
+    state = router.state
+    state.current_backend = "agent"
+    state.current_status = "playing"
+    state.current = faixa_do_payload({"title": "Faixa", "webpage_url": "https://example.invalid/faixa"})
+    state.music_session_active = True
+    router._set_idle_reason = lambda st, reason: None
+    router._mark_internal_voice_disconnect = lambda gid, **kwargs: None
+    router._schedule_agent_session_finished_effects = lambda gid, reason: None
+    router._set_panel_controls_invalidation = lambda gid, **kwargs: None
+    unbound = []
+    monkeypatch.setattr(sincronizacao, "desvincular_guild_worker", lambda gid: unbound.append(gid))
+
+    await sincronizar_estado_agente(router, 10, agent_state={
+        "status": "idle", "current": None, "queue": [],
+        "voice_connected": True, "voice_session_mode": "music_idle_grace",
+    }, create_panel=False)
+    assert state.current is None and state.agent_voice_connected
+    assert unbound == []
+
+    await sincronizar_estado_agente(router, 10, agent_state={
+        "status": "idle", "current": None, "queue": [],
+        "voice_connected": False, "voice_session_mode": "disconnected",
+    }, create_panel=False)
+    assert not state.agent_voice_connected
+    # O monitor efetua o unbind após confirmar três snapshots desconectados.

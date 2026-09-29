@@ -410,7 +410,10 @@ async def sincronizar_estado_agente(
                 router._set_current_status(state, "idle")
                 router._mark_internal_voice_disconnect(guild_id, seconds=8.0)
                 router._schedule_agent_session_finished_effects(guild_id, "agent_idle")
-                desvincular_guild_worker(guild_id)
+                # O fim da faixa não encerra a posse da voz: durante a janela
+                # de espera o TTS ainda precisa chegar ao mesmo worker.
+                if not bool(remote.get("voice_connected")) or str(remote.get("voice_session_mode") or "").lower() == "disconnected":
+                    desvincular_guild_worker(guild_id)
             else:
                 if track is not None:
                     state.current = track
@@ -436,6 +439,8 @@ async def sincronizar_estado_agente(
         state.agent_voice_recovery_attempts = max(0, int(remote.get("voice_runtime_recovery_attempts") or 0))
     state.agent_voice_recovery_last_error = str(remote.get("voice_runtime_recovery_last_error") or "")[:260]
     state.agent_voice_session_mode = str(remote.get("voice_session_mode") or "")[:64]
+    if "voice_connected" in remote:
+        state.agent_voice_connected = bool(remote["voice_connected"])
     state.agent_voice_presence_reason = str(remote.get("voice_presence_reason") or "")[:120]
     state.agent_last_disconnect_reason = str(remote.get("last_disconnect_reason") or "")[:96]
     state.agent_last_disconnect_event = str(remote.get("last_disconnect_event") or "")[:96]

@@ -1171,6 +1171,99 @@ def test_pause_freezes_position_and_resume_restarts_prefetch_clock(music, monkey
     run(scenario())
 
 
+def test_paused_music_keeps_tts_audible_without_resuming_track(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 320
+
+        class MusicSource:
+            reads = 0
+            def read(self):
+                self.reads += 1
+                return b"\x01\x00" * 1920
+            def cleanup(self): pass
+
+        class Speech:
+            def __init__(self): self.frames = [b"\x02\x00" * 1920, b""]
+            def read(self): return self.frames.pop(0)
+            def cleanup(self): pass
+
+        music_source = MusicSource()
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(), music_source=music_source,
+            music_volume=1.0, persistent=True,
+        )
+
+        class Voice:
+            source = mixer
+            def is_playing(self): return True
+            def is_connected(self): return True
+            def pause(self): raise AssertionError("a pausa não deve parar a thread de voz")
+            def resume(self): raise AssertionError("o resume deve liberar apenas o ramo musical")
+
+        st = music.GuildMusicState(
+            guild_id=gid, current=music.AgentTrack(title="music", query="music"),
+            status="playing", player=Voice(), started_monotonic=music.time.monotonic(),
+        )
+        agent.states[gid] = st
+        await agent.cmd_pause({"guild_id": gid})
+        assert mixer.music_paused and mixer.read() == bytes(3840)
+        assert music_source.reads == 0
+
+        done = mixer.add_tts(Speech())
+        assert mixer.read() == b"\x02\x00" * 1920
+        mixer.read()
+        await asyncio.sleep(0)
+        assert done.done() and done.exception() is None
+        assert music_source.reads == 0 and st.paused
+
+        await agent.cmd_resume({"guild_id": gid})
+        assert not mixer.music_paused and mixer.read() == b"\x01\x00" * 1920
+        assert music_source.reads == 1 and not st.paused
+        mixer.cleanup()
+
+    run(scenario())
+
+
+def test_idle_mixer_waits_for_preparing_tts_and_reports_real_interruptions(music):
+    async def scenario():
+        class FinishedMusic:
+            def read(self): return b""
+            def cleanup(self): pass
+
+        class Speech:
+            def __init__(self, frames): self.frames = list(frames)
+            def read(self): return self.frames.pop(0)
+            def cleanup(self): pass
+
+        mixer = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(), music_source=FinishedMusic(),
+            music_volume=0.55, persistent=True,
+        )
+        mixer.reserve_tts()
+        mixer.finish_when_idle()
+        assert mixer.read() == bytes(3840)  # faixa terminou durante a síntese
+        done = mixer.add_tts(Speech([b"\x03\x00" * 1920, b""]))
+        mixer.release_tts()
+        assert mixer.read() == b"\x03\x00" * 1920
+        mixer.read()
+        await asyncio.sleep(0)
+        assert done.done() and done.exception() is None
+        assert mixer.read() == b""  # só encerra depois da fala
+
+        interrupted = music.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(), music_source=FinishedMusic(),
+            music_volume=0.55, persistent=True,
+        )
+        incomplete = interrupted.add_tts(Speech([b"\x04\x00" * 1920, b""]))
+        interrupted.cleanup()
+        await asyncio.sleep(0)
+        assert incomplete.done()
+        assert "TTS interrompido" in str(incomplete.exception())
+
+    run(scenario())
+
+
 def test_seek_invalidates_prefetch_generation_before_restarting_player(music):
     async def scenario():
         agent = music.MusicAgent()
@@ -2880,6 +2973,85 @@ def test_stale_disconnected_voice_client_is_cleaned_before_reconnect(music, monk
         assert voice is guild.voice_client
         assert channel.calls == 1
         assert "voice_stale_client_cleanup" in events
+
+    run(scenario())
+
+
+def test_stale_cleanup_and_lazy_preconnect_never_start_a_second_player(music, monkeypatch):
+    monkeypatch.setenv("MUSIC_AGENT_VOICE_RECONNECT_GRACE_SECONDS", "0")
+
+    async def scenario():
+        gid, channel_id, bot_id = 19040, 19050, 19060
+        agent = music.MusicAgent()
+        channel = types.SimpleNamespace(id=channel_id)
+        member = types.SimpleNamespace(id=bot_id, guild=types.SimpleNamespace(id=gid))
+        agent.client.user = types.SimpleNamespace(id=bot_id)
+        before = types.SimpleNamespace(channel=channel)
+        after = types.SimpleNamespace(channel=None)
+        events = []
+        agent.log = lambda event, **fields: events.append(event)
+        recovery = []
+        agent._schedule_voice_runtime_recovery = lambda *args, **kwargs: recovery.append(args) or True
+
+        class StaleVoice:
+            def __init__(self, guild): self.guild, self.channel = guild, channel
+            def is_connected(self): return False
+            async def disconnect(self, force=False):
+                await agent.client.on_voice_state_update(member, before, after)
+                self.guild.voice_client = None
+
+        class FreshVoice:
+            def __init__(self): self.channel = channel
+            def is_connected(self): return True
+
+        class Channel:
+            id = channel_id
+            async def connect(self, self_deaf=True):
+                guild.voice_client = FreshVoice()
+                return guild.voice_client
+
+        class Guild:
+            id = gid
+            def __init__(self): self.voice_client = StaleVoice(self)
+            def get_channel(self, value): return target if value == channel_id else None
+
+        guild, target = Guild(), Channel()
+        agent.client.get_guild = lambda value: guild if value == gid else None
+        agent.client.get_channel = lambda value: target if value == channel_id else None
+        st = music.GuildMusicState(
+            guild_id=gid, voice_channel_id=channel_id, status="preparing",
+            current=music.AgentTrack(title="lazy", query="ytsearch1:lazy"),
+        )
+        agent.states[gid] = st
+        connected, created = await agent._ensure_direct_voice_client(gid)
+        assert created and connected.is_connected()
+        assert "voice_internal_cleanup_observed" in events
+        assert recovery == [] and st.current is not None and st.status == "preparing"
+
+        # Uma perda externa durante a resolução também pertence ao preconnect
+        # em andamento; ele próprio tentará conectar ou falhar, sem player rival.
+        await agent.client.on_voice_state_update(member, before, after)
+        assert "voice_loss_during_prepare" in events
+        assert recovery == [] and st.status == "preparing"
+        assert not agent._voice_runtime_recovery_tasks
+
+    run(scenario())
+
+
+def test_runtime_recovery_refuses_unresolved_lazy_track(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 19041
+        st = music.GuildMusicState(
+            guild_id=gid, current=music.AgentTrack(title="lazy", query="ytsearch1:lazy"),
+            status="preparing",
+        )
+        agent.states[gid] = st
+        assert agent._schedule_voice_runtime_recovery(
+            gid, played_for=0.0, reason="test", error="voice lost"
+        ) is False
+        assert not agent._voice_runtime_recovery_tasks
+        assert st.current is not None and st.status == "preparing"
 
     run(scenario())
 
