@@ -143,7 +143,7 @@ def record_play(track, marker: str) -> bool:
 def pending() -> dict | None:
     if channel() == (0, 0):
         return None
-    version = 3 if channel_type() == "forum" else 2
+    version = 4 if channel_type() == "forum" else 2
     with _db() as db:
         row = db.execute("""SELECT chave, track_json, reference_json, estado FROM arquivo_musicas WHERE tocadas>=2
             AND ((reference_json='' AND estado NOT IN ('too_large', 'ineligible'))
@@ -176,13 +176,14 @@ def mark_result(key: str, result: dict) -> None:
     if (status == "done" and all(int(ref.get(field) or 0) > 0 for field in ("guild_id", "channel_id", "message_id", "attachment_id"))
             and int(ref["guild_id"]) == configured_guild and same_target):
         with _db() as db:
-            version = max(1, min(3, int(result.get("presentation") or 1)))
+            version = max(1, min(4, int(result.get("presentation") or 1)))
+            refresh_at = time.time() + 3600 if kind == "forum" and version < 4 else 0
             old_row = db.execute("SELECT reference_json FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
             old = json.loads(old_row[0]) if old_row and old_row[0] else {}
             cleanup = old if old and old != ref and int(old.get("guild_id") or 0) == configured_guild else {}
             db.execute("""UPDATE arquivo_musicas SET reference_json=?, emoji=?, estado='done',
-                apresentacao=?, tentativa_em=0 WHERE chave=?""",
-                (json.dumps(ref), str(result.get("emoji") or "")[:100], version, key))
+                apresentacao=?, tentativa_em=? WHERE chave=?""",
+                (json.dumps(ref), str(result.get("emoji") or "")[:100], version, refresh_at, key))
             if cleanup:
                 db.execute("INSERT OR IGNORE INTO arquivo_limpezas(chave, message_id, previous_json) VALUES (?, ?, ?)",
                            (key, int(cleanup["message_id"]), json.dumps(cleanup)))
@@ -217,7 +218,7 @@ def archived(track) -> tuple[dict, str, str]:
 
 
 def counts() -> dict[str, int]:
-    version = 3 if channel_type() == "forum" else 2
+    version = 4 if channel_type() == "forum" else 2
     with _db() as db:
         rows = db.execute("SELECT estado, COUNT(*) FROM arquivo_musicas WHERE tocadas>=2 GROUP BY estado").fetchall()
         one_play = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE tocadas=1").fetchone()[0]

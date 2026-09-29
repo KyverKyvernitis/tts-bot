@@ -1,0 +1,5 @@
+CORREÇÃO INCREMENTAL DAS CAPAS DO FÓRUM
+
+Aplique este ZIP na raiz do projeto depois da rodada musica-forum-arquivo-velocidade-20260929.zip. Se bot e agente estiverem em instalações separadas, atualize os dois e reinicie seus processos. Preserve o banco de dados.
+
+Posts existentes (v3) serão reparados em segundo plano, um por vez, no mesmo tópico. O áudio e o ID do anexo são mantidos. Se a capa não estiver disponível, o áudio continua utilizável e a capa será tentada novamente após uma hora.

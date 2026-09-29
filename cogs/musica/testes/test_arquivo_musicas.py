@@ -6,7 +6,7 @@ from cogs.musica.busca import arquivo
 from cogs.musica.nucleo.modelos import MusicTrack
 from cogs.musica.arquivo_coordenador import ArchiveCoordinator
 from cogs.musica.runtime_telefone.agente.validade_stream import (
-    ArchiveMixin, DiscordAttachmentError, _archive_audio_filename, _archive_metadata, _archive_url,
+    ArchiveMixin, DiscordAttachmentError, _archive_audio_filename, _archive_cover_confirmed, _archive_metadata, _archive_url,
 )
 
 
@@ -141,6 +141,14 @@ def test_mensagem_do_arquivo_fornece_emoji_e_exige_autoria():
     raw["attachments"][0]["filename"] = "Arctic Monkeys - 505.ogg"
     assert _archive_metadata(raw, key, 5, ref)["duration"] == 235.0
     assert _archive_metadata(raw, key, 5, ref)["audio_stream_index"] == 0
+    raw["embeds"][0]["url"] = _archive_url("https://www.youtube.com/watch?v=abc", key, version=4)
+    assert _archive_metadata(raw, key, 5, {**ref, "forum_id": 7})["duration"] == 235.0
+    raw["embeds"][0]["thumbnail"] = {"url": "attachment://capa.jpg"}
+    raw["attachments"].append({"id": "7", "filename": "capa.jpg",
+                                 "url": "https://cdn.discordapp.com/attachments/2/7/capa.jpg?ex=ffff&hm=abc"})
+    assert not _archive_cover_confirmed(raw)
+    raw["embeds"][0]["thumbnail"]["url"] = "https://cdn.discordapp.com/attachments/2/7/capa.jpg"
+    assert _archive_cover_confirmed(raw)
     assert _archive_audio_filename("Arctic Monkeys / 505", ".ogg") == "Arctic Monkeys 505.ogg"
     raw["embeds"][0]["url"] = _archive_url("https://www.youtube.com/watch?v=abc", "b" * 32)
     with pytest.raises(DiscordAttachmentError):
@@ -293,6 +301,29 @@ async def test_webm_opus_vira_ogg_sem_recodificar_e_capa_vira_jpeg(tmp_path):
     assert codec == "opus" and index == 0 and 0.9 < duration < 1.1
     jpeg = await worker._archive_jpeg(image, tmp_path / "capa.jpg")
     assert jpeg is not None and jpeg.read_bytes().startswith(b"\xff\xd8\xff")
+    result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "stream=pix_fmt", "-of", "default=nw=1", str(jpeg)],
+                            check=True, capture_output=True, text=True)
+    assert "pix_fmt=yuvj420p" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_capa_tenta_outro_link_e_fallback_youtube(tmp_path):
+    calls = []
+
+    class Worker(ArchiveMixin):
+        async def _archive_cover(self, url, folder):
+            calls.append(url)
+            return folder / "capa.jpg" if url.endswith("/hqdefault.jpg") else None
+
+    worker = Worker()
+    result = await worker._archive_cover_for_track({
+        "display_thumbnail": "https://i.scdn.co/image/indisponivel",
+        "thumbnail": "https://i.ytimg.com/vi/abc/maxresdefault.jpg",
+        "webpage_url": "https://www.youtube.com/watch?v=abc",
+    }, tmp_path)
+    assert result == tmp_path / "capa.jpg"
+    assert calls == ["https://i.scdn.co/image/indisponivel", "https://i.ytimg.com/vi/abc/maxresdefault.jpg",
+                     "https://i.ytimg.com/vi/abc/hqdefault.jpg"]
 
 
 @pytest.mark.asyncio
@@ -338,6 +369,7 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
 
     channel = Channel()
     created = []
+    edits = []
 
     class Thread:
         id = 40
@@ -346,6 +378,10 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
 
         async def history(self, **kwargs):
             yield new_message
+
+        async def fetch_message(self, message_id):
+            assert message_id == 30
+            return new_message
 
     thread = Thread()
 
@@ -366,30 +402,42 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
         async def create_thread(self, *, name, embed, files, applied_tags, allowed_mentions):
             created.append((name, embed, [file.filename for file in files]))
             new_message.embeds = [embed]
-            new_message.attachments = [SimpleNamespace(id=8, filename="capa.jpg"),
-                                       SimpleNamespace(id=9, filename=files[-1].filename)]
+            new_message.attachments = [SimpleNamespace(id=8, filename="capa.jpg",
+                                                       url="https://cdn.discordapp.com/attachments/40/8/capa.jpg?ex=ffff&hm=abc"),
+                                       SimpleNamespace(id=9, filename=files[-1].filename,
+                                                       url=f"https://cdn.discordapp.com/attachments/40/9/{files[-1].filename}")]
             return SimpleNamespace(thread=thread, message=new_message)
 
     forum = Forum()
     monkeypatch.setattr(discord, "ForumChannel", Forum, raising=False)
 
-    new_message = SimpleNamespace(id=30, channel=thread, author=SimpleNamespace(id=5), embeds=[], attachments=[])
+    async def edit_post(*, embed, attachments, allowed_mentions):
+        edits.append((embed, [attachment.id if hasattr(attachment, "id") else attachment.filename
+                              for attachment in attachments]))
+        new_message.embeds = [embed]
+        new_message.attachments = [attachment if hasattr(attachment, "id") else SimpleNamespace(
+            id=10, filename=attachment.filename,
+            url="https://cdn.discordapp.com/attachments/40/10/capa-v4.jpg?ex=ffff&hm=abc")
+            for attachment in attachments]
+        return new_message
+
+    new_message = SimpleNamespace(id=30, channel=thread, author=SimpleNamespace(id=5), embeds=[],
+                                  attachments=[], edit=edit_post)
 
     async def ready():
         pass
 
     async def raw(channel_id, message_id):
         assert (channel_id, message_id) == (40, 30)
-        attachment = new_message.attachments[-1]
         return {"author": {"id": "5"}, "guild_id": "1", "channel_id": "40",
                 "embeds": [new_message.embeds[0].to_dict()],
                 "attachments": [{"id": str(attachment.id), "filename": attachment.filename,
-                                 "url": f"https://cdn.discordapp.com/attachments/40/{attachment.id}/{attachment.filename}"}]}
+                                 "url": attachment.url} for attachment in new_message.attachments]}
 
     class Worker(ArchiveMixin):
         def __init__(self):
             self.client = SimpleNamespace(wait_until_ready=ready,
-                                          get_channel=lambda channel_id: {2: channel, 20: forum}.get(channel_id),
+                                          get_channel=lambda channel_id: {2: channel, 20: forum, 40: thread}.get(channel_id),
                                           user=SimpleNamespace(id=5), http=SimpleNamespace(get_message=raw))
             self.states = {}
 
@@ -409,6 +457,9 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
             output.write_bytes(b"\xff\xd8\xff")
             return output
 
+        def log(self, *args, **kwargs):
+            pass
+
     async def instant(_):
         pass
 
@@ -419,18 +470,29 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
                       "webpage_url": original, "thumbnail": "https://i.ytimg.com/vi/abc/hqdefault.jpg"}}
     worker = Worker()
     result = await worker._archive_one(item)
-    assert result["status"] == "done" and result["presentation"] == 3
+    assert result["status"] == "done" and result["presentation"] == 4
     assert result["reference"]["forum_id"] == 20
     assert result["reference"]["channel_id"] == 40
     assert result["reference"]["message_id"] == 30
     assert result["reference"]["attachment_id"] == 9
     assert created[0][0] == "Arctic Monkeys - 505"
     assert created[0][2] == ["capa.jpg", "Arctic Monkeys - 505.ogg"]
-    assert new_message.embeds[0].thumbnail.url == "attachment://capa.jpg"
+    assert new_message.embeds[0].thumbnail.url == "https://cdn.discordapp.com/attachments/40/8/capa.jpg"
+    assert edits[0][1] == [8, 9]
     assert message.attachments[0].id == 4  # migração só apaga depois de gravar o novo índice
-    assert (await worker._archive_existing(forum, {**item, "retry": True})) == (new_message, 3)
+    assert (await worker._archive_existing(forum, {**item, "retry": True})) == (new_message, 4)
     assert (await worker._archive_one({**item, "retry": True}))["reference"] == result["reference"]
     assert len(created) == 1
+    assert len(edits) == 1
+
+    # O índice v3 provoca reparo no mesmo post, sem baixar nem reenviar o áudio.
+    new_message.embeds[0].url = _archive_url(original, key, version=3)
+    new_message.embeds[0].set_thumbnail(url="attachment://capa.jpg")
+    repaired = await worker._archive_one({**item, "existing_ref": result["reference"]})
+    assert repaired["reference"] == result["reference"] and repaired["presentation"] == 4
+    assert len(created) == 1 and len(edits) == 3
+    assert edits[1][1] == [9, "capa-v4.jpg"] and edits[2][1] == [9, 10]
+    assert new_message.embeds[0].thumbnail.url == "https://cdn.discordapp.com/attachments/40/10/capa-v4.jpg"
 
 
 def test_troca_para_forum_preserva_audio_ate_novo_post_validado(tmp_path, monkeypatch):
@@ -451,6 +513,12 @@ def test_troca_para_forum_preserva_audio_ate_novo_post_validado(tmp_path, monkey
     arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 3})
     assert arquivo.archived(track)[0] == new
     assert arquivo.pending() is None
+    assert arquivo.counts()["refresh"] == 1
+    with arquivo._db() as db:
+        db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE chave=?", (key,))
+    assert arquivo.pending()["reference"] == new
+    arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 4})
+    assert arquivo.counts()["refresh"] == 0
     assert arquivo.cleanup_pending()["previous"] == old
     arquivo.mark_cleanup(key, old, done=True)
     assert arquivo.cleanup_pending() is None
