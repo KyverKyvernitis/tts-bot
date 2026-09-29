@@ -10,7 +10,7 @@ from .agente_telefone.comandos import music_agent_command, music_agent_status
 from .busca import arquivo
 
 log = logging.getLogger(__name__)
-_MIN_COVER_AGENT_VERSION = (0, 3, 75)
+_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 76)
 
 
 def _archive_agent_ready(payload: dict) -> bool:
@@ -19,7 +19,7 @@ def _archive_agent_ready(payload: dict) -> bool:
     version = str(payload.get("version") or "")
     if not re.fullmatch(r"\d+(?:\.\d+){2,3}", version):
         return False
-    return tuple(int(part) for part in version.split(".")[:3]) >= _MIN_COVER_AGENT_VERSION
+    return tuple(int(part) for part in version.split(".")[:3]) >= _MIN_ARCHIVE_AGENT_VERSION
 
 
 @dataclass
@@ -34,21 +34,53 @@ class ArchiveCoordinator:
     def __init__(self, bot) -> None:
         self.bot = bot
         self.task: asyncio.Task | None = None
+        self.seed_task: asyncio.Task | None = None
         self.listening: dict[int, _Listening] = {}
         self._wake = asyncio.Event()
 
     def start(self) -> None:
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._run(), name="music-archive-coordinator")
+        if self.seed_task is None or self.seed_task.done():
+            self.seed_task = asyncio.create_task(self._seed_learned(), name="music-archive-learned-seed")
 
     async def close(self) -> None:
-        if self.task is not None:
-            self.task.cancel()
+        for task in (self.task, self.seed_task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self.task
+                await task
             except asyncio.CancelledError:
                 pass
-            self.task = None
+        self.task = self.seed_task = None
+
+    async def _seed_learned(self) -> None:
+        await self.bot.wait_until_ready()
+        seeded: tuple[int, int] = (0, 0)
+        while True:
+            try:
+                target = await asyncio.to_thread(arquivo.channel)
+                kind = await asyncio.to_thread(arquivo.channel_type)
+                if kind != "forum" or target == (0, 0):
+                    seeded = (0, 0)
+                elif target != seeded:
+                    cursor = ""
+                    while True:
+                        next_cursor, items = await asyncio.to_thread(arquivo.learned_page, cursor)
+                        if not next_cursor or next_cursor == cursor:
+                            break
+                        if items:
+                            await asyncio.to_thread(arquivo.register_learned_batch, items)
+                            self._wake.set()
+                        cursor = next_cursor
+                        await asyncio.sleep(0.05)
+                    seeded = target
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("[music/archive] importação da memória adiada", exc_info=True)
+            await asyncio.sleep(12)
 
     def observe(self, guild_id: int, track, remote: dict, *, confirmed: bool) -> None:
         """Conta o início confirmado uma vez por item real da fila."""
@@ -104,6 +136,7 @@ class ArchiveCoordinator:
                         pass
                     self._wake.clear()
                     continue
+                await asyncio.to_thread(arquivo.flush_learned)
                 cleanup = await asyncio.to_thread(arquivo.cleanup_pending)
                 if cleanup is not None:
                     try:
@@ -131,7 +164,7 @@ class ArchiveCoordinator:
                 # Evite publicar v5 durante a troca e adiar a correção por 1 h.
                 agent = await music_agent_status(guild_id=guild_id, timeout_seconds=3.0)
                 if not _archive_agent_ready(agent):
-                    log.info("[music/archive] aguardando agente com capas v6 | versão=%s", agent.get("version"))
+                    log.info("[music/archive] aguardando agente com fórum v7 | versão=%s", agent.get("version"))
                     await asyncio.sleep(12)
                     continue
                 from .busca.arquivo import media_key

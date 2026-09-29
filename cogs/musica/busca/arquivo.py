@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -12,6 +13,8 @@ from urllib.parse import parse_qs, urlsplit
 from .memoria import _db_path, _track_payload
 
 log = logging.getLogger(__name__)
+_learned_lock = threading.Lock()
+_new_learned: dict[str, tuple[dict, float]] = {}
 
 
 def _url_key(url: str) -> str:
@@ -69,6 +72,9 @@ def _db() -> sqlite3.Connection:
         if "apresentacao" not in columns:
             db.execute("ALTER TABLE arquivo_musicas ADD COLUMN apresentacao INTEGER NOT NULL DEFAULT 1")
         db.execute("PRAGMA user_version=3")
+    if db.execute("PRAGMA user_version").fetchone()[0] < 4:
+        db.execute("ALTER TABLE arquivo_musicas ADD COLUMN aprendida_em REAL NOT NULL DEFAULT 0")
+        db.execute("PRAGMA user_version=4")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_reproducoes (marcador TEXT PRIMARY KEY, registrado_em REAL NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_aliases (alias TEXT PRIMARY KEY, chave TEXT NOT NULL)")
     db.execute("""CREATE TABLE IF NOT EXISTS arquivo_limpezas (
@@ -140,15 +146,112 @@ def record_play(track, marker: str) -> bool:
     return True
 
 
+def note_learned(tracks) -> None:
+    """A escolha já foi persistida; avise o coordenador sem I/O no play."""
+    with _learned_lock:
+        for track in tracks:
+            key = media_key(track)
+            if key:
+                _new_learned[key] = (_track_payload(track), time.time())
+        # A varredura da memória persistida recupera qualquer item descartado.
+        while len(_new_learned) > 2048:
+            _new_learned.pop(next(iter(_new_learned)))
+
+
+def flush_learned() -> int:
+    with _learned_lock:
+        items = list(_new_learned.items())
+        _new_learned.clear()
+    try:
+        return register_learned_batch([(payload, stamp) for _key, (payload, stamp) in items])
+    except Exception:
+        with _learned_lock:
+            for key, value in items:
+                _new_learned.setdefault(key, value)
+        raise
+
+
+def learned_page(after: str = "", limit: int = 128) -> tuple[str, list[tuple[dict, float]]]:
+    """Página pequena da memória persistente, incluindo playlists não tocadas."""
+    from .memoria import _abrir_db
+    with _abrir_db() as db:
+        rows = db.execute("SELECT chave, track_json, registrado_em FROM escolhas WHERE chave>? "
+                          "ORDER BY chave LIMIT ?", (after, max(1, min(256, limit)))).fetchall()
+    parsed = []
+    for _alias, encoded, stamp in rows:
+        try:
+            payload = json.loads(encoded)
+            if isinstance(payload, dict):
+                parsed.append((payload, float(stamp)))
+        except (TypeError, ValueError):
+            continue
+    return (rows[-1][0] if rows else after), parsed
+
+
+def _metadata_score(payload: dict) -> tuple[int, int, int, int]:
+    url = str(payload.get("webpage_url") or "")
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    playable = url.startswith("https://") and not host.endswith(("spotify.com", "music.apple.com", "deezer.com"))
+    return (int(playable), int(bool(payload.get("duration"))),
+            int(bool(payload.get("display_thumbnail") or payload.get("thumbnail"))),
+            sum(bool(payload.get(field)) for field in ("original_url", "display_title", "display_source", "uploader")))
+
+
+def register_learned_batch(items: list[tuple[dict, float]]) -> int:
+    """Uma linha por música, nunca uma linha por alias; preserva IDs já publicados."""
+    from .memoria import _track_from_payload
+    candidates: dict[str, tuple[dict, float]] = {}
+    for payload, stamp in items:
+        track = _track_from_payload(payload)
+        key = media_key(track)
+        if not key or not str(track.webpage_url or "").startswith("https://"):
+            continue
+        try:
+            duration = float(track.duration or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        if track.is_live or duration > 600 or duration < 0:
+            continue
+        previous = candidates.get(key)
+        if previous is None or (_metadata_score(payload), stamp) > (_metadata_score(previous[0]), previous[1]):
+            candidates[key] = (payload, stamp)
+    if not candidates:
+        return 0
+    with _db() as db:
+        for key, (payload, stamp) in candidates.items():
+            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            row = db.execute("SELECT track_json, aprendida_em FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
+            if row is None:
+                db.execute("INSERT INTO arquivo_musicas(chave, track_json, aprendida_em) VALUES (?, ?, ?)",
+                           (key, encoded, stamp))
+            else:
+                try:
+                    old = json.loads(row[0])
+                except (ValueError, TypeError):
+                    old = {}
+                if _metadata_score(payload) > _metadata_score(old):
+                    db.execute("UPDATE arquivo_musicas SET track_json=?, aprendida_em=MAX(aprendida_em, ?) WHERE chave=?",
+                               (encoded, stamp, key))
+                else:
+                    db.execute("UPDATE arquivo_musicas SET aprendida_em=MAX(aprendida_em, ?) WHERE chave=?",
+                               (stamp, key))
+    return len(candidates)
+
+
 def pending() -> dict | None:
     if channel() == (0, 0):
         return None
-    version = 6 if channel_type() == "forum" else 2
+    version = 7 if channel_type() == "forum" else 2
     with _db() as db:
-        row = db.execute("""SELECT chave, track_json, reference_json, estado FROM arquivo_musicas WHERE tocadas>=2
+        row = db.execute("""SELECT chave, track_json, reference_json, estado FROM arquivo_musicas
+            WHERE (aprendida_em>0 OR tocadas>=2)
             AND ((reference_json='' AND estado NOT IN ('too_large', 'ineligible'))
                 OR (reference_json!='' AND apresentacao<?)) AND tentativa_em<=?
-            ORDER BY tentativa_em, chave LIMIT 1""", (version, time.time())).fetchone()
+            ORDER BY CASE WHEN reference_json!='' THEN 0 ELSE 1 END,
+                     tentativa_em, aprendida_em DESC, chave LIMIT 1""", (version, time.time())).fetchone()
     if not row:
         return None
     try:
@@ -176,8 +279,8 @@ def mark_result(key: str, result: dict) -> None:
     if (status == "done" and all(int(ref.get(field) or 0) > 0 for field in ("guild_id", "channel_id", "message_id", "attachment_id"))
             and int(ref["guild_id"]) == configured_guild and same_target):
         with _db() as db:
-            version = max(1, min(6, int(result.get("presentation") or 1)))
-            refresh_at = time.time() + 3600 if kind == "forum" and version < 6 else 0
+            version = max(1, min(7, int(result.get("presentation") or 1)))
+            refresh_at = time.time() + 3600 if kind == "forum" and version < 7 else 0
             old_row = db.execute("SELECT reference_json FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
             old = json.loads(old_row[0]) if old_row and old_row[0] else {}
             cleanup = old if old and old != ref and int(old.get("guild_id") or 0) == configured_guild else {}
@@ -218,14 +321,16 @@ def archived(track) -> tuple[dict, str, str]:
 
 
 def counts() -> dict[str, int]:
-    version = 6 if channel_type() == "forum" else 2
+    version = 7 if channel_type() == "forum" else 2
     with _db() as db:
-        rows = db.execute("SELECT estado, COUNT(*) FROM arquivo_musicas WHERE tocadas>=2 GROUP BY estado").fetchall()
+        rows = db.execute("SELECT estado, COUNT(*) FROM arquivo_musicas GROUP BY estado").fetchall()
+        learned = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE aprendida_em>0").fetchone()[0]
         one_play = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE tocadas=1").fetchone()[0]
         refresh = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE reference_json!='' AND apresentacao<?",
                              (version,)).fetchone()[0]
         cleanup = db.execute("SELECT COUNT(*) FROM arquivo_limpezas").fetchone()[0]
-    return {**dict(rows), "one_play": int(one_play), "refresh": int(refresh), "cleanup": int(cleanup)}
+    return {**dict(rows), "learned": int(learned), "one_play": int(one_play),
+            "refresh": int(refresh), "cleanup": int(cleanup)}
 
 
 def cleanup_pending() -> dict | None:

@@ -267,6 +267,7 @@ _MARKER_V3 = "music-archive-v3-"
 _MARKER_V4 = "music-archive-v4-"
 _MARKER_V5 = "music-archive-v5-"
 _MARKER_V6 = "music-archive-v6-"
+_MARKER_V7 = "music-archive-v7-"
 _PUBLIC_FOOTER = "Arquivo de músicas"
 _IMAGE_HOSTS = {"i.ytimg.com", "img.youtube.com", "i.scdn.co", "e-cdns-images.dzcdn.net",
                 "is1-ssl.mzstatic.com", "is2-ssl.mzstatic.com", "is3-ssl.mzstatic.com",
@@ -286,7 +287,7 @@ def _archive_url(origin: str, key: str, *, version: int = 2) -> str:
     parsed = urlsplit(origin)
     if parsed.scheme != "https" or not parsed.netloc:
         raise ValueError("link público da faixa ausente")
-    marker = _MARKER_V6 if version >= 6 else _MARKER_V5 if version >= 5 else _MARKER_V4 if version >= 4 else _MARKER_V3 if version >= 3 else _MARKER_V2
+    marker = _MARKER_V7 if version >= 7 else _MARKER_V6 if version >= 6 else _MARKER_V5 if version >= 5 else _MARKER_V4 if version >= 4 else _MARKER_V3 if version >= 3 else _MARKER_V2
     fragment = "&".join(filter(None, (parsed.fragment, marker + key)))
     return urlunsplit(parsed._replace(fragment=fragment))
 
@@ -319,6 +320,16 @@ def _archive_cover_confirmed(raw: dict) -> bool:
     embed = (raw.get("embeds") or [{}])[0]
     thumbnail = (embed.get("thumbnail") or {}).get("url")
     try:
+        if _MARKER_V7 in str(embed.get("url") or ""):
+            for item in raw.get("attachments") or []:
+                if Path(str(item.get("filename") or "")).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+                    continue
+                try:
+                    valid_cdn_url(item.get("url"))
+                    return True
+                except (DiscordAttachmentError, ValueError, TypeError):
+                    continue
+            return False
         path = urlsplit(valid_cdn_url(thumbnail)).path
         return any(Path(str(item.get("filename") or "")).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
                    and urlsplit(valid_cdn_url(item.get("url"))).path == path
@@ -339,13 +350,26 @@ def _archive_metadata(raw: dict, key: str, bot_id: int, ref: dict) -> dict:
         raise DiscordAttachmentError("A mensagem não pertence ao arquivo de música esperado.")
     if footer == _PUBLIC_FOOTER:
         markers = [part for part in urlsplit(str(embed.get("url") or "")).fragment.split("&")
-                   if part.startswith((_MARKER_V2, _MARKER_V3, _MARKER_V4, _MARKER_V5, _MARKER_V6))]
-        expected = ({_MARKER_V3 + key, _MARKER_V4 + key, _MARKER_V5 + key, _MARKER_V6 + key} if ref.get("forum_id")
+                   if part.startswith((_MARKER_V2, _MARKER_V3, _MARKER_V4, _MARKER_V5, _MARKER_V6, _MARKER_V7))]
+        expected = ({_MARKER_V3 + key, _MARKER_V4 + key, _MARKER_V5 + key, _MARKER_V6 + key, _MARKER_V7 + key} if ref.get("forum_id")
                     else {_MARKER_V2 + key})
         if markers and (len(markers) != 1 or markers[0] not in expected):
             raise DiscordAttachmentError("Identificador do arquivo diferente da faixa esperada.")
     fields = {str(field.get("name") or ""): str(field.get("value") or "") for field in embed.get("fields") or [] if isinstance(field, dict)}
-    origin = fields.get("Fonte", "")
+    is_compact = _MARKER_V7 + key in str(embed.get("url") or "")
+    if is_compact:
+        lines = str(embed.get("description") or "").splitlines()
+        try:
+            origin, duration_text = lines[0].rsplit(" • ", 1)
+            fields["Duração"] = duration_text
+            fields["Formato"] = lines[1]
+            fields["Qualidade"] = lines[1]
+            if len(lines) > 2 and lines[2].startswith("Fluxo de áudio: "):
+                fields["Índice de áudio"] = lines[2].split(": ", 1)[1]
+        except (IndexError, ValueError):
+            raise DiscordAttachmentError("Metadados da mensagem compacta incompletos.") from None
+    else:
+        origin = fields.get("Fonte", "")
     emoji = origin.split(" ", 1)[0][:100]
     if not emoji or len(emoji) > 100:
         raise DiscordAttachmentError("A origem do áudio está ausente no arquivo.")
@@ -384,7 +408,7 @@ class ArchiveMixin:
         key = str(body.get("archive_key") or "")
         track = body.get("track") if isinstance(body.get("track"), dict) else {}
         try:
-            duration = float(track["duration"])
+            duration = float(track.get("duration") or 0)
             guild_id = int(body["guild_id"])
             channel_id = int(body["archive_channel_id"])
         except (TypeError, ValueError, KeyError):
@@ -396,7 +420,7 @@ class ArchiveMixin:
             public_host = not ipaddress.ip_address(host).is_private
         except ValueError:
             public_host = host not in {"localhost", "localhost.localdomain"} and "." in host
-        if (not re.fullmatch(r"[a-f0-9]{32}", key) or not 0 < duration <= 600
+        if (not re.fullmatch(r"[a-f0-9]{32}", key) or not 0 <= duration <= 600
                 or guild_id <= 0 or channel_id <= 0 or parsed.scheme != "https"
                 or not public_host or host.endswith(("discord.com", "discordapp.com"))):
             raise ValueError("faixa inelegível para o arquivo")
@@ -404,7 +428,7 @@ class ArchiveMixin:
             previous = self._archive_results[key]
             ref = previous.get("reference") if isinstance(previous.get("reference"), dict) else {}
             same_channel = int(ref.get("guild_id") or 0) == guild_id and int(ref.get("forum_id") or 0) == channel_id
-            if previous.get("status") == "done" and same_channel and int(previous.get("presentation") or 1) >= 6:
+            if previous.get("status") == "done" and same_channel and int(previous.get("presentation") or 1) >= 7:
                 return {"ok": True, **previous}
             self._archive_results.pop(key, None)
         if key != self._archive_active and key not in {item.get("key") for item in list(self._archive_queue._queue)}:
@@ -482,6 +506,8 @@ class ArchiveMixin:
             return 0
         url = str(embed.url or "")
         fragments = urlsplit(url).fragment.split("&")
+        if _MARKER_V7 + item["key"] in fragments:
+            return 7
         if _MARKER_V6 + item["key"] in fragments:
             return 6
         if _MARKER_V5 + item["key"] in fragments:
@@ -492,7 +518,7 @@ class ArchiveMixin:
             return 3
         if _MARKER_V2 + item["key"] in fragments:
             return 2
-        if any(fragment.startswith((_MARKER_V2, _MARKER_V3, _MARKER_V4, _MARKER_V5, _MARKER_V6)) for fragment in fragments):
+        if any(fragment.startswith((_MARKER_V2, _MARKER_V3, _MARKER_V4, _MARKER_V5, _MARKER_V6, _MARKER_V7)) for fragment in fragments):
             return 0
         # Alguns clientes descartam o fragmento do título do embed. O link
         # original, a autoria e o canal ainda identificam a mensagem.
@@ -751,6 +777,22 @@ class ArchiveMixin:
     async def _archive_download(self, item: dict, folder: Path) -> Path | None:
         track = item["track"]
         url = str(track["webpage_url"])
+        if (urlsplit(url).hostname or "").lower() in {"open.spotify.com", "music.apple.com", "www.deezer.com", "deezer.com"}:
+            query = self._query_from_track_meta(track)
+            resolved = await self.resolve_track(query, track_meta=track,
+                                                body={"guild_id": item["guild_id"]}, priority=20)
+            url = str(resolved.webpage_url or "")
+            if not url.startswith("https://") or url == str(track["webpage_url"]):
+                raise RuntimeError("não encontrei uma fonte reproduzível para a faixa aprendida")
+            if resolved.duration and resolved.duration > 600:
+                raise ArchiveDurationTooLong("música com mais de 10 minutos")
+            track["webpage_url"] = url
+            track["source"] = resolved.source or "YouTube"
+            track["display_source"] = track["source"]
+            from cogs.musica import configuracao as music_config
+            source_name = str(track["source"]).lower()
+            emoji_key = next((name for name in music_config.MUSIC_SOURCE_EMOJIS if name in source_name), "")
+            item["emoji"] = music_config.MUSIC_SOURCE_EMOJIS.get(emoji_key, music_config.MUSIC_SOURCE_EMOJI_FALLBACK)
         base = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist", "--no-warnings",
                 "--no-progress", "--no-part", "--max-filesize", "20M", "--socket-timeout", "12",
                 "--format-sort", str(getattr(self, "ytdlp_sort", "abr,acodec,asr")),
@@ -793,19 +835,34 @@ class ArchiveMixin:
             raise ArchiveTooLarge("a melhor faixa compatível ultrapassa 20 MiB")
         raise RuntimeError("não consegui baixar um formato de áudio válido")
 
-    async def _archive_finish_cover(self, message, item: dict, cover_name: str):
-        cover = next((attachment for attachment in message.attachments if attachment.filename == cover_name), None)
+    async def _archive_finish_cover(self, message, item: dict, cover_name: str = ""):
+        if cover_name:
+            cover = next((attachment for attachment in message.attachments
+                          if attachment.filename == cover_name), None)
+        else:
+            cover = next((attachment for attachment in message.attachments
+                          if Path(attachment.filename).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
         if cover is None:
             raise ValueError("Discord não confirmou a imagem enviada")
-        cdn = valid_cdn_url(cover.url)
-        # URLs de anexos vêm assinadas. O Discord renova a URL sem query nos
-        # embeds, inclusive depois que a assinatura original expira.
-        cdn = urlunsplit(urlsplit(cdn)._replace(query="", fragment=""))
+        valid_cdn_url(cover.url)
         embed = message.embeds[0].copy()
+        fields = {field.name: str(field.value) for field in embed.fields}
+        source = fields.get("Fonte", "")
+        duration = fields.get("Duração", "")
+        if not source or not duration:
+            raise ValueError("Fonte ou duração ausente na mensagem")
         origin = str(item["track"].get("original_url") or item["track"].get("webpage_url") or "")[:500]
-        embed.url = _archive_url(origin, item["key"], version=6)
-        embed.set_thumbnail(url=cdn)
-        return await message.edit(embed=embed, attachments=list(message.attachments),
+        embed.url = _archive_url(origin, item["key"], version=7)
+        embed.title = "Abrir origem da faixa"
+        embed.clear_fields()
+        embed.description = f"{source} • {duration}\n{fields.get('Formato', '')} • {fields.get('Qualidade', '')}".strip()
+        if fields.get("Índice de áudio"):
+            embed.description += f"\nFluxo de áudio: {fields['Índice de áudio']}"
+        embed.colour = discord.Colour(0x5865F2)
+        embed.set_thumbnail(url=None)
+        artist = re.sub(r"\s+", " ", str(item["track"].get("display_uploader") or item["track"].get("uploader") or "")).strip()[:100]
+        preview = f"🎙️ {artist} · {duration}" if artist else f"{source} · {duration}"
+        return await message.edit(content=preview, embed=embed, attachments=list(message.attachments),
                                   allowed_mentions=discord.AllowedMentions.none())
 
     async def _archive_one(self, item: dict) -> dict:
@@ -826,31 +883,35 @@ class ArchiveMixin:
                 parsed = _archive_metadata(raw, item["key"], self.client.user.id, ref)
                 if version >= 4 and not _archive_cover_confirmed(raw):
                     version = 3
-                if version < 6:
-                    with tempfile.TemporaryDirectory(prefix="music-cover-") as location:
-                        folder = Path(location)
-                        cover = await self._archive_cover_for_track(item["track"], folder)
-                        if cover is not None:
-                            await self._archive_wait_stable_voice()
-                            cover_name = "capa-v6.jpg"
-                            file = discord.File(cover, filename=cover_name)
-                            try:
-                                staged = message.embeds[0].copy()
-                                staged.set_thumbnail(url=None)
-                                message = await message.edit(embed=staged, attachments=[attachment, file],
-                                                             allowed_mentions=discord.AllowedMentions.none())
-                            finally:
-                                file.close()
-                            try:
-                                message = await self._archive_finish_cover(message, item, cover_name)
-                                version = 6
-                            except (discord.HTTPException, ValueError, IndexError) as exc:
-                                self.log("archive_cover_retry", key=item["key"], error=type(exc).__name__)
-                        else:
-                            self.log("archive_cover_missing", key=item["key"])
+                if version < 7:
+                    if version == 6 and _archive_cover_confirmed(raw):
+                        message = await self._archive_finish_cover(message, item)
+                        version = 7
+                    else:
+                        with tempfile.TemporaryDirectory(prefix="music-cover-") as location:
+                            folder = Path(location)
+                            cover = await self._archive_cover_for_track(item["track"], folder)
+                            if cover is not None:
+                                await self._archive_wait_stable_voice()
+                                cover_name = "capa-v7.jpg"
+                                file = discord.File(cover, filename=cover_name)
+                                try:
+                                    staged = message.embeds[0].copy()
+                                    staged.set_thumbnail(url=None)
+                                    message = await message.edit(embed=staged, attachments=[attachment, file],
+                                                                 allowed_mentions=discord.AllowedMentions.none())
+                                finally:
+                                    file.close()
+                                try:
+                                    message = await self._archive_finish_cover(message, item, cover_name)
+                                    version = 7
+                                except (discord.HTTPException, ValueError, IndexError) as exc:
+                                    self.log("archive_cover_retry", key=item["key"], error=type(exc).__name__)
+                            else:
+                                self.log("archive_cover_missing", key=item["key"])
                 raw = await self.client.http.get_message(ref["channel_id"], message.id)
                 parsed = _archive_metadata(raw, item["key"], self.client.user.id, ref)
-                if version == 6 and not _archive_cover_confirmed(raw):
+                if version == 7 and not _archive_cover_confirmed(raw):
                     self.log("archive_cover_retry", key=item["key"], error="cover_not_confirmed")
                     version = 3
                 return {"status": "done", "reference": ref, "emoji": parsed["emoji"], "presentation": version}
@@ -933,14 +994,14 @@ class ArchiveMixin:
             if cover is not None:
                 try:
                     message = await self._archive_finish_cover(message, item, cover.name)
-                    version = 6
+                    version = 7
                 except (discord.HTTPException, ValueError, IndexError) as exc:
                     self.log("archive_cover_retry", key=item["key"], error=type(exc).__name__)
             else:
                 self.log("archive_cover_missing", key=item["key"])
             raw = await self.client.http.get_message(thread.id, message.id)
             parsed = _archive_metadata(raw, item["key"], self.client.user.id, ref)
-            if version == 6 and not _archive_cover_confirmed(raw):
+            if version == 7 and not _archive_cover_confirmed(raw):
                 self.log("archive_cover_retry", key=item["key"], error="cover_not_confirmed")
                 version = 3
             return {"status": "done", "reference": ref, "emoji": parsed["emoji"], "presentation": version}

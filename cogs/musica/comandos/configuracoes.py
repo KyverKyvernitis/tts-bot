@@ -26,7 +26,7 @@ class FluxoConfiguracoes:
             counts = await asyncio.to_thread(arquivo.counts)
             channel_text = f"<#{channel_id}>" if channel_id else "desativado"
             mode = "fórum" if kind == "forum" else "canal antigo"
-            await ctx.reply(f"Arquivo ({mode}): {channel_text} · 1 reprodução: {counts.get('one_play', 0)} · pendentes após 2: {counts.get('waiting', 0)} · enviadas: {counts.get('done', 0)} · migrando: {counts.get('refresh', 0)} · limpando antigos: {counts.get('cleanup', 0)} · falhas: {counts.get('failed', 0)} · acima do limite: {counts.get('too_large', 0)}.",
+            await ctx.reply(f"Arquivo ({mode}): {channel_text} · aprendidas únicas: {counts.get('learned', 0)} · pendentes: {counts.get('waiting', 0)} · enviadas: {counts.get('done', 0)} · atualizando posts: {counts.get('refresh', 0)} · limpando antigos: {counts.get('cleanup', 0)} · falhas: {counts.get('failed', 0)} · acima do limite: {counts.get('too_large', 0)}.",
                             mention_author=False, allowed_mentions=discord.AllowedMentions.none())
             return
         try:

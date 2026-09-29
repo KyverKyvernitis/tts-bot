@@ -709,6 +709,9 @@ def registrar_selecao_busca(
         prioridade=_PRIORIDADE_SELECAO,
         now=now,
     )
+    if any(resultados):
+        from .arquivo import note_learned
+        note_learned((track,))
     # Mantem o contrato historico: o retorno informa se a consulta original
     # foi registrada, mesmo que aliases secundarios tenham sido bloqueados por
     # uma escolha de link com prioridade maior.
@@ -749,6 +752,9 @@ def registrar_link_busca(track: MusicTrack, *, now: float | None = None) -> tupl
         prioridade=_PRIORIDADE_LINK,
         now=now,
     )
+    if any(resultados):
+        from .arquivo import note_learned
+        note_learned((track,))
     return tuple(alias for alias, escolha in zip(aliases, resultados) if escolha is not None)
 
 
@@ -786,6 +792,8 @@ def registrar_lote_link_busca(
                 registrados += 1
     if persistir:
         _persistir_varias(persistir)
+        from .arquivo import note_learned
+        note_learned((escolha.track for escolha in persistir))
     return registrados
 
 def obter_escolha_busca(

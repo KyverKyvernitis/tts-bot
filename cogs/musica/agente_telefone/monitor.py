@@ -463,14 +463,6 @@ def iniciar_monitor_music_agent(
                 _limpar_auditoria_monitor(router, guild_id, recovered=recovered_after_failures)
 
                 if bool(payload.get("unchanged")) and revisao_remota:
-                    progress = payload.get("archive_progress")
-                    archive = getattr(router, "archive", None)
-                    current = getattr(state_success, "current", None)
-                    if (
-                        archive is not None and isinstance(progress, dict) and current is not None
-                        and str(progress.get("queue_item_id") or "") == str(getattr(current, "queue_item_id", "") or "")
-                    ):
-                        archive.observe(guild_id, current, progress, confirmed=bool(progress.get("confirmed_playing")))
                     if ultimo_estado_remoto:
                         try:
                             schedule_playlist_refill_if_needed(router, guild_id, ultimo_estado_remoto)

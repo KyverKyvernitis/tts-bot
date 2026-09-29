@@ -45,6 +45,64 @@ def test_duas_reproducoes_reais_limite_e_alias(tmp_path, monkeypatch):
     assert arquivo.pending()["key"] == key
 
 
+def test_aprendida_apos_uma_reproducao_elegivel_sem_segunda_vez(tmp_path, monkeypatch):
+    from cogs.musica.busca import memoria
+
+    monkeypatch.setattr(memoria, "_db_path", lambda: tmp_path / "memoria.sqlite3")
+    monkeypatch.setattr(arquivo, "_db_path", lambda: tmp_path / "memoria.sqlite3")
+    memoria.limpar_memoria_busca()
+    try:
+        track = _track()
+        arquivo.set_channel(1, 2, kind="forum")
+        assert arquivo.record_play(track, "inicio-unico")
+        assert arquivo.pending() is None
+        assert memoria.registrar_selecao_busca("um título", track)
+        assert arquivo.flush_learned() == 1
+        assert arquivo.pending()["key"] == arquivo.media_key(track)
+        assert arquivo.counts()["learned"] == 1
+        with arquivo._db() as db:
+            assert db.execute("SELECT tocadas, aprendida_em FROM arquivo_musicas").fetchone()[0] == 1
+            assert db.execute("SELECT aprendida_em FROM arquivo_musicas").fetchone()[0] > 0
+        # Os aliases para a consulta e para o título não geram posts duplicados.
+        assert memoria.registrar_link_busca(_track(original="https://www.youtube.com/watch?v=abc123"))
+        assert arquivo.flush_learned() == 1
+        assert arquivo.counts()["learned"] == 1
+    finally:
+        memoria.limpar_memoria_busca()
+
+
+def test_varredura_recupera_playlist_aprendida_antes_de_tocar(tmp_path, monkeypatch):
+    from cogs.musica.busca import memoria
+
+    monkeypatch.setattr(memoria, "_db_path", lambda: tmp_path / "memoria.sqlite3")
+    monkeypatch.setattr(arquivo, "_db_path", lambda: tmp_path / "memoria.sqlite3")
+    memoria.limpar_memoria_busca()
+    try:
+        arquivo.set_channel(1, 2, kind="forum")
+        first = _track(webpage="https://www.youtube.com/watch?v=abc123",
+                       original="https://www.youtube.com/watch?v=abc123")
+        second = _track(webpage="https://www.youtube.com/watch?v=xyz456",
+                        original="https://www.youtube.com/watch?v=xyz456")
+        second.title = "Outra música aprendida"
+        assert memoria.registrar_lote_link_busca([first, second]) > 2
+        # Simula reinício do bot antes de escoar o buffer de notificações.
+        with arquivo._learned_lock:
+            arquivo._new_learned.clear()
+        cursor = ""
+        while True:
+            new_cursor, page = arquivo.learned_page(cursor, limit=2)
+            if new_cursor == cursor:
+                break
+            arquivo.register_learned_batch(page)
+            cursor = new_cursor
+        assert arquivo.counts()["learned"] == 2
+        assert arquivo.pending()["key"] in {arquivo.media_key(first), arquivo.media_key(second)}
+        with arquivo._db() as db:
+            assert db.execute("SELECT MIN(tocadas), MAX(tocadas) FROM arquivo_musicas").fetchone() == (0, 0)
+    finally:
+        memoria.limpar_memoria_busca()
+
+
 def test_observador_conta_dois_inicios_e_nao_conta_fila_snapshot_seek_ou_pausa(tmp_path, monkeypatch):
     monkeypatch.setattr(arquivo, "_db_path", lambda: tmp_path / "archive.sqlite3")
     monkeypatch.setattr("cogs.musica.busca.memoria.faixa_aprendida", lambda track: True)
@@ -111,7 +169,7 @@ async def test_arquivo_espera_novo_agente_antes_de_enviar_capa(tmp_path, monkeyp
         calls.append(action)
         if action == "archive_enqueue":
             return {"ok": True, "status": "queued"}
-        return {"ok": True, "status": "done", "presentation": 6,
+        return {"ok": True, "status": "done", "presentation": 7,
                 "reference": {"guild_id": 1, "forum_id": 2, "channel_id": 3,
                               "message_id": 4, "attachment_id": 5}}
 
@@ -128,7 +186,7 @@ async def test_arquivo_espera_novo_agente_antes_de_enviar_capa(tmp_path, monkeyp
     assert calls == []
     assert real_pending()["key"] == key
 
-    version = "0.3.75"
+    version = "0.3.76"
     pending_calls = 0
 
     def pending_once():
@@ -143,7 +201,7 @@ async def test_arquivo_espera_novo_agente_antes_de_enviar_capa(tmp_path, monkeyp
         await manager._run()
     assert calls == ["archive_enqueue", "archive_status"]
     with arquivo._db() as db:
-        assert db.execute("SELECT estado, apresentacao FROM arquivo_musicas WHERE chave=?", (key,)).fetchone() == ("done", 6)
+        assert db.execute("SELECT estado, apresentacao FROM arquivo_musicas WHERE chave=?", (key,)).fetchone() == ("done", 7)
 
 
 def test_arquivo_antigo_entra_em_atualizacao_sem_nova_reproducao(tmp_path, monkeypatch):
@@ -212,6 +270,21 @@ def test_mensagem_do_arquivo_fornece_emoji_e_exige_autoria():
     assert _archive_metadata(raw, key, 5, {**ref, "forum_id": 7})["duration"] == 235.0
     raw["embeds"][0]["url"] = _archive_url("https://www.youtube.com/watch?v=abc", key, version=6)
     assert _archive_metadata(raw, key, 5, {**ref, "forum_id": 7})["duration"] == 235.0
+    raw["embeds"][0]["url"] = _archive_url("https://www.youtube.com/watch?v=abc", key, version=7)
+    raw["embeds"][0]["description"] = "<:YouTube:123> YouTube • 3:55\nOPUS · OGG · 48 kHz • ≈128 kbps"
+    raw["embeds"][0]["fields"] = []
+    compact = _archive_metadata(raw, key, 5, {**ref, "forum_id": 7})
+    assert (compact["emoji"], compact["source"], compact["duration"]) == ("<:YouTube:123>", "YouTube", 235)
+    assert compact["audio_abr"] == 128 and compact["audio_sample_rate"] == 48000
+    raw["attachments"].extend((
+        {"id": "6", "filename": "quebrada.jpg", "url": "https://example.com/invalid.jpg"},
+        {"id": "7", "filename": "capa.jpg", "url": "https://cdn.discordapp.com/attachments/2/7/capa.jpg"},
+    ))
+    assert _archive_cover_confirmed(raw)
+    raw["attachments"] = raw["attachments"][:1]
+    raw["embeds"][0]["url"] = _archive_url("https://www.youtube.com/watch?v=abc", key, version=6)
+    raw["embeds"][0]["fields"] = [{"name": "Fonte", "value": "<:YouTube:123> YouTube"},
+                                  {"name": "Duração", "value": "3:55"}]
     raw["embeds"][0]["thumbnail"] = {"url": "attachment://capa.jpg"}
     raw["attachments"].append({"id": "7", "filename": "capa.jpg",
                                  "url": "https://cdn.discordapp.com/attachments/2/7/capa.jpg?ex=ffff&hm=abc"})
@@ -288,7 +361,7 @@ def test_estado_compacto_inclui_progresso_sem_serializar_fila():
 
 
 @pytest.mark.asyncio
-async def test_monitor_conta_progresso_compacto_da_faixa_certa(monkeypatch):
+async def test_monitor_nao_conta_reproducoes_para_arquivar_aprendidas(monkeypatch):
     import asyncio
     from types import SimpleNamespace
     from cogs.musica.agente_telefone import monitor
@@ -332,11 +405,8 @@ async def test_monitor_conta_progresso_compacto_da_faixa_certa(monkeypatch):
     monitor.iniciar_monitor_music_agent(Router(), 91)
     await asyncio.wait_for(state.agent_monitor_task, timeout=1.0)
 
-    assert len(observed) == 1
-    assert observed[0][0][0] == 91
-    assert observed[0][0][1] is state.current
-    assert observed[0][0][2]["position_ms"] == 20000
-    assert observed[0][1] == {"confirmed": True}
+    assert calls >= 3
+    assert observed == []
 
 
 @pytest.mark.asyncio
@@ -553,17 +623,19 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
     forum = Forum()
     monkeypatch.setattr(discord, "ForumChannel", Forum, raising=False)
 
-    async def edit_post(*, embed, attachments, allowed_mentions):
+    async def edit_post(*, embed, attachments, allowed_mentions, content=None):
         edits.append((embed, [attachment.id if hasattr(attachment, "id") else attachment.filename
-                              for attachment in attachments]))
+                                  for attachment in attachments]))
         new_message.embeds = [embed]
+        if content is not None:
+            new_message.content = content
         new_message.attachments = [attachment if hasattr(attachment, "id") else SimpleNamespace(
             id=10, filename=attachment.filename,
-            url="https://cdn.discordapp.com/attachments/40/10/capa-v6.jpg?ex=ffff&hm=abc")
+            url="https://cdn.discordapp.com/attachments/40/10/capa-v7.jpg?ex=ffff&hm=abc")
             for attachment in attachments]
         return new_message
 
-    new_message = SimpleNamespace(id=30, channel=thread, author=SimpleNamespace(id=5), embeds=[],
+    new_message = SimpleNamespace(id=30, channel=thread, author=SimpleNamespace(id=5), embeds=[], content="",
                                   attachments=[], edit=edit_post)
 
     async def ready():
@@ -612,39 +684,114 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
                       "webpage_url": original, "thumbnail": "https://i.ytimg.com/vi/abc/hqdefault.jpg"}}
     worker = Worker()
     result = await worker._archive_one(item)
-    assert result["status"] == "done" and result["presentation"] == 6
+    assert result["status"] == "done" and result["presentation"] == 7
     assert result["reference"]["forum_id"] == 20
     assert result["reference"]["channel_id"] == 40
     assert result["reference"]["message_id"] == 30
     assert result["reference"]["attachment_id"] == 9
     assert created[0][0] == "Arctic Monkeys - 505"
     assert created[0][2] == ["capa.jpg", "Arctic Monkeys - 505.ogg"]
-    assert new_message.embeds[0].thumbnail.url == "https://cdn.discordapp.com/attachments/40/8/capa.jpg"
+    assert not new_message.embeds[0].thumbnail.url
+    assert new_message.content.startswith("🎵 YouTube ·")
     assert edits[0][1] == [8, 9]
     assert message.attachments[0].id == 4  # migração só apaga depois de gravar o novo índice
-    assert (await worker._archive_existing(forum, {**item, "retry": True})) == (new_message, 6)
+    assert (await worker._archive_existing(forum, {**item, "retry": True})) == (new_message, 7)
     assert (await worker._archive_one({**item, "retry": True}))["reference"] == result["reference"]
     assert len(created) == 1
     assert len(edits) == 1
 
+    # Um post v6 com imagem íntegra só troca o layout; mantém os dois anexos.
+    v6_embed = discord.Embed(title="Arctic Monkeys - 505", url=_archive_url(original, key, version=6))
+    for name, value in (("Fonte", "🎵 YouTube"), ("Duração", "4:14"),
+                        ("Formato", "OPUS · OGG · 48 kHz"), ("Qualidade", "≈128 kbps")):
+        v6_embed.add_field(name=name, value=value)
+    v6_embed.set_footer(text="Arquivo de músicas")
+    v6_embed.set_thumbnail(url=new_message.attachments[0].url)
+    new_message.embeds = [v6_embed]
+
+    async def cover_must_not_download(url, folder):
+        raise AssertionError("layout v6 com capa válida não deve baixar a imagem")
+
+    worker._archive_cover = cover_must_not_download
+    updated = await worker._archive_one({**item, "existing_ref": result["reference"]})
+    assert updated["presentation"] == 7 and updated["reference"] == result["reference"]
+    assert len(created) == 1 and len(edits) == 2 and edits[1][1] == [8, 9]
+    worker._archive_cover = Worker._archive_cover.__get__(worker)
+
     # O índice v5 provoca reparo no mesmo post, sem baixar nem reenviar o áudio.
-    new_message.embeds[0].url = _archive_url(original, key, version=5)
-    new_message.embeds[0].set_thumbnail(url="attachment://capa.jpg")
+    def previous_embed():
+        embed = discord.Embed(title="Arctic Monkeys - 505", url=_archive_url(original, key, version=5))
+        embed.add_field(name="Fonte", value="🎵 YouTube")
+        embed.add_field(name="Duração", value="4:14")
+        embed.add_field(name="Formato", value="OPUS · OGG · 48 kHz")
+        embed.add_field(name="Qualidade", value="≈128 kbps")
+        embed.set_footer(text="Arquivo de músicas")
+        embed.set_thumbnail(url="attachment://capa.jpg")
+        return embed
+
+    new_message.embeds = [previous_embed()]
     repaired = await worker._archive_one({**item, "existing_ref": result["reference"]})
-    assert repaired["reference"] == result["reference"] and repaired["presentation"] == 6
-    assert len(created) == 1 and len(edits) == 3
-    assert edits[1][1] == [9, "capa-v6.jpg"] and edits[2][1] == [9, 10]
-    assert new_message.embeds[0].thumbnail.url == "https://cdn.discordapp.com/attachments/40/10/capa-v6.jpg"
+    assert repaired["reference"] == result["reference"] and repaired["presentation"] == 7
+    assert len(created) == 1 and len(edits) == 4
+    assert edits[2][1] == [9, "capa-v7.jpg"] and edits[3][1] == [9, 10]
+    assert not new_message.embeds[0].thumbnail.url
 
     # Sem origem válida, a imagem antiga (possivelmente verde) não deve voltar.
     async def missing_cover(url, folder):
         return None
 
     worker._archive_cover = missing_cover
-    new_message.embeds[0].url = _archive_url(original, key, version=5)
+    new_message.embeds = [previous_embed()]
     delayed = await worker._archive_one({**item, "existing_ref": result["reference"]})
-    assert delayed["presentation"] == 5 and delayed["reference"] == result["reference"]
-    assert len(edits) == 3
+    # O índice v5 aponta para capa.jpg, já substituída pelo reparo anterior.
+    assert delayed["presentation"] == 3 and delayed["reference"] == result["reference"]
+    assert len(edits) == 4
+
+
+@pytest.mark.asyncio
+async def test_playlist_spotify_arquiva_audio_da_fonte_resolvida(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    module = ArchiveMixin._archive_download.__globals__
+    process_calls = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def spawn(*cmd, **kwargs):
+        process_calls.append(cmd)
+        (tmp_path / "audio.ogg").write_bytes(b"opus")
+        return Process()
+
+    monkeypatch.setattr(module["asyncio"], "create_subprocess_exec", spawn)
+
+    class Worker(ArchiveMixin):
+        states = {}
+        cookies_file = ""
+        js_runtimes = ""
+        _archive_active = "a" * 32
+
+        def _query_from_track_meta(self, track):
+            return "ytsearch1:Artista - Faixa official audio"
+
+        async def resolve_track(self, query, **kwargs):
+            assert query.startswith("ytsearch1:")
+            assert kwargs["priority"] == 20
+            return SimpleNamespace(webpage_url="https://www.youtube.com/watch?v=abc123",
+                                   duration=183, source="YouTube")
+
+    item = {"key": "a" * 32, "guild_id": 1, "emoji": "🎵",
+            "track": {"title": "Artista - Faixa", "webpage_url": "https://open.spotify.com/track/abc123",
+                      "source": "Spotify", "display_source": "Spotify", "duration": 181}}
+    audio = await Worker()._archive_download(item, tmp_path)
+    assert audio == tmp_path / "audio.ogg"
+    assert len(process_calls) == 1 and process_calls[0][-1] == "https://www.youtube.com/watch?v=abc123"
+    assert item["track"]["display_source"] == "YouTube"
+    from cogs.musica import configuracao
+    assert item["emoji"] == configuracao.MUSIC_SOURCE_EMOJIS["youtube"]
 
 
 def test_troca_para_forum_preserva_audio_ate_novo_post_validado(tmp_path, monkeypatch):
@@ -680,6 +827,10 @@ def test_troca_para_forum_preserva_audio_ate_novo_post_validado(tmp_path, monkey
         db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE chave=?", (key,))
     assert arquivo.pending()["reference"] == new
     arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 6})
+    assert arquivo.counts()["refresh"] == 1
+    with arquivo._db() as db:
+        db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE chave=?", (key,))
+    arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 7})
     assert arquivo.counts()["refresh"] == 0
     assert arquivo.cleanup_pending()["previous"] == old
     arquivo.mark_cleanup(key, old, done=True)
