@@ -922,6 +922,8 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             return await self.cmd_archive_enqueue(body)
         if action == "archive_status":
             return await self.cmd_archive_status(body)
+        if action == "archive_cleanup":
+            return await self.cmd_archive_cleanup(body)
         if action in {"status", "get_state"}:
             guild_id = safe_id(body.get("guild_id"))
             return self.status_payload(

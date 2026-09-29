@@ -296,7 +296,7 @@ async def test_webm_opus_vira_ogg_sem_recodificar_e_capa_vira_jpeg(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_atualizacao_da_mensagem_antiga_mantem_id_e_muda_anexo(monkeypatch):
+async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monkeypatch):
     from pathlib import Path
     from types import SimpleNamespace
 
@@ -326,11 +326,6 @@ async def test_atualizacao_da_mensagem_antiga_mantem_id_e_muda_anexo(monkeypatch
         embeds = [old_embed]
         attachments = [Attachment()]
 
-        async def edit(self, *, embed, attachments, allowed_mentions):
-            self.embeds = [embed]
-            self.attachments = [SimpleNamespace(id=9, filename=attachments[0].filename)]
-            return self
-
     message = Message()
 
     class Channel:
@@ -342,20 +337,59 @@ async def test_atualizacao_da_mensagem_antiga_mantem_id_e_muda_anexo(monkeypatch
             return message
 
     channel = Channel()
-    monkeypatch.setattr(discord, "TextChannel", Channel, raising=False)
+    created = []
+
+    class Thread:
+        id = 40
+        name = "Arctic Monkeys - 505"
+        owner_id = 5
+
+        async def history(self, **kwargs):
+            yield new_message
+
+    thread = Thread()
+
+    class Forum:
+        id = 20
+        guild = SimpleNamespace(id=1)
+        flags = SimpleNamespace(require_tag=False)
+        available_tags = []
+        threads = [thread]
+
+        def is_media(self):
+            return False
+
+        async def archived_threads(self, **kwargs):
+            if False:
+                yield None
+
+        async def create_thread(self, *, name, embed, files, applied_tags, allowed_mentions):
+            created.append((name, embed, [file.filename for file in files]))
+            new_message.embeds = [embed]
+            new_message.attachments = [SimpleNamespace(id=8, filename="capa.jpg"),
+                                       SimpleNamespace(id=9, filename=files[-1].filename)]
+            return SimpleNamespace(thread=thread, message=new_message)
+
+    forum = Forum()
+    monkeypatch.setattr(discord, "ForumChannel", Forum, raising=False)
+
+    new_message = SimpleNamespace(id=30, channel=thread, author=SimpleNamespace(id=5), embeds=[], attachments=[])
 
     async def ready():
         pass
 
     async def raw(channel_id, message_id):
-        attachment = message.attachments[0]
-        return {"author": {"id": "5"}, "guild_id": "1", "embeds": [message.embeds[0].to_dict()],
+        assert (channel_id, message_id) == (40, 30)
+        attachment = new_message.attachments[-1]
+        return {"author": {"id": "5"}, "guild_id": "1", "channel_id": "40",
+                "embeds": [new_message.embeds[0].to_dict()],
                 "attachments": [{"id": str(attachment.id), "filename": attachment.filename,
-                                 "url": f"https://cdn.discordapp.com/attachments/2/{attachment.id}/{attachment.filename}"}]}
+                                 "url": f"https://cdn.discordapp.com/attachments/40/{attachment.id}/{attachment.filename}"}]}
 
     class Worker(ArchiveMixin):
         def __init__(self):
-            self.client = SimpleNamespace(wait_until_ready=ready, get_channel=lambda _: channel,
+            self.client = SimpleNamespace(wait_until_ready=ready,
+                                          get_channel=lambda channel_id: {2: channel, 20: forum}.get(channel_id),
                                           user=SimpleNamespace(id=5), http=SimpleNamespace(get_message=raw))
             self.states = {}
 
@@ -367,20 +401,141 @@ async def test_atualizacao_da_mensagem_antiga_mantem_id_e_muda_anexo(monkeypatch
             output.write_bytes(audio.read_bytes())
             return output, 254.08, 0, "opus"
 
+        async def _archive_probe(self, audio):
+            return {"streams": [{"codec_type": "audio", "index": 0, "bit_rate": "128000", "sample_rate": "48000"}]}
+
         async def _archive_cover(self, url, folder):
             output = folder / "capa.jpg"
             output.write_bytes(b"\xff\xd8\xff")
             return output
 
-    item = {"key": key, "guild_id": 1, "channel_id": 2, "emoji": "🎵",
+    async def instant(_):
+        pass
+
+    monkeypatch.setattr(ArchiveMixin._archive_one.__globals__["asyncio"], "sleep", instant)
+    item = {"key": key, "guild_id": 1, "channel_id": 20, "emoji": "🎵",
             "existing_ref": {"guild_id": 1, "channel_id": 2, "message_id": 3, "attachment_id": 4},
             "track": {"title": "Arctic Monkeys - 505", "source": "YouTube",
                       "webpage_url": original, "thumbnail": "https://i.ytimg.com/vi/abc/hqdefault.jpg"}}
-    result = await Worker()._archive_one(item)
-    assert result["status"] == "done" and result["presentation"] == 2
-    assert result["reference"]["message_id"] == 3
+    worker = Worker()
+    result = await worker._archive_one(item)
+    assert result["status"] == "done" and result["presentation"] == 3
+    assert result["reference"]["forum_id"] == 20
+    assert result["reference"]["channel_id"] == 40
+    assert result["reference"]["message_id"] == 30
     assert result["reference"]["attachment_id"] == 9
-    assert message.attachments[0].filename == "Arctic Monkeys - 505.ogg"
-    assert message.embeds[0].footer.text == "Arquivo de músicas"
-    assert message.embeds[0].thumbnail.url == "attachment://capa.jpg"
-    assert [field.name for field in message.embeds[0].fields] == ["Fonte", "Duração", "Formato"]
+    assert created[0][0] == "Arctic Monkeys - 505"
+    assert created[0][2] == ["capa.jpg", "Arctic Monkeys - 505.ogg"]
+    assert new_message.embeds[0].thumbnail.url == "attachment://capa.jpg"
+    assert message.attachments[0].id == 4  # migração só apaga depois de gravar o novo índice
+    assert (await worker._archive_existing(forum, {**item, "retry": True})) == (new_message, 3)
+    assert (await worker._archive_one({**item, "retry": True}))["reference"] == result["reference"]
+    assert len(created) == 1
+
+
+def test_troca_para_forum_preserva_audio_ate_novo_post_validado(tmp_path, monkeypatch):
+    monkeypatch.setattr(arquivo, "_db_path", lambda: tmp_path / "archive.sqlite3")
+    track = _track()
+    key = arquivo.media_key(track)
+    arquivo.set_channel(1, 2)
+    arquivo.record_play(track, "1")
+    arquivo.record_play(track, "2")
+    old = {"guild_id": 1, "channel_id": 2, "message_id": 3, "attachment_id": 4}
+    arquivo.mark_result(key, {"status": "done", "reference": old, "emoji": "🎵", "presentation": 2})
+    arquivo.set_channel(1, 20, kind="forum")
+    assert arquivo.archived(track)[0] == old
+    assert arquivo.pending()["reference"] == old
+    arquivo.mark_attempt(key)
+    assert arquivo.pending()["retry"] is True  # reinício entre publicação e ACK
+    new = {"guild_id": 1, "forum_id": 20, "channel_id": 40, "message_id": 30, "attachment_id": 9}
+    arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 3})
+    assert arquivo.archived(track)[0] == new
+    assert arquivo.pending() is None
+    assert arquivo.cleanup_pending()["previous"] == old
+    arquivo.mark_cleanup(key, old, done=True)
+    assert arquivo.cleanup_pending() is None
+
+
+@pytest.mark.asyncio
+async def test_reproducao_do_post_le_emoji_e_qualidade_em_uma_mensagem():
+    from types import SimpleNamespace
+    from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin
+    from cogs.musica.runtime_telefone.agente.estado import AgentTrack
+
+    key = "a" * 32
+    ref = {"guild_id": 1, "forum_id": 20, "channel_id": 40, "message_id": 30, "attachment_id": 9}
+    raw = {"author": {"id": "5"}, "guild_id": "1", "channel_id": "40",
+           "embeds": [{"url": _archive_url("https://youtu.be/abc", key, version=3),
+                       "footer": {"text": "Arquivo de músicas"},
+                       "fields": [{"name": "Fonte", "value": "🎵 YouTube"},
+                                  {"name": "Duração", "value": "4:14"},
+                                  {"name": "Formato", "value": "OPUS · OGG · 48 kHz"},
+                                  {"name": "Qualidade", "value": "≈160 kbps"}] }],
+           "attachments": [{"id": "9", "filename": "505.ogg",
+                            "url": "https://cdn.discordapp.com/attachments/40/9/505.ogg?ex=ffffffff&hm=signed"}]}
+    calls = []
+
+    async def get_message(channel_id, message_id):
+        calls.append((channel_id, message_id))
+        return raw
+
+    class Agent(ResolucaoMixin):
+        client = SimpleNamespace(user=SimpleNamespace(id=5), http=SimpleNamespace(get_message=get_message))
+
+        def _agent_track_from_metadata(self, track_meta, *, body):
+            return AgentTrack(title="505", audio_abr=128)
+
+    track = await Agent()._resolve_archive_attachment(track_meta={"archive_key": key, "archive_ref": ref}, body={"guild_id": 1})
+    assert calls == [(40, 30)]
+    assert track.archive_ref == ref and track.source_emoji == "🎵"
+    assert track.audio_abr == 160 and track.audio_sample_rate == 48000
+    assert track.stream_url == raw["attachments"][0]["url"]
+
+
+@pytest.mark.asyncio
+async def test_limpeza_so_remove_antigo_depois_de_validar_novo_e_liberar_fila():
+    from types import SimpleNamespace
+    from cogs.musica.runtime_telefone.agente.estado import AgentTrack
+
+    discord = ArchiveMixin.cmd_archive_cleanup.__globals__["discord"]
+    key = "a" * 32
+    old = {"guild_id": 1, "channel_id": 2, "message_id": 3, "attachment_id": 4}
+    new = {"guild_id": 1, "forum_id": 20, "channel_id": 40, "message_id": 30, "attachment_id": 9}
+    previous_embed = discord.Embed(url="https://youtu.be/abc")
+    previous_embed.set_footer(text="music-archive:v1:" + key)
+    removed = []
+
+    async def delete():
+        removed.append(True)
+
+    message = SimpleNamespace(author=SimpleNamespace(id=5), embeds=[previous_embed],
+                              attachments=[SimpleNamespace(id=4)], delete=delete)
+
+    class Channel:
+        async def fetch_message(self, message_id):
+            assert message_id == 3
+            return message
+
+    async def get_message(channel_id, message_id):
+        assert (channel_id, message_id) == (40, 30)
+        return {"author": {"id": "5"}, "guild_id": "1", "channel_id": "40",
+                "embeds": [{"url": _archive_url("https://youtu.be/abc", key, version=3),
+                            "footer": {"text": "Arquivo de músicas"},
+                            "fields": [{"name": "Fonte", "value": "🎵 YouTube"},
+                                       {"name": "Duração", "value": "4:14"}]}],
+                "attachments": [{"id": "9", "filename": "505.ogg",
+                                 "url": "https://cdn.discordapp.com/attachments/40/9/505.ogg?ex=ffffffff&hm=signed"}]}
+
+    class Agent(ArchiveMixin):
+        client = SimpleNamespace(user=SimpleNamespace(id=5), get_channel=lambda _: Channel(),
+                                 http=SimpleNamespace(get_message=get_message))
+
+    agent = Agent()
+    agent.states = {1: SimpleNamespace(current=None, queue=[AgentTrack(archive_ref=old)])}
+    body = {"guild_id": 1, "archive_key": key, "archive_ref": new, "previous_ref": old,
+            "track": {"webpage_url": "https://youtu.be/abc"}}
+    assert (await agent.cmd_archive_cleanup(body))["removed"] is False
+    assert not removed
+    agent.states[1].queue = []
+    assert (await agent.cmd_archive_cleanup(body))["removed"] is True
+    assert removed == [True]

@@ -86,6 +86,27 @@ class ArchiveCoordinator:
         await self.bot.wait_until_ready()
         while True:
             try:
+                if await asyncio.to_thread(arquivo.channel_type) != "forum" or arquivo.channel() == (0, 0):
+                    try:
+                        await asyncio.wait_for(self._wake.wait(), timeout=12)
+                    except asyncio.TimeoutError:
+                        pass
+                    self._wake.clear()
+                    continue
+                cleanup = await asyncio.to_thread(arquivo.cleanup_pending)
+                if cleanup is not None:
+                    try:
+                        answer = await music_agent_command(
+                            "archive_cleanup", guild_id=cleanup["reference"]["guild_id"],
+                            archive_key=cleanup["key"], archive_ref=cleanup["reference"],
+                            previous_ref=cleanup["previous"], track=cleanup["track"], timeout_seconds=8.0,
+                        )
+                        await asyncio.to_thread(arquivo.mark_cleanup, cleanup["key"], cleanup["previous"],
+                                                done=bool(answer.get("removed")))
+                    except Exception:
+                        log.warning("[music/archive] limpeza adiada", exc_info=True)
+                        await asyncio.to_thread(arquivo.mark_cleanup, cleanup["key"], cleanup["previous"], done=False)
+                    continue
                 item = await asyncio.to_thread(arquivo.pending)
                 if item is None:
                     try:
@@ -107,9 +128,10 @@ class ArchiveCoordinator:
                 from . import configuracao as config
                 emoji_key = next((name for name in config.MUSIC_SOURCE_EMOJIS if name in source), "")
                 emoji = config.MUSIC_SOURCE_EMOJIS.get(emoji_key, config.MUSIC_SOURCE_EMOJI_FALLBACK)
+                await asyncio.to_thread(arquivo.mark_attempt, key)
                 await music_agent_command(
                     "archive_enqueue", guild_id=guild_id, archive_channel_id=channel_id,
-                    archive_key=key, archive_ref=item.get("reference") or {},
+                    archive_key=key, archive_ref=item.get("reference") or {}, archive_retry=item.get("retry", False),
                     track=track, source_emoji=emoji, timeout_seconds=8.0,
                 )
                 # A resposta HTTP do enqueue é imediata; o download e o upload

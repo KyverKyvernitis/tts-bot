@@ -54,20 +54,27 @@ def _db() -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(path), timeout=2)
     db.execute("PRAGMA busy_timeout=2000")
-    db.execute("CREATE TABLE IF NOT EXISTS arquivo_config (id INTEGER PRIMARY KEY CHECK (id=1), guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS arquivo_config (id INTEGER PRIMARY KEY CHECK (id=1), guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, channel_type TEXT NOT NULL DEFAULT 'text')")
     db.execute("""CREATE TABLE IF NOT EXISTS arquivo_musicas (
         chave TEXT PRIMARY KEY, track_json TEXT NOT NULL, tocadas INTEGER NOT NULL DEFAULT 0,
         reference_json TEXT NOT NULL DEFAULT '', emoji TEXT NOT NULL DEFAULT '',
         estado TEXT NOT NULL DEFAULT 'waiting', tentativa_em REAL NOT NULL DEFAULT 0,
         falhas INTEGER NOT NULL DEFAULT 0, apresentacao INTEGER NOT NULL DEFAULT 1
     )""")
-    if db.execute("PRAGMA user_version").fetchone()[0] < 2:
+    if db.execute("PRAGMA user_version").fetchone()[0] < 3:
+        config_columns = {row[1] for row in db.execute("PRAGMA table_info(arquivo_config)")}
+        if "channel_type" not in config_columns:
+            db.execute("ALTER TABLE arquivo_config ADD COLUMN channel_type TEXT NOT NULL DEFAULT 'text'")
         columns = {row[1] for row in db.execute("PRAGMA table_info(arquivo_musicas)")}
         if "apresentacao" not in columns:
             db.execute("ALTER TABLE arquivo_musicas ADD COLUMN apresentacao INTEGER NOT NULL DEFAULT 1")
-        db.execute("PRAGMA user_version=2")
+        db.execute("PRAGMA user_version=3")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_reproducoes (marcador TEXT PRIMARY KEY, registrado_em REAL NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_aliases (alias TEXT PRIMARY KEY, chave TEXT NOT NULL)")
+    db.execute("""CREATE TABLE IF NOT EXISTS arquivo_limpezas (
+        chave TEXT NOT NULL, message_id INTEGER NOT NULL, previous_json TEXT NOT NULL,
+        tentativa_em REAL NOT NULL DEFAULT 0, PRIMARY KEY(chave, message_id)
+    )""")
     return db
 
 
@@ -77,20 +84,38 @@ def channel() -> tuple[int, int]:
     return (int(row[0]), int(row[1])) if row else (0, 0)
 
 
-def set_channel(guild_id: int, channel_id: int) -> None:
+def channel_type() -> str:
     with _db() as db:
-        previous = db.execute("SELECT guild_id, channel_id FROM arquivo_config WHERE id=1").fetchone()
-        db.execute("INSERT INTO arquivo_config VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET guild_id=excluded.guild_id, channel_id=excluded.channel_id", (guild_id, channel_id))
-        if guild_id > 0 and channel_id > 0 and previous and tuple(previous) != (guild_id, channel_id):
-            # Um anexo no canal antigo não pode satisfazer o arquivo novo.
+        row = db.execute("SELECT channel_type FROM arquivo_config WHERE id=1").fetchone()
+    return str(row[0]) if row else "text"
+
+
+def set_channel(guild_id: int, channel_id: int, *, kind: str = "text") -> None:
+    if kind not in {"text", "forum"}:
+        raise ValueError("tipo de canal inválido")
+    with _db() as db:
+        previous = db.execute("SELECT guild_id, channel_id, channel_type FROM arquivo_config WHERE id=1").fetchone()
+        db.execute("""INSERT INTO arquivo_config(id, guild_id, channel_id, channel_type) VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET guild_id=excluded.guild_id,
+            channel_id=excluded.channel_id, channel_type=excluded.channel_type""", (guild_id, channel_id, kind))
+        if guild_id > 0 and channel_id > 0 and previous and tuple(previous) != (guild_id, channel_id, kind):
+            # No fórum, a referência antiga continua tocável durante a migração.
             for key, encoded in db.execute("SELECT chave, reference_json FROM arquivo_musicas WHERE reference_json!=''"):
                 try:
                     ref = json.loads(encoded)
-                    valid_here = (int(ref["guild_id"]), int(ref["channel_id"])) == (guild_id, channel_id)
+                    same_guild = int(ref["guild_id"]) == guild_id
+                    valid_here = same_guild and ((kind == "forum" and int(ref.get("forum_id") or 0) == channel_id)
+                                                 or (kind == "text" and int(ref["channel_id"]) == channel_id))
                 except (ValueError, KeyError, TypeError):
+                    same_guild = False
                     valid_here = False
                 if not valid_here:
-                    db.execute("UPDATE arquivo_musicas SET reference_json='', emoji='', estado='waiting', tentativa_em=0 WHERE chave=?", (key,))
+                    if kind == "forum" and same_guild:
+                        db.execute("UPDATE arquivo_musicas SET apresentacao=MIN(apresentacao, 2), tentativa_em=0 WHERE chave=?", (key,))
+                    else:
+                        db.execute("""UPDATE arquivo_musicas SET reference_json='', emoji='', estado='waiting',
+                            tentativa_em=0 WHERE chave=?""", (key,))
+                        db.execute("DELETE FROM arquivo_limpezas WHERE chave=?", (key,))
 
 
 def record_play(track, marker: str) -> bool:
@@ -118,30 +143,49 @@ def record_play(track, marker: str) -> bool:
 def pending() -> dict | None:
     if channel() == (0, 0):
         return None
+    version = 3 if channel_type() == "forum" else 2
     with _db() as db:
-        row = db.execute("""SELECT chave, track_json, reference_json FROM arquivo_musicas WHERE tocadas>=2
+        row = db.execute("""SELECT chave, track_json, reference_json, estado FROM arquivo_musicas WHERE tocadas>=2
             AND ((reference_json='' AND estado NOT IN ('too_large', 'ineligible'))
-                OR (reference_json!='' AND apresentacao<2)) AND tentativa_em<=?
-            ORDER BY tentativa_em, chave LIMIT 1""", (time.time(),)).fetchone()
+                OR (reference_json!='' AND apresentacao<?)) AND tentativa_em<=?
+            ORDER BY tentativa_em, chave LIMIT 1""", (version, time.time())).fetchone()
     if not row:
         return None
     try:
         return {"key": row[0], "track": json.loads(row[1]),
-                "reference": json.loads(row[2]) if row[2] else {}}
+                "reference": json.loads(row[2]) if row[2] else {}, "retry": row[3] in {"working", "failed"}}
     except (TypeError, ValueError):
         log.warning("[music/archive] metadados inválidos: %s", row[0])
         return None
 
 
+def mark_attempt(key: str) -> None:
+    with _db() as db:
+        db.execute("UPDATE arquivo_musicas SET estado='working' WHERE chave=?", (key,))
+
+
 def mark_result(key: str, result: dict) -> None:
     status = str(result.get("status") or "failed")
     ref = result.get("reference") if isinstance(result.get("reference"), dict) else {}
+    configured_guild, configured_channel = channel()
+    kind = channel_type()
+    same_target = ((int(ref.get("forum_id") or 0) == configured_channel
+                    and int(ref.get("channel_id") or 0) != configured_channel
+                    and int(result.get("presentation") or 0) >= 3) if kind == "forum"
+                   else int(ref.get("channel_id") or 0) == configured_channel)
     if (status == "done" and all(int(ref.get(field) or 0) > 0 for field in ("guild_id", "channel_id", "message_id", "attachment_id"))
-            and (int(ref["guild_id"]), int(ref["channel_id"])) == channel()):
+            and int(ref["guild_id"]) == configured_guild and same_target):
         with _db() as db:
-            version = max(1, min(2, int(result.get("presentation") or 1)))
-            db.execute("UPDATE arquivo_musicas SET reference_json=?, emoji=?, estado='done', apresentacao=?, tentativa_em=0 WHERE chave=?",
-                       (json.dumps(ref), str(result.get("emoji") or "")[:100], version, key))
+            version = max(1, min(3, int(result.get("presentation") or 1)))
+            old_row = db.execute("SELECT reference_json FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
+            old = json.loads(old_row[0]) if old_row and old_row[0] else {}
+            cleanup = old if old and old != ref and int(old.get("guild_id") or 0) == configured_guild else {}
+            db.execute("""UPDATE arquivo_musicas SET reference_json=?, emoji=?, estado='done',
+                apresentacao=?, tentativa_em=0 WHERE chave=?""",
+                (json.dumps(ref), str(result.get("emoji") or "")[:100], version, key))
+            if cleanup:
+                db.execute("INSERT OR IGNORE INTO arquivo_limpezas(chave, message_id, previous_json) VALUES (?, ?, ?)",
+                           (key, int(cleanup["message_id"]), json.dumps(cleanup)))
         return
     with _db() as db:
         row = db.execute("SELECT falhas FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
@@ -158,12 +202,14 @@ def archived(track) -> tuple[dict, str, str]:
     with _db() as db:
         row = db.execute("""SELECT chave, reference_json, emoji FROM arquivo_musicas
             WHERE chave=COALESCE((SELECT chave FROM arquivo_aliases WHERE alias=?), ?)""", (key, key)).fetchone()
-    if not row or not row[0]:
+        configured = db.execute("SELECT guild_id, channel_id, channel_type FROM arquivo_config WHERE id=1").fetchone()
+    if not row or not row[0] or configured is None:
         return {}, "", ""
     try:
         ref = json.loads(row[1])
-        configured = channel()
-        if (int(ref["guild_id"]), int(ref["channel_id"])) != configured:
+        if int(ref["guild_id"]) != configured[0]:
+            return {}, "", ""
+        if configured[2] != "forum" and int(ref["channel_id"]) != configured[1]:
             return {}, "", ""
         return ref, row[2], row[0]
     except (ValueError, TypeError, KeyError):
@@ -171,8 +217,36 @@ def archived(track) -> tuple[dict, str, str]:
 
 
 def counts() -> dict[str, int]:
+    version = 3 if channel_type() == "forum" else 2
     with _db() as db:
         rows = db.execute("SELECT estado, COUNT(*) FROM arquivo_musicas WHERE tocadas>=2 GROUP BY estado").fetchall()
         one_play = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE tocadas=1").fetchone()[0]
-        refresh = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE reference_json!='' AND apresentacao<2").fetchone()[0]
-    return {**dict(rows), "one_play": int(one_play), "refresh": int(refresh)}
+        refresh = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE reference_json!='' AND apresentacao<?",
+                             (version,)).fetchone()[0]
+        cleanup = db.execute("SELECT COUNT(*) FROM arquivo_limpezas").fetchone()[0]
+    return {**dict(rows), "one_play": int(one_play), "refresh": int(refresh), "cleanup": int(cleanup)}
+
+
+def cleanup_pending() -> dict | None:
+    with _db() as db:
+        row = db.execute("""SELECT l.chave, m.reference_json, l.previous_json, m.track_json FROM arquivo_limpezas l
+            JOIN arquivo_musicas m ON m.chave=l.chave
+            WHERE l.tentativa_em<=? ORDER BY l.tentativa_em, l.chave LIMIT 1""",
+            (time.time(),)).fetchone()
+    if not row:
+        return None
+    try:
+        return {"key": row[0], "reference": json.loads(row[1]), "previous": json.loads(row[2]),
+                "track": json.loads(row[3])}
+    except (TypeError, ValueError):
+        return None
+
+
+def mark_cleanup(key: str, previous: dict, *, done: bool) -> None:
+    with _db() as db:
+        if done:
+            db.execute("DELETE FROM arquivo_limpezas WHERE chave=? AND message_id=? AND previous_json=?",
+                       (key, int(previous["message_id"]), json.dumps(previous)))
+        else:
+            db.execute("UPDATE arquivo_limpezas SET tentativa_em=? WHERE chave=? AND message_id=? AND previous_json=?",
+                       (time.time() + 300, key, int(previous["message_id"]), json.dumps(previous)))

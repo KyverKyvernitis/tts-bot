@@ -605,6 +605,10 @@ class ResolucaoMixin:
             ref = {name: int(ref[name]) for name in ("guild_id", "channel_id", "message_id", "attachment_id")}
             if min(ref.values()) <= 0:
                 raise ValueError
+            if track_meta["archive_ref"].get("forum_id") is not None:
+                ref["forum_id"] = int(track_meta["archive_ref"]["forum_id"])
+                if ref["forum_id"] <= 0 or ref["forum_id"] == ref["channel_id"]:
+                    raise ValueError
         except (KeyError, TypeError, ValueError):
             raise DiscordAttachmentError("Referência do arquivo inválida.") from None
         raw = await self.client.http.get_message(ref["channel_id"], ref["message_id"])
@@ -617,6 +621,10 @@ class ResolucaoMixin:
         track.source = meta["source"] or track.source
         track.audio_stream_index = meta["audio_stream_index"]
         track.duration = meta["duration"]
+        if meta["audio_abr"]:
+            track.audio_abr = meta["audio_abr"]
+        if meta["audio_sample_rate"]:
+            track.audio_sample_rate = meta["audio_sample_rate"]
         track.stream_url = meta["url"]
         track.stream_resolved_monotonic = time.monotonic()
         track.transport_hint = "discord-archive"

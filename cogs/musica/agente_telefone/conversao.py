@@ -107,7 +107,7 @@ def faixa_do_payload(payload: dict[str, Any], fallback: MusicTrack | None = None
         track.attachment_ref = {key: int(attachment_ref[key]) for key in ("guild_id", "channel_id", "message_id", "attachment_id") if str(attachment_ref.get(key) or "").isdigit()}
     archive_ref = payload.get("archive_ref")
     if isinstance(archive_ref, dict):
-        track.archive_ref = {key: int(archive_ref[key]) for key in ("guild_id", "channel_id", "message_id", "attachment_id") if str(archive_ref.get(key) or "").isdigit()}
+        track.archive_ref = {key: int(archive_ref[key]) for key in ("guild_id", "forum_id", "channel_id", "message_id", "attachment_id") if str(archive_ref.get(key) or "").isdigit()}
     track.source_emoji = str(payload.get("source_emoji") or (getattr(fallback, "source_emoji", "") if fallback else ""))[:100]
     return track
 
