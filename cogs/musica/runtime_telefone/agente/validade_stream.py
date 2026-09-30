@@ -296,6 +296,19 @@ def _archive_origin(url: str) -> str:
     return urlunsplit(urlsplit(str(url or ""))._replace(fragment=""))
 
 
+def _archive_public_origin(track: dict) -> str:
+    """Use a public page; legacy memories can have a provider URI as original_url."""
+    for field in ("original_url", "webpage_url"):
+        url = str(track.get(field) or "").strip()
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme == "https" and parsed.netloc:
+                return url
+        except ValueError:
+            continue
+    raise ValueError("link público da faixa ausente")
+
+
 def _archive_duration_text(seconds: float) -> str:
     total = max(0, int(round(seconds)))
     return f"{total // 60}:{total % 60:02d}"
@@ -432,8 +445,11 @@ class ArchiveMixin:
                 return {"ok": True, **previous}
             self._archive_results.pop(key, None)
         if key != self._archive_active and key not in {item.get("key") for item in list(self._archive_queue._queue)}:
+            source_emojis = body.get("source_emojis") if isinstance(body.get("source_emojis"), dict) else {}
             self._archive_queue.put_nowait({"key": key, "track": track, "guild_id": guild_id,
                                             "channel_id": channel_id, "emoji": str(body.get("source_emoji") or "🎵")[:100],
+                                            "source_emojis": {str(name).lower()[:30]: str(emoji)[:100]
+                                                              for name, emoji in source_emojis.items() if name and emoji},
                                             "retry": bool(body.get("archive_retry")),
                                             "existing_ref": body.get("archive_ref") if isinstance(body.get("archive_ref"), dict) else {}})
         if self._archive_task is None or self._archive_task.done():
@@ -522,7 +538,10 @@ class ArchiveMixin:
             return 0
         # Alguns clientes descartam o fragmento do título do embed. O link
         # original, a autoria e o canal ainda identificam a mensagem.
-        origin = str(item["track"].get("original_url") or item["track"].get("webpage_url") or "")
+        try:
+            origin = _archive_public_origin(item["track"])
+        except ValueError:
+            return 0
         return (3 if item.get("forum") else 2) if origin and _archive_origin(url) == _archive_origin(origin) else 0
 
     async def _archive_existing(self, forum, item: dict):
@@ -789,10 +808,10 @@ class ArchiveMixin:
             track["webpage_url"] = url
             track["source"] = resolved.source or "YouTube"
             track["display_source"] = track["source"]
-            from cogs.musica import configuracao as music_config
             source_name = str(track["source"]).lower()
-            emoji_key = next((name for name in music_config.MUSIC_SOURCE_EMOJIS if name in source_name), "")
-            item["emoji"] = music_config.MUSIC_SOURCE_EMOJIS.get(emoji_key, music_config.MUSIC_SOURCE_EMOJI_FALLBACK)
+            source_emojis = item.get("source_emojis") or {}
+            emoji_key = next((name for name in source_emojis if name in source_name), "")
+            item["emoji"] = source_emojis.get(emoji_key, item["emoji"])
         base = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist", "--no-warnings",
                 "--no-progress", "--no-part", "--max-filesize", "20M", "--socket-timeout", "12",
                 "--format-sort", str(getattr(self, "ytdlp_sort", "abr,acodec,asr")),
@@ -842,7 +861,7 @@ class ArchiveMixin:
         duration = fields.get("Duração", "")
         if not source or not duration:
             raise ValueError("Fonte ou duração ausente na mensagem")
-        origin = str(item["track"].get("original_url") or item["track"].get("webpage_url") or "")[:500]
+        origin = _archive_public_origin(item["track"])[:500]
         embed.url = _archive_url(origin, item["key"], version=7)
         embed.title = "Abrir origem da faixa"
         embed.clear_fields()
@@ -965,7 +984,7 @@ class ArchiveMixin:
                 cover = await self._archive_existing_cover(previous, folder)
             title = str(item["track"].get("display_title") or item["track"].get("title") or "Música")[:240]
             source = str(item["track"].get("display_source") or item["track"].get("source") or "Áudio")[:80]
-            origin = str(item["track"].get("original_url") or item["track"].get("webpage_url") or "")[:500]
+            origin = _archive_public_origin(item["track"])[:500]
             embed = discord.Embed(title=title, url=_archive_url(origin, item["key"], version=3))
             prior_emoji = next((str(field.value).split(" ", 1)[0] for field in previous.embeds[0].fields
                                 if field.name == "Fonte"), "") if previous is not None and previous.embeds else ""
@@ -990,15 +1009,24 @@ class ArchiveMixin:
             finally:
                 for file in files:
                     file.close()
-            ref_attachment = next((attachment for attachment in message.attachments if attachment.filename == audio_name), None)
+            # A resposta de create_thread às vezes chega antes da lista de
+            # anexos. A leitura REST já necessária para validar a mensagem
+            # fornece os IDs definitivos, sem criar um segundo post.
+            for attempt in range(3):
+                raw = await self.client.http.get_message(thread.id, message.id)
+                ref_attachment = next((attachment for attachment in raw.get("attachments") or []
+                                       if Path(str(attachment.get("filename") or "")).suffix.lower() in _AUDIO_EXTS), None)
+                if ref_attachment is not None:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (attempt + 1))
             if ref_attachment is None:
                 raise ValueError("Discord não confirmou o áudio enviado")
             ref = {"guild_id": forum.guild.id, "forum_id": forum.id, "channel_id": thread.id,
-                   "message_id": message.id, "attachment_id": ref_attachment.id}
+                   "message_id": message.id, "attachment_id": int(ref_attachment["id"])}
             version = 7 if cover is not None else 3
             if cover is None:
                 self.log("archive_cover_missing", key=item["key"])
-            raw = await self.client.http.get_message(thread.id, message.id)
             parsed = _archive_metadata(raw, item["key"], self.client.user.id, ref)
             if version == 7 and not _archive_cover_confirmed(raw):
                 self.log("archive_cover_retry", key=item["key"], error="cover_not_confirmed")

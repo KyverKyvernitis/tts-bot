@@ -10,7 +10,7 @@ from .agente_telefone.comandos import music_agent_command, music_agent_status
 from .busca import arquivo
 
 log = logging.getLogger(__name__)
-_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 77)
+_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 78)
 
 
 def _archive_agent_ready(payload: dict) -> bool:
@@ -193,7 +193,8 @@ class ArchiveCoordinator:
                 await music_agent_command(
                     "archive_enqueue", guild_id=guild_id, archive_channel_id=channel_id,
                     archive_key=key, archive_ref=item.get("reference") or {}, archive_retry=item.get("retry", False),
-                    track=track, source_emoji=emoji, timeout_seconds=8.0,
+                    track=track, source_emoji=emoji, source_emojis=config.MUSIC_SOURCE_EMOJIS,
+                    timeout_seconds=8.0,
                 )
                 # A resposta HTTP do enqueue é imediata; o download e o upload
                 # continuam em segundo plano sem ocupar a ponte de comandos.

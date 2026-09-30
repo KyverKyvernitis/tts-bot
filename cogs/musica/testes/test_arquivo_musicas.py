@@ -6,13 +6,21 @@ from cogs.musica.busca import arquivo
 from cogs.musica.nucleo.modelos import MusicTrack
 from cogs.musica.arquivo_coordenador import ArchiveCoordinator
 from cogs.musica.runtime_telefone.agente.validade_stream import (
-    ArchiveMixin, DiscordAttachmentError, _archive_audio_filename, _archive_cover_confirmed, _archive_metadata, _archive_url,
+    ArchiveMixin, DiscordAttachmentError, _archive_audio_filename, _archive_cover_confirmed, _archive_metadata,
+    _archive_public_origin, _archive_url,
 )
 
 
 def _track(duration=240, *, webpage="https://www.youtube.com/watch?v=abc123", original=""):
     return MusicTrack(title="Música de teste", webpage_url=webpage, original_url=original,
                       duration=duration, requester_id=1, source="YouTube", queue_item_id="play-1")
+
+
+def test_origem_publica_usa_url_resolvida_quando_original_e_identificador():
+    assert _archive_public_origin({"original_url": "spotify:track:123",
+                                   "webpage_url": "https://www.youtube.com/watch?v=abc123"}) == "https://www.youtube.com/watch?v=abc123"
+    with pytest.raises(ValueError, match="link público"):
+        _archive_public_origin({"original_url": "spotify:track:123", "webpage_url": ""})
 
 
 def test_duas_reproducoes_reais_limite_e_alias(tmp_path, monkeypatch):
@@ -240,7 +248,7 @@ async def test_arquivo_espera_novo_agente_antes_de_enviar_capa(tmp_path, monkeyp
     assert calls == []
     assert real_pending()["key"] == key
 
-    version = "0.3.77"
+    version = "0.3.78"
     pending_calls = 0
 
     def pending_once(**kwargs):
@@ -401,7 +409,7 @@ def test_agendamento_no_agente_responde_antes_do_download():
             self.calls = []
 
         async def _archive_one(self, item):
-            self.calls.append(item["key"])
+            self.calls.append((item["key"], item["source_emojis"]))
             await asyncio.sleep(0.02)
             return {"status": "done", "reference": {"guild_id": 1, "channel_id": 2,
                                                       "message_id": 3, "attachment_id": 4}, "emoji": "🎵"}
@@ -413,11 +421,12 @@ def test_agendamento_no_agente_responde_antes_do_download():
         stub = Stub()
         key = "a" * 32
         body = {"archive_key": key, "guild_id": 1, "archive_channel_id": 2,
+                "source_emojis": {"YouTube": "<:YouTube:123>"},
                 "track": {"webpage_url": "https://www.youtube.com/watch?v=abc", "duration": 240}}
         assert (await stub.cmd_archive_enqueue(body))["status"] == "queued"
         assert (await stub.cmd_archive_enqueue(body))["status"] == "queued"
         await stub._archive_queue.join()
-        assert stub.calls == [key]
+        assert stub.calls == [(key, {"youtube": "<:YouTube:123>"})]
         assert (await stub.cmd_archive_status(body))["status"] == "done"
 
     asyncio.run(check())
@@ -729,12 +738,16 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
     async def ready():
         pass
 
+    raw_calls = 0
+
     async def raw(channel_id, message_id):
+        nonlocal raw_calls
+        raw_calls += 1
         assert (channel_id, message_id) == (40, 30)
         return {"author": {"id": "5"}, "guild_id": "1", "channel_id": "40",
                 "embeds": [new_message.embeds[0].to_dict()],
                 "attachments": [{"id": str(attachment.id), "filename": attachment.filename,
-                                 "url": attachment.url} for attachment in new_message.attachments]}
+                                 "url": attachment.url} for attachment in new_message.attachments] if raw_calls > 1 else []}
 
     class Worker(ArchiveMixin):
         def __init__(self):
@@ -779,6 +792,7 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
     assert result["reference"]["attachment_id"] == 9
     assert created[0][0] == "Arctic Monkeys - 505"
     assert created[0][2] == ["capa.jpg", "Arctic Monkeys - 505.ogg"]
+    assert raw_calls >= 2  # Discord pode entregar os anexos após create_thread
     assert not new_message.embeds[0].thumbnail.url
     assert new_message.content.startswith("🎵 YouTube ·")
     assert not edits  # novo post já nasce compacto, sem REST edit adicional
@@ -838,6 +852,7 @@ async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monke
 
 @pytest.mark.asyncio
 async def test_playlist_spotify_arquiva_audio_da_fonte_resolvida(tmp_path, monkeypatch):
+    import builtins
     from types import SimpleNamespace
 
     module = ArchiveMixin._archive_download.__globals__
@@ -871,14 +886,23 @@ async def test_playlist_spotify_arquiva_audio_da_fonte_resolvida(tmp_path, monke
             return SimpleNamespace(webpage_url="https://www.youtube.com/watch?v=abc123",
                                    duration=183, source="YouTube")
 
+    from cogs.musica import configuracao
     item = {"key": "a" * 32, "guild_id": 1, "emoji": "🎵",
+            "source_emojis": configuracao.MUSIC_SOURCE_EMOJIS,
             "track": {"title": "Artista - Faixa", "webpage_url": "https://open.spotify.com/track/abc123",
                       "source": "Spotify", "display_source": "Spotify", "duration": 181}}
+    original_import = builtins.__import__
+
+    def runtime_without_bot_config(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "cogs.musica" and "configuracao" in fromlist:
+            raise ImportError("configuracao não faz parte do release Android")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", runtime_without_bot_config)
     audio = await Worker()._archive_download(item, tmp_path)
     assert audio == tmp_path / "audio.ogg"
     assert len(process_calls) == 1 and process_calls[0][-1] == "https://www.youtube.com/watch?v=abc123"
     assert item["track"]["display_source"] == "YouTube"
-    from cogs.musica import configuracao
     assert item["emoji"] == configuracao.MUSIC_SOURCE_EMOJIS["youtube"]
 
 
