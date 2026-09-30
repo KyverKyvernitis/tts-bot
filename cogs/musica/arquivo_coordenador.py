@@ -10,7 +10,7 @@ from .agente_telefone.comandos import music_agent_command, music_agent_status
 from .busca import arquivo
 
 log = logging.getLogger(__name__)
-_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 78)
+_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 79)
 
 
 def _archive_agent_ready(payload: dict) -> bool:

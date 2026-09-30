@@ -811,24 +811,40 @@ class ResolucaoMixin:
                     self._resolve_thread_local.cancel_event = cancel_event
                     self._resolve_thread_local.deadline = time.monotonic() + max(1.0, float(getattr(self, "ytdlp_timeout", 20.0) or 20.0))
                     try:
+                        catalog = self._metadata_source_kind(track_meta) in {"spotify", "deezer", "apple"}
+
+                        def _resolve_alternative(reason: str) -> dict[str, Any]:
+                            self.log("resolve_catalog_alternative", guild_id=safe_id(body.get("guild_id")), reason=reason)
+                            return self._resolve_with_ytdlp(
+                                busca_alternativa(query), expected_metadata=track_meta,
+                            )
+
                         def _resolve_primary_target() -> dict[str, Any]:
                             return self._resolve_with_ytdlp(resolve_target)
 
                         try:
-                            resolved = _resolve_primary_target()
-                        except Exception:
-                            if resolve_target == query:
+                            try:
+                                resolved = _resolve_primary_target()
+                            except Exception:
+                                if resolve_target == query:
+                                    raise
+                                # Um vídeo cacheado pode ter sido removido; volte
+                                # à consulta textual antes de alargar a busca.
+                                self.log(
+                                    "resolve_cached_media_refresh_failed",
+                                    guild_id=safe_id(body.get("guild_id")),
+                                    target=resolve_target[:120],
+                                )
+                                resolved = self._resolve_with_ytdlp(query)
+                        except RuntimeError as exc:
+                            if (not catalog or not query.lower().startswith(_LOCAL_SEARCH_PREFIXES)
+                                    or "yt-dlp não retornou mídia" not in str(exc)):
                                 raise
-                            # The cached logical->media mapping can outlive a
-                            # removed/private video. Only then fall back to one
-                            # fresh textual resolve and replace that mapping.
-                            self.log(
-                                "resolve_cached_media_refresh_failed",
-                                guild_id=safe_id(body.get("guild_id")),
-                                target=resolve_target[:120],
-                            )
-                            resolved = self._resolve_with_ytdlp(query)
-                        if self._metadata_source_kind(track_meta) in {"spotify", "deezer", "apple"}:
+                            # Uma busca sem resultados também precisa tentar
+                            # os três candidatos; antes só títulos divergentes
+                            # chegavam a esse caminho.
+                            resolved = _resolve_alternative("busca_vazia")
+                        if catalog:
                             valid, _score, reason = avaliar_correspondencia(track_meta, resolved)
                             if not valid:
                                 self.log(
@@ -838,11 +854,9 @@ class ResolucaoMixin:
                                     expected=short_text(track_meta.get("title"), 90),
                                     found=short_text(resolved.get("title"), 90),
                                 )
-                                # Só casos comprovadamente duvidosos pagam pela
-                                # busca de três candidatos. O prazo é compartilhado.
-                                resolved = self._resolve_with_ytdlp(
-                                    busca_alternativa(query), expected_metadata=track_meta,
-                                )
+                                # Só casos duvidosos pagam pela busca maior;
+                                # todas as tentativas dividem o mesmo prazo.
+                                resolved = _resolve_alternative(reason)
                         return resolved
                     finally:
                         with contextlib.suppress(Exception):
@@ -1035,10 +1049,15 @@ class ResolucaoMixin:
             if expected_metadata is not None:
                 eligible = []
                 for entry in entries:
-                    valid, score, _reason = avaliar_correspondencia(expected_metadata, entry)
-                    if valid and _select_stream_info(entry).get("stream_url"):
+                    valid, score, reason = avaliar_correspondencia(expected_metadata, entry)
+                    has_audio = valid and bool(_select_stream_info(entry).get("stream_url"))
+                    if has_audio:
                         eligible.append((score, entry))
+                    else:
+                        self.log("yt_dlp_catalog_candidate_rejected", reason=reason if not valid else "sem_audio",
+                                 title=short_text(entry.get("title"), 90), duration=entry.get("duration"))
                 if not eligible:
+                    self.log("yt_dlp_catalog_no_match", candidates=len(entries))
                     raise RuntimeError("nenhuma fonte encontrada corresponde à faixa solicitada")
                 data = max(eligible, key=lambda item: item[0])[1]
             else:

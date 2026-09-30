@@ -374,6 +374,20 @@ def test_candidatos_de_catalogo_rejeitam_remix_e_duracao_errada() -> None:
     assert busca_alternativa("ytsearch1:Olive Northern Lights") == "ytsearch3:Olive Northern Lights"
 
 
+def test_titulo_de_catalogo_com_artista_separado_aceita_faixa_correta() -> None:
+    from cogs.musica.runtime_telefone.agente.correspondencia import avaliar_correspondencia, busca_alternativa
+
+    expected = {"display_title": "Heaven Pierce Her - Cerberus", "display_uploader": "Heaven Pierce Her", "duration": 142}
+    assert avaliar_correspondencia(expected, {"title": "Cerberus", "duration": 142})[0]
+    assert avaliar_correspondencia(expected, {"title": "Cerberus (ULTRAKILL: INFINITE HYPERDEATH)", "duration": 141})[0]
+    assert not avaliar_correspondencia(expected, {"title": "Heaven Pierce Her - ORDER", "duration": 420})[0]
+    assert not avaliar_correspondencia(expected, {"title": "Cerberus ~ Phase 2 - Heaven Pierce Her", "duration": 65})[0]
+    assert not avaliar_correspondencia({"title": "The National Anthem", "artist": "The National"},
+                                      {"title": "Anthem"})[0]
+    assert busca_alternativa("ytsearch1:Heaven Pierce Her - Cerberus official audio") == \
+        "ytsearch3:Heaven Pierce Her - Cerberus"
+
+
 def test_busca_de_catalogo_troca_primeiro_video_errado_por_candidato_valido(monkeypatch) -> None:
     import asyncio
     from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
@@ -398,6 +412,34 @@ def test_busca_de_catalogo_troca_primeiro_video_errado_por_candidato_valido(monk
     assert len(queries) == 2
     assert queries[1][0].startswith("ytsearch3:")
     assert queries[1][1] == meta
+
+
+def test_busca_vazia_de_catalogo_tenta_tres_candidatos_sem_sufixo(monkeypatch) -> None:
+    import asyncio
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    queries = []
+
+    def resolve(query, *, expected_metadata=None):
+        queries.append((query, expected_metadata))
+        if len(queries) == 1:
+            raise RuntimeError("yt-dlp não retornou mídia")
+        return {"title": "Cerberus", "duration": 142,
+                "webpage_url": "https://youtu.be/RbXEFL9RIWg", "stream_url": "https://cdn/cerberus"}
+
+    agent._resolve_with_ytdlp = resolve
+    meta = {"display_title": "Heaven Pierce Her - Cerberus", "display_uploader": "Heaven Pierce Her",
+            "duration": 142, "source": "spotify"}
+    track = asyncio.run(agent.resolve_track(
+        "ytsearch1:Heaven Pierce Her - Cerberus official audio", track_meta=meta, body={"guild_id": 4},
+    ))
+    assert track.stream_url == "https://cdn/cerberus"
+    assert queries == [
+        ("ytsearch1:Heaven Pierce Her - Cerberus official audio", None),
+        ("ytsearch3:Heaven Pierce Her - Cerberus", meta),
+    ]
 
 
 def test_ytdlp_fallback_compartilha_o_prazo_e_ordena_por_qualidade(monkeypatch) -> None:
@@ -456,6 +498,34 @@ def test_ytdlp_busca_alternativa_seleciona_candidato_compativel(monkeypatch) -> 
         "ytsearch3:Olive Northern Lights", expected_metadata={"title": "Northern Lights", "artist": "Olive", "duration": 200},
     )
     assert resolved["stream_url"] == "https://cdn/correct"
+
+
+def test_ytdlp_busca_cerberus_seleciona_duracao_correta(monkeypatch) -> None:
+    import json
+    import subprocess
+    from cogs.musica.testes.runtime_telefone.test_music_agent_lifecycle import _load_music_agent
+
+    music = _load_music_agent(monkeypatch)
+    agent = music.MusicAgent()
+    agent.cookies_file = "/nonexistent"
+    monkeypatch.setenv("MUSIC_AGENT_YTDLP_WARM_HELPER_ENABLED", "false")
+
+    def command(cmd, *, timeout):
+        assert cmd[-1] == "ytsearch3:Heaven Pierce Her - Cerberus"
+        data = {"entries": [
+            {"title": "Cerberus ~ Phase 2 - Heaven Pierce Her", "duration": 65,
+             "url": "https://cdn/phase2", "acodec": "opus"},
+            {"title": "Cerberus", "duration": 142, "url": "https://cdn/cerberus", "acodec": "opus"},
+        ]}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(data), "")
+
+    agent._run_ytdlp_command = command
+    resolved = agent._resolve_with_ytdlp(
+        "ytsearch3:Heaven Pierce Her - Cerberus",
+        expected_metadata={"display_title": "Heaven Pierce Her - Cerberus",
+                           "display_uploader": "Heaven Pierce Her", "duration": 142},
+    )
+    assert resolved["stream_url"] == "https://cdn/cerberus"
 
 
 def test_tts_bufferizado_termina_apos_o_ultimo_frame(monkeypatch):

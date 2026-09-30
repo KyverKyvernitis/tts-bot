@@ -80,6 +80,11 @@ def _db() -> sqlite3.Connection:
         # podem ser corrigidos já pelo agente novo, sem esperar mais uma hora.
         db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE reference_json!='' AND apresentacao BETWEEN 4 AND 6")
         db.execute("PRAGMA user_version=5")
+    if db.execute("PRAGMA user_version").fetchone()[0] < 6:
+        # Com a busca corrigida no agente 0.3.79, as faixas antigas que
+        # falharam não precisam esperar o backoff anterior para tentar de novo.
+        db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE estado='failed' AND reference_json=''")
+        db.execute("PRAGMA user_version=6")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_reproducoes (marcador TEXT PRIMARY KEY, registrado_em REAL NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_aliases (alias TEXT PRIMARY KEY, chave TEXT NOT NULL)")
     db.execute("""CREATE TABLE IF NOT EXISTS arquivo_limpezas (

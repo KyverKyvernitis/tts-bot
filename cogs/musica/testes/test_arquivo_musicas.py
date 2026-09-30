@@ -201,6 +201,22 @@ def test_falha_de_upload_visivel_e_retentavel(tmp_path, monkeypatch):
     assert arquivo.pending() is None  # aguarda o backoff antes de tentar de novo
 
 
+def test_migracao_reagenda_falhas_antigas_uma_vez(tmp_path, monkeypatch):
+    monkeypatch.setattr(arquivo, "_db_path", lambda: tmp_path / "archive.sqlite3")
+    arquivo.set_channel(1, 2, kind="forum")
+    track = _track()
+    arquivo.record_play(track, "play-1")
+    key = arquivo.media_key(track)
+    with arquivo._db() as db:
+        db.execute("UPDATE arquivo_musicas SET estado='failed', falhas=4, tentativa_em=9999999999 WHERE chave=?", (key,))
+        db.execute("PRAGMA user_version=5")
+    assert arquivo.pending()["key"] == key
+    with arquivo._db() as db:
+        assert db.execute("SELECT falhas, tentativa_em FROM arquivo_musicas WHERE chave=?", (key,)).fetchone() == (4, 0)
+        db.execute("UPDATE arquivo_musicas SET tentativa_em=9999999999 WHERE chave=?", (key,))
+    assert arquivo.pending() is None
+
+
 @pytest.mark.asyncio
 async def test_arquivo_espera_novo_agente_antes_de_enviar_capa(tmp_path, monkeypatch):
     import asyncio
@@ -248,7 +264,7 @@ async def test_arquivo_espera_novo_agente_antes_de_enviar_capa(tmp_path, monkeyp
     assert calls == []
     assert real_pending()["key"] == key
 
-    version = "0.3.78"
+    version = "0.3.79"
     pending_calls = 0
 
     def pending_once(**kwargs):
