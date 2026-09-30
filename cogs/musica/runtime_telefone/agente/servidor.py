@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import importlib
+from importlib.metadata import PackageNotFoundError, version as package_version
 import base64
 import hashlib
 import io
@@ -93,7 +94,11 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.80"
+AGENT_VERSION = "0.3.81"
+try:
+    ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
+except PackageNotFoundError:
+    ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:missing"
 STARTED_AT = time.time()
 
 
@@ -882,6 +887,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             "ok": True,
             "available": bool(self.client.is_ready()),
             "version": AGENT_VERSION,
+            "archive_resolver_revision": ARCHIVE_RESOLVER_REVISION,
             "uptime_seconds": round(time.time() - STARTED_AT, 1),
             "discord_ready": bool(self.client.is_ready()),
             "user": str(self.client.user) if self.client.user else "",

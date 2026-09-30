@@ -22,7 +22,7 @@ from .validade_stream import (
     DiscordAttachmentError, _archive_metadata, fetch_discord_attachment,
     initial_discord_cdn_url, normalize_reference, valid_cdn_url,
 )
-from .correspondencia import avaliar_correspondencia, busca_alternativa
+from .correspondencia import CatalogNoMatchError, avaliar_correspondencia, busca_alternativa
 from .estado import AgentTrack
 from .ytdlp_quente import WarmYTDLPResolver
 from .validade_stream import prazo_stream
@@ -1058,7 +1058,7 @@ class ResolucaoMixin:
                                  title=short_text(entry.get("title"), 90), duration=entry.get("duration"))
                 if not eligible:
                     self.log("yt_dlp_catalog_no_match", candidates=len(entries))
-                    raise RuntimeError("nenhuma fonte encontrada corresponde à faixa solicitada")
+                    raise CatalogNoMatchError("nenhuma fonte encontrada corresponde à faixa solicitada")
                 data = max(eligible, key=lambda item: item[0])[1]
             else:
                 data = next(iter(entries), {})

@@ -4,14 +4,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from .agente_telefone.comandos import music_agent_command, music_agent_status
 from .busca import arquivo
 
 log = logging.getLogger(__name__)
-_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 79)
-_MIN_SOURCE_AGENT_VERSION = (0, 3, 80)
+_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 81)
+_MIN_SOURCE_AGENT_VERSION = (0, 3, 81)
 
 
 def _archive_agent_ready(payload: dict) -> bool:
@@ -44,6 +46,8 @@ class ArchiveCoordinator:
         self._wake = asyncio.Event()
         self._new_archive_streak = 0
         self._cleanup_streak = 0
+        self._revision = ""
+        self._revision_checked_at = 0.0
 
     def start(self) -> None:
         if self.task is None or self.task.done():
@@ -168,6 +172,16 @@ class ArchiveCoordinator:
                     continue
                 self._cleanup_streak = 0
                 if item is None:
+                    if time.monotonic() - self._revision_checked_at >= 300:
+                        self._revision_checked_at = time.monotonic()
+                        guild_id, _channel_id = arquivo.channel()
+                        agent = await music_agent_status(guild_id=guild_id, timeout_seconds=3.0)
+                        if _archive_agent_ready(agent):
+                            revision = str(agent.get("archive_resolver_revision") or agent.get("version") or "")
+                            if revision != self._revision:
+                                self._revision = revision
+                                if await asyncio.to_thread(arquivo.reopen_on_revision, revision):
+                                    continue
                     try:
                         await asyncio.wait_for(self._wake.wait(), timeout=12)
                     except asyncio.TimeoutError:
@@ -179,10 +193,18 @@ class ArchiveCoordinator:
                 # Evite publicar v5 durante a troca e adiar a correção por 1 h.
                 agent = await music_agent_status(guild_id=guild_id, timeout_seconds=3.0)
                 if not _archive_agent_ready(agent):
-                    log.info("[music/archive] aguardando agente com fórum v7 | versão=%s", agent.get("version"))
+                    log.info("[music/archive] aguardando agente com auditoria v8 | versão=%s", agent.get("version"))
                     await asyncio.sleep(12)
                     continue
-                if item.get("source_override") and not _source_agent_ready(agent):
+                revision = str(agent.get("archive_resolver_revision") or agent.get("version") or "")
+                if revision != self._revision:
+                    self._revision = revision
+                    await asyncio.to_thread(arquivo.reopen_on_revision, revision)
+                known_url = str(item.get("source_known") or "")
+                bandcamp_url = str(item.get("source_override") or "")
+                if not bandcamp_url and (urlsplit(known_url).hostname or "").lower().endswith(".bandcamp.com"):
+                    bandcamp_url = known_url
+                if bandcamp_url and not _source_agent_ready(agent):
                     log.info("[music/archive] aguardando agente com fonte externa | versão=%s", agent.get("version"))
                     await asyncio.sleep(12)
                     continue
@@ -192,45 +214,87 @@ class ArchiveCoordinator:
                 key = item["key"]
                 track = _track_from_payload(metadata)
                 if media_key(track) != key:
-                    arquivo.mark_result(key, {"status": "failed"})
+                    await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed", "reason": "invalid_key",
+                                                                         "agent_revision": revision})
                     continue
+                if known_url and not bandcamp_url:
+                    track.webpage_url = known_url
+                    host = (urlsplit(known_url).hostname or "").lower()
+                    if "youtube.com" in host:
+                        track.source = track.display_source = "YouTube"
+                    elif host == "soundcloud.com":
+                        track.source = track.display_source = "SoundCloud"
                 source = (track.display_source or track.source).lower()
                 from . import configuracao as config
                 emoji_key = next((name for name in config.MUSIC_SOURCE_EMOJIS if name in source), "")
                 emoji = config.MUSIC_SOURCE_EMOJIS.get(emoji_key, config.MUSIC_SOURCE_EMOJI_FALLBACK)
+                await asyncio.to_thread(arquivo.mark_attempt, key, source=bandcamp_url or known_url or track.webpage_url,
+                                        revision=revision)
                 archive_source = None
-                if item.get("source_override"):
-                    from .arquivo_fonte import resolve_bandcamp_source
+                if bandcamp_url:
+                    from .arquivo_fonte import SourceMismatchError, resolve_bandcamp_source
                     try:
                         archive_source = await asyncio.wait_for(
-                            asyncio.to_thread(resolve_bandcamp_source, item["source_override"], metadata), timeout=45,
+                            asyncio.to_thread(resolve_bandcamp_source, bandcamp_url, metadata), timeout=45,
                         )
-                    except Exception:
-                        log.warning("[music/archive] fonte oficial indisponível | chave=%s", key, exc_info=True)
-                        await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed"})
+                    except SourceMismatchError:
+                        log.warning("[music/archive] fonte oficial divergente | chave=%s", key)
+                        await asyncio.to_thread(arquivo.mark_result, key, {"status": "unavailable",
+                                                                           "reason": "source_mismatch", "agent_revision": revision})
+                        continue
+                    except Exception as exc:
+                        log.warning("[music/archive] fonte oficial indisponível | chave=%s tipo=%s", key, type(exc).__name__)
+                        await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed",
+                                                                           "reason": "source_resolve_error", "agent_revision": revision})
                         continue
                     emoji = config.MUSIC_SOURCE_EMOJIS.get("bandcamp", config.MUSIC_SOURCE_EMOJI_FALLBACK)
-                await asyncio.to_thread(arquivo.mark_attempt, key)
-                await music_agent_command(
+                enqueue = await music_agent_command(
                     "archive_enqueue", guild_id=guild_id, archive_channel_id=channel_id,
                     archive_key=key, archive_ref=item.get("reference") or {}, archive_retry=item.get("retry", False),
                     track=track, source_emoji=emoji, source_emojis=config.MUSIC_SOURCE_EMOJIS,
                     archive_source=archive_source,
                     timeout_seconds=8.0,
                 )
+                if not enqueue.get("ok", True):
+                    await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed",
+                                                                       "reason": "agent_rejected", "agent_revision": revision})
+                    continue
                 # A resposta HTTP do enqueue é imediata; o download e o upload
                 # continuam em segundo plano sem ocupar a ponte de comandos.
-                for _ in range(240):
+                for _ in range(96):
                     await asyncio.sleep(5)
                     answer = await music_agent_command("archive_status", guild_id=guild_id, archive_key=key,
                                                        timeout_seconds=8.0, command_id="")
                     status = str(answer.get("status") or "")
-                    if status in {"done", "too_large", "ineligible", "failed", "missing"}:
-                        await asyncio.to_thread(arquivo.mark_result, key, answer)
+                    if status in {"done", "too_large", "ineligible", "unavailable", "failed", "missing"}:
+                        discovery_rejected = False
+                        if status == "unavailable" and answer.get("reason") == "no_match" and not bandcamp_url:
+                            from .arquivo_fonte import SourceMismatchError, resolve_bandcamp_source
+                            candidate = await asyncio.to_thread(arquivo.bandcamp_candidate, metadata)
+                            if candidate:
+                                try:
+                                    await asyncio.wait_for(
+                                        asyncio.to_thread(resolve_bandcamp_source, candidate, metadata), timeout=45,
+                                    )
+                                except SourceMismatchError:
+                                    discovery_rejected = True
+                                except Exception as exc:
+                                    log.warning("[music/archive] descoberta de fonte adiada | chave=%s tipo=%s",
+                                                key, type(exc).__name__)
+                                    answer = {"status": "failed", "reason": "source_resolve_error"}
+                                else:
+                                    await asyncio.to_thread(arquivo.mark_result, key, {**answer, "agent_revision": revision})
+                                    if await asyncio.to_thread(arquivo.queue_discovered_source, key, candidate):
+                                        self._new_archive_streak += 1
+                                    break
+                        await asyncio.to_thread(arquivo.mark_result, key, {**answer, "agent_revision": revision})
+                        if discovery_rejected:
+                            await asyncio.to_thread(arquivo.note_discovery_failure, key, "source_mismatch")
                         self._new_archive_streak = 0 if item["reference"] else self._new_archive_streak + 1
                         break
                 else:
-                    await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed"})
+                    await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed", "reason": "agent_timeout",
+                                                                       "agent_revision": revision})
             except asyncio.CancelledError:
                 raise
             except Exception:

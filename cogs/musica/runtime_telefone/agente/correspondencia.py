@@ -10,6 +10,10 @@ _RUIDO = frozenset({"official", "audio", "video", "music", "hd", "hq", "vevo", "
 _VERSOES = ("live", "remix", "cover", "karaoke", "nightcore", "sped up", "slowed")
 
 
+class CatalogNoMatchError(RuntimeError):
+    """A busca terminou, mas nenhum candidato corresponde à faixa."""
+
+
 def _normalizar(value: Any) -> str:
     raw = unicodedata.normalize("NFKD", str(value or "").lower())
     raw = "".join(char for char in raw if not unicodedata.combining(char))

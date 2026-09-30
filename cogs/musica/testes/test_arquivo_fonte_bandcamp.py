@@ -10,7 +10,7 @@ import pytest
 from cogs.musica.busca import arquivo
 from cogs.musica.nucleo.modelos import MusicTrack
 from cogs.musica.arquivo_fonte import resolve_bandcamp_source
-from cogs.musica.runtime_telefone.agente.validade_stream import ArchiveMixin, _archive_bandcamp_source, _archive_source_failure
+from cogs.musica.runtime_telefone.agente.validade_stream import ArchiveMixin, _archive_bandcamp_source, _archive_download_reason
 
 
 PAGE = "https://heavenpierceher.bandcamp.com/track/disgrace-humiliation"
@@ -127,7 +127,7 @@ async def test_agent_baixa_fonte_validada_sem_refazer_busca_spotify(tmp_path, mo
     assert track["display_source"] == "Bandcamp" and item["emoji"] == "🎼"
     with pytest.raises(ValueError):
         _archive_bandcamp_source({**raw, "stream_url": "https://localhost/audio"}, track)
-    assert _archive_source_failure(f"ERROR: HTTP Error 403: Forbidden ({STREAM})".encode()) == "Bandcamp HTTP 403"
+    assert _archive_download_reason(f"ERROR: HTTP Error 403: Forbidden ({STREAM})".encode(), bandcamp=True) == "source_http_403"
 
 
 @pytest.mark.asyncio
@@ -142,7 +142,8 @@ async def test_coordenador_resolve_fonte_e_a_entrega_ao_agent(tmp_path, monkeypa
     arquivo.record_play(track, "inicio")
     arquivo.set_source_override(key, PAGE)
     assert not coordinator._source_agent_ready({"available": True, "version": "0.3.79"})
-    assert coordinator._source_agent_ready({"available": True, "version": "0.3.80"})
+    assert not coordinator._source_agent_ready({"available": True, "version": "0.3.80"})
+    assert coordinator._source_agent_ready({"available": True, "version": "0.3.81"})
 
     class Bot:
         async def wait_until_ready(self):
@@ -150,7 +151,7 @@ async def test_coordenador_resolve_fonte_e_a_entrega_ao_agent(tmp_path, monkeypa
 
     sent = []
     async def status(**_kwargs):
-        return {"available": True, "version": "0.3.80"}
+        return {"available": True, "version": "0.3.81"}
 
     async def command(action, **kwargs):
         sent.append((action, kwargs))

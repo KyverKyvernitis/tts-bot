@@ -264,7 +264,7 @@ async def test_arquivo_espera_novo_agente_antes_de_enviar_capa(tmp_path, monkeyp
     assert calls == []
     assert real_pending()["key"] == key
 
-    version = "0.3.79"
+    version = "0.3.81"
     pending_calls = 0
 
     def pending_once(**kwargs):
