@@ -18,6 +18,8 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 import aiohttp
 import discord
 
+from .correspondencia import avaliar_correspondencia
+
 
 class DiscordAttachmentError(ValueError):
     """Erro apresentável sem expor URLs assinadas ou credenciais."""
@@ -283,6 +285,45 @@ class ArchiveDurationTooLong(ValueError):
     pass
 
 
+def _archive_bandcamp_source(raw: Any, track: dict) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("fonte externa inválida")
+    page = str(raw.get("webpage_url") or "")
+    stream = str(raw.get("stream_url") or "")
+    title = str(raw.get("title") or "").strip()
+    try:
+        page_url, stream_url = urlsplit(page), urlsplit(stream)
+        page_host, stream_host = (page_url.hostname or "").lower(), (stream_url.hostname or "").lower()
+        safe = (page_url.scheme == stream_url.scheme == "https"
+                and page_host.endswith(".bandcamp.com") and page_url.path.startswith("/track/")
+                and stream_host.endswith(".bcbits.com")
+                and all(part is None for part in (page_url.username, page_url.password, page_url.port,
+                                                   stream_url.username, stream_url.password, stream_url.port)))
+        duration = float(raw.get("duration") or 0)
+        expected = float(track.get("duration") or 0)
+    except (ValueError, TypeError):
+        raise ValueError("fonte externa inválida") from None
+    valid, _score, _reason = avaliar_correspondencia(track, raw)
+    if (not safe or not title or len(page) > 500 or len(stream) > 3000 or not valid
+            or not 0 < expected <= 600 or not 0 < duration <= 600
+            or abs(expected - duration) > max(5, expected * 0.03)):
+        raise ValueError("fonte externa não corresponde à faixa")
+    return {"webpage_url": page, "stream_url": stream, "duration": duration, "source": "Bandcamp"}
+
+
+def _archive_source_failure(stderr: bytes) -> str:
+    """Preserva o motivo útil sem registrar a URL assinada do áudio."""
+    message = stderr.decode("utf-8", "replace")
+    status = re.search(r"HTTP Error\s+([1-5]\d{2})", message, flags=re.IGNORECASE)
+    if status:
+        return f"Bandcamp HTTP {status.group(1)}"
+    if "timed out" in message.lower() or "timeout" in message.lower():
+        return "Bandcamp timeout"
+    return "falha no áudio Bandcamp"
+
+
 def _archive_url(origin: str, key: str, *, version: int = 2) -> str:
     parsed = urlsplit(origin)
     if parsed.scheme != "https" or not parsed.netloc:
@@ -437,6 +478,7 @@ class ArchiveMixin:
                 or guild_id <= 0 or channel_id <= 0 or parsed.scheme != "https"
                 or not public_host or host.endswith(("discord.com", "discordapp.com"))):
             raise ValueError("faixa inelegível para o arquivo")
+        archive_source = _archive_bandcamp_source(body.get("archive_source"), track)
         if key in self._archive_results:
             previous = self._archive_results[key]
             ref = previous.get("reference") if isinstance(previous.get("reference"), dict) else {}
@@ -451,6 +493,7 @@ class ArchiveMixin:
                                             "source_emojis": {str(name).lower()[:30]: str(emoji)[:100]
                                                               for name, emoji in source_emojis.items() if name and emoji},
                                             "retry": bool(body.get("archive_retry")),
+                                            "archive_source": archive_source,
                                             "existing_ref": body.get("archive_ref") if isinstance(body.get("archive_ref"), dict) else {}})
         if self._archive_task is None or self._archive_task.done():
             self._archive_task = asyncio.create_task(self._archive_loop(), name="music-archive-upload")
@@ -796,7 +839,14 @@ class ArchiveMixin:
     async def _archive_download(self, item: dict, folder: Path) -> Path | None:
         track = item["track"]
         url = str(track["webpage_url"])
-        if (urlsplit(url).hostname or "").lower() in {"open.spotify.com", "music.apple.com", "www.deezer.com", "deezer.com"}:
+        archive_source = item.get("archive_source") or {}
+        if archive_source:
+            url = archive_source["stream_url"]
+            track["webpage_url"] = archive_source["webpage_url"]
+            track["original_url"] = archive_source["webpage_url"]
+            track["source"] = track["display_source"] = "Bandcamp"
+            item["emoji"] = (item.get("source_emojis") or {}).get("bandcamp", item["emoji"])
+        elif (urlsplit(url).hostname or "").lower() in {"open.spotify.com", "music.apple.com", "www.deezer.com", "deezer.com"}:
             query = self._query_from_track_meta(track)
             resolved = await self.resolve_track(query, track_meta=track,
                                                 body={"guild_id": item["guild_id"]}, priority=20)
@@ -821,12 +871,16 @@ class ArchiveMixin:
         cookies = str(getattr(self, "cookies_file", "") or "")
         if cookies and os.path.isfile(cookies):
             base += ["--cookies", cookies]
+        if archive_source:
+            base += ["--add-header", f"Referer:{archive_source['webpage_url']}"]
         for runtime in str(getattr(self, "js_runtimes", "") or "").split(","):
             if runtime.strip():
                 base += ["--js-runtimes", runtime.strip()]
         oversized = False
-        for fmt in ("bestaudio[filesize<20M]/bestaudio[filesize_approx<20M]/bestaudio[abr<=256]/bestaudio",
-                    "bestaudio[abr<=192]"):
+        formats = (("bestaudio/best",) if archive_source else
+                   ("bestaudio[filesize<20M]/bestaudio[filesize_approx<20M]/bestaudio[abr<=256]/bestaudio",
+                    "bestaudio[abr<=192]"))
+        for fmt in formats:
             if self._archive_active != item["key"]:
                 return None
             for stale in folder.glob("audio.*"):
@@ -849,7 +903,8 @@ class ArchiveMixin:
             if b"does not pass filter duration <= 600" in stderr:
                 raise ArchiveDurationTooLong("música com mais de 10 minutos")
             oversized |= b"larger than max-filesize" in stderr or b"file is larger" in stderr
-            self.log("archive_format_retry", key=item["key"], format=fmt[:32], error=(err or b"")[-160:].decode("utf-8", "replace"))
+            self.log("archive_format_retry", key=item["key"], format=fmt[:32],
+                     error=_archive_source_failure(err or b"") if archive_source else (err or b"")[-160:].decode("utf-8", "replace"))
         if oversized:
             raise ArchiveTooLarge("a melhor faixa compatível ultrapassa 20 MiB")
         raise RuntimeError("não consegui baixar um formato de áudio válido")
@@ -969,6 +1024,9 @@ class ArchiveMixin:
             if ready is None:
                 return {"status": "failed"}
             audio, duration, audio_index, codec = ready
+            archive_source = item.get("archive_source") or {}
+            if archive_source and abs(duration - float(archive_source["duration"])) > max(5, float(archive_source["duration"]) * 0.03):
+                raise RuntimeError("duração do áudio Bandcamp não corresponde à faixa")
             details = await self._archive_probe(audio)
             audio_stream = next((entry for entry in details.get("streams") or []
                                  if entry.get("codec_type") == "audio" and int(entry.get("index", -1)) == audio_index), {})

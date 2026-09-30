@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -85,6 +86,10 @@ def _db() -> sqlite3.Connection:
         # falharam não precisam esperar o backoff anterior para tentar de novo.
         db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE estado='failed' AND reference_json=''")
         db.execute("PRAGMA user_version=6")
+    if db.execute("PRAGMA user_version").fetchone()[0] < 7:
+        if "fonte_arquivo" not in {row[1] for row in db.execute("PRAGMA table_info(arquivo_musicas)")}:
+            db.execute("ALTER TABLE arquivo_musicas ADD COLUMN fonte_arquivo TEXT NOT NULL DEFAULT ''")
+        db.execute("PRAGMA user_version=7")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_reproducoes (marcador TEXT PRIMARY KEY, registrado_em REAL NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_aliases (alias TEXT PRIMARY KEY, chave TEXT NOT NULL)")
     db.execute("""CREATE TABLE IF NOT EXISTS arquivo_limpezas (
@@ -104,6 +109,28 @@ def channel_type() -> str:
     with _db() as db:
         row = db.execute("SELECT channel_type FROM arquivo_config WHERE id=1").fetchone()
     return str(row[0]) if row else "text"
+
+
+def set_source_override(key: str, url: str) -> None:
+    """Vincula uma página oficial ao arquivo sem alterar a chave da faixa aprendida."""
+    key = str(key or "").strip().lower()
+    url = str(url or "").strip()
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        raise ValueError("link Bandcamp inválido") from None
+    if (not re.fullmatch(r"[a-f0-9]{32}", key) or parsed.scheme != "https"
+            or not host.endswith(".bandcamp.com") or parsed.username or parsed.password
+            or port is not None or not parsed.path.startswith("/track/") or len(url) > 500):
+        raise ValueError("use a página pública de uma faixa do Bandcamp")
+    with _db() as db:
+        row = db.execute("SELECT reference_json FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
+        if row is None or row[0]:
+            raise ValueError("use a chave de uma música aprendida ainda não arquivada")
+        db.execute("""UPDATE arquivo_musicas SET fonte_arquivo=?, tentativa_em=0,
+                   falhas=0, estado='waiting' WHERE chave=?""", (url, key))
 
 
 def set_channel(guild_id: int, channel_id: int, *, kind: str = "text") -> None:
@@ -275,7 +302,7 @@ def pending(*, prefer_new: bool = True) -> dict | None:
         return None
     version = 7 if channel_type() == "forum" else 2
     with _db() as db:
-        row = db.execute("""SELECT chave, track_json, reference_json, estado FROM arquivo_musicas
+        row = db.execute("""SELECT chave, track_json, reference_json, estado, fonte_arquivo FROM arquivo_musicas
             WHERE (aprendida_em>0 OR tocadas>=1)
             AND ((reference_json='' AND estado NOT IN ('too_large', 'ineligible'))
                 OR (reference_json!='' AND apresentacao<?)) AND tentativa_em<=?
@@ -286,7 +313,8 @@ def pending(*, prefer_new: bool = True) -> dict | None:
         return None
     try:
         return {"key": row[0], "track": json.loads(row[1]),
-                "reference": json.loads(row[2]) if row[2] else {}, "retry": row[3] in {"working", "failed"}}
+                "reference": json.loads(row[2]) if row[2] else {}, "retry": row[3] in {"working", "failed"},
+                "source_override": row[4]}
     except (TypeError, ValueError):
         log.warning("[music/archive] metadados inválidos: %s", row[0])
         return None

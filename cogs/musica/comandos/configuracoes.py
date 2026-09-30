@@ -17,7 +17,20 @@ class FluxoConfiguracoes:
     async def _run_musicarquivo(self, ctx: commands.Context, option: str = "") -> None:
         if not await self.bot.is_owner(ctx.author):
             return
-        value = option.strip().lower()
+        raw = option.strip()
+        value = raw.lower()
+        if value.startswith("fonte "):
+            parts = raw.split(maxsplit=2)
+            try:
+                if len(parts) != 3:
+                    raise ValueError("use `_musicarquivo fonte <chave> <link Bandcamp>`")
+                await asyncio.to_thread(arquivo.set_source_override, parts[1], parts[2])
+            except ValueError as exc:
+                await ctx.reply(str(exc), mention_author=False)
+                return
+            self.archive._wake.set()
+            await ctx.reply("Fonte oficial registrada. Arquivamento agendado.", mention_author=False)
+            return
         if value == "off":
             await asyncio.to_thread(arquivo.set_channel, 0, 0)
             await ctx.reply("Arquivo de músicas desativado.", mention_author=False)

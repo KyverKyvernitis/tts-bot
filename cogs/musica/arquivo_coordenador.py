@@ -11,6 +11,7 @@ from .busca import arquivo
 
 log = logging.getLogger(__name__)
 _MIN_ARCHIVE_AGENT_VERSION = (0, 3, 79)
+_MIN_SOURCE_AGENT_VERSION = (0, 3, 80)
 
 
 def _archive_agent_ready(payload: dict) -> bool:
@@ -20,6 +21,10 @@ def _archive_agent_ready(payload: dict) -> bool:
     if not re.fullmatch(r"\d+(?:\.\d+){2,3}", version):
         return False
     return tuple(int(part) for part in version.split(".")[:3]) >= _MIN_ARCHIVE_AGENT_VERSION
+
+
+def _source_agent_ready(payload: dict) -> bool:
+    return _archive_agent_ready(payload) and tuple(int(part) for part in payload["version"].split(".")[:3]) >= _MIN_SOURCE_AGENT_VERSION
 
 
 @dataclass
@@ -177,6 +182,10 @@ class ArchiveCoordinator:
                     log.info("[music/archive] aguardando agente com fórum v7 | versão=%s", agent.get("version"))
                     await asyncio.sleep(12)
                     continue
+                if item.get("source_override") and not _source_agent_ready(agent):
+                    log.info("[music/archive] aguardando agente com fonte externa | versão=%s", agent.get("version"))
+                    await asyncio.sleep(12)
+                    continue
                 from .busca.arquivo import media_key
                 from .busca.memoria import _track_from_payload
                 metadata = item["track"]
@@ -189,11 +198,24 @@ class ArchiveCoordinator:
                 from . import configuracao as config
                 emoji_key = next((name for name in config.MUSIC_SOURCE_EMOJIS if name in source), "")
                 emoji = config.MUSIC_SOURCE_EMOJIS.get(emoji_key, config.MUSIC_SOURCE_EMOJI_FALLBACK)
+                archive_source = None
+                if item.get("source_override"):
+                    from .arquivo_fonte import resolve_bandcamp_source
+                    try:
+                        archive_source = await asyncio.wait_for(
+                            asyncio.to_thread(resolve_bandcamp_source, item["source_override"], metadata), timeout=45,
+                        )
+                    except Exception:
+                        log.warning("[music/archive] fonte oficial indisponível | chave=%s", key, exc_info=True)
+                        await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed"})
+                        continue
+                    emoji = config.MUSIC_SOURCE_EMOJIS.get("bandcamp", config.MUSIC_SOURCE_EMOJI_FALLBACK)
                 await asyncio.to_thread(arquivo.mark_attempt, key)
                 await music_agent_command(
                     "archive_enqueue", guild_id=guild_id, archive_channel_id=channel_id,
                     archive_key=key, archive_ref=item.get("reference") or {}, archive_retry=item.get("retry", False),
                     track=track, source_emoji=emoji, source_emojis=config.MUSIC_SOURCE_EMOJIS,
+                    archive_source=archive_source,
                     timeout_seconds=8.0,
                 )
                 # A resposta HTTP do enqueue é imediata; o download e o upload
