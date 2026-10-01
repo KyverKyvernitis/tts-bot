@@ -94,7 +94,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.82"
+AGENT_VERSION = "0.3.83"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -140,9 +140,14 @@ def _audit_value(key: str, value: Any) -> Any:
 
 class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
     def __init__(self) -> None:
+        self.executor_mode = str(os.getenv("MUSIC_AGENT_EXECUTOR_MODE", "full")).strip().lower()
+        if self.executor_mode not in {"full", "voice", "archive"}:
+            raise ValueError("MUSIC_AGENT_EXECUTOR_MODE deve ser full, voice ou archive")
         self.host = os.getenv("MUSIC_AGENT_HOST", "127.0.0.1")
         self.port = env_int("MUSIC_AGENT_PORT", 8780)
         self.token = os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or ""
+        if not self.token and self.host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Music Agent fora de loopback exige MUSIC_AGENT_TOKEN")
         self.discord_token = os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or ""
         self.ytdlp_format = formato_audio_configurado(os.getenv("MUSIC_AGENT_YTDLP_FORMAT") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or DEFAULT_YTDLP_AUDIO_FORMAT)
         self.ytdlp_sort = os.getenv("MUSIC_AGENT_YTDLP_SORT") or DEFAULT_YTDLP_AUDIO_SORT
@@ -187,6 +192,13 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         normal_idle = env_float("MUSIC_IDLE_DISCONNECT_SECONDS", 120.0)
         min_idle = max(15.0, env_float("MUSIC_AGENT_MIN_IDLE_DISCONNECT_SECONDS", normal_idle))
         self.idle_disconnect_seconds = max(min_idle, env_float("MUSIC_AGENT_IDLE_DISCONNECT_SECONDS", normal_idle))
+        explicit_idle = any(name in os.environ for name in (
+            "MUSIC_IDLE_DISCONNECT_SECONDS", "MUSIC_AGENT_IDLE_DISCONNECT_SECONDS",
+            "MUSIC_AGENT_MIN_IDLE_DISCONNECT_SECONDS",
+        ))
+        self.fast_idle_retention_seconds = max(0.0, min(1800.0, env_float(
+            "MUSIC_AGENT_FAST_IDLE_RETENTION_SECONDS", self.idle_disconnect_seconds if explicit_idle else 600.0,
+        )))
         self.voice_empty_disconnect_seconds = max(
             0.5,
             min(15.0, env_float("MUSIC_AGENT_VOICE_EMPTY_DISCONNECT_SECONDS", 2.0)),
@@ -219,6 +231,9 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         # executar channel.connect() simultaneamente.
         self._voice_connect_locks: dict[int, asyncio.Lock] = {}
         self._voice_connect_lock_users: dict[int, int] = {}
+        self._voice_prepare_leases: dict[int, Any] = {}
+        self._voice_prepare_tasks: set[asyncio.Task] = set()
+        self._archive_foreground_until: dict[int, float] = {}
         self._voice_runtime_recovery_tasks: dict[int, asyncio.Task] = {}
         self._voice_cleanup_pending: dict[int, float] = {}
         self._tts_direct_locks: dict[int, asyncio.Lock] = {}
@@ -306,6 +321,15 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
     def log(self, event: str, *, guild_id: int = 0, **fields: Any) -> None:
         stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        if event == "music_first_packet_sent":
+            # Uma linha JSON completa para medir durações locais sem truncar
+            # dicionários nem gravar conteúdo, tokens ou URLs da música.
+            record = {"event": event, "guild_id": guild_id, "at": stamp,
+                      "trace_id": str(fields.get("trace_id") or "")[:128],
+                      "controller_timing_ms": fields.get("controller_timing_ms") or {},
+                      "agent_timing_ms": fields.get("agent_timing_ms") or {}}
+            print("[music-start] " + json.dumps(record, ensure_ascii=False, separators=(",", ":")), flush=True)
+            return
         details = " ".join(f"{key}={short_text(_audit_value(key, value), 220)!r}" for key, value in fields.items() if value is not None and value != "")
         gid = f" guild={guild_id}" if guild_id else ""
         print(f"[music-agent] {event}{gid} at={stamp!r}{(' ' + details) if details else ''}", flush=True)
@@ -317,6 +341,8 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
         @self.client.event
         async def on_voice_state_update(member, before, after) -> None:  # type: ignore[no-untyped-def]
+            if self.executor_mode == "archive":
+                return
             guild = getattr(member, "guild", None)
             guild_id = safe_id(getattr(guild, "id", 0))
             if guild_id <= 0 or guild_id not in self.states:
@@ -648,12 +674,14 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             if humans <= 0:
                 self._schedule_voice_presence_disconnect(
                     guild_id,
-                    delay=float(self.idle_disconnect_seconds or 120.0),
-                    reason="music_alone",
-                    expected_mode="music_owned",
+                    delay=float(self.voice_empty_disconnect_seconds or 2.0),
+                    reason="queue_idle_empty",
+                    expected_mode="music_idle_grace",
                 )
             else:
                 self._cancel_voice_presence_disconnect(guild_id)
+                if previous == 0:
+                    self._schedule_idle_disconnect(guild_id)
             return
 
         if mode == "voice_idle":
@@ -679,6 +707,8 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._set_voice_session_mode(st, "music_idle_grace", reason="queue_idle")
         self._cancel_idle_disconnect(guild_id)
         delay = max(15.0, float(self.idle_disconnect_seconds or 120.0))
+        if (self._voice_human_count(st) or 0) > 0:
+            delay = max(delay, self.fast_idle_retention_seconds)
         self._idle_disconnect_tasks[guild_id] = asyncio.create_task(self._idle_disconnect_later(guild_id, delay))
 
     async def _idle_disconnect_later(self, guild_id: int, delay: float) -> None:
@@ -755,27 +785,31 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
     async def handle_health(self, request: web.Request) -> web.Response:
         if not self._auth_ok(request):
-            return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=401, headers=self._agent_response_headers())
         query = getattr(request, "query", {}) or {}
         guild_id = safe_id(query.get("guild_id")) if hasattr(query, "get") else 0
         compact = truthy(query.get("compact"), bool(guild_id)) if hasattr(query, "get") else False
         known_revision = str(query.get("known_revision") or "").strip() if hasattr(query, "get") else ""
-        return web.json_response(self.status_payload(guild_id=guild_id, compact=compact, known_revision=known_revision))
+        return web.json_response(self.status_payload(guild_id=guild_id, compact=compact, known_revision=known_revision), headers=self._agent_response_headers())
+
+    def _agent_response_headers(self) -> dict[str, str]:
+        return {"X-Music-Agent-Version": AGENT_VERSION,
+                "X-Music-Agent-Discord-Ready": "true" if self.client.is_ready() else "false"}
 
     async def handle_command(self, request: web.Request) -> web.Response:
         if not self._auth_ok(request):
-            return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=401, headers=self._agent_response_headers())
         try:
             body = await request.json()
         except Exception:
             body = {}
         try:
             result = await self.dispatch(body)
-            return web.json_response(result)
+            return web.json_response(result, headers=self._agent_response_headers())
         except Exception as exc:
             self.log("command_error", action=body.get("action"), error=f"{type(exc).__name__}: {exc}")
             detail = str(exc) if isinstance(exc, DiscordAttachmentError) else f"{type(exc).__name__}: {short_text(exc, 300)}"
-            return web.json_response({"ok": False, "error": detail, "status": self.status_payload()}, status=400)
+            return web.json_response({"ok": False, "error": detail, "status": self.status_payload()}, status=400, headers=self._agent_response_headers())
 
     def voice_dependencies_payload(self, *, force: bool = False) -> dict[str, Any]:
         now = time.monotonic()
@@ -894,6 +928,8 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             "user": str(self.client.user) if self.client.user else "",
             "playback_backend": "discord-voice-direct",
             "direct_audio_enabled": self.direct_audio_enabled,
+            "executor_mode": self.executor_mode,
+            "capabilities": {"voice": self.executor_mode != "archive", "archive": self.executor_mode != "voice"},
         }
         if compact and guild_id > 0:
             state = self.states.get(guild_id)
@@ -915,6 +951,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
         base.update({
             "idle_disconnect_seconds": self.idle_disconnect_seconds,
+            "fast_idle_retention_seconds": self.fast_idle_retention_seconds,
             "voice_empty_disconnect_seconds": self.voice_empty_disconnect_seconds,
             "cache": {
                 "metadata_entries": len(self._metadata_cache),
@@ -928,6 +965,16 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         return base
 
     async def _dispatch_action(self, body: dict[str, Any], action: str) -> dict[str, Any]:
+        read_only = action in {"status", "get_state"}
+        archive_action = action.startswith("archive_")
+        if not read_only and ((self.executor_mode == "voice" and archive_action)
+                              or (self.executor_mode == "archive" and not archive_action)):
+            return {"ok": False, "error": "ação indisponível neste modo de executor",
+                    "executor_mode": self.executor_mode}
+        if action == "prepare_voice":
+            return await self.cmd_prepare_voice(body)
+        if action == "cancel_prepare_voice":
+            return await self.cmd_cancel_prepare_voice(body)
         if action == "archive_enqueue":
             return await self.cmd_archive_enqueue(body)
         if action == "archive_status":
@@ -1113,6 +1160,10 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             active_tts = list(self._tts_requests().values())
             self._active_tts_requests.clear()
             await cancel_tasks(active_tts)
+            for guild_id in list(self._voice_prepare_leases):
+                await self._cancel_voice_preparation(guild_id, reason="shutdown")
+            await cancel_tasks(list(self._voice_prepare_tasks))
+            self._voice_prepare_tasks.clear()
 
             background = (
                 ([self._archive_task] if self._archive_task is not None else [])
@@ -1160,6 +1211,10 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 with contextlib.suppress(Exception):
                     warm_client.close()
                 self._ytdlp_warm_client = None
+            close_archive_http = getattr(self, "_close_archive_manifest_http", None)
+            if callable(close_archive_http):
+                with contextlib.suppress(Exception):
+                    await close_archive_http()
 
             close = getattr(self.client, "close", None)
             if callable(close):

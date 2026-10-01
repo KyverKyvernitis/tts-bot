@@ -91,9 +91,10 @@ def payload_faixa_agent(
     requester_id: int = 0,
     requester_name: str = "",
     fallback_query: str = "",
+    archive_result: tuple[dict, str, str] | None = None,
 ) -> dict[str, Any]:
     from ..busca import arquivo
-    archive_ref, emoji, archive_key = arquivo.archived(track)
+    archive_ref, emoji, archive_key = archive_result if archive_result is not None else arquivo.archived(track)
     return {
         "title": track.title,
         "webpage_url": track.webpage_url,
@@ -117,6 +118,14 @@ def payload_faixa_agent(
         "archive_key": archive_key,
         "source_emoji": emoji,
     }
+
+
+def payload_faixas_agent(tracks, *, requester_id: int = 0, requester_name: str = "", guild_id: int = 0) -> list[dict[str, Any]]:
+    from ..busca import arquivo
+    tracks = list(tracks)
+    refs = arquivo.archived_many(tracks, guild_id=guild_id)
+    return [payload_faixa_agent(track, requester_id=requester_id, requester_name=requester_name,
+                               archive_result=ref) for track, ref in zip(tracks, refs)]
 
 
 def payload_cursor_playlist(
@@ -307,9 +316,10 @@ def schedule_playlist_refill_if_needed(router: Any, guild_id: int, remote: dict[
             # Cada nova janela da playlist passa a servir também como memória
             # de direct play por nome. Isso reutiliza os aliases existentes de
             # link (incluindo primeira palavra) e evita pesquisa externa futura.
-            if cursor.provider.startswith("spotify") and batch.tracks:
-                with contextlib.suppress(Exception):
-                    registrar_lote_link_busca(batch.tracks)
+            learn_window = bool(cursor.provider.startswith("spotify") and batch.tracks)
+            if learn_window:
+                from ..busca.memoria import enfileirar_lote_link_busca
+                await asyncio.to_thread(enfileirar_lote_link_busca, batch.tracks)
 
             provider_next = batch.playlist_cursor or cursor.advanced(len(batch.tracks), exhausted=not batch.tracks)
             next_offset = max(int(cursor.next_offset), int(getattr(provider_next, "next_offset", cursor.next_offset + len(batch.tracks)) or 0))
@@ -328,14 +338,9 @@ def schedule_playlist_refill_if_needed(router: Any, guild_id: int, remote: dict[
                 block_end_offset=block_end,
                 shuffle_seed=cursor.shuffle_seed,
             )
-            tracks_payload = [
-                payload_faixa_agent(
-                    track,
-                    requester_id=requester_id,
-                    requester_name=requester_name,
-                )
-                for track in batch.tracks
-            ]
+            tracks_payload = await asyncio.to_thread(payload_faixas_agent, batch.tracks,
+                                                    requester_id=requester_id, requester_name=requester_name,
+                                                    guild_id=guild_id)
             command_attempts = max(1, min(3, int(getattr(config, "MUSIC_PLAYLIST_REFILL_COMMAND_MAX_ATTEMPTS", 2) or 2)))
             result: dict[str, Any] | None = None
             command_exc: Exception | None = None
@@ -370,6 +375,9 @@ def schedule_playlist_refill_if_needed(router: Any, guild_id: int, remote: dict[
                 raise command_exc
             if result is None or router.current_music_operation_generation(guild_id) != generation:
                 return
+            if learn_window:
+                from ..comandos.tocar import schedule_deferred_learning
+                schedule_deferred_learning(router)
 
             current = router.get_state(int(guild_id))
             _reset_refill_backoff(current, None if next_cursor.exhausted else next_cursor)

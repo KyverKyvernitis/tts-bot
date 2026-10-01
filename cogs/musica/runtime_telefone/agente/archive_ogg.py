@@ -46,10 +46,12 @@ def _packet_samples(packet: bytes) -> int:
     return samples * frames
 
 
-def _inspect(path: Path) -> tuple[int, int, int]:
+def _inspect(path: Path, *, checkpoint=None) -> tuple[int, int, int]:
     samples, preskip, last_granule, packet = 0, 0, 0, bytearray()
     with path.open("rb") as source:
         while True:
+            if checkpoint:
+                checkpoint()
             header = source.read(27)
             if not header:
                 break
@@ -82,10 +84,12 @@ def _inspect(path: Path) -> tuple[int, int, int]:
     return samples, preskip, last_granule
 
 
-def _packets(path: Path):
+def _packets(path: Path, *, checkpoint=None):
     packet = bytearray()
     with path.open("rb") as source:
         while True:
+            if checkpoint:
+                checkpoint()
             header = source.read(27)
             if not header:
                 break
@@ -114,7 +118,7 @@ def _write_page(output, *, body: bytes, lacing: bytes, serial: int, sequence: in
     output.write(page)
 
 
-def add_opus_preroll(original: Path, paths: list[Path]) -> list[float]:
+def add_opus_preroll(original: Path, paths: list[Path], *, checkpoint=None) -> list[float]:
     """Repackage copied packets with 80 ms decoder preroll, without encoding.
 
     Middle parts include the preceding packets. Their OpusHead pre-skip consumes
@@ -125,15 +129,15 @@ def add_opus_preroll(original: Path, paths: list[Path]) -> list[float]:
     import os
     import shutil
     import time
-    samples, source_preskip, source_granule = _inspect(original)
+    samples, source_preskip, source_granule = _inspect(original, checkpoint=checkpoint)
     end_trim = samples - source_granule
     if end_trim < 0 or end_trim > 5760:
         raise ValueError("granule final Opus inválido")
-    if sum(_inspect(path)[0] for path in paths) != samples:
+    if sum(_inspect(path, checkpoint=checkpoint)[0] for path in paths) != samples:
         raise ValueError("a segmentação perdeu pacotes Opus")
     tail, tail_samples, decoded_durations = deque(), 0, []
     for order, path in enumerate(paths):
-        packets = iter(_packets(path))
+        packets = iter(_packets(path, checkpoint=checkpoint))
         head, tags = next(packets), next(packets)
         if not head.startswith(b"OpusHead") or not tags.startswith(b"OpusTags"):
             raise ValueError("cabeçalhos Opus ausentes")
@@ -172,6 +176,8 @@ def add_opus_preroll(original: Path, paths: list[Path]) -> list[float]:
             if previous is None:
                 raise ValueError("segmento Opus vazio")
             while previous is not None:
+                if checkpoint:
+                    checkpoint()
                 packet, next_packet = previous, next(packets, None)
                 if time.monotonic() - last_disk_check > 1.0:
                     if shutil.disk_usage(path.parent).free < reserve:
@@ -194,8 +200,8 @@ def add_opus_preroll(original: Path, paths: list[Path]) -> list[float]:
     return decoded_durations
 
 
-def decoded_opus_duration(path: Path) -> float:
-    _samples, preskip, granule = _inspect(path)
+def decoded_opus_duration(path: Path, *, checkpoint=None) -> float:
+    _samples, preskip, granule = _inspect(path, checkpoint=checkpoint)
     duration = (granule - preskip) / 48000
     if duration <= 0:
         raise ValueError("duração Opus inválida")

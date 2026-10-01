@@ -22,6 +22,8 @@ from .roteamento import (
     resolver_destino_worker,
     vincular_guild_worker,
     desvincular_guild_worker,
+    control_destination,
+    post_json_destino,
 )
 from .transporte_http import post_json_worker
 from .utilitarios import _phone_worker_base_url
@@ -171,6 +173,8 @@ async def cancelar_comandos_diferidos() -> None:
 
 async def _resolver_destino_retry(original: DestinoWorker, guild_id: int) -> DestinoWorker:
     """Atualiza endpoint apenas se continuar sendo o mesmo worker lógico."""
+    if original.transport == "direct":
+        return original
     try:
         selection = await require_music_worker_available_async()
         candidate = resolver_destino_worker(selection, guild_id=guild_id, preferir_vinculo=False)
@@ -236,7 +240,9 @@ def _agendar_comando_diferido(
     }
     if guild_id > 0:
         _DEFERRED_STATE[guild_id] = state
-        desvincular_guild_worker(guild_id)
+        # Uma resposta perdida pode ter iniciado voz. Preserve seu dono durante
+        # a recuperação; trocar executor aqui criaria duas sessões concorrentes.
+        vincular_guild_worker(guild_id, destino)
 
     async def _runner() -> None:
         current_destino = destino
@@ -251,9 +257,9 @@ def _agendar_comando_diferido(
                 state["base"] = current_destino.base
                 state["worker_id"] = current_destino.worker_id
                 try:
-                    data = await post_json_worker(
-                        url=f"{current_destino.base}/task",
-                        token=current_destino.token,
+                    data = await post_json_destino(
+                        destino=current_destino,
+                        post_json=post_json_worker,
                         payload=payload,
                         timeout_seconds=min(max(3.0, total_timeout), 24.0),
                         max_erro=400,
@@ -398,7 +404,9 @@ async def music_agent_command(
         timeout_headroom = max(3.0, float(getattr(config, "MUSIC_AGENT_TTS_HTTP_HEADROOM_SECONDS", 12.0) or 12.0))
     total_timeout = max(2.0, float(payload["timeout_seconds"]) + timeout_headroom)
 
-    destino = destino_vinculado(guild_id)
+    destino = destino_vinculado(guild_id) if not action_normalized.startswith("archive_") else None
+    if destino is None:
+        destino = control_destination(guild_id, action_normalized)
     selection = None
     if destino is None:
         try:
@@ -421,9 +429,9 @@ async def music_agent_command(
     base = destino.base
     token = destino.token
     try:
-        data = await post_json_worker(
-            url=f"{base}/task",
-            token=token,
+        data = await post_json_destino(
+            destino=destino,
+            post_json=post_json_worker,
             payload=payload,
             timeout_seconds=total_timeout,
             max_erro=400,
@@ -468,12 +476,14 @@ async def music_agent_command(
         if action_normalized in _DEFERRED_PLAY_ACTIONS:
             _cancelar_comando_diferido(int(guild_id), reason="immediate_delivery_succeeded")
         vincular_guild_worker(int(guild_id), destino)
+    elif int(guild_id or 0) > 0 and action_normalized == "disconnect":
+        desvincular_guild_worker(int(guild_id))
     logger.info("[music/agent] comando remoto enviado | worker=%s action=%s guild=%s", destino.worker_id or destino.name, action, guild_id)
     return data
 
 
 async def music_agent_status(*, timeout_seconds: float | None = None, guild_id: int = 0, known_revision: str = "") -> dict[str, Any]:
-    destino = destino_vinculado(guild_id)
+    destino = destino_vinculado(guild_id) or control_destination(guild_id, "status")
     selection = None
     if destino is None:
         selection = await require_music_worker_available_async()
@@ -490,9 +500,9 @@ async def music_agent_status(*, timeout_seconds: float | None = None, guild_id: 
     )
     total_timeout = max(1.0, float(payload["timeout_seconds"]) + 1.0)
     try:
-        data = await post_json_worker(
-            url=f"{base}/task",
-            token=token,
+        data = await post_json_destino(
+            destino=destino,
+            post_json=post_json_worker,
             payload=payload,
             timeout_seconds=total_timeout,
             max_erro=220,

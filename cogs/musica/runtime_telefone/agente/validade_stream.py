@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import signal
 import sys
 import shutil
 import tempfile
@@ -22,6 +23,10 @@ import discord
 from .correspondencia import CatalogNoMatchError, avaliar_correspondencia
 from .archive_pipeline import ArchivePipelineMixin
 from .archive_manifest import (MANIFEST_MARKER, inline_manifest, validate_manifest, flatten_segments, hydrate_archive_manifest)
+
+_ARCHIVE_PAUSE_SLICE_SECONDS = 15.0
+_ARCHIVE_RUN_SLICE_SECONDS = 1.0
+_ARCHIVE_TOTAL_PAUSE_SECONDS = 180.0
 
 
 class DiscordAttachmentError(ValueError):
@@ -712,6 +717,7 @@ class ArchiveMixin(ArchivePipelineMixin):
         return None
 
     async def _archive_cover(self, url: str, destination: Path) -> Path | None:
+        await self._archive_wait_stable_voice()
         try:
             parts = urlsplit(url)
             if parts.scheme != "https" or (parts.hostname or "").lower() not in _IMAGE_HOSTS:
@@ -724,7 +730,9 @@ class ArchiveMixin(ArchivePipelineMixin):
                     # read(n) pode retornar apenas o primeiro bloco disponível.
                     # Espere o fim da resposta antes de converter a imagem.
                     image = bytearray()
+                    transfer = {}
                     async for chunk in response.content.iter_chunked(64 * 1024):
+                        await self._archive_transfer_checkpoint(transfer, chunk_bytes=len(chunk))
                         image.extend(chunk)
                         if len(image) > 2 * 1024 * 1024:
                             return None
@@ -767,7 +775,7 @@ class ArchiveMixin(ArchivePipelineMixin):
         return None
 
     async def _archive_jpeg(self, source: Path, output: Path) -> Path | None:
-        proc = await asyncio.create_subprocess_exec(
+        proc = await self._archive_spawn(
             self.ffmpeg_executable, "-nostdin", "-v", "error", "-threads", "1", "-y",
             # O decoder MJPEG padrão devolve sucesso e pinta de verde a área
             # ausente até quando o JPEG cortado termina com o marcador EOI.
@@ -775,32 +783,35 @@ class ArchiveMixin(ArchivePipelineMixin):
             "-q:v", "2", str(output), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
-            await asyncio.wait_for(proc.communicate(), timeout=12)
+            await self._archive_download_communicate(proc, source.parent, budget=None, timeout=12)
         except asyncio.CancelledError:
-            proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
+            if proc.returncode is None:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
             raise
         except (asyncio.TimeoutError, OSError):
-            proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
+            if proc.returncode is None:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
             return None
         if proc.returncode != 0 or not output.is_file() or not 0 < output.stat().st_size <= 2 * 1024 * 1024:
             return None
         if output.read_bytes()[:3] != b"\xff\xd8\xff":
             return None
-        probe = await asyncio.create_subprocess_exec(
+        probe = await self._archive_spawn(
             self.ffprobe_executable, "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=codec_name,pix_fmt,width,height", "-of", "json", str(output),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
-            data, _ = await asyncio.wait_for(probe.communicate(), timeout=5)
+            data, _ = await self._archive_download_communicate(probe, output.parent, budget=None, timeout=5)
         except asyncio.TimeoutError:
-            probe.kill()
-            with contextlib.suppress(Exception):
-                await probe.wait()
+            if probe.returncode is None:
+                probe.kill()
+                with contextlib.suppress(Exception):
+                    await probe.wait()
             return None
         try:
             info = (json.loads(data).get("streams") or [{}])[0] if probe.returncode == 0 else {}
@@ -821,7 +832,7 @@ class ArchiveMixin(ArchivePipelineMixin):
             return None
         try:
             source = folder / "capa-antiga"
-            await attachment.save(str(source))
+            await self._archive_download_attachment(attachment, source)
             if source.stat().st_size > 2 * 1024 * 1024:
                 return None
             return await self._archive_jpeg(source, folder / "capa.jpg")
@@ -829,17 +840,18 @@ class ArchiveMixin(ArchivePipelineMixin):
             return None
 
     async def _archive_probe(self, audio: Path) -> dict:
-        proc = await asyncio.create_subprocess_exec(
+        proc = await self._archive_spawn(
             self.ffprobe_executable, "-v", "error", "-show_entries",
             "format=duration,bit_rate:stream=index,codec_type,codec_name,bit_rate,sample_rate,channels", "-of", "json", str(audio),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         try:
-            data, _ = await asyncio.wait_for(proc.communicate(), timeout=12)
+            data, _ = await self._archive_download_communicate(proc, audio.parent, budget=None, timeout=12)
         except BaseException:
-            proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
+            if proc.returncode is None:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
             raise
         return json.loads(data) if proc.returncode == 0 else {}
 
@@ -873,19 +885,15 @@ class ArchiveMixin(ArchivePipelineMixin):
             return None
         if codec == "opus" and audio.suffix.lower() in {".ogg", ".opus"}:
             from .archive_ogg import decoded_opus_duration
-            duration = await asyncio.to_thread(decoded_opus_duration, audio)
+            duration = await self._archive_background_call(decoded_opus_duration, audio)
         return audio, duration, int(primary["index"]), codec
 
     async def _archive_wait_stable_voice(self) -> None:
-        for _ in range(45):
-            busy = any(
-                st.status in {"starting", "preparing", "reconnecting", "tts_direct"}
-                or bool(getattr(st, "voice_runtime_recovery_pending", False))
-                for st in self.states.values()
-            )
-            if not busy and not any(task and not task.done() for task in self._active_resolve_tasks.values()):
+        deadline = time.monotonic() + 90.0
+        while time.monotonic() < deadline:
+            if not self._archive_foreground_busy():
                 return
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.1)
         raise RuntimeError("voz ocupada; arquivamento adiado")
 
     def _archive_in_use(self, message_id: int) -> bool:
@@ -895,20 +903,46 @@ class ArchiveMixin(ArchivePipelineMixin):
             for state in self.states.values()
         )
 
-    async def _archive_download_communicate(self, proc, folder: Path, *, budget: int, timeout: float):
-        """Bound disk use even for chunked HTTP/HLS with no Content-Length."""
+    async def _archive_download_communicate(self, proc, folder: Path, *, budget: int | None, timeout: float):
+        """Monitor temporary disk and cede archive subprocesses to voice startup.
+
+        Only private process groups created by this agent are suspended. Paused
+        time does not consume the media timeout. A one-second work slice every
+        15 seconds and a total pause budget keep a failed startup from holding
+        downloads indefinitely. Cancellation always resumes, kills and reaps.
+        """
         completion = asyncio.create_task(proc.communicate())
         deadline = time.monotonic() + timeout
-        initial_free = shutil.disk_usage(folder).free
+        initial_free = shutil.disk_usage(folder).free if budget is not None else 0
         reserve = max(64 * 1024 * 1024, int(initial_free * 0.05))
+        paused_at, paused_total, fair_until = 0.0, 0.0, 0.0
+        next_disk_check = time.monotonic() + 1.0
         try:
             while True:
-                remaining = deadline - time.monotonic()
+                now = time.monotonic()
+                busy = self._archive_foreground_busy()
+                if paused_at:
+                    if not busy or now - paused_at >= _ARCHIVE_PAUSE_SLICE_SECONDS:
+                        self._archive_signal_process(proc, signal.SIGCONT)
+                        interval = now - paused_at
+                        deadline += interval
+                        paused_total += interval
+                        paused_at = 0.0
+                        fair_until = now + (_ARCHIVE_RUN_SLICE_SECONDS if busy else 0.0)
+                elif busy and now >= fair_until and os.name == "posix":
+                    if self._archive_signal_process(proc, signal.SIGSTOP):
+                        paused_at = now
+                if paused_total + (now - paused_at if paused_at else 0.0) > _ARCHIVE_TOTAL_PAUSE_SECONDS:
+                    raise ArchiveDownloadFailure("voice_priority_deferred")
+                remaining = deadline - now + (now - paused_at if paused_at else 0.0)
                 if remaining <= 0:
                     raise asyncio.TimeoutError
-                done, _pending = await asyncio.wait({completion}, timeout=min(1.0, remaining))
+                done, _pending = await asyncio.wait({completion}, timeout=min(0.1, remaining))
                 if done:
                     return completion.result()
+                if budget is None or time.monotonic() < next_disk_check:
+                    continue
+                next_disk_check = time.monotonic() + 1.0
                 def disk_status():
                     used = sum(path.stat().st_size for path in folder.rglob("*")
                                if path.is_file() and not path.is_symlink())
@@ -917,8 +951,11 @@ class ArchiveMixin(ArchivePipelineMixin):
                 if used > budget or free < reserve:
                     raise ArchiveDownloadFailure("temporary_space_unavailable")
         except BaseException:
+            if paused_at:
+                self._archive_signal_process(proc, signal.SIGCONT)
             if proc.returncode is None:
-                proc.kill()
+                if not self._archive_signal_process(proc, signal.SIGKILL):
+                    proc.kill()
             try:
                 await asyncio.wait_for(asyncio.shield(completion), timeout=5.0)
             except BaseException:
@@ -976,7 +1013,7 @@ class ArchiveMixin(ArchivePipelineMixin):
                 "--no-progress", "--max-filesize", str(download_budget), "--socket-timeout", "12",
                 "--format-sort", str(getattr(self, "ytdlp_sort", "abr,acodec,asr")),
                 "-o", str(folder / "audio.%(ext)s")]
-        if any(st.status in {"playing", "paused"} for st in self.states.values()):
+        if self._archive_playback_active():
             base.extend(("--limit-rate", "512K"))
         cookies = str(getattr(self, "cookies_file", "") or "")
         if cookies and os.path.isfile(cookies):
@@ -993,7 +1030,7 @@ class ArchiveMixin(ArchivePipelineMixin):
             if self._archive_active != item["key"]:
                 return None
             cmd = [*base, "-f", fmt, url]
-            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL,
+            proc = await self._archive_spawn(*cmd, stdout=asyncio.subprocess.DEVNULL,
                                                          stderr=asyncio.subprocess.PIPE)
             try:
                 _out, err = await self._archive_download_communicate(proc, folder, budget=download_budget,

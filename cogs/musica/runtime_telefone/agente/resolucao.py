@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -41,11 +42,12 @@ _LOCAL_SEARCH_PREFIXES = ("ytsearch", "ytmsearch")
 
 
 class ResolucaoMixin:
-    @staticmethod
-    def _archive_cache_key(ref: dict, key: str) -> tuple:
+    def _archive_cache_key(self, ref: dict, key: str) -> tuple:
         try:
-            return (int(ref["guild_id"]), int(ref.get("forum_id") or 0), int(ref["channel_id"]),
-                    int(ref["message_id"]), int(ref["attachment_id"]), str(key))
+            bot_id = int(getattr(getattr(getattr(self, "client", None), "user", None), "id", 0) or 0)
+            return (bot_id, int(ref["guild_id"]), int(ref.get("forum_id") or 0), int(ref["channel_id"]),
+                    int(ref["message_id"]), int(ref["attachment_id"]), int(ref.get("manifest_attachment_id") or 0),
+                    str(ref.get("segment_revision") or ""), str(key))
         except (TypeError, KeyError, ValueError):
             return ()
 
@@ -424,6 +426,25 @@ class ResolucaoMixin:
             "webpage_url": canonical,
         }
 
+    @staticmethod
+    def _play_trace_from_metadata(track_meta: dict[str, Any], body: dict[str, Any]) -> dict:
+        result = {"trace_id": short_text(track_meta.get("trace_id") or body.get("trace_id"), 80)}
+        for field in ("controller_timing_ms", "agent_timing_ms"):
+            raw = track_meta.get(field) or body.get(field) or {}
+            timing = {}
+            if isinstance(raw, dict):
+                for name, value in list(raw.items())[:16]:
+                    try:
+                        milliseconds = float(value)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if math.isfinite(milliseconds) and milliseconds >= 0:
+                        timing[short_text(name, 60)] = milliseconds
+            result[field] = timing
+        # Monotonic timestamps are owned by cmd_play in this process. Never
+        # import them from a payload produced by the VPS or another agent.
+        return result
+
     def _agent_track_from_resolved(self, resolved: dict[str, Any], *, query: str, track_meta: dict[str, Any], body: dict[str, Any], cached: bool = False) -> AgentTrack:
         title_hint = _metadata_text(track_meta.get("title") or body.get("title"), limit=160)
         requester_id = safe_id(body.get("requester_id") or track_meta.get("requester_id"))
@@ -483,6 +504,7 @@ class ResolucaoMixin:
         if title_hint.casefold() in {"youtube", "link", "música", "musica", "desconhecida", "unknown"}:
             title_hint = ""
         track = AgentTrack(
+            **self._play_trace_from_metadata(track_meta, body),
             title=title_hint or resolved_title or short_text(query, 160) or "Música",
             requester_id=requester_id,
             requester_name=requester_name,
@@ -572,6 +594,7 @@ class ResolucaoMixin:
             ).strip()
             title = _metadata_text(virtual_cursor.get("title") or track_meta.get("title") or "Playlist", limit=160) or "Playlist"
             return AgentTrack(
+                **self._play_trace_from_metadata(track_meta, body),
                 title=title,
                 requester_id=safe_id(body.get("requester_id") or track_meta.get("requester_id")),
                 requester_name=short_text(body.get("requester_name") or track_meta.get("requester_name"), 80),
@@ -589,6 +612,7 @@ class ResolucaoMixin:
         uploader = _metadata_text(track_meta.get("display_uploader") or track_meta.get("uploader") or track_meta.get("artist") or track_meta.get("channel"), limit=120)
         source = short_text(track_meta.get("display_source") or track_meta.get("source") or body.get("source") or "worker-ytdlp", 80)
         return AgentTrack(
+            **self._play_trace_from_metadata(track_meta, body),
             title=title,
             requester_id=safe_id(body.get("requester_id") or track_meta.get("requester_id")),
             requester_name=short_text(body.get("requester_name") or track_meta.get("requester_name"), 80),
@@ -635,6 +659,9 @@ class ResolucaoMixin:
     def _archive_cache_store(self, cache: dict, cache_key: tuple, deadline: float, meta: dict) -> None:
         cache.pop(cache_key, None)
         payload = dict(meta)
+        # The validated immutable manifest has its own cache. Keep only the
+        # playback projection here, rather than duplicating its full JSON.
+        payload.pop("archive_manifest", None)
         # Estimativa conservadora para strings/dicts Python, calculada só uma
         # vez por entrada; eviction não serializa todos os manifestos.
         payload["_archive_cache_bytes"] = 3 * len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) + 256
@@ -643,12 +670,54 @@ class ResolucaoMixin:
         while len(cache) > 256 or sum(int(value[1].get("_archive_cache_bytes", 0)) for value in cache.values()) > 2 * 1024 * 1024:
             cache.pop(next(iter(cache)))
 
+    @staticmethod
+    def _archive_segment_revision(segment: dict) -> str:
+        return ":".join(str(segment.get(field) or "") for field in ("filename", "size_bytes", "sha256"))
+
+    async def _hydrate_archive_manifest(self, raw: dict, *, key: str, reference: dict) -> dict:
+        from .archive_manifest import ArchiveManifestCache, MANIFEST_MARKER, hydrate_archive_manifest, inline_manifest
+        expected_manifest_id = int(reference.get("manifest_attachment_id") or 0)
+        if expected_manifest_id and not any(
+            isinstance(item, dict) and str(item.get("id")) == str(expected_manifest_id)
+            and item.get("filename") == "archive-manifest.json"
+            for item in raw.get("attachments") or ()
+        ):
+            raise DiscordAttachmentError("O anexo do manifesto foi removido ou atualizado.")
+        manifest = inline_manifest(raw)
+        if manifest is not None:
+            raw["_archive_manifest"] = manifest
+            return raw
+        embeds = raw.get("embeds") or []
+        if not embeds or MANIFEST_MARKER not in str(embeds[0].get("url") or ""):
+            return raw
+        import aiohttp
+        session = getattr(self, "_archive_manifest_http", None)
+        if session is None or session.closed:
+            # This session belongs to the agent's event loop and is closed by
+            # shutdown. CDN cookies and credentials are unnecessary.
+            session = self._archive_manifest_http = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15.0), cookie_jar=aiohttp.DummyCookieJar(),
+                connector=aiohttp.TCPConnector(limit=4, ttl_dns_cache=300),
+            )
+        cache = getattr(self, "_archive_manifest_metadata", None)
+        if cache is None:
+            cache = self._archive_manifest_metadata = ArchiveManifestCache()
+        return await hydrate_archive_manifest(raw, session=session, metadata_cache=cache,
+                                              archive_key=key, reference=reference, bot_id=int(self.client.user.id))
+
+    async def _close_archive_manifest_http(self) -> None:
+        session = getattr(self, "_archive_manifest_http", None)
+        self._archive_manifest_http = None
+        if session is not None and not session.closed:
+            await session.close()
+
     async def _resolve_archive_segment(self, track: AgentTrack, index: int, *, force_refresh: bool = False) -> dict:
         segment = track.archive_segments[index]
         ref = normalize_reference(segment, int(track.archive_ref["guild_id"]))
         if ref["channel_id"] != int(track.archive_ref["channel_id"]):
             raise DiscordAttachmentError("A parte do áudio pertence a outro post.")
-        cache_key = (*self._archive_cache_key({**ref, "forum_id": track.archive_ref.get("forum_id", 0)}, track.archive_key), "segment")
+        cache_key = (*self._archive_cache_key({**ref, "forum_id": track.archive_ref.get("forum_id", 0),
+                                                   "segment_revision": self._archive_segment_revision(segment)}, track.archive_key), "segment")
         cache = getattr(self, "_archive_segment_url_cache", None)
         if cache is None:
             cache = self._archive_segment_url_cache = {}
@@ -729,9 +798,11 @@ class ResolucaoMixin:
                 raw = await self.client.http.get_message(ref["channel_id"], ref["message_id"])
                 if not isinstance(raw, dict) or str((raw.get("author") or {}).get("id")) != str(self.client.user.id):
                     raise DiscordAttachmentError("O arquivo não foi publicado por este bot.")
-                from .archive_manifest import hydrate_archive_manifest
-                await hydrate_archive_manifest(raw)
+                await self._hydrate_archive_manifest(raw, key=key, reference=ref)
                 meta = _archive_metadata(raw, key, int(self.client.user.id), ref)
+                path = urlparse(meta["url"]).path.split("/", 4)
+                if len(path) != 5 or path[2:4] != [str(ref["channel_id"]), str(ref["attachment_id"])]:
+                    raise DiscordAttachmentError("A URL do áudio não corresponde ao anexo do arquivo.")
                 signed = initial_discord_cdn_url(meta["url"], ref, min_remaining_seconds=75.0)
                 if signed:
                     now = time.monotonic()
@@ -763,7 +834,8 @@ class ResolucaoMixin:
                 segment_cache = getattr(self, "_archive_segment_url_cache", None)
                 if segment_cache is None:
                     segment_cache = self._archive_segment_url_cache = {}
-                segment_key = (*self._archive_cache_key({**track.attachment_ref, "forum_id": ref.get("forum_id", 0)}, key), "segment")
+                segment_key = (*self._archive_cache_key({**track.attachment_ref, "forum_id": ref.get("forum_id", 0),
+                                                              "segment_revision": self._archive_segment_revision(segment)}, key), "segment")
                 now = time.monotonic()
                 self._archive_cache_store(segment_cache, segment_key, self._archive_url_deadline(track.stream_url, now), {**segment, "url": track.stream_url})
             else:

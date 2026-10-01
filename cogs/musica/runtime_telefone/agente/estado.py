@@ -47,6 +47,10 @@ class AgentTrack:
     # assinadas de cada parte vivem apenas no resolver durante a reprodução.
     archive_segments: list[dict[str, Any]] = field(default_factory=list)
     archive_segment_index: int = 0
+    trace_id: str = ""
+    controller_timing_ms: dict[str, float] = field(default_factory=dict)
+    agent_timing_ms: dict[str, float] = field(default_factory=dict)
+    agent_received_monotonic: float = field(default=0.0, repr=False)
 
     def __post_init__(self) -> None:
         if not str(self.queue_item_id or "").strip():
@@ -59,6 +63,9 @@ class AgentTrack:
     def public(self) -> dict[str, Any]:
         return {
             "title": self.title,
+            "trace_id": self.trace_id,
+            "controller_timing_ms": dict(self.controller_timing_ms),
+            "agent_timing_ms": dict(self.agent_timing_ms),
             "requester_id": self.requester_id,
             "requester_name": self.requester_name,
             "query": self.query,
@@ -117,6 +124,7 @@ class GuildMusicState:
     started_monotonic: float = 0.0
     paused_monotonic: float = 0.0
     last_audio_end_monotonic: float = 0.0
+    first_audio_sent_monotonic: float = 0.0
     updated_at: float = field(default_factory=time.time)
     player: Any = None
     volume_percent: int = 55

@@ -383,9 +383,16 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
         # DNS/TCP/TLS/keep-alive entre pesquisas consecutivas.
         session = await self._http_session_persistente()
         async with session.request(method, url, data=data, headers=headers or None) as response:
-            raw = await response.content.read(2_000_001)
-            if len(raw) > 2_000_000:
-                raise ValueError("resposta JSON do provider excedeu 2 MB")
+            chunks, size = [], 0
+            while True:
+                chunk = await response.content.read(min(65_536, 2_000_001 - size))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > 2_000_000:
+                    raise ValueError("resposta JSON do provider excedeu 2 MB")
+                chunks.append(chunk)
+            raw = b"".join(chunks)
             if response.status >= 400:
                 raise HTTPError(
                     url,
@@ -423,5 +430,4 @@ class MusicApiProviders(ProvedorSpotifyMixin, ProvedorYouTubeMixin, ProvedorDeez
             self._youtube_search_com_quota(query, limit=limit, include_details=False),
             timeout=timeout_provider,
         )
-
 

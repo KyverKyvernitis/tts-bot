@@ -69,6 +69,9 @@ class ArchiveCoordinator:
 
     async def _seed_learned(self) -> None:
         await self.bot.wait_until_ready()
+        # Migração e cache de schema fora do primeiro comando de reprodução.
+        from .busca.memoria import _ensure_loaded
+        await asyncio.to_thread(_ensure_loaded)
         while True:
             try:
                 # O outbox persiste escolhas até a confirmação do catálogo.

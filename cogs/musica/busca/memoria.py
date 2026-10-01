@@ -10,6 +10,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from typing import Sequence
 
 from cogs.musica import configuracao as config
@@ -449,6 +450,12 @@ def _abrir_db_locked() -> sqlite3.Connection:
             registrado_em REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS escolhas_outbox_ordem ON escolhas_arquivo_outbox(registrado_em, chave);
+        CREATE TABLE IF NOT EXISTS escolhas_link_pendentes (
+            batch_id TEXT PRIMARY KEY,
+            tracks_json TEXT NOT NULL,
+            registrado_em REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS escolhas_links_ordem ON escolhas_link_pendentes(registrado_em, batch_id);
         CREATE TRIGGER IF NOT EXISTS escolhas_removida AFTER DELETE ON escolhas BEGIN
             DELETE FROM escolhas_indice WHERE chave=OLD.chave;
             DELETE FROM escolhas_tokens WHERE chave=OLD.chave;
@@ -686,7 +693,7 @@ def _candidatos_persistidos(query: str, *, aproximada: bool) -> list[EscolhaBusc
     return sorted(candidatos.values(), key=lambda item: item.registrado_em, reverse=True)[:limite]
 
 
-def _persistir_varias(escolhas: Sequence[EscolhaBusca]) -> None:
+def _persistir_varias(escolhas: Sequence[EscolhaBusca], *, raise_errors: bool = False) -> None:
     if not escolhas:
         return
     try:
@@ -699,7 +706,8 @@ def _persistir_varias(escolhas: Sequence[EscolhaBusca]) -> None:
                     "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(chave) DO UPDATE SET "
                     "consulta=excluded.consulta, origem=excluded.origem, prioridade=excluded.prioridade, "
                     "track_json=excluded.track_json, registrado_em=excluded.registrado_em "
-                    "WHERE excluded.prioridade>=escolhas.prioridade",
+                    "WHERE excluded.prioridade>escolhas.prioridade OR "
+                    "(excluded.prioridade=escolhas.prioridade AND excluded.registrado_em>=escolhas.registrado_em)",
                     (escolha.chave, escolha.consulta, escolha.origem, escolha.prioridade, payload, escolha.registrado_em),
                 )
                 if not cursor.rowcount:
@@ -717,6 +725,8 @@ def _persistir_varias(escolhas: Sequence[EscolhaBusca]) -> None:
                 # Escolha e entrega ao arquivador pertencem à mesma transação.
                 _enfileirar_arquivo(conn, escolha.track, stamp=stamp)
     except Exception:
+        if raise_errors:
+            raise
         logger.warning("[music/search-memory] falha ao persistir escolha; mantendo RAM", exc_info=True)
 
 
@@ -760,6 +770,7 @@ def _registrar(
     prioridade: int,
     now: float | None = None,
     persistir: bool = True,
+    preservar_mais_novo: bool = False,
 ) -> EscolhaBusca | None:
     clean_query = str(query or "").strip()
     if not clean_query:
@@ -771,7 +782,9 @@ def _registrar(
     stamp = float(time.time() if now is None else now)
     with _LOCK:
         anterior = _memoria.get(chave) or _buscar_exata_persistida(chave)
-        if anterior is not None and anterior.prioridade > int(prioridade):
+        if anterior is not None and (anterior.prioridade > int(prioridade) or (
+            preservar_mais_novo and anterior.prioridade == int(prioridade) and anterior.registrado_em > stamp
+        )):
             # Link direto é autoridade maior e não é substituído por uma escolha
             # posterior feita no seletor de resultados.
             _cache_escolha(anterior)
@@ -1027,6 +1040,8 @@ def registrar_lote_link_busca(
     tracks: Sequence[MusicTrack],
     *,
     now: float | None = None,
+    raise_errors: bool = False,
+    preservar_mais_novo: bool = False,
 ) -> int:
     """Aprende em lote os mesmos aliases agressivos usados por link direto.
 
@@ -1050,15 +1065,53 @@ def registrar_lote_link_busca(
                 prioridade=_PRIORIDADE_LINK,
                 now=now,
                 persistir=False,
+                preservar_mais_novo=preservar_mais_novo,
             )
             if escolha is not None:
                 persistir.append(escolha)
                 registrados += 1
     if persistir:
-        _persistir_varias(persistir)
+        _persistir_varias(persistir, raise_errors=raise_errors)
         from .arquivo import note_learned
         note_learned((escolha.track for escolha in persistir))
     return registrados
+
+
+def enfileirar_lote_link_busca(tracks: Sequence[MusicTrack]) -> tuple[str, ...]:
+    """Commit curto antes do play; aliases e índices ficam para depois do som.
+
+    Os dados públicos da janela ficam duráveis mesmo se o bot reiniciar entre
+    enqueue e aprendizagem. Não persiste URLs assinadas nem áudio.
+    """
+    payloads = [_track_payload(track) for track in tracks
+                if str(track.original_url or track.webpage_url or "").lower().startswith(("http://", "https://", "www."))]
+    ids = []
+    if not payloads:
+        return ()
+    with _LOCK, _abrir_db() as conn:
+        stamp = time.time()
+        for start in range(0, len(payloads), 32):
+            batch_id = uuid.uuid4().hex
+            conn.execute("INSERT INTO escolhas_link_pendentes(batch_id, tracks_json, registrado_em) VALUES (?, ?, ?)",
+                         (batch_id, json.dumps(payloads[start:start + 32], ensure_ascii=False, separators=(",", ":")), stamp))
+            ids.append(batch_id)
+    return tuple(ids)
+
+
+def processar_lotes_link_pendentes(*, limit: int = 2) -> int:
+    """Replay limitado; ACK só após commit de escolhas, índices e outbox."""
+    with _LOCK, _abrir_db() as conn:
+        rows = conn.execute("SELECT batch_id, tracks_json, registrado_em FROM escolhas_link_pendentes "
+                            "ORDER BY registrado_em, batch_id LIMIT ?", (max(1, min(16, int(limit))),)).fetchall()
+    processed = 0
+    for batch_id, encoded, stamp in rows:
+        payloads = json.loads(encoded)
+        tracks = [_track_from_payload(payload) for payload in payloads if isinstance(payload, dict)]
+        registrar_lote_link_busca(tracks, now=float(stamp), raise_errors=True, preservar_mais_novo=True)
+        with _LOCK, _abrir_db() as conn:
+            conn.execute("DELETE FROM escolhas_link_pendentes WHERE batch_id=?", (batch_id,))
+        processed += 1
+    return processed
 
 def obter_escolha_busca(
     query: str,

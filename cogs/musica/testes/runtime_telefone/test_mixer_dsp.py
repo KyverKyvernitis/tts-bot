@@ -61,6 +61,40 @@ def test_telemetria_ignora_silencio_sintetico_do_buffer(mixer_module):
         wrapper.cleanup()
 
 
+def test_sinal_primeiro_pacote_distingue_tts_silencio_e_fonte_trocada(mixer_module):
+    async def scenario():
+        class Synthetic(Frames):
+            def read(self):
+                result = super().read()
+                self.last_read_had_audio = False
+                return result
+        original = Synthetic(mixer_module.PCM_SILENCE)
+        replacement = Frames(stereo_frame(1000, -1000))
+        mixer = mixer_module.AgentMixedAudioSource(
+            loop=asyncio.get_running_loop(), music_source=original,
+            music_volume=1, persistent=True,
+        )
+        wrapper = mixer_module.AgentTelemetryAudioSource(mixer)
+        done = mixer.add_tts(Frames(stereo_frame(2000, 2000)), volume=1)
+        try:
+            assert wrapper.read()
+            assert not mixer.last_read_had_music
+            assert not wrapper.last_read_had_music
+            assert wrapper.last_read_music_source is None
+            mixer.replace_music_source(replacement, volume=1, on_music_end=None)
+            assert wrapper.read()
+            assert wrapper.last_read_had_music
+            assert wrapper.last_read_music_source is replacement
+            assert mixer.last_read_music_source is replacement
+            wrapper.read()
+            assert not wrapper.last_read_had_music
+            assert wrapper.last_read_music_source is None
+            await done
+        finally:
+            wrapper.cleanup()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("native", [True, False])
 def test_tts_aceita_200_porcento_sem_aplicar_teto_musical(mixer_module, native):
     async def scenario():

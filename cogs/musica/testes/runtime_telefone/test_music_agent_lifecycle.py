@@ -44,7 +44,7 @@ def _load_music_agent(monkeypatch):
     class TCPSite: pass
     web.Application=Application; web.Request=Request; web.Response=Response; web.AppRunner=AppRunner; web.TCPSite=TCPSite
     web.get=lambda *a, **k: ("get", a, k); web.post=lambda *a, **k: ("post", a, k)
-    web.json_response=lambda data, status=200: (data, status)
+    web.json_response=lambda data, status=200, headers=None: (data, status)
     aiohttp.web=web
 
     monkeypatch.syspath_prepend(str(ROOT))
@@ -72,6 +72,170 @@ def music(monkeypatch):
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def test_voice_preparation_cancellation_owns_only_its_lease(music):
+    from types import SimpleNamespace
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 19901
+        calls = []
+        voice = SimpleNamespace(is_connected=lambda: True)
+        async def disconnect(force=False): calls.append("disconnect")
+        voice.disconnect = disconnect
+        async def connect(guild_id, **kwargs):
+            assert kwargs["speculative_lease"].prepare_id == "owned"
+            return voice, True
+        agent._ensure_direct_voice_client = connect
+        agent._registered_voice_client_for_guild = lambda *args: None
+        result = await agent.cmd_prepare_voice({"guild_id": gid, "voice_channel_id": 19, "prepare_id": "owned"})
+        assert result["prepared"]
+        assert not (await agent.cmd_cancel_prepare_voice({"guild_id": gid, "prepare_id": "unrelated"}))["cancelled"]
+        assert calls == []
+        assert (await agent.cmd_cancel_prepare_voice({"guild_id": gid, "prepare_id": "owned"}))["cancelled"]
+        assert calls == ["disconnect"]
+        assert agent.states[gid].voice_channel_id == 0
+        assert not agent._voice_prepare_leases
+        await asyncio.sleep(0)
+    run(scenario())
+
+
+def test_voice_preparation_adopted_during_handshake_survives_cancel(music):
+    from types import SimpleNamespace
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 19902
+        entered, release = asyncio.Event(), asyncio.Event()
+        voice = SimpleNamespace(is_connected=lambda: True)
+        async def forbidden(*args, **kwargs): raise AssertionError("adopted voice disconnected")
+        voice.disconnect = forbidden
+        async def connect(guild_id, **kwargs):
+            entered.set()
+            await release.wait()
+            assert agent._voice_prepare_allowed(guild_id, kwargs["speculative_lease"])
+            return voice, True
+        agent._ensure_direct_voice_client = connect
+        agent._registered_voice_client_for_guild = lambda *args: None
+        body = {"guild_id": gid, "voice_channel_id": 19, "prepare_id": "adopt"}
+        prepare = asyncio.create_task(agent.cmd_prepare_voice(body))
+        await entered.wait()
+        await agent._adopt_voice_preparation(gid, body)
+        agent.states[gid].current = music.AgentTrack(query="song")
+        agent.states[gid].last_action = "play"
+        assert not await agent._cancel_voice_preparation(gid, prepare_id="adopt")
+        release.set()
+        assert (await prepare)["prepared"]
+        assert not agent._voice_prepare_leases
+        await asyncio.sleep(0)
+    run(scenario())
+
+
+def test_voice_preparation_never_moves_tts_or_existing_session(music):
+    from types import SimpleNamespace
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 19903
+        st = music.GuildMusicState(guild_id=gid, status="tts_direct")
+        agent.states[gid] = st
+        body = {"guild_id": gid, "voice_channel_id": 19, "prepare_id": "prepare"}
+        assert (await agent.cmd_prepare_voice(body))["reason"] == "active_session"
+        st.status = "idle"
+        voice = SimpleNamespace(is_connected=lambda: True, channel=SimpleNamespace(id=20))
+        agent._registered_voice_client_for_guild = lambda *args: voice
+        assert not (await agent.cmd_prepare_voice(body))["prepared"]
+        assert not agent._voice_prepare_leases and st.voice_channel_id == 0
+    run(scenario())
+
+
+def test_first_packet_trace_requires_successful_music_send_and_current_token(music):
+    from types import SimpleNamespace
+    agent = music.MusicAgent()
+    gid = 19904
+    track = music.AgentTrack(query="song", trace_id="trace", agent_received_monotonic=1)
+    st = music.GuildMusicState(guild_id=gid, current=track, playback_token=7)
+    agent.states[gid] = st
+    events = []
+    agent.log = lambda event, **data: events.append((event, data))
+    pcm = object()
+    source = SimpleNamespace(last_read_had_music=False, last_read_music_source=None)
+    class Connection:
+        failed = False
+        def send_packet(self, data):
+            if self.failed:
+                raise OSError("dropped")
+    class Voice:
+        def __init__(self): self.source, self._connection = source, Connection()
+        def send_audio_packet(self, data, **kwargs):
+            try: self._connection.send_packet(data)
+            except OSError: pass  # discord.py suppresses dropped UDP packets.
+    voice = Voice()
+    agent._arm_music_packet_trace(voice, source, guild_id=gid, track=track, token=7, pcm_source=pcm)
+    voice.send_audio_packet(b"tts")
+    source.last_read_had_music = True
+    source.last_read_music_source = object()
+    voice.send_audio_packet(b"previous source")
+    assert not events
+    source.last_read_music_source = pcm
+    voice._connection.failed = True
+    voice.send_audio_packet(b"dropped music")
+    assert not events
+    voice._connection.failed = False
+    voice.send_audio_packet(b"music")
+    voice.send_audio_packet(b"music again")
+    assert [event for event, _ in events] == ["music_first_packet_sent"]
+    assert "agent_to_first_packet_ms" in track.agent_timing_ms
+    agent._arm_music_packet_trace(voice, source, guild_id=gid, track=track, token=7, pcm_source=pcm)
+    st.playback_token = 8
+    voice.send_audio_packet(b"stale")
+    assert len(events) == 1
+    assert voice._music_packet_thread_local.music_packet_context is None
+
+
+def test_segmented_initial_audio_warms_only_current_part_and_shares_quota(music):
+    from cogs.musica.runtime_telefone.agente.audio_segmentado import ArchiveSegmentedPCMSource
+    from cogs.musica.runtime_telefone.agente.buffer_pcm import BufferedPCMSource
+    async def scenario():
+        agent = music.MusicAgent()
+        agent._loop = asyncio.get_running_loop()
+        segments = [{"duration": .1, "offset_seconds": 0}, {"duration": .1, "offset_seconds": .1}]
+        track = music.AgentTrack(stream_url="https://cdn.example/current", audio_stream_index=0,
+                                 archive_segments=segments, duration=.2)
+        st = music.GuildMusicState(guild_id=19905, voice_channel_id=19, current=track)
+        other = music.GuildMusicState(guild_id=19906, voice_channel_id=20, current=track)
+        agent.states.update({19905: st, 19906: other})
+        created = []
+        class Frames:
+            def __init__(self): self.count = 0
+            def read(self):
+                self.count += 1
+                return b"\1" * 3840 if self.count <= 5 else b""
+            def cleanup(self): pass
+        async def create(index, offset):
+            created.append(index)
+            return BufferedPCMSource(Frames(), max_frames=25)
+        def source_for(track, **kwargs):
+            return ArchiveSegmentedPCMSource(segments=segments, start_index=0, start_offset=0,
+                create_segment=create, loop=agent._loop, max_frames=kwargs["buffer_max_frames"],
+                preparing=kwargs["preparing"], claim_prepare=agent._claim_audio_prepare_slot,
+                release_prepare=agent._release_audio_prepare_slot)
+        agent._create_pcm_source = source_for
+        assert agent._begin_initial_audio(19905, track)
+        assert not agent._begin_initial_audio(19906, track)
+        entry = agent._initial_audio[19905]
+        await entry.source.wait_ready(timeout=1)
+        assert created == [0]  # Even short files must not prefetch before adoption.
+        st.playback_token += 1
+        adopted = agent._take_initial_audio(19905, track, st.playback_token)
+        assert adopted is entry.source
+        assert not agent._audio_extra_owners  # Initial decoder is now playback.
+        for _ in range(20):
+            if 1 in created: break
+            await asyncio.sleep(.005)
+        assert created == [0, 1]
+        adopted.cleanup()
+        await asyncio.sleep(.01)
+        assert not agent._audio_extra_owners
+    run(scenario())
 
 
 def test_discord_video_is_verified_before_queue_and_retries_do_not_duplicate(music, monkeypatch):

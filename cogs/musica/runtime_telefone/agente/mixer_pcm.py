@@ -139,6 +139,8 @@ class AgentTelemetryAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self._started_monotonic = time.monotonic()
         self.first_frame_ms: float | None = None
         self.first_frame_monotonic: float | None = None
+        self.last_read_had_music = False
+        self.last_read_music_source: Any = None
         self._init_audio_telemetry(
             telemetry_enabled=telemetry_enabled,
             stall_threshold_ms=stall_threshold_ms,
@@ -149,9 +151,16 @@ class AgentTelemetryAudioSource(discord.AudioSource, _AudioReadTelemetry):
         return bool(getattr(self.source, "is_opus", lambda: False)())
 
     def read(self) -> bytes:
+        self.last_read_had_music = False
+        self.last_read_music_source = None
         if self._closed:
             return b""
         frame = self._read_source(self.source)
+        self.last_read_had_music = bool(frame) and bool(getattr(
+            self.source, "last_read_had_music", getattr(self.source, "last_read_had_audio", True)
+        ))
+        if self.last_read_had_music:
+            self.last_read_music_source = getattr(self.source, "last_read_music_source", self.source)
         if frame and getattr(self.source, "last_read_had_audio", True) and self.first_frame_ms is None:
             now = time.monotonic()
             self.first_frame_monotonic = now
@@ -209,6 +218,8 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         self._started_monotonic = time.monotonic()
         self.first_frame_ms: float | None = None
         self.first_frame_monotonic: float | None = None
+        self.last_read_had_music = False
+        self.last_read_music_source: Any = None
         self._init_audio_telemetry(
             telemetry_enabled=telemetry_enabled,
             stall_threshold_ms=stall_threshold_ms,
@@ -285,6 +296,8 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             self._started_monotonic = time.monotonic()
             self.first_frame_ms = None
             self.first_frame_monotonic = None
+            self.last_read_had_music = False
+            self.last_read_music_source = None
             self._init_audio_telemetry(
                 telemetry_enabled=self.telemetry_enabled,
                 stall_threshold_ms=self.stall_threshold_ms,
@@ -568,6 +581,8 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         return self._mix_gain
 
     def read(self) -> bytes:
+        self.last_read_had_music = False
+        self.last_read_music_source = None
         if self._closed:
             return b""
         with self._lock:
@@ -619,6 +634,8 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             return b""
         music_volume = self.normal_music_volume * (self.duck_factor if overlays else 1.0)
         music_has_audio = bool(music_frame and getattr(music_source, "last_read_had_audio", True))
+        self.last_read_had_music = music_has_audio
+        self.last_read_music_source = music_source if music_has_audio else None
         if music_frame and not overlays:
             output = self._enhance_music_bass(self._smooth_music(music_frame, music_volume))
             if self._mix_gain < 0.999:

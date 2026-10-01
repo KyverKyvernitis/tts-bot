@@ -80,6 +80,8 @@ async def _resolver_busca_textual_simplificada(
             return ExtractedBatch(tracks=tracks_api, query=query, is_playlist=False)
 
     destino = destino_vinculado(guild_id)
+    if destino is not None and destino.transport == "direct":
+        destino = None
     if destino is None:
         selection = await require_music_worker_available_async()
         destino = resolver_destino_worker(selection, guild_id=guild_id, preferir_vinculo=False)
@@ -206,6 +208,8 @@ async def resolve_music_tracks_on_worker(
         )
 
     destino = destino_vinculado(guild_id)
+    if destino is not None and destino.transport == "direct":
+        destino = None
     if destino is None:
         selection = await require_music_worker_available_async()
         destino = resolver_destino_worker(selection, guild_id=guild_id, preferir_vinculo=False)

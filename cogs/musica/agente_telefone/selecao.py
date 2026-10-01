@@ -214,6 +214,10 @@ async def select_music_worker_async() -> MusicWorkerSelection:
 
 
 async def ensure_music_worker_available() -> MusicWorkerSelection:
+    from .roteamento import direct_music_worker_selection
+    direct = await direct_music_worker_selection()
+    if direct is not None:
+        return direct
     return await select_music_worker_async()
 
 

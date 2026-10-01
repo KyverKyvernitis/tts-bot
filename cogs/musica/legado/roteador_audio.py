@@ -2068,6 +2068,13 @@ class AudioRouter:
         state.music_afk_expired = False
 
     async def close(self) -> None:
+        fast_tasks = list(getattr(self, "_music_fast_start_tasks", set()))
+        for task in fast_tasks:
+            if not task.done():
+                task.cancel()
+        if fast_tasks:
+            await asyncio.gather(*fast_tasks, return_exceptions=True)
+        getattr(self, "_music_fast_start_tasks", set()).clear()
         for task in list(getattr(self, "_lavalink_shadow_tasks", {}).values()):
             if task is not None and not task.done():
                 task.cancel()

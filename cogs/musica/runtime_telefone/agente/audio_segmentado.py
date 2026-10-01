@@ -47,7 +47,9 @@ class ArchiveSegmentedPCMSource(discord.AudioSource):
         self, *, segments: list[dict], start_index: int, start_offset: float,
         create_segment: Callable[[int, float], Awaitable[Any]], loop: asyncio.AbstractEventLoop,
         max_frames: int = 75, stall_seconds: float = 12.0, playback_speed: float = 1.0,
-        lead_seconds: float = 12.0,
+        lead_seconds: float = 12.0, preparing: bool = False,
+        claim_prepare: Callable[[Any], bool] | None = None,
+        release_prepare: Callable[[Any], None] | None = None,
     ) -> None:
         self.segments = segments
         self.index = start_index
@@ -58,6 +60,11 @@ class ArchiveSegmentedPCMSource(discord.AudioSource):
         self._stall_seconds = stall_seconds
         self._speed = max(0.1, playback_speed)
         self._lead_seconds = max(1.0, lead_seconds)
+        self._playback_active = not preparing
+        self._claim_prepare = claim_prepare
+        self._release_prepare = release_prepare
+        self._prepare_owner = ("segment", id(self))
+        self._prepare_slot_owned = False
         self._lock = threading.RLock()
         self._closed = False
         self._current: Any = None
@@ -97,11 +104,14 @@ class ArchiveSegmentedPCMSource(discord.AudioSource):
 
     def _maybe_prepare_next(self) -> None:
         with self._lock:
-            if self._closed or self.index + 1 >= len(self.segments) or self._next is not None or self._next_task is not None:
+            if self._closed or not self._playback_active or self.index + 1 >= len(self.segments) or self._next is not None or self._next_task is not None:
                 return
             remaining = (float(self.segments[self.index]["duration"]) - self._offset) / self._speed - self._frames_read * 0.02
             if remaining > self._lead_seconds:
                 return
+            if self._claim_prepare is not None and not self._claim_prepare(self._prepare_owner):
+                return
+            self._prepare_slot_owned = True
             self._next_task = self._loop.create_task(self._prepare_next(self.index + 1))
             self._next_task.add_done_callback(consume_task_result)
 
@@ -114,10 +124,24 @@ class ArchiveSegmentedPCMSource(discord.AudioSource):
                 else:
                     self._next = source
         except asyncio.CancelledError:
+            self._release_prepare_slot()
             raise
         except Exception as exc:
             with self._lock:
                 self._next_error = exc
+            self._release_prepare_slot()
+
+    def _release_prepare_slot(self) -> None:
+        with self._lock:
+            if self._prepare_slot_owned:
+                self._prepare_slot_owned = False
+                if self._release_prepare is not None:
+                    self._release_prepare(self._prepare_owner)
+
+    def activate_playback(self) -> None:
+        with self._lock:
+            self._playback_active = True
+        self._loop.call_soon_threadsafe(self._maybe_prepare_next)
 
     async def wait_ready(self, *, timeout: float, min_frames: int = 1) -> None:
         started = time.monotonic()
@@ -176,6 +200,7 @@ class ArchiveSegmentedPCMSource(discord.AudioSource):
                     old = self._current
                     self._current, self._next = self._next, None
                     self._next_task = None
+                    self._release_prepare_slot()
                     self.index += 1
                     self._segments_completed += 1
                     self._offset = 0.0
@@ -208,6 +233,7 @@ class ArchiveSegmentedPCMSource(discord.AudioSource):
             if self._closed:
                 return
             self._closed = True
+            self._release_prepare_slot()
             for source in (self._current, self._next):
                 if source is not None:
                     with contextlib.suppress(Exception):
@@ -297,6 +323,9 @@ class ContinuousArchiveDSPSource(discord.AudioSource):
 
     def is_opus(self) -> bool:
         return False
+
+    def activate_playback(self) -> None:
+        self.raw.activate_playback()
 
     def read(self) -> bytes:
         with self._lock:

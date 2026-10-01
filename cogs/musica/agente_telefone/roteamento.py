@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
+import ipaddress
+import json
+import time
 from typing import Any, Mapping
 from urllib.parse import urlsplit
+from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 from cogs.musica import configuracao as config
 
@@ -16,9 +21,113 @@ class DestinoWorker:
     name: str
     base: str
     token: str
+    transport: str = "phone-worker"
 
 
 _DESTINOS_GUILD: dict[int, DestinoWorker] = {}
+_DIRECT_HEALTH_CACHE: tuple[tuple[str, str], float, MusicWorkerSelection] | None = None
+
+
+class _NoDirectRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Nunca encaminhe o Bearer privado a um destino escolhido por redirect.
+        return None
+
+
+urlopen = build_opener(_NoDirectRedirect()).open
+
+
+def configured_direct_destination() -> DestinoWorker | None:
+    """Destino opt-in para um Music Agent independente, sem trocar dono ativo."""
+    if not bool(getattr(config, "MUSIC_AGENT_DIRECT_API_ENABLED", False)):
+        return None
+    base = str(getattr(config, "MUSIC_AGENT_DIRECT_API_BASE_URL", "") or "").strip().rstrip("/")
+    token = str(getattr(config, "MUSIC_AGENT_DIRECT_API_TOKEN", "") or "").strip()
+    parsed = urlsplit(base)
+    if (not token or parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.path not in {"", "/"}):
+        raise ValueError("configure o endpoint privado e token do Music Agent direto")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("porta inválida do Music Agent direto") from exc
+    if parsed.scheme == "http":
+        host = parsed.hostname.lower()
+        private = host == "localhost" or host.endswith(".ts.net")
+        try:
+            address = ipaddress.ip_address(host)
+            private = private or address.is_loopback or (
+                address.version == 4 and any(address in network for network in (
+                    ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("172.16.0.0/12"),
+                    ipaddress.ip_network("192.168.0.0/16"), ipaddress.ip_network("100.64.0.0/10"),
+                ))
+            ) or (address.version == 6 and address in ipaddress.ip_network("fc00::/7"))
+        except ValueError:
+            pass
+        if not private:
+            raise ValueError("Music Agent direto exige HTTPS ou endereço privado/Tailscale")
+    return DestinoWorker("music-agent-direct", "Music Agent VPS", base, token, "direct")
+
+
+def control_destination(guild_id: int, action: str) -> DestinoWorker | None:
+    # Arquivamento permanece no worker de metadados, inclusive com voz na VPS.
+    if str(action or "").strip().lower().replace("-", "_").startswith("archive_"):
+        return None
+    return destino_vinculado(guild_id) or configured_direct_destination()
+
+
+async def post_json_destino(
+    *, destino: DestinoWorker, payload: Mapping[str, Any], timeout_seconds: float,
+    max_erro: int = 400, post_json: Any = None,
+) -> dict[str, Any]:
+    if post_json is None:
+        from .transporte_http import post_json_worker
+        post_json = post_json_worker
+    direct = destino.transport == "direct"
+    body = dict(payload)
+    if direct:
+        body.pop("task", None)
+    return await post_json(
+        url=f"{destino.base}/{'command' if direct else 'task'}", token=destino.token,
+        payload=body, timeout_seconds=timeout_seconds, max_erro=max_erro,
+    )
+
+
+def _direct_health_selection(destino: DestinoWorker) -> MusicWorkerSelection:
+    global _DIRECT_HEALTH_CACHE
+    now = time.monotonic()
+    key = (destino.base, destino.token)
+    if _DIRECT_HEALTH_CACHE and _DIRECT_HEALTH_CACHE[0] == key and now - _DIRECT_HEALTH_CACHE[1] < 0.8:
+        return _DIRECT_HEALTH_CACHE[2]
+    available = False
+    reason = "music_agent_direct_indisponivel"
+    try:
+        request = Request(f"{destino.base}/health", headers={"Authorization": f"Bearer {destino.token}"})
+        with urlopen(request, timeout=3.0) as response:
+            # Health é pequeno. Nunca transfira áudio nem snapshots ilimitados.
+            raw = response.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            raise ValueError("health excedeu orçamento")
+        data = json.loads(raw)
+        version = tuple(int(part) for part in str(data.get("version") or "0").split(".")[:3])
+        available = bool(data.get("ok", True) and data.get("discord_ready")
+                         and data.get("executor_mode", "full") in {"voice", "full"}
+                         and data.get("voice_dependencies", {}).get("ok")
+                         and version >= (0, 3, 83))
+        reason = "ok" if available else "music_agent_direct_nao_pronto"
+    except Exception:
+        # Não inclua token, URL assinada ou corpo de erro na seleção/logs.
+        pass
+    selection = MusicWorkerSelection(available, worker_id=destino.worker_id, name=destino.name,
+                                    reason=reason, worker={"endpoint": destino.base, "transport": "direct"})
+    _DIRECT_HEALTH_CACHE = (key, now, selection)
+    return selection
+
+
+async def direct_music_worker_selection() -> MusicWorkerSelection | None:
+    destino = configured_direct_destination()
+    return await asyncio.to_thread(_direct_health_selection, destino) if destino else None
 
 
 def _normalizar_base(value: object) -> str:
@@ -97,6 +206,10 @@ def escopo_cache_worker(selection: MusicWorkerSelection) -> str:
 
 __all__ = [
     "DestinoWorker",
+    "configured_direct_destination",
+    "control_destination",
+    "post_json_destino",
+    "direct_music_worker_selection",
     "destino_da_selecao",
     "destino_vinculado",
     "resolver_destino_worker",

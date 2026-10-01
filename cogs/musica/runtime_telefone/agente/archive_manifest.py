@@ -7,6 +7,9 @@ Signed CDN URLs are deliberately excluded from the durable manifest.
 from __future__ import annotations
 
 import hashlib
+import copy
+import time
+from collections import OrderedDict
 import base64
 import zlib
 import json
@@ -32,10 +35,15 @@ def encode_manifest(manifest: dict) -> bytes:
     return json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
-def file_sha256(path: Path) -> str:
+def file_sha256(path: Path, *, checkpoint=None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
+        while True:
+            if checkpoint:
+                checkpoint()
+            block = source.read(1024 * 1024)
+            if not block:
+                break
             digest.update(block)
     return digest.hexdigest()
 
@@ -147,12 +155,134 @@ def inline_manifest(raw: dict) -> dict | None:
     return value
 
 
-async def hydrate_archive_manifest(raw: dict, *, timeout: float = 15.0) -> dict:
-    """Return the REST message with a manifest hydrated; legacy messages are unchanged.
+class ArchiveManifestCache:
+    """Bounded RAM cache for validated, URL-free immutable manifest revisions.
 
-    Small manifests are also inline, avoiding another CDN request on normal plays.
-    Larger manifests are read from the starter's JSON attachment, bounded by the
-    attachment size and an 8 MiB parser memory budget.
+    A fresh Discord REST message still verifies ownership and attachments before
+    reusing a revision. CDN signatures never form part of this cache or its key.
+    """
+    def __init__(self, *, max_entries: int = 128, max_bytes: int = 4 * 1024 * 1024,
+                 ttl_seconds: float = 86400.0) -> None:
+        self.max_entries = max(0, int(max_entries))
+        self.max_bytes = max(0, int(max_bytes))
+        self.ttl_seconds = max(0.0, float(ttl_seconds))
+        self._entries: OrderedDict[tuple, tuple[float, dict, int]] = OrderedDict()
+        self._bytes = 0
+
+    @staticmethod
+    def revision(raw: dict, *, archive_key: str, reference: dict, bot_id: int) -> tuple:
+        if str((raw.get("author") or {}).get("id")) != str(bot_id):
+            raise ValueError("manifesto não pertence ao bot")
+        for name in ("guild_id", "channel_id"):
+            if str(raw.get(name) or reference[name]) != str(reference[name]):
+                raise ValueError("manifesto pertence a outro post")
+        if raw.get("id") and str(raw["id"]) != str(reference["message_id"]):
+            raise ValueError("mensagem do manifesto diferente do arquivo")
+        embeds = raw.get("embeds") or []
+        embed = embeds[0] if embeds and isinstance(embeds[0], dict) else {}
+        markers = [part for part in urlsplit(str(embed.get("url") or "")).fragment.split("&")
+                   if re.match(r"music-archive-v[2-8]-", part)]
+        if markers != [MANIFEST_MARKER + archive_key] or str((embed.get("footer") or {}).get("text")) != "Arquivo de músicas":
+            raise ValueError("identificador do manifesto diferente do arquivo")
+        attachments = raw.get("attachments") or []
+        manifest_attachment = next((item for item in attachments if isinstance(item, dict)
+                                    and item.get("filename") == MANIFEST_FILENAME), None)
+        if not manifest_attachment:
+            raise ValueError("manifesto do arquivo ainda não confirmado")
+        manifest_id = int(manifest_attachment.get("id") or 0)
+        expected = int(reference.get("manifest_attachment_id") or manifest_id)
+        if manifest_id <= 0 or manifest_id != expected:
+            raise ValueError("anexo do manifesto diferente do arquivo")
+        # Public message metadata is part of the revision, including the first
+        # audio's name and size. Refreshing a CDN signature alone keeps it valid.
+        identity = {"edited_timestamp": raw.get("edited_timestamp"),
+                    "embed": {field: embed.get(field) for field in ("url", "footer", "description", "fields")},
+                    "attachments": [{field: item.get(field) for field in ("id", "filename", "size")}
+                                    for item in attachments if isinstance(item, dict)]}
+        fingerprint = hashlib.sha256(encode_manifest(identity)).hexdigest()
+        return (int(bot_id), *(int(reference.get(field) or 0) for field in _REFERENCE_FIELDS),
+                manifest_id, archive_key, fingerprint)
+
+    def get(self, revision: tuple) -> dict | None:
+        entry = self._entries.get(revision)
+        if entry is None:
+            return None
+        created, manifest, size = entry
+        if time.monotonic() - created >= self.ttl_seconds:
+            self._entries.pop(revision)
+            self._bytes -= size
+            return None
+        self._entries.move_to_end(revision)
+        return copy.deepcopy(manifest)
+
+    def put(self, revision: tuple, manifest: dict) -> None:
+        # Whitelist durable audio metadata: no arbitrary extras or signed URLs.
+        stable = {field: manifest[field] for field in
+                  ("version", "archive_key", "duration", "sha256", *_AUDIO_FIELDS)}
+        stable["segments"] = [{field: entry[field] for field in
+                               ("order", "offset_seconds", "duration", "sha256", "size_bytes", "filename", "reference", *_AUDIO_FIELDS)}
+                              for entry in manifest["segments"]]
+        stable = copy.deepcopy(stable)
+        size = 3 * len(encode_manifest(stable)) + 512
+        old = self._entries.pop(revision, None)
+        if old is not None:
+            self._bytes -= old[2]
+        if not self.max_entries or self.ttl_seconds <= 0 or size > self.max_bytes:
+            return
+        while self._entries and (len(self._entries) >= self.max_entries or self._bytes + size > self.max_bytes):
+            _, removed = self._entries.popitem(last=False)
+            self._bytes -= removed[2]
+        self._entries[revision] = (time.monotonic(), stable, size)
+        self._bytes += size
+
+
+async def _download_manifest(attachment: dict, raw: dict, *, timeout: float,
+                             session: aiohttp.ClientSession | None) -> dict:
+    size = int(attachment.get("size") or 0)
+    if not 0 < size <= 8 * 1024 * 1024:
+        raise ValueError("tamanho inválido do manifesto")
+    url = str(attachment.get("url") or "")
+    parts = urlsplit(url)
+    if parts.scheme != "https" or parts.hostname not in {"cdn.discordapp.com", "media.discordapp.net"} or parts.username or parts.password or parts.port:
+        raise ValueError("URL inválida do manifesto")
+    path = re.match(r"^/attachments/(\d+)/(\d+)/[^/]+$", parts.path)
+    if not path or str(path[2]) != str(attachment.get("id")) or (raw.get("channel_id") and str(path[1]) != str(raw["channel_id"])):
+        raise ValueError("URL do manifesto diferente do anexo confirmado")
+    payload = bytearray()
+
+    async def download(client: aiohttp.ClientSession) -> None:
+        async with client.get(url, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+            if response.status != 200:
+                raise ValueError("manifesto indisponível no CDN")
+            async for chunk in response.content.iter_chunked(65536):
+                payload.extend(chunk)
+                if len(payload) > size or len(payload) > 8 * 1024 * 1024:
+                    raise ValueError("manifesto excedeu o tamanho confirmado")
+
+    if session is None:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as temporary:
+            await download(temporary)
+    else:
+        await download(session)
+    if len(payload) != size:
+        raise ValueError("manifesto incompleto no CDN")
+    manifest = json.loads(payload)
+    if not isinstance(manifest, dict):
+        raise ValueError("manifesto inválido")
+    return manifest
+
+
+async def hydrate_archive_manifest(raw: dict, *, timeout: float = 15.0,
+                                   session: aiohttp.ClientSession | None = None,
+                                   metadata_cache: ArchiveManifestCache | None = None,
+                                   archive_key: str = "", reference: dict | None = None,
+                                   bot_id: int | None = None) -> dict:
+    """Hydrate a v8 manifest, pooling HTTP and reusing trusted metadata if supplied.
+
+    Small inline manifests and legacy messages do not open an HTTP session.
+    Every cache hit requires a current authenticated Discord REST message with
+    the same immutable attachment revision. Audio and CDN URLs stay uncached
+    here; the resolver maintains their separate short-lived cache.
     """
     manifest = inline_manifest(raw)
     if manifest is not None:
@@ -164,29 +294,24 @@ async def hydrate_archive_manifest(raw: dict, *, timeout: float = 15.0) -> dict:
     attachment = next((item for item in raw.get("attachments") or [] if item.get("filename") == MANIFEST_FILENAME), None)
     if not attachment:
         raise ValueError("manifesto do arquivo ainda não confirmado")
-    size = int(attachment.get("size") or 0)
-    if not 0 < size <= 8 * 1024 * 1024:
-        raise ValueError("tamanho inválido do manifesto")
-    url = str(attachment.get("url") or "")
-    parts = urlsplit(url)
-    if parts.scheme != "https" or parts.hostname not in {"cdn.discordapp.com", "media.discordapp.net"} or parts.username or parts.password or parts.port:
-        raise ValueError("URL inválida do manifesto")
-    if not re.match(r"^/attachments/\d+/\d+/", parts.path):
-        raise ValueError("URL inválida do manifesto")
-    payload = bytearray()
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-        async with session.get(url, allow_redirects=False) as response:
-            if response.status != 200:
-                raise ValueError("manifesto indisponível no CDN")
-            async for chunk in response.content.iter_chunked(65536):
-                payload.extend(chunk)
-                if len(payload) > size or len(payload) > 8 * 1024 * 1024:
-                    raise ValueError("manifesto excedeu o tamanho confirmado")
-    if len(payload) != size:
-        raise ValueError("manifesto incompleto no CDN")
-    manifest = json.loads(payload)
-    if not isinstance(manifest, dict):
-        raise ValueError("manifesto inválido")
+    revision = None
+    if metadata_cache is not None:
+        if not archive_key or reference is None or bot_id is None:
+            raise ValueError("contexto autenticado ausente para o manifesto")
+        revision = metadata_cache.revision(raw, archive_key=archive_key, reference=reference, bot_id=bot_id)
+        manifest = metadata_cache.get(revision)
+        if manifest is not None:
+            raw["_archive_manifest"] = manifest
+            return raw
+    manifest = await _download_manifest(attachment, raw, timeout=timeout, session=session)
+    if metadata_cache is not None:
+        manifest = validate_manifest(manifest, archive_key=archive_key, reference=reference)
+        first = manifest["segments"][0]
+        audio = next((item for item in raw.get("attachments") or []
+                      if str(item.get("id")) == str(reference["attachment_id"])), None)
+        if not audio or first["filename"] != audio.get("filename") or int(first["size_bytes"]) != int(audio.get("size") or 0):
+            raise ValueError("primeiro anexo diferente do manifesto")
+        metadata_cache.put(revision, manifest)
     raw["_archive_manifest"] = manifest
     return raw
 

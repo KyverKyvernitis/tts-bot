@@ -197,10 +197,36 @@ async def test_nome_aprendido_da_playlist_nao_consulta_api_de_busca(monkeypatch)
         limpar_memoria_busca()
 
 
-def test_refills_spotify_continuam_alimentando_memoria_direct() -> None:
-    from pathlib import Path
+@pytest.mark.asyncio
+async def test_refills_spotify_continuam_alimentando_memoria_direct(tmp_path, monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from cogs.musica.busca import memoria, arquivo
+    from cogs.musica.nucleo.modelos import ExtractedBatch, PlaylistCursor
+    from cogs.musica.reproducao import playlist_virtual
 
-    root = Path(__file__).resolve().parents[1]
-    source = (root / "reproducao" / "playlist_virtual.py").read_text(encoding="utf-8")
-    assert 'cursor.provider.startswith("spotify")' in source
-    assert "registrar_lote_link_busca(batch.tracks)" in source
+    monkeypatch.setattr(memoria, "_db_path", lambda: tmp_path / "choices.sqlite3")
+    monkeypatch.setattr(arquivo, "_db_path", lambda: tmp_path / "archive.sqlite3")
+    memoria.limpar_memoria_busca()
+    cursor = PlaylistCursor(provider="spotify_public", source_url="https://open.spotify.com/playlist/test",
+                            next_offset=25, exhausted=False)
+    state = SimpleNamespace(music_operation_generation=0, virtual_playlist_refill_task=None)
+    async def extract(*args, **kwargs):
+        return ExtractedBatch(tracks=[_spotify_track("Home", SPOTIFY_HOME)], query=cursor.source_url,
+                              is_playlist=True, playlist_cursor=cursor.advanced(1, exhausted=True))
+    router = SimpleNamespace(get_state=lambda guild: state, current_music_operation_generation=lambda guild: 0,
+                             extractor=SimpleNamespace(continue_playlist_window=extract))
+    async def command(action, **kwargs):
+        assert action == "playlist_refill"
+        with memoria._abrir_db() as db:
+            assert db.execute("SELECT COUNT(*) FROM escolhas_link_pendentes").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM escolhas").fetchone()[0] == 0
+        return {"ok": True, "state": {}}
+    monkeypatch.setattr(playlist_virtual, "music_agent_command", command)
+    remote = {"voice_channel_id": 10, "text_channel_id": 20,
+              "virtual_playlist": {"cursor": cursor.public(), "waiting": True, "materialized_before": 0}}
+    assert playlist_virtual.schedule_playlist_refill_if_needed(router, 1, remote)
+    await state.virtual_playlist_refill_task
+    await asyncio.gather(*router._music_fast_start_tasks)
+    assert memoria.obter_escolha_busca("Home").original_url == SPOTIFY_HOME
+    memoria.limpar_memoria_busca()

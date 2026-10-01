@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 import time
 from dataclasses import dataclass, replace
 from typing import Any
@@ -20,7 +21,7 @@ class AudioPreparado:
     item_id: str
     stream_url: str
     offset: float
-    source: BufferedPCMSource
+    source: Any
     created_at: float
     ready: bool = False
     effects: tuple[int, int, int] = (0, 0, 0)
@@ -30,7 +31,7 @@ class AudioPreparado:
 class AudioInicial:
     item_id: str
     stream_url: str
-    source: BufferedPCMSource
+    source: Any
     created_at: float
     playback_token: int
     queue_reset_generation: int
@@ -39,9 +40,36 @@ class AudioInicial:
     audio_stream_index: int
     audio_sample_rate: int
     confirmed: bool
+    archive_identity: tuple = ()
 
 
 class PreparacaoAudioMixin:
+    def _claim_audio_prepare_slot(self, owner: Any) -> bool:
+        """Uma cota compartilhada por início, próxima faixa e próxima parte."""
+        if not hasattr(self, "_audio_extra_owners"):
+            self._audio_extra_owners = set()
+            self._audio_extra_lock = threading.RLock()
+        with self._audio_extra_lock:
+            if owner in self._audio_extra_owners:
+                return True
+            if len(self._audio_extra_owners) >= getattr(self, "next_audio_prepare_max_sources", 1):
+                return False
+            self._audio_extra_owners.add(owner)
+            return True
+
+    def _release_audio_prepare_slot(self, owner: Any) -> None:
+        lock = getattr(self, "_audio_extra_lock", None)
+        if lock is not None:
+            with lock:
+                self._audio_extra_owners.discard(owner)
+
+    @staticmethod
+    def _archive_audio_identity(track: AgentTrack) -> tuple:
+        return tuple(tuple(segment.get(key) for key in (
+            "guild_id", "channel_id", "message_id", "attachment_id", "duration", "offset_seconds",
+            "audio_stream_index", "audio_sample_rate", "audio_channels",
+        )) for segment in track.archive_segments)
+
     async def _prepare_current_pcm(self, guild_id: int, track: AgentTrack, playback_token: int) -> Any:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         effects = (0, st.effect_level("nightcore"), st.effect_level("slowed_reverb"))  # Bassboost atua somente no mixer
@@ -75,11 +103,19 @@ class PreparacaoAudioMixin:
     def _create_pcm_source(
         self, track: AgentTrack, *, effects: tuple[int | bool, ...] = (0, 0, 0),
         first_audio_stream: bool = False, buffer_max_frames: int | None = None,
-        preserve_partial_frames: bool = False,
+        preserve_partial_frames: bool = False, preparing: bool = False,
     ) -> Any:
         if track.archive_segments:
             start_index = self._archive_segment_at(track.archive_segments, track.start_offset_seconds)
             start_local = max(0.0, track.start_offset_seconds - float(track.archive_segments[start_index]["offset_seconds"]))
+            if len(track.archive_segments) == 1:
+                segment = track.archive_segments[0]
+                single = replace(track, archive_segments=[], start_offset_seconds=start_local,
+                                 audio_stream_index=int(segment.get("audio_stream_index", track.audio_stream_index)),
+                                 audio_sample_rate=int(segment.get("audio_sample_rate", track.audio_sample_rate)),
+                                 audio_channels=int(segment.get("audio_channels", track.audio_channels)))
+                return self._create_pcm_source(single, effects=effects, buffer_max_frames=buffer_max_frames,
+                                               preserve_partial_frames=True)
 
             async def create_segment(index: int, offset: float) -> Any:
                 segment = track.archive_segments[index]
@@ -111,6 +147,9 @@ class PreparacaoAudioMixin:
                 create_segment=create_segment, loop=loop,
                 max_frames=buffer_max_frames or getattr(self, "pcm_buffer_max_frames", 75),
                 stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0),
+                preparing=preparing,
+                claim_prepare=self._claim_audio_prepare_slot,
+                release_prepare=self._release_audio_prepare_slot,
             )
             if any(effects[1:]):
                 try:
@@ -156,36 +195,43 @@ class PreparacaoAudioMixin:
         if entry is None or (item_id and entry.item_id != item_id):
             return
         self._initial_audio.pop(guild_id, None)
+        self._release_audio_prepare_slot(("initial", guild_id))
         entry.source.cleanup()
 
     def _begin_initial_audio(self, guild_id: int, track: AgentTrack, *, speculative_first_audio: bool = False) -> bool:
         st = self.states.get(guild_id)
         if (
             not getattr(self, "initial_audio_prepare_enabled", True)
-            or not self.direct_pcm_volume_enabled or not getattr(self, "pcm_buffer_enabled", True)
+            or (not self.direct_pcm_volume_enabled and not track.archive_segments) or not getattr(self, "pcm_buffer_enabled", True)
             or st is None or not track.stream_url or track.is_live
-            or track.archive_segments
         ):
             return False
         existing = self._initial_audio.get(guild_id)
         if existing is not None:
-            if existing.item_id == track.queue_item_id and existing.stream_url == track.stream_url:
+            if (existing.item_id == track.queue_item_id and existing.stream_url == track.stream_url
+                    and existing.archive_identity == self._archive_audio_identity(track)
+                    and existing.effects == (0, st.effect_level("nightcore"), st.effect_level("slowed_reverb"))
+                    and existing.playback_token == st.playback_token
+                    and existing.voice_channel_id == st.voice_channel_id):
                 return True
             self._cancel_initial_audio(guild_id)
         # Divide com o prefetch da próxima faixa a cota de um decoder extra no
         # aparelho. O buffer inicial guarda no máximo 0,5 s de PCM (96 KiB).
-        if len(self._initial_audio) + len(self._prepared_audio) >= 1:
+        if not self._claim_audio_prepare_slot(("initial", guild_id)):
             return False
         effects = (0, st.effect_level("nightcore"), st.effect_level("slowed_reverb"))
         try:
             source = self._create_pcm_source(
                 track, effects=effects, first_audio_stream=speculative_first_audio,
                 buffer_max_frames=min(25, self.pcm_buffer_max_frames),
+                preparing=True,
             )
         except Exception as exc:
+            self._release_audio_prepare_slot(("initial", guild_id))
             self.log("initial_audio_unavailable", guild_id=guild_id, error=type(exc).__name__)
             return False
-        if not isinstance(source, BufferedPCMSource):
+        if not isinstance(source, (BufferedPCMSource, ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource)):
+            self._release_audio_prepare_slot(("initial", guild_id))
             with contextlib.suppress(Exception):
                 source.cleanup()
             return False
@@ -194,6 +240,7 @@ class PreparacaoAudioMixin:
             st.playback_token, st.queue_reset_generation, st.voice_channel_id,
             effects, track.audio_stream_index, track.audio_sample_rate,
             confirmed=not speculative_first_audio,
+            archive_identity=self._archive_audio_identity(track),
         )
         self.log("initial_audio_started", guild_id=guild_id, speculative=speculative_first_audio)
         return True
@@ -231,16 +278,18 @@ class PreparacaoAudioMixin:
         entry.audio_sample_rate = int(audio_sample_rate)
         entry.confirmed = True
 
-    def _take_initial_audio(self, guild_id: int, track: AgentTrack, playback_token: int) -> BufferedPCMSource | None:
+    def _take_initial_audio(self, guild_id: int, track: AgentTrack, playback_token: int) -> Any:
         entry = self._initial_audio.pop(guild_id, None)
         if entry is None:
             return None
+        self._release_audio_prepare_slot(("initial", guild_id))
         st = self.states.get(guild_id)
         if (
             entry.confirmed and st is not None and st.current is track
             and entry.item_id == track.queue_item_id and entry.stream_url == track.stream_url
             and entry.audio_stream_index == track.audio_stream_index
             and entry.audio_sample_rate == track.audio_sample_rate
+            and entry.archive_identity == self._archive_audio_identity(track)
             and entry.effects == (0, st.effect_level("nightcore"), st.effect_level("slowed_reverb"))
             and entry.playback_token + 1 == playback_token == st.playback_token
             and entry.queue_reset_generation == st.queue_reset_generation
@@ -249,6 +298,9 @@ class PreparacaoAudioMixin:
             and time.monotonic() - entry.created_at <= 30.0
         ):
             entry.source.set_max_frames(self.pcm_buffer_max_frames)
+            activate = getattr(entry.source, "activate_playback", None)
+            if callable(activate):
+                activate()
             self.log("initial_audio_reused", guild_id=guild_id,
                      warm_ms=round((time.monotonic() - entry.created_at) * 1000.0, 1),
                      **entry.source.audio_buffer_metrics())
@@ -266,10 +318,13 @@ class PreparacaoAudioMixin:
         effects = (0, st.effect_level("nightcore"), st.effect_level("slowed_reverb")) if st else (0, 0, 0)
         if prepared is not None and not (prepared.ready and prepared.item_id == keep_item_id and prepared.effects == effects):
             self._prepared_audio.pop(guild_id, None)
+            self._release_audio_prepare_slot(("track", guild_id))
             prepared.source.cleanup()
 
     def _take_prepared_audio(self, guild_id: int, track: AgentTrack) -> BufferedPCMSource | None:
         prepared = self._prepared_audio.pop(guild_id, None)
+        if prepared is not None:
+            self._release_audio_prepare_slot(("track", guild_id))
         self._cancel_audio_preparation(guild_id)
         if prepared is None:
             return None
@@ -280,6 +335,9 @@ class PreparacaoAudioMixin:
             and abs(prepared.offset - track.start_offset_seconds) < 0.01
             and time.monotonic() - prepared.created_at <= 45.0
         ):
+            activate = getattr(prepared.source, "activate_playback", None)
+            if callable(activate):
+                activate()
             self.log("next_audio_reused", guild_id=guild_id, **prepared.source.audio_buffer_metrics())
             return prepared.source
         prepared.source.cleanup()
@@ -289,8 +347,9 @@ class PreparacaoAudioMixin:
         st = self.states.get(guild_id)
         if (
             not getattr(self, "next_audio_prepare_enabled", True)
-            or not self.direct_pcm_volume_enabled or not getattr(self, "pcm_buffer_enabled", True)
+            or not getattr(self, "pcm_buffer_enabled", True)
             or st is None or st.paused or not st.queue or st.queue[0].is_virtual_playlist_marker
+            or (not self.direct_pcm_volume_enabled and not st.queue[0].archive_segments)
             or st.current is None or not st.current.duration or not st.started_monotonic
         ):
             self._cancel_audio_preparation(guild_id)
@@ -326,6 +385,7 @@ class PreparacaoAudioMixin:
                     return
                 track = st.queue[0]
                 if not track.stream_url or self._track_stream_needs_refresh(track):
+                    previous_track = track
                     meta = track.public()
                     query = self._query_from_track_meta(meta, fallback_query=track.query)
                     if track.stream_url:
@@ -336,14 +396,19 @@ class PreparacaoAudioMixin:
                     )
                     if not still_next():
                         return
+                    self._copy_play_trace(previous_track, track)
                     st.queue[0] = track
                 if track.is_live or not track.stream_url:
                     return
                 # Sem fila oculta de FFmpegs: há no máximo uma preparação extra
                 # por padrão em todo o aparelho, além das músicas já tocando.
-                if len(self._prepared_audio) + len(self._initial_audio) >= getattr(self, "next_audio_prepare_max_sources", 1):
+                if not self._claim_audio_prepare_slot(("track", guild_id)):
                     return
-                source = self._create_pcm_source(track, effects=effects)
+                try:
+                    source = self._create_pcm_source(track, effects=effects, preparing=True)
+                except BaseException:
+                    self._release_audio_prepare_slot(("track", guild_id))
+                    raise
                 owned = AudioPreparado(item_id, track.stream_url, track.start_offset_seconds, source, time.monotonic(), effects=effects)
                 self._prepared_audio[guild_id] = owned
                 await source.wait_ready(
@@ -362,6 +427,7 @@ class PreparacaoAudioMixin:
                 if owned is not None and not owned.ready:
                     if self._prepared_audio.get(guild_id) is owned:
                         self._prepared_audio.pop(guild_id, None)
+                    self._release_audio_prepare_slot(("track", guild_id))
                     owned.source.cleanup()
                 current_task = asyncio.current_task()
                 if self._audio_prepare_tasks.get(guild_id) is current_task:

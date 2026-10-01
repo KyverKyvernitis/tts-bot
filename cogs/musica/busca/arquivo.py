@@ -390,7 +390,8 @@ def note_learned(tracks) -> None:
 
 def flush_learned(limit: int = 128) -> int:
     """Entrega e confirma uma página; reinício/falha pode repetir sem perder jobs."""
-    from .memoria import obter_pendencias_arquivamento, confirmar_pendencia_arquivamento
+    from .memoria import obter_pendencias_arquivamento, confirmar_pendencia_arquivamento, processar_lotes_link_pendentes
+    processar_lotes_link_pendentes(limit=2)
     items = obter_pendencias_arquivamento(limit=limit)
     if not items:
         return 0
@@ -651,15 +652,31 @@ def reopen_on_revision(revision: str) -> int:
     return len(rows)
 
 
-def archived(track) -> tuple[dict, str, str]:
-    key = media_key(track)
-    if not key:
-        return {}, "", ""
+def archived_many(tracks, *, guild_id: int = 0) -> list[tuple[dict, str, str]]:
+    """Lê uma janela inteira com uma conexão, preservando ordem e repetições."""
+    tracks = list(tracks)
+    keys = [media_key(track) for track in tracks]
+    unique = list(dict.fromkeys(key for key in keys if key))
+    if not unique:
+        return [({}, "", "") for _ in tracks]
+    rows = {}
     with _db() as db:
-        row = db.execute("""SELECT chave, reference_json, emoji, track_json, fonte_estavel FROM arquivo_musicas
-            WHERE chave=COALESCE((SELECT chave FROM arquivo_aliases WHERE alias=?), ?)""", (key, key)).fetchone()
         configured = db.execute("SELECT guild_id, channel_id, channel_type FROM arquivo_config WHERE id=1").fetchone()
-    if not row or not row[0] or configured is None:
+        if configured is not None and (not guild_id or int(configured[0]) == int(guild_id)):
+            for start in range(0, len(unique), 400):
+                page = unique[start:start + 400]
+                values = ",".join("(?)" for _ in page)
+                for row in db.execute(f"""WITH requested(alias) AS (VALUES {values})
+                    SELECT requested.alias, m.chave, m.reference_json, m.emoji, m.track_json, m.fonte_estavel
+                    FROM requested LEFT JOIN arquivo_aliases a ON a.alias=requested.alias
+                    JOIN arquivo_musicas m ON m.chave=COALESCE(a.chave, requested.alias)""", page):
+                    rows[row[0]] = row[1:]
+    return [_archive_result(track, rows.get(key), configured, guild_id=guild_id)
+            for track, key in zip(tracks, keys)]
+
+
+def _archive_result(track, row, configured, *, guild_id: int = 0) -> tuple[dict, str, str]:
+    if not row or not row[0] or configured is None or (guild_id and int(configured[0]) != int(guild_id)):
         return {}, "", ""
     try:
         ref = json.loads(row[1])
@@ -677,6 +694,10 @@ def archived(track) -> tuple[dict, str, str]:
         return ref, row[2], row[0]
     except (ValueError, TypeError, KeyError):
         return {}, "", ""
+
+
+def archived(track) -> tuple[dict, str, str]:
+    return archived_many((track,))[0]
 
 
 def _public_identity(url: str) -> tuple | None:

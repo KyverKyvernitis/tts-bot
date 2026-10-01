@@ -1,0 +1,36 @@
+[Unit]
+Description=Discord Music Agent - executor de voz
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=music-agent
+Group=music-agent
+WorkingDirectory=/opt/tts-bot-main
+EnvironmentFile=/etc/music-agent/voice.env
+ExecStart=/opt/music-agent-venv/bin/python -u -m cogs.musica.runtime_telefone.agente.servidor
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=25
+KillMode=control-group
+StateDirectory=music-agent
+StateDirectoryMode=0700
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+CPUWeight=200
+IOWeight=200
+Nice=-5
+LimitNOFILE=8192
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

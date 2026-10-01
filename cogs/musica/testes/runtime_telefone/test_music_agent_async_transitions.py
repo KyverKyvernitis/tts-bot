@@ -457,7 +457,7 @@ def test_music_active_alone_uses_music_timeout_not_short_tts_timeout(music):
     run(scenario())
 
 
-def test_music_idle_grace_keeps_idle_timer_and_preserves_alone_condition(music):
+def test_music_idle_grace_keeps_idle_timer_and_leaves_empty_channel_quickly(music):
     async def scenario():
         agent = music.MusicAgent()
         gid = 213
@@ -479,7 +479,7 @@ def test_music_idle_grace_keeps_idle_timer_and_preserves_alone_condition(music):
         agent._schedule_voice_presence_disconnect = schedule
         await agent._refresh_voice_presence_policy(gid, source="test")
         assert presence_calls == [
-            ((gid,), {"delay": 120.0, "reason": "music_alone", "expected_mode": "music_owned"})
+            ((gid,), {"delay": 2.0, "reason": "queue_idle_empty", "expected_mode": "music_idle_grace"})
         ]
 
     run(scenario())

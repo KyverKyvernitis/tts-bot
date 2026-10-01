@@ -5,7 +5,8 @@ import asyncio
 import contextlib
 import math
 import time
-from dataclasses import replace
+import threading
+from dataclasses import dataclass, replace
 from typing import Any
 
 import discord
@@ -26,7 +27,177 @@ class VoiceSessionError(RuntimeError):
     """Falha de transporte/sessão Discord Voice, não falha da mídia."""
 
 
+@dataclass
+class VoicePreparationLease:
+    prepare_id: str
+    channel_id: int
+    generation: int
+    previous_channel_id: int
+    expires_monotonic: float
+    task: asyncio.Task | None = None
+    expiry_task: asyncio.Task | None = None
+    voice_client: Any = None
+    created: bool = False
+    adopted: bool = False
+
+
 class ReproducaoMixin(PreparacaoAudioMixin):
+    @staticmethod
+    def _attach_play_trace(track: AgentTrack, body: dict[str, Any], received: float) -> None:
+        track.trace_id = str(body.get("trace_id") or "")[:128]
+        timings = body.get("controller_timing_ms")
+        track.controller_timing_ms = {
+            str(key)[:64]: float(value) for key, value in (list(timings.items())[:20] if isinstance(timings, dict) else [])
+            if isinstance(value, (int, float)) and math.isfinite(float(value)) and 0 <= value <= 86400000
+        }
+        track.agent_received_monotonic = received
+
+    @staticmethod
+    def _copy_play_trace(previous: AgentTrack, following: AgentTrack) -> None:
+        following.trace_id = previous.trace_id
+        following.controller_timing_ms = dict(previous.controller_timing_ms)
+        following.agent_timing_ms = dict(previous.agent_timing_ms)
+        following.agent_received_monotonic = previous.agent_received_monotonic
+
+    def _voice_prepare_allowed(self, guild_id: int, lease: VoicePreparationLease) -> bool:
+        st = self.states.get(guild_id)
+        if st is None or st.voice_channel_id != lease.channel_id:
+            return False
+        if lease.adopted:
+            return st.last_action != "stop"
+        return bool(
+            getattr(self, "_voice_prepare_leases", {}).get(guild_id) is lease
+            and time.monotonic() < lease.expires_monotonic
+            and st.playback_token == lease.generation
+            and st.current is None and not st.queue
+            and st.status in {"idle", "stopped", "failed"}
+            and not self._tts_active_for_guild(guild_id)
+        )
+
+    def _tts_active_for_guild(self, guild_id: int) -> bool:
+        st = self.states.get(guild_id)
+        pending = getattr(getattr(getattr(st, "player", None), "source", None), "has_pending_tts", None)
+        return bool(
+            (st is not None and st.status == "tts_direct")
+            or (callable(pending) and pending())
+            or any(key[0] == guild_id for key in getattr(self, "_active_tts_requests", {}))
+        )
+
+    async def cmd_prepare_voice(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id, channel_id = safe_id(body.get("guild_id")), safe_id(body.get("voice_channel_id"))
+        prepare_id = str(body.get("prepare_id") or "").strip()
+        if not guild_id or not channel_id or not prepare_id or len(prepare_id) > 128:
+            raise ValueError("guild_id, voice_channel_id e prepare_id são obrigatórios")
+        leases = self._voice_prepare_leases
+        existing = leases.get(guild_id)
+        if existing is not None:
+            if existing.prepare_id != prepare_id or existing.channel_id != channel_id:
+                return {"ok": True, "prepared": False, "prepare_id": prepare_id, "reason": "another_preparation"}
+            if existing.task is not None:
+                try:
+                    await asyncio.shield(existing.task)
+                except asyncio.CancelledError:
+                    return {"ok": True, "prepared": False, "prepare_id": prepare_id, "reason": "cancelled"}
+            return {"ok": True, "prepared": self._voice_client_is_connected(existing.voice_client),
+                    "prepare_id": prepare_id, "reason": "reused_preparation"}
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        if (not self.direct_audio_enabled or st.current is not None or st.queue
+                or st.status not in {"idle", "stopped", "failed"} or self._tts_active_for_guild(guild_id)):
+            return {"ok": True, "prepared": False, "prepare_id": prepare_id, "reason": "active_session"}
+        registered = self._registered_voice_client_for_guild(guild_id, self.client.get_guild(guild_id))
+        if registered is not None:
+            same = safe_id(getattr(getattr(registered, "channel", None), "id", 0)) == channel_id
+            return {"ok": True, "prepared": bool(same and self._voice_client_is_connected(registered)),
+                    "prepare_id": prepare_id, "reason": "existing_session"}
+        try:
+            duration = max(5.0, min(60.0, float(body.get("lease_seconds", 45.0))))
+        except (TypeError, ValueError):
+            duration = 45.0
+        lease = VoicePreparationLease(prepare_id, channel_id, st.playback_token, st.voice_channel_id,
+                                     time.monotonic() + duration)
+        leases[guild_id] = lease
+        st.voice_channel_id = channel_id
+        self._archive_foreground_until[guild_id] = time.monotonic() + min(duration, 10.0)
+
+        async def prepare() -> None:
+            try:
+                voice, created = await self._ensure_direct_voice_client(guild_id, speculative_lease=lease)
+                lease.voice_client, lease.created = voice, created
+                if not self._voice_prepare_allowed(guild_id, lease):
+                    if created and st.player is not voice:
+                        await self._disconnect_voice_client_bounded(voice, guild_id=guild_id, reason="stale_prepare_voice")
+                    lease.voice_client = None
+                    return
+                self.log("voice_prepared", guild_id=guild_id, prepare_id=prepare_id,
+                         trace_id=str(body.get("trace_id") or "")[:128], created=created)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.log("prepare_voice_failed", guild_id=guild_id, prepare_id=prepare_id, error=type(exc).__name__)
+
+        async def expire() -> None:
+            try:
+                await asyncio.sleep(duration)
+                await self._cancel_voice_preparation(guild_id, prepare_id=prepare_id, reason="lease_expired")
+            except asyncio.CancelledError:
+                pass
+
+        lease.task = asyncio.create_task(prepare(), name="music-prepare-voice")
+        self._voice_prepare_tasks.add(lease.task)
+        lease.task.add_done_callback(self._voice_prepare_tasks.discard)
+        lease.expiry_task = asyncio.create_task(expire(), name="music-prepare-voice-expiry")
+        try:
+            await asyncio.shield(lease.task)
+        except asyncio.CancelledError:
+            # Leases, e não a vida da conexão HTTP, são os donos da especulação.
+            if lease.task.cancelled():
+                return {"ok": True, "prepared": False, "prepare_id": prepare_id, "reason": "cancelled"}
+            raise
+        return {"ok": True, "prepared": self._voice_client_is_connected(lease.voice_client),
+                "prepare_id": prepare_id, "lease_seconds": duration,
+                "reason": "prepared" if lease.voice_client is not None else "unavailable"}
+
+    async def _cancel_voice_preparation(self, guild_id: int, *, prepare_id: str = "", reason: str = "cancelled") -> bool:
+        lease = getattr(self, "_voice_prepare_leases", {}).get(guild_id)
+        if lease is None or (prepare_id and lease.prepare_id != prepare_id) or lease.adopted:
+            return False
+        self._voice_prepare_leases.pop(guild_id, None)
+        if lease.expiry_task is not None and lease.expiry_task is not asyncio.current_task():
+            lease.expiry_task.cancel()
+        if lease.task is not None:
+            if not lease.task.done():
+                lease.task.cancel()
+            await asyncio.gather(lease.task, return_exceptions=True)
+        st = self.states.get(guild_id)
+        voice = lease.voice_client
+        if lease.created and voice is not None and (st is None or st.player is not voice):
+            await self._disconnect_voice_client_bounded(voice, guild_id=guild_id, reason=reason)
+        if st is not None and st.current is None and not st.queue and st.player is None and st.voice_channel_id == lease.channel_id:
+            st.voice_channel_id = lease.previous_channel_id
+        self.log("voice_preparation_cancelled", guild_id=guild_id, prepare_id=lease.prepare_id, reason=reason)
+        return True
+
+    async def cmd_cancel_prepare_voice(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id, prepare_id = safe_id(body.get("guild_id")), str(body.get("prepare_id") or "").strip()
+        if not guild_id or not prepare_id:
+            raise ValueError("guild_id e prepare_id são obrigatórios")
+        cancelled = await self._cancel_voice_preparation(guild_id, prepare_id=prepare_id)
+        return {"ok": True, "cancelled": cancelled, "prepare_id": prepare_id}
+
+    async def _adopt_voice_preparation(self, guild_id: int, body: dict[str, Any]) -> None:
+        lease = getattr(self, "_voice_prepare_leases", {}).get(guild_id)
+        if lease is None:
+            return
+        if (lease.prepare_id != str(body.get("prepare_id") or "")
+                or lease.channel_id != safe_id(body.get("voice_channel_id"))):
+            await self._cancel_voice_preparation(guild_id, reason="superseded_play")
+            return
+        lease.adopted = True
+        self._voice_prepare_leases.pop(guild_id, None)
+        if lease.expiry_task is not None:
+            lease.expiry_task.cancel()
+        # O handshake pendente mantém o lock normal; play o reutiliza ao terminar.
+
     def _voice_operation_timeout_seconds(self) -> float:
         default = min(8.0, max(3.0, float(getattr(self, "prepare_timeout", 8.0) or 8.0)))
         return max(1.5, min(20.0, env_float("MUSIC_AGENT_VOICE_OPERATION_TIMEOUT_SECONDS", default)))
@@ -366,6 +537,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 }
                 self._prefetch_resolving.add(task_key)
                 resolved = await asyncio.wait_for(self.resolve_track(query, track_meta=current_first.public(), body=body, priority=20), timeout=self.prefetch_timeout)
+                self._copy_play_trace(current_first, resolved)
                 latest2 = self.states.setdefault(int(guild_id or 0), GuildMusicState(guild_id=int(guild_id or 0)))
                 if int(getattr(latest2, "playback_token", 0) or 0) == token and latest2.queue and latest2.queue[0].queue_item_id == first_item_id:
                     check_key = self._resolve_cache_key(
@@ -689,6 +861,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             return result
 
     async def cmd_play(self, body: dict[str, Any]) -> dict[str, Any]:
+        received_monotonic = time.monotonic()
         guild_id = safe_id(body.get("guild_id"))
         voice_channel_id = safe_id(body.get("voice_channel_id"))
         text_channel_id = safe_id(body.get("text_channel_id"))
@@ -706,6 +879,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             raise ValueError("query/url vazia")
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         self._update_auto_leave_from_body(st, body)
+        await self._adopt_voice_preparation(guild_id, body)
         st.voice_channel_id = voice_channel_id
         st.text_channel_id = text_channel_id
         if not st.normal_volume_percent:
@@ -725,6 +899,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 if not isinstance(item, dict):
                     continue
                 track = self._agent_track_from_metadata(item, body=body, fallback_query=query)
+                self._attach_play_trace(track, body, received_monotonic)
                 if track.query or track.stream_url or track.webpage_url:
                     tracks.append(track)
             if not tracks:
@@ -771,6 +946,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         # quando ela realmente chegar ao início da fila. Isso também permite
         # que a primeira resolução seja sobreposta à conexão de voz.
         track = self._agent_track_from_metadata(track_meta, body=body, fallback_query=query)
+        self._attach_play_trace(track, body, received_monotonic)
         if not (track.query or track.stream_url or track.webpage_url):
             raise ValueError("faixa sem query/url reproduzível")
         if int(getattr(st, "playback_token", 0) or 0) != command_generation or str(getattr(st, "last_action", "") or "").lower() == "stop":
@@ -1077,6 +1253,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.queue_reset_generation += 1
         st.last_action = "stop"
+        await self._cancel_voice_preparation(guild_id, reason="manual_stop")
         self._cancel_youtube_queue_metadata(guild_id)
         self._cancel_prefetch_tasks(guild_id)
         self._cancel_idle_disconnect(guild_id)
@@ -1932,6 +2109,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             if self._track_key(st.current) != self._track_key(next_track):
                 self._push_history(st, st.current)
         st.current = next_track
+        st.first_audio_sent_monotonic = 0.0
+        self._archive_foreground_until[guild_id] = time.monotonic() + max(5.0, self.prepare_timeout)
+        next_track.agent_timing_ms = {}
+        if next_track.agent_received_monotonic:
+            next_track.agent_timing_ms["queue_wait_ms"] = round((time.monotonic() - next_track.agent_received_monotonic) * 1000, 1)
         repaired = st._repair_current_queue_alias()
         if repaired:
             self.log(
@@ -1992,7 +2174,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 # A conexão de voz já foi iniciada acima em paralelo à
                 # resolução, inclusive quando o stream estava em cache.
                 failure_phase = "resolve"
-                started = time.time()
+                started = time.monotonic()
                 meta = st.current.public()
                 query = self._query_from_track_meta(meta, fallback_query=st.current.query or st.current.title)
                 body = {
@@ -2026,8 +2208,13 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                     await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                     return
                 st.current = resolved_current
+                resolved_current.trace_id = current_ref.trace_id
+                resolved_current.controller_timing_ms = dict(current_ref.controller_timing_ms)
+                resolved_current.agent_timing_ms = dict(current_ref.agent_timing_ms)
+                resolved_current.agent_received_monotonic = current_ref.agent_received_monotonic
+                resolved_current.agent_timing_ms["resolve_ms"] = round((time.monotonic() - started) * 1000, 1)
                 current_ref = st.current
-                self.log("lazy_resolve_done", guild_id=guild_id, elapsed_ms=round((time.time() - started) * 1000.0, 1), title=getattr(st.current, "title", ""))
+                self.log("lazy_resolve_done", guild_id=guild_id, elapsed_ms=round((time.monotonic() - started) * 1000.0, 1), title=getattr(st.current, "title", ""))
             if int(getattr(st, "playback_token", 0) or 0) != request_token or st.current is not current_ref:
                 self.log("play_start_ignored", guild_id=guild_id, reason="stale_generation")
                 await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
@@ -2052,9 +2239,12 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             await asyncio.wait_for(play_coro, timeout=max(5.0, self.prepare_timeout))
         except asyncio.CancelledError:
             await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
+            self._cancel_initial_audio(guild_id, item_id=current_ref.queue_item_id)
             raise
         except Exception as exc:
             await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
+            self._cancel_initial_audio(guild_id, item_id=current_ref.queue_item_id)
+            self._archive_foreground_until[guild_id] = time.monotonic()
             if st.current is not current_ref:
                 self.log("play_failure_superseded", guild_id=guild_id, phase=failure_phase)
                 return
@@ -2219,7 +2409,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             raise RuntimeError(f"guild {guild_id} não encontrada no player remoto após {wait_seconds:.1f}s")
         raise RuntimeError(f"canal de voz {voice_channel_id} não encontrado após {wait_seconds:.1f}s")
 
-    async def _ensure_direct_voice_client(self, guild_id: int) -> tuple[Any, bool]:
+    async def _ensure_direct_voice_client(self, guild_id: int, *, speculative_lease: VoicePreparationLease | None = None) -> tuple[Any, bool]:
         """Prepare a sessão de voz e diga se esta chamada criou a conexão."""
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         requested_channel_id = int(st.voice_channel_id or 0)
@@ -2237,6 +2427,14 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             requested_channel_id = int(st.voice_channel_id or requested_channel_id)
             guild, channel = await self._resolve_guild_and_channel(guild_id, requested_channel_id)
             existing = self._registered_voice_client_for_guild(guild_id, guild)
+            if speculative_lease is not None:
+                if not self._voice_prepare_allowed(guild_id, speculative_lease):
+                    raise asyncio.CancelledError()
+                if existing is not None and (
+                    not self._voice_client_is_connected(existing)
+                    or safe_id(getattr(getattr(existing, "channel", None), "id", 0)) != requested_channel_id
+                ):
+                    raise VoiceSessionError("a preparação não pode substituir uma sessão existente")
 
             if existing is not None and not getattr(existing, "is_connected", lambda: False)():
                 grace = max(0.0, min(2.0, env_float("MUSIC_AGENT_VOICE_RECONNECT_GRACE_SECONDS", 0.6)))
@@ -2413,6 +2611,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         started = time.monotonic()
         deadline = started + max_delay
         tracks_first_frame = hasattr(source, "first_frame_ms")
+        packet_trace = getattr(voice_client, "_music_packet_trace", None)
+        tracks_packet = bool(packet_trace and packet_trace.get("source") is source and packet_trace.get("supported"))
         while True:
             if not getattr(voice_client, "is_connected", lambda: False)():
                 raise VoiceSessionError("conectei no canal, mas a voz caiu antes do áudio")
@@ -2420,7 +2620,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 getattr(voice_client, "is_playing", lambda: False)()
                 or getattr(voice_client, "is_paused", lambda: False)()
             )
-            if playing and (not tracks_first_frame or getattr(source, "first_frame_ms", None) is not None):
+            confirmed = bool(packet_trace.get("first_packet_monotonic")) if tracks_packet else (
+                not tracks_first_frame or getattr(source, "first_frame_ms", None) is not None)
+            if playing and confirmed:
                 return max(0.0, time.monotonic() - started)
             now = time.monotonic()
             if now >= deadline:
@@ -2432,6 +2634,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             raise RuntimeError("ffmpeg iniciou, mas o áudio não ficou tocando")
         if tracks_first_frame and getattr(source, "first_frame_ms", None) is None:
             raise TimeoutError("FFmpeg não entregou o primeiro frame de áudio")
+        if tracks_packet and not packet_trace.get("first_packet_monotonic"):
+            raise TimeoutError("a voz não enviou o primeiro pacote de música")
         return max(0.0, time.monotonic() - started)
 
     def _discord_opus_bitrate_kbps(self, voice_client: Any, track: AgentTrack | None = None) -> tuple[int, int]:
@@ -2494,6 +2698,71 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             return {}
         return dict(payload) if isinstance(payload, dict) else {}
 
+    def _arm_music_packet_trace(self, voice_client: Any, source: Any, *, guild_id: int,
+                               track: AgentTrack, token: int, pcm_source: Any = None) -> None:
+        """Mede o envio UDP real, inclusive quando discord.py suprime OSError."""
+        trace = {"source": source, "expected_music_source": pcm_source,
+                 "guild_id": guild_id, "track": track, "token": token,
+                 "first_packet_monotonic": None, "supported": False}
+        voice_client._music_packet_trace = trace
+        connection = getattr(voice_client, "_connection", None)
+        original_transport = getattr(connection, "send_packet", None)
+        original_audio = getattr(voice_client, "_music_original_send_audio_packet", None) or getattr(voice_client, "send_audio_packet", None)
+        if not callable(original_transport) or not callable(original_audio):
+            return
+        try:
+            local = getattr(voice_client, "_music_packet_thread_local", None)
+            if local is None:
+                local = threading.local()
+                voice_client._music_packet_thread_local = local
+            if getattr(voice_client, "_music_packet_traced_connection", None) is not connection:
+                def send_transport(packet: bytes) -> Any:
+                    result = original_transport(packet)
+                    context = getattr(local, "music_packet_context", None)
+                    if context is not None:
+                        self._record_first_music_packet(voice_client, context)
+                    return result
+                connection.send_packet = send_transport
+                voice_client._music_packet_traced_connection = connection
+            if not hasattr(voice_client, "_music_original_send_audio_packet"):
+                def send_audio(data: bytes, *args: Any, **kwargs: Any) -> Any:
+                    context = getattr(voice_client, "_music_packet_trace", None)
+                    current_source = getattr(voice_client, "source", None)
+                    music_source = getattr(current_source, "last_read_music_source", None)
+                    expected = context.get("expected_music_source") if context else None
+                    had_music = bool(getattr(current_source, "last_read_had_music", False))
+                    matches = bool(context and current_source is context.get("source")
+                                   and had_music and (expected is None or music_source is expected))
+                    local.music_packet_context = context if matches else None
+                    try:
+                        return original_audio(data, *args, **kwargs)
+                    finally:
+                        local.music_packet_context = None
+                voice_client._music_original_send_audio_packet = original_audio
+                voice_client.send_audio_packet = send_audio
+            trace["supported"] = True
+        except (AttributeError, TypeError):
+            # Wrappers/custom VoiceClients continuam usando a confirmação por
+            # read(), mas não publicam uma falsa medição de envio de pacote.
+            self.log("first_packet_trace_unavailable", guild_id=guild_id)
+
+    def _record_first_music_packet(self, voice_client: Any, trace: dict[str, Any]) -> None:
+        if trace.get("first_packet_monotonic") is not None or getattr(voice_client, "_music_packet_trace", None) is not trace:
+            return
+        st = self.states.get(trace["guild_id"])
+        track = trace["track"]
+        if st is None or st.playback_token != trace["token"] or st.current is not track:
+            return
+        now = time.monotonic()
+        trace["first_packet_monotonic"] = now
+        st.first_audio_sent_monotonic = now
+        self._archive_foreground_until[st.guild_id] = now + 1.0
+        if track.agent_received_monotonic:
+            track.agent_timing_ms["agent_to_first_packet_ms"] = round((now - track.agent_received_monotonic) * 1000, 1)
+        self.log("music_first_packet_sent", guild_id=st.guild_id, trace_id=track.trace_id,
+                 controller_timing_ms=track.controller_timing_ms, agent_timing_ms=track.agent_timing_ms,
+                 playback_token=trace["token"])
+
     async def _play_direct_voice(self, guild_id: int, track: AgentTrack, *, prepared_voice: tuple[Any, bool] | None = None) -> None:
         direct_start_monotonic = time.monotonic()
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
@@ -2526,6 +2795,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 return
         else:
             self.log("voice_preconnect_reused", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
+        track.agent_timing_ms["direct_voice_ready_ms"] = round((time.monotonic() - direct_start_monotonic) * 1000, 1)
         existing_source = getattr(voice_client, "source", None)
         pcm_pipeline = self.direct_pcm_volume_enabled or bool(track.archive_segments)
         reusable = bool(
@@ -2643,6 +2913,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 self.log("play_start_superseded", guild_id=guild_id, phase="pcm_prepare")
                 return
             quality_context["pcm_prepare_ms"] = round((time.monotonic() - pcm_prepare_started) * 1000.0, 1)
+            track.agent_timing_ms["pcm_prepare_ms"] = quality_context["pcm_prepare_ms"]
         try:
             source = self._build_ffmpeg_source(
                 track.stream_url,
@@ -2701,6 +2972,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             )
 
         play_called_monotonic = time.monotonic()
+        self._arm_music_packet_trace(voice_client, source, guild_id=guild_id, track=track,
+                                    token=playback_token, pcm_source=pcm_source)
         if not reusable:
             try:
                 self._play_music_source(voice_client, source, after=after, opus_bitrate_kbps=opus_bitrate_kbps)

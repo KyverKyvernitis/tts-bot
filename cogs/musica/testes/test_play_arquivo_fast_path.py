@@ -1,5 +1,6 @@
 """A faixa já arquivada dispensa o provedor, inclusive em links Spotify."""
 from types import SimpleNamespace
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -72,11 +73,15 @@ async def test_link_arquivado_evitar_provider_e_stream_temporario(catalogo, monk
     ref = _publicar(catalogo)
     flow, ctx, sent = _flow(monkeypatch)
     await flow._run_play(ctx, "https://open.spotify.com/intl-pt/track/knowntrack?si=tracking")
-    assert len(sent) == 1 and sent[0][0] == "play"
-    track = sent[0][1]["track"]
-    assert track.title == "Faixa conhecida"
-    assert track.requester_id == 8 and track.requester_name == "Pessoa"
-    assert track.archive_ref == ref and not track.stream_url
+    await asyncio.gather(*flow.router._music_fast_start_tasks)
+    plays = [kwargs for action, kwargs in sent if action == "play"]
+    assert len(plays) == 1
+    track = plays[0]["track"]
+    assert track["title"] == "Faixa conhecida"
+    assert track["requester_id"] == 8 and track["requester_name"] == "Pessoa"
+    assert track["archive_ref"] == ref and not track["stream_url"]
+    assert plays[0]["trace_id"] and plays[0]["prepare_id"]
+    assert plays[0]["controller_timing_ms"]["command_to_dispatch_ms"] >= 0
     flow.router.extractor.extract.assert_not_awaited()
 
 
@@ -121,8 +126,9 @@ async def test_indice_indisponivel_continua_resolucao_normal(catalogo, monkeypat
         tracks=[_track()], query=_track().original_url,
     ))
     await flow._run_play(ctx, _track().original_url)
+    await asyncio.gather(*flow.router._music_fast_start_tasks)
     flow.router.extractor.extract.assert_awaited_once()
-    assert len(sent) == 1 and sent[0][0] == "play"
+    assert len([action for action, _ in sent if action == "play"]) == 1
 
 
 def test_snapshot_preserva_referencia_manifesto_sem_url_assinada(monkeypatch):

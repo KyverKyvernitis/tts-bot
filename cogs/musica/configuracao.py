@@ -298,6 +298,10 @@ PHONE_WORKER_ENABLED = bool(MUSIC_PHONE_WORKER_DIRECT_ENABLED and PHONE_WORKER_H
 # Music Agent no phone worker — padrão da música. A VPS fica como plano de UI/status
 # e o Phone Worker assume voz/player/yt-dlp quando disponível. Lavalink fica só em metadados.
 MUSIC_AGENT_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "true"), True)
+# Executor independente opt-in: a resolução/arquivamento continuam no worker.
+MUSIC_AGENT_DIRECT_API_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_DIRECT_API_ENABLED", "false"), False)
+MUSIC_AGENT_DIRECT_API_BASE_URL = (os.getenv("MUSIC_AGENT_DIRECT_API_BASE_URL", "") or "").strip()
+MUSIC_AGENT_DIRECT_API_TOKEN = (os.getenv("MUSIC_AGENT_DIRECT_API_TOKEN", "") or "").strip()
 MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", "18.0"), 18.0))
 MUSIC_AGENT_STATUS_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", "5.0"), 5.0))
 MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", "30.0"), 30.0))
@@ -352,6 +356,8 @@ MUSIC_SEARCH_HTTP_POOL_LIMIT = max(2, min(24, _parse_int(os.getenv("MUSIC_SEARCH
 MUSIC_SEARCH_HTTP_POOL_LIMIT_PER_HOST = max(1, min(MUSIC_SEARCH_HTTP_POOL_LIMIT, _parse_int(os.getenv("MUSIC_SEARCH_HTTP_POOL_LIMIT_PER_HOST", "4"), 4)))
 MUSIC_SEARCH_HTTP_KEEPALIVE_SECONDS = max(5.0, min(120.0, _parse_float(os.getenv("MUSIC_SEARCH_HTTP_KEEPALIVE_SECONDS", "30.0"), 30.0)))
 MUSIC_SEARCH_HTTP_DNS_CACHE_SECONDS = max(30.0, min(1800.0, _parse_float(os.getenv("MUSIC_SEARCH_HTTP_DNS_CACHE_SECONDS", "300.0"), 300.0)))
+# Revalidação curta do HTML público das coleções Spotify; somente RAM.
+MUSIC_SPOTIFY_PUBLIC_HTML_CACHE_TTL_SECONDS = max(0.0, min(60.0, _parse_float(os.getenv("MUSIC_SPOTIFY_PUBLIC_HTML_CACHE_TTL_SECONDS", "20.0"), 20.0)))
 # API-first: a YouTube Data API e a unica fonte da primeira tentativa.
 # Se vier ao menos um resultado utilizavel, nao consultamos o Phone Worker.
 # A reproducao continua sendo resolvida exclusivamente pelo yt-dlp apos a escolha.

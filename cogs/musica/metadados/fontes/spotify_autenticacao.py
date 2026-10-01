@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import OrderedDict
 import html
 import json
 import logging
 import re
 import time
+import sys
 from typing import Any, Iterable
+from cogs.musica import configuracao as config
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -113,7 +116,55 @@ class SpotifyAutenticacaoMixin:
         return raw.decode("utf-8", errors="ignore")
 
     async def _to_thread_text(self, url: str, *, headers: dict[str, str] | None = None, max_bytes: int = 5_000_000) -> str:
-        return await asyncio.to_thread(self._request_text, url, headers=headers, max_bytes=max_bytes)
+        session = await self._http_session_persistente()
+        # Só documentos públicos de coleções; nenhum token ou áudio no cache.
+        cacheable = bool(re.fullmatch(r"https://open\.spotify\.com/(?:embed/)?(?:playlist|album)/[A-Za-z0-9]+", url) and not headers)
+        ttl = max(0.0, min(60.0, float(getattr(config, "MUSIC_SPOTIFY_PUBLIC_HTML_CACHE_TTL_SECONDS", 20.0))))
+        cache = getattr(self, "_spotify_public_html_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._spotify_public_html_cache = cache
+        key = (url, max_bytes)
+        previous = cache.get(key) if cacheable and ttl else None
+        if previous is not None and previous[0] > time.monotonic():
+            cache.move_to_end(key)
+            return previous[1]
+        request_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+            **(headers or {}),
+        }
+        if previous is not None:
+            if previous[2]:
+                request_headers["If-None-Match"] = previous[2]
+            if previous[3]:
+                request_headers["If-Modified-Since"] = previous[3]
+        async with session.get(url, headers=request_headers) as response:
+            if response.status == 304 and previous is not None:
+                cache[key] = (time.monotonic() + ttl, *previous[1:])
+                cache.move_to_end(key)
+                return previous[1]
+            if response.status >= 400:
+                raise HTTPError(url, int(response.status), str(response.reason or "HTTP error"), response.headers, None)
+            chunks, size = [], 0
+            while True:
+                chunk = await response.content.read(min(65_536, max_bytes + 1 - size))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError("resposta HTML do provider excedeu o orçamento")
+                chunks.append(chunk)
+            content = b"".join(chunks).decode("utf-8", errors="ignore")
+            if cacheable and ttl:
+                cache[key] = (time.monotonic() + ttl, content, response.headers.get("ETag", ""),
+                              response.headers.get("Last-Modified", ""), sys.getsizeof(content))
+                cache.move_to_end(key)
+                while len(cache) > 4 or sum(item[4] for item in cache.values()) > 8 * 1024 * 1024:
+                    cache.popitem(last=False)
+        return content
 
     async def spotify_public_token(self) -> str:
         """Token anônimo do web player usado como fallback público.

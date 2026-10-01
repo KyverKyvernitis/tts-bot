@@ -1,0 +1,7 @@
+discord.py[voice]>=2.7.1,<2.8
+davey
+aiohttp>=3.10,<4
+yt-dlp[default,curl-cffi]
+# TTS opcional, instalado para manter o comportamento do executor completo.
+edge-tts==7.2.8
+gTTS==2.5.4
