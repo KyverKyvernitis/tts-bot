@@ -73,6 +73,7 @@ class MusicTrack:
     attachment_ref: dict[str, int] = field(default_factory=dict)
     # Arquivo global configurado pelo dono; a fonte visual continua original.
     archive_ref: dict[str, int] = field(default_factory=dict)
+    archive_segments: list[dict[str, Any]] = field(default_factory=list)
     source_emoji: str = ""
     # Referência leve para uma entrada ainda virtual da playlist. Estes campos
     # são usados apenas pela UI/control plane; áudio continua resolvido JIT.

@@ -502,6 +502,23 @@ class FluxoTocar:
             return True
         return False
 
+    async def _archived_url_batch(
+        self, query: str, *, guild_id: int, requester_id: int, requester_name: str,
+    ) -> ExtractedBatch | None:
+        """Reusa a faixa do fórum antes de acessar o provedor de metadados."""
+        profile = self._query_profile(query)
+        if not profile.is_url or profile.resource_type in {"playlist", "album"}:
+            return None
+        from ..busca.arquivo import archived_track_for_url
+
+        track = await asyncio.to_thread(
+            archived_track_for_url, profile.canonical or query,
+            guild_id=guild_id, requester_id=requester_id, requester_name=requester_name,
+        )
+        if track is None:
+            return None
+        return ExtractedBatch(tracks=[track], query=query, is_playlist=False)
+
     def _music_agent_query_for_track(self, track: MusicTrack, fallback: str = "") -> str:
         return consulta_agent_para_faixa(track, fallback)
 
@@ -591,7 +608,19 @@ class FluxoTocar:
 
             requester_name = getattr(ctx.author, "display_name", str(ctx.author))
 
-            if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+            archived_batch = None
+            if getattr(self.router, "music_worker_only_enabled", lambda: False)() and input_profile.is_url:
+                try:
+                    archived_batch = await self._archived_url_batch(
+                        query, guild_id=ctx.guild.id, requester_id=ctx.author.id,
+                        requester_name=requester_name,
+                    )
+                except Exception:
+                    logger.warning("[music/archive] índice indisponível; usando resolução normal", exc_info=True)
+            if archived_batch is not None:
+                batch = archived_batch
+                logger.info("[music/timing] link do arquivo reutilizado | guild=%s elapsed_ms=%.1f", ctx.guild.id, (time.monotonic() - command_started) * 1000.0)
+            elif getattr(self.router, "music_worker_only_enabled", lambda: False)():
                 try:
                     youtube_text_search = self._is_youtube_text_search(query)
                     if input_profile.is_metadata_only:
@@ -746,7 +775,7 @@ class FluxoTocar:
             # direct-hit de `_play`, sem API de busca na próxima chamada.
             if batch.is_playlist and input_profile.platform == "spotify":
                 with contextlib.suppress(Exception):
-                    registrar_lote_link_busca(batch.tracks)
+                    await asyncio.to_thread(registrar_lote_link_busca, batch.tracks)
 
             virtual_playlist_cursor = getattr(batch, "playlist_cursor", None)
             if (

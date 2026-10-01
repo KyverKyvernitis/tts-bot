@@ -208,7 +208,10 @@ class AudioDiscordTests(unittest.IsolatedAsyncioTestCase):
         resolver = Resolver()
         meta = {"attachment_ref": REF, "queue_item_id": "discord-media:123:1000:10"}
         rest = AsyncMock(return_value={"url": URL})
-        with patch("cogs.musica.runtime_telefone.agente.resolucao.fetch_discord_attachment", rest):
+        # O fixture do MusicAgent recarrega módulos. A classe importada neste
+        # arquivo pode pertencer ao snapshot anterior; substitua o global que
+        # sua função realmente usa, independentemente da ordem da suíte.
+        with patch.dict(ResolucaoMixin._resolve_discord_attachment.__globals__, {"fetch_discord_attachment": rest}):
             first = await resolver._resolve_discord_attachment(track_meta=meta, body={"guild_id": 123})
             self.assertEqual(first.stream_url, URL)
             rest.assert_not_awaited()

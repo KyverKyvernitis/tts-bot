@@ -48,44 +48,27 @@ def test_seek_music_agent_prefere_query_estavel_a_url_publica() -> None:
     assert "track.query or track.webpage_url or track.title" in source
 
 
-def test_music_agent_audit_remove_tracking_sem_alterar_parametros_funcionais() -> None:
-    import importlib.util
-    import sys
-    import types
-
-    # servidor importa discord/aiohttp; os testes de unidade só precisam da função pura.
-    source = (Path(__file__).resolve().parents[1] / "runtime_telefone" / "agente" / "servidor.py").read_text(encoding="utf-8")
-    assert 'AGENT_VERSION = "0.3.56"' in source
-    assert '_audit_value(key, value)' in source
-
-    # Exercita a mesma política por AST/exec sem inicializar o Discord client.
-    import ast
-    tree = ast.parse(source)
-    wanted = {"_audit_value"}
-    nodes = [node for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign, ast.FunctionDef))]
-    selected = []
-    for node in nodes:
-        if isinstance(node, ast.FunctionDef) and node.name == "_audit_value":
-            selected.append(node)
-        elif isinstance(node, ast.Assign) and any(getattr(t, "id", "") in {"_AUDIT_URL_FIELDS", "_AUDIT_DROP_QUERY_KEYS"} for t in node.targets):
-            selected.append(node)
-        elif isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") in {"_AUDIT_URL_FIELDS", "_AUDIT_DROP_QUERY_KEYS"}:
-            selected.append(node)
-    module = ast.Module(body=selected, type_ignores=[])
-    ns = {"Any": object, "urllib": __import__("urllib")}
-    # __import__('urllib') does not eagerly expose parse in every interpreter.
-    import urllib.parse
-    ns["urllib"] = urllib
-    exec(compile(module, "<audit>", "exec"), ns)
-    audit_value = ns["_audit_value"]
+def test_music_agent_audit_remove_tracking_sem_alterar_parametros_funcionais(capsys) -> None:
+    from cogs.musica.runtime_telefone.agente.servidor import MusicAgent, _audit_value
 
     spotify = "https://open.spotify.com/track/abc?si=secret&utm_source=copy-link"
-    assert audit_value("query", spotify) == "https://open.spotify.com/track/abc"
+    assert _audit_value("query", spotify) == "https://open.spotify.com/track/abc"
     youtube = "https://www.youtube.com/watch?v=abc123&list=PL1&feature=share"
-    assert audit_value("query", youtube) == "https://www.youtube.com/watch?v=abc123&list=PL1"
+    assert _audit_value("query", youtube) == "https://www.youtube.com/watch?v=abc123&list=PL1"
     signed = "https://media.invalid/a?token=private&x=1"
-    assert "private" not in audit_value("url", signed)
-    assert "x=1" in audit_value("url", signed)
+    assert "private" not in _audit_value("url", signed)
+    assert "x=1" in _audit_value("url", signed)
+
+    # Exercita o destino real do log sem inicializar o cliente Discord. A
+    # sanitização deve ocorrer na saída, preservando o payload do comando.
+    fields = {"query": spotify, "webpage_url": youtube, "url": signed}
+    MusicAgent.log(None, "resolve", guild_id=123, **fields)
+    audit = capsys.readouterr().out
+    assert "resolve guild=123" in audit
+    assert "secret" not in audit and "private" not in audit
+    assert "utm_source" not in audit and "feature=share" not in audit
+    assert "v=abc123&list=PL1" in audit and "x=1" in audit
+    assert fields == {"query": spotify, "webpage_url": youtube, "url": signed}
 
 
 def test_metadata_provider_block_response_remove_query_tracking(monkeypatch) -> None:

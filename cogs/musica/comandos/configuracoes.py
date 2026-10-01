@@ -62,13 +62,21 @@ class FluxoConfiguracoes:
             return
         if value == "falhas" or value.startswith("falhas "):
             try:
-                page = int(raw.split(maxsplit=1)[1]) if " " in raw else 1
-                if not 1 <= page <= 100:
+                parts = raw.split()
+                cursor = None
+                page = 1
+                if len(parts) == 3 and parts[1].lower() == "depois":
+                    cursor = arquivo.parse_failure_cursor(parts[2])
+                elif len(parts) <= 2:
+                    page = int(parts[1]) if len(parts) == 2 else 1
+                else:
+                    raise ValueError
+                if page < 1:
                     raise ValueError
             except ValueError:
-                await ctx.reply("Use `_musicarquivo falhas [página]` (1 a 100).", mention_author=False)
+                await ctx.reply("Use `_musicarquivo falhas [página]` ou `falhas depois <cursor>`.", mention_author=False)
                 return
-            entries = await asyncio.to_thread(arquivo.failures, 6, (page - 1) * 6)
+            entries = await asyncio.to_thread(arquivo.failures, 6, (page - 1) * 6, after=cursor)
             if not entries:
                 await ctx.reply("Nenhuma música com falha no arquivo.", mention_author=False)
                 return
@@ -80,21 +88,31 @@ class FluxoConfiguracoes:
                 lines.append(f"`{entry['key']}` · {entry['title'][:70]}\n"
                              f"{entry['state']} · {reason} · {entry['attempts']} tentativa(s){retry}"
                              f"{' · '+host if host else ''}")
-            lines.append("Fonte nova: `_musicarquivo fonte <chave> <link>` · tentar de novo: `_musicarquivo reavaliar <chave>`.")
+            if len(entries) == 6:
+                lines.append(f"Continuar: `_musicarquivo falhas depois {arquivo.failure_cursor(entries[-1])}`")
+            lines.append("Fonte: `_musicarquivo fonte <chave> <link>` · repetir: `_musicarquivo reavaliar <chave>`.")
             await ctx.reply("\n".join(lines)[:1900], mention_author=False,
                             allowed_mentions=discord.AllowedMentions.none())
             return
         if value.startswith("auditoria "):
             parts = raw.split()
             try:
-                page = int(parts[2]) if len(parts) == 3 else 1
-                if len(parts) > 3 or not 1 <= page <= 100:
+                page, before_id = 1, 0
+                if len(parts) == 4 and parts[2].lower() == "depois":
+                    before_id = int(parts[3])
+                    if before_id <= 0:
+                        raise ValueError
+                elif len(parts) in {2, 3}:
+                    page = int(parts[2]) if len(parts) == 3 else 1
+                else:
+                    raise ValueError
+                if page < 1:
                     raise ValueError
             except ValueError:
-                await ctx.reply("Use `_musicarquivo auditoria <chave> [página]` (1 a 100).", mention_author=False)
+                await ctx.reply("Use `_musicarquivo auditoria <chave> [página]` ou `auditoria <chave> depois <id>`.", mention_author=False)
                 return
             key = parts[1]
-            events = await asyncio.to_thread(arquivo.history, key, 8, (page - 1) * 8)
+            events = await asyncio.to_thread(arquivo.history, key, 8, (page - 1) * 8, before_id=before_id)
             if not events:
                 await ctx.reply("Nenhum evento encontrado para essa chave.", mention_author=False)
                 return
@@ -105,6 +123,8 @@ class FluxoConfiguracoes:
                 lines.append(f"{_archive_time(event['at'])} · {event['event'].replace('_', ' ')}"
                              f"{' · '+reason if reason else ''}{' · '+host if host else ''}"
                              f"{' · '+event['revision'] if event['revision'] else ''}")
+            if len(events) == 8:
+                lines.append(f"Continuar: `_musicarquivo auditoria {key} depois {events[-1]['id']}`")
             await ctx.reply("\n".join(lines)[:1900], mention_author=False,
                             allowed_mentions=discord.AllowedMentions.none())
             return
@@ -123,7 +143,7 @@ class FluxoConfiguracoes:
                 try:
                     agent = await music_agent_status(guild_id=guild_id, timeout_seconds=3.0)
                     version = str(agent.get("version") or "?")
-                    agent_label = f" · agente: {version}" + ("" if _archive_agent_ready(agent) else " (aguardando 0.3.81)")
+                    agent_label = f" · agente: {version}" + ("" if _archive_agent_ready(agent) else " (aguardando 0.3.82)")
                 except Exception:
                     agent_label = " · agente: indisponível"
             await ctx.reply(f"Arquivo ({mode}): {channel_text} · escolhas na memória: {counts.get('choices', 0)} · músicas indexadas: {counts.get('learned', 0)} · aguardando envio: {counts.get('unposted', 0)} · enviadas: {counts.get('done', 0)} · atualizando posts: {counts.get('refresh', 0)} · falhas transitórias: {counts.get('failed', 0)} · sem fonte: {counts.get('unavailable', 0)} · pausadas: {counts.get('paused', 0)} · acima do limite: {counts.get('too_large', 0)}{agent_label}.",

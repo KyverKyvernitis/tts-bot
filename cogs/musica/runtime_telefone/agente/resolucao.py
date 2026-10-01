@@ -362,6 +362,10 @@ class ResolucaoMixin:
         archive_key = self._archive_cache_key(track.archive_ref or {}, track.archive_key or "")
         if archive_key:
             getattr(self, "_archive_url_cache", {}).pop(archive_key, None)
+            segment_cache = getattr(self, "_archive_segment_url_cache", {})
+            for key in list(segment_cache):
+                if key[-2] == str(track.archive_key):
+                    segment_cache.pop(key, None)
         media_key = self._media_cache_key(track)
         if not media_key:
             meta = track.public()
@@ -385,6 +389,8 @@ class ResolucaoMixin:
             # URLs externas sem timestamp conhecido continuam válidas até falhar;
             # o recovery cobre esse caso sem adivinhar a idade do link.
             return False
+        if track.archive_ref:
+            return time.monotonic() >= self._archive_url_deadline(track.stream_url, resolved_at)
         return time.monotonic() >= self._stream_deadline(
             track.stream_url, resolved_at, self.stream_refresh_before_play_seconds,
         )
@@ -609,7 +615,77 @@ class ResolucaoMixin:
             archive_key=str(track_meta.get("archive_key") or ""),
             source_emoji=str(track_meta.get("source_emoji") or "")[:100],
             audio_stream_index=int(track_meta.get("audio_stream_index", -1)),
+            archive_segments=[dict(segment) for segment in track_meta.get("archive_segments", ()) if isinstance(segment, dict)],
+            archive_segment_index=int(track_meta.get("archive_segment_index") or 0),
         )
+
+    def _archive_url_deadline(self, url: str, resolved_at: float) -> float:
+        # A assinatura do CDN, e não o TTL genérico de yt-dlp, determina a
+        # reutilização. O teto de um dia também limita relógios/URLs anormais.
+        return prazo_stream(url, resolved_at, 90.0, max_age_seconds=86400.0,
+                            margin_seconds=max(10.0, float(getattr(self, "stream_expiry_margin_seconds", 60.0))))
+
+    @staticmethod
+    def _archive_segment_at(segments: list[dict], position: float) -> int:
+        for index, segment in enumerate(segments):
+            if position < float(segment["offset_seconds"]) + float(segment["duration"]):
+                return index
+        return max(0, len(segments) - 1)
+
+    def _archive_cache_store(self, cache: dict, cache_key: tuple, deadline: float, meta: dict) -> None:
+        cache.pop(cache_key, None)
+        payload = dict(meta)
+        # Estimativa conservadora para strings/dicts Python, calculada só uma
+        # vez por entrada; eviction não serializa todos os manifestos.
+        payload["_archive_cache_bytes"] = 3 * len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) + 256
+        cache[cache_key] = (deadline, payload)
+        # Metadados de manifestos grandes também contam no orçamento da RAM.
+        while len(cache) > 256 or sum(int(value[1].get("_archive_cache_bytes", 0)) for value in cache.values()) > 2 * 1024 * 1024:
+            cache.pop(next(iter(cache)))
+
+    async def _resolve_archive_segment(self, track: AgentTrack, index: int, *, force_refresh: bool = False) -> dict:
+        segment = track.archive_segments[index]
+        ref = normalize_reference(segment, int(track.archive_ref["guild_id"]))
+        if ref["channel_id"] != int(track.archive_ref["channel_id"]):
+            raise DiscordAttachmentError("A parte do áudio pertence a outro post.")
+        cache_key = (*self._archive_cache_key({**ref, "forum_id": track.archive_ref.get("forum_id", 0)}, track.archive_key), "segment")
+        cache = getattr(self, "_archive_segment_url_cache", None)
+        if cache is None:
+            cache = self._archive_segment_url_cache = {}
+        locks = getattr(self, "_archive_url_locks", None)
+        if locks is None:
+            locks = self._archive_url_locks = WeakValueDictionary()
+        lock = locks.get(cache_key)
+        if lock is None:
+            lock = locks[cache_key] = asyncio.Lock()
+        async with lock:
+            cached = cache.get(cache_key)
+            if not force_refresh and cached and cached[0] > time.monotonic() + 10.0:
+                cache.pop(cache_key, None)
+                cache[cache_key] = cached
+                return dict(cached[1])
+            raw = await self.client.http.get_message(ref["channel_id"], ref["message_id"])
+            if (not isinstance(raw, dict) or str((raw.get("author") or {}).get("id")) != str(self.client.user.id)
+                    or str(raw.get("channel_id") or ref["channel_id"]) != str(ref["channel_id"])
+                    or str(raw.get("guild_id") or ref["guild_id"]) != str(ref["guild_id"])):
+                raise DiscordAttachmentError("A parte do arquivo não pertence ao bot neste post.")
+            marker = f"music-archive-segment-v1:{track.archive_key}:{index}"
+            segment_markers = [part for embed in raw.get("embeds") or () if isinstance(embed, dict)
+                               for part in urlparse(str(embed.get("url") or "")).fragment.split("&")]
+            if index and marker not in segment_markers and str(raw.get("content") or "") != marker:
+                raise DiscordAttachmentError("Identificador da parte do arquivo inválido.")
+            attachment = next((item for item in raw.get("attachments") or () if str(item.get("id")) == str(ref["attachment_id"])), None)
+            if (not isinstance(attachment, dict) or str(attachment.get("filename") or "") != str(segment.get("filename") or "")
+                    or int(attachment.get("size") or 0) != int(segment.get("size_bytes") or 0)):
+                raise DiscordAttachmentError("O anexo não corresponde ao manifesto do arquivo.")
+            url = valid_cdn_url(attachment.get("url"))
+            # Vincula também o path assinado ao attachment verificado.
+            if not initial_discord_cdn_url(url, ref, min_remaining_seconds=0.0):
+                raise DiscordAttachmentError("A parte não tem uma URL assinada válida.")
+            meta = {**segment, "url": url}
+            now = time.monotonic()
+            self._archive_cache_store(cache, cache_key, self._archive_url_deadline(url, now), meta)
+            return meta
 
     async def _resolve_archive_attachment(self, *, track_meta: dict[str, Any], body: dict[str, Any],
                                           force_refresh: bool = False) -> AgentTrack:
@@ -624,6 +700,10 @@ class ResolucaoMixin:
             if track_meta["archive_ref"].get("forum_id") is not None:
                 ref["forum_id"] = int(track_meta["archive_ref"]["forum_id"])
                 if ref["forum_id"] <= 0 or ref["forum_id"] == ref["channel_id"]:
+                    raise ValueError
+            if track_meta["archive_ref"].get("manifest_attachment_id") is not None:
+                ref["manifest_attachment_id"] = int(track_meta["archive_ref"]["manifest_attachment_id"])
+                if ref["manifest_attachment_id"] <= 0:
                     raise ValueError
         except (KeyError, TypeError, ValueError):
             raise DiscordAttachmentError("Referência do arquivo inválida.") from None
@@ -647,15 +727,17 @@ class ResolucaoMixin:
             else:
                 cache.pop(cache_key, None)
                 raw = await self.client.http.get_message(ref["channel_id"], ref["message_id"])
+                if not isinstance(raw, dict) or str((raw.get("author") or {}).get("id")) != str(self.client.user.id):
+                    raise DiscordAttachmentError("O arquivo não foi publicado por este bot.")
+                from .archive_manifest import hydrate_archive_manifest
+                await hydrate_archive_manifest(raw)
                 meta = _archive_metadata(raw, key, int(self.client.user.id), ref)
                 signed = initial_discord_cdn_url(meta["url"], ref, min_remaining_seconds=75.0)
                 if signed:
                     now = time.monotonic()
-                    deadline = min(now + 90.0, self._stream_deadline(signed, now, 90.0))
+                    deadline = self._archive_url_deadline(signed, now)
                     if deadline > now + 10.0:
-                        cache[cache_key] = (deadline, dict(meta))
-                        if len(cache) > 256:
-                            cache.pop(next(iter(cache)))
+                        self._archive_cache_store(cache, cache_key, deadline, meta)
         track = self._agent_track_from_metadata(track_meta, body=body)
         track.archive_ref = dict(ref)
         track.attachment_ref = dict(ref)
@@ -664,11 +746,30 @@ class ResolucaoMixin:
         track.source = meta["source"] or track.source
         track.audio_stream_index = meta["audio_stream_index"]
         track.duration = meta["duration"]
+        track.audio_codec = str(meta.get("audio_codec") or track.audio_codec)
+        track.audio_channels = int(meta.get("audio_channels") or track.audio_channels)
+        track.audio_ext = str(meta.get("audio_ext") or str(meta.get("filename") or "").rsplit(".", 1)[-1] or track.audio_ext)
         if meta["audio_abr"]:
             track.audio_abr = meta["audio_abr"]
         if meta["audio_sample_rate"]:
             track.audio_sample_rate = meta["audio_sample_rate"]
         track.stream_url = meta["url"]
+        track.archive_segments = [dict(segment) for segment in meta.get("archive_segments", ())]
+        if track.archive_segments:
+            track.archive_segment_index = self._archive_segment_at(track.archive_segments, track.start_offset_seconds)
+            if track.archive_segment_index == 0:
+                segment = track.archive_segments[0]
+                track.attachment_ref = normalize_reference(segment, ref["guild_id"])
+                segment_cache = getattr(self, "_archive_segment_url_cache", None)
+                if segment_cache is None:
+                    segment_cache = self._archive_segment_url_cache = {}
+                segment_key = (*self._archive_cache_key({**track.attachment_ref, "forum_id": ref.get("forum_id", 0)}, key), "segment")
+                now = time.monotonic()
+                self._archive_cache_store(segment_cache, segment_key, self._archive_url_deadline(track.stream_url, now), {**segment, "url": track.stream_url})
+            else:
+                segment = await self._resolve_archive_segment(track, track.archive_segment_index, force_refresh=force_refresh)
+                track.stream_url = segment["url"]
+                track.attachment_ref = normalize_reference(segment, ref["guild_id"])
         track.stream_resolved_monotonic = time.monotonic()
         track.transport_hint = "discord-archive"
         return track

@@ -21,8 +21,10 @@ class BufferedPCMSource(discord.AudioSource):
     permitindo que TTS continue. Um stall prolongado vira erro recuperável.
     """
 
-    def __init__(self, source: discord.AudioSource, *, max_frames: int = 75, stall_seconds: float = 12.0) -> None:
+    def __init__(self, source: discord.AudioSource, *, max_frames: int = 75, stall_seconds: float = 12.0,
+                 preserve_partial_frames: bool = False) -> None:
         self.source = source
+        self._preserve_partial_frames = preserve_partial_frames
         self.max_frames = max(1, min(150, int(max_frames)))
         self.stall_seconds = max(0.1, min(30.0, float(stall_seconds)))
         self._frames: deque[bytes] = deque()
@@ -64,7 +66,8 @@ class BufferedPCMSource(discord.AudioSource):
                         self._eof = True
                         self._condition.notify_all()
                         return
-                    self._frames.append(frame[:FRAME_BYTES].ljust(FRAME_BYTES, b"\0"))
+                    self._frames.append(frame[:FRAME_BYTES] if self._preserve_partial_frames
+                                        else frame[:FRAME_BYTES].ljust(FRAME_BYTES, b"\0"))
                     self._peak_frames = max(self._peak_frames, len(self._frames))
                     self._condition.notify_all()
         except Exception as exc:

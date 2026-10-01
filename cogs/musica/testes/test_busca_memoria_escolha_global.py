@@ -173,7 +173,7 @@ def test_link_cria_alias_do_titulo_e_primeira_palavra_e_sobrepoe_seletor() -> No
     limpar_memoria_busca()
 
 
-def test_limite_memoria_configuravel_evicta_mais_antiga(monkeypatch) -> None:
+def test_limite_memoria_configuravel_evicta_so_ram(monkeypatch) -> None:
     from cogs.musica import configuracao as config
     from cogs.musica.busca import limpar_memoria_busca, obter_escolha_busca, registrar_selecao_busca
 
@@ -192,7 +192,11 @@ def test_limite_memoria_configuravel_evicta_mais_antiga(monkeypatch) -> None:
             now=float(idx + 1),
         )
 
-    assert obter_escolha_busca("faixa 0") is None
+    from cogs.musica.busca import memoria
+    assert len(memoria._memoria) == 3
+    assert memoria.chave_semantica_busca("faixa 0") not in memoria._memoria
+    assert obter_escolha_busca("faixa 0") is not None
+    assert len(memoria._memoria) == 3
     assert obter_escolha_busca("faixa 1") is not None
     assert obter_escolha_busca("faixa 3") is not None
     limpar_memoria_busca()

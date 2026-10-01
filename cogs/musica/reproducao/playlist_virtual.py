@@ -113,6 +113,7 @@ def payload_faixa_agent(
         "queue_item_id": str(getattr(track, "queue_item_id", "") or ""),
         "attachment_ref": dict(getattr(track, "attachment_ref", {}) or {}),
         "archive_ref": archive_ref,
+        "archive_segments": list(getattr(track, "archive_segments", ()) or ()),
         "archive_key": archive_key,
         "source_emoji": emoji,
     }

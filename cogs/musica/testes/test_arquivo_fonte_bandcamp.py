@@ -76,6 +76,11 @@ def test_vps_aceita_apenas_audio_oficial_com_titulo_e_duracao_compativeis(monkey
     resolved = resolve_bandcamp_source(PAGE, expected)
     assert resolved["stream_url"] == STREAM and resolved["source"] == "Bandcamp"
 
+    info["duration"] = 1800.0
+    expected["duration"] = 1800.0
+    assert resolve_bandcamp_source(PAGE, expected)["duration"] == 1800.0
+    info["duration"] = 110.014
+    expected["duration"] = 110
     for field, wrong in (("title", "Heaven Pierce Her - ORDER"), ("title", ""), ("duration", 220),
                          ("url", "https://127.0.0.1/audio.mp3")):
         modified = info[field]
@@ -143,7 +148,8 @@ async def test_coordenador_resolve_fonte_e_a_entrega_ao_agent(tmp_path, monkeypa
     arquivo.set_source_override(key, PAGE)
     assert not coordinator._source_agent_ready({"available": True, "version": "0.3.79"})
     assert not coordinator._source_agent_ready({"available": True, "version": "0.3.80"})
-    assert coordinator._source_agent_ready({"available": True, "version": "0.3.81"})
+    assert not coordinator._source_agent_ready({"available": True, "version": "0.3.81"})
+    assert coordinator._source_agent_ready({"available": True, "version": "0.3.82"})
 
     class Bot:
         async def wait_until_ready(self):
@@ -151,7 +157,7 @@ async def test_coordenador_resolve_fonte_e_a_entrega_ao_agent(tmp_path, monkeypa
 
     sent = []
     async def status(**_kwargs):
-        return {"available": True, "version": "0.3.81"}
+        return {"available": True, "version": "0.3.82"}
 
     async def command(action, **kwargs):
         sent.append((action, kwargs))

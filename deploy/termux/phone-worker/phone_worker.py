@@ -9415,6 +9415,11 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "cogs/musica/runtime_telefone/agente/buffer_pcm.py": ("worker", "cogs/musica/runtime_telefone/agente/buffer_pcm.py", 0o644),
     "cogs/musica/runtime_telefone/agente/preparacao_audio.py": ("worker", "cogs/musica/runtime_telefone/agente/preparacao_audio.py", 0o644),
     "cogs/musica/runtime_telefone/agente/validade_stream.py": ("worker", "cogs/musica/runtime_telefone/agente/validade_stream.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/archive_manifest.py": ("worker", "cogs/musica/runtime_telefone/agente/archive_manifest.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/archive_ogg.py": ("worker", "cogs/musica/runtime_telefone/agente/archive_ogg.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/archive_pipeline.py": ("worker", "cogs/musica/runtime_telefone/agente/archive_pipeline.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/archive_staging.py": ("worker", "cogs/musica/runtime_telefone/agente/archive_staging.py", 0o644),
+    "cogs/musica/runtime_telefone/agente/audio_segmentado.py": ("worker", "cogs/musica/runtime_telefone/agente/audio_segmentado.py", 0o644),
     "cogs/musica/runtime_telefone/agente/resolucao.py": ("worker", "cogs/musica/runtime_telefone/agente/resolucao.py", 0o644),
     "cogs/musica/runtime_telefone/agente/ytdlp_quente.py": ("worker", "cogs/musica/runtime_telefone/agente/ytdlp_quente.py", 0o644),
     "cogs/musica/runtime_telefone/agente/reproducao.py": ("worker", "cogs/musica/runtime_telefone/agente/reproducao.py", 0o644),
@@ -9451,7 +9456,9 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "teto_renderer/renderer.py": ("worker", "teto_renderer/renderer.py", 0o644),
     "scripts/validate-teto-assets.py": ("worker", "scripts/validate-teto-assets.py", 0o755),
 }
-_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example"})
+# These installation-only files remain accepted for manual/legacy updates,
+# but are not part of the immutable runtime release or its source hash.
+_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"install.sh", "accept-core-worker-on-device.sh", "README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example"})
 _PHONE_WORKER_SOURCE_HASH_CACHE: dict[str, Any] = {"signature": None, "value": ""}
 _PHONE_WORKER_SOURCE_HASH_LOCK = threading.Lock()
 

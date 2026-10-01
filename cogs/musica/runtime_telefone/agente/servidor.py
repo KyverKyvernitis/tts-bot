@@ -94,7 +94,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.81"
+AGENT_VERSION = "0.3.82"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -282,6 +282,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         # URLs assinadas são temporárias e ficam só na memória do worker.
         self._discord_verified_urls: dict[str, tuple[str, float]] = {}
         self._archive_url_cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
+        self._archive_segment_url_cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
         self._archive_url_locks: WeakValueDictionary[tuple, asyncio.Lock] = WeakValueDictionary()
         self._archive_init()
         intents = discord.Intents.none()
@@ -1115,6 +1116,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
             background = (
                 ([self._archive_task] if self._archive_task is not None else [])
+                + ([self._archive_temp_cleanup_task] if getattr(self, "_archive_temp_cleanup_task", None) is not None else [])
                 +
                 list(self._idle_disconnect_tasks.values())
                 + list(self._voice_presence_disconnect_tasks.values())
@@ -1179,6 +1181,9 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             self.log("api_ready", url=f"http://{self.host}:{self.port}", token="sim" if self.token else "não")
             if not self.discord_token:
                 raise RuntimeError("defina MUSIC_AGENT_BOT_TOKEN, DISCORD_TOKEN ou BOT_TOKEN no worker")
+            self._archive_temp_cleanup_task = asyncio.create_task(
+                self._archive_temp_maintenance(), name="music-archive-temp-cleanup"
+            )
             await self.client.start(self.discord_token)
         finally:
             if self._runner is runner:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import sqlite3
 import threading
@@ -17,7 +18,17 @@ from .memoria import _db_path, _track_payload
 log = logging.getLogger(__name__)
 _learned_lock = threading.Lock()
 _new_learned: dict[str, tuple[dict, float]] = {}
-_MAX_TRANSIENT_FAILURES = 5
+_SCHEMA_VERSION = 11
+_schema_lock = threading.Lock()
+_RETRY_MAX_SECONDS = 6 * 3600
+
+
+class _ArchiveConnection(sqlite3.Connection):
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
 
 
 def _stable_source(url: str) -> str:
@@ -61,10 +72,8 @@ def _bandcamp_slug(payload: dict) -> str:
 
 
 def _audit(db: sqlite3.Connection, key: str, event: str, *, reason: str = "", source: str = "", revision: str = "") -> None:
-    cursor = db.execute("INSERT INTO arquivo_eventos(chave, ocorrido_em, evento, motivo, fonte, revisao) VALUES (?, ?, ?, ?, ?, ?)",
-                        (key, time.time(), event[:30], reason[:48], _stable_source(source), revision[:60]))
-    if cursor.lastrowid % 128 == 0:
-        db.execute("DELETE FROM arquivo_eventos WHERE id <= (SELECT COALESCE(MAX(id), 0)-2000 FROM arquivo_eventos)")
+    db.execute("INSERT INTO arquivo_eventos(chave, ocorrido_em, evento, motivo, fonte, revisao) VALUES (?, ?, ?, ?, ?, ?)",
+               (key, time.time(), event[:30], reason[:48], _stable_source(source), revision[:60]))
 
 
 def _url_key(url: str) -> str:
@@ -90,6 +99,23 @@ def _url_key(url: str) -> str:
     return hashlib.sha256(url.lower().encode("utf-8")).hexdigest()[:32]
 
 
+def _url_aliases(url: str) -> tuple[str, ...]:
+    """Aliases canônicos novos sem renomear chaves publicadas no fórum."""
+    keys = [_url_key(url)]
+    identity = _public_identity(url)
+    if identity and identity[0] == "open.spotify.com":
+        keys.append(_url_key(f"https://open.spotify.com{identity[1]}"))
+    elif identity and identity[0] == "youtube" and identity[1]:
+        keys.append(_url_key(f"https://www.youtube.com/watch?v={identity[1]}"))
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
+def _remember_urls(db: sqlite3.Connection, key: str, urls) -> None:
+    for url in urls:
+        for alias in _url_aliases(url):
+            db.execute("INSERT OR IGNORE INTO arquivo_aliases VALUES (?, ?)", (alias, key))
+
+
 def media_key(track) -> str:
     if getattr(track, "is_live", False) or (getattr(track, "attachment_ref", None) and not getattr(track, "archive_ref", None)):
         return ""
@@ -99,14 +125,7 @@ def media_key(track) -> str:
     return _url_key(getattr(track, "webpage_url", "")) or _url_key(original)
 
 
-def _db() -> sqlite3.Connection:
-    # O comando que limpa escolhas não pode apagar o canal configurado nem os
-    # IDs dos anexos já enviados. O sufixo preserva o isolamento de worktrees.
-    memory_path: Path = _db_path()
-    path = memory_path.with_name(memory_path.stem + "-arquivo.sqlite3")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(str(path), timeout=2)
-    db.execute("PRAGMA busy_timeout=2000")
+def _initialize_db(db: sqlite3.Connection) -> None:
     db.execute("CREATE TABLE IF NOT EXISTS arquivo_config (id INTEGER PRIMARY KEY CHECK (id=1), guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, channel_type TEXT NOT NULL DEFAULT 'text')")
     db.execute("""CREATE TABLE IF NOT EXISTS arquivo_musicas (
         chave TEXT PRIMARY KEY, track_json TEXT NOT NULL, tocadas INTEGER NOT NULL DEFAULT 0,
@@ -162,7 +181,61 @@ def _db() -> sqlite3.Connection:
         chave TEXT NOT NULL, message_id INTEGER NOT NULL, previous_json TEXT NOT NULL,
         tentativa_em REAL NOT NULL DEFAULT 0, PRIMARY KEY(chave, message_id)
     )""")
-    return db
+    if db.execute("PRAGMA user_version").fetchone()[0] < _SCHEMA_VERSION:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(arquivo_musicas)")}
+        if "enfileirada_em" not in columns:
+            db.execute("ALTER TABLE arquivo_musicas ADD COLUMN enfileirada_em REAL NOT NULL DEFAULT 0")
+        if "retry_reference_json" not in columns:
+            db.execute("ALTER TABLE arquivo_musicas ADD COLUMN retry_reference_json TEXT NOT NULL DEFAULT ''")
+        db.execute("UPDATE arquivo_musicas SET enfileirada_em=aprendida_em WHERE enfileirada_em=0 AND aprendida_em>0")
+        # Os limites antigos eram decisões locais, não indisponibilidade real.
+        db.execute("""UPDATE arquivo_musicas SET estado='waiting', tentativa_em=0, falhas=0,
+                   motivo_falha='' WHERE reference_json='' AND
+                   (estado='paused' OR (estado='ineligible' AND motivo_falha='duration_limit')
+                    OR (estado='too_large' AND motivo_falha='size_limit'))""")
+        cursor = db.execute("SELECT chave, track_json FROM arquivo_musicas")
+        while rows := cursor.fetchmany(256):
+            for key, raw in rows:
+                try:
+                    payload = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                _remember_urls(db, key, (payload.get("webpage_url"), payload.get("original_url")))
+        db.execute("CREATE INDEX IF NOT EXISTS arquivo_pendentes ON arquivo_musicas(tentativa_em, enfileirada_em, chave)")
+        db.execute("""CREATE INDEX IF NOT EXISTS arquivo_fila_nova ON arquivo_musicas(enfileirada_em, chave)
+                   WHERE reference_json='' AND estado NOT IN ('too_large', 'ineligible', 'unavailable', 'paused')
+                   AND (aprendida_em>0 OR tocadas>=1)""")
+        db.execute("""CREATE INDEX IF NOT EXISTS arquivo_fila_atualizacoes ON arquivo_musicas(enfileirada_em, chave)
+                   WHERE reference_json!='' AND (aprendida_em>0 OR tocadas>=1)""")
+        db.execute("CREATE INDEX IF NOT EXISTS arquivo_reproducoes_data ON arquivo_reproducoes(registrado_em)")
+        db.execute("CREATE INDEX IF NOT EXISTS arquivo_limpezas_pendentes ON arquivo_limpezas(tentativa_em, chave)")
+        db.execute("CREATE INDEX IF NOT EXISTS arquivo_eventos_chave_id ON arquivo_eventos(chave, id DESC)")
+        db.execute("CREATE INDEX IF NOT EXISTS arquivo_falhas ON arquivo_musicas(estado, ultima_tentativa_em DESC, chave)")
+        db.execute("CREATE INDEX IF NOT EXISTS arquivo_escolhas_data ON arquivo_musicas(aprendida_em, chave)")
+        db.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+
+
+def _db() -> sqlite3.Connection:
+    # Configuração e IDs sobrevivem à limpeza da memória de escolhas.
+    memory_path: Path = _db_path()
+    path = memory_path.with_name(memory_path.stem + "-arquivo.sqlite3")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path), timeout=5, factory=_ArchiveConnection)
+    db.execute("PRAGMA busy_timeout=5000")
+    db.execute("PRAGMA synchronous=NORMAL")
+    try:
+        if db.execute("PRAGMA user_version").fetchone()[0] < _SCHEMA_VERSION:
+            with _schema_lock:
+                if db.execute("PRAGMA user_version").fetchone()[0] < _SCHEMA_VERSION:
+                    db.execute("PRAGMA journal_mode=WAL")
+                    _initialize_db(db)
+                    db.commit()
+        return db
+    except Exception:
+        db.close()
+        raise
 
 
 def channel() -> tuple[int, int]:
@@ -279,15 +352,23 @@ def record_play(track, marker: str) -> bool:
         duration = float(track.duration)
     except (TypeError, ValueError):
         return False
-    if not key or not 0 < duration <= 600 or len(marker) > 128:
+    if not key or not math.isfinite(duration) or duration <= 0 or len(marker) > 128:
         return False
     with _db() as db:
         if not db.execute("INSERT OR IGNORE INTO arquivo_reproducoes VALUES (?, ?)", (marker, time.time())).rowcount:
             return False
-        previous = db.execute("SELECT fonte_estavel, estado, reference_json FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
-        db.execute("""INSERT INTO arquivo_musicas(chave, track_json, tocadas) VALUES (?, ?, 1)
+        previous = db.execute("SELECT fonte_estavel, estado, reference_json, track_json FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
+        payload = _track_payload(track)
+        if previous:
+            try:
+                old_payload = json.loads(previous[3])
+                if _metadata_score(old_payload) > _metadata_score(payload):
+                    payload = old_payload
+            except (TypeError, ValueError):
+                pass
+        db.execute("""INSERT INTO arquivo_musicas(chave, track_json, tocadas, enfileirada_em) VALUES (?, ?, 1, ?)
             ON CONFLICT(chave) DO UPDATE SET tocadas=MIN(2, tocadas+1), track_json=excluded.track_json""",
-            (key, json.dumps(_track_payload(track), ensure_ascii=False),))
+            (key, json.dumps(payload, ensure_ascii=False), time.time()))
         source = _stable_source(getattr(track, "webpage_url", ""))
         if source and (previous is None or previous[0] != source):
             if previous and previous[1] in {"unavailable", "paused"} and not previous[2]:
@@ -296,37 +377,29 @@ def record_play(track, marker: str) -> bool:
             else:
                 db.execute("UPDATE arquivo_musicas SET fonte_estavel=? WHERE chave=?", (source, key))
             _audit(db, key, "fonte_observada", source=source)
-        for url in (getattr(track, "webpage_url", ""), getattr(track, "original_url", "")):
-            alias = _url_key(url)
-            if alias:
-                db.execute("INSERT OR REPLACE INTO arquivo_aliases VALUES (?, ?)", (alias, key))
+        _remember_urls(db, key, (getattr(track, "webpage_url", ""), getattr(track, "original_url", "")))
         db.execute("DELETE FROM arquivo_reproducoes WHERE registrado_em < ?", (time.time() - 90 * 86400,))
     return True
 
 
 def note_learned(tracks) -> None:
-    """A escolha já foi persistida; avise o coordenador sem I/O no play."""
-    with _learned_lock:
-        for track in tracks:
-            key = media_key(track)
-            if key:
-                _new_learned[key] = (_track_payload(track), time.time())
-        # A varredura da memória persistida recupera qualquer item descartado.
-        while len(_new_learned) > 2048:
-            _new_learned.pop(next(iter(_new_learned)))
+    """Compatibilidade: a origem durável dos jobs agora é o outbox da memória."""
+    # Não manter outra cópia de playlists em RAM. A memória escreve o outbox
+    # na mesma transação das escolhas, antes desta notificação.
 
 
-def flush_learned() -> int:
-    with _learned_lock:
-        items = list(_new_learned.items())
-        _new_learned.clear()
-    try:
-        return register_learned_batch([(payload, stamp) for _key, (payload, stamp) in items])
-    except Exception:
-        with _learned_lock:
-            for key, value in items:
-                _new_learned.setdefault(key, value)
-        raise
+def flush_learned(limit: int = 128) -> int:
+    """Entrega e confirma uma página; reinício/falha pode repetir sem perder jobs."""
+    from .memoria import obter_pendencias_arquivamento, confirmar_pendencia_arquivamento
+    items = obter_pendencias_arquivamento(limit=limit)
+    if not items:
+        return 0
+    registered = register_learned_batch([(_track_payload(track), stamp) for _key, track, stamp in items])
+    # Somente depois do commit do catálogo. Ack condicionado ao timestamp
+    # observado não apaga uma escolha nova que chegou durante o registro.
+    for key, _track, stamp in items:
+        confirmar_pendencia_arquivamento(key, registrado_em=stamp)
+    return registered
 
 
 def learned_page(after: str = "", limit: int = 128) -> tuple[str, list[tuple[dict, float]]]:
@@ -390,7 +463,7 @@ def register_learned_batch(items: list[tuple[dict, float]]) -> int:
             duration = float(track.duration or 0)
         except (TypeError, ValueError):
             duration = 0
-        if track.is_live or duration > 600 or duration < 0:
+        if track.is_live or not math.isfinite(duration) or duration < 0:
             continue
         previous = candidates.get(key)
         if previous is None or (_metadata_score(payload), stamp) > (_metadata_score(previous[0]), previous[1]):
@@ -403,8 +476,8 @@ def register_learned_batch(items: list[tuple[dict, float]]) -> int:
             row = db.execute("SELECT track_json, aprendida_em, fonte_estavel, estado, reference_json FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
             selected = row is None
             if row is None:
-                db.execute("INSERT INTO arquivo_musicas(chave, track_json, aprendida_em) VALUES (?, ?, ?)",
-                           (key, encoded, stamp))
+                db.execute("INSERT INTO arquivo_musicas(chave, track_json, aprendida_em, enfileirada_em) VALUES (?, ?, ?, ?)",
+                           (key, encoded, stamp, time.time()))
             else:
                 try:
                     old = json.loads(row[0])
@@ -417,6 +490,7 @@ def register_learned_batch(items: list[tuple[dict, float]]) -> int:
                 else:
                     db.execute("UPDATE arquivo_musicas SET aprendida_em=MAX(aprendida_em, ?) WHERE chave=?",
                                (stamp, key))
+            _remember_urls(db, key, (payload.get("webpage_url"), payload.get("original_url")))
             source = _stable_source(payload.get("webpage_url"))
             if source and (row is None or not row[2] or selected) and (row is None or row[2] != source):
                 if row and row[3] in {"unavailable", "paused"} and not row[4]:
@@ -431,20 +505,24 @@ def register_learned_batch(items: list[tuple[dict, float]]) -> int:
 def pending(*, prefer_new: bool = True) -> dict | None:
     if channel() == (0, 0):
         return None
-    version = 7 if channel_type() == "forum" else 2
+    version = 8 if channel_type() == "forum" else 2
     with _db() as db:
-        row = db.execute("""SELECT chave, track_json, reference_json, estado, fonte_arquivo, fonte_estavel FROM arquivo_musicas
-            WHERE (aprendida_em>0 OR tocadas>=1)
-            AND ((reference_json='' AND estado NOT IN ('too_large', 'ineligible', 'unavailable', 'paused'))
-                OR (reference_json!='' AND apresentacao<?)) AND tentativa_em<=?
-            ORDER BY CASE WHEN (reference_json='')=? THEN 0 ELSE 1 END,
-                     tentativa_em, aprendida_em DESC, chave LIMIT 1""",
-                         (version, time.time(), int(prefer_new))).fetchone()
+        row = None
+        for new in (prefer_new, not prefer_new):
+            clause = ("reference_json='' AND estado NOT IN ('too_large', 'ineligible', 'unavailable', 'paused')"
+                      if new else "reference_json!='' AND apresentacao<?")
+            args = (time.time(),) if new else (version, time.time())
+            row = db.execute("""SELECT chave, track_json, reference_json, estado,
+                             fonte_arquivo, fonte_estavel, retry_reference_json
+                             FROM arquivo_musicas WHERE (aprendida_em>0 OR tocadas>=1) AND """
+                             + clause + " AND tentativa_em<=? ORDER BY enfileirada_em, chave LIMIT 1", args).fetchone()
+            if row:
+                break
     if not row:
         return None
     try:
         return {"key": row[0], "track": json.loads(row[1]),
-                "reference": json.loads(row[2]) if row[2] else {}, "retry": row[3] in {"working", "failed"},
+                "reference": json.loads(row[6] or row[2]) if row[6] or row[2] else {}, "retry": row[3] in {"working", "failed"},
                 "source_override": row[4], "source_known": row[5]}
     except (TypeError, ValueError):
         log.warning("[music/archive] metadados inválidos: %s", row[0])
@@ -453,8 +531,37 @@ def pending(*, prefer_new: bool = True) -> dict | None:
 
 def mark_attempt(key: str, *, source: str = "", revision: str = "") -> None:
     with _db() as db:
-        db.execute("UPDATE arquivo_musicas SET estado='working', ultima_tentativa_em=? WHERE chave=?", (time.time(), key))
+        db.execute("UPDATE arquivo_musicas SET estado='working', ultima_tentativa_em=? WHERE chave=?",
+                   (time.time(), key))
         _audit(db, key, "tentativa", source=source, revision=revision)
+
+
+def _reference_valid(ref: dict, guild_id: int, channel_id: int, kind: str) -> bool:
+    try:
+        ids = {field: int(ref.get(field) or 0) for field in ("guild_id", "channel_id", "message_id", "attachment_id")}
+        if any(value <= 0 for value in ids.values()) or ids["guild_id"] != guild_id:
+            return False
+        if kind == "forum":
+            if int(ref.get("forum_id") or 0) != channel_id or ids["channel_id"] == channel_id:
+                return False
+        elif ids["channel_id"] != channel_id:
+            return False
+        segments = ref.get("segments", [])
+        if not isinstance(segments, list):
+            return False
+        for segment in segments:
+            if not isinstance(segment, dict):
+                return False
+            reference = segment.get("reference") or segment
+            if (not isinstance(reference, dict)
+                    or any(int(reference.get(field) or 0) <= 0 for field in ("message_id", "attachment_id"))
+                    or int(reference.get("guild_id") or 0) != guild_id
+                    or int(reference.get("channel_id") or 0) != ids["channel_id"]
+                    or (kind == "forum" and int(reference.get("forum_id") or 0) != channel_id)):
+                return False
+        return True
+    except (ValueError, TypeError, OverflowError):
+        return False
 
 
 def mark_result(key: str, result: dict) -> None:
@@ -465,25 +572,26 @@ def mark_result(key: str, result: dict) -> None:
     ref = result.get("reference") if isinstance(result.get("reference"), dict) else {}
     configured_guild, configured_channel = channel()
     kind = channel_type()
-    same_target = ((int(ref.get("forum_id") or 0) == configured_channel
-                    and int(ref.get("channel_id") or 0) != configured_channel
-                    and int(result.get("presentation") or 0) >= 3) if kind == "forum"
-                   else int(ref.get("channel_id") or 0) == configured_channel)
-    if (status == "done" and all(int(ref.get(field) or 0) > 0 for field in ("guild_id", "channel_id", "message_id", "attachment_id"))
-            and int(ref["guild_id"]) == configured_guild and same_target):
+    if status == "done" and _reference_valid(ref, configured_guild, configured_channel, kind):
         with _db() as db:
-            version = max(1, min(7, int(result.get("presentation") or 1)))
-            refresh_at = time.time() + 3600 if kind == "forum" and version < 7 else 0
+            version = max(1, min(8, int(result.get("presentation") or 1)))
+            refresh_at = time.time() + 3600 if kind == "forum" and version < 8 else 0
             old_row = db.execute("SELECT reference_json, track_json, fonte_arquivo FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
             old = json.loads(old_row[0]) if old_row and old_row[0] else {}
-            cleanup = old if old and old != ref and int(old.get("guild_id") or 0) == configured_guild else {}
+            same_channel = bool(old and int(old.get("channel_id") or 0) == int(ref["channel_id"]))
+            same_location = same_channel and (kind == "forum" or int(old.get("message_id") or 0) == int(ref["message_id"]))
+            # Atualizar manifesto/segmentos na mesma thread não torna a thread
+            # anterior descartável: apagá-la removeria o arquivo recém-validado.
+            cleanup = old if old and not same_location and int(old.get("guild_id") or 0) == configured_guild else {}
             source = _stable_source(result.get("source_url"))
             db.execute("""UPDATE arquivo_musicas SET reference_json=?, emoji=?, estado='done',
-                apresentacao=?, tentativa_em=?, falhas=0, motivo_falha='',
+                apresentacao=?, tentativa_em=?, falhas=0, motivo_falha='', retry_reference_json='',
                 fonte_estavel=CASE WHEN ?!='' THEN ? ELSE fonte_estavel END,
                 revisao_agente=? WHERE chave=?""",
                 (json.dumps(ref), str(result.get("emoji") or "")[:100], version, refresh_at,
                  source, source, revision, key))
+            if source:
+                _remember_urls(db, key, (source,))
             _audit(db, key, "concluido", source=source, revision=revision)
             if source and old_row and _stable_source(old_row[2]) == source:
                 host = (urlsplit(source).hostname or "").lower()
@@ -503,23 +611,26 @@ def mark_result(key: str, result: dict) -> None:
         row = db.execute("SELECT falhas, fonte_arquivo, fonte_estavel FROM arquivo_musicas WHERE chave=?", (key,)).fetchone()
         if row is None:
             return
+        if ref and _reference_valid(ref, configured_guild, configured_channel, kind):
+            db.execute("UPDATE arquivo_musicas SET retry_reference_json=? WHERE chave=?",
+                       (json.dumps(ref, ensure_ascii=False), key))
         failures = int(row[0]) + 1
         if status == "unavailable" and reason in {"no_match", "metadata_mismatch", "source_mismatch", "source_unavailable"}:
             state, retry_at = "unavailable", 0
         elif status in {"too_large", "ineligible"}:
             state, retry_at = status, 0
-        elif failures >= _MAX_TRANSIENT_FAILURES:
-            state, retry_at = "paused", 0
         else:
+            # Falha de rede/upload nunca elimina o trabalho. O teto limita
+            # pressão sobre os provedores; não limita o número de tentativas.
             state = "failed"
-            retry_at = time.time() + min(1800, 30 * 2 ** min(6, failures - 1))
+            retry_at = time.time() + min(_RETRY_MAX_SECONDS, 30 * 2 ** min(10, failures - 1))
         if status == "done":
             reason = "invalid_reference"
         if not result.get("reason") and state == "unavailable":
             reason = "erro_desconhecido"
         db.execute("""UPDATE arquivo_musicas SET falhas=?, estado=?, motivo_falha=?,
-                   tentativa_em=?, revisao_agente=? WHERE chave=?""",
-                   (failures, state, reason, retry_at, revision, key))
+                   tentativa_em=?, enfileirada_em=?, revisao_agente=? WHERE chave=?""",
+                   (failures, state, reason, retry_at, retry_at, revision, key))
         _audit(db, key, state, reason=reason, source=row[1] or row[2], revision=revision)
         log.info("[music/archive] resultado | chave=%s estado=%s motivo=%s tentativas=%s", key, state, reason, failures)
 
@@ -545,7 +656,7 @@ def archived(track) -> tuple[dict, str, str]:
     if not key:
         return {}, "", ""
     with _db() as db:
-        row = db.execute("""SELECT chave, reference_json, emoji FROM arquivo_musicas
+        row = db.execute("""SELECT chave, reference_json, emoji, track_json, fonte_estavel FROM arquivo_musicas
             WHERE chave=COALESCE((SELECT chave FROM arquivo_aliases WHERE alias=?), ?)""", (key, key)).fetchone()
         configured = db.execute("SELECT guild_id, channel_id, channel_type FROM arquivo_config WHERE id=1").fetchone()
     if not row or not row[0] or configured is None:
@@ -556,13 +667,97 @@ def archived(track) -> tuple[dict, str, str]:
             return {}, "", ""
         if configured[2] != "forum" and int(ref["channel_id"]) != configured[1]:
             return {}, "", ""
+        payload = json.loads(row[3])
+        known = {_public_identity(payload.get("webpage_url")),
+                 _public_identity(payload.get("original_url")), _public_identity(row[4])}
+        requested = {_public_identity(getattr(track, "webpage_url", "")),
+                     _public_identity(getattr(track, "original_url", ""))}
+        if not (known - {None}) & (requested - {None}):
+            return {}, "", ""
         return ref, row[2], row[0]
     except (ValueError, TypeError, KeyError):
         return {}, "", ""
 
 
+def _public_identity(url: str) -> tuple | None:
+    """Confirma a URL exata antes do atalho, inclusive IDs sensíveis a caixa.
+
+    As chaves legadas ignoravam algumas queries. Esta checagem impede que
+    Apple Music (?i=faixa) ou uma fonte genérica herdem o áudio de outra faixa.
+    """
+    try:
+        parsed = urlsplit(str(url or "").strip())
+        host = (parsed.hostname or "").lower().removeprefix("www.")
+        if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password or parsed.port is not None:
+            return None
+        path = parsed.path.rstrip("/")
+        query = parse_qs(parsed.query)
+        if host in {"youtube.com", "m.youtube.com", "music.youtube.com"} and path == "/watch":
+            return "youtube", query.get("v", [""])[0]
+        if host == "youtu.be":
+            return "youtube", path.lstrip("/")
+        if host in {"youtube.com", "m.youtube.com", "music.youtube.com"}:
+            short = re.fullmatch(r"/(?:shorts|live|embed)/([A-Za-z0-9_-]{11})", path)
+            if short:
+                return "youtube", short.group(1)
+        if host == "open.spotify.com":
+            path = re.sub(r"^/intl-[^/]+/", "/", path)
+            return host, path
+        if host in {"soundcloud.com", "deezer.com"} or host.endswith(".bandcamp.com"):
+            return host, path
+        if host == "music.apple.com":
+            return host, path, query.get("i", [""])[0]
+        meaningful = tuple(sorted((name, tuple(values)) for name, values in query.items()
+                                  if not name.lower().startswith("utm_") and name.lower() not in {"fbclid", "gclid"}))
+        return host, path, meaningful
+    except (ValueError, TypeError):
+        return None
+
+
+def archived_track_for_url(url: str, *, requester_id: int = 0, requester_name: str = "", guild_id: int = 0):
+    """Resolve um link conhecido pelo índice do fórum, sem consultar provedores."""
+    from .memoria import _track_from_payload
+    aliases = _url_aliases(url)
+    if not aliases:
+        return None
+    with _db() as db:
+        row = None
+        for alias in aliases:
+            row = db.execute("""SELECT chave, track_json, reference_json, emoji, fonte_estavel FROM arquivo_musicas
+                WHERE chave=COALESCE((SELECT chave FROM arquivo_aliases WHERE alias=?), ?)
+                AND reference_json!=''""", (alias, alias)).fetchone()
+            if row is not None:
+                break
+        configured = db.execute("SELECT guild_id, channel_id, channel_type FROM arquivo_config WHERE id=1").fetchone()
+    if row is None or configured is None or (guild_id and int(configured[0]) != int(guild_id)):
+        return None
+    try:
+        payload, ref = json.loads(row[1]), json.loads(row[2])
+        if not isinstance(payload, dict) or not isinstance(ref, dict) or int(ref.get("guild_id") or 0) != int(configured[0]):
+            return None
+        requested = _public_identity(url)
+        if requested is None or requested not in {
+            _public_identity(payload.get("webpage_url")),
+            _public_identity(payload.get("original_url")),
+            _public_identity(row[4]),
+        }:
+            return None
+        # Referências do fórum anterior no mesmo guild continuam tocáveis
+        # durante uma migração; o runtime valida o servidor novamente.
+        if configured[2] != "forum" and int(ref.get("channel_id") or 0) != int(configured[1]):
+            return None
+        track = _track_from_payload(payload)
+        track.requester_id = int(requester_id or 0)
+        track.requester_name = str(requester_name or "")
+        track.archive_ref = ref
+        track.source_emoji = str(row[3] or "")
+        return track
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return None
+
+
 def counts() -> dict[str, int]:
-    version = 7 if channel_type() == "forum" else 2
+    version = 8 if channel_type() == "forum" else 2
     with _db() as db:
         rows = db.execute("SELECT estado, COUNT(*) FROM arquivo_musicas GROUP BY estado").fetchall()
         learned = db.execute("SELECT COUNT(*) FROM arquivo_musicas WHERE aprendida_em>0 OR tocadas>0").fetchone()[0]
@@ -579,14 +774,19 @@ def counts() -> dict[str, int]:
             "refresh": int(refresh), "cleanup": int(cleanup)}
 
 
-def failures(limit: int = 8, offset: int = 0) -> list[dict]:
-    """Resumo leve para o dono, sem URLs temporárias nem logs brutos."""
+def failures(limit: int = 8, offset: int = 0, *, after: tuple[float, str] | None = None) -> list[dict]:
+    """Resumo do dono; cursor dispensa OFFSET crescente em acervos grandes."""
+    clause = ""
+    args: list = []
+    if after is not None:
+        clause = " AND (ultima_tentativa_em<? OR (ultima_tentativa_em=? AND chave>?))"
+        args.extend((after[0], after[0], after[1]))
+    args.extend((max(1, min(20, limit)), max(0, int(offset))))
     with _db() as db:
         rows = db.execute("""SELECT chave, track_json, estado, motivo_falha, falhas,
             tentativa_em, ultima_tentativa_em, fonte_arquivo, fonte_estavel
-            FROM arquivo_musicas WHERE reference_json='' AND estado IN ('failed', 'paused', 'unavailable', 'too_large', 'ineligible')
-            ORDER BY ultima_tentativa_em DESC, chave LIMIT ? OFFSET ?""",
-            (max(1, min(20, limit)), max(0, min(1000, offset)))).fetchall()
+            FROM arquivo_musicas WHERE reference_json='' AND estado IN ('failed', 'paused', 'unavailable', 'too_large', 'ineligible')"""
+            + clause + " ORDER BY ultima_tentativa_em DESC, chave LIMIT ? OFFSET ?", args).fetchall()
     result = []
     for key, raw, state, reason, attempts, retry_at, last_at, override, known in rows:
         try:
@@ -600,16 +800,28 @@ def failures(limit: int = 8, offset: int = 0) -> list[dict]:
     return result
 
 
-def history(key: str, limit: int = 8, offset: int = 0) -> list[dict]:
+def failure_cursor(entry: dict) -> str:
+    return f"{float(entry['last_at']).hex()}:{entry['key']}"
+
+
+def parse_failure_cursor(cursor: str) -> tuple[float, str]:
+    stamp, key = str(cursor).rsplit(":", 1)
+    number = float.fromhex(stamp)
+    if not math.isfinite(number) or number < 0 or not re.fullmatch(r"[a-f0-9]{32}", key):
+        raise ValueError("cursor de falhas inválido")
+    return number, key
+
+
+def history(key: str, limit: int = 8, offset: int = 0, *, before_id: int = 0) -> list[dict]:
     key = str(key or "").strip().lower()
     if not re.fullmatch(r"[a-f0-9]{32}", key):
         return []
     with _db() as db:
-        rows = db.execute("""SELECT ocorrido_em, evento, motivo, fonte, revisao
-            FROM arquivo_eventos WHERE chave=? ORDER BY id DESC LIMIT ? OFFSET ?""",
-            (key, max(1, min(20, limit)), max(0, min(1000, offset)))).fetchall()
-    return [{"at": at, "event": event, "reason": reason, "source": source, "revision": revision}
-            for at, event, reason, source, revision in rows]
+        rows = db.execute("""SELECT ocorrido_em, evento, motivo, fonte, revisao, id
+            FROM arquivo_eventos WHERE chave=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (key, max(0, int(before_id)), max(0, int(before_id)), max(1, min(20, limit)), max(0, int(offset)))).fetchall()
+    return [{"at": at, "event": event, "reason": reason, "source": source, "revision": revision, "id": event_id}
+            for at, event, reason, source, revision, event_id in rows]
 
 
 def cleanup_pending() -> dict | None:

@@ -55,6 +55,11 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("cogs/musica/runtime_telefone/agente/buffer_pcm.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/preparacao_audio.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/validade_stream.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/archive_manifest.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/archive_ogg.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/archive_pipeline.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/archive_staging.py", 0o644),
+    ("cogs/musica/runtime_telefone/agente/audio_segmentado.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/resolucao.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/ytdlp_quente.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/reproducao.py", 0o644),
@@ -72,16 +77,11 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("cogs/musica/runtime_telefone/termux/__init__.py", 0o644),
     ("cogs/musica/runtime_telefone/termux/integracao-worker.sh", 0o755),
     ("cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh", 0o755),
-    ("cogs/musica/runtime_telefone/termux/musica.env.example", 0o600),
     ("start-phone-worker.sh", 0o755),
     ("watch-phone-worker.sh", 0o755),
     ("pair-phone-worker.sh", 0o755),
     ("repair-phone-worker.sh", 0o755),
-    ("accept-core-worker-on-device.sh", 0o755),
     ("bootstrap-phone-worker.sh", 0o755),
-    ("install.sh", 0o755),
-    ("README.md", 0o644),
-    ("phone-worker.env.example", 0o600),
     ("teto_renderer/__init__.py", 0o644),
     ("teto_renderer/errors.py", 0o644),
     ("teto_renderer/cache.py", 0o644),
@@ -90,6 +90,16 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("teto_renderer/prosody.py", 0o644),
     ("teto_renderer/renderer.py", 0o644),
     ("scripts/validate-teto-assets.py", 0o755),
+)
+# Installation and documentation remain in the checkout and SSH installer.
+# They are not required to boot an immutable runtime release. Keeping them
+# separate leaves the complete runtime within bootstrap 1.0.0's 64-member ZIP.
+PHONE_WORKER_INSTALLATION_FILES = (
+    ("install.sh", 0o755),
+    ("accept-core-worker-on-device.sh", 0o755),
+    ("README.md", 0o644),
+    ("phone-worker.env.example", 0o600),
+    ("cogs/musica/runtime_telefone/termux/musica.env.example", 0o600),
 )
 PHONE_WORKER_UPDATE_ARCHIVE_MIN_VERSION = "1.11.0"
 PHONE_WORKER_BOOTSTRAP_MIN_VERSION = "1.0.0"
@@ -115,6 +125,11 @@ PHONE_WORKER_DOMAIN_SOURCE_TARGETS = frozenset({
     "cogs/musica/runtime_telefone/agente/buffer_pcm.py",
     "cogs/musica/runtime_telefone/agente/preparacao_audio.py",
     "cogs/musica/runtime_telefone/agente/validade_stream.py",
+    "cogs/musica/runtime_telefone/agente/archive_manifest.py",
+    "cogs/musica/runtime_telefone/agente/archive_ogg.py",
+    "cogs/musica/runtime_telefone/agente/archive_pipeline.py",
+    "cogs/musica/runtime_telefone/agente/archive_staging.py",
+    "cogs/musica/runtime_telefone/agente/audio_segmentado.py",
     "cogs/musica/runtime_telefone/agente/resolucao.py",
     "cogs/musica/runtime_telefone/agente/ytdlp_quente.py",
     "cogs/musica/runtime_telefone/agente/reproducao.py",
@@ -134,7 +149,7 @@ PHONE_WORKER_DOMAIN_SOURCE_TARGETS = frozenset({
     "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh",
     "cogs/musica/runtime_telefone/termux/musica.env.example",
 })
-PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example"})
+PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset(name for name, _mode in PHONE_WORKER_INSTALLATION_FILES)
 PHONE_WORKER_SOURCE_FILES = tuple(
     item for item in PHONE_WORKER_FILES if item[0] not in PHONE_WORKER_SOURCE_HASH_EXCLUDED
 )
@@ -493,7 +508,9 @@ def _canonical_phone_worker_root() -> Path:
 
 def _build_worker_update_payload(*, scripts_only: bool = False) -> dict[str, Any]:
     src = _canonical_phone_worker_root()
-    targets = PHONE_WORKER_FILES if not scripts_only else tuple(item for item in PHONE_WORKER_FILES if item[0].endswith(".sh"))
+    targets = PHONE_WORKER_FILES if not scripts_only else tuple(
+        item for item in (*PHONE_WORKER_FILES, *PHONE_WORKER_INSTALLATION_FILES) if item[0].endswith(".sh")
+    )
     files: list[dict[str, Any]] = []
     missing: list[str] = []
     for name, mode in targets:

@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from cogs.musica.agente_telefone.conversao import faixa_do_payload
+from cogs.musica.interface import componentes
 from cogs.musica.metadados.fontes.spotify_publico_parser import parse_embed_document
+from cogs.musica.nucleo.estado import MusicGuildState
+from cogs.musica.nucleo.modelos import MusicTrack
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin
 
 
@@ -98,13 +101,42 @@ def test_faixa_spotify_resolvida_expoe_youtube_como_fonte_e_spotify_como_origem(
 
 def test_interface_prioriza_fonte_real_e_nao_expoe_detalhes_de_implementacao() -> None:
     root = Path(__file__).resolve().parents[1]
-    components = (root / "interface" / "componentes.py").read_text(encoding="utf-8")
+    source = (root / "interface" / "componentes.py").read_text(encoding="utf-8")
+    track = MusicTrack(
+        title="Cavetown - Juliet",
+        webpage_url=SPOTIFY_PLAYLIST,
+        original_url=SPOTIFY_PLAYLIST,
+        requester_id=1,
+        requester_name="Core",
+        source="YouTube",
+        display_source="YouTube",
+        extractor="worker-ytdlp",
+        fallback_reason="Spotify",
+        duration=278,
+    )
+    state = MusicGuildState()
+    assert componentes._source_badge_for_track(track)[1] == "YouTube"
+    rendered = componentes._player_track_text(state, track)
+    assert "Pedido por Core · via Spotify" in rendered
+    assert "YouTube" in rendered
 
-    assert 'for attr in ("display_source", "source", "extractor")' in components
-    assert 'requester_line = f"-# Pedido por {requester}" + (f" · via' in components
-    assert 'total_text = str(total) if (not virtual or virtual_total_known) else f"{total}+"' in components
-    assert 'lines.append(f"-# + {hidden} música' in components
-    lower = components.lower()
+    # Um anexo confirmado vence o extractor genérico preenchido pelo worker.
+    track.source = track.display_source = "Discord"
+    track.attachment_ref = {"channel_id": 10, "message_id": 20, "attachment_id": 30}
+    assert componentes._source_badge_for_track(track)[1] == "Discord"
+
+    state.forward_queue.extend([track] * 5)
+    state.agent_remote_queue_size = 8
+    state.agent_virtual_playlist = {"active": True, "total_tracks": 8, "next_offset": 5}
+    known_preview = componentes._queue_preview_text(state, limit=4)
+    assert "**Fila** · 8 músicas" in known_preview
+    assert "8+ músicas" not in known_preview
+    assert "-# + 4 músicas" in known_preview
+    state.agent_virtual_playlist["total_tracks"] = None
+    unknown_preview = componentes._queue_preview_text(state, limit=4)
+    assert "**Fila** · 8+ músicas" in unknown_preview
+
+    lower = "\n".join((source, rendered, known_preview, unknown_preview)).lower()
     assert "restante da playlist carregado automaticamente conforme necessário" not in lower
     assert "duração carregada" not in lower
     assert "já carregadas" not in lower

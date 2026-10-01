@@ -63,7 +63,7 @@ def test_link_manual_canonico_e_auditoria_sem_query(tmp_path, monkeypatch):
         arquivo.set_source_override(key, "https://heavenpierceher.bandcamp.com/track/")
 
 
-def test_retries_transitorios_tem_limite_e_nova_revisao_reabre(tmp_path, monkeypatch):
+def test_retries_transitorios_continuam_apos_cinco_falhas(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     track = _track()
     key = arquivo.media_key(track)
@@ -73,10 +73,12 @@ def test_retries_transitorios_tem_limite_e_nova_revisao_reabre(tmp_path, monkeyp
         arquivo.mark_result(key, {"status": "failed", "reason": "download_timeout",
                                   "agent_revision": "0.3.81:2026.08.19"})
         assert arquivo.failures()[0]["attempts"] == attempt + 1
-    assert arquivo.failures()[0]["state"] == "paused"
+    failure = arquivo.failures()[0]
+    assert failure["state"] == "failed" and failure["retry_at"] > 0
     assert arquivo.pending() is None
     assert arquivo.reopen_on_revision("0.3.81:2026.08.19") == 0
-    assert arquivo.reopen_on_revision("0.3.82:2026.08.19") == 1
+    assert arquivo.reopen_on_revision("0.3.82:2026.08.19") == 0
+    monkeypatch.setattr(arquivo.time, "time", lambda: failure["retry_at"] + 1)
     assert arquivo.pending()["key"] == key
     arquivo.mark_result(key, {"status": "unavailable", "reason": "no_match",
                               "agent_revision": "0.3.82:2026.08.19"})
@@ -234,7 +236,7 @@ async def test_coordenador_usa_dominio_confirmado_apos_no_match(tmp_path, monkey
         return real_pending(**kwargs)
 
     async def status(**_kwargs):
-        return {"available": True, "version": "0.3.81", "archive_resolver_revision": "0.3.81:2026.08.19"}
+        return {"available": True, "version": "0.3.82", "archive_resolver_revision": "0.3.81:2026.08.19"}
 
     async def command(action, **kwargs):
         sent.append((action, kwargs))

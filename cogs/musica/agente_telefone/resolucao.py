@@ -181,7 +181,8 @@ async def resolve_music_tracks_on_worker(
     if busca_textual and somente_metadados and bool(
         getattr(config, "MUSIC_SEARCH_CHOICE_MEMORY_ENABLED", True)
     ):
-        escolhida = obter_escolha_busca(
+        escolhida = await asyncio.to_thread(
+            obter_escolha_busca,
             clean_query,
             requester_id=requester_id,
             requester_name=requester_name,

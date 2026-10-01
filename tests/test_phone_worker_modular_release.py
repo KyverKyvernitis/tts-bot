@@ -32,6 +32,11 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/agente/buffer_pcm.py",
              "cogs/musica/runtime_telefone/agente/preparacao_audio.py",
              "cogs/musica/runtime_telefone/agente/validade_stream.py",
+             "cogs/musica/runtime_telefone/agente/archive_manifest.py",
+             "cogs/musica/runtime_telefone/agente/archive_ogg.py",
+             "cogs/musica/runtime_telefone/agente/archive_pipeline.py",
+             "cogs/musica/runtime_telefone/agente/archive_staging.py",
+             "cogs/musica/runtime_telefone/agente/audio_segmentado.py",
              "cogs/musica/runtime_telefone/agente/resolucao.py",
     "cogs/musica/runtime_telefone/agente/ytdlp_quente.py",
              "cogs/musica/runtime_telefone/agente/reproducao.py",
@@ -48,8 +53,7 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/ponte_worker/servico.py",
              "cogs/musica/runtime_telefone/termux/__init__.py",
              "cogs/musica/runtime_telefone/termux/integracao-worker.sh",
-             "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh",
-             "cogs/musica/runtime_telefone/termux/musica.env.example"}
+             "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh"}
 
 
 def load(name, path):
@@ -96,6 +100,16 @@ def test_music_agent_release_list_covers_every_canonical_python_module(publisher
     }
     published = {name for name, _mode in publisher.PHONE_WORKER_FILES if name.startswith(prefix) and name.endswith(".py")}
     assert published == canonical
+
+
+def test_installation_files_stay_in_checkout_outside_runtime_release(publisher):
+    runtime_files = {name for name, _mode in publisher.PHONE_WORKER_FILES}
+    installation_files = {name for name, _mode in publisher.PHONE_WORKER_INSTALLATION_FILES}
+    assert not runtime_files & installation_files
+    assert len(runtime_files) + 1 == original_bootstrap().DEFAULT_MAX_MEMBERS
+    assert installation_files == publisher.PHONE_WORKER_SOURCE_HASH_EXCLUDED
+    for name in installation_files:
+        assert publisher._phone_worker_source_path(PHONE, name).is_file()
 
 
 def test_complete_modular_release_is_accepted_by_original_bootstrap(publisher, tmp_path):
@@ -171,11 +185,15 @@ sys.path.insert(0, sys.argv[1])
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin
 from cogs.musica.runtime_telefone.agente.correspondencia import avaliar_correspondencia
 from cogs.musica.runtime_telefone.agente.efeitos import velocidade
+from cogs.musica.runtime_telefone.agente import archive_manifest, archive_ogg, archive_staging, archive_pipeline, audio_segmentado
 assert ResolucaoMixin is not None and callable(avaliar_correspondencia)
 assert velocidade(nightcore=True) == 1.25
+from pathlib import Path
+for module in (archive_manifest, archive_ogg, archive_staging, archive_pipeline, audio_segmentado):
+    assert Path(module.__file__).is_relative_to(Path(sys.argv[1]))
 '''
     resolver_result = subprocess.run(
-        [sys.executable, "-S", "-c", resolver_code, str(staging)],
+        [sys.executable, "-c", resolver_code, str(staging)],
         cwd=tmp_path, capture_output=True, text=True, timeout=10,
     )
     assert resolver_result.returncode == 0, resolver_result.stdout + resolver_result.stderr

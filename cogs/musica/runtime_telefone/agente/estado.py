@@ -43,6 +43,10 @@ class AgentTrack:
     archive_key: str = ""
     source_emoji: str = ""
     audio_stream_index: int = -1
+    # Referências e metadados somente; os bytes continuam no fórum. URLs
+    # assinadas de cada parte vivem apenas no resolver durante a reprodução.
+    archive_segments: list[dict[str, Any]] = field(default_factory=list)
+    archive_segment_index: int = 0
 
     def __post_init__(self) -> None:
         if not str(self.queue_item_id or "").strip():
@@ -87,6 +91,10 @@ class AgentTrack:
             "archive_key": self.archive_key,
             "source_emoji": self.source_emoji,
             "audio_stream_index": self.audio_stream_index,
+            "archive_segments": [{key: value for key, value in segment.items()
+                                  if key not in {"url", "stream_url", "direct_url", "http_headers", "_archive_cache_bytes"}}
+                                 for segment in self.archive_segments],
+            "archive_segment_index": self.archive_segment_index,
         }
 
 

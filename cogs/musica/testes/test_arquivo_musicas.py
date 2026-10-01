@@ -47,7 +47,7 @@ def test_duas_reproducoes_reais_limite_e_alias(tmp_path, monkeypatch):
     arquivo.set_channel(0, 0)
     arquivo.set_channel(77, 88)
     assert arquivo.archived(from_origin) == (ref, "<:YouTube:123>", key)
-    assert not arquivo.record_play(_track(duration=600.01), "1:too-long:3")
+    assert arquivo.record_play(_track(duration=600.01), "1:long-track:3")
     assert arquivo.record_play(_track(duration=600), "1:exactly-ten:3")
     arquivo.set_channel(77, 101)
     assert arquivo.archived(from_origin) == ({}, "", "")
@@ -264,7 +264,7 @@ async def test_arquivo_espera_novo_agente_antes_de_enviar_capa(tmp_path, monkeyp
     assert calls == []
     assert real_pending()["key"] == key
 
-    version = "0.3.81"
+    version = "0.3.82"
     pending_calls = 0
 
     def pending_once(**kwargs):
@@ -651,219 +651,39 @@ async def test_capa_le_todos_os_blocos_e_rejeita_jpeg_incompleto(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(monkeypatch):
-    from pathlib import Path
+async def test_migracao_publica_post_com_capa_audio_e_recupera_ack_perdido(tmp_path, monkeypatch):
     from types import SimpleNamespace
-
-    # Um teste legado recarrega o módulo Discord durante a coleta. Use o
-    # módulo efetivamente associado ao ArchiveMixin sob teste.
+    from cogs.musica.testes.runtime_telefone.test_arquivo_segmentado import UploadWorker, FakeAttachment, FakeForum, FakeMessage
+    from cogs.musica.runtime_telefone.agente import archive_staging
+    from cogs.musica.runtime_telefone.agente.archive_manifest import MANIFEST_FILENAME
     discord = ArchiveMixin._archive_one.__globals__["discord"]
-
-    key = "a" * 32
-    original = "https://www.youtube.com/watch?v=abc"
-    old_embed = discord.Embed(title="Arctic Monkeys - 505", url=original)
+    monkeypatch.setattr(discord, "ForumChannel", FakeForum)
+    monkeypatch.setattr(archive_staging.tempfile, "gettempdir", lambda: str(tmp_path))
+    worker = UploadWorker()
+    key, original = "a" * 32, "https://www.youtube.com/watch?v=abc"
+    old_embed = discord.Embed(title="Long track", url=original)
     old_embed.add_field(name="Fonte", value="🎵 YouTube")
-    old_embed.add_field(name="Duração", value="254.08")
-    old_embed.add_field(name="Índice de áudio", value="0")
+    old_embed.add_field(name="Duração", value="800")
     old_embed.set_footer(text="music-archive:v1:" + key)
-
-    class Attachment:
-        id = 4
-        filename = "musica-" + key + ".webm"
-        size = 50
-
-        async def save(self, destination):
-            Path(destination).write_bytes(b"webm-opus")
-
-    class Message:
-        id = 3
-        author = SimpleNamespace(id=5)
-        embeds = [old_embed]
-        attachments = [Attachment()]
-
-    message = Message()
-
-    class Channel:
-        id = 2
-        guild = SimpleNamespace(id=1)
-
-        async def fetch_message(self, message_id):
-            assert message_id == 3
-            return message
-
-    channel = Channel()
-    created = []
-    edits = []
-
-    class Thread:
-        id = 40
-        name = "Arctic Monkeys - 505"
-        owner_id = 5
-
-        async def history(self, **kwargs):
-            yield new_message
-
-        async def fetch_message(self, message_id):
-            assert message_id == 30
-            return new_message
-
-    thread = Thread()
-
-    class Forum:
-        id = 20
-        guild = SimpleNamespace(id=1)
-        flags = SimpleNamespace(require_tag=False)
-        available_tags = []
-        threads = [thread]
-
-        def is_media(self):
-            return False
-
-        async def archived_threads(self, **kwargs):
-            if False:
-                yield None
-
-        async def create_thread(self, *, name, content, embed, files, applied_tags, allowed_mentions):
-            created.append((name, embed, [file.filename for file in files]))
-            new_message.embeds = [embed]
-            new_message.content = content or ""
-            new_message.attachments = [SimpleNamespace(id=8, filename="capa.jpg",
-                                                       url="https://cdn.discordapp.com/attachments/40/8/capa.jpg?ex=ffff&hm=abc"),
-                                       SimpleNamespace(id=9, filename=files[-1].filename,
-                                                       url=f"https://cdn.discordapp.com/attachments/40/9/{files[-1].filename}")]
-            return SimpleNamespace(thread=thread, message=new_message)
-
-    forum = Forum()
-    monkeypatch.setattr(discord, "ForumChannel", Forum, raising=False)
-
-    async def edit_post(*, embed, attachments, allowed_mentions, content=None):
-        edits.append((embed, [attachment.id if hasattr(attachment, "id") else attachment.filename
-                                  for attachment in attachments]))
-        new_message.embeds = [embed]
-        if content is not None:
-            new_message.content = content
-        new_message.attachments = [attachment if hasattr(attachment, "id") else SimpleNamespace(
-            id=10, filename=attachment.filename,
-            url="https://cdn.discordapp.com/attachments/40/10/capa-v7.jpg?ex=ffff&hm=abc")
-            for attachment in attachments]
-        return new_message
-
-    new_message = SimpleNamespace(id=30, channel=thread, author=SimpleNamespace(id=5), embeds=[], content="",
-                                  attachments=[], edit=edit_post)
-
-    async def ready():
-        pass
-
-    raw_calls = 0
-
-    async def raw(channel_id, message_id):
-        nonlocal raw_calls
-        raw_calls += 1
-        assert (channel_id, message_id) == (40, 30)
-        return {"author": {"id": "5"}, "guild_id": "1", "channel_id": "40",
-                "embeds": [new_message.embeds[0].to_dict()],
-                "attachments": [{"id": str(attachment.id), "filename": attachment.filename,
-                                 "url": attachment.url} for attachment in new_message.attachments] if raw_calls > 1 else []}
-
-    class Worker(ArchiveMixin):
-        def __init__(self):
-            self.client = SimpleNamespace(wait_until_ready=ready,
-                                          get_channel=lambda channel_id: {2: channel, 20: forum, 40: thread}.get(channel_id),
-                                          user=SimpleNamespace(id=5), http=SimpleNamespace(get_message=raw))
-            self.states = {}
-
-        async def _archive_wait_stable_voice(self):
-            pass
-
-        async def _archive_audio_ready(self, audio, folder):
-            output = folder / "audio.ogg"
-            output.write_bytes(audio.read_bytes())
-            return output, 254.08, 0, "opus"
-
-        async def _archive_probe(self, audio):
-            return {"streams": [{"codec_type": "audio", "index": 0, "bit_rate": "128000", "sample_rate": "48000"}]}
-
-        async def _archive_cover(self, url, folder):
-            output = folder / "capa.jpg"
-            output.write_bytes(b"\xff\xd8\xff")
-            return output
-
-        def log(self, *args, **kwargs):
-            pass
-
-    async def instant(_):
-        pass
-
-    monkeypatch.setattr(ArchiveMixin._archive_one.__globals__["asyncio"], "sleep", instant)
+    old_message = FakeMessage(worker, 3, SimpleNamespace(id=2), [old_embed], [FakeAttachment(4, "musica.webm", b"original")])
+    async def fetch_old(message_id):
+        assert message_id == 3
+        return old_message
+    old_channel = SimpleNamespace(id=2, fetch_message=fetch_old)
+    original_get_channel = worker.get_channel
+    worker.client.get_channel = lambda channel_id: old_channel if channel_id == 2 else original_get_channel(channel_id)
     item = {"key": key, "guild_id": 1, "channel_id": 20, "emoji": "🎵",
             "existing_ref": {"guild_id": 1, "channel_id": 2, "message_id": 3, "attachment_id": 4},
-            "track": {"title": "Arctic Monkeys - 505", "source": "YouTube",
-                      "webpage_url": original, "thumbnail": "https://i.ytimg.com/vi/abc/hqdefault.jpg"}}
-    worker = Worker()
+            "track": {"title": "Long track", "source": "YouTube", "duration": 800, "webpage_url": original}}
     result = await worker._archive_one(item)
-    assert result["status"] == "done" and result["presentation"] == 7
-    assert result["reference"]["forum_id"] == 20
-    assert result["reference"]["channel_id"] == 40
-    assert result["reference"]["message_id"] == 30
-    assert result["reference"]["attachment_id"] == 9
-    assert created[0][0] == "Arctic Monkeys - 505"
-    assert created[0][2] == ["capa.jpg", "Arctic Monkeys - 505.ogg"]
-    assert raw_calls >= 2  # Discord pode entregar os anexos após create_thread
-    assert not new_message.embeds[0].thumbnail.url
-    assert new_message.content.startswith("🎵 YouTube ·")
-    assert not edits  # novo post já nasce compacto, sem REST edit adicional
-    assert message.attachments[0].id == 4  # migração só apaga depois de gravar o novo índice
-    assert (await worker._archive_existing(forum, {**item, "retry": True})) == (new_message, 7)
-    assert (await worker._archive_one({**item, "retry": True}))["reference"] == result["reference"]
-    assert len(created) == 1
-    assert not edits
-
-    # Um post v6 com imagem íntegra só troca o layout; mantém os dois anexos.
-    v6_embed = discord.Embed(title="Arctic Monkeys - 505", url=_archive_url(original, key, version=6))
-    for name, value in (("Fonte", "🎵 YouTube"), ("Duração", "4:14"),
-                        ("Formato", "OPUS · OGG · 48 kHz"), ("Qualidade", "≈128 kbps")):
-        v6_embed.add_field(name=name, value=value)
-    v6_embed.set_footer(text="Arquivo de músicas")
-    v6_embed.set_thumbnail(url=new_message.attachments[0].url)
-    new_message.embeds = [v6_embed]
-
-    async def cover_must_not_download(url, folder):
-        raise AssertionError("layout v6 com capa válida não deve baixar a imagem")
-
-    worker._archive_cover = cover_must_not_download
-    updated = await worker._archive_one({**item, "existing_ref": result["reference"]})
-    assert updated["presentation"] == 7 and updated["reference"] == result["reference"]
-    assert len(created) == 1 and len(edits) == 1 and edits[0][1] == [8, 9]
-    worker._archive_cover = Worker._archive_cover.__get__(worker)
-
-    # O índice v5 provoca reparo no mesmo post, sem baixar nem reenviar o áudio.
-    def previous_embed():
-        embed = discord.Embed(title="Arctic Monkeys - 505", url=_archive_url(original, key, version=5))
-        embed.add_field(name="Fonte", value="🎵 YouTube")
-        embed.add_field(name="Duração", value="4:14")
-        embed.add_field(name="Formato", value="OPUS · OGG · 48 kHz")
-        embed.add_field(name="Qualidade", value="≈128 kbps")
-        embed.set_footer(text="Arquivo de músicas")
-        embed.set_thumbnail(url="attachment://capa.jpg")
-        return embed
-
-    new_message.embeds = [previous_embed()]
-    repaired = await worker._archive_one({**item, "existing_ref": result["reference"]})
-    assert repaired["reference"] == result["reference"] and repaired["presentation"] == 7
-    assert len(created) == 1 and len(edits) == 3
-    assert edits[1][1] == [9, "capa-v7.jpg"] and edits[2][1] == [9, 10]
-    assert not new_message.embeds[0].thumbnail.url
-
-    # Sem origem válida, a imagem antiga (possivelmente verde) não deve voltar.
-    async def missing_cover(url, folder):
-        return None
-
-    worker._archive_cover = missing_cover
-    new_message.embeds = [previous_embed()]
-    delayed = await worker._archive_one({**item, "existing_ref": result["reference"]})
-    # O índice v5 aponta para capa.jpg, já substituída pelo reparo anterior.
-    assert delayed["presentation"] == 3 and delayed["reference"] == result["reference"]
-    assert len(edits) == 3
+    assert result["status"] == "done" and result["presentation"] == 8
+    assert result["reference"]["forum_id"] == 20 and result["reference"]["channel_id"] == 40
+    assert len(result["reference"]["segments"]) == 2
+    assert old_message.attachments[0].id == 4  # old audio is removed only after the new catalog ACK
+    starter = worker.forum.threads[0].messages[0]
+    assert any(attachment.filename == MANIFEST_FILENAME for attachment in starter.attachments)
+    retry = await worker._archive_one({**item, "retry": True})
+    assert retry["reference"] == result["reference"] and worker.created == 1
 
 
 @pytest.mark.asyncio
@@ -959,6 +779,8 @@ def test_troca_para_forum_preserva_audio_ate_novo_post_validado(tmp_path, monkey
     with arquivo._db() as db:
         db.execute("UPDATE arquivo_musicas SET tentativa_em=0 WHERE chave=?", (key,))
     arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 7})
+    assert arquivo.counts()["refresh"] == 1
+    arquivo.mark_result(key, {"status": "done", "reference": new, "emoji": "🎵", "presentation": 8})
     assert arquivo.counts()["refresh"] == 0
     assert arquivo.cleanup_pending()["previous"] == old
     arquivo.mark_cleanup(key, old, done=True)
@@ -1037,7 +859,9 @@ async def test_audio_do_forum_reutiliza_url_assinada_e_renova_apos_falha():
     agent._invalidate_track_stream_cache(refreshed)
     another = await agent._resolve_archive_attachment(track_meta=metadata, body={"guild_id": 1})
     assert len(calls) == 3 and another.stream_url != refreshed.stream_url
-    with pytest.raises(DiscordAttachmentError):
+    # Fixtures do runtime recarregam o módulo; verifique a classe de erro do
+    # método em uso, em vez de uma importação retida pela coleta dos testes.
+    with pytest.raises(agent._resolve_archive_attachment.__func__.__globals__["DiscordAttachmentError"]):
         await agent._resolve_archive_attachment(track_meta=metadata, body={"guild_id": 2})
     assert len(calls) == 3
 

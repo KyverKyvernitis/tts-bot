@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -12,8 +13,8 @@ from .agente_telefone.comandos import music_agent_command, music_agent_status
 from .busca import arquivo
 
 log = logging.getLogger(__name__)
-_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 81)
-_MIN_SOURCE_AGENT_VERSION = (0, 3, 81)
+_MIN_ARCHIVE_AGENT_VERSION = (0, 3, 82)
+_MIN_SOURCE_AGENT_VERSION = (0, 3, 82)
 
 
 def _archive_agent_ready(payload: dict) -> bool:
@@ -68,36 +69,19 @@ class ArchiveCoordinator:
 
     async def _seed_learned(self) -> None:
         await self.bot.wait_until_ready()
-        seeded: tuple[int, int] = (0, 0)
-        last: tuple[float, str] = (0.0, "")
         while True:
             try:
-                target = await asyncio.to_thread(arquivo.channel)
-                kind = await asyncio.to_thread(arquivo.channel_type)
-                if kind != "forum" or target == (0, 0):
-                    seeded = (0, 0)
-                    last = (0.0, "")
-                else:
-                    # Na primeira passagem, leia tudo. Depois, releia apenas
-                    # dois segundos da cauda para absorver escritas feitas
-                    # durante a paginação, inclusive aliases sobrescritos.
-                    cursor = (0.0, "") if target != seeded else (max(0.0, last[0] - 2.0), "")
-                    while True:
-                        next_cursor, items = await asyncio.to_thread(arquivo.learned_updates, cursor)
-                        if next_cursor == cursor:
-                            break
-                        if items:
-                            await asyncio.to_thread(arquivo.register_learned_batch, items)
-                            self._wake.set()
-                        cursor = next_cursor
-                        await asyncio.sleep(0.05)
-                    seeded = target
-                    last = cursor
+                # O outbox persiste escolhas até a confirmação do catálogo.
+                # Drenar páginas limita CPU/RAM sem revarrer aliases a cada boot.
+                added = await asyncio.to_thread(arquivo.flush_learned)
+                if added:
+                    self._wake.set()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.warning("[music/archive] importação da memória adiada", exc_info=True)
-            await asyncio.sleep(12)
+                added = 0
+            await asyncio.sleep(0.05 if added else 12)
 
     def observe(self, guild_id: int, track, remote: dict, *, confirmed: bool) -> None:
         """Conta o início confirmado uma vez por item real da fila."""
@@ -109,7 +93,7 @@ class ArchiveCoordinator:
             token = int(remote["playback_token"])
         except (KeyError, TypeError, ValueError):
             return
-        if duration <= 0 or duration > 600 or position < 0:
+        if not math.isfinite(duration) or not math.isfinite(position) or duration <= 0 or position < 0:
             return
         queue_id = str(getattr(track, "queue_item_id", "") or "")
         if not queue_id:
@@ -261,11 +245,17 @@ class ArchiveCoordinator:
                     continue
                 # A resposta HTTP do enqueue é imediata; o download e o upload
                 # continuam em segundo plano sem ocupar a ponte de comandos.
-                for _ in range(96):
+                # O agente aplica timeouts por operação e duração. Enquanto
+                # responde working/queued, uma faixa longa não expira por um
+                # limite fixo do coordenador. A ponte continua com timeout HTTP.
+                while True:
                     await asyncio.sleep(5)
                     answer = await music_agent_command("archive_status", guild_id=guild_id, archive_key=key,
                                                        timeout_seconds=8.0, command_id="")
                     status = str(answer.get("status") or "")
+                    if not answer.get("ok", True) or status not in {"queued", "working", "done", "too_large", "ineligible", "unavailable", "failed", "missing"}:
+                        await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed", "reason": "agent_rejected", "agent_revision": revision})
+                        break
                     if status in {"done", "too_large", "ineligible", "unavailable", "failed", "missing"}:
                         discovery_rejected = False
                         if status == "unavailable" and answer.get("reason") == "no_match" and not bandcamp_url:
@@ -292,9 +282,6 @@ class ArchiveCoordinator:
                             await asyncio.to_thread(arquivo.note_discovery_failure, key, "source_mismatch")
                         self._new_archive_streak = 0 if item["reference"] else self._new_archive_streak + 1
                         break
-                else:
-                    await asyncio.to_thread(arquivo.mark_result, key, {"status": "failed", "reason": "agent_timeout",
-                                                                       "agent_revision": revision})
             except asyncio.CancelledError:
                 raise
             except Exception:

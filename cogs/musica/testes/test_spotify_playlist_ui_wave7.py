@@ -4,7 +4,9 @@ import ast
 from pathlib import Path
 
 from cogs.musica.agente_telefone.monitor import _assinatura_painel_remoto
+from cogs.musica.interface import componentes
 from cogs.musica.nucleo.estado import MusicGuildState
+from cogs.musica.nucleo.modelos import MusicTrack
 from cogs.musica.reproducao.sincronizacao import sincronizar_fila_remota
 
 
@@ -96,15 +98,32 @@ def test_assinatura_do_painel_muda_quando_cursor_virtual_avanca() -> None:
 
 
 def test_preview_virtual_e_compacto_e_sem_detalhes_internos() -> None:
-    block = _function_source("_queue_preview_text")
-    total_label = _function_source("_virtual_playlist_total_label")
+    state = MusicGuildState()
+    assert componentes._virtual_playlist_total_label(state) == ""
+    state.agent_virtual_playlist = {"active": True, **_virtual()["cursor"]}
+    assert componentes._virtual_playlist_total_label(state) == ""
+    waiting_preview = componentes._queue_preview_text(state)
+    assert "**Fila**" in waiting_preview
+    assert "0+ músicas" in waiting_preview
+    assert "carregando próximas" in waiting_preview.casefold()
+    assert list(state.forward_queue) == []
 
-    assert 'return ""' in total_label
-    assert "if virtual:" in block
-    assert "carregando próximas…" in block
-    assert "restante da playlist carregado automaticamente conforme necessário" not in block
-    assert "duração carregada" not in block
-    assert "já carregada" not in block
+    state.agent_virtual_playlist["total_tracks"] = 137
+    state.agent_remote_queue_size = 135
+    track = MusicTrack("Cavetown - Home", "https://open.spotify.com/track/abc123", requester_id=1, duration=269)
+    state.forward_queue.extend([track] * 5)
+    assert componentes._virtual_playlist_total_label(state) == "137 músicas"
+    materialized_preview = componentes._queue_preview_text(state, limit=4)
+    assert "**Fila** · 135 músicas" in materialized_preview
+    assert materialized_preview.count("Cavetown - Home") == 4
+    assert "-# + 131 músicas" in materialized_preview
+    assert len(state.forward_queue) == 5
+
+    for rendered in (waiting_preview, materialized_preview):
+        lower = rendered.casefold()
+        assert "restante da playlist carregado automaticamente conforme necessário" not in lower
+        assert "duração carregada" not in lower
+        assert "já carregada" not in lower
 
 
 def test_marker_virtual_sem_faixa_materializada_nao_vira_idle() -> None:

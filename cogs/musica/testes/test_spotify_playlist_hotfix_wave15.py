@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import pytest
-from pathlib import Path
 
+from cogs.musica.interface import componentes
 from cogs.musica.metadados.fontes.spotify_publico import SpotifyPublicoMixin
+from cogs.musica.nucleo.estado import MusicGuildState
 from cogs.musica.nucleo.modelos import MusicTrack
 from cogs.musica.nucleo.playlist_virtual import logical_virtual_queue_count
 
@@ -84,15 +85,34 @@ def test_contagem_logica_da_fila_virtual_usa_total_real() -> None:
 
 
 def test_components_v2_usa_total_logico_remoto_e_link_publico_spotify() -> None:
-    source = (Path(__file__).resolve().parents[1] / "interface" / "componentes.py").read_text(encoding="utf-8")
-    # Wave 15 recebe o total lógico autoritativo do agente em vez de
-    # reconstruí-lo a partir de um único cursor virtual. Isso também cobre
-    # múltiplas playlists e layouts embaralhados.
-    assert 'getattr(state, "agent_remote_queue_size", 0)' in source
-    assert "def _virtual_playlists_info" in source
-    assert 'count = f"{total} música' in source
-    assert 'profile.platform == "spotify" and profile.resource_type == "track"' in source
-    assert 'return f"[{label}]({url})"' in source
+    tracks = [_track("Cavetown - Home", HOME), _track("Cavetown - Boys Will Be Bugs", BOYS)]
+    state = MusicGuildState()
+    state.forward_queue.extend(tracks)
+    state.agent_remote_queue_size = 205
+    state.agent_virtual_playlists = [
+        {"active": True, "total_tracks": 137, "next_offset": 25, "source_url": PLAYLIST},
+        {"active": True, "total_tracks": 88, "next_offset": 44, "source_url": PLAYLIST + "?second=1"},
+    ]
+    # Renderiza a fila sem criar controles Discord: o total autoritativo deve
+    # vencer a janela de duas faixas e a reconstrução por um único cursor.
+    view = object.__new__(componentes.QueueView)
+    view.page = 0
+    view.selected_position = None
+    rendered = view._queue_text(state, tracks)
+    assert "## 📜 Fila · 205 músicas" in rendered
+    assert "205+ músicas" not in rendered
+    assert "2 playlists na fila" in rendered
+    assert f"[Cavetown - Home]({HOME})" in rendered
+    assert f"]({PLAYLIST})" not in rendered
+
+    # A origem Spotify individual também vence a URL do áudio YouTube.
+    tracks[0].original_url = HOME
+    tracks[0].webpage_url = "https://www.youtube.com/watch?v=abc123"
+    assert componentes._track_link_v2(tracks[0]) == f"[Cavetown - Home]({HOME})"
+    assert componentes._track_link_v2(_track("Coleção", PLAYLIST)) == "Coleção"
+
+    state.agent_virtual_playlists[1]["total_tracks"] = None
+    assert "## 📜 Fila · 205+ músicas" in view._queue_text(state, tracks)
 
 
 

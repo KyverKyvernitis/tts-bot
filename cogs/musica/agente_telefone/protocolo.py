@@ -36,6 +36,7 @@ def faixa_para_payload(track: MusicTrack | Mapping[str, Any]) -> dict[str, Any]:
         "queue_item_id": str(getattr(track, "queue_item_id", "") or ""),
         "attachment_ref": dict(getattr(track, "attachment_ref", {}) or {}),
         "archive_ref": archive_ref,
+        "archive_segments": list(getattr(track, "archive_segments", ()) or ()),
         "archive_key": archive_key,
         "source_emoji": source_emoji or getattr(track, "source_emoji", ""),
         "resolved_audio_format_id": getattr(track, "resolved_audio_format_id", ""),

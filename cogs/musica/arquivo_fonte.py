@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import math
 from urllib.parse import urlsplit
 
 from .runtime_telefone.agente.correspondencia import avaliar_correspondencia
@@ -62,7 +63,7 @@ def resolve_bandcamp_source(url: str, expected: dict) -> dict:
         duration = float(info.get("duration") or 0)
     except (ValueError, TypeError):
         wanted = duration = 0
-    if not title or not valid or not 0 < wanted <= 600 or not 0 < duration <= 600 or abs(wanted - duration) > max(5, wanted * 0.03):
+    if not title or not valid or not math.isfinite(wanted) or not math.isfinite(duration) or wanted <= 0 or duration <= 0 or abs(wanted - duration) > max(5, wanted * 0.03):
         raise SourceMismatchError(f"fonte Bandcamp não corresponde à faixa ({reason})")
     stream_url = str(info.get("url") or "")
     if not _bandcamp_audio(stream_url) or str(info.get("acodec") or "none").lower() == "none":

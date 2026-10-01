@@ -83,7 +83,10 @@ def test_vps_and_phone_worker_compute_the_same_runtime_source_hash(monkeypatch: 
     worker_dir = ROOT / "deploy/termux/phone-worker"
     monkeypatch.setattr(phone_worker, "_phone_worker_dir", lambda: worker_dir)
 
-    assert set(name for name, _mode in automation.PHONE_WORKER_FILES) == set(phone_worker._WORKER_UPDATE_TARGETS)
+    runtime_targets = {name for name, _mode in automation.PHONE_WORKER_FILES}
+    assert runtime_targets <= set(phone_worker._WORKER_UPDATE_TARGETS)
+    assert set(phone_worker._WORKER_UPDATE_TARGETS) - runtime_targets == automation.PHONE_WORKER_SOURCE_HASH_EXCLUDED
+    assert automation.PHONE_WORKER_SOURCE_HASH_EXCLUDED == phone_worker._PHONE_WORKER_SOURCE_HASH_EXCLUDED
     assert automation._hash_phone_worker_files(worker_dir) == phone_worker._phone_worker_source_hash()
 
 

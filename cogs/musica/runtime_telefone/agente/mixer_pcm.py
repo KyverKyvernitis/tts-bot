@@ -18,6 +18,7 @@ from typing import Any, Callable
 import discord
 
 PCM_FRAME_BYTES = 3840
+PCM_SILENCE = b"\x00" * PCM_FRAME_BYTES
 MAX_MUSIC_VOLUME = 1.5
 PCM_PEAK = 32767
 PCM_BOOST_KNEE = int(PCM_PEAK * 0.95)
@@ -151,7 +152,7 @@ class AgentTelemetryAudioSource(discord.AudioSource, _AudioReadTelemetry):
         if self._closed:
             return b""
         frame = self._read_source(self.source)
-        if frame and self.first_frame_ms is None:
+        if frame and getattr(self.source, "last_read_had_audio", True) and self.first_frame_ms is None:
             now = time.monotonic()
             self.first_frame_monotonic = now
             self.first_frame_ms = (now - self._started_monotonic) * 1000.0
@@ -449,7 +450,11 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             frame = frame[:target_size]
         module = self._audioop()
         if module is not None:
-            return module.add(base, self._scale_frame(frame, volume), 2)
+            # O limiter comum já calculou a folga da soma em _safe_mix_gain.
+            # Aplicar o boost musical aqui comprimia a voz uma segunda vez e
+            # limitava a 150% o TTS, que aceita volume até 200%.
+            scaled = frame if abs(volume - 1.0) <= 0.001 else module.mul(frame, 2, volume)
+            return module.add(base, scaled, 2)
         base_samples = array("h")
         base_samples.frombytes(base)
         self._mix_into(base_samples, frame, volume)
@@ -607,9 +612,9 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                 # A decisão de encerrar precisa ser atômica com uma troca de
                 # faixa ou um overlay que entrou entre o snapshot e este ponto.
                 if self.music_source is not None or self._overlays or self._tts_reservations:
-                    return b"\x00" * PCM_FRAME_BYTES
+                    return PCM_SILENCE
                 if self.persistent and not self._finish_when_idle and not self._closed:
-                    return b"\x00" * PCM_FRAME_BYTES
+                    return PCM_SILENCE
                 self.cleanup()
             return b""
         music_volume = self.normal_music_volume * (self.duck_factor if overlays else 1.0)
@@ -624,7 +629,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         if music_frame:
             base = self._enhance_music_bass(self._smooth_music(music_frame, music_volume))
         else:
-            base = b"\x00" * PCM_FRAME_BYTES
+            base = PCM_SILENCE
         overlay_frames: list[tuple[bytes, float]] = []
         ended: list[dict[str, Any]] = []
         for overlay in overlays:

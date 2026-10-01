@@ -4,12 +4,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import discord
 
 from .buffer_pcm import BufferedPCMSource
+from .audio_segmentado import ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource, ExactSegmentPCMSource
 from .ciclo_vida import remove_owned_task
 from .estado import AgentTrack, GuildMusicState
 
@@ -51,7 +52,7 @@ class PreparacaoAudioMixin:
         async def wait_for_audio(candidate: Any) -> Any:
             self._starting_pcm[guild_id] = candidate
             try:
-                if isinstance(candidate, BufferedPCMSource):
+                if isinstance(candidate, (BufferedPCMSource, ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource)):
                     await candidate.wait_ready(timeout=min(12.0, self.prepare_timeout))
                 return candidate
             except BaseException:
@@ -74,7 +75,55 @@ class PreparacaoAudioMixin:
     def _create_pcm_source(
         self, track: AgentTrack, *, effects: tuple[int | bool, ...] = (0, 0, 0),
         first_audio_stream: bool = False, buffer_max_frames: int | None = None,
+        preserve_partial_frames: bool = False,
     ) -> Any:
+        if track.archive_segments:
+            start_index = self._archive_segment_at(track.archive_segments, track.start_offset_seconds)
+            start_local = max(0.0, track.start_offset_seconds - float(track.archive_segments[start_index]["offset_seconds"]))
+
+            async def create_segment(index: int, offset: float) -> Any:
+                segment = track.archive_segments[index]
+                if index == track.archive_segment_index and track.stream_url and not self._track_stream_needs_refresh(track):
+                    url = track.stream_url
+                else:
+                    segment = await self._resolve_archive_segment(track, index)
+                    url = segment["url"]
+                part = replace(
+                    track, archive_segments=[], stream_url=url, start_offset_seconds=offset,
+                    attachment_ref={key: int(segment[key]) for key in ("guild_id", "channel_id", "message_id", "attachment_id")},
+                    audio_stream_index=int(segment.get("audio_stream_index", 0)),
+                    audio_sample_rate=int(segment.get("audio_sample_rate", track.audio_sample_rate)),
+                    audio_channels=int(segment.get("audio_channels", track.audio_channels)),
+                    duration=float(segment["duration"]),
+                )
+                # A velocidade/reverb atuam em um único pipe após a união de
+                # PCM; assim a cauda e o estado do filtro não reiniciam por parte.
+                source = self._create_pcm_source(part, effects=(0, 0, 0), buffer_max_frames=buffer_max_frames,
+                                                 preserve_partial_frames=True)
+                if not isinstance(source, BufferedPCMSource):
+                    source = BufferedPCMSource(source, max_frames=buffer_max_frames or getattr(self, "pcm_buffer_max_frames", 75),
+                                               stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0))
+                return source
+
+            loop = self._loop or asyncio.get_running_loop()
+            raw = ArchiveSegmentedPCMSource(
+                segments=track.archive_segments, start_index=start_index, start_offset=start_local,
+                create_segment=create_segment, loop=loop,
+                max_frames=buffer_max_frames or getattr(self, "pcm_buffer_max_frames", 75),
+                stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0),
+            )
+            if any(effects[1:]):
+                try:
+                    options, _ = self._ffmpeg_options_for_source(48000, effects=effects)
+                except BaseException:
+                    raw.cleanup()
+                    raise
+                return ContinuousArchiveDSPSource(
+                    raw, executable=self.ffmpeg_executable, options=options, loop=loop,
+                    max_frames=buffer_max_frames or getattr(self, "pcm_buffer_max_frames", 75),
+                    stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0),
+                )
+            return raw
         options, _mode = self._ffmpeg_options_for_source(
             track.audio_sample_rate, effects=effects, is_live=track.is_live,
         )
@@ -92,11 +141,14 @@ class PreparacaoAudioMixin:
             track.stream_url, executable=self.ffmpeg_executable,
             before_options=before, options=options,
         )
-        if not getattr(self, "pcm_buffer_enabled", True):
+        if preserve_partial_frames:
+            pcm = ExactSegmentPCMSource(pcm)
+        if not getattr(self, "pcm_buffer_enabled", True) and not preserve_partial_frames:
             return pcm
         return BufferedPCMSource(
             pcm, max_frames=buffer_max_frames or getattr(self, "pcm_buffer_max_frames", 75),
             stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0),
+            **({"preserve_partial_frames": True} if preserve_partial_frames else {}),
         )
 
     def _cancel_initial_audio(self, guild_id: int, *, item_id: str = "") -> None:
@@ -112,6 +164,7 @@ class PreparacaoAudioMixin:
             not getattr(self, "initial_audio_prepare_enabled", True)
             or not self.direct_pcm_volume_enabled or not getattr(self, "pcm_buffer_enabled", True)
             or st is None or not track.stream_url or track.is_live
+            or track.archive_segments
         ):
             return False
         existing = self._initial_audio.get(guild_id)

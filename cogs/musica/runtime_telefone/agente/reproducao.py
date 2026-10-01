@@ -17,6 +17,7 @@ from .estado import AgentTrack, GuildMusicState
 from .efeitos import filtros
 from .mixer_pcm import AgentMixedAudioSource, AgentTelemetryAudioSource, PCM_FRAME_BYTES
 from .buffer_pcm import BufferedPCMSource
+from .audio_segmentado import ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource
 from .preparacao_audio import PreparacaoAudioMixin
 from .utilitarios import safe_id, short_text
 
@@ -1659,7 +1660,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         if not track.stream_url or (track.attachment_ref and self._track_stream_needs_refresh(track)):
             generation = st.playback_token
             try:
-                track = await self.resolve_track(track.query or track.webpage_url or track.title, track_meta=track.public(), body=body)
+                track = await self.resolve_track(track.query or track.webpage_url or track.title,
+                                                 track_meta={**track.public(), "start_offset_seconds": target}, body=body)
                 if st.playback_token != generation or st.current is None or st.current.queue_item_id != track.queue_item_id:
                     return {"ok": False, "cancelled": True, "error": "a música mudou durante o seek", "state": st.public()}
                 st.current = track
@@ -1797,7 +1799,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                         selected.stream_url = refreshed.stream_url
                         selected.stream_resolved_monotonic = refreshed.stream_resolved_monotonic
                     candidate = self._create_pcm_source(selected, effects=desired)
-                    if not isinstance(candidate, BufferedPCMSource):
+                    if not isinstance(candidate, (BufferedPCMSource, ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource)):
                         candidate = BufferedPCMSource(candidate, max_frames=10,
                                                       stall_seconds=self.pcm_buffer_stall_seconds)
                     await candidate.wait_ready(timeout=min(4.0, self.prepare_timeout), min_frames=1)
@@ -2496,12 +2498,19 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         direct_start_monotonic = time.monotonic()
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         requested_token = st.playback_token
-        if track.attachment_ref and (not track.stream_url or self._track_stream_needs_refresh(track)):
+        segment_changed = bool(track.archive_segments and self._archive_segment_at(track.archive_segments, track.start_offset_seconds) != track.archive_segment_index)
+        if track.attachment_ref and (not track.stream_url or self._track_stream_needs_refresh(track) or segment_changed):
             refreshed = await self._resolve_discord_attachment(track_meta=track.public(), body={"guild_id": guild_id})
             if requested_token != st.playback_token:
                 return
             track.stream_url = refreshed.stream_url
             track.stream_resolved_monotonic = refreshed.stream_resolved_monotonic
+            track.archive_segments = refreshed.archive_segments
+            track.archive_segment_index = refreshed.archive_segment_index
+            track.attachment_ref = refreshed.attachment_ref
+            track.audio_sample_rate = refreshed.audio_sample_rate
+            track.audio_channels = refreshed.audio_channels
+            track.audio_codec = refreshed.audio_codec
         if not track.stream_url:
             raise RuntimeError("track sem stream_url direto")
         voice_client = prepared_voice[0] if prepared_voice is not None else None
@@ -2518,8 +2527,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         else:
             self.log("voice_preconnect_reused", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
         existing_source = getattr(voice_client, "source", None)
+        pcm_pipeline = self.direct_pcm_volume_enabled or bool(track.archive_segments)
         reusable = bool(
-            self.direct_pcm_volume_enabled
+            pcm_pipeline
             and isinstance(existing_source, AgentMixedAudioSource)
             and existing_source.persistent
             and existing_source.music_ended
@@ -2551,7 +2561,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             "source_sample_rate": source_rate,
             "source_channels": source_channels,
             "resample_mode": resample_mode,
-            "output": "pcm_s16le_48k_stereo" if self.direct_pcm_volume_enabled else "discord-opus",
+            "output": "pcm_s16le_48k_stereo" if pcm_pipeline else "discord-opus",
             "channel_bitrate_kbps": channel_bitrate_kbps,
             "opus_bitrate_kbps": opus_bitrate_kbps,
             "volume_percent": int(st.volume_percent),
@@ -2571,7 +2581,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             abr_kbps=max(0, int(getattr(track, "audio_abr", 0) or 0)),
             sample_rate=source_rate,
             channels=source_channels,
-            output="pcm_s16le_48k_stereo" if self.direct_pcm_volume_enabled else "discord-opus",
+            output="pcm_s16le_48k_stereo" if pcm_pipeline else "discord-opus",
             resample=bool(source_rate and source_rate != 48000),
             resample_mode=resample_mode,
             channel_bitrate_kbps=channel_bitrate_kbps,
@@ -2592,7 +2602,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             )
 
         pcm_source = None
-        if self.direct_pcm_volume_enabled:
+        if pcm_pipeline:
             pcm_prepare_started = time.monotonic()
             try:
                 pcm_source = await self._prepare_current_pcm(guild_id, track, playback_token)
@@ -2611,6 +2621,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                         refreshed = await self._resolve_discord_attachment(track_meta=track.public(), body={"guild_id": guild_id},
                                                                             force_refresh=True)
                         fresh = {"url": refreshed.stream_url}
+                        track.archive_segments = refreshed.archive_segments
+                        track.archive_segment_index = refreshed.archive_segment_index
+                        track.attachment_ref = refreshed.attachment_ref
                         ref = track.archive_ref
                     else:
                         ref = normalize_reference(track.attachment_ref, guild_id)
@@ -2637,11 +2650,12 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 start_offset_seconds=getattr(track, "start_offset_seconds", 0.0),
                 opus_bitrate_kbps=opus_bitrate_kbps,
                 source_sample_rate=source_rate,
-                on_music_end=on_music_end if self.direct_pcm_volume_enabled else None,
+                on_music_end=on_music_end if pcm_pipeline else None,
                 reuse_mixer=existing_source if reusable else None,
                 pcm_source=pcm_source,
                 effects=effects,
                 is_live=track.is_live,
+                **({"force_pcm": True} if track.archive_segments else {}),
             )
         except BaseException:
             if pcm_source is not None:
@@ -2855,13 +2869,14 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         pcm_source: Any = None,
         effects: tuple[int | bool, ...] = (0, 0, 0),
         is_live: bool = False,
+        force_pcm: bool = False,
     ) -> Any:
         volume = max(0.0, min(1.5, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
         before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
         ffmpeg_options, _resample_mode = self._ffmpeg_options_for_source(
             source_sample_rate, effects=effects, is_live=is_live,
         )
-        if self.direct_pcm_volume_enabled:
+        if self.direct_pcm_volume_enabled or force_pcm:
             pcm = pcm_source if pcm_source is not None else self._create_pcm_source(AgentTrack(
                 stream_url=stream_url, audio_sample_rate=source_sample_rate,
                 start_offset_seconds=start_offset_seconds, is_live=is_live,
@@ -3087,6 +3102,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 resume_offset = min(resume_offset, max(0.0, float(track.duration) - 0.05))
 
         meta = track.public()
+        meta["start_offset_seconds"] = resume_offset
         query = self._query_from_track_meta(meta, fallback_query=track.query or track.webpage_url or track.title)
         if not query:
             return False
