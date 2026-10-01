@@ -94,7 +94,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.84"
+AGENT_VERSION = "0.3.85"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -1166,6 +1166,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         async with self._shutdown_lock:
             if self._shutdown_complete:
                 return
+            self._audio_prepare_stopping = True
 
             active_tts = list(self._tts_requests().values())
             self._active_tts_requests.clear()
@@ -1174,6 +1175,13 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 await self._cancel_voice_preparation(guild_id, reason="shutdown")
             await cancel_tasks(list(self._voice_prepare_tasks))
             self._voice_prepare_tasks.clear()
+
+            # Estes helpers só encerram decoders opcionais. Cancelá-los antes
+            # da primeira execução impediria o cleanup e a liberação da cota.
+            await asyncio.gather(
+                *list(getattr(self, "_audio_extra_preempt_tasks", {}).values()),
+                return_exceptions=True,
+            )
 
             background = (
                 ([self._archive_task] if self._archive_task is not None else [])

@@ -14,6 +14,7 @@ from cogs.musica.runtime_telefone.agente.audio_segmentado import ArchiveSegmente
 from cogs.musica.runtime_telefone.agente.buffer_pcm import BufferedPCMSource
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin
+from cogs.musica.runtime_telefone.agente.preparacao_audio import AudioPreparado, PreparacaoAudioMixin
 
 
 class FakePCM:
@@ -37,6 +38,252 @@ class FakePCM:
 
     def audio_buffer_metrics(self):
         return {"buffer_underruns": 0}
+
+
+def preparation_owner():
+    owner = PreparacaoAudioMixin()
+    owner.next_audio_prepare_max_sources = 1
+    owner._prepared_audio, owner._initial_audio = {}, {}
+    owner._audio_prepare_tasks, owner._audio_prepare_keys = {}, {}
+    owner.states = {}
+    return owner
+
+
+@pytest.mark.asyncio
+async def test_current_archive_part_preempts_optional_next_track_without_freeing_live_decoder_slot():
+    import threading
+
+    owner = preparation_owner()
+    cleaning, allow_cleanup = threading.Event(), threading.Event()
+    optional = FakePCM([b"q" * 3840])
+    def cleanup():
+        cleaning.set()
+        assert allow_cleanup.wait(2)
+        optional.closed = True
+    optional.cleanup = cleanup
+    owner._prepared_audio[1] = AudioPreparado("queued", "next", 0, optional, time.monotonic(), True)
+    assert owner._claim_audio_prepare_slot(("track", 1))
+    made = []
+    async def create(index, offset):
+        if index:
+            assert optional.closed
+        made.append(index)
+        return FakePCM([bytes([index + 1]) * 3840] * 2)
+    raw = ArchiveSegmentedPCMSource(segments=[{"duration": .04}, {"duration": .04}],
+        start_index=0, start_offset=0, create_segment=create, loop=asyncio.get_running_loop(),
+        claim_prepare=owner._claim_audio_prepare_slot, release_prepare=owner._release_audio_prepare_slot)
+    try:
+        await raw.wait_ready(timeout=1)
+        for _ in range(100):
+            if cleaning.is_set(): break
+            await asyncio.sleep(.001)
+        assert cleaning.is_set()
+        assert owner._audio_extra_owners == {("track", 1)}
+        assert not owner._claim_audio_prepare_slot(("initial", 2))
+        assert made == [0]
+        allow_cleanup.set()
+        for _ in range(100):
+            raw._maybe_prepare_next()
+            if made == [0, 1]: break
+            await asyncio.sleep(.001)
+        assert made == [0, 1]
+        assert not owner._prepared_audio
+        await asyncio.sleep(0)
+        assert [raw.read()[0] for _ in range(4)] == [1, 1, 2, 2]
+    finally:
+        allow_cleanup.set()
+        raw.cleanup()
+        await asyncio.sleep(.01)
+
+
+@pytest.mark.asyncio
+async def test_two_archive_calls_can_advance_at_eof_with_one_extra_decoder_slot():
+    owner = preparation_owner()
+    made_a, made_b = [], []
+    async def create_a(index, offset):
+        part = FakePCM([bytes([index + 1]) * 3840] * 2)
+        made_a.append(part)
+        return part
+    async def create_b(index, offset):
+        if index:
+            assert made_b[0].closed  # Playback replacement opens only after EOF decoder cleanup.
+        part = FakePCM([bytes([index + 3]) * 3840] * 2)
+        made_b.append(part)
+        return part
+    def raw(create):
+        return ArchiveSegmentedPCMSource(segments=[{"duration": .04}, {"duration": .04}],
+            start_index=0, start_offset=0, create_segment=create, loop=asyncio.get_running_loop(),
+            claim_prepare=owner._claim_audio_prepare_slot, release_prepare=owner._release_audio_prepare_slot,
+            stall_seconds=.2)
+    first, second = raw(create_a), raw(create_b)
+    try:
+        await asyncio.gather(first.wait_ready(timeout=1), second.wait_ready(timeout=1))
+        await asyncio.sleep(0)
+        assert len(made_a) == 2 and len(made_b) == 1
+        held = set(owner._audio_extra_owners)
+        assert len(held) == 1
+        assert [second.read()[0] for _ in range(2)] == [3, 3]
+        began = time.monotonic()
+        assert second.read() == bytes(3840)
+        assert time.monotonic() - began < .02
+        for _ in range(100):
+            if len(made_b) == 2: break
+            await asyncio.sleep(.001)
+        assert len(made_b) == 2
+        assert owner._audio_extra_owners == held  # The replacement is playback, never an extra.
+        await asyncio.sleep(0)
+        assert [second.read()[0] for _ in range(2)] == [4, 4]
+        assert second.read() == b""
+    finally:
+        first.cleanup()
+        second.cleanup()
+        await asyncio.sleep(.01)
+
+
+@pytest.mark.asyncio
+async def test_required_part_replacement_preserves_short_tail_and_propagates_download_error():
+    async def exercise(failed):
+        made = []
+        pieces = [b"a" * 1900, b"b" * 2000]
+        async def create(index, offset):
+            if index:
+                assert made[0].closed
+                if failed:
+                    raise OSError("required attachment unavailable")
+            part = FakePCM([pieces[index]])
+            made.append(part)
+            return part
+        raw = ArchiveSegmentedPCMSource(segments=[{"duration": len(piece) / 192000} for piece in pieces],
+            start_index=0, start_offset=0, create_segment=create, loop=asyncio.get_running_loop(),
+            claim_prepare=lambda owner: False)
+        try:
+            await raw.wait_ready(timeout=1)
+            assert raw.read() == bytes(3840) and not raw.last_read_had_audio
+            await asyncio.sleep(0)
+            await asyncio.gather(raw._next_task, return_exceptions=True)
+            if failed:
+                with pytest.raises(OSError, match="required attachment unavailable"):
+                    raw.read()
+            else:
+                frames = [raw.read(), raw.read()]
+                assert b"".join(frames) == b"".join(pieces).ljust(7680, b"\0")
+                assert raw.read() == b""
+        finally:
+            raw.cleanup()
+    await exercise(False)
+    await exercise(True)
+
+
+@pytest.mark.asyncio
+async def test_required_part_replacement_timeout_and_shutdown_cleanup_inflight_decoder():
+    next_started = asyncio.Event()
+    made = []
+    async def create(index, offset):
+        part = FakePCM([b"x" * 3840])
+        made.append(part)
+        if index:
+            assert made[0].closed
+            async def wait_ready(**kwargs):
+                next_started.set()
+                await asyncio.Event().wait()
+            part.wait_ready = wait_ready
+        return part
+    raw = ArchiveSegmentedPCMSource(segments=[{"duration": .02}, {"duration": .02}],
+        start_index=0, start_offset=0, create_segment=create, loop=asyncio.get_running_loop(),
+        claim_prepare=lambda owner: False, stall_seconds=.05)
+    try:
+        await raw.wait_ready(timeout=1)
+        raw.read()
+        assert raw.read() == bytes(3840)
+        await asyncio.wait_for(next_started.wait(), timeout=1)
+        raw._gap_since = time.monotonic() - .1
+        with pytest.raises(TimeoutError, match="próxima parte"):
+            raw.read()
+    finally:
+        raw.cleanup()
+        await asyncio.sleep(0)
+        await asyncio.gather(raw._next_task, return_exceptions=True)
+    assert len(made) == 2 and all(part.closed for part in made)
+    assert raw.read() == b""
+
+
+@pytest.mark.asyncio
+async def test_cancelled_optional_preemption_keeps_slot_until_cleanup_finishes():
+    import threading
+
+    owner = preparation_owner()
+    entered, release = threading.Event(), threading.Event()
+    optional = FakePCM([])
+    def cleanup():
+        entered.set()
+        assert release.wait(2)
+        optional.closed = True
+    optional.cleanup = cleanup
+    owner._prepared_audio[1] = AudioPreparado("queued", "next", 0, optional, time.monotonic(), True)
+    assert owner._claim_audio_prepare_slot(("track", 1))
+    assert not owner._claim_audio_prepare_slot(("segment", 2))
+    task = owner._audio_extra_preempt_tasks[("track", 1)]
+    try:
+        for _ in range(100):
+            if entered.is_set(): break
+            await asyncio.sleep(.001)
+        assert entered.is_set()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done() and owner._audio_extra_owners == {("track", 1)}
+        assert not owner._claim_audio_prepare_slot(("initial", 3))
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert optional.closed and not owner._audio_extra_owners
+    assert not owner._audio_extra_preempt_tasks
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_during_pending_track_preemption_keeps_decoder_slot():
+    import threading
+
+    owner = preparation_owner()
+    owner.pcm_buffer_enabled = owner.direct_pcm_volume_enabled = True
+    owner._track_stream_needs_refresh = lambda track: False
+    owner.log = lambda *args, **kwargs: None
+    entered_wait = asyncio.Event()
+    entered_cleanup, release_cleanup = threading.Event(), threading.Event()
+    optional = FakePCM([b"q" * 3840])
+    async def wait_ready(**kwargs):
+        entered_wait.set()
+        await asyncio.Event().wait()
+    def cleanup():
+        entered_cleanup.set()
+        assert release_cleanup.wait(2)
+        optional.closed = True
+    optional.wait_ready, optional.cleanup = wait_ready, cleanup
+    owner._create_pcm_source = lambda *args, **kwargs: optional
+    owner.prepare_timeout = 1
+    owner.states[1] = GuildMusicState(1, current=AgentTrack(duration=5),
+        queue=[AgentTrack(stream_url="https://example/next")], started_monotonic=time.monotonic())
+    owner._schedule_audio_prepare(1)
+    await entered_wait.wait()
+    preparing = owner._audio_prepare_tasks[1]
+    assert not owner._claim_audio_prepare_slot(("segment", 2))
+    preempting = owner._audio_extra_preempt_tasks[("track", 1)]
+    try:
+        for _ in range(100):
+            if entered_cleanup.is_set(): break
+            await asyncio.sleep(.001)
+        assert entered_cleanup.is_set()
+        for _ in range(2):
+            preempting.cancel()
+            await asyncio.sleep(0)
+        assert not preempting.done() and owner._audio_extra_owners == {("track", 1)}
+        assert not owner._claim_audio_prepare_slot(("initial", 3))
+    finally:
+        release_cleanup.set()
+        await asyncio.gather(preempting, preparing, return_exceptions=True)
+    assert optional.closed and not owner._audio_extra_owners
+    assert not owner._audio_prepare_tasks and not owner._prepared_audio
+    owner._audio_prepare_stopping = True
+    assert not owner._claim_audio_prepare_slot(("initial", 3))
 
 
 @pytest.mark.asyncio

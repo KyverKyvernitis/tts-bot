@@ -1,11 +1,13 @@
 """Resolução yt-dlp exposta pelo Phone Worker para o domínio de música."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -20,6 +22,15 @@ _WARM_YDL_POOL_LOCK = threading.Lock()
 _WARM_YDL_POOL: list[dict[str, Any]] = []
 _METADATA_PROVIDER_AUDIT_LOCK = threading.Lock()
 _METADATA_PROVIDER_AUDIT: dict[str, dict[str, Any]] = {}
+
+
+def _emit_log_line(line: str) -> None:
+    """Uma saída de log fechada não deve interromper a resolução de música."""
+    try:
+        print(line, flush=True)
+    except BrokenPipeError:
+        with contextlib.suppress(BrokenPipeError, OSError):
+            print(line, file=sys.stderr, flush=True)
 
 
 def _warm_ydl_pool_limit() -> int:
@@ -127,10 +138,7 @@ def _audit_metadata_provider_block(provider: str, path: str) -> None:
         suppressed = int(item.get("suppressed") or 0)
         item.update({"at": now, "suppressed": 0})
     suffix = f" suppressed={suppressed}" if suppressed else ""
-    print(
-        f"[music-ytdlp] metadata_provider_url_blocked provider={provider} path={path!r}{suffix}",
-        flush=True,
-    )
+    _emit_log_line(f"[music-ytdlp] metadata_provider_url_blocked provider={provider} path={path!r}{suffix}")
 
 
 def _metadata_provider_url_kind(value: str) -> str:
@@ -553,11 +561,10 @@ def resolve_ytdlp(body: dict[str, Any], *, job_timeout: int) -> dict[str, Any]:
 
     if not tracks:
         reason = cli_stderr or api_error or "yt-dlp não retornou URL de áudio"
-        print(
+        _emit_log_line(
             "[music-ytdlp] tracks=0 "
             f"target={short_text(target, limit=120)!r} cookies={'on' if cookies_ok else 'off'} "
-            f"js={','.join(js_runtimes) or 'off'} rc={cli_rc} erro={short_text(reason, limit=240)}",
-            flush=True,
+            f"js={','.join(js_runtimes) or 'off'} rc={cli_rc} erro={short_text(reason, limit=240)}"
         )
 
     return {

@@ -1,4 +1,4 @@
-# Voz no Termux — perfil 0.3.84
+# Voz no Termux — perfil 0.3.85
 
 A voz permanece no Termux. A VPS atende o controller, os comandos e o painel.
 O Phone Worker atende reprodução, resolução e arquivamento. Os arquivos de
@@ -31,7 +31,7 @@ arquivos do perfil experimental foram preservados para compatibilidade, mas
 não são ativados nesta entrega. Não há alternância automática entre executores.
 
 Veja [as instruções de retorno e recuperação de BrokenPipe](../../docs/MUSIC_AGENT_0_3_84.md)
-e [a validação local](../../docs/VALIDACAO_MUSIC_AGENT_0_3_84.md).
+e [a correção de continuidade no Termux](../../docs/MUSIC_AGENT_0_3_85.md).
 
 Para medir o início da reprodução, salve os eventos `[music-start]` de antes e
 depois e rode:

@@ -143,7 +143,7 @@ async def test_controller_direct_route_reaches_real_authenticated_agent_http(dir
         async with ClientSession() as client:
             async with client.get(base + "/health") as response:
                 assert response.status == 401
-                assert response.headers["X-Music-Agent-Version"] == "0.3.84"
+                assert response.headers["X-Music-Agent-Version"] == "0.3.85"
             async with client.post(base + "/command", headers={"Authorization": "Bearer voice-secret"},
                                    json={"action": "archive_enqueue"}) as response:
                 assert (await response.json())["ok"] is False

@@ -102,21 +102,36 @@ class ArchiveSegmentedPCMSource(discord.AudioSource):
             self._current = source
         self._maybe_prepare_next()
 
-    def _maybe_prepare_next(self) -> None:
+    def _maybe_prepare_next(self, required: bool = False) -> None:
         with self._lock:
-            if self._closed or not self._playback_active or self.index + 1 >= len(self.segments) or self._next is not None or self._next_task is not None:
+            if (self._closed or not self._playback_active or self.index + 1 >= len(self.segments)
+                    or self._next is not None or self._next_task is not None or self._prepare_slot_owned):
                 return
             remaining = (float(self.segments[self.index]["duration"]) - self._offset) / self._speed - self._frames_read * 0.02
             if remaining > self._lead_seconds:
                 return
-            if self._claim_prepare is not None and not self._claim_prepare(self._prepare_owner):
-                return
-            self._prepare_slot_owned = True
-            self._next_task = self._loop.create_task(self._prepare_next(self.index + 1))
+            if not required:
+                if self._claim_prepare is not None and not self._claim_prepare(self._prepare_owner):
+                    return
+                self._prepare_slot_owned = True
+            # No EOF a parte seguinte substitui o decoder de playback. Ela
+            # não é mais uma fonte extra e não espera outra call liberar cota.
+            self._next_task = self._loop.create_task(self._prepare_next(self.index + 1, replace_current=required))
             self._next_task.add_done_callback(consume_task_result)
 
-    async def _prepare_next(self, index: int) -> None:
+    async def _prepare_next(self, index: int, *, replace_current: bool = False) -> None:
         try:
+            if replace_current:
+                with self._lock:
+                    old = self._current
+                # Mantém a referência ao EOF para read() continuar verificando
+                # erro, timeout e cauda, mas fecha os recursos antes de abrir
+                # o substituto. A thread de voz apenas agenda este trabalho.
+                if old is not None:
+                    await asyncio.to_thread(old.cleanup)
+                with self._lock:
+                    if self._closed:
+                        return
             source = await self._make_ready(index, 0.0)
             with self._lock:
                 if self._closed or self.index + 1 != index:
@@ -200,14 +215,16 @@ class ArchiveSegmentedPCMSource(discord.AudioSource):
                     old = self._current
                     self._current, self._next = self._next, None
                     self._next_task = None
-                    self._release_prepare_slot()
                     self.index += 1
                     self._segments_completed += 1
                     self._offset = 0.0
                     self._frames_read = 0
-                    old.cleanup()
+                    try:
+                        old.cleanup()
+                    finally:
+                        self._release_prepare_slot()
                     continue  # Primeiro frame da parte nova neste mesmo tick.
-                self._loop.call_soon_threadsafe(self._maybe_prepare_next)
+                self._loop.call_soon_threadsafe(self._maybe_prepare_next, True)
                 now = time.monotonic()
                 self._gap_since = self._gap_since or now
                 if now - self._gap_since >= self._stall_seconds:

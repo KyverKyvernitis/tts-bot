@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import builtins
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -78,3 +80,70 @@ def test_metadata_provider_block_response_remove_query_tracking(monkeypatch) -> 
         job_timeout=20,
     )
     assert result["query"] == "https://open.spotify.com/track/abc"
+
+
+@pytest.mark.parametrize("stderr_broken", [False, True])
+def test_metadata_provider_block_survives_broken_log_pipe(monkeypatch, stderr_broken: bool) -> None:
+    worker_resolucao._METADATA_PROVIDER_AUDIT.clear()
+    stderr_lines = []
+
+    def broken_print(line, *, file=None, flush=False):
+        assert flush is True
+        if file is sys.stderr and not stderr_broken:
+            stderr_lines.append(line)
+            return
+        raise BrokenPipeError(32, "Broken pipe")
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "yt_dlp":
+            raise AssertionError("URL de metadata não deve iniciar yt-dlp mesmo se o log falhar")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "print", broken_print)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    result = worker_resolucao.resolve_ytdlp(
+        {"query": "https://open.spotify.com/playlist/abc?si=secret"}, job_timeout=20,
+    )
+    assert result["ok"] is False
+    assert result["error"] == "metadata_provider_url_blocked"
+    assert result["blocked_before_ytdlp"] is True
+    assert result["provider"] == "spotify"
+    assert result["query"] == "https://open.spotify.com/playlist/abc"
+    if stderr_broken:
+        assert stderr_lines == []
+    else:
+        assert len(stderr_lines) == 1
+        assert "metadata_provider_url_blocked provider=spotify" in stderr_lines[0]
+        assert "secret" not in stderr_lines[0]
+
+
+def test_empty_ytdlp_search_survives_broken_log_pipes(monkeypatch) -> None:
+    class EmptyYDL:
+        def __init__(self, options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, target, download=False):
+            return None
+
+    def broken_print(*args, **kwargs):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setenv("PHONE_WORKER_MUSIC_YTDLP_WARM_POOL_SIZE", "0")
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=EmptyYDL))
+    monkeypatch.setattr(builtins, "print", broken_print)
+    result = worker_resolucao.resolve_ytdlp(
+        {"query": "consulta sem resultados", "metadata_only": True, "fast_search": True},
+        job_timeout=20,
+    )
+    assert result["ok"] is True
+    assert result["tracks"] == []
+    assert result["tracks_found"] == 0
+    assert result["api_error"] == ""

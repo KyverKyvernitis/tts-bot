@@ -12,7 +12,7 @@ import discord
 
 from .buffer_pcm import BufferedPCMSource
 from .audio_segmentado import ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource, ExactSegmentPCMSource
-from .ciclo_vida import remove_owned_task
+from .ciclo_vida import consume_task_result, remove_owned_task
 from .estado import AgentTrack, GuildMusicState
 
 
@@ -46,13 +46,30 @@ class AudioInicial:
 class PreparacaoAudioMixin:
     def _claim_audio_prepare_slot(self, owner: Any) -> bool:
         """Uma cota compartilhada por início, próxima faixa e próxima parte."""
+        if getattr(self, "_audio_prepare_stopping", False):
+            return False
         if not hasattr(self, "_audio_extra_owners"):
             self._audio_extra_owners = set()
             self._audio_extra_lock = threading.RLock()
+            self._audio_extra_preempting = set()
+            self._audio_extra_preempt_tasks = {}
         with self._audio_extra_lock:
+            if owner in self._audio_extra_preempting:
+                return False
             if owner in self._audio_extra_owners:
                 return True
             if len(self._audio_extra_owners) >= getattr(self, "next_audio_prepare_max_sources", 1):
+                # Uma parte da música atual tem prioridade sobre aquecer uma
+                # faixa futura. A vaga continua ocupada durante o cleanup.
+                if isinstance(owner, tuple) and owner[0] == "segment":
+                    for optional in list(self._audio_extra_owners):
+                        if (isinstance(optional, tuple) and optional[0] == "track"
+                                and optional not in self._audio_extra_preempting):
+                            self._audio_extra_preempting.add(optional)
+                            task = asyncio.create_task(self._preempt_optional_audio(optional))
+                            self._audio_extra_preempt_tasks[optional] = task
+                            task.add_done_callback(consume_task_result)
+                            break
                 return False
             self._audio_extra_owners.add(owner)
             return True
@@ -61,7 +78,43 @@ class PreparacaoAudioMixin:
         lock = getattr(self, "_audio_extra_lock", None)
         if lock is not None:
             with lock:
-                self._audio_extra_owners.discard(owner)
+                if owner not in self._audio_extra_preempting:
+                    self._audio_extra_owners.discard(owner)
+
+    @staticmethod
+    async def _cleanup_audio_off_loop(source: Any) -> None:
+        cleanup = asyncio.get_running_loop().run_in_executor(None, source.cleanup)
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # Cancelar a espera não encerra a thread. Até cancelamentos
+                # repetidos aguardam seu fim antes de liberar a vaga.
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _preempt_optional_audio(self, owner: tuple) -> None:
+        guild_id = owner[1]
+        prepared = self._prepared_audio.pop(guild_id, None)
+        task = self._audio_prepare_tasks.pop(guild_id, None)
+        self._audio_prepare_keys.pop(guild_id, None)
+        try:
+            if task is not None and task is not asyncio.current_task():
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        finally:
+            try:
+                if prepared is not None:
+                    await self._cleanup_audio_off_loop(prepared.source)
+            finally:
+                with self._audio_extra_lock:
+                    self._audio_extra_preempting.discard(owner)
+                    self._audio_extra_owners.discard(owner)
+                    self._audio_extra_preempt_tasks.pop(owner, None)
 
     @staticmethod
     def _archive_audio_identity(track: AgentTrack) -> tuple:
@@ -195,8 +248,8 @@ class PreparacaoAudioMixin:
         if entry is None or (item_id and entry.item_id != item_id):
             return
         self._initial_audio.pop(guild_id, None)
-        self._release_audio_prepare_slot(("initial", guild_id))
         entry.source.cleanup()
+        self._release_audio_prepare_slot(("initial", guild_id))
 
     def _begin_initial_audio(self, guild_id: int, track: AgentTrack, *, speculative_first_audio: bool = False) -> bool:
         st = self.states.get(guild_id)
@@ -318,8 +371,8 @@ class PreparacaoAudioMixin:
         effects = (0, st.effect_level("nightcore"), st.effect_level("slowed_reverb")) if st else (0, 0, 0)
         if prepared is not None and not (prepared.ready and prepared.item_id == keep_item_id and prepared.effects == effects):
             self._prepared_audio.pop(guild_id, None)
-            self._release_audio_prepare_slot(("track", guild_id))
             prepared.source.cleanup()
+            self._release_audio_prepare_slot(("track", guild_id))
 
     def _take_prepared_audio(self, guild_id: int, track: AgentTrack) -> BufferedPCMSource | None:
         prepared = self._prepared_audio.pop(guild_id, None)
@@ -424,15 +477,19 @@ class PreparacaoAudioMixin:
             except Exception as exc:
                 self.log("next_audio_prepare_failed", guild_id=guild_id, error=type(exc).__name__)
             finally:
-                if owned is not None and not owned.ready:
-                    if self._prepared_audio.get(guild_id) is owned:
-                        self._prepared_audio.pop(guild_id, None)
-                    self._release_audio_prepare_slot(("track", guild_id))
-                    owned.source.cleanup()
-                current_task = asyncio.current_task()
-                if self._audio_prepare_tasks.get(guild_id) is current_task:
-                    self._audio_prepare_keys.pop(guild_id, None)
-                remove_owned_task(self._audio_prepare_tasks, guild_id, current_task)
+                try:
+                    if owned is not None and not owned.ready:
+                        if self._prepared_audio.get(guild_id) is owned:
+                            self._prepared_audio.pop(guild_id, None)
+                        try:
+                            await self._cleanup_audio_off_loop(owned.source)
+                        finally:
+                            self._release_audio_prepare_slot(("track", guild_id))
+                finally:
+                    current_task = asyncio.current_task()
+                    if self._audio_prepare_tasks.get(guild_id) is current_task:
+                        self._audio_prepare_keys.pop(guild_id, None)
+                    remove_owned_task(self._audio_prepare_tasks, guild_id, current_task)
 
         self._audio_prepare_keys[guild_id] = prepare_key
         self._audio_prepare_tasks[guild_id] = asyncio.create_task(prepare())

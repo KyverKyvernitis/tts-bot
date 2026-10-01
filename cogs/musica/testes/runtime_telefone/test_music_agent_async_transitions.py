@@ -157,6 +157,32 @@ def test_shutdown_cancels_background_tasks_disconnects_players_and_closes_resour
     run(scenario())
 
 
+def test_shutdown_collects_optional_preemption_before_its_first_execution(music):
+    from cogs.musica.runtime_telefone.agente.preparacao_audio import AudioPreparado
+    import threading
+    import time
+
+    async def scenario():
+        agent = music.MusicAgent()
+        cleaned = []
+        class Source:
+            def cleanup(self):
+                cleaned.append(threading.current_thread().name)
+
+        agent._prepared_audio[1] = AudioPreparado("queued", "next", 0, Source(), time.monotonic(), True)
+        assert agent._claim_audio_prepare_slot(("track", 1))
+        assert not agent._claim_audio_prepare_slot(("segment", 2))
+        # Nenhum yield: o helper ainda não começou quando shutdown é chamado.
+        await asyncio.wait_for(agent.shutdown(), timeout=2)
+        assert cleaned and all(name != "MainThread" for name in cleaned)
+        assert not agent._prepared_audio
+        assert not agent._audio_extra_owners
+        assert not agent._audio_extra_preempt_tasks
+        assert not agent._claim_audio_prepare_slot(("initial", 3))
+
+    run(scenario())
+
+
 def test_direct_tts_cancellation_transfers_to_short_voice_idle_policy(music, monkeypatch):
     async def scenario():
         agent = music.MusicAgent()
