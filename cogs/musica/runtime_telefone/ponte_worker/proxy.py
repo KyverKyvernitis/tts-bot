@@ -313,6 +313,12 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
                 })
             except Exception as exc:
                 _forget_runtime_version(cache_key)
+                if attempt == 0 and isinstance(exc, (
+                    BrokenPipeError, ConnectionResetError, http.client.RemoteDisconnected,
+                )):
+                    # Socket keep-alive encerrado: _pooled_request já o fechou.
+                    # Refaça na conexão nova com o mesmo ID, sem restart de voz.
+                    continue
                 if is_status or attempt > 0 or attempted_prepare is not None:
                     return _finish({"ok": False, "available": False, "error": f"{type(exc).__name__}: {hooks.short_text(exc, limit=260)}"})
                 _repair()

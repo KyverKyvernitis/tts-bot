@@ -298,6 +298,9 @@ PHONE_WORKER_ENABLED = bool(MUSIC_PHONE_WORKER_DIRECT_ENABLED and PHONE_WORKER_H
 # Music Agent no phone worker — padrão da música. A VPS fica como plano de UI/status
 # e o Phone Worker assume voz/player/yt-dlp quando disponível. Lavalink fica só em metadados.
 MUSIC_AGENT_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "true"), True)
+# Voz permanece no Termux, inclusive com flags antigas do perfil VPS presentes.
+# Um perfil VPS exige escolha explícita adicional; não é fallback automático.
+MUSIC_AGENT_VOICE_EXECUTOR = (os.getenv("MUSIC_AGENT_VOICE_EXECUTOR", "termux") or "termux").strip().lower()
 # Executor independente opt-in: a resolução/arquivamento continuam no worker.
 MUSIC_AGENT_DIRECT_API_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_DIRECT_API_ENABLED", "false"), False)
 MUSIC_AGENT_DIRECT_API_BASE_URL = (os.getenv("MUSIC_AGENT_DIRECT_API_BASE_URL", "") or "").strip()

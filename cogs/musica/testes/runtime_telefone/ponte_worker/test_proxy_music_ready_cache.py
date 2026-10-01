@@ -105,6 +105,39 @@ def test_lost_response_retries_same_id_on_reachable_agent_without_restart(setup,
     assert result["proxy_timing_ms"]["request_count"] == 2
 
 
+@pytest.mark.parametrize("failure", [BrokenPipeError(32, "Broken pipe"), ConnectionResetError("reset")])
+def test_closed_keepalive_retries_same_id_without_heavy_audit_or_voice_restart(setup, monkeypatch, failure):
+    hooks, _now, snapshots, services, _requests, _health = setup
+    original = proxy._pooled_request
+    attempts = []
+    def request(*args, **kwargs):
+        attempts.append(json.loads(kwargs["body"]))
+        if len(attempts) == 1:
+            raise failure
+        return original(*args, **kwargs)
+    monkeypatch.setattr(proxy, "_pooled_request", request)
+    result = play(hooks, command_id="retain-on-epipe")
+    assert result["ok"] and len(attempts) == 2
+    assert attempts[0] == attempts[1]
+    assert not snapshots and not services
+    assert result["proxy_timing_ms"]["repair"] == 0
+
+
+def test_closed_keepalive_status_retries_without_restart(setup, monkeypatch):
+    hooks, _now, snapshots, services, _requests, _health = setup
+    original = proxy._pooled_request
+    attempts = []
+    def request(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise BrokenPipeError(32, "Broken pipe")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(proxy, "_pooled_request", request)
+    result = proxy.proxy_music_agent({"action": "status"}, max_output_bytes=4096, hooks=hooks)
+    assert result["ok"] and len(attempts) == 2
+    assert not services and not snapshots
+
+
 def test_missing_agent_starts_once_and_generates_one_id_for_both_attempts(setup, monkeypatch):
     hooks, _now, snapshots, services, _requests, health = setup
     health["available"] = False

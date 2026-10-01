@@ -15,6 +15,7 @@ def direct(monkeypatch):
     roteamento.limpar_vinculos_worker()
     monkeypatch.setattr(roteamento, "_DIRECT_HEALTH_CACHE", None)
     monkeypatch.setattr(roteamento.config, "MUSIC_AGENT_DIRECT_API_ENABLED", True)
+    monkeypatch.setattr(roteamento.config, "MUSIC_AGENT_VOICE_EXECUTOR", "vps")
     monkeypatch.setattr(roteamento.config, "MUSIC_AGENT_DIRECT_API_BASE_URL", "http://127.0.0.1:8767")
     monkeypatch.setattr(roteamento.config, "MUSIC_AGENT_DIRECT_API_TOKEN", "voice-secret")
     yield roteamento.configured_direct_destination()
@@ -142,7 +143,7 @@ async def test_controller_direct_route_reaches_real_authenticated_agent_http(dir
         async with ClientSession() as client:
             async with client.get(base + "/health") as response:
                 assert response.status == 401
-                assert response.headers["X-Music-Agent-Version"] == "0.3.83"
+                assert response.headers["X-Music-Agent-Version"] == "0.3.84"
             async with client.post(base + "/command", headers={"Authorization": "Bearer voice-secret"},
                                    json={"action": "archive_enqueue"}) as response:
                 assert (await response.json())["ok"] is False
@@ -155,3 +156,25 @@ async def test_controller_direct_route_reaches_real_authenticated_agent_http(dir
         await fechar_sessao_http()
         await runner.cleanup()
         await agent.client.close()
+
+
+@pytest.mark.asyncio
+async def test_termux_default_ignores_old_vps_flags_health_and_binding(direct, monkeypatch):
+    monkeypatch.setattr(roteamento.config, "MUSIC_AGENT_VOICE_EXECUTOR", "termux")
+    monkeypatch.setattr(roteamento.config, "MUSIC_AGENT_DIRECT_API_BASE_URL", "old-invalid-value")
+    assert roteamento.configured_direct_destination() is None
+    roteamento.vincular_guild_worker(19, direct)
+    assert roteamento.destino_vinculado(19) is None
+    phone = MusicWorkerSelection(True, worker_id="phone", worker={"endpoint": "http://phone:8766"})
+    monkeypatch.setattr(roteamento.config, "PHONE_WORKER_TOKEN", "phone-token")
+    monkeypatch.setattr(selecao, "select_music_worker_async", AsyncMock(return_value=phone))
+    assert (await selecao.ensure_music_worker_available()).worker_id == "phone"
+    monkeypatch.setattr(comandos, "require_music_worker_available_async", AsyncMock(return_value=phone))
+    sent = []
+    async def post(**kwargs):
+        sent.append(kwargs["url"])
+        return {"ok": True}
+    monkeypatch.setattr(comandos, "post_json_worker", post)
+    await comandos.music_agent_command("play", guild_id=19, query="music")
+    await comandos.music_agent_status(guild_id=19)
+    assert sent == ["http://phone:8766/task", "http://phone:8766/task"]

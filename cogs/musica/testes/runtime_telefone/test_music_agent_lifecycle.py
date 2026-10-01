@@ -74,6 +74,21 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def test_broken_stdout_does_not_interrupt_play_commands_or_packet_telemetry(music, monkeypatch):
+    calls = []
+    def broken_print(line, **kwargs):
+        if kwargs.get("file") is not sys.stderr:
+            raise BrokenPipeError(32, "Broken pipe")
+        calls.append(line)
+    monkeypatch.setattr("builtins.print", broken_print)
+    agent = music.MusicAgent()
+    agent.log("play_received", guild_id=1, action="play")
+    agent.log("music_first_packet_sent", guild_id=1, trace_id="trace",
+              controller_timing_ms={"metadata_ms": 1}, agent_timing_ms={"agent_to_first_packet_ms": 2})
+    assert len(calls) == 2
+    assert "play_received" in calls[0] and "[music-start]" in calls[1]
+
+
 def test_voice_preparation_cancellation_owns_only_its_lease(music):
     from types import SimpleNamespace
     async def scenario():

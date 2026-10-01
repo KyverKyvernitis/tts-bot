@@ -39,7 +39,8 @@ urlopen = build_opener(_NoDirectRedirect()).open
 
 def configured_direct_destination() -> DestinoWorker | None:
     """Destino opt-in para um Music Agent independente, sem trocar dono ativo."""
-    if not bool(getattr(config, "MUSIC_AGENT_DIRECT_API_ENABLED", False)):
+    if (str(getattr(config, "MUSIC_AGENT_VOICE_EXECUTOR", "termux")).strip().lower() != "vps"
+            or not bool(getattr(config, "MUSIC_AGENT_DIRECT_API_ENABLED", False))):
         return None
     base = str(getattr(config, "MUSIC_AGENT_DIRECT_API_BASE_URL", "") or "").strip().rstrip("/")
     token = str(getattr(config, "MUSIC_AGENT_DIRECT_API_TOKEN", "") or "").strip()
@@ -159,7 +160,12 @@ def destino_vinculado(guild_id: int) -> DestinoWorker | None:
         guild = int(guild_id or 0)
     except Exception:
         return None
-    return _DESTINOS_GUILD.get(guild) if guild > 0 else None
+    destino = _DESTINOS_GUILD.get(guild) if guild > 0 else None
+    if (destino is not None and destino.transport == "direct"
+            and str(getattr(config, "MUSIC_AGENT_VOICE_EXECUTOR", "termux")).strip().lower() != "vps"):
+        _DESTINOS_GUILD.pop(guild, None)
+        return None
+    return destino
 
 
 def resolver_destino_worker(

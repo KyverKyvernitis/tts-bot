@@ -94,7 +94,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.83"
+AGENT_VERSION = "0.3.84"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -328,11 +328,21 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                       "trace_id": str(fields.get("trace_id") or "")[:128],
                       "controller_timing_ms": fields.get("controller_timing_ms") or {},
                       "agent_timing_ms": fields.get("agent_timing_ms") or {}}
-            print("[music-start] " + json.dumps(record, ensure_ascii=False, separators=(",", ":")), flush=True)
+            MusicAgent._emit_log_line("[music-start] " + json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             return
         details = " ".join(f"{key}={short_text(_audit_value(key, value), 220)!r}" for key, value in fields.items() if value is not None and value != "")
         gid = f" guild={guild_id}" if guild_id else ""
-        print(f"[music-agent] {event}{gid} at={stamp!r}{(' ' + details) if details else ''}", flush=True)
+        MusicAgent._emit_log_line(f"[music-agent] {event}{gid} at={stamp!r}{(' ' + details) if details else ''}")
+
+    @staticmethod
+    def _emit_log_line(line: str) -> None:
+        try:
+            print(line, flush=True)
+        except BrokenPipeError:
+            # O supervisor pode fechar stdout. Telemetria não interrompe áudio
+            # nem transforma um comando válido numa falha BrokenPipeError.
+            with contextlib.suppress(BrokenPipeError, OSError):
+                print(line, file=sys.stderr, flush=True)
 
     def _wire_discord_events(self) -> None:
         @self.client.event

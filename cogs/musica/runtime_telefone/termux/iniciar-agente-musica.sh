@@ -25,6 +25,11 @@ if [[ -f "$MUSIC_AGENT_ENV_FILE" ]]; then
   source "$MUSIC_AGENT_ENV_FILE"
   set +a
 fi
+# A configuração antiga archive-only pertencia ao perfil de voz na VPS.
+# No perfil Termux a reprodução e o arquivo voltam ao mesmo executor.
+if [[ "${MUSIC_AGENT_VOICE_EXECUTOR:-termux}" == "termux" ]]; then
+  export MUSIC_AGENT_EXECUTOR_MODE=full
+fi
 PYTHON_BIN="${PHONE_WORKER_PYTHON:-python}"
 HOST="${MUSIC_AGENT_HOST:-127.0.0.1}"
 PORT="${MUSIC_AGENT_PORT:-8780}"

@@ -6,6 +6,7 @@ import pytest
 
 from cogs.musica.agente_telefone import comandos, protocolo, transporte_http
 from cogs.musica.agente_telefone.roteamento import DestinoWorker
+from cogs.musica.agente_telefone.modelos import MusicWorkerEngineUnavailable
 
 
 class _RespostaOK:
@@ -68,6 +69,66 @@ def test_comando_recebe_id_idempotente_unico() -> None:
     second = protocolo.montar_comando("play", guild_id=1, query="505")
     assert len(first["command_id"]) >= 20
     assert first["command_id"] != second["command_id"]
+
+
+@pytest.mark.asyncio
+async def test_serialized_broken_pipe_retries_play_with_same_id_and_preserves_phone_owner(monkeypatch):
+    from cogs.musica.agente_telefone import roteamento
+    guild_id = 88721
+    phone = DestinoWorker("phone", "Termux", "http://100.64.0.10:8766", "token")
+    roteamento.vincular_guild_worker(guild_id, phone)
+    sent = []
+    async def post(**kwargs):
+        sent.append(kwargs["payload"]["command_id"])
+        if len(sent) <= 2:
+            return {"ok": False, "error": "BrokenPipeError: [Errno 32] Broken pipe"}
+        return {"ok": True, "state": {"status": "playing"}}
+    monkeypatch.setattr(comandos, "post_json_worker", post)
+    monkeypatch.setattr(comandos, "_resolver_destino_retry", lambda original, guild: asyncio.sleep(0, result=original))
+    try:
+        response = await comandos.music_agent_command("enqueue_many", guild_id=guild_id, query="playlist", command_id="playlist-delivery")
+        assert response["deferred"]
+        assert roteamento.destino_vinculado(guild_id) == phone
+        await asyncio.wait_for(comandos._DEFERRED_TASKS[guild_id], timeout=2)
+        assert sent == ["playlist-delivery"] * 3
+        assert comandos.estado_comando_diferido(guild_id)["status"] == "delivered"
+    finally:
+        await comandos.cancelar_comandos_diferidos()
+        roteamento.desvincular_guild_worker(guild_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+@pytest.mark.parametrize("serialized", [False, True])
+async def test_http_rejection_with_broken_pipe_detail_is_not_replayed(monkeypatch, status, serialized):
+    phone = DestinoWorker("phone", "Termux", "http://100.64.0.10:8766", "token")
+    guild_id = 88723
+    monkeypatch.setattr(comandos, "destino_vinculado", lambda guild: phone)
+    calls = []
+    async def post(**kwargs):
+        calls.append(kwargs["payload"])
+        message = f"Music Agent HTTP {status}: BrokenPipeError: [Errno 32] Broken pipe"
+        if serialized:
+            return {"ok": False, "error": message}
+        raise RuntimeError(message)
+    monkeypatch.setattr(comandos, "post_json_worker", post)
+    with pytest.raises(MusicWorkerEngineUnavailable):
+        await comandos.music_agent_command("enqueue_many", guild_id=guild_id, query="playlist")
+    assert len(calls) == 1
+    assert guild_id not in comandos._DEFERRED_TASKS
+
+
+@pytest.mark.asyncio
+async def test_serialized_broken_pipe_on_temporal_control_is_not_queued_or_exposed_raw(monkeypatch):
+    phone = DestinoWorker("phone", "Termux", "http://100.64.0.10:8766", "token")
+    monkeypatch.setattr(comandos, "destino_vinculado", lambda guild: phone)
+    async def post(**kwargs):
+        return {"ok": False, "error": "BrokenPipeError: [Errno 32] Broken pipe"}
+    monkeypatch.setattr(comandos, "post_json_worker", post)
+    with pytest.raises(MusicWorkerEngineUnavailable, match="reconectando") as error:
+        await comandos.music_agent_command("pause", guild_id=88722)
+    assert "BrokenPipe" not in str(error.value)
+    assert 88722 not in comandos._DEFERRED_TASKS
 
 
 @pytest.mark.asyncio

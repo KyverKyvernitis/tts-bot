@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Mapping
 
@@ -68,9 +69,13 @@ def _erro_transporte_transitorio(exc: BaseException) -> bool:
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        text = f"{type(current).__name__} {current}".lower()
+        # Uma resposta HTTP de erro pode vir após uma mutação parcial no agente.
+        # Não a confunda com perda da resposta de um comando bem-sucedido.
+        if re.search(r"\bhttp\s+[45]\d{2}\b", text):
+            return False
         if isinstance(current, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
             return True
-        text = f"{type(current).__name__} {current}".lower()
         if any(
             token in text
             for token in (
@@ -84,6 +89,10 @@ def _erro_transporte_transitorio(exc: BaseException) -> bool:
                 "no route to host",
                 "temporary failure in name resolution",
                 "server disconnected",
+                "brokenpipeerror",
+                "broken pipe",
+                "errno 32",
+                "connectionreseterror",
             )
         ):
             return True
@@ -285,6 +294,11 @@ def _agendar_comando_diferido(
 
                 if not isinstance(data, dict) or data.get("ok") is False:
                     state["last_error"] = str((data or {}).get("error") if isinstance(data, dict) else "resposta inválida")[:260]
+                    if isinstance(data, dict) and _erro_transporte_transitorio(
+                        MusicWorkerEngineUnavailable(state["last_error"])
+                    ):
+                        delay = min(retry_max, max(0.35, delay * 1.7))
+                        continue
                     state["status"] = "failed"
                     state["finished_at"] = time.monotonic()
                     logger.warning(
@@ -468,6 +482,14 @@ async def music_agent_command(
         raise MusicWorkerEngineUnavailable(message[:260]) from exc
     if data.get("ok") is False:
         message = str(data.get("error") or data.get("message") or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE).strip()
+        # O proxy pode serializar uma falha de socket numa resposta HTTP 200.
+        # Ela precisa da mesma recuperação idempotente das exceções de rede.
+        remote_error = MusicWorkerEngineUnavailable(message)
+        if _erro_transporte_transitorio(remote_error):
+            if action_normalized in _DEFERRED_PLAY_ACTIONS and int(guild_id or 0) > 0:
+                return _agendar_comando_diferido(destino=destino, payload=payload,
+                    total_timeout=total_timeout, erro_inicial=remote_error)
+            message = "Sistema de música indisponível no momento: O worker está reconectando; tente novamente em alguns segundos"
         lower = message.lower()
         if "music agent" in lower or "configure music_agent" in lower or "sem token" in lower:
             message = str(getattr(config, "MUSIC_AGENT_MISSING_TOKEN_MESSAGE", MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE) or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE)

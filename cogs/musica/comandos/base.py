@@ -92,6 +92,8 @@ class BaseComandosMusica:
         ):
             return clean
         lower = raw.lower()
+        if "brokenpipeerror" in lower or "broken pipe" in lower or "errno 32" in lower:
+            return "`⚠️` A conexão com o player foi interrompida. Tente novamente em alguns segundos."
         if any(
             needle in lower
             for needle in (

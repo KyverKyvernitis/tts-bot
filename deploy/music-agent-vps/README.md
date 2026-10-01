@@ -1,84 +1,45 @@
-# Executor de voz na VPS — opção 0.3.83
+# Voz no Termux — perfil 0.3.84
 
-O controller pode enviar `/command` diretamente ao Music Agent na VPS. Isso remove
-o caminho VPS → túnel/telefone → proxy local dos comandos de voz. O Phone Worker
-continua atendendo resolução de metadados e arquivamento. O modo padrão permanece
-`full` no telefone até esta opção ser configurada.
+A voz permanece no Termux. A VPS atende o controller, os comandos e o painel.
+O Phone Worker atende reprodução, resolução e arquivamento. Os arquivos de
+áudio permanentes continuam no fórum atual, com staging em diretórios
+temporários durante o arquivamento.
 
-O perfil usa o mesmo código de reprodução, volume, efeitos e TTS. Não ativa
-passthrough Opus: o volume 55%, a mistura de TTS e os efeitos precisam de PCM.
-Os arquivos permanentes de música continuam no fórum; os buffers de reprodução
-ficam na RAM e o arquivador mantém seu staging temporário.
+No controller, use:
 
-## Preparar Linux com systemd
-
-Copie o repositório atualizado para `/opt/tts-bot-main`. Antes de iniciar voz na
-VPS, envie `_disconnect` em todas as guilds com sessão existente e configure
-`MUSIC_AGENT_EXECUTOR_MODE=archive` no ambiente do agente do telefone. Reinicie
-esse agente. Seu registro continuará disponível para metadados/arquivamento,
-mas ele recusará comandos de voz. Nunca mantenha dois executores de voz ativos
-com o mesmo token. O controller normal e o agente separado usam o mesmo token,
-como na arquitetura atual; apenas o agente é responsável por voz.
-
-Instale dependências e o serviço (Debian/Ubuntu):
-
-```bash
-sudo apt-get update
-sudo apt-get install -y python3-venv ffmpeg libopus0 nodejs
-sudo useradd --system --home-dir /var/lib/music-agent --shell /usr/sbin/nologin music-agent
-sudo python3 -m venv /opt/music-agent-venv
-sudo /opt/music-agent-venv/bin/pip install -r /opt/tts-bot-main/deploy/music-agent-vps/requirements-voice.txt
-sudo install -d -m 700 /etc/music-agent
-sudo install -m 600 /opt/tts-bot-main/deploy/music-agent-vps/voice.env.example /etc/music-agent/voice.env
-sudo install -m 644 /opt/tts-bot-main/deploy/music-agent-vps/music-agent-voice.service /etc/systemd/system/music-agent-voice.service
+```dotenv
+MUSIC_AGENT_VOICE_EXECUTOR=termux
+MUSIC_AGENT_DIRECT_API_ENABLED=false
 ```
 
-Preencha os dois tokens em `/etc/music-agent/voice.env`. O token privado da API
-deve ser aleatório e diferente do token Discord. O usuário `music-agent` precisa
-ler o código em `/opt/tts-bot-main`; a unidade impede escrita no repositório.
-Não execute `useradd` se esse usuário já existir. Para YouTube, use Node em versão
-suportada pelo yt-dlp instalado; `nodejs` de distribuição antiga pode precisar
-ser atualizado. `deno` também pode ser usado com a configuração correspondente.
+Esse é o padrão mesmo se a primeira variável não existir. Flags antigas da API
+direta não movem a voz para a VPS. O supervisor do Termux restaura o modo
+`full`, incluindo quando o ambiente anterior estava configurado em `archive`.
+Atualize controller e runtime do telefone juntos e reinicie os processos pelo
+procedimento existente; preserve os tokens e o endereço do Phone Worker.
 
-Inicie e consulte o serviço:
+Caso tenha ativado o serviço opcional da versão 0.3.83, pare-o na VPS antes de
+iniciar voz no telefone:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now music-agent-voice
-sudo journalctl -u music-agent-voice -n 40 --no-pager
+sudo bash deploy/music-agent-vps/return-to-termux.sh
 ```
 
-Acrescente as três variáveis de `controller.env.example` no ambiente do bot
-principal. O token precisa coincidir com `MUSIC_AGENT_TOKEN`. Reinicie o
-controller depois do agente ficar `discord_ready=true` e com dependências
-disponíveis. O controller valida versão >=0.3.83 e modo `voice`/`full`, sem
-recorrer automaticamente a outro executor de voz quando a rota falha.
+O script para e desabilita somente `music-agent-voice.service`, quando esse
+serviço existe. Não altera o processo principal do bot nem os secrets. Os
+arquivos do perfil experimental foram preservados para compatibilidade, mas
+não são ativados nesta entrega. Não há alternância automática entre executores.
 
-Para outra máquina, use HTTPS autenticado ou a interface privada Tailscale.
-HTTP aceita loopback, redes privadas e endereços/MagicDNS do tailnet. A API exige
-token; não exponha a porta na internet. O modelo loopback dispensa abrir porta.
+Veja [as instruções de retorno e recuperação de BrokenPipe](../../docs/MUSIC_AGENT_0_3_84.md)
+e [a validação local](../../docs/VALIDACAO_MUSIC_AGENT_0_3_84.md).
 
-Para voltar ao telefone: `_disconnect` nas sessões da VPS, pare/desabilite o
-serviço de voz, desative `MUSIC_AGENT_DIRECT_API_ENABLED`, retorne o telefone a
-`MUSIC_AGENT_EXECUTOR_MODE=full` e reinicie o controller. Não troque executor com
-fila ativa; o vínculo da guild é mantido até desconexão explícita.
-
-## Medir antes/depois
-
-Colete pelo menos 20 reproduções de cada cenário: arquivo já conhecido com call
-conectada, arquivo com call desconectada, playlist conhecida e música ainda não
-arquivada. Mantenha região do Discord, qualidade e carga comparáveis. Salve as
-linhas do journal com `[music-start]` e rode:
+Para medir o início da reprodução, salve os eventos `[music-start]` de antes e
+depois e rode:
 
 ```bash
 python3 scripts/benchmark-music-start.py antes.log --compare depois.log
 ```
 
-O relatório mostra mediana e p95 das durações locais do controller e do agente
-até o primeiro pacote musical enviado com sucesso. Não subtrai relógios de
-máquinas diferentes nem soma etapas concorrentes. `queue_wait_ms` separa faixas
-enfileiradas; o relatório de início imediato exclui esperas >100ms na fila.
-O primeiro pacote enviado é uma aproximação operacional do início, não uma
-medição do som recebido pelo cliente Discord. Latência de rede e decodificação
-no cliente precisam de medição adicional. Não há porcentagem de ganho real
-antes de executar esse comparativo no ambiente de produção.
+O relatório calcula mediana e p95 de durações locais até o primeiro pacote
+musical enviado. O som recebido pelo cliente Discord ainda depende da rede e
+do cliente; esta execução não mediu uma call no ambiente de produção.
