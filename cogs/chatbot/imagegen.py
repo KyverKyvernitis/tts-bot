@@ -1174,11 +1174,11 @@ async def _generate_image_impl(
     channel_is_nsfw: bool,
     timeout_seconds: float,
 ) -> ImageGenerationResult:
-    """Geração de imagem com roteamento multi-provider por perfil.
+    """Geração de imagem com roteamento multi-provider por pedido.
 
-    Perfil = (nsfw, style) onde style ∈ {realistic, anime, generic}.
-    Cada perfil tem uma ordem de preferência de providers (ver
-    `image_providers_ext.provider_order_for_profile`). Router itera a ordem,
+    Características = (nsfw, style) onde style ∈ {realistic, anime, generic}.
+    Cada combinação tem uma ordem de preferência de providers (ver
+    `image_providers_ext.provider_order_for_request`). Router itera a ordem,
     pula providers não configurados, faz fallback se erro for retryable.
     """
     from . import image_providers_ext as ext
@@ -1209,16 +1209,16 @@ async def _generate_image_impl(
             reason="prompt_too_vague",
         )
 
-    # Perfil derivado: nsfw (binário) + estilo (anime/realistic/generic).
-    profile = ext.ImageProfile(
+    # Características derivadas: nsfw (binário) + estilo (anime/realistic/generic).
+    request_traits = ext.ImageRequestTraits(
         nsfw=(pclass == "adult_allowed"),
         style=ext.detect_style(prompt_clean),
     )
     log.info(
-        "chatbot: imagegen classify | profile=%s nsfw_channel=%s prompt=%r",
-        profile.describe(),
+        "chatbot: imagegen classify | request_traits=%s nsfw_channel=%s prompt=%r",
+        request_traits.describe(),
         channel_is_nsfw,
-        ("<adult:redacted>" if profile.nsfw else _prompt_preview(prompt_clean)),
+        ("<adult:redacted>" if request_traits.nsfw else _prompt_preview(prompt_clean)),
     )
 
     # Env vars (todas opcionais — providers sem chave são pulados).
@@ -1253,11 +1253,11 @@ async def _generate_image_impl(
     eff_timeout = max(1.0, float(timeout_seconds))
 
     # Modo legacy: usuário forçou um provider específico. Respeita e sai.
-    if not use_auto_router and profile.nsfw:
+    if not use_auto_router and request_traits.nsfw:
         return await _run_legacy_nsfw_provider(
             session,
             adult_provider=adult_provider,
-            profile=profile,
+            request_traits=request_traits,
             prompt_clean=prompt_clean,
             aihorde_key=aihorde_key,
             hf_key=hf_key,
@@ -1268,11 +1268,11 @@ async def _generate_image_impl(
             eff_timeout=eff_timeout,
         )
 
-    # Router: itera providers na ordem de preferência pro perfil.
-    order = ext.provider_order_for_profile(profile)
+    # Router: itera providers na ordem de preferência para o pedido.
+    order = ext.provider_order_for_request(request_traits)
     log.info(
-        "chatbot: imagegen router order | profile=%s order=%s",
-        profile.describe(),
+        "chatbot: imagegen router order | request_traits=%s order=%s",
+        request_traits.describe(),
         order,
     )
 
@@ -1303,7 +1303,7 @@ async def _generate_image_impl(
                 _try_provider(
                     provider_name,
                     session=session,
-                    profile=profile,
+                    request_traits=request_traits,
                     prompt_clean=prompt_clean,
                     timeout_seconds=attempt_budget,
                     gemini_key=gemini_key,
@@ -1328,14 +1328,14 @@ async def _generate_image_impl(
                 detail="attempt_deadline",
             )
         if result is None:
-            # Provider não configurado (sem chave) ou não aplicável ao perfil.
+            # Provider não configurado (sem chave) ou não aplicável ao pedido.
             continue
         attempts.append(result)
         if result.ok:
             log.info(
-                "chatbot: imagegen router ok | provider=%s profile=%s",
+                "chatbot: imagegen router ok | provider=%s request_traits=%s",
                 result.provider,
-                profile.describe(),
+                request_traits.describe(),
             )
             return result
 
@@ -1373,7 +1373,7 @@ async def _try_provider(
     name: str,
     *,
     session: aiohttp.ClientSession,
-    profile,  # ext.ImageProfile
+    request_traits,  # ext.ImageRequestTraits
     prompt_clean: str,
     timeout_seconds: float,
     gemini_key: str,
@@ -1392,7 +1392,7 @@ async def _try_provider(
     from . import image_providers_ext as ext
 
     if name == "gemini":
-        if profile.nsfw or not gemini_key:
+        if request_traits.nsfw or not gemini_key:
             return None
         return await _generate_with_gemini(
             session,
@@ -1403,39 +1403,39 @@ async def _try_provider(
 
     if name == "pollinations":
         # Pollinations: SFW livre (sem key). NSFW exige token.
-        if profile.nsfw and not pollinations_key:
+        if request_traits.nsfw and not pollinations_key:
             return None
         ok, data, mime, reason = await ext.generate_with_pollinations(
             session,
             api_key=pollinations_key,
             prompt=prompt_clean,
-            profile=profile,
+            request_traits=request_traits,
             timeout_seconds=timeout_seconds,
         )
         if ok:
             return ImageGenerationResult(
                 ok=True,
                 provider="pollinations",
-                prompt_class=("adult_allowed" if profile.nsfw else "safe"),
+                prompt_class=("adult_allowed" if request_traits.nsfw else "safe"),
                 image=GeneratedImage(data=data, mime_type=mime or "image/jpeg"),
             )
         return ImageGenerationResult(
             ok=False,
             provider="pollinations",
-            prompt_class=("adult_allowed" if profile.nsfw else "safe"),
+            prompt_class=("adult_allowed" if request_traits.nsfw else "safe"),
             reason=reason or "network_error",
         )
 
     if name == "cloudflare":
         # Cloudflare Workers AI: só SFW. Se não configurado ou se NSFW, pula.
-        if profile.nsfw or not cf_account or not cf_token:
+        if request_traits.nsfw or not cf_account or not cf_token:
             return None
         ok, data, mime, reason = await ext.generate_with_cloudflare(
             session,
             account_id=cf_account,
             api_token=cf_token,
             prompt=prompt_clean,
-            profile=profile,
+            request_traits=request_traits,
             timeout_seconds=timeout_seconds,
         )
         if ok:
@@ -1453,7 +1453,7 @@ async def _try_provider(
         )
 
     if name == "aihorde":
-        model_list = ext.aihorde_models_for_profile(profile, override=adult_model_override)
+        model_list = ext.aihorde_models_for_request(request_traits, override=adult_model_override)
         model_str = ",".join(model_list)
         result = await _generate_with_aihorde(
             session,
@@ -1462,10 +1462,10 @@ async def _try_provider(
             model=model_str,
             prompt=prompt_clean,
             timeout_seconds=timeout_seconds,
-            is_nsfw=profile.nsfw,
+            is_nsfw=request_traits.nsfw,
         )
         return _with_prompt_class(
-            result, "adult_allowed" if profile.nsfw else "safe",
+            result, "adult_allowed" if request_traits.nsfw else "safe",
         )
 
     if name == "huggingface":
@@ -1480,7 +1480,7 @@ async def _try_provider(
             timeout_seconds=timeout_seconds,
         )
         return _with_prompt_class(
-            result, "adult_allowed" if profile.nsfw else "safe",
+            result, "adult_allowed" if request_traits.nsfw else "safe",
         )
 
     if name == "adult_custom":
@@ -1505,7 +1505,7 @@ async def _run_legacy_nsfw_provider(
     session: aiohttp.ClientSession,
     *,
     adult_provider: str,
-    profile,  # ext.ImageProfile
+    request_traits,  # ext.ImageRequestTraits
     prompt_clean: str,
     aihorde_key: str,
     hf_key: str,
@@ -1521,7 +1521,7 @@ async def _run_legacy_nsfw_provider(
     from . import image_providers_ext as ext
 
     if adult_provider == "aihorde":
-        model_list = ext.aihorde_models_for_profile(profile, override=adult_model_override)
+        model_list = ext.aihorde_models_for_request(request_traits, override=adult_model_override)
         return await _generate_with_aihorde(
             session,
             api_key=aihorde_key,
@@ -1529,7 +1529,7 @@ async def _run_legacy_nsfw_provider(
             model=",".join(model_list),
             prompt=prompt_clean,
             timeout_seconds=eff_timeout,
-            is_nsfw=profile.nsfw,
+            is_nsfw=request_traits.nsfw,
         )
     if adult_provider in ("huggingface", "hf"):
         attempts: list[ImageGenerationResult] = []

@@ -159,10 +159,8 @@ REMOVED_SLASH_COMMANDS = {
     "form_repostar",
     "form_reset",
     "form_status",
-    # O painel técnico de TTS é consultado pelo comando de prefixo status.
+    # O painel técnico de TTS foi movido para /vps > TTS.
     "health",
-    # O antigo painel VPS foi separado nos comandos de prefixo base e status.
-    "vps",
     # Core Workers agora é comando privado de prefixo: workers/worker/w.
     "workers",
 }
@@ -419,62 +417,33 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
         else:
             COG_LOG.info("[cogs] todas carregadas: %s", loaded)
 
-    async def _cleanup_removed_slash_commands(self, guild_ids: set[int]) -> bool:
-        """Remove apenas os nomes antigos e confirma a limpeza de cada escopo."""
+    async def _cleanup_removed_slash_commands(self, guild_ids: set[int]) -> None:
+        """Remove comandos slash antigos sem tocar em comandos de outras cogs."""
         names = REMOVED_SLASH_COMMANDS
-        failed_scopes: list[str] = []
 
-        async def delete_matching(scope: str, *, guild: discord.Object | None = None) -> bool:
+        async def delete_matching(scope: str, *, guild: discord.Object | None = None) -> None:
             try:
                 commands_found = await self.tree.fetch_commands(guild=guild)
             except Exception as e:
                 print(f"[SYNC][{scope}] não consegui buscar comandos pra limpar slash antigos: {e}")
-                return False
+                return
 
-            matched = False
-            deletion_failed = False
             for cmd in commands_found:
                 name = str(getattr(cmd, "name", "") or "")
                 if name not in names:
                     continue
-                matched = True
                 try:
                     await cmd.delete()
                     print(f"[SYNC][{scope}] removido comando antigo: /{name}")
                 except Exception as e:
-                    if isinstance(e, discord.NotFound) or getattr(e, "status", None) == 404:
-                        print(f"[SYNC][{scope}] comando antigo já ausente: /{name}")
-                        continue
-                    deletion_failed = True
                     print(f"[SYNC][{scope}] falha ao remover /{name}: {e}")
 
-            if not matched:
-                return True
-            try:
-                remaining = await self.tree.fetch_commands(guild=guild)
-            except Exception as e:
-                print(f"[SYNC][{scope}] não consegui confirmar a limpeza de slash antigos: {e}")
-                return False
-            remaining_names = sorted({
-                str(getattr(cmd, "name", "") or "")
-                for cmd in remaining
-                if str(getattr(cmd, "name", "") or "") in names
-            })
-            if remaining_names:
-                print(f"[SYNC][{scope}] comandos antigos ainda presentes: {', '.join(remaining_names)}")
-            return not deletion_failed and not remaining_names
-
-        if not await delete_matching("GLOBAL"):
-            failed_scopes.append("GLOBAL")
+        await delete_matching("GLOBAL")
         for guild_id in sorted(guild_ids):
-            scope = f"GUILD {guild_id}"
-            if not await delete_matching(
-                scope,
+            await delete_matching(
+                f"GUILD {guild_id}",
                 guild=discord.Object(id=int(guild_id)),
-            ):
-                failed_scopes.append(scope)
-        self._removed_slash_cleanup_failed_scopes = tuple(failed_scopes)
-        return not failed_scopes
+            )
 
     def _json_safe_value(self, value):
         if value is None or isinstance(value, (str, int, float, bool)):
@@ -620,34 +589,28 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
 
     def _removed_slash_cleanup_signature(self, guild_ids: set[int]) -> str:
         payload = {
-            "version": 2,
             "names": sorted(REMOVED_SLASH_COMMANDS),
             "guild_ids": sorted(int(gid) for gid in guild_ids),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
-    async def _cleanup_removed_slash_commands_if_needed(self, guild_ids: set[int]) -> bool:
+    async def _cleanup_removed_slash_commands_if_needed(self, guild_ids: set[int]) -> None:
         signature = self._removed_slash_cleanup_signature(guild_ids)
         try:
             state = json.loads(self._removed_slash_cleanup_state_path.read_text(encoding="utf-8"))
         except Exception:
             state = {}
         if isinstance(state, dict) and state.get("signature") == signature:
-            self._removed_slash_cleanup_failed_scopes = ()
             print("[SYNC] limpeza de slash antigos já conferida; pulando.")
-            return True
-        if not await self._cleanup_removed_slash_commands(guild_ids):
-            print("[SYNC] limpeza incompleta; a próxima inicialização ou reload tentará novamente.")
-            return False
+            return
+        await self._cleanup_removed_slash_commands(guild_ids)
         try:
             self._removed_slash_cleanup_state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._removed_slash_cleanup_state_path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps({"version": 2, "signature": signature, "updated_at": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.write_text(json.dumps({"signature": signature, "updated_at": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self._removed_slash_cleanup_state_path)
         except Exception:
             BOOT_LOG.warning("[SYNC] falha ao salvar marcador de limpeza slash", exc_info=True)
-            return False
-        return True
 
     def _resolve_app_command_sync_guild_ids(self) -> set[int]:
         health_guild_id = 927002914449424404
@@ -674,11 +637,16 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
         previous_manifest = self._load_previous_app_commands_manifest()
         diff = self._app_command_manifest_diff(previous_manifest, current_manifest)
         manifest_changed = previous_manifest is None or diff["previous_hash"] != diff["current_hash"]
+        # Um sync apenas nas guilds não publica as mudanças globais. Ao mudar
+        # o escopo para global, publica mesmo se o manifesto local não mudou.
+        global_sync_hash = str((previous_manifest or {}).get("global_sync_hash") or "")
+        global_sync_pending = bool(allow_global_sync and global_sync_hash != diff["current_hash"])
         status: dict[str, object] = {
             "checked_at": datetime.now(timezone.utc).isoformat(),
             "manifest_changed": manifest_changed,
             "sync_enabled": bool(should_sync),
             "global_sync_allowed": bool(allow_global_sync),
+            "global_sync_pending": global_sync_pending,
             "clear_global_allowed": bool(clear_globals_allowed),
             "sync_performed": False,
             "clear_performed": False,
@@ -686,7 +654,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
             "removed": diff["removed"],
             "previous_hash": diff["previous_hash"],
             "current_hash": diff["current_hash"],
-            "reason": "manifest_changed" if manifest_changed else "unchanged",
+            "reason": "manifest_changed" if manifest_changed else "global_sync_pending" if global_sync_pending else "unchanged",
             "trigger": trigger,
         }
 
@@ -696,7 +664,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
             print(f"[SYNC] Pulado ({trigger}): sync de slash commands desativado")
             return status
 
-        if not manifest_changed:
+        if not manifest_changed and not global_sync_pending:
             status["reason"] = "unchanged"
             self._write_app_command_sync_status(status)
             print(f"[SYNC] Manifest de slash commands sem mudanças ({trigger}); sync/clear global pulados.")
@@ -725,7 +693,19 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                     except Exception as e:
                         print(f"[SYNC] Não consegui buscar comandos globais: {e}")
                         existing_globals = []
-                    removed_names = {label.lstrip('/').split()[0] for label in diff["removed"]}
+                    # Remover um subcomando não remove seu grupo. As labels
+                    # incluem as raízes de todos os escopos locais: preserve
+                    # qualquer raiz ainda existente, como /chatbot.
+                    current_root_names = {
+                        str(label).lstrip('/').split()[0]
+                        for label in current_manifest.get("labels", [])
+                        if str(label).lstrip('/').strip()
+                    }
+                    removed_names = {
+                        str(label).lstrip('/').split()[0]
+                        for label in diff["removed"]
+                        if str(label).lstrip('/').strip()
+                    } - current_root_names
                     deleted = 0
                     preserved = 0
                     for cmd in existing_globals:
@@ -757,6 +737,9 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                     for cmd in synced_guild:
                         name = getattr(cmd, "name", None) or str(cmd)
                         print(f"[SYNC][GUILD {guild_id}] /{name}")
+            current_manifest["global_sync_hash"] = (
+                str(current_manifest.get("hash") or "") if allow_global_sync else global_sync_hash
+            )
             self._save_app_commands_manifest(current_manifest)
             status["reason"] = "synced"
         except Exception as exc:

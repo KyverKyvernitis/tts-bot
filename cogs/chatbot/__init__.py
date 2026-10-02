@@ -1,4 +1,4 @@
-"""Chatbot cog — conversação IA via profiles gerenciados por staff.
+"""Chatbot cog — conversação IA com o próprio bot de Discord.
 
 Arquitetura e decisões em `cog.py`. Este módulo só expõe o setup
 do discord.py extension.

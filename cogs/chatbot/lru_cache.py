@@ -1,6 +1,6 @@
 """Cache LRU com TTL — dict + deque, zero deps.
 
-Usado pra 3 caches do chatbot (webhooks, profile ativo, profile data).
+Usado pelos caches de configuração e de mensagens enviadas pelo chatbot.
 Cada entrada expira em TTL segundos, e se o cache atingir o limite de
 entradas, evicta a mais antiga.
 

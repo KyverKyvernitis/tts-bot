@@ -1,5 +1,4 @@
-"""System prompt "mestre" — instruções globais aplicadas antes das
-personalidades dos profiles.
+"""Instruções globais do próprio bot, compartilhadas entre os servidores.
 
 Modelo:
 - 1 doc com `type="chatbot_master"` na coleção dedicada do chatbot.
@@ -9,8 +8,8 @@ Modelo:
       editar. Nenhum outro server pode mexer.
 
 Por que 1 doc só?
-- O master prompt é global — mesmo texto aplicado a TODOS os profiles em
-  TODOS os servers onde o bot está. Isso permite ao dono do bot garantir
+- O prompt é global — mesmo texto aplicado em todos os servidores onde
+  o bot está. Isso permite ao dono do bot garantir
   segurança básica e qualidade (anti-repetição, tom, etc) sem depender de
   cada staff saber escrever prompt.
 
@@ -53,6 +52,7 @@ class MasterPrompt:
     def to_doc(self) -> dict:
         return {
             "type": C.DOC_TYPE_MASTER,
+            "schema_version": C.CHATBOT_SCHEMA_VERSION,
             "prompt": self.prompt,
             "config_guild_id": int(self.config_guild_id),
             "updated_at": self.updated_at,
@@ -123,6 +123,7 @@ class MasterPromptStore:
             {"type": C.DOC_TYPE_MASTER},
             {
                 "$set": {
+                    "schema_version": C.CHATBOT_SCHEMA_VERSION,
                     "prompt": safe,
                     "updated_at": now,
                     "updated_by": int(updated_by),
@@ -151,6 +152,7 @@ class MasterPromptStore:
             {"type": C.DOC_TYPE_MASTER},
             {
                 "$set": {
+                    "schema_version": C.CHATBOT_SCHEMA_VERSION,
                     "config_guild_id": int(new_guild_id),
                     "updated_at": now,
                     "updated_by": int(updated_by),

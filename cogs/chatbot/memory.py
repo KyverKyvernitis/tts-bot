@@ -1,9 +1,7 @@
-"""Memória V2 isolada por profile, revisão, canal e nível de privacidade.
+"""Memória do bot isolada por servidor, canal e nível de privacidade.
 
-Documentos V1 são preservados para rollback, porém nunca entram no prompt V2.
-Cada documento armazena trocas como turnos indivisíveis e gerações invalidam
-escritas atrasadas depois de um reset, eliminando as corridas do antigo
-fire-and-forget.
+Turnos completos e gerações de reset impedem que uma resposta atrasada
+reintroduza contexto apagado. Históricos arquivados nunca entram no prompt.
 """
 from __future__ import annotations
 
@@ -68,9 +66,9 @@ class MemoryStore:
         self._locks: "OrderedDict[tuple[int, int, str, int], asyncio.Lock]" = OrderedDict()
 
     def _lock_for(
-        self, guild_id: int, channel_id: int, profile_revision: str, user_id: int
+        self, guild_id: int, channel_id: int, visibility_scope: str, user_id: int
     ) -> asyncio.Lock:
-        key = (int(guild_id), int(channel_id), str(profile_revision), int(user_id))
+        key = (int(guild_id), int(channel_id), str(visibility_scope), int(user_id))
         lock = self._locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
@@ -169,19 +167,15 @@ class MemoryStore:
         *,
         scope: str,
         guild_id: int,
-        profile_id: str,
-        profile_revision: str,
         channel_id: int,
         visibility_scope: str,
         user_id: int,
         epoch: MemoryEpoch,
     ) -> dict:
         return {
-            "type": C.DOC_TYPE_MEMORY_V2,
+            "type": C.DOC_TYPE_MEMORY_V3,
             "scope": scope,
             "guild_id": int(guild_id),
-            "profile_id": str(profile_id),
-            "profile_revision": str(profile_revision or f"legacy:{profile_id}"),
             "channel_id": int(channel_id),
             "visibility_scope": str(visibility_scope),
             "global_generation": int(epoch.global_generation),
@@ -193,22 +187,18 @@ class MemoryStore:
     async def load_context(
         self,
         guild_id: int,
-        profile_id: str,
         user_id: int,
         *,
-        profile_revision: str,
         channel_id: int,
         visibility_scope: str,
     ) -> tuple[MemoryEpoch, list[MemoryEntry], list[MemoryEntry]]:
         epoch = await self.capture_epoch(guild_id, user_id)
         user_query = self._query(
-            scope="user", guild_id=guild_id, profile_id=profile_id,
-            profile_revision=profile_revision, channel_id=channel_id,
+            scope="user", guild_id=guild_id, channel_id=channel_id,
             visibility_scope=visibility_scope, user_id=user_id, epoch=epoch,
         )
         guild_query = self._query(
-            scope="guild", guild_id=guild_id, profile_id=profile_id,
-            profile_revision=profile_revision, channel_id=channel_id,
+            scope="guild", guild_id=guild_id, channel_id=channel_id,
             visibility_scope=visibility_scope, user_id=0, epoch=epoch,
         )
         user_doc, guild_doc = await asyncio.gather(
@@ -232,18 +222,15 @@ class MemoryStore:
     async def get_user_history(
         self,
         guild_id: int,
-        profile_id: str,
         user_id: int,
         *,
-        profile_revision: str = "",
         channel_id: int = 0,
         visibility_scope: str = "channel:0",
         epoch: Optional[MemoryEpoch] = None,
     ) -> list[MemoryEntry]:
         current = epoch or await self.capture_epoch(guild_id, user_id)
         doc = await self._coll.find_one(self._query(
-            scope="user", guild_id=guild_id, profile_id=profile_id,
-            profile_revision=profile_revision, channel_id=channel_id,
+            scope="user", guild_id=guild_id, channel_id=channel_id,
             visibility_scope=visibility_scope, user_id=user_id, epoch=current,
         ))
         return self._flatten_turns(doc)
@@ -251,18 +238,15 @@ class MemoryStore:
     async def get_guild_history(
         self,
         guild_id: int,
-        profile_id: str,
         *,
         current_user_id: int = 0,
-        profile_revision: str = "",
         channel_id: int = 0,
         visibility_scope: str = "channel:0",
         epoch: Optional[MemoryEpoch] = None,
     ) -> list[MemoryEntry]:
         current = epoch or await self.capture_epoch(guild_id, current_user_id)
         doc = await self._coll.find_one(self._query(
-            scope="guild", guild_id=guild_id, profile_id=profile_id,
-            profile_revision=profile_revision, channel_id=channel_id,
+            scope="guild", guild_id=guild_id, channel_id=channel_id,
             visibility_scope=visibility_scope, user_id=0, epoch=current,
         ))
         guild_user_ids = {
@@ -321,33 +305,29 @@ class MemoryStore:
     async def append_turn(
         self,
         guild_id: int,
-        profile_id: str,
         user_id: int,
         *,
-        profile_revision: str,
         channel_id: int,
         visibility_scope: str,
         epoch: MemoryEpoch,
         user_message: str,
         user_name: str,
         assistant_message: str,
-        user_history_size: int = C.USER_MEMORY_MAX_MESSAGES,
+        user_history_size: int = C.DEFAULT_HISTORY_SIZE,
     ) -> None:
         turn = self._turn(
             user_id=user_id, user_name=user_name, user_message=user_message,
             assistant_message=assistant_message,
             user_generation=epoch.user_generation,
         )
-        lock = self._lock_for(guild_id, channel_id, profile_revision, user_id)
+        lock = self._lock_for(guild_id, channel_id, visibility_scope, user_id)
         async with lock:
             user_query = self._query(
-                scope="user", guild_id=guild_id, profile_id=profile_id,
-                profile_revision=profile_revision, channel_id=channel_id,
+                scope="user", guild_id=guild_id, channel_id=channel_id,
                 visibility_scope=visibility_scope, user_id=user_id, epoch=epoch,
             )
             guild_query = self._query(
-                scope="guild", guild_id=guild_id, profile_id=profile_id,
-                profile_revision=profile_revision, channel_id=channel_id,
+                scope="guild", guild_id=guild_id, channel_id=channel_id,
                 visibility_scope=visibility_scope, user_id=0, epoch=epoch,
             )
             # Os dois documentos são atualizados em paralelo; cada `$push` é
@@ -361,51 +341,8 @@ class MemoryStore:
                 ),
             )
 
-    async def append_user_turn(
-        self, guild_id: int, profile_id: str, user_id: int, *,
-        user_message: str, user_name: str, assistant_message: str,
-        max_messages: int = C.USER_MEMORY_MAX_MESSAGES, **kwargs,
-    ) -> None:
-        epoch = kwargs.get("epoch") or await self.capture_epoch(guild_id, user_id)
-        await self._append(
-            self._query(
-                scope="user", guild_id=guild_id, profile_id=profile_id,
-                profile_revision=str(kwargs.get("profile_revision") or ""),
-                channel_id=int(kwargs.get("channel_id") or 0),
-                visibility_scope=str(kwargs.get("visibility_scope") or "channel:0"),
-                user_id=user_id, epoch=epoch,
-            ),
-            self._turn(
-                user_id=user_id, user_name=user_name,
-                user_message=user_message, assistant_message=assistant_message,
-                user_generation=epoch.user_generation,
-            ),
-            max_messages=max_messages,
-        )
-
-    async def append_guild_turn(
-        self, guild_id: int, profile_id: str, *, user_id: int, user_name: str,
-        user_message: str, assistant_message: str, **kwargs,
-    ) -> None:
-        epoch = kwargs.get("epoch") or await self.capture_epoch(guild_id, user_id)
-        await self._append(
-            self._query(
-                scope="guild", guild_id=guild_id, profile_id=profile_id,
-                profile_revision=str(kwargs.get("profile_revision") or ""),
-                channel_id=int(kwargs.get("channel_id") or 0),
-                visibility_scope=str(kwargs.get("visibility_scope") or "channel:0"),
-                user_id=0, epoch=epoch,
-            ),
-            self._turn(
-                user_id=user_id, user_name=user_name,
-                user_message=user_message, assistant_message=assistant_message,
-                user_generation=epoch.user_generation,
-            ),
-            max_messages=C.GUILD_MEMORY_MAX_MESSAGES,
-        )
-
     async def clear_user_history(
-        self, guild_id: int, user_id: int, profile_id: Optional[str] = None
+        self, guild_id: int, user_id: int
     ) -> int:
         gid, uid = int(guild_id), int(user_id)
         await self._coll.update_one(
@@ -423,46 +360,22 @@ class MemoryStore:
             }, upsert=True,
         )
         user_query: dict = {
-            "type": {"$in": [C.DOC_TYPE_MEMORY, C.DOC_TYPE_MEMORY_V2]},
+            "type": C.DOC_TYPE_MEMORY_V3,
             "scope": "user", "guild_id": gid, "user_id": uid,
         }
         guild_query: dict = {
-            "type": C.DOC_TYPE_MEMORY_V2, "scope": "guild", "guild_id": gid,
+            "type": C.DOC_TYPE_MEMORY_V3, "scope": "guild", "guild_id": gid,
         }
-        legacy_guild_query: dict = {
-            "type": C.DOC_TYPE_MEMORY, "scope": "guild", "guild_id": gid,
-        }
-        if profile_id is not None:
-            for query in (user_query, guild_query, legacy_guild_query):
-                query["profile_id"] = str(profile_id)
         removed = await self._coll.delete_many(user_query)
-        pulled, legacy_pulled = await asyncio.gather(
-            self._coll.update_many(guild_query, {"$pull": {"turns": {"user_id": uid}}}),
-            self._coll.update_many(legacy_guild_query, {"$pull": {"entries": {"user_id": uid}}}),
+        pulled = await self._coll.update_many(
+            guild_query, {"$pull": {"turns": {"user_id": uid}}},
         )
-        return int(removed.deleted_count + pulled.modified_count + legacy_pulled.modified_count)
+        return int(removed.deleted_count + pulled.modified_count)
 
-    async def clear_guild_history(
-        self, guild_id: int, profile_id: Optional[str] = None
-    ) -> int:
-        if profile_id is not None:
-            return await self.clear_profile_memory(guild_id, profile_id)
+    async def clear_guild_history(self, guild_id: int) -> int:
         return await self.clear_all_guild_memory(guild_id)
 
-    async def clear_profile_memory(self, guild_id: int, profile_id: str) -> int:
-        result = await self._coll.delete_many({
-            "type": {"$in": [C.DOC_TYPE_MEMORY, C.DOC_TYPE_MEMORY_V2]},
-            "guild_id": int(guild_id), "profile_id": str(profile_id),
-        })
-        return int(result.deleted_count)
-
-    async def clear_all_guild_memory(
-        self, guild_id: int, *, profile_id: Optional[str] = None
-    ) -> int:
-        # Compatibilidade com callers antigos sem invalidar, por engano, a
-        # memória de todos os outros profiles da guild.
-        if profile_id is not None:
-            return await self.clear_profile_memory(guild_id, profile_id)
+    async def clear_all_guild_memory(self, guild_id: int) -> int:
         gid = int(guild_id)
         await self._coll.update_one(
             {"type": C.DOC_TYPE_MEMORY_EPOCH, "epoch_key": f"guild:{gid}"},
@@ -477,7 +390,7 @@ class MemoryStore:
             }, upsert=True,
         )
         query: dict = {
-            "type": {"$in": [C.DOC_TYPE_MEMORY, C.DOC_TYPE_MEMORY_V2]},
+            "type": C.DOC_TYPE_MEMORY_V3,
             "guild_id": gid,
         }
         result = await self._coll.delete_many(query)
@@ -496,6 +409,6 @@ class MemoryStore:
             }, upsert=True,
         )
         result = await self._coll.delete_many({
-            "type": {"$in": [C.DOC_TYPE_MEMORY, C.DOC_TYPE_MEMORY_V2]},
+            "type": C.DOC_TYPE_MEMORY_V3,
         })
         return int(result.deleted_count)

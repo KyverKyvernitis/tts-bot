@@ -1,28 +1,18 @@
-"""ChatbotCog — listener + orquestração.
+"""Chatbot único do bot: configuração, filas, contexto e respostas nativas.
 
-Responsabilidades:
-1. Detectar triggers (menção do bot no início OU reply a mensagem do webhook).
-2. Resolver profile ativo do server. Se não tiver, ignora silenciosamente.
-3. Aplicar cooldown por usuário (evita spam + protege rate-limit do Groq).
-4. Admitir o turno em filas limitadas por tipo e por usuário.
-5. Gerar resposta e enviar via webhook com identidade do profile.
-6. Persistir histórico (pessoal + coletivo).
-
-NÃO bloqueia o listener: todo processamento vai para o supervisor de tasks.
-O listener `on_message` retorna em <10ms mesmo quando a IA demora 5s.
-
-Slash commands ficam em `commands.py` como mixin (`ChatbotCommandsMixin`)
-e são herdados por esta classe. Modais ficam em `views.py`.
+Identidade vem do Discord; instruções globais são separadas da configuração
+operacional de cada servidor. Histórico externo não é varrido automaticamente.
 """
 from __future__ import annotations
 
 import asyncio
 import inspect
+import io
 import logging
 import os
 import re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Literal, Optional
 
 import aiohttp
@@ -31,67 +21,26 @@ from discord.ext import commands
 
 from . import constants as C
 from .commands import ChatbotCommandsMixin
-from .lru_cache import LRUCacheTTL
+from .config import ConfigStore, GuildChatbotConfig
 from .master import MasterPrompt, MasterPromptStore
-from .media import extract_attachments, is_voice_message, download_attachment_bytes
+from .media import extract_attachments, is_voice_message, download_attachment_bytes, channel_is_nsfw
 from .audio import (
-    DEFAULT_TTS_VOICE,
-    MAX_TTS_CHARS,
-    synthesize_speech,
-    transcribe_audio,
+    DEFAULT_TTS_VOICE, MAX_TTS_CHARS, synthesize_speech, transcribe_audio,
     user_asked_for_tts,
 )
-from .imagegen import (
-    build_image_failure_message,
-    generated_image_extension,
-    parse_image_intent,
-)
+from .imagegen import build_image_failure_message, generated_image_extension, parse_image_intent
 from .image_service import ImageService
-from .memory import (
-    MemoryStore, MemoryEntry, MemoryEpoch, visibility_scope_for,
-)
-from .profiles import ProfileStore, ChatbotProfile
+from .memory import MemoryStore, MemoryEntry, MemoryEpoch, visibility_scope_for
+from .message_index import ChatbotMessageIndex
 from .runtime import AdmissionController, TaskSupervisor
-from .extrovert import (
-    ExtrovertStore,
-    extrovert_prompt_hint,
-    is_extrovert_candidate,
-    pick_profile as pick_extrovert_profile,
-    roll_chance as roll_extrovert_chance,
-)
-from .message_index import MessageProfileIndex
-from .providers import (
-    AllProvidersExhausted,
-    ChatMessage,
-    ProviderError,
-    ProviderRouter,
-)
-from .webhooks import WebhookManager
+from .spontaneous import is_spontaneous_candidate, roll_chance, spontaneous_prompt_hint
+from .providers import AllProvidersExhausted, ChatMessage, ProviderError, ProviderRouter
 
 log = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------------------------
-# Trigger resolution — como o bot foi invocado nessa mensagem.
-# ------------------------------------------------------------------------------
-
-@dataclass
+@dataclass(frozen=True)
 class TriggerInfo:
-    """Diz qual profile responde e se é invocação temporária.
-
-    - `profile`: o profile que vai responder
-    - `is_temporary`: True se esse profile NÃO é o ativo do server, sendo
-      chamado só pra essa mensagem. Nesse caso adicionamos canal history
-      no prompt pra dar contexto da conversa em andamento.
-    - `content`: o texto da mensagem do user SEM o gatilho (sem `<@bot>` ou
-      `@Nome` inicial)
-    - `via`: string descritiva ('bot_mention', 'profile_name', 'reply',
-      'extrovert') — só pra logs, não afeta lógica.
-    - `behavior_hint`: instrução extra para modos especiais, como resposta
-      espontânea do extrovert.
-    """
-    profile: ChatbotProfile
-    is_temporary: bool
     content: str
     via: str
     behavior_hint: str = ""
@@ -107,135 +56,65 @@ class UserIntent:
 
 
 _ADULT_CHAT_RE = re.compile(
-    r"\b("
-    r"roleplay\s*nsfw|rp\s*nsfw|roleplay\s*\+?18|rp\s*\+?18|"
-    r"roleplay\s*adult[oa]|rp\s*adult[oa]|"
-    r"sexo\s+por\s+texto|er[oó]tic[oa]\s+por\s+texto"
-    r")\b",
+    r"\b(roleplay\s*nsfw|rp\s*nsfw|roleplay\s*\+?18|rp\s*\+?18|"
+    r"roleplay\s*adult[oa]|rp\s*adult[oa]|sexo\s+por\s+texto|er[oó]tic[oa]\s+por\s+texto)\b",
     re.IGNORECASE | re.UNICODE,
 )
 
 
-# Regex pra capturar `@palavra` no início da mensagem. Permite letras/números
-# e os separadores comuns em nicks (_ - . espaço interno). Não suporta emojis
-# no nome — se o profile tiver emoji no nome, a staff vai precisar usar reply.
-_MENTION_NAME_RE = re.compile(
-    r"^\s*@([A-Za-zÀ-ÿ0-9_\-.][A-Za-zÀ-ÿ0-9_\-. ]{0,79})",
-    re.UNICODE,
-)
-
-
 class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
-    """Cog principal do chatbot. Tudo outro depende desta instância.
-
-    Herda de `ChatbotCommandsMixin` que adiciona os slash commands (veja
-    commands.py). O nome "Chatbot" é usado no bot.get_cog() para lookup —
-    os comandos do mixin assumem isso via `interaction.client.get_cog("Chatbot")`.
-    """
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._session: Optional[aiohttp.ClientSession] = None
-        self._profiles: Optional[ProfileStore] = None
+        self._config: Optional[ConfigStore] = None
         self._memory: Optional[MemoryStore] = None
         self._master: Optional[MasterPromptStore] = None
         self._router: Optional[ProviderRouter] = None
-        self._webhooks: Optional[WebhookManager] = None
-        self._extrovert: Optional[ExtrovertStore] = None
-        self._message_index: Optional[MessageProfileIndex] = None
+        self._message_index: Optional[ChatbotMessageIndex] = None
         self._image_service: Optional[ImageService] = None
         self._admission = AdmissionController()
         self._supervisor = TaskSupervisor()
-
-        # Cooldown por (guild_id, user_id) → monotonic de próxima permissão
-        # Usa dict simples; limpa periodicamente no watchdog.
         self._user_cooldowns: dict[tuple[int, int], float] = {}
-
-        # Locks por (guild_id, channel_id, profile_id). Preservam a ordem das
-        # respostas dentro do mesmo canal/profile sem bloquear outros canais.
-        self._turn_locks: dict[tuple[int, int, str], asyncio.Lock] = {}
-        self._turn_lock_touched: dict[tuple[int, int, str], float] = {}
-
-        # Cooldowns específicos do modo extrovert. Separados do cooldown normal
-        # para não afetar menção/reply e para controlar respostas espontâneas.
-        self._extrovert_channel_cooldowns: dict[tuple[int, int], float] = {}
-        self._extrovert_user_cooldowns: dict[tuple[int, int], float] = {}
-        self._extrovert_profile_cooldowns: dict[tuple[int, str], float] = {}
-        self._extrovert_guild_cooldowns: dict[int, float] = {}
-        self._extrovert_last_channel_response: dict[tuple[int, int], float] = {}
-
-        # Cache de history do canal — evita re-fetch quando vários profiles
-        # são invocados em sequência. Key: channel_id, value: list[Message]
-        # (só os N mais recentes antes da chamada).
-        self._channel_history_cache: LRUCacheTTL[int, list] = LRUCacheTTL(
-            max_entries=C.CHANNEL_HISTORY_CACHE_MAX_ENTRIES,
-            ttl_seconds=C.CHANNEL_HISTORY_CACHE_TTL_SECONDS,
-        )
-
-        # Task do watchdog de limpeza de cooldowns.
+        self._turn_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._turn_lock_touched: dict[tuple[int, int], float] = {}
+        self._spontaneous_channel_cooldowns: dict[tuple[int, int], float] = {}
+        self._spontaneous_user_cooldowns: dict[tuple[int, int], float] = {}
+        self._spontaneous_guild_cooldowns: dict[int, float] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
 
-    # -------------------------------------------------------------------------
-    # Lifecycle
-    # -------------------------------------------------------------------------
-
     async def cog_load(self):
-        db = getattr(self.bot, "settings_db", None)
-        if db is None:
-            log.warning("chatbot: settings_db não disponível — cog não funcionará")
-            return
-
-        # Coleção DEDICADA ao chatbot (não a `settings` compartilhada com
-        # TTS etc). Ver cogs/chatbot/db.py pra motivação.
         from .db import get_chatbot_collection, ensure_indexes
-        chatbot_coll = get_chatbot_collection(db)
-        if chatbot_coll is None:
-            log.warning("chatbot: não conseguiu abrir coleção dedicada — cog não funcionará")
-            return
-        # Índices/migração são isolados do TTS: qualquer falha é registrada e o
-        # restante do bot continua inicializando.
-        await ensure_indexes(chatbot_coll)
-        try:
-            from .migrations import run_migrations
-            await run_migrations(chatbot_coll)
-        except Exception:
-            log.exception("chatbot: migração V2 falhou; usando migração preguiçosa")
+        from .migrations import run_migrations
 
-        # Session dedicada. NÃO reutilizamos a do bot (que é interna do discord.py)
-        # para não misturar pools de conexão com as requests ao Discord API.
+        coll = get_chatbot_collection(getattr(self.bot, "settings_db", None))
+        if coll is None:
+            log.warning("chatbot: banco indisponível; chatbot desativado")
+            return
+        try:
+            await ensure_indexes(coll)
+            await run_migrations(coll)
+        except Exception as exc:
+            # Não abrir o caminho novo parcialmente migrado nem ler legado.
+            log.error("chatbot: preparação V3 falhou (%s); chatbot desativado", type(exc).__name__)
+            return
         connector = aiohttp.TCPConnector(limit=6, limit_per_host=3, ttl_dns_cache=300)
         self._session = aiohttp.ClientSession(connector=connector)
-
-        self._profiles = ProfileStore(chatbot_coll)
-        self._memory = MemoryStore(chatbot_coll)
-        self._master = MasterPromptStore(chatbot_coll)
-        self._extrovert = ExtrovertStore(chatbot_coll)
-        self._message_index = MessageProfileIndex(chatbot_coll)
-
-        groq_key = os.environ.get("GROQ_API_KEY") or ""
-        gemini_key = os.environ.get("GEMINI_API_KEY") or ""
-        if not groq_key and not gemini_key:
-            log.warning(
-                "chatbot: GROQ_API_KEY e GEMINI_API_KEY não estão no env. "
-                "Chatbot carregado mas não responde — configure as keys e reinicie."
-            )
+        self._config = ConfigStore(coll)
+        self._memory = MemoryStore(coll)
+        self._master = MasterPromptStore(coll)
+        self._message_index = ChatbotMessageIndex(coll)
+        groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+        gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
         self._router = ProviderRouter(
-            self._session,
-            groq_key=groq_key or None,
-            gemini_key=gemini_key or None,
-        )
-        self._webhooks = WebhookManager(
-            bot=self.bot, session=self._session, coll=chatbot_coll,
+            self._session, groq_key=groq_key or None, gemini_key=gemini_key or None,
         )
         self._image_service = ImageService(self._session, self._admission)
-
         self._cleanup_task = self._supervisor.create(
             self._cooldown_cleanup_loop(), name="chatbot-cleanup",
         )
-        log.info("chatbot: cog carregado (groq=%s gemini=%s, coll=%s)",
-                 "on" if groq_key else "off",
-                 "on" if gemini_key else "off",
-                 chatbot_coll.name)
+        if not groq_key and not gemini_key:
+            log.warning("chatbot: configure GROQ_API_KEY ou GEMINI_API_KEY para conversação")
+        log.info("chatbot: bot único carregado (schema=%s)", C.CHATBOT_SCHEMA_VERSION)
 
     async def cog_unload(self):
         await self._supervisor.shutdown()
@@ -243,19 +122,20 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if self._session is not None:
             await self._session.close()
             self._session = None
-
-    # -------------------------------------------------------------------------
-    # Cooldowns + ordenação dos turnos
-    # -------------------------------------------------------------------------
+        self._config = None
+        self._router = None
+        self._image_service = None
 
     def _is_user_on_cooldown(self, guild_id: int, user_id: int) -> bool:
         key = (int(guild_id), int(user_id))
         expire = self._user_cooldowns.get(key, 0.0)
         return time.monotonic() < expire
 
+
     def _apply_user_cooldown(self, guild_id: int, user_id: int) -> None:
         key = (int(guild_id), int(user_id))
         self._user_cooldowns[key] = time.monotonic() + C.USER_COOLDOWN_SECONDS
+
 
     async def _cooldown_cleanup_loop(self) -> None:
         """Remove entradas expiradas do dict de cooldowns.
@@ -281,8 +161,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     self._turn_lock_touched.pop(key, None)
                     self._turn_locks.pop(key, None)
 
-                # Limpa cooldowns do extrovert para manter RAM bounded.
-                self._cleanup_extrovert_cooldowns(now)
+                # Limpa cooldowns espontâneos para manter RAM bounded.
+                self._cleanup_spontaneous_cooldowns(now)
                 if self._message_index is not None:
                     try:
                         await self._message_index.cleanup_old()
@@ -293,15 +173,11 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         except Exception:
             log.exception("chatbot: erro no cooldown cleanup")
 
-    def _turn_key(
-        self,
-        guild_id: int,
-        channel_id: int,
-        profile_id: str,
-    ) -> tuple[int, int, str]:
-        return (int(guild_id), int(channel_id), str(profile_id or "active"))
 
-    def _turn_lock_for(self, key: tuple[int, int, str]) -> asyncio.Lock:
+    def _turn_key(self, guild_id: int, channel_id: int) -> tuple[int, int]:
+        return int(guild_id), int(channel_id)
+
+    def _turn_lock_for(self, key: tuple[int, int]) -> asyncio.Lock:
         self._turn_lock_touched[key] = time.monotonic()
         lock = self._turn_locks.get(key)
         if lock is None:
@@ -309,93 +185,66 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             self._turn_locks[key] = lock
         return lock
 
-    def _touch_turn_lock(self, key: tuple[int, int, str]) -> None:
+    def _touch_turn_lock(self, key: tuple[int, int]) -> None:
         self._turn_lock_touched[key] = time.monotonic()
 
-    def _cleanup_extrovert_cooldowns(self, now: float | None = None) -> None:
-        now = time.monotonic() if now is None else float(now)
-        for mapping in (
-            self._extrovert_channel_cooldowns,
-            self._extrovert_user_cooldowns,
-            self._extrovert_profile_cooldowns,
-            self._extrovert_guild_cooldowns,
-        ):
-            stale = [
-                key for key, expires in list(mapping.items())
-                if float(expires) <= now
-            ]
-            for key in stale:
-                mapping.pop(key, None)
-        # This map stores a timestamp (not an expiry), because it is also used
-        # by the anti-spam interval calculation.
-        stale_channels = [
-            key
-            for key, timestamp in list(self._extrovert_last_channel_response.items())
-            if now - float(timestamp) > C.EXTROVERT_COOLDOWN_IDLE_TTL_SECONDS
-        ]
-        for key in stale_channels:
-            self._extrovert_last_channel_response.pop(key, None)
+    def _cleanup_spontaneous_cooldowns(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        for mapping in (self._spontaneous_channel_cooldowns,
+                        self._spontaneous_user_cooldowns,
+                        self._spontaneous_guild_cooldowns):
+            for key, expires in list(mapping.items()):
+                if expires <= now:
+                    mapping.pop(key, None)
 
-    def _is_extrovert_on_cooldown(
-        self, *, guild_id: int, channel_id: int, user_id: int, profile_id: str
-    ) -> bool:
+    def _is_spontaneous_on_cooldown(self, *, guild_id: int, channel_id: int, user_id: int) -> bool:
         now = time.monotonic()
-        checks = (
-            self._extrovert_guild_cooldowns.get(int(guild_id), 0.0),
-            self._extrovert_channel_cooldowns.get((int(guild_id), int(channel_id)), 0.0),
-            self._extrovert_user_cooldowns.get((int(guild_id), int(user_id)), 0.0),
-            self._extrovert_profile_cooldowns.get((int(guild_id), str(profile_id)), 0.0),
-        )
-        return any(expire > now for expire in checks)
+        return any(expires > now for expires in (
+            self._spontaneous_guild_cooldowns.get(int(guild_id), 0.0),
+            self._spontaneous_channel_cooldowns.get((int(guild_id), int(channel_id)), 0.0),
+            self._spontaneous_user_cooldowns.get((int(guild_id), int(user_id)), 0.0),
+        ))
 
-    def _apply_extrovert_cooldowns(
-        self, *, guild_id: int, channel_id: int, user_id: int, profile_id: str
-    ) -> None:
+    def _apply_spontaneous_cooldowns(self, *, guild_id: int, channel_id: int, user_id: int) -> None:
         now = time.monotonic()
-        gid = int(guild_id)
-        cid = int(channel_id)
-        uid = int(user_id)
-        pid = str(profile_id)
-        self._extrovert_guild_cooldowns[gid] = now + C.EXTROVERT_GUILD_COOLDOWN_SECONDS
-        self._extrovert_channel_cooldowns[(gid, cid)] = now + C.EXTROVERT_CHANNEL_COOLDOWN_SECONDS
-        self._extrovert_user_cooldowns[(gid, uid)] = now + C.EXTROVERT_USER_COOLDOWN_SECONDS
-        self._extrovert_profile_cooldowns[(gid, pid)] = now + C.EXTROVERT_PROFILE_COOLDOWN_SECONDS
-        self._extrovert_last_channel_response[(gid, cid)] = now
+        gid, cid, uid = int(guild_id), int(channel_id), int(user_id)
+        self._spontaneous_guild_cooldowns[gid] = now + C.SPONTANEOUS_GUILD_COOLDOWN_SECONDS
+        self._spontaneous_channel_cooldowns[(gid, cid)] = now + C.SPONTANEOUS_CHANNEL_COOLDOWN_SECONDS
+        self._spontaneous_user_cooldowns[(gid, uid)] = now + C.SPONTANEOUS_USER_COOLDOWN_SECONDS
 
-    async def _remember_sent_profile_message(
-        self, *, guild_id: int, channel_id: int, message_id: int, profile_id: str
-    ) -> None:
+    async def _remember_sent_message(self, *, guild_id: int, channel_id: int, message_id: int) -> None:
         if self._message_index is None:
             return
         try:
             await self._message_index.remember(
-                guild_id=guild_id,
-                channel_id=channel_id,
-                message_id=message_id,
-                profile_id=profile_id,
+                guild_id=guild_id, channel_id=channel_id, message_id=message_id,
             )
         except Exception:
-            log.exception("chatbot: falha ao registrar mensagem de profile")
+            log.exception("chatbot: falha ao registrar mensagem enviada")
 
-    def _append_cached_channel_message(self, message: discord.Message) -> None:
-        """Atualiza apenas caches já materializados, sem criar histórico parcial."""
-        channel_id = int(getattr(getattr(message, "channel", None), "id", 0) or 0)
-        message_id = int(getattr(message, "id", 0) or 0)
-        if channel_id <= 0 or message_id <= 0:
-            return
-        cached = self._channel_history_cache.get(channel_id)
-        if cached is None:
-            return
-        updated = [item for item in cached if int(getattr(item, "id", 0) or 0) != message_id]
-        updated.append(message)
-        updated.sort(key=lambda item: int(getattr(item, "id", 0) or 0))
-        self._channel_history_cache.set(
-            channel_id, updated[-C.CHANNEL_HISTORY_FETCH_COUNT:],
+    async def _capture_turn_epoch(self, guild_id: int, user_id: int) -> Optional[MemoryEpoch]:
+        if self._memory is None:
+            return None
+        try:
+            return await asyncio.wait_for(
+                self._memory.capture_epoch(guild_id, user_id), timeout=2.0,
+            )
+        except Exception:
+            log.warning("chatbot: epoch indisponível; turno não será persistido")
+            return None
+
+    async def _can_respond(
+        self, guild_id: int, channel_id: int, *, spontaneous: bool = False,
+        parent_id: int | None = None,
+    ) -> bool:
+        if self._config is None:
+            return False
+        cfg = await self._config.get_config(guild_id)
+        if not cfg.enabled or not cfg.allows_channel(channel_id, parent_id=parent_id):
+            return False
+        return not spontaneous or (
+            cfg.spontaneous_enabled and cfg.allows_spontaneous_channel(channel_id, parent_id=parent_id)
         )
-
-    # -------------------------------------------------------------------------
-    # Trigger detection
-    # -------------------------------------------------------------------------
 
     def _is_mention_at_start(self, message: discord.Message) -> bool:
         """Retorna True se a mensagem começa com menção ao bot (antes de qualquer
@@ -416,6 +265,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         prefixes = (f"<@{me.id}>", f"<@!{me.id}>")
         return any(stripped.startswith(p) for p in prefixes)
 
+
     def _strip_bot_mention(self, content: str) -> str:
         """Remove a menção inicial do bot (se houver) e retorna o resto."""
         me = self.bot.user
@@ -427,45 +277,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 return stripped[len(p):].lstrip()
         return content
 
-    def _is_potential_profile_reply(self, message: discord.Message) -> bool:
-        """Pré-filtra replies sem I/O antes de criar uma task pesada.
-
-        O índice persistido continua sendo a fonte de verdade. Aqui só evitamos
-        encaminhar replies que o próprio payload do Discord já prova serem para
-        outro usuário. Webhooks, mensagens do bot e referências não resolvidas
-        seguem para a validação segura em ``_resolve_trigger``.
-        """
-        ref = message.reference
-        if ref is None:
-            return False
-
-        resolved = getattr(ref, "resolved", None)
-        if not isinstance(resolved, discord.Message):
-            # Referência ausente/deletada ainda pode existir no message index.
-            return True
-        if resolved.webhook_id is not None:
-            # A propriedade do webhook é confirmada depois; nome não é confiado.
-            return True
-
-        me = self.bot.user
-        target_author = getattr(resolved, "author", None)
-        bot_id = getattr(me, "id", None)
-        author_id = getattr(target_author, "id", None)
-        return bool(
-            bot_id is not None
-            and author_id is not None
-            and int(author_id) == int(bot_id)
-        )
-
-    async def _is_reply_to_managed_webhook(self, message: discord.Message) -> bool:
-        """True se a mensagem é reply a uma mensagem enviada por nosso webhook."""
-        resolved = await self._resolve_reply_target(message)
-        if resolved is None or resolved.webhook_id is None:
-            return False
-
-        if self._webhooks is None:
-            return False
-        return await self._webhooks.owns_webhook_id(message.channel, resolved.webhook_id)
 
     async def _resolve_reply_target(
         self, message: discord.Message
@@ -492,257 +303,52 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return None
 
-    def _profile_name_candidates(
-        self, guild: Optional[discord.Guild], profile: ChatbotProfile
-    ) -> list[str]:
-        names: list[str] = []
-        if getattr(profile, "dynamic_identity", False) and profile.source_user_id and guild is not None:
-            member = guild.get_member(int(profile.source_user_id))
-            if member is not None:
-                names.append(str(getattr(member, "display_name", "") or member.name))
-        for name in (profile.name, profile.fallback_name):
-            name = str(name or "").strip()
-            if name and name not in names:
-                names.append(name)
-        if profile.profile_kind == C.PROFILE_KIND_USER_STYLE:
-            # Mensagens anteriores a esta versão eram renderizadas como
-            # `Persona · Nome`. Mantemos esses nomes somente no matcher legado
-            # para que replies antigas sobrevivam à mudança visual.
-            rendered = [f"Persona · {name}"[:C.MAX_NAME_LENGTH] for name in names]
-            names.extend(name for name in rendered if name and name not in names)
-        return names
 
-    def _match_profile_mention(
-        self, content: str, profiles: list[ChatbotProfile], guild: Optional[discord.Guild] = None
-    ) -> tuple[Optional[ChatbotProfile], str]:
-        """Tenta casar `@Nome` no início da mensagem com um dos profiles.
+    def _is_potential_chatbot_reply(self, message: discord.Message) -> bool:
+        ref = message.reference
+        if ref is None:
+            return False
+        resolved = getattr(ref, "resolved", None)
+        if not isinstance(resolved, discord.Message):
+            return True
+        me = self.bot.user
+        return me is not None and resolved.author.id == me.id
 
-        Para personas, também aceita o nick atual do usuário vinculado quando
-        ele está em cache no servidor.
-        """
-        stripped = content.lstrip()
-        if not stripped.startswith("@"):
-            return (None, content)
-
-        candidates: list[tuple[ChatbotProfile, str]] = []
-        for p in profiles:
-            for name in self._profile_name_candidates(guild, p):
-                candidates.append((p, name))
-        candidates.sort(key=lambda item: -len(item[1]))
-
-        lower = stripped.lower()
-        for p, pname in candidates:
-            pname = (pname or "").strip()
-            if not pname:
-                continue
-            token = f"@{pname.lower()}"
-            if lower.startswith(token):
-                next_idx = len(token)
-                if next_idx >= len(stripped):
-                    remainder = ""
-                elif stripped[next_idx].isalnum():
-                    continue
-                else:
-                    remainder = stripped[next_idx:].lstrip(" ,:;-—")
-                return (p, remainder)
-        return (None, content)
-
-    async def _resolve_reply_profile_by_index(
-        self,
-        message: discord.Message,
-        profiles: list[ChatbotProfile],
-    ) -> Optional[ChatbotProfile]:
-        """Resolve profile de uma reply usando message_id -> profile_id.
-
-        É o caminho correto para personas/user_style, porque nick/avatar do
-        webhook são dinâmicos e não devem ser usados como chave.
-        """
-        if self._message_index is None or message.reference is None:
+    async def _resolve_trigger(self, message: discord.Message) -> Optional[TriggerInfo]:
+        if self._config is None or message.guild is None:
             return None
-        ref_id = int(getattr(message.reference, "message_id", 0) or 0)
-        if ref_id <= 0:
-            return None
-        try:
-            mapped = await self._message_index.resolve(ref_id)
-        except Exception:
-            log.exception("chatbot: falha ao resolver reply pelo índice")
-            return None
-        if mapped is None:
-            return None
-        if message.guild is not None and int(mapped.guild_id) != int(message.guild.id):
-            return None
-        if int(mapped.channel_id) != int(getattr(message.channel, "id", 0) or 0):
-            return None
-        by_id = {p.profile_id: p for p in profiles}
-        return by_id.get(mapped.profile_id)
-
-    async def _resolve_extrovert_trigger(
-        self,
-        message: discord.Message,
-        profiles: list[ChatbotProfile],
-    ) -> Optional["TriggerInfo"]:
-        if C.SAFE_MODE or self._extrovert is None or message.guild is None:
-            return None
-        guild = message.guild
-
-        try:
-            config = await self._extrovert.get_config(guild.id)
-        except Exception:
-            log.exception("chatbot: falha ao carregar config extrovert")
-            return None
-
-        if not is_extrovert_candidate(message, config):
-            return None
-
-        channel_key = (int(guild.id), int(message.channel.id))
-        if config.options.avoid_channel_streak:
-            last = self._extrovert_last_channel_response.get(channel_key, 0.0)
-            if last and time.monotonic() < last + C.EXTROVERT_CHANNEL_COOLDOWN_SECONDS:
-                return None
-
-        blocked_profiles = {
-            pid for (gid, pid), expire in self._extrovert_profile_cooldowns.items()
-            if int(gid) == int(guild.id) and expire > time.monotonic()
-        }
-        profile = pick_extrovert_profile(
-            profiles=profiles,
-            config=config,
-            blocked_profile_ids=blocked_profiles,
-        )
-        if profile is None:
-            return None
-
-        if self._is_extrovert_on_cooldown(
-            guild_id=guild.id,
-            channel_id=message.channel.id,
-            user_id=message.author.id,
-            profile_id=profile.profile_id,
+        cfg = await self._config.get_config(message.guild.id)
+        if not cfg.enabled or not cfg.allows_channel(
+            message.channel.id, parent_id=getattr(message.channel, "parent_id", None),
         ):
             return None
-
-        if not roll_extrovert_chance(config):
-            return None
-
-        return TriggerInfo(
-            profile=profile,
-            is_temporary=True,
-            content=(message.content or "").strip(),
-            via="extrovert",
-            behavior_hint=extrovert_prompt_hint(),
-        )
-
-    async def _resolve_trigger(
-        self, message: discord.Message
-    ) -> Optional["TriggerInfo"]:
-        """Decide SE o bot deve responder essa mensagem e COMO.
-
-        Ordem de verificação (curto-circuito na primeira que bate):
-          1. Menção direta do bot (`<@botid> ...`) → profile ATIVO do server
-          2. Menção de nome (`@Nome ...`) → profile correspondente,
-             temporário se não for o ativo
-          3. Reply a mensagem de webhook gerenciado → profile dono daquele
-             webhook, temporário se não for o ativo
-
-        Se nada bate → retorna None (cog ignora a mensagem).
-        """
-        if self._profiles is None:
-            return None
-        guild = message.guild
-        if guild is None:
-            return None
-
-        # Desativar é global para todas as formas de invocação. A V1 permitia
-        # contornar isso por @Nome, reply e extrovert.
-        if not await self._profiles.is_enabled(guild.id):
-            return None
-
-        # Lista de profiles é usada nos 2 casos (name + reply). Busca uma
-        # vez só.
-        profiles = await self._profiles.list_profiles(guild.id)
-        if not profiles:
-            return None
-        active = next((p for p in profiles if p.active), None)
-
-        # --- 1. Menção direta do bot ------------------------------------------
         if self._is_mention_at_start(message):
-            if active is None:
-                return None  # sem profile ativo, ignora
-            content = self._strip_bot_mention(message.content).strip()
-            return TriggerInfo(
-                profile=active,
-                is_temporary=False,
-                content=content,
-                via="bot_mention",
-            )
-
-        # --- 2. Menção de nome `@Nome` ----------------------------------------
-        matched, remainder = self._match_profile_mention(
-            message.content, profiles, guild,
-        )
-        if matched is not None:
-            is_temp = active is None or matched.profile_id != active.profile_id
-            return TriggerInfo(
-                profile=matched,
-                is_temporary=is_temp,
-                content=remainder.strip(),
-                via="profile_name",
-            )
-
-        # --- 3. Reply a mensagem enviada por profile ---------------------------
+            return TriggerInfo(content=self._strip_bot_mention(message.content).strip(), via="bot_mention")
         if message.reference is not None:
-            matched_profile = await self._resolve_reply_profile_by_index(message, profiles)
-
-            # Fallback legado só é permitido para um webhook cuja propriedade
-            # já foi verificada pelo manager; nome sozinho é spoofável.
-            if matched_profile is None:
-                replied = await self._resolve_reply_target(message)
-                managed_reply = False
-                if (
-                    replied is not None
-                    and replied.webhook_id is not None
-                    and self._webhooks is not None
-                ):
-                    managed_reply = await self._webhooks.owns_webhook_id(
-                        message.channel, replied.webhook_id,
-                    )
-                if managed_reply:
-                    author_name = str(
-                        getattr(replied.author, "name", "") or ""
-                    ).strip().lower()
-                    for p in profiles:
-                        names = self._profile_name_candidates(guild, p)
-                        if any(name.strip().lower() == author_name for name in names):
-                            matched_profile = p
-                            break
-                    if matched_profile is None:
-                        matched_profile = active
-
-            if matched_profile is not None:
-                is_temp = (
-                    active is None
-                    or matched_profile.profile_id != active.profile_id
-                )
-                return TriggerInfo(
-                    profile=matched_profile,
-                    is_temporary=is_temp,
-                    content=message.content.strip(),
-                    via="reply",
-                )
-
-            log.debug(
-                "chatbot: reply ignorada | guild=%s channel=%s ref=%s "
-                "reason=profile_unresolved",
-                guild.id,
-                getattr(message.channel, "id", 0),
-                getattr(message.reference, "message_id", 0),
-            )
-
-        # --- 4. Extrovert: resposta espontânea sem menção ----------------------
-        extrovert = await self._resolve_extrovert_trigger(message, profiles)
-        if extrovert is not None:
-            return extrovert
-
-        return None
+            ref_id = getattr(message.reference, "message_id", None)
+            if not ref_id or self._message_index is None:
+                return None
+            sent = await self._message_index.resolve(ref_id)
+            if sent is None or sent.guild_id != message.guild.id or sent.channel_id != message.channel.id:
+                return None
+            target = await self._resolve_reply_target(message)
+            me = self.bot.user
+            # Respostas de /imagem têm webhook_id do aplicativo no Discord.
+            # Autoria do bot e índice V3 autenticam o alvo, inclusive nesse caso.
+            if target is not None and (me is None or target.author.id != me.id):
+                return None
+            # O índice é autoridade quando o alvo foi apagado/não está acessível.
+            return TriggerInfo(content=(message.content or "").strip(), via="reply")
+        if C.SAFE_MODE or not is_spontaneous_candidate(message, cfg):
+            return None
+        if self._is_spontaneous_on_cooldown(
+            guild_id=message.guild.id, channel_id=message.channel.id, user_id=message.author.id,
+        ) or not roll_chance(cfg):
+            return None
+        return TriggerInfo(
+            content=(message.content or "").strip(), via="spontaneous",
+            behavior_hint=spontaneous_prompt_hint(),
+        )
 
     async def _maybe_transcribe(self, message: discord.Message) -> Optional[str]:
         """Transcreve voice msg ou áudio anexado, se houver e key disponível.
@@ -790,140 +396,55 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             )
         return text
 
+
     async def _maybe_generate_image(
-        self,
-        *,
-        message: discord.Message,
-        profile: ChatbotProfile,
-        prompt_text: str,
-        image_prompt: str | None = None,
-        processing_reaction: Optional[str] = None,
+        self, *, message: discord.Message, prompt_text: str,
+        image_prompt: str | None = None, processing_reaction: Optional[str] = None,
     ) -> bool:
-        """Tenta gerar imagem via Gemini e enviar via webhook.
-
-        Retorna True se processou (sucesso ou falha avisada ao user),
-        False se não deu pra tentar (sem key, sem webhook, etc) e o caller
-        deve seguir pro chat normal.
-        """
-        import io as _io
-
-        if self._session is None or self._webhooks is None or self._image_service is None:
+        if self._session is None or self._image_service is None or message.guild is None:
             await self._remove_processing_reaction(message, processing_reaction)
             return False
-
-        # Extrai o prompt real do texto do user (ou usa o já parseado no caller)
-        img_prompt = (image_prompt or "").strip() or parse_image_intent(prompt_text).prompt
-        if not img_prompt.strip():
+        prompt = (image_prompt or "").strip() or parse_image_intent(prompt_text).prompt
+        if not prompt:
             await self._remove_processing_reaction(message, processing_reaction)
             return False
-
-        channel = message.channel
-        profile = await self._profile_with_resolved_identity(message.guild, profile)
-        prompt_class = "adult_allowed" if parse_image_intent(img_prompt).category == "adult_allowed" else "safe"
-        log.info(
-            "chatbot: gerando imagem | profile=%s prompt=%r",
-            profile.name, ("<adult:redacted>" if prompt_class == "adult_allowed" else img_prompt[:80]),
-        )
-
-        # NSFW só vale se: (a) canal é age-restricted no Discord, E (b) a guild
-        # está na allowlist (constants.nsfw_enabled_for_guild). Fora da allowlist
-        # tratamos o canal como SFW silenciosamente; o resto do fluxo cuida da
-        # mensagem genérica caso o pedido fosse adulto.
-        guild_id = message.guild.id if message.guild else None
-        channel_nsfw_flag = bool(getattr(channel, "nsfw", False))
-        effective_nsfw = channel_nsfw_flag and C.nsfw_enabled_for_guild(guild_id)
-
-        # Reação visual "gerando" — imagegen demora 10-30s
-        reaction = processing_reaction
-        if reaction is None:
-            reaction = await self._add_processing_reaction(message)
+        channel, guild = message.channel, message.guild
+        effective_nsfw = channel_is_nsfw(channel) and C.nsfw_enabled_for_guild(guild.id)
+        private = isinstance(channel, discord.Thread) and channel.is_private()
+        visibility = visibility_scope_for(channel.id, is_nsfw=effective_nsfw, is_private=private)
+        # Capturar ANTES da chamada: reset durante a geração invalida este turno.
+        epoch = await self._capture_turn_epoch(guild.id, message.author.id)
+        reaction = processing_reaction or await self._add_processing_reaction(message)
         try:
-            generated = await self._image_service.generate(
-                prompt=img_prompt,
-                channel_is_nsfw=effective_nsfw,
-                slot_acquired=True,
+            result = await self._image_service.generate(
+                prompt=prompt, channel_is_nsfw=effective_nsfw, slot_acquired=True,
             )
-            if not generated.ok or generated.image is None:
-                # Modelo falhou ou bloqueou — avisa e deixa o chat lidar normal
-                try:
-                    await message.reply(
-                        build_image_failure_message(generated),
-                        mention_author=False,
-                        delete_after=15.0,
-                    )
-                except discord.HTTPException:
-                    pass
-                return True  # processou (avisou o user)
-
-            # Envia a imagem como anexo via webhook
-            ext = generated_image_extension(generated.image.mime_type)
-            safe_name = "".join(c for c in profile.name if c.isalnum())[:20] or "image"
-            filename = f"{safe_name}.{ext}"
-            file = discord.File(
-                _io.BytesIO(generated.image.data), filename=filename,
+            if not await self._can_respond(guild.id, channel.id, parent_id=getattr(channel, "parent_id", None)):
+                return True
+            if not result.ok or result.image is None:
+                await message.reply(
+                    build_image_failure_message(result), mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(), delete_after=15.0,
+                )
+                return True
+            ext = generated_image_extension(result.image.mime_type)
+            file = discord.File(io.BytesIO(result.image.data), filename=f"imagem.{ext}")
+            caption = self._neutralize_mentions(f"🖼️ Imagem gerada para: {prompt[:200]}")
+            sent = await message.reply(
+                caption, file=file, mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
-
-            caption = f"🖼️ Imagem gerada para: *{img_prompt[:200]}*"
-            sent = await self._webhooks.send_as_profile(
-                channel=channel,
-                profile_name=profile.name,
-                avatar_url=profile.avatar_url,
-                content=caption[:1900],
-                files=[file],
-            )
-            if sent is not None:
-                await self._remember_sent_profile_message(
-                    guild_id=message.guild.id if message.guild else 0,
-                    channel_id=message.channel.id,
-                    message_id=sent.id,
-                    profile_id=profile.profile_id,
-                )
-            else:
-                # Fallback sem webhook
-                try:
-                    file2 = discord.File(_io.BytesIO(generated.image.data), filename=filename)
-                    fallback_sent = await channel.send(
-                        content=f"**{profile.name}:** {caption[:1800]}",
-                        files=[file2],
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-                    await self._remember_sent_profile_message(
-                        guild_id=message.guild.id if message.guild else 0,
-                        channel_id=message.channel.id,
-                        message_id=fallback_sent.id,
-                        profile_id=profile.profile_id,
-                    )
-                    sent = fallback_sent
-                except discord.HTTPException:
-                    log.warning("chatbot: fallback imagegen send falhou")
-            if sent is not None and self._memory is not None and message.guild is not None:
-                is_private = bool(
-                    isinstance(channel, discord.Thread)
-                    and getattr(channel, "is_private", lambda: False)()
-                )
-                visibility_scope = visibility_scope_for(
-                    channel.id, is_nsfw=effective_nsfw, is_private=is_private,
-                )
-                epoch = await self._memory.capture_epoch(
-                    message.guild.id, message.author.id,
-                )
+            await self._remember_sent_message(guild_id=guild.id, channel_id=channel.id, message_id=sent.id)
+            if epoch is not None:
                 await self._persist_turn(
-                    guild_id=message.guild.id,
-                    profile_id=profile.profile_id,
-                    profile_revision=profile.revision,
-                    channel_id=channel.id,
-                    visibility_scope=visibility_scope,
-                    epoch=epoch,
-                    user_id=message.author.id,
+                    guild_id=guild.id, user_id=message.author.id, channel_id=channel.id,
+                    visibility_scope=visibility, epoch=epoch,
                     user_name=str(getattr(message.author, "display_name", message.author.name)),
-                    user_message=prompt_text,
-                    assistant_message=f"[imagem gerada: {img_prompt[:500]}]",
-                    user_history_size=profile.history_size,
+                    user_message=prompt_text, assistant_message=f"[imagem gerada: {prompt[:500]}]",
                 )
             return True
         finally:
-            if reaction is not None:
-                await self._remove_processing_reaction(message, reaction)
+            await self._remove_processing_reaction(message, reaction)
 
     def _detect_user_intent(self, content: str) -> UserIntent:
         text = (content or "").strip()
@@ -940,6 +461,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if user_asked_for_tts(text):
             return UserIntent(kind="audio_request")
         return UserIntent(kind="normal_chat")
+
 
     async def _record_chatbot_tts_synt(self, guild_id: int | None, engine: str = "edge") -> None:
         try:
@@ -959,67 +481,14 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         except Exception:
             log.exception("chatbot: falha ao persistir synt TTS | guild=%s engine=%s", gid, engine)
 
+
     async def _maybe_generate_tts(
-        self,
-        *,
-        content: str,
-        reply: str,
-        profile: ChatbotProfile,
-        guild_id: int | None = None,
-        user_id: int | None = None,
+        self, *, content: str, reply: str,
+        guild_id: int | None = None, user_id: int | None = None,
     ) -> Optional[discord.File]:
-        """Se bater condições, gera TTS do reply e retorna discord.File.
-
-        Condições (qualquer uma verdadeira aciona):
-        - User pediu explicitamente ("responde por áudio", "manda audio", etc)
-        - profile.tts_chance > 0 e random() < tts_chance
-        - O system_prompt do profile contém frases que indicam "sempre áudio"
-          ou "às vezes áudio" (controle textual pela staff, sem precisar de
-          campo numérico separado)
-
-        Retorna None se não precisa gerar, ou se geração falhou.
-        Formato: MP3 gerado pelo edge-tts, com nome do profile.
-        """
-        import io as _io
-        import random as _random
-
-        # Heurística no system prompt pra permitir staff configurar frequência
-        # SEM um campo dedicado no modal (modal já tá cheio).
-        prompt_lower = (profile.system_prompt or "").lower()
-        prompt_tts_chance = 0.0
-        if any(kw in prompt_lower for kw in (
-            "sempre fala por áudio", "sempre fala por audio",
-            "sempre responde em áudio", "sempre responde em audio",
-            "sempre manda áudio", "sempre manda audio",
-            "responde sempre em voz", "responde sempre em áudio",
-        )):
-            prompt_tts_chance = 1.0
-        elif any(kw in prompt_lower for kw in (
-            "às vezes fala por áudio", "as vezes fala por audio",
-            "às vezes manda áudio", "as vezes manda audio",
-            "de vez em quando manda áudio", "de vez em quando manda audio",
-        )):
-            prompt_tts_chance = 0.3
-
-        # Chance efetiva = max das duas fontes
-        effective_chance = max(profile.tts_chance, prompt_tts_chance)
-
-        # Decisão de gerar ou não
-        should = False
-        if user_asked_for_tts(content):
-            should = True
-            log.info("chatbot: TTS acionado por pedido | profile=%s", profile.name)
-        elif effective_chance > 0.0:
-            if _random.random() < effective_chance:
-                should = True
-                log.info(
-                    "chatbot: TTS acionado por sorte | profile=%s chance=%.2f",
-                    profile.name, effective_chance,
-                )
-        if not should:
+        """Sintetiza resposta somente quando o usuário pede áudio."""
+        if C.SAFE_MODE or not user_asked_for_tts(content):
             return None
-
-        # Gera — edge-tts pode demorar 2-5s.
         # Sanitiza ANTES de sintetizar para o áudio não falar uma negativa
         # contraditória do tipo "não posso responder com áudio".
         spoken_reply = self._sanitize_audio_capability_claim(
@@ -1070,11 +539,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if not adapter_attempted:
             await self._record_chatbot_tts_synt(guild_id, "edge")
 
-        # Nome do arquivo: usa o nome do profile pra dar identidade
-        safe_name = "".join(c for c in profile.name if c.isalnum())[:20] or "audio"
-        filename = f"{safe_name}.mp3"
-        return discord.File(_io.BytesIO(audio_bytes), filename=filename)
-
+        return discord.File(io.BytesIO(audio_bytes), filename="resposta.mp3")
 
     def _sanitize_audio_capability_claim(self, reply: str, *, audio_will_be_sent: bool) -> str:
         """Remove contradições quando o bot efetivamente envia áudio.
@@ -1148,11 +613,11 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return f"Te mandei em áudio. {cleaned}"
         return "Te mandei o áudio."
 
+
     async def _maybe_enqueue_voice_call_tts(
         self,
         *,
         message: discord.Message,
-        profile: ChatbotProfile,
         spoken_text: str,
         audio_was_sent: bool,
     ) -> None:
@@ -1214,89 +679,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         except Exception:
             log.exception("chatbot: falha ao enfileirar fala na call")
 
-    async def _fetch_channel_history(
-        self, channel, message: discord.Message
-    ) -> list[discord.Message]:
-        """Pega as últimas N mensagens do canal ANTES da `message` atual.
-
-        Usado pra dar contexto a profile invocado temporariamente. Resultados
-        são cacheados por ~30s pra aguentar bursts de invocação sequencial.
-
-        Retorna lista ordenada do mais ANTIGO pro mais recente.
-        """
-        cached = self._channel_history_cache.get(channel.id)
-        if cached is not None:
-            # Filtra só mensagens antes da atual (cache pode ter msgs mais novas
-            # se rolaram em outro burst).
-            return [m for m in cached if m.id < message.id]
-
-        try:
-            # history retorna iter async. `before=message` garante só antes.
-            msgs = []
-            async for m in channel.history(
-                limit=C.CHANNEL_HISTORY_FETCH_COUNT,
-                before=message,
-            ):
-                msgs.append(m)
-            msgs.reverse()  # do mais antigo pro mais recente
-        except (discord.Forbidden, discord.HTTPException):
-            log.warning("chatbot: falha ao buscar history | channel=%s", channel.id)
-            return []
-
-        self._channel_history_cache.set(channel.id, msgs)
-        return msgs
-
-    def _format_channel_history(
-        self, msgs: list[discord.Message], target_profile_name: str
-    ) -> Optional[str]:
-        """Formata history do canal em texto pra injetar no prompt.
-
-        - Mensagens de webhook com o MESMO nome do profile alvo são marcadas
-          como `[você disse antes]` pra dar continuidade.
-        - Outros webhooks (outros profiles) viram `[{nome do profile}]`.
-        - Users humanos viram `{display_name}: ...`.
-        - Mensagens vazias (só embed/attachment) são puladas.
-        """
-        if not msgs:
-            return None
-
-        lines_reversed: list[str] = []
-        target_lower = (target_profile_name or "").strip().lower()
-        total = 0
-        for m in reversed(msgs):
-            text = self._clean_prompt_text(m.content or "", 300).replace("\n", " ")
-            if not text:
-                continue
-
-            if m.webhook_id is not None:
-                # Webhook — identifica o profile pelo nome do author
-                author_name = str(
-                    getattr(m.author, "name", "") or ""
-                ).strip()
-                if author_name.lower() == target_lower:
-                    line = f"[você, em mensagem anterior]: {text}"
-                else:
-                    safe_author = self._clean_prompt_text(author_name or "outro profile", 80)
-                    line = f"[{safe_author}]: {text}"
-            else:
-                # Humano
-                display = str(
-                    getattr(m.author, "display_name", None)
-                    or getattr(m.author, "name", "alguém")
-                ).strip()
-                safe_display = self._clean_prompt_text(display or "alguém", 80)
-                line = f"{safe_display}: {text}"
-
-            next_total = total + len(line) + 1
-            if next_total > C.MAX_CHANNEL_CONTEXT_CHARS and lines_reversed:
-                break
-            lines_reversed.append(line)
-            total = next_total
-
-        if not lines_reversed:
-            return None
-        return "\n".join(reversed(lines_reversed))
-
 
     def _format_reply_context(
         self, replied: discord.Message
@@ -1311,8 +693,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if not text:
             return None  # sem texto útil pra dar contexto
 
-        # Nome: prefere display_name (apelido no server). Se for webhook,
-        # o author.name é o nome do profile (customizado no send).
+        # Nome de exibição do autor da mensagem explicitamente citada.
         author = replied.author
         name = self._clean_prompt_text(
             getattr(author, "display_name", None) or author.name or "alguém",
@@ -1323,59 +704,18 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         return f'respondendo a {name}: "{text}"'
 
 
-    # -------------------------------------------------------------------------
-    # Text safety / prompt bounding
-    # -------------------------------------------------------------------------
-
-
-    async def _resolve_profile_identity(
-        self,
-        guild: Optional[discord.Guild],
-        profile: ChatbotProfile,
-    ) -> tuple[str, str]:
-        """Resolve nome/avatar efetivos do profile.
-
-        Profiles `user_style` usam identidade dinâmica: nick e avatar atuais do
-        usuário vinculado, com fallback salvo caso ele saia do servidor.
-        """
-        name = str(profile.name or profile.fallback_name or "Chatbot").strip()
-        avatar_url = str(profile.avatar_url or profile.fallback_avatar_url or "").strip()
-        if getattr(profile, "dynamic_identity", False) and profile.source_user_id and guild is not None:
-            member = guild.get_member(int(profile.source_user_id))
-            if member is None:
-                try:
-                    member = await guild.fetch_member(int(profile.source_user_id))
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    member = None
-            if member is not None:
-                name = str(getattr(member, "display_name", "") or member.name or name)
-                avatar = getattr(member, "display_avatar", None) or getattr(member, "avatar", None)
-                avatar_url = str(getattr(avatar, "url", "") or avatar_url)
-        name = self._neutralize_mentions(name)[:C.MAX_NAME_LENGTH].strip() or "Chatbot"
-        avatar_url = avatar_url[:C.MAX_AVATAR_URL_LENGTH].strip()
-        return name, avatar_url
-
-    async def _profile_with_resolved_identity(
-        self,
-        guild: Optional[discord.Guild],
-        profile: ChatbotProfile,
-    ) -> ChatbotProfile:
-        name, avatar_url = await self._resolve_profile_identity(guild, profile)
-        if name == profile.name and avatar_url == profile.avatar_url:
-            return profile
-        return replace(profile, name=name, avatar_url=avatar_url)
-
     def _neutralize_mentions(self, text: str) -> str:
         """Remove menções globais do texto enviado/ecoado pelo chatbot.
 
-        allowed_mentions=None já impede ping real, mas neutralizar o texto evita
-        visual de @everyone/@here em mensagens de webhook e fallback.
+        AllowedMentions.none() já impede ping real, mas neutralizar o texto evita
+        visual de @everyone/@here em mensagens do bot.
         """
         text = str(text or "")
         return (
             text.replace("@everyone", "@\u200beveryone")
             .replace("@here", "@\u200bhere")
         )
+
 
     def _clean_prompt_text(self, text: str, limit: int) -> str:
         """Texto compacto para contexto do modelo, com limite defensivo."""
@@ -1387,78 +727,22 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return text[: max(0, limit - 3)].rstrip() + "..."
         return text
 
+
     def _sanitize_model_reply(self, text: str) -> str:
         """Normaliza a resposta do modelo antes de enviar/persistir."""
         text = self._clean_prompt_text(text, C.MAX_MODEL_REPLY_CHARS)
         return self._neutralize_mentions(text)
 
-    # -------------------------------------------------------------------------
-    # Prompt building
-    # -------------------------------------------------------------------------
 
-    def _build_system_prompt(
-        self,
-        profile: ChatbotProfile,
-        master_prompt: Optional[str] = None,
-        is_temporary: bool = False,
-        channel_is_nsfw: bool = False,
-    ) -> str:
-        """Monta o system prompt final.
-
-        Ordem:
-          1. MASTER_PROMPT (globais do dono — inclui PROIBIÇÕES ABSOLUTAS)
-          2. DIRETIVA DE CANAL (SFW ou NSFW conforme channel.nsfw)
-          3. HARD_PREAMBLE (anti-injection + formato base)
-          4. Personalidade do profile
-          5. Nota de invocação temporária (se aplicável)
-
-        A diretiva de canal entra LOGO após o master porque as regras de
-        tom (SFW vs NSFW) são contextuais, e o modelo precisa saber delas
-        antes de assumir o personagem.
-
-        Personagens NUNCA sobrescrevem master nem diretivas de canal.
-        """
-        parts: list[str] = []
-
-        # 1. Master prompt (se existe) — regras supremas do dono.
-        if master_prompt and master_prompt.strip():
-            parts.append("====== DIRETRIZES GLOBAIS (sempre seguir) ======")
-            parts.append(master_prompt.strip())
-            parts.append("====== FIM DAS DIRETRIZES GLOBAIS ======")
-            parts.append("")
-
-        # 2. Diretiva de canal — SFW ou NSFW. Sempre incluímos uma das duas
-        # pra o modelo ter clareza. Em "unknown", trata como SFW (defensivo).
-        parts.append("====== CONTEXTO DESTE CANAL ======")
-        if channel_is_nsfw:
-            parts.append(C.NSFW_CHANNEL_DIRECTIVE.strip())
+    def _build_system_prompt(self, master_prompt: Optional[str] = None, channel_is_nsfw: bool = False) -> str:
+        instructions = (master_prompt or "").strip() or C.DEFAULT_MASTER_PROMPT
+        parts = [instructions, C.NSFW_CHANNEL_DIRECTIVE if channel_is_nsfw else C.SFW_CHANNEL_DIRECTIVE,
+                 C.HARD_SYSTEM_PREAMBLE]
+        if C.SAFE_MODE:
+            parts.append("Recursos: neste momento responda apenas em texto; áudio e geração de imagens estão suspensos.")
         else:
-            parts.append(C.SFW_CHANNEL_DIRECTIVE.strip())
-        parts.append("====== FIM DO CONTEXTO DO CANAL ======")
-        parts.append("")
-
-        # 3. Hard preamble (anti-injection + formato base)
-        parts.append(C.HARD_SYSTEM_PREAMBLE.strip())
-
-        # 4. Personalidade customizada do profile
-        custom = (profile.system_prompt or "").strip()
-        if custom:
-            parts.append("")
-            parts.append(f"Você é {profile.name}. Personalidade:")
-            parts.append(custom)
-
-        # 5. Nota sobre invocação temporária (se for o caso)
-        if is_temporary:
-            parts.append("")
-            parts.append(
-                "IMPORTANTE: você está sendo invocado temporariamente nesta "
-                "conversa — NÃO é o chatbot ativo atual do servidor. Responda "
-                "apenas à mensagem que lhe foi dirigida, sem assumir que vai "
-                "continuar a conversa. Use o contexto do canal abaixo pra "
-                "entender o que está rolando antes de responder."
-            )
-
-        return "\n".join(parts)
+            parts.append("Áudio só é tentado quando solicitado. Não anuncie que enviou um anexo antes da confirmação do envio.")
+        return "\n\n".join(part.strip() for part in parts if part.strip())
 
     def _format_guild_context(self, guild_entries: list[MemoryEntry]) -> str:
         """Formata histórico coletivo com limite de caracteres.
@@ -1490,43 +774,23 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return ""
         return "\n".join(reversed(lines_reversed))
 
+
     def _build_messages(
         self,
-        profile: ChatbotProfile,
         user_history: list[MemoryEntry],
         guild_context: list[MemoryEntry],
         user_name: str,
         user_message: str,
         reply_context: Optional[str] = None,
         master_prompt: Optional[str] = None,
-        channel_context: Optional[str] = None,
-        is_temporary: bool = False,
         channel_is_nsfw: bool = False,
         image_urls: Optional[list[str]] = None,
         behavior_hint: str = "",
     ) -> tuple[str, list[ChatMessage]]:
-        """Monta o payload final: (system_prompt, [messages]).
+        """Payload do bot; contextos citados têm autoridade de dados do usuário."""
+        system = self._build_system_prompt(master_prompt=master_prompt, channel_is_nsfw=channel_is_nsfw)
 
-        Estrutura do system_prompt (ordem de precedência semântica):
-          1. MASTER_PROMPT (dono do bot — global, inclui proibições absolutas)
-          2. DIRETIVA DE CANAL (SFW ou NSFW)
-          3. HARD_PREAMBLE (Anthropic-style guardrails)
-          4. Personalidade do profile (staff do server)
-          5. Nota de invocação temporária (se aplicável)
-          6. Contexto coletivo da memória do profile
-          7. Contexto do canal (só se invocação temporária — últimas N msgs)
-
-        messages[] = histórico pessoal do user com ESSE profile + nova mensagem.
-        A nova mensagem pode vir com contexto de reply embutido.
-        """
-        system = self._build_system_prompt(
-            profile,
-            master_prompt=master_prompt,
-            is_temporary=is_temporary,
-            channel_is_nsfw=channel_is_nsfw,
-        )
-
-        # Nota extra de comportamento para modos especiais (ex: extrovert).
+        # Nota extra de comportamento para modos especiais (ex: espontâneo).
         if behavior_hint and behavior_hint.strip():
             system = system + "\n\n" + behavior_hint.strip()
 
@@ -1557,8 +821,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         context_sections: list[str] = []
         if collective:
             context_sections.append(f"Conversas anteriores no canal:\n{collective}")
-        if channel_context:
-            context_sections.append(f"Mensagens recentes do canal:\n{channel_context}")
         if reply_context:
             context_sections.append(f"Mensagem respondida:\n{reply_context}")
         prefix = ""
@@ -1578,9 +840,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
         return system, messages
 
-    # -------------------------------------------------------------------------
-    # Feedback visual: reação durante processamento + quote da mensagem original
-    # -------------------------------------------------------------------------
 
     async def _add_processing_reaction(self, message: discord.Message) -> Optional[str]:
         """Adiciona a reação de "processando" na mensagem do usuário.
@@ -1599,6 +858,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 continue
         return None
 
+
     async def _remove_processing_reaction(
         self, message: discord.Message, emoji_str: Optional[str]
     ) -> None:
@@ -1615,592 +875,224 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         except (discord.HTTPException, discord.NotFound, discord.Forbidden):
             pass
 
-    def _format_reply_quote(self, user_name: str, user_content: str) -> str:
-        """Formata o início da resposta como quote markdown, emulando reply
-        sem gerar ping.
-
-        Exemplo de saída:
-            > **Ana:** oi como vai
-            (em seguida, o conteúdo da resposta da IA é anexado pelo chamador)
-
-        Discord renderiza com uma barrinha lateral igual à reply nativa,
-        só que sem a seta clicável e sem notificação.
-        """
-        # Trunca a mensagem original pra 120 chars no quote — pra não gastar
-        # espaço da resposta se o usuário mandou um textão.
-        snippet = self._clean_prompt_text(user_content or "", 120).replace("\n", " ")
-        snippet = self._neutralize_mentions(snippet)
-        # Escapa asteriscos no nome do user (evita bold quebrado se o nome
-        # tiver **). Aspas como fallback não precisa escapar.
-        safe_name = self._clean_prompt_text(user_name or "alguém", 80).replace("**", "").strip()
-        safe_name = self._neutralize_mentions(safe_name)
-        if not safe_name:
-            safe_name = "alguém"
-        return f"> **{safe_name}:** {snippet}"
-
-    # -------------------------------------------------------------------------
-    # Main listener
-    # -------------------------------------------------------------------------
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # Descarta ruído o mais rápido possível — este método DEVE retornar
-        # em <10ms pra não atrapalhar o TTS e outros listeners.
-        if message.author.bot or message.webhook_id is not None:
+        if message.author.bot or message.webhook_id is not None or message.guild is None:
             return
-        if message.type not in (
-            discord.MessageType.default,
-            discord.MessageType.reply,
-        ):
+        if message.type not in (discord.MessageType.default, discord.MessageType.reply):
             return
-        if message.guild is None:
-            return  # só em guilds, DMs não
-        antibot_guard = getattr(self.bot, "antibot_should_block_message", None)
-        if callable(antibot_guard) and bool(antibot_guard(message)):
+        if not isinstance(message.channel, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread)):
             return
-        # Aceita chats de: TextChannel (padrão), VoiceChannel (chat embutido
-        # da voice call), StageChannel (chat de stage), Thread (threads
-        # normais + forum posts). Todos são `Messageable` e suportam webhook.
-        if not isinstance(
-            message.channel,
-            (discord.TextChannel, discord.VoiceChannel,
-             discord.StageChannel, discord.Thread),
-        ):
+        guard = getattr(self.bot, "antibot_should_block_message", None)
+        if callable(guard) and bool(guard(message)):
             return
-        if self._router is None or self._profiles is None:
-            return  # cog não inicializado
-
-        # Mantém um cache já existente fresco sem transformar um cache miss em
-        # histórico incompleto (nesse caso `_fetch_channel_history` consulta a API).
-        self._append_cached_channel_message(message)
-
-        # Pré-filtro barato: menções e replies potencialmente dirigidas a um
-        # profile continuam. Replies comprovadamente dirigidas a outra pessoa
-        # não criam task nem disputam a fila limitada do chatbot. Para o
-        # extrovert, aceitamos mensagens comuns somente quando o cache indica
-        # que pode haver config ativa neste guild/canal (ou cache miss após restart).
-        content = message.content or ""
-        stripped = content.lstrip()
-        has_bot_mention = self._is_mention_at_start(message)
-        has_name_mention = stripped.startswith("@")
-        has_reply_candidate = self._is_potential_profile_reply(message)
-        has_direct_trigger = (
-            has_bot_mention or has_name_mention or has_reply_candidate
+        if self._router is None or self._config is None:
+            return
+        direct = self._is_mention_at_start(message) or self._is_potential_chatbot_reply(message)
+        spontaneous = (
+            not C.SAFE_MODE and not direct and bool((message.content or "").strip())
+            and self._config.quick_might_apply(
+                message.guild.id, message.channel.id, parent_id=getattr(message.channel, "parent_id", None),
+            )
         )
-        has_extrovert_candidate = (
-            not C.SAFE_MODE
-            and not has_direct_trigger
-            and bool(content.strip())
-            and self._extrovert is not None
-            and self._extrovert.quick_might_apply(message.guild.id, message.channel.id)
-        )
-        if not (has_direct_trigger or has_extrovert_candidate):
-            return
-
-        self._supervisor.create(
-            self._process_chat(message),
-            name=f"chatbot-turn:{message.guild.id}:{message.id}",
-        )
+        if direct or spontaneous:
+            self._supervisor.create(
+                self._process_chat(message), name=f"chatbot-turn:{message.guild.id}:{message.id}",
+            )
 
     async def _process_chat(self, message: discord.Message) -> None:
-        """Processa a mensagem: resolve trigger, cooldown, gera e envia.
-
-        Este método é a task "pesada" — roda em paralelo ao event loop.
-        Qualquer exceção é capturada e logada sem propagar.
-        """
         try:
-            guild, author = message.guild, message.author
-            if guild is None or author is None or self._profiles is None:
+            guild = message.guild
+            if guild is None or self._config is None:
                 return
-
-            lease = await self._admission.try_admit(
-                "chat", guild_id=guild.id, user_id=author.id,
-            )
+            trigger = await self._resolve_trigger(message)
+            if trigger is None:
+                return
+            spontaneous = trigger.via == "spontaneous"
+            if self._is_user_on_cooldown(guild.id, message.author.id):
+                return
+            lease = await self._admission.try_admit("chat", guild_id=guild.id, user_id=message.author.id)
             if lease is None:
-                if self._is_mention_at_start(message) or message.reference is not None:
-                    try:
-                        await message.reply(
-                            "⏳ Já estou processando seu pedido ou a fila está cheia.",
-                            mention_author=False, delete_after=10.0,
-                        )
-                    except discord.HTTPException:
-                        pass
+                if not spontaneous:
+                    await message.reply(
+                        "⏳ Já estou processando seu pedido ou a fila está cheia.",
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none(), delete_after=10.0,
+                    )
                 return
-
             async with lease:
-                trigger = await self._resolve_trigger(message)
-                if trigger is None:
-                    if self._is_mention_at_start(message):
-                        try:
-                            await message.reply(
-                                "Nenhum profile de chatbot ativo neste servidor. "
-                                "A staff pode configurar com `/chatbot profile ativar`.",
-                                mention_author=False, delete_after=10.0,
-                            )
-                        except discord.HTTPException:
-                            pass
-                    return
-                if self._is_user_on_cooldown(guild.id, author.id):
-                    try:
-                        await message.add_reaction("⌛")
-                    except discord.HTTPException:
-                        pass
-                    return
-
-                images, audios = extract_attachments(message)
-                content_for_ai = (trigger.content or "").strip()
-                if not content_for_ai and images:
-                    content_for_ai = "Analise a imagem anexada."
-                if audios and (not content_for_ai or is_voice_message(message)) and not C.SAFE_MODE:
-                    async with self._admission.resource("stt"):
-                        transcription = await self._maybe_transcribe(message)
-                    if transcription:
-                        content_for_ai = (
-                            f"{content_for_ai}\n[áudio transcrito]: {transcription}"
-                            if content_for_ai else f"[áudio transcrito]: {transcription}"
-                        )
-                if not content_for_ai:
-                    return
-                self._apply_user_cooldown(guild.id, author.id)
-
-                turn_key = self._turn_key(
-                    guild.id, message.channel.id, trigger.profile.profile_id,
-                )
-                async with self._turn_lock_for(turn_key):
-                    self._touch_turn_lock(turn_key)
-                    intent = self._detect_user_intent(content_for_ai)
-                    if intent.kind == "chat_adult":
-                        try:
-                            await message.reply(
-                                "🔞 Roleplay adulto não está disponível no chat. Posso fazer roleplay não explícito.",
-                                mention_author=False, delete_after=20.0,
-                            )
-                        except discord.HTTPException:
-                            pass
+                key = self._turn_key(guild.id, message.channel.id)
+                async with self._turn_lock_for(key):
+                    self._touch_turn_lock(key)
+                    if not await self._can_respond(
+                        guild.id, message.channel.id, spontaneous=spontaneous,
+                        parent_id=getattr(message.channel, "parent_id", None),
+                    ):
                         return
-                    if intent.kind in ("image_safe", "image_adult") and C.SAFE_MODE:
-                        try:
+                    if spontaneous and self._is_spontaneous_on_cooldown(
+                        guild_id=guild.id, channel_id=message.channel.id, user_id=message.author.id,
+                    ):
+                        return
+                    content = trigger.content.strip()
+                    images, audios = extract_attachments(message)
+                    if not content and images:
+                        content = "Analise a imagem anexada."
+                    if audios and (not content or is_voice_message(message)) and not C.SAFE_MODE:
+                        async with self._admission.resource("stt"):
+                            transcription = await self._maybe_transcribe(message)
+                        if transcription:
+                            content = f"{content}\n[áudio transcrito]: {transcription}".strip()
+                    if not content:
+                        return
+                    self._apply_user_cooldown(guild.id, message.author.id)
+                    intent = self._detect_user_intent(content)
+                    if intent.kind == "chat_adult":
+                        await message.reply(
+                            "🔞 Roleplay adulto não está disponível no chat. Posso conversar sem conteúdo explícito.",
+                            mention_author=False, allowed_mentions=discord.AllowedMentions.none(), delete_after=20.0,
+                        )
+                        return
+                    if intent.kind in ("image_safe", "image_adult"):
+                        if C.SAFE_MODE:
                             await message.reply(
                                 "🛠️ Geração de imagem está temporariamente em modo de recuperação.",
-                                mention_author=False, delete_after=15.0,
+                                mention_author=False, allowed_mentions=discord.AllowedMentions.none(), delete_after=15.0,
                             )
-                        except discord.HTTPException:
-                            pass
-                        return
-                    if intent.kind in ("image_safe", "image_adult") and not C.SAFE_MODE:
-                        # O turno entrou como chat porque a intenção só fica
-                        # disponível após trigger/STT. Migra a lease para a fila
-                        # de imagem antes de esperar o provider, liberando uma
-                        # vaga de LLM para conversas de texto.
-                        image_reaction = await self._add_processing_reaction(message)
-                        try:
-                            switched = await lease.switch_kind("image")
-                        except BaseException:
-                            await self._remove_processing_reaction(
-                                message, image_reaction,
-                            )
-                            raise
-                        if not switched:
-                            await self._remove_processing_reaction(
-                                message, image_reaction,
-                            )
-                            try:
+                            return
+                        # Resposta espontânea permanece textual e barata.
+                        if not spontaneous:
+                            if not await lease.switch_kind("image"):
                                 await message.reply(
-                                    "⏳ A fila de imagens está cheia. Tenta novamente em instantes.",
-                                    mention_author=False,
-                                    delete_after=12.0,
+                                    "⏳ A fila de imagens está cheia.", mention_author=False,
+                                    allowed_mentions=discord.AllowedMentions.none(), delete_after=12.0,
                                 )
-                            except discord.HTTPException:
-                                pass
-                            return
-                        handled = await self._maybe_generate_image(
-                            message=message, profile=trigger.profile,
-                            prompt_text=content_for_ai, image_prompt=intent.prompt,
-                            processing_reaction=image_reaction,
-                        )
-                        if handled:
-                            if trigger.via == "extrovert":
-                                self._apply_extrovert_cooldowns(
-                                    guild_id=guild.id, channel_id=message.channel.id,
-                                    user_id=author.id, profile_id=trigger.profile.profile_id,
-                                )
-                            return
-                        # A geração deixou de ser aplicável (por exemplo, unload
-                        # concorrente). Volta à classe de chat antes do fallback
-                        # textual para respeitar o limite de LLM.
-                        if not await lease.switch_kind("chat"):
-                            return
+                                return
+                            handled = await self._maybe_generate_image(
+                                message=message, prompt_text=content, image_prompt=intent.prompt,
+                            )
+                            if handled:
+                                return
+                            if not await lease.switch_kind("chat"):
+                                return
                     try:
                         sent = await asyncio.wait_for(
-                            self._generate_and_send(
-                                message, trigger.profile, content_for_ai,
-                                is_temporary=trigger.is_temporary,
-                                behavior_hint=trigger.behavior_hint,
-                            ),
+                            self._generate_and_send(message, content, behavior_hint=trigger.behavior_hint),
                             timeout=C.CHAT_TURN_TIMEOUT_SECONDS,
                         )
-                        if sent and trigger.via == "extrovert":
-                            self._apply_extrovert_cooldowns(
-                                guild_id=guild.id, channel_id=message.channel.id,
-                                user_id=author.id, profile_id=trigger.profile.profile_id,
+                        if sent and spontaneous:
+                            self._apply_spontaneous_cooldowns(
+                                guild_id=guild.id, channel_id=message.channel.id, user_id=message.author.id,
                             )
                     except asyncio.TimeoutError:
-                        log.warning(
-                            "chatbot: turno expirou | guild=%s channel=%s profile=%s",
-                            guild.id, message.channel.id, trigger.profile.profile_id,
-                        )
+                        log.warning("chatbot: turno expirou | guild=%s channel=%s", guild.id, message.channel.id)
         except Exception:
-            # Pega tudo — esta task é fire-and-forget, não pode crashar o bot.
-            log.exception("chatbot: erro não tratado no processamento")
+            log.exception("chatbot: falha ao processar turno")
 
-    async def _generate_and_send(
-        self,
-        message: discord.Message,
-        profile: ChatbotProfile,
-        content: str,
-        *,
-        is_temporary: bool = False,
-        behavior_hint: str = "",
-    ) -> bool:
-        """Parte 2: chama IA + envia via webhook.
-
-        Fluxo:
-          1. Reage na msg do user com emoji animado "processando".
-          2. Lê históricos (pessoal + coletivo DO PROFILE) em paralelo.
-             Se `is_temporary`, também lê master prompt + canal history.
-          3. Monta prompt e chama o router com deadline próprio.
-          4. Prepende um quote markdown (sem ping) pra emular reply nativo,
-             já que webhook não suporta message_reference.
-          5. Envia via webhook com identidade do profile.
-          6. Remove a reação de processando.
-          7. Persiste o turno de forma ordenada antes de liberar a admissão.
-
-        `is_temporary` = True quando o profile foi invocado por `@Nome` ou
-        reply, e NÃO é o profile ativo do server. Nesse caso adicionamos
-        history do canal no prompt pra ele entender o contexto da conversa
-        corrente em que foi chamado.
-
-        Erros em qualquer passo não crasheiam — apenas logam e limpam a reação.
-        """
-        guild = message.guild
-        author = message.author
-        if guild is None or author is None:
+    async def _generate_and_send(self, message: discord.Message, content: str, *, behavior_hint: str = "") -> bool:
+        guild, channel, author = message.guild, message.channel, message.author
+        if guild is None or self._memory is None or self._router is None:
             return False
-        if self._memory is None or self._router is None or self._webhooks is None:
-            return False
-
-        channel = message.channel
-        # Aceita todos os tipos de canal com chat. Webhooks funcionam
-        # nativamente em Text/Voice/Stage. Em Thread, o webhook é do canal
-        # pai e usamos `thread=` no send.
-        supported_types = (
-            discord.TextChannel, discord.VoiceChannel,
-            discord.StageChannel, discord.Thread,
-        )
-        if not isinstance(channel, supported_types):
-            return False
-
-        user_display = str(getattr(author, "display_name", author.name))
-        display_profile = await self._profile_with_resolved_identity(guild, profile)
-
-        # 1. Reação de processando
-        reaction_applied = await self._add_processing_reaction(message)
-
-        # Daqui pra frente, tudo que retorna precisa passar pelo finally
-        # que remove a reação. Usa try/finally explícito em vez de bloco `with`.
+        reaction = await self._add_processing_reaction(message)
         try:
-            guild_id_for_nsfw = message.guild.id if message.guild else None
-            channel_nsfw_flag = bool(getattr(channel, "nsfw", False))
-            channel_is_nsfw = (
-                channel_nsfw_flag and C.nsfw_enabled_for_guild(guild_id_for_nsfw)
-            )
-            is_private = bool(
-                isinstance(channel, discord.Thread)
-                and getattr(channel, "is_private", lambda: False)()
-            )
-            visibility_scope = visibility_scope_for(
-                channel.id, is_nsfw=channel_is_nsfw, is_private=is_private,
-            )
-
-            # Uma captura de geração alimenta leitura e escrita do turno. Assim,
-            # reset concorrente torna a escrita atrasada invisível.
-            memory_context_task = self._memory.load_context(
-                guild.id, profile.profile_id, author.id,
-                profile_revision=profile.revision,
-                channel_id=channel.id,
-                visibility_scope=visibility_scope,
-            )
-            master_task = self._master.get() if self._master else None
-
-            # Channel history só se invocação temporária. Economiza ~100ms
-            # de fetch_history quando é o ativo respondendo normal.
-            channel_history_task = None
-            if is_temporary:
-                channel_history_task = self._fetch_channel_history(
-                    channel, message,
-                )
-
-            gather_args = [memory_context_task]
-            if master_task is not None:
-                gather_args.append(master_task)
-            if channel_history_task is not None:
-                gather_args.append(channel_history_task)
-
+            effective_nsfw = channel_is_nsfw(channel) and C.nsfw_enabled_for_guild(guild.id)
+            private = isinstance(channel, discord.Thread) and channel.is_private()
+            visibility = visibility_scope_for(channel.id, is_nsfw=effective_nsfw, is_private=private)
+            tasks = [self._memory.load_context(
+                guild.id, author.id, channel_id=channel.id, visibility_scope=visibility,
+            )]
+            if self._master is not None:
+                tasks.append(self._master.get())
             try:
                 results = await asyncio.wait_for(
-                    asyncio.gather(*gather_args, return_exceptions=True),
-                    timeout=C.CONTEXT_LOAD_TIMEOUT_SECONDS,
+                    asyncio.gather(*tasks, return_exceptions=True), timeout=C.CONTEXT_LOAD_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                log.warning("chatbot: timeout ao ler contexto; seguindo sem histórico")
-                results = [[]] * len(gather_args)
-            except Exception:
-                log.exception("chatbot: falha ao ler contexto")
-                results = [[]] * len(gather_args)
-
+                log.warning("chatbot: contexto indisponível; usando prompt padrão sem histórico")
+                results = [None] * len(tasks)
             memory_result = results[0]
-            if (
-                isinstance(memory_result, tuple)
-                and len(memory_result) == 3
-            ):
-                memory_epoch, user_hist, guild_hist = memory_result
+            if isinstance(memory_result, tuple) and len(memory_result) == 3:
+                epoch, personal, collective = memory_result
             else:
-                # Mesmo sem histórico precisamos capturar a geração atual. Usar
-                # zero aqui poderia ressuscitar um turno depois de `/reset`.
-                try:
-                    memory_epoch = await asyncio.wait_for(
-                        self._memory.capture_epoch(guild.id, author.id), timeout=2.0,
-                    )
-                except Exception:
-                    log.warning("chatbot: falha ao capturar epoch de fallback")
-                    memory_epoch = None
-                user_hist, guild_hist = [], []
-            idx = 1
-            master_cfg: Optional[MasterPrompt] = None
-            if master_task is not None:
-                r = results[idx]
-                master_cfg = r if not isinstance(r, Exception) else None
-                idx += 1
-            channel_msgs: list = []
-            if channel_history_task is not None:
-                r = results[idx]
-                channel_msgs = r if not isinstance(r, Exception) else []
-
-            # Resolve contexto de reply: se o user respondeu a alguém (user
-            # ou webhook), a IA precisa saber qual mensagem.
-            reply_context: Optional[str] = None
+                epoch = await self._capture_turn_epoch(guild.id, author.id)
+                personal, collective = [], []
+            master = results[1] if len(results) > 1 and isinstance(results[1], MasterPrompt) else None
+            reply_context = None
             if message.reference is not None:
-                replied = await self._resolve_reply_target(message)
-                if replied is not None:
-                    reply_context = self._format_reply_context(replied)
-
-            # Canal history formatado — só passa pro prompt se é temporário.
-            # Profile ativo tem a memória própria dele; não precisa disso.
-            channel_context: Optional[str] = None
-            if is_temporary and channel_msgs:
-                channel_context = self._format_channel_history(
-                    channel_msgs, display_profile.name,
-                )
-
-            # Extrai imagens anexadas para o modelo multimodal. O Groq recebe
-            # as URLs HTTPS do CDN; o fallback Gemini baixa e valida os bytes
-            # com limite antes de convertê-los para inlineData.
-            images, _audios = extract_attachments(message)
-            image_urls = [img.url for img in images]
-            if image_urls:
-                log.info(
-                    "chatbot: mensagem com %d imagem(ns) | user=%s",
-                    len(image_urls), message.author.id,
-                )
-
+                target = await self._resolve_reply_target(message)
+                if target is not None:
+                    # Uma reply é uma nova citação explícita, mesmo após reset.
+                    reply_context = self._format_reply_context(target)
+            images, _ = extract_attachments(message)
             system, messages = self._build_messages(
-                profile=display_profile,
-                user_history=user_hist,
-                guild_context=guild_hist,
-                user_name=user_display,
-                user_message=content,
-                reply_context=reply_context,
-                master_prompt=master_cfg.prompt if master_cfg else None,
-                channel_context=channel_context,
-                is_temporary=is_temporary,
-                channel_is_nsfw=channel_is_nsfw,
-                image_urls=image_urls,
+                user_history=personal, guild_context=collective,
+                user_name=str(getattr(author, "display_name", author.name)), user_message=content,
+                reply_context=reply_context, master_prompt=master.prompt if master else None,
+                channel_is_nsfw=effective_nsfw, image_urls=[item.url for item in images],
                 behavior_hint=behavior_hint,
             )
-
-            # Log do modo — útil pra debugar se diretiva entrou certo.
-            # NÃO loga o prompt completo (é longo e pode ter PII). Só metadados.
-            log.info(
-                "chatbot: gerando resposta | profile=%s canal=%s modo=%s",
-                display_profile.name,
-                "nsfw" if channel_is_nsfw else "sfw",
-                "temporary" if is_temporary else "active",
-            )
-
             try:
-                reply = await self._router.chat(
-                    system=system,
-                    messages=messages,
-                    temperature=display_profile.temperature,
-                )
-            except AllProvidersExhausted:
-                log.warning("chatbot: todos providers exauridos")
-                try:
+                reply = await self._router.chat(system=system, messages=messages, temperature=C.DEFAULT_TEMPERATURE)
+            except (AllProvidersExhausted, ProviderError, asyncio.TimeoutError):
+                log.warning("chatbot: serviço de conversação indisponível")
+                if not behavior_hint and await self._can_respond(
+                    guild.id, channel.id, parent_id=getattr(channel, "parent_id", None),
+                ):
                     await message.reply(
                         "🤖 Estou com problemas técnicos. Tenta de novo daqui a pouco.",
-                        mention_author=False, delete_after=15.0,
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none(), delete_after=15.0,
                     )
-                except discord.HTTPException:
-                    pass
                 return False
-            except ProviderError as e:
-                log.warning("chatbot: ProviderError: %s", e)
-                return False
-            except asyncio.TimeoutError:
-                log.warning("chatbot: timeout no provider")
-                return False
-            except Exception:
-                log.exception("chatbot: erro inesperado ao chamar provider")
-                return False
-
             reply = self._sanitize_model_reply(reply)
             if not reply:
-                return False  # sem resposta útil, fica quieto
-            if behavior_hint:
-                reply = reply[:C.EXTROVERT_MAX_REPLY_CHARS].rstrip()
-
-            # 4.5. Gera TTS se o user pediu ou se o profile tem tts_chance > 0
-            # e caiu na sorte.
-            tts_file = await self._maybe_generate_tts(
-                content=content,  # texto original do user
-                reply=reply,
-                profile=display_profile,
-                guild_id=(message.guild.id if message.guild else None),
-                user_id=author.id,
-            )
-            reply = self._sanitize_audio_capability_claim(
-                reply,
-                audio_will_be_sent=(tts_file is not None),
-            )
-            if tts_file is not None:
-                # Both synthesis implementations intentionally cap at this
-                # size. Keep display, memory and voice-call cache key identical
-                # to the bytes attached to the Discord message.
-                reply = reply[:MAX_TTS_CHARS].rstrip()
-
-            # 4. Quote no início pra emular reply (sem ping). Limite de 2000
-            # chars total do Discord — o quote consome ~150, o resto cabe.
-            quote_line = self._format_reply_quote(user_display, content)
-            budget = 2000 - len(quote_line) - 2
-            if budget < 200:
-                quote_line = self._format_reply_quote(user_display, content[:60])
-                budget = 2000 - len(quote_line) - 2
-            if len(reply) > budget:
-                reply = reply[: max(200, budget - 3)] + "..."
-            # Texto nunca some quando há anexo de áudio: acessibilidade,
-            # moderação e memória continuam funcionando.
-            final_content = f"{quote_line}\n{reply}"
-
-            # 5. Envia via webhook com identidade do profile
-            files: list[discord.File] = []
-            if tts_file is not None:
-                files.append(tts_file)
-
-            sent = await self._webhooks.send_as_profile(
-                channel=channel,
-                profile_name=display_profile.name,
-                avatar_url=display_profile.avatar_url,
-                content=final_content or None,
-                files=files if files else None,
-            )
-            if sent is not None:
-                self._append_cached_channel_message(sent)
-                await self._remember_sent_profile_message(
-                    guild_id=guild.id,
-                    channel_id=channel.id,
-                    message_id=sent.id,
-                    profile_id=profile.profile_id,
+                return False
+            limit = C.SPONTANEOUS_MAX_REPLY_CHARS if behavior_hint else 2000
+            reply = reply[:limit].rstrip()
+            tts_file = None
+            if not behavior_hint:
+                tts_file = await self._maybe_generate_tts(
+                    content=content, reply=reply, guild_id=guild.id, user_id=author.id,
                 )
-            else:
-                # Fallback: envia como o próprio bot avisando que falhou o webhook.
-                try:
-                    for attachment in files:
-                        try:
-                            attachment.fp.seek(0)
-                        except Exception:
-                            pass
-                    fallback_sent = await channel.send(
-                        (f"**{display_profile.name}:**\n{final_content}"[:1990] if final_content else None),
-                        allowed_mentions=discord.AllowedMentions.none(),
-                        files=files if files else discord.utils.MISSING,
-                    )
-                    self._append_cached_channel_message(fallback_sent)
-                    await self._remember_sent_profile_message(
-                        guild_id=guild.id,
-                        channel_id=channel.id,
-                        message_id=fallback_sent.id,
-                        profile_id=profile.profile_id,
-                    )
-                except discord.HTTPException:
-                    log.warning("chatbot: fallback send também falhou | channel=%s", channel.id)
-                    return False
-
-            await self._maybe_enqueue_voice_call_tts(
-                message=message,
-                profile=display_profile,
-                spoken_text=reply,
-                audio_was_sent=(tts_file is not None),
+            reply = self._sanitize_audio_capability_claim(reply, audio_will_be_sent=tts_file is not None)
+            if tts_file is not None:
+                reply = reply[:MAX_TTS_CHARS].rstrip()
+            if not await self._can_respond(
+                guild.id, channel.id, spontaneous=bool(behavior_hint),
+                parent_id=getattr(channel, "parent_id", None),
+            ):
+                if tts_file is not None:
+                    tts_file.close()
+                return False
+            sent = await message.reply(
+                reply[:2000], mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+                files=[tts_file] if tts_file is not None else discord.utils.MISSING,
             )
-
-            # Persistência ordenada faz parte do turno; não deixamos task órfã.
-            if memory_epoch is not None:
+            await self._remember_sent_message(guild_id=guild.id, channel_id=channel.id, message_id=sent.id)
+            await self._maybe_enqueue_voice_call_tts(
+                message=message, spoken_text=reply, audio_was_sent=tts_file is not None,
+            )
+            if epoch is not None:
                 await self._persist_turn(
-                    guild_id=guild.id,
-                    profile_id=profile.profile_id,
-                    profile_revision=profile.revision,
-                    channel_id=channel.id,
-                    visibility_scope=visibility_scope,
-                    epoch=memory_epoch,
-                    user_id=author.id,
-                    user_name=user_display,
-                    user_message=content,
-                    assistant_message=reply,
-                    user_history_size=profile.history_size,
+                    guild_id=guild.id, user_id=author.id, channel_id=channel.id,
+                    visibility_scope=visibility, epoch=epoch,
+                    user_name=str(getattr(author, "display_name", author.name)),
+                    user_message=content, assistant_message=reply[:2000],
                 )
             return True
         finally:
-            # 6. Remove a reação independente de ter dado certo ou não
-            await self._remove_processing_reaction(message, reaction_applied)
+            await self._remove_processing_reaction(message, reaction)
 
     async def _persist_turn(
-        self,
-        *,
-        guild_id: int,
-        profile_id: str,
-        profile_revision: str,
-        channel_id: int,
-        visibility_scope: str,
-        epoch: MemoryEpoch,
-        user_id: int,
-        user_name: str,
-        user_message: str,
-        assistant_message: str,
-        user_history_size: int,
+        self, *, guild_id: int, user_id: int, channel_id: int, visibility_scope: str,
+        epoch: MemoryEpoch, user_name: str, user_message: str, assistant_message: str,
+        user_history_size: int = C.DEFAULT_HISTORY_SIZE,
     ) -> None:
-        """Grava um turno indivisível na memória V2."""
         if self._memory is None:
             return
         try:
             await self._memory.append_turn(
-                guild_id, profile_id, user_id,
-                profile_revision=profile_revision,
-                channel_id=channel_id,
-                visibility_scope=visibility_scope,
-                epoch=epoch,
-                user_message=user_message,
-                user_name=user_name,
-                assistant_message=assistant_message,
-                user_history_size=user_history_size,
+                guild_id, user_id, channel_id=channel_id, visibility_scope=visibility_scope,
+                epoch=epoch, user_name=user_name, user_message=user_message,
+                assistant_message=assistant_message, user_history_size=user_history_size,
             )
         except Exception:
             log.exception("chatbot: falha ao persistir turno")

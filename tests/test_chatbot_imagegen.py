@@ -20,11 +20,11 @@ from cogs.chatbot.imagegen import (
     parse_image_intent,
 )
 from cogs.chatbot.image_providers_ext import (
-    ImageProfile,
+    ImageRequestTraits,
     _pollinations_model,
-    aihorde_models_for_profile,
+    aihorde_models_for_request,
     detect_style,
-    provider_order_for_profile,
+    provider_order_for_request,
 )
 
 
@@ -89,60 +89,60 @@ class ProviderOrderTests(unittest.TestCase):
         for style in ("generic", "anime", "realistic"):
             with self.subTest(style=style):
                 self.assertEqual(
-                    _pollinations_model(ImageProfile(nsfw=False, style=style)),
+                    _pollinations_model(ImageRequestTraits(nsfw=False, style=style)),
                     "flux",
                 )
 
     def test_sfw_generic_prefers_pollinations(self):
-        order = provider_order_for_profile(ImageProfile(nsfw=False, style="generic"))
+        order = provider_order_for_request(ImageRequestTraits(nsfw=False, style="generic"))
         self.assertEqual(order[0], "pollinations")
         self.assertIn("cloudflare", order)
         self.assertIn("gemini", order)
 
     def test_sfw_anime_prefers_pollinations(self):
-        order = provider_order_for_profile(ImageProfile(nsfw=False, style="anime"))
+        order = provider_order_for_request(ImageRequestTraits(nsfw=False, style="anime"))
         self.assertEqual(order[0], "pollinations")
 
     def test_nsfw_anime_prefers_aihorde(self):
-        order = provider_order_for_profile(ImageProfile(nsfw=True, style="anime"))
+        order = provider_order_for_request(ImageRequestTraits(nsfw=True, style="anime"))
         self.assertEqual(order[0], "aihorde")
         # Pollinations filtra NSFW (LlamaGuard) mesmo com chave — não pode
         # estar na cascata pra não mascarar falhas com output SFW.
         self.assertNotIn("pollinations", order)
 
     def test_nsfw_realistic_prefers_aihorde(self):
-        order = provider_order_for_profile(ImageProfile(nsfw=True, style="realistic"))
+        order = provider_order_for_request(ImageRequestTraits(nsfw=True, style="realistic"))
         self.assertEqual(order[0], "aihorde")
         self.assertNotIn("pollinations", order)
 
     def test_nsfw_generic_excludes_pollinations(self):
-        order = provider_order_for_profile(ImageProfile(nsfw=True, style="generic"))
+        order = provider_order_for_request(ImageRequestTraits(nsfw=True, style="generic"))
         self.assertNotIn("pollinations", order)
 
 
 class AihordeModelSelectionTests(unittest.TestCase):
     def test_override_takes_precedence(self):
-        models = aihorde_models_for_profile(
-            ImageProfile(nsfw=True, style="anime"),
+        models = aihorde_models_for_request(
+            ImageRequestTraits(nsfw=True, style="anime"),
             override="MyCustomModel, AnotherOne",
         )
         self.assertEqual(models, ["MyCustomModel", "AnotherOne"])
 
-    def test_nsfw_profiles_return_empty_list(self):
+    def test_nsfw_requests_return_empty_list(self):
         # Pra NSFW (qualquer estilo), não filtrar por modelo — deixa o Horde
         # rotear pra qualquer worker NSFW. Filtrar por modelo específico
         # faz a fila explodir porque os modelos populares (Pony, Juggernaut)
         # ficam sobrecarregados.
         for style in ("anime", "realistic", "generic"):
             with self.subTest(style=style):
-                models = aihorde_models_for_profile(
-                    ImageProfile(nsfw=True, style=style)
+                models = aihorde_models_for_request(
+                    ImageRequestTraits(nsfw=True, style=style)
                 )
                 self.assertEqual(models, [])
 
     def test_sfw_anime_does_not_use_nsfw_models(self):
         # Pony V6 XL é treinado em NSFW; pra SFW anime usa Animagine/Illustrious.
-        models = aihorde_models_for_profile(ImageProfile(nsfw=False, style="anime"))
+        models = aihorde_models_for_request(ImageRequestTraits(nsfw=False, style="anime"))
         self.assertIn("Animagine XL", models)
         self.assertNotIn("Pony Diffusion XL", models)
 
@@ -320,6 +320,12 @@ class AdminCommandScopingTests(unittest.TestCase):
         admin = ChatbotCommandsMixin.__dict__["chatbot_admin"]
         names = sorted(c.name for c in admin.walk_commands())
         self.assertEqual(names, ["master", "reset_global"])
+
+    def test_chatbot_group_only_has_configuration_and_memory(self):
+        from cogs.chatbot.commands import ChatbotCommandsMixin
+        chatbot = ChatbotCommandsMixin.__dict__["chatbot"]
+        names = sorted(command.name for command in chatbot.walk_commands())
+        self.assertEqual(names, ["configurar", "memoria"])
 
 
 class GateBehaviorIntegrationTests(unittest.IsolatedAsyncioTestCase):

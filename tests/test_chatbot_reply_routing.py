@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 
-from cogs.chatbot import constants as C
 from cogs.chatbot.cog import ChatbotCog
-from cogs.chatbot.message_index import MessageProfileRef
-from cogs.chatbot.profiles import ChatbotProfile
+from cogs.chatbot import constants as C
+from cogs.chatbot.config import GuildChatbotConfig
 
 
 class _RecordingSupervisor:
@@ -18,33 +17,40 @@ class _RecordingSupervisor:
 
     def create(self, coro, *, name: str):
         self.names.append(name)
-        # O listener cria a coroutine antes de entregá-la ao supervisor. Como
-        # este fake não executa tasks, fechamos explicitamente para não vazar.
+        # O listener entrega a coroutine ao supervisor sem executar I/O.
         coro.close()
         return None
 
 
-def _cog() -> ChatbotCog:
+def _cog(*, enabled: bool = True, channel_ids: tuple[int, ...] = (20,)) -> ChatbotCog:
     cog = object.__new__(ChatbotCog)
     cog.bot = SimpleNamespace(user=SimpleNamespace(id=999))
     cog._router = object()
-    cog._profiles = object()
-    cog._extrovert = None
+    cog._config = SimpleNamespace(
+        get_config=AsyncMock(return_value=GuildChatbotConfig(
+            guild_id=10, enabled=enabled, channel_ids=channel_ids,
+        )),
+        quick_might_apply=Mock(return_value=False),
+    )
+    cog._message_index = SimpleNamespace(resolve=AsyncMock(return_value=None))
     cog._supervisor = _RecordingSupervisor()
-    cog._append_cached_channel_message = lambda _message: None
     return cog
 
 
-def _target(*, author_id: int, webhook_id: int | None = None):
+def _target(*, author_id: int = 999, webhook_id: int | None = None):
     target = Mock(spec=discord.Message)
-    target.author = SimpleNamespace(id=author_id)
+    target.id = 50
+    target.author = SimpleNamespace(id=author_id, bot=True)
     target.webhook_id = webhook_id
+    target.guild = SimpleNamespace(id=10)
+    target.channel = SimpleNamespace(id=20)
     return target
 
 
-def _message(*, message_type, resolved, content: str = "Sla"):
+def _message(*, resolved=None, content: str = "Sla", message_type=discord.MessageType.reply):
     channel = Mock(spec=discord.TextChannel)
     channel.id = 20
+    channel.fetch_message = AsyncMock(return_value=None)
     return SimpleNamespace(
         id=30,
         author=SimpleNamespace(id=40, bot=False),
@@ -57,232 +63,289 @@ def _message(*, message_type, resolved, content: str = "Sla"):
     )
 
 
+def _indexed(cog: ChatbotCog, *, guild_id: int = 10, channel_id: int = 20):
+    cog._message_index.resolve.return_value = SimpleNamespace(
+        guild_id=guild_id, channel_id=channel_id, message_id=50,
+    )
+
+
 class ReplyListenerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_native_reply_to_webhook_is_scheduled_once(self):
+    async def test_native_reply_to_bot_schedules_validation_without_io(self):
         cog = _cog()
-        message = _message(
-            message_type=discord.MessageType.reply,
-            resolved=_target(author_id=123, webhook_id=456),
-        )
-
-        await cog.on_message(message)
-
-        self.assertEqual(
-            cog._supervisor.names,
-            ["chatbot-turn:10:30"],
-        )
-
-    async def test_native_reply_to_ordinary_user_is_ignored(self):
-        cog = _cog()
-        message = _message(
-            message_type=discord.MessageType.reply,
-            resolved=_target(author_id=123),
-        )
-
-        await cog.on_message(message)
-
-        self.assertEqual(cog._supervisor.names, [])
-
-    async def test_native_reply_to_bot_fallback_is_scheduled(self):
-        cog = _cog()
-        message = _message(
-            message_type=discord.MessageType.reply,
-            resolved=_target(author_id=999),
-        )
+        message = _message(resolved=_target())
 
         await cog.on_message(message)
 
         self.assertEqual(cog._supervisor.names, ["chatbot-turn:10:30"])
+        cog._config.get_config.assert_not_awaited()
+        cog._message_index.resolve.assert_not_awaited()
+        message.channel.fetch_message.assert_not_awaited()
 
-    async def test_unresolved_reply_reaches_persisted_index_fallback(self):
+    async def test_unresolved_reply_schedules_persisted_index_validation(self):
         cog = _cog()
-        message = _message(
-            message_type=discord.MessageType.reply,
-            resolved=None,
-        )
+        message = _message()
 
         await cog.on_message(message)
 
         self.assertEqual(cog._supervisor.names, ["chatbot-turn:10:30"])
+        message.channel.fetch_message.assert_not_awaited()
 
-    async def test_system_message_is_still_ignored(self):
+    async def test_reply_to_ordinary_user_is_ignored(self):
         cog = _cog()
-        message = _message(
-            message_type=discord.MessageType.pins_add,
-            resolved=_target(author_id=123, webhook_id=456),
-        )
+        target = _target(author_id=123)
+        target.author.bot = False
+        await cog.on_message(_message(resolved=target))
+        self.assertEqual(cog._supervisor.names, [])
+
+    async def test_reply_to_another_bot_is_ignored(self):
+        cog = _cog()
+        await cog.on_message(_message(resolved=_target(author_id=123)))
+        self.assertEqual(cog._supervisor.names, [])
+
+    async def test_reply_to_legacy_webhook_is_ignored(self):
+        cog = _cog()
+        await cog.on_message(_message(resolved=_target(author_id=456, webhook_id=456)))
+        self.assertEqual(cog._supervisor.names, [])
+
+    async def test_reply_to_application_original_response_schedules_index_validation(self):
+        # edit_original_response de /imagem pertence ao aplicativo, mas tem
+        # webhook_id mesmo que o autor continue sendo o próprio bot.
+        cog = _cog()
+        message = _message(resolved=_target(author_id=999, webhook_id=999))
 
         await cog.on_message(message)
 
+        self.assertEqual(cog._supervisor.names, ["chatbot-turn:10:30"])
+        cog._message_index.resolve.assert_not_awaited()
+        message.channel.fetch_message.assert_not_awaited()
+
+    async def test_system_message_is_ignored(self):
+        cog = _cog()
+        await cog.on_message(_message(
+            message_type=discord.MessageType.pins_add, resolved=_target(),
+        ))
         self.assertEqual(cog._supervisor.names, [])
 
-    async def test_incoming_webhook_reply_is_still_ignored(self):
+    async def test_incoming_webhook_reply_is_ignored(self):
         cog = _cog()
-        message = _message(
-            message_type=discord.MessageType.reply,
-            resolved=_target(author_id=123, webhook_id=456),
-        )
+        message = _message(resolved=_target())
         message.webhook_id = 777
-
         await cog.on_message(message)
-
         self.assertEqual(cog._supervisor.names, [])
 
-    async def test_incoming_bot_reply_is_still_ignored(self):
+    async def test_incoming_bot_reply_is_ignored(self):
+        cog = _cog()
+        message = _message(resolved=_target())
+        message.author.bot = True
+        await cog.on_message(message)
+        self.assertEqual(cog._supervisor.names, [])
+
+    async def test_bot_mention_still_schedules_one_turn(self):
         cog = _cog()
         message = _message(
-            message_type=discord.MessageType.reply,
-            resolved=_target(author_id=123, webhook_id=456),
+            message_type=discord.MessageType.default, content="<@999> oi",
         )
-        message.author.bot = True
-
+        message.reference = None
         await cog.on_message(message)
+        self.assertEqual(cog._supervisor.names, ["chatbot-turn:10:30"])
 
+    async def test_plain_old_persona_name_has_no_direct_trigger(self):
+        cog = _cog()
+        cog._config.quick_might_apply.return_value = False
+        message = _message(
+            message_type=discord.MessageType.default, content="@Osaka oi",
+        )
+        message.reference = None
+        await cog.on_message(message)
         self.assertEqual(cog._supervisor.names, [])
 
-    async def test_default_bot_mention_keeps_working(self):
+    async def test_spontaneous_cache_miss_schedules_validation_without_io(self):
         cog = _cog()
+        cog._config.quick_might_apply.return_value = True
         message = _message(
             message_type=discord.MessageType.default,
-            resolved=None,
-            content="<@999> oi",
+            content="bom dia, alguém vai jogar hoje?",
         )
         message.reference = None
 
-        await cog.on_message(message)
+        with patch.object(C, "SAFE_MODE", False):
+            await cog.on_message(message)
 
         self.assertEqual(cog._supervisor.names, ["chatbot-turn:10:30"])
+        cog._config.get_config.assert_not_awaited()
+        cog._message_index.resolve.assert_not_awaited()
+        message.channel.fetch_message.assert_not_awaited()
 
 
-class ReplyProfileResolutionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_message_index_resolves_profile_without_using_webhook_name(self):
+class ReplyResolutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_index_and_bot_author_resolve_reply_without_identity_lookup(self):
         cog = _cog()
-        profile = ChatbotProfile(
-            guild_id=10,
-            profile_id="persona-osaka",
-            name="Nome salvo diferente do webhook",
-            profile_kind=C.PROFILE_KIND_USER_STYLE,
-        )
-        cog._profiles = SimpleNamespace(
-            is_enabled=AsyncMock(return_value=True),
-            list_profiles=AsyncMock(return_value=[profile]),
-        )
-        cog._message_index = SimpleNamespace(
-            resolve=AsyncMock(return_value=MessageProfileRef(
-                guild_id=10,
-                channel_id=20,
-                message_id=50,
-                profile_id="persona-osaka",
-            )),
-        )
-        message = _message(
-            message_type=discord.MessageType.reply,
-            resolved=_target(author_id=123, webhook_id=456),
-        )
+        _indexed(cog)
+        message = _message(resolved=_target())
 
         trigger = await cog._resolve_trigger(message)
 
         self.assertIsNotNone(trigger)
-        self.assertEqual(trigger.profile.profile_id, "persona-osaka")
         self.assertEqual(trigger.via, "reply")
         self.assertEqual(trigger.content, "Sla")
+        self.assertFalse(hasattr(trigger, "profile"))
+        self.assertFalse(hasattr(trigger, "is_temporary"))
+        cog._message_index.resolve.assert_awaited_once_with(50)
+        message.channel.fetch_message.assert_not_awaited()
 
-    async def test_message_index_rejects_mapping_from_another_channel(self):
+    async def test_other_function_message_from_same_bot_is_not_a_chatbot_reply(self):
+        # Música e jogos usam a mesma identidade, mas não entram no índice.
         cog = _cog()
-        profile = ChatbotProfile(
-            guild_id=10,
-            profile_id="persona-osaka",
-            name="Osaka",
-            profile_kind=C.PROFILE_KIND_USER_STYLE,
+        trigger = await cog._resolve_trigger(_message(resolved=_target()))
+        self.assertIsNone(trigger)
+
+    async def test_index_cannot_authorize_another_user_or_legacy_webhook(self):
+        for target in (_target(author_id=123), _target(author_id=456, webhook_id=456)):
+            with self.subTest(target=target):
+                cog = _cog()
+                _indexed(cog)
+                self.assertIsNone(await cog._resolve_trigger(_message(resolved=target)))
+
+    async def test_reply_to_slash_image_original_response_uses_index_and_bot_author(self):
+        cog = _cog()
+        _indexed(cog)
+        target = _target(author_id=999, webhook_id=999)
+        self.assertIsInstance(target, discord.Message)
+        message = _message(resolved=target, content="Faça outra imagem nesse estilo")
+
+        trigger = await cog._resolve_trigger(message)
+
+        self.assertIsNotNone(trigger)
+        self.assertEqual(trigger.via, "reply")
+        self.assertEqual(trigger.content, "Faça outra imagem nesse estilo")
+        cog._message_index.resolve.assert_awaited_once_with(50)
+        message.channel.fetch_message.assert_not_awaited()
+
+    async def test_application_original_response_without_chatbot_index_is_ignored(self):
+        cog = _cog()
+        target = _target(author_id=999, webhook_id=999)
+
+        self.assertIsNone(await cog._resolve_trigger(_message(resolved=target)))
+
+    async def test_index_mapping_must_match_guild_and_channel(self):
+        for guild_id, channel_id in ((999, 20), (10, 999)):
+            with self.subTest(guild_id=guild_id, channel_id=channel_id):
+                cog = _cog()
+                _indexed(cog, guild_id=guild_id, channel_id=channel_id)
+                self.assertIsNone(await cog._resolve_trigger(_message(resolved=_target())))
+
+    async def test_index_still_resolves_when_discord_target_is_unavailable(self):
+        cog = _cog()
+        _indexed(cog)
+        message = _message()
+
+        trigger = await cog._resolve_trigger(message)
+
+        self.assertIsNotNone(trigger)
+        self.assertEqual(trigger.via, "reply")
+
+    async def test_reply_is_ignored_when_chatbot_is_disabled(self):
+        cog = _cog(enabled=False)
+        _indexed(cog)
+        self.assertIsNone(await cog._resolve_trigger(_message(resolved=_target())))
+
+    async def test_reply_is_ignored_outside_configured_channels(self):
+        cog = _cog(channel_ids=(21,))
+        _indexed(cog)
+        self.assertIsNone(await cog._resolve_trigger(_message(resolved=_target())))
+
+    async def test_configured_parent_channel_allows_reply_in_its_thread(self):
+        cog = _cog(channel_ids=(20,))
+        _indexed(cog, channel_id=22)
+        message = _message(resolved=_target())
+        thread = Mock(spec=discord.Thread)
+        thread.id = 22
+        thread.parent_id = 20
+        thread.fetch_message = AsyncMock(return_value=None)
+        message.channel = thread
+
+        trigger = await cog._resolve_trigger(message)
+
+        self.assertIsNotNone(trigger)
+        self.assertEqual(trigger.via, "reply")
+
+    async def test_thread_reply_cannot_use_parent_channel_message_mapping(self):
+        cog = _cog(channel_ids=(20,))
+        _indexed(cog, channel_id=20)
+        message = _message(resolved=_target())
+        thread = Mock(spec=discord.Thread)
+        thread.id = 22
+        thread.parent_id = 20
+        message.channel = thread
+
+        self.assertIsNone(await cog._resolve_trigger(message))
+
+    async def test_initial_bot_mention_strips_only_actual_mention(self):
+        for content in ("<@999> oi", "  <@!999> oi"):
+            with self.subTest(content=content):
+                cog = _cog()
+                message = _message(content=content)
+                message.reference = None
+                trigger = await cog._resolve_trigger(message)
+                self.assertIsNotNone(trigger)
+                self.assertEqual(trigger.via, "bot_mention")
+                self.assertEqual(trigger.content, "oi")
+                cog._message_index.resolve.assert_not_awaited()
+
+    async def test_name_or_later_mention_cannot_invoke_chatbot(self):
+        for content in ("@Osaka oi", "oi <@999>", "<@123> oi"):
+            with self.subTest(content=content):
+                cog = _cog()
+                message = _message(content=content)
+                message.reference = None
+                self.assertIsNone(await cog._resolve_trigger(message))
+
+    async def test_spontaneous_mode_invokes_same_bot_without_profile(self):
+        cog = _cog()
+        cog._config.get_config.return_value = GuildChatbotConfig(
+            guild_id=10, enabled=True, channel_ids=(20,),
+            spontaneous_enabled=True, spontaneous_channel_ids=(20,),
         )
-        cog._message_index = SimpleNamespace(
-            resolve=AsyncMock(return_value=MessageProfileRef(
-                guild_id=10,
-                channel_id=999,
-                message_id=50,
-                profile_id="persona-osaka",
-            )),
-        )
+        cog._is_spontaneous_on_cooldown = Mock(return_value=False)
         message = _message(
-            message_type=discord.MessageType.reply,
-            resolved=_target(author_id=123),
+            message_type=discord.MessageType.default,
+            content="bom dia, alguém vai jogar hoje?",
         )
+        message.reference = None
 
-        resolved = await cog._resolve_reply_profile_by_index(message, [profile])
+        with patch.object(C, "SAFE_MODE", False), patch("cogs.chatbot.cog.roll_chance", return_value=True):
+            trigger = await cog._resolve_trigger(message)
 
-        self.assertIsNone(resolved)
+        self.assertIsNotNone(trigger)
+        self.assertEqual(trigger.via, "spontaneous")
+        self.assertTrue(trigger.behavior_hint)
+        self.assertFalse(hasattr(trigger, "profile"))
+        cog._message_index.resolve.assert_not_awaited()
 
 
-class PersonaDisplayIdentityTests(unittest.IsolatedAsyncioTestCase):
-    async def test_persona_uses_current_member_nick_without_prefix(self):
+class ReplyTargetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_reply_target_avoids_discord_fetch(self):
         cog = _cog()
-        avatar = SimpleNamespace(url="https://cdn.example/avatar.png")
-        member = SimpleNamespace(
-            display_name="Osaka",
-            name="osaka",
-            display_avatar=avatar,
-            avatar=avatar,
-        )
-        guild = SimpleNamespace(get_member=lambda _user_id: member)
-        profile = ChatbotProfile(
-            guild_id=10,
-            profile_id="persona-osaka",
-            name="Nome antigo",
-            profile_kind=C.PROFILE_KIND_USER_STYLE,
-            source_user_id=123,
-            dynamic_identity=True,
-        )
+        target = _target()
+        message = _message(resolved=target)
+        self.assertIs(await cog._resolve_reply_target(message), target)
+        message.channel.fetch_message.assert_not_awaited()
 
-        name, avatar_url = await cog._resolve_profile_identity(guild, profile)
-
-        self.assertEqual(name, "Osaka")
-        self.assertEqual(avatar_url, "https://cdn.example/avatar.png")
-
-    async def test_persona_name_keeps_safety_and_length_limits(self):
+    async def test_uncached_target_is_fetched_for_reply_context(self):
         cog = _cog()
-        display_name = "@everyone" + ("x" * C.MAX_NAME_LENGTH)
-        member = SimpleNamespace(
-            display_name=display_name,
-            name="fallback",
-            display_avatar=None,
-            avatar=None,
-        )
-        guild = SimpleNamespace(get_member=lambda _user_id: member)
-        profile = ChatbotProfile(
-            guild_id=10,
-            profile_id="persona-safe",
-            name="Nome antigo",
-            profile_kind=C.PROFILE_KIND_USER_STYLE,
-            source_user_id=123,
-            dynamic_identity=True,
-        )
+        target = _target()
+        message = _message()
+        message.channel.fetch_message.return_value = target
+        self.assertIs(await cog._resolve_reply_target(message), target)
+        message.channel.fetch_message.assert_awaited_once_with(50)
 
-        name, _avatar_url = await cog._resolve_profile_identity(guild, profile)
-
-        self.assertTrue(name.startswith("@\u200beveryone"))
-        self.assertEqual(len(name), C.MAX_NAME_LENGTH)
-        self.assertFalse(name.startswith("Persona ·"))
-
-    def test_legacy_prefixed_names_remain_reply_compatible(self):
+    async def test_discord_fetch_failure_has_no_reply_context(self):
         cog = _cog()
-        member = SimpleNamespace(display_name="Osaka", name="osaka")
-        guild = SimpleNamespace(get_member=lambda _user_id: member)
-        profile = ChatbotProfile(
-            guild_id=10,
-            profile_id="persona-osaka",
-            name="Nome antigo",
-            fallback_name="Nome salvo",
-            profile_kind=C.PROFILE_KIND_USER_STYLE,
-            source_user_id=123,
-            dynamic_identity=True,
+        message = _message()
+        message.channel.fetch_message.side_effect = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "missing permission",
         )
-
-        candidates = cog._profile_name_candidates(guild, profile)
-
-        self.assertIn("Osaka", candidates)
-        self.assertIn("Persona · Osaka", candidates)
-        self.assertIn("Nome antigo", candidates)
-        self.assertIn("Persona · Nome antigo", candidates)
+        self.assertIsNone(await cog._resolve_reply_target(message))
 
 
 if __name__ == "__main__":

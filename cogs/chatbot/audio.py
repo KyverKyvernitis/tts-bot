@@ -3,8 +3,8 @@
 STT: dado um arquivo de áudio, devolve texto transcrito. Usado quando
 user manda voice message no Discord.
 
-TTS: dado um texto, devolve bytes de MP3. Usado quando user pede "fala
-isso por áudio" ou quando o profile tem frequência de áudio configurada.
+TTS: dado um texto, devolve bytes de MP3 quando o usuário pede uma
+resposta em áudio.
 
 Deps externas:
 - `edge-tts` (pip install edge-tts). Leve, sem API key, usa o serviço
@@ -169,7 +169,7 @@ async def synthesize_speech(
 # -----------------------------------------------------------------------------
 
 # Palavras-chave que indicam pedido EXPLÍCITO de resposta em áudio.
-# Usadas só pra "user pediu" — a outra via (frequência do profile) é random.
+# Usadas para reconhecer solicitações explícitas de áudio.
 # Mantemos frases exatas + regex abaixo porque users costumam responder só
 # "em áudio" depois de uma resposta em texto, ou pedir "gera um áudio".
 _TTS_REQUEST_PATTERNS = (

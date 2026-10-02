@@ -1,11 +1,10 @@
-"""Providers de imagem adicionais e roteamento por perfil (estilo, NSFW).
+"""Providers de imagem adicionais e roteamento por características do pedido (estilo, NSFW).
 
 Estende o imagegen.py com:
 - Classificação de estilo (realistic/anime/generic) além do nsfw/safe.
 - Provider Pollinations (API atual com chave e endpoint legado SFW sem chave).
 - Provider Cloudflare Workers AI (10k neurons/dia grátis, FLUX schnell, só SFW).
-- Seleção de modelos do AI Horde por perfil (anime NSFW vai pro Pony, realistic NSFW
-  vai pro Juggernaut, etc).
+- Seleção de modelos do AI Horde por pedido, sem restringir workers em NSFW.
 
 Env vars usadas:
 - POLLINATIONS_API_KEY: opcional, usa a API unificada e aumenta o rate limit.
@@ -116,8 +115,8 @@ def detect_style(prompt: str) -> Style:
 
 
 @dataclass(frozen=True)
-class ImageProfile:
-    """Perfil do pedido, usado pelo router pra escolher providers e modelos."""
+class ImageRequestTraits:
+    """Características do pedido para escolher providers e modelos."""
     nsfw: bool
     style: Style
 
@@ -126,7 +125,7 @@ class ImageProfile:
 
 
 # -----------------------------------------------------------------------------
-# Seleção de modelos do AI Horde por perfil
+# Seleção de modelos do AI Horde por pedido
 # -----------------------------------------------------------------------------
 # Estes são os checkpoints do Horde (nomes canônicos) mais fortes em cada nicho.
 # Ordem importa: o primeiro é o preferido, demais são fallback se o primeiro
@@ -163,22 +162,22 @@ _AIHORDE_MODELS_SFW_GENERIC = [
 ]
 
 
-def aihorde_models_for_profile(profile: ImageProfile, override: str = "") -> list[str]:
-    """Escolhe a lista de modelos do Horde pro perfil, ou respeita override do .env."""
+def aihorde_models_for_request(request_traits: ImageRequestTraits, override: str = "") -> list[str]:
+    """Escolhe a lista de modelos do Horde para o pedido, ou respeita override do .env."""
     raw = (override or "").strip()
     if raw:
         return [m.strip() for m in raw.split(",") if m.strip()]
 
-    if profile.nsfw:
-        if profile.style == "anime":
+    if request_traits.nsfw:
+        if request_traits.style == "anime":
             return list(_AIHORDE_MODELS_NSFW_ANIME)
-        if profile.style == "realistic":
+        if request_traits.style == "realistic":
             return list(_AIHORDE_MODELS_NSFW_REALISTIC)
         return list(_AIHORDE_MODELS_NSFW_GENERIC)
 
-    if profile.style == "anime":
+    if request_traits.style == "anime":
         return list(_AIHORDE_MODELS_SFW_ANIME)
-    if profile.style == "realistic":
+    if request_traits.style == "realistic":
         return list(_AIHORDE_MODELS_SFW_REALISTIC)
     return list(_AIHORDE_MODELS_SFW_GENERIC)
 
@@ -194,7 +193,7 @@ _POLLINATIONS_BASE = "https://gen.pollinations.ai/image"
 _POLLINATIONS_LEGACY_BASE = "https://image.pollinations.ai/prompt"
 
 
-def _pollinations_model(profile: ImageProfile) -> str:
+def _pollinations_model(request_traits: ImageRequestTraits) -> str:
     """Usa um ID presente na API atual e no fallback legado.
 
     Os antigos ``flux-anime``/``flux-realism`` não fazem mais parte do
@@ -208,7 +207,7 @@ async def generate_with_pollinations(
     *,
     api_key: str,
     prompt: str,
-    profile: ImageProfile,
+    request_traits: ImageRequestTraits,
     timeout_seconds: float,
 ) -> tuple[bool, Optional[bytes], Optional[str], str]:
     """Gera imagem via Pollinations.
@@ -220,11 +219,11 @@ async def generate_with_pollinations(
     """
     # O router atual não envia NSFW ao Pollinations; callers legados ainda
     # precisam apresentar uma chave para qualquer tentativa desse tipo.
-    if profile.nsfw and not api_key:
+    if request_traits.nsfw and not api_key:
         return False, None, None, "missing_key"
 
-    model = _pollinations_model(profile)
-    width, height = (768, 1024) if profile.style != "generic" else (1024, 1024)
+    model = _pollinations_model(request_traits)
+    width, height = (768, 1024) if request_traits.style != "generic" else (1024, 1024)
 
     # Monta URL: prompt vai no path (encoded), params na query.
     encoded_prompt = quote(prompt[:1500], safe="")
@@ -236,7 +235,7 @@ async def generate_with_pollinations(
         "width": str(width),
         "height": str(height),
         # Na API atual, `nsfw` habilita os filtros sexual + violência.
-        "safe": "false" if profile.nsfw else ("nsfw" if current_api else "true"),
+        "safe": "false" if request_traits.nsfw else ("nsfw" if current_api else "true"),
     }
     if not current_api:
         params.update({"nologo": "false", "enhance": "false"})
@@ -311,15 +310,15 @@ async def generate_with_cloudflare(
     account_id: str,
     api_token: str,
     prompt: str,
-    profile: ImageProfile,
+    request_traits: ImageRequestTraits,
     timeout_seconds: float,
 ) -> tuple[bool, Optional[bytes], Optional[str], str]:
     """Gera imagem via Cloudflare Workers AI (FLUX schnell).
 
-    Só funciona pra SFW. Se `profile.nsfw=True`, retorna missing_key imediato
+    Só funciona pra SFW. Se `request_traits.nsfw=True`, retorna missing_key imediato
     (sinaliza ao router que deve pular pro próximo).
     """
-    if profile.nsfw:
+    if request_traits.nsfw:
         return False, None, None, "missing_key"
     if not account_id or not api_token:
         return False, None, None, "missing_key"
@@ -408,7 +407,7 @@ async def generate_with_cloudflare(
 
 
 # -----------------------------------------------------------------------------
-# Ordem de preferência de providers por perfil
+# Ordem de preferência de providers por pedido
 # -----------------------------------------------------------------------------
 # Ranking equilibra qualidade e previsibilidade. APIs de produção vêm antes da
 # fila voluntária do Horde em SFW; o router ainda reserva deadline para fallback.
@@ -425,10 +424,10 @@ ProviderName = Literal[
 ]
 
 
-def provider_order_for_profile(profile: ImageProfile) -> list[ProviderName]:
+def provider_order_for_request(request_traits: ImageRequestTraits) -> list[ProviderName]:
     """Retorna ordem preferencial de providers pra tentar. Router pula os
     que não estão configurados (sem chave/conta)."""
-    if profile.nsfw:
+    if request_traits.nsfw:
         # NÃO incluir Pollinations em NSFW: o provider tem safety checker
         # (LlamaGuard) que filtra conteúdo explícito mesmo com chave e
         # `safe=false`, então acaba entregando imagem SFW sorrateiramente.
@@ -436,9 +435,9 @@ def provider_order_for_profile(profile: ImageProfile) -> list[ProviderName]:
         return ["aihorde", "huggingface", "adult_custom"]
 
     # SFW — Pollinations e Cloudflare têm FLUX, qualidade topo.
-    if profile.style == "realistic":
+    if request_traits.style == "realistic":
         return ["pollinations", "cloudflare", "gemini", "aihorde", "huggingface"]
-    if profile.style == "anime":
+    if request_traits.style == "anime":
         return ["pollinations", "gemini", "cloudflare", "aihorde", "huggingface"]
     # SFW genérico: FLUX em Pollinations é o melhor all-around.
     return ["pollinations", "cloudflare", "gemini", "aihorde", "huggingface"]

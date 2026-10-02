@@ -24,6 +24,14 @@ from . import constants as C
 log = logging.getLogger(__name__)
 
 
+def channel_is_nsfw(channel) -> bool:
+    """Threads e posts de fórum herdam a restrição de idade do canal pai."""
+    predicate = getattr(channel, "is_nsfw", None)
+    if callable(predicate):
+        return bool(predicate())
+    return bool(getattr(channel, "nsfw", False))
+
+
 @dataclass(frozen=True)
 class MediaAttachment:
     """Um anexo que o bot consegue processar.

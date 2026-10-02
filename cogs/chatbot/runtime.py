@@ -5,7 +5,7 @@ não limita trabalho. Este módulo fornece:
 
 * fila limitada por classe de trabalho;
 * apenas uma solicitação pesada por usuário;
-* semáforos separados para chat, STT, imagem e persona;
+* semáforos separados para chat, STT e imagem;
 * rastreamento/cancelamento no unload do cog.
 
 Não há dependências externas e todo estado é limitado, adequado à VPS de 1 GB.
@@ -29,7 +29,6 @@ T = TypeVar("T")
 class AdmissionSnapshot:
     queued_chat: int
     queued_image: int
-    queued_persona: int
     inflight_users: int
 
 
@@ -115,7 +114,6 @@ class AdmissionController:
         self._semaphores = {
             "chat": asyncio.Semaphore(C.MAX_CONCURRENT_REQUESTS),
             "image": asyncio.Semaphore(C.IMAGE_MAX_CONCURRENT_REQUESTS),
-            "persona": asyncio.Semaphore(C.PERSONA_MAX_CONCURRENT_REQUESTS),
         }
         self._resource_semaphores = {
             "stt": asyncio.Semaphore(C.STT_MAX_CONCURRENT_REQUESTS),
@@ -124,7 +122,6 @@ class AdmissionController:
         self._queue_limits = {
             "chat": C.MAX_QUEUE_SIZE,
             "image": C.IMAGE_MAX_QUEUE_SIZE,
-            "persona": C.PERSONA_MAX_QUEUE_SIZE,
         }
         self._queued = {kind: 0 for kind in self._queue_limits}
         self._inflight_users: set[tuple[int, int]] = set()
@@ -188,7 +185,6 @@ class AdmissionController:
         return AdmissionSnapshot(
             queued_chat=int(self._queued.get("chat", 0)),
             queued_image=int(self._queued.get("image", 0)),
-            queued_persona=int(self._queued.get("persona", 0)),
             inflight_users=len(self._inflight_users),
         )
 

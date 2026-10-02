@@ -56,8 +56,9 @@
         "ia",
         "imagem",
         "imagens",
-        "profile",
-        "perfil"
+        "memoria",
+        "configurar chatbot",
+        "resposta espontanea"
       ]
     },
     {
@@ -811,7 +812,7 @@
       "key": "imagem",
       "category": "chatbot",
       "group": "Criar",
-      "description": "Gera uma imagem com o perfil ativo.",
+      "description": "Gera uma imagem diretamente pelo bot.",
       "usage": "/imagem <prompt>",
       "search_terms": [
         "gerar imagem",
@@ -836,49 +837,22 @@
       "slash_path": "reset"
     },
     {
-      "key": "chatbot_profile",
+      "key": "chatbot_configurar",
       "category": "chatbot",
       "group": "Staff",
-      "description": "Gerencia perfis do chatbot.",
-      "usage": "/chatbot profile",
+      "description": "Configura ativação, canais e modo espontâneo do chatbot.",
+      "usage": "/chatbot configurar",
       "search_terms": [
-        "profile",
-        "profiles",
-        "perfil chatbot"
-      ],
-      "permission": "manage_guild",
-      "slash_root": "chatbot",
-      "slash_path": "chatbot profile",
-      "detail_note": "Requer Gerenciar servidor."
-    },
-    {
-      "key": "chatbot_persona",
-      "category": "chatbot",
-      "group": "Staff",
-      "description": "Configura uma persona baseada em usuário.",
-      "usage": "/chatbot persona",
-      "search_terms": [
-        "persona"
-      ],
-      "permission": "manage_guild",
-      "slash_root": "chatbot",
-      "slash_path": "chatbot persona",
-      "detail_note": "Requer Gerenciar servidor."
-    },
-    {
-      "key": "chatbot_extrovert",
-      "category": "chatbot",
-      "group": "Staff",
-      "description": "Ajusta respostas espontâneas do chatbot.",
-      "usage": "/chatbot extrovert",
-      "search_terms": [
-        "extrovert",
-        "extrovertido",
+        "configurar chatbot",
+        "ativar chatbot",
+        "desativar chatbot",
+        "canais chatbot",
+        "modo espontaneo",
         "resposta espontanea"
       ],
       "permission": "manage_guild",
       "slash_root": "chatbot",
-      "slash_path": "chatbot extrovert",
+      "slash_path": "chatbot configurar",
       "detail_note": "Requer Gerenciar servidor."
     },
     {
