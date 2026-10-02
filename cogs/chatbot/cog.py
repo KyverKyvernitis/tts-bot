@@ -51,20 +51,13 @@ class TriggerInfo:
     behavior_hint: str = ""
 
 
-IntentKind = Literal["normal_chat", "image_safe", "image_adult", "chat_adult", "audio_request"]
+IntentKind = Literal["normal_chat", "image_safe", "image_adult", "audio_request"]
 
 
 @dataclass(frozen=True)
 class UserIntent:
     kind: IntentKind
     prompt: str = ""
-
-
-_ADULT_CHAT_RE = re.compile(
-    r"\b(roleplay\s*nsfw|rp\s*nsfw|roleplay\s*\+?18|rp\s*\+?18|"
-    r"roleplay\s*adult[oa]|rp\s*adult[oa]|sexo\s+por\s+texto|er[oó]tic[oa]\s+por\s+texto)\b",
-    re.IGNORECASE | re.UNICODE,
-)
 
 
 class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
@@ -471,8 +464,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 kind=("image_adult" if image_intent.category == "adult_allowed" else "image_safe"),
                 prompt=image_intent.prompt,
             )
-        if _ADULT_CHAT_RE.search(text):
-            return UserIntent(kind="chat_adult")
         if user_asked_for_tts(text):
             return UserIntent(kind="audio_request")
         return UserIntent(kind="normal_chat")
@@ -1130,12 +1121,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                         return
                     self._apply_user_cooldown(guild.id, message.author.id)
                     intent = self._detect_user_intent(content)
-                    if intent.kind == "chat_adult":
-                        await message.reply(
-                            "🔞 Roleplay adulto não está disponível no chat. Posso conversar sem conteúdo explícito.",
-                            mention_author=False, allowed_mentions=discord.AllowedMentions.none(), delete_after=20.0,
-                        )
-                        return
                     if intent.kind in ("image_safe", "image_adult"):
                         if C.SAFE_MODE:
                             await message.reply(

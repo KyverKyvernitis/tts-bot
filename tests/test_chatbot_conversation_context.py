@@ -11,9 +11,11 @@ import pytest
 
 from cogs.chatbot import constants as C
 from cogs.chatbot.cog import ChatbotCog
+from cogs.chatbot.config import GuildChatbotConfig
 from cogs.chatbot.master import MasterPrompt
 from cogs.chatbot.media import PreparedImage
 from cogs.chatbot.memory import MemoryEntry, MemoryEpoch, MemoryStore
+from cogs.chatbot.runtime import AdmissionController
 
 
 def pair(question: str, answer: str, *, user_id: int = 40):
@@ -375,3 +377,60 @@ async def test_failed_memory_and_slow_master_finish_without_leaking_context_task
     assert memory_tasks[0].done() and not memory_tasks[0].cancelled()
     assert isinstance(memory_tasks[0].exception(), RuntimeError)
     cog._remove_processing_reaction.assert_awaited_once_with(message, "⏳")
+
+
+@pytest.mark.asyncio
+async def test_benign_question_about_nsfw_term_reaches_model_through_listener(cog, message):
+    question = "o que significa roleplay nsfw?"
+    answer = "É interpretar personagens em um contexto marcado como conteúdo adulto."
+    cog._router.chat.return_value = answer
+    cog._config = SimpleNamespace(get_config=AsyncMock(return_value=GuildChatbotConfig(
+        guild_id=10, enabled=True,
+    )))
+    cog._admission = AdmissionController()
+    cog._turn_locks = {}
+    cog._turn_lock_touched = {}
+    cog._user_cooldowns = {}
+    message.author.bot = False
+    message.webhook_id = None
+    message.type = discord.MessageType.default
+    message.content = f"<@999> {question}"
+    supervised = []
+
+    def create(coroutine, *, name):
+        task = asyncio.create_task(coroutine, name=name)
+        supervised.append(task)
+        return task
+
+    cog._supervisor = SimpleNamespace(create=create)
+    await cog.on_message(message)
+    assert len(supervised) == 1
+    await supervised[0]
+
+    cog._router.chat.assert_awaited_once()
+    assert cog._router.chat.await_args.kwargs["messages"][-1].content == question
+    message.reply.assert_awaited_once()
+    assert message.reply.await_args.args[0] == answer
+    assert "Roleplay adulto não está disponível" not in message.reply.await_args.args[0]
+    assert cog._memory.append_turn.await_args.kwargs["assistant_message"] == answer
+    assert cog._admission.snapshot().inflight_users == 0
+    message.channel.history.assert_not_called()
+    cog._remove_processing_reaction.assert_awaited_once_with(message, "⏳")
+
+
+@pytest.mark.asyncio
+async def test_model_profanity_is_preserved_while_global_mentions_stay_disabled(cog, message):
+    cog._router.chat.return_value = "Caralho, @everyone e @here, que bagunça do cacete."
+
+    assert await cog._generate_and_send(message, "esse código quebrou de novo kkkkk")
+
+    sent = message.reply.await_args.args[0]
+    assert "Caralho" in sent
+    assert "cacete" in sent
+    assert "@everyone" not in sent
+    assert "@here" not in sent
+    assert "@\u200beveryone" in sent
+    assert "@\u200bhere" in sent
+    assert message.reply.await_args.kwargs["allowed_mentions"].to_dict() == {"parse": []}
+    assert message.reply.await_args.kwargs["mention_author"] is False
+    assert cog._memory.append_turn.await_args.kwargs["assistant_message"] == sent

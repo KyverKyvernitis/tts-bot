@@ -29,7 +29,8 @@ menções e replies podem funcionar nos canais acessíveis ao bot depois da
 ativação. Escolher canais permitidos restringe onde o chatbot atende.
 Threads e posts de fórum herdam a autorização do canal pai selecionado, mas
 mantêm memória própria, isolada pelo ID de cada thread. A restrição de idade
-também é herdada do canal pai e continua sujeita à allowlist existente.
+herdada do canal pai e a allowlist existente continuam sendo consideradas no
+isolamento da memória.
 O comando mostra o estado atual e o botão **Editar configuração**, que abre o
 formulário de ativação, canais e modo espontâneo. `/imagem` também respeita a
 ativação e os canais permitidos. O chatbot atende nos servidores; mensagens
@@ -47,9 +48,10 @@ fallback entre provedores e integração TTS continuam no fluxo do chatbot. Áud
 é produzido quando solicitado, junto com a resposta em texto.
 
 O padrão de conversa usa português brasileiro informal, respostas curtas e
-reconhecimento direto de correções. Palavrões comuns, sarcasmo e brincadeiras
-podem aparecer quando solicitados ou adequados ao contexto, sem exigir um canal
-NSFW e sem forçar gírias em toda resposta. O tom não depende de personagens ou
+reconhecimento direto de correções. A orientação é ser mais livre com as palavras:
+gírias, palavrões, sarcasmo e brincadeiras podem aparecer espontaneamente quando
+cabem no contexto, sem exigir um pedido de xingamento ou um canal NSFW e sem
+forçar insultos em toda resposta. O tom não depende de personagens ou
 perfis. Instruções personalizadas do prompt mestre são preservadas: a atualização
 substitui somente padrões antigos reconhecidos. A memória V3 existente não é
 apagada para mudar o tom. Restrições do modelo escolhido continuam valendo;
@@ -62,10 +64,15 @@ explícitas sobre o canal/servidor ou no modo espontâneo. Um atraso no carregam
 do prompt mestre não descarta um histórico que já terminou de carregar.
 
 Não existe uma etapa de tradução para inglês e retradução da resposta. A escolha
-do modelo influencia a naturalidade em português: o padrão de texto continua
-`openai/gpt-oss-20b`, um modelo de uso geral. Não foi feita comparação real de
-fluência entre ele, `openai/gpt-oss-120b` e Gemini Flash. Os testes locais validam
-o fluxo, não essa qualidade. Compare diálogos completos antes de trocar o padrão.
+do modelo influencia a naturalidade em português: o padrão de texto agora
+prioriza `openai/gpt-oss-120b`, com `openai/gpt-oss-20b` como fallback. Não foi
+feita comparação real de fluência entre esses modelos e Gemini Flash. Os testes
+locais validam o fluxo, não essa qualidade.
+
+As recusas editoriais locais do chat de texto foram removidas: palavras adultas
+ou grosseiras, por si só, não iniciam uma recusa automática. Os modelos e
+provedores mantêm suas próprias regras, e as proteções da geração de imagens
+continuam valendo. Os limites de anexos, filas e permissões são controles técnicos.
 
 Nos logs em nível INFO, busque `chatbot: result=success`: o registro informa
 `provider`, `model`, `mode`, `elapsed_ms` e `message_count`. Esse é o modelo que
@@ -101,7 +108,11 @@ São aceitos JPEG, PNG, WebP e GIF, com até três imagens por mensagem e 20 MiB
 por arquivo. Imagens muito grandes podem ser reduzidas; GIFs e WebPs animados
 usam apenas o primeiro frame. PDFs e outros arquivos não são lidos como imagens.
 
-| Variável | Finalidade |
+As configurações abaixo são opcionais para operadores. Para aplicar esta
+atualização, basta enviar o ZIP correto ao updater e reiniciar o bot. Não é
+necessário editar `.env`; configurações explícitas existentes são preservadas.
+
+| Variável opcional | Finalidade |
 | --- | --- |
 | `CHATBOT_GROQ_VISION_MODELS` | Lista ordenada de modelos Groq para ler imagens |
 | `CHATBOT_GEMINI_VISION_MODELS` | Lista independente de modelos Gemini para ler imagens |
@@ -128,8 +139,8 @@ apresenta `gemini-3.8-flash` como estável. Conforme a
 Gemini 2.5 Flash e Flash-Lite não foram descontinuados, mas o acesso está restrito
 a contas que já os usaram. Uma chave nova pode não aceitar os padrões 2.5 deste
 projeto. Confira acesso e custo na conta antes de configurar outro ID; versão
-mais recente ou modelo maior não demonstram melhor português. As cadeias padrão
-de texto e o orçamento permanecem iguais.
+mais recente ou modelo maior não demonstram melhor português. A rota de visão
+e a ordem de provedores continuam iguais nesta revisão de linguagem.
 
 O fluxo não guarda os bytes do anexo na memória de conversa. Ao voltar a uma
 imagem antiga, responda à mensagem que contém o anexo para fornecer a referência
@@ -142,14 +153,15 @@ relativos à raiz do repositório. Escolha um deles conforme o código instalado
 
 | Pacote | Base necessária | Exclusões |
 | --- | --- | --- |
-| `chatbot-conversa-natural-atualizacao.zip` | Primeira simplificação já aplicada, ou qualquer atualização posterior de conversa/visão | Nenhuma; os módulos antigos já foram retirados |
-| `chatbot-conversa-natural-desde-original.zip` | Código do ZIP original, ainda com os módulos antigos | Quatro módulos, via `update-manifest.json` |
+| `chatbot-linguagem-livre-atualizacao.zip` | Primeira simplificação já aplicada, ou qualquer atualização posterior de conversa/visão | Nenhuma; os módulos antigos já foram retirados |
+| `chatbot-linguagem-livre-desde-original.zip` | Código do ZIP original, ainda com os módulos antigos | Quatro módulos, via `update-manifest.json` |
 
 O pacote `atualizacao` reúne as mudanças posteriores à primeira simplificação
 (`chatbot-simplificado-incremental.zip`), permitindo atualizar também quem já
 aplicou os pacotes anteriores de conversa/visão.
 
-Envie somente o pacote correspondente ao updater. O pacote `desde-original`
+Envie somente o pacote correspondente ao updater e reinicie o bot depois da
+aplicação. O pacote `desde-original`
 contém alterações acumuladas e declara quatro operações `delete`:
 `cogs/chatbot/persona.py`, `cogs/chatbot/profiles.py`, `cogs/chatbot/extrovert.py`
 e `cogs/chatbot/webhooks.py`. O updater exige que os arquivos declarados para
@@ -243,7 +255,8 @@ que ficará em produção.
 
 ## Validação local
 
-Execute a suíte local com as dependências do projeto:
+Na validação local, 302 testes e 52 subtests passaram. Para repetir a suíte com
+as dependências do projeto:
 
 ```sh
 python -m pytest -q tests/test_chatbot*.py tests/test_tts_helpers.py tests/test_antibot.py

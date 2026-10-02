@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import runpy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -172,3 +173,21 @@ async def test_unrelated_master_update_does_not_trigger_default_migration():
 
     assert master.prompt == "Tom personalizado."
     coll.update_one.assert_not_awaited()
+
+
+def test_groq_text_default_prefers_larger_model_without_changing_vision(monkeypatch):
+    monkeypatch.delenv("CHATBOT_GROQ_MODELS", raising=False)
+    monkeypatch.setenv("CHATBOT_GROQ_VISION_MODELS", "configured/vision-model")
+
+    settings = runpy.run_path(C.__file__)
+
+    assert settings["GROQ_MODELS"] == ("openai/gpt-oss-120b", "openai/gpt-oss-20b")
+    assert settings["GROQ_VISION_MODELS"] == ("configured/vision-model",)
+
+
+def test_explicit_groq_text_models_keep_operator_order(monkeypatch):
+    monkeypatch.setenv("CHATBOT_GROQ_MODELS", " custom/first ,custom/second ")
+
+    settings = runpy.run_path(C.__file__)
+
+    assert settings["GROQ_MODELS"] == ("custom/first", "custom/second")

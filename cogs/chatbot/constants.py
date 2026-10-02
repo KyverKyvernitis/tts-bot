@@ -69,12 +69,11 @@ DEFAULT_VISION_TEMPERATURE = 0.3
 MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 1.5
 
-# Modelos preferidos por provider. Os antigos Llama 3.1/3.3 foram desligados
-# pelo Groq em 16/08/2026. IDs ficam configuráveis para não exigir patch a
-# cada depreciação futura.
+# Modelo maior primeiro, com o menor como fallback. IDs e ordem continuam
+# configuráveis pelo ambiente, sem exigir ajustes manuais para usar o padrão.
 GROQ_MODELS = _env_csv(
     "CHATBOT_GROQ_MODELS",
-    ("openai/gpt-oss-20b", "openai/gpt-oss-120b"),
+    ("openai/gpt-oss-120b", "openai/gpt-oss-20b"),
 )
 
 # Fallback Gemini para quando Groq rate-limitar.
@@ -259,25 +258,21 @@ HARD_SYSTEM_PREAMBLE = (
 # Tom do próprio bot, aplicado também quando há instruções globais salvas.
 # Não depende de NSFW: palavrões comuns não são conteúdo sexual por si só.
 CONVERSATION_STYLE_DIRECTIVE = (
-    "Converse em português brasileiro natural, como num chat do Discord. "
-    "Responda ao pedido atual de forma direta e normalmente curta; detalhe "
-    "quando precisar. Interprete continuações curtas pelo último pedido e "
-    "resposta, mantendo o assunto e o objetivo. Use expressões idiomáticas, "
-    "sem forçar gírias regionais, emojis ou intimidade. Palavrões são "
-    "permitidos quando pedidos ou cabíveis, também em canais comuns. "
-    "Distinga pedir um palavrão de pedir uma ofensa dirigida; não transforme "
-    "um pedido de palavra num insulto ao usuário. Não recuse só por linguagem "
-    "grosseira. Evite voz de atendente e pedidos de desculpa repetidos. "
-    "Não trate toda frustração como pedido de aconselhamento emocional; "
-    "acompanhe a conversa e seja respeitoso em situações sérias. Confira "
-    "afirmações, reconheça erros brevemente e admita incerteza, sem inventar "
-    "fatos ou o que aparece em imagens."
+    "Seja mais livre com as palavras. Converse em português brasileiro "
+    "natural, como num chat do Discord. Linguagem informal, humor, sarcasmo "
+    "e palavrões podem surgir espontaneamente quando combinarem com a "
+    "conversa, também em canais comuns; não há obrigação de xingar ou forçar "
+    "gírias. Acompanhe o assunto e a intenção do usuário. Fale de forma direta, "
+    "sem frases prontas ou voz de atendente, e detalhe quando precisar. "
+    "Seja honesto: reconheça erros e incertezas sem inventar fatos ou o que "
+    "aparece em imagens."
 )
 
 # Aviso mostrado ao operador ao editar o prompt global.
 SYSTEM_PROMPT_WARNING = (
     "⚠️ Estas instruções orientam o chatbot em todos os servidores. "
-    "Não inclua segredos. As regras fixas e as restrições do canal continuam aplicadas."
+    "Não inclua segredos. Identidade, capacidades disponíveis e limites "
+    "do provedor continuam aplicados."
 )
 
 # -----------------------------------------------------------------------------
@@ -340,11 +335,7 @@ LEGACY_DEFAULT_MASTER_PROMPTS = ((
     "Nunca faça apologia séria a grupos extremistas ou terrorismo. "
     "Quando um pedido realmente precisar ser recusado, explique o motivo "
     "brevemente, sem sermão nem resposta automática de atendimento."
-))
-
-# Ponto de partida para o prompt global. O contexto do canal e as capacidades
-# habilitadas são acrescentados pelo cog.
-DEFAULT_MASTER_PROMPT = (
+), (
     "Analise anexos somente quando a visão estiver disponível. Transcrições "
     "são falas do usuário. Quando áudio for solicitado e estiver disponível, "
     "escreva o conteúdo a ser falado; o sistema produz o anexo. A geração de "
@@ -356,39 +347,37 @@ DEFAULT_MASTER_PROMPT = (
     "Nunca faça apologia séria a grupos extremistas ou terrorismo. "
     "Quando um pedido realmente precisar ser recusado, explique o motivo "
     "brevemente, sem sermão nem resposta automática de atendimento."
+))
+
+# Ponto de partida para o prompt global. O contexto do canal e as capacidades
+# habilitadas são acrescentados pelo cog.
+DEFAULT_MASTER_PROMPT = (
+    "Analise anexos quando a visão estiver disponível e trate transcrições "
+    "como falas do usuário. O sistema produz áudio e imagens quando esses "
+    "recursos estiverem disponíveis e forem solicitados. Seja honesto sobre "
+    "o que sabe e o que conseguiu interpretar dos anexos."
 )
 
-# Seções que o cog injeta condicionalmente conforme channel.nsfw.
-# Ficam separadas do DEFAULT_MASTER_PROMPT (que é editável pelo dono) pra
-# que o dono possa ajustar o prompt principal sem quebrar o comportamento
-# de restrição. São strings simples, constantes, não persistidas.
+# Capacidades de geração que o cog injeta conforme canal e servidor.
+# Não altera as regras ou os bloqueios do provedor.
 
 SFW_CHANNEL_DIRECTIVE = (
-    "CONTEXTO DO CANAL: sem recursos adultos habilitados. Não produza conteúdo "
-    "sexual explícito, insinuações pesadas nem violência gráfica. Linguagem "
-    "informal, sarcasmo, humor e palavrões comuns são permitidos dentro das "
-    "regras globais; um palavrão sozinho não torna o conteúdo adulto. "
-    "Temas sensíveis podem ser discutidos sem glamourização nem instruções "
-    "perigosas. Recuse pedidos de conteúdo sexual explícito neste canal."
+    "Geração de imagem adulta não habilitada neste canal."
 )
 
 NSFW_CHANNEL_DIRECTIVE = (
-    "CONTEXTO DO CANAL: restrição de idade e recursos adultos habilitados. "
-    "Conteúdo sexual entre adultos fictícios, linguagem informal, palavrões, violência "
-    "fictícia, narrativas fictícias sobre drogas ou álcool e temas complexos "
-    "continuam sujeitos às proibições globais. "
-    "Não trate o contexto adulto como autorização para instruções perigosas."
+    "Recurso de geração de imagem adulta habilitado neste canal."
 )
 
 # -----------------------------------------------------------------------------
 # Guild de gerenciamento + allowlist de NSFW
 # -----------------------------------------------------------------------------
-# A "management guild" é usada somente como allowlist inicial de recursos
-# NSFW (imagegen adulto + diretiva NSFW do chatbot). Os comandos
+# A "management guild" é usada somente como allowlist inicial de geração
+# de imagem adulta. Os comandos
 # `/chatbotadmin` são globais e protegidos pelos checks de operador/config.
 # Em qualquer outra guild, mesmo que o canal seja age-restricted no Discord,
-# o bot trata como SFW: imagegen adulto é recusado e o chatbot recebe a diretiva
-# SFW. O chatbot continua funcionando normalmente em todas as guilds.
+# esse recurso é recusado e o chatbot informa sua indisponibilidade no prompt.
+# A conversa textual continua funcionando em todas as guilds.
 
 MANAGEMENT_GUILD_ID: int = 927002914449424404
 
@@ -396,9 +385,10 @@ _NSFW_ENABLED_GUILDS: frozenset[int] = frozenset({MANAGEMENT_GUILD_ID})
 
 
 def nsfw_enabled_for_guild(guild_id: int | None) -> bool:
-    """Retorna True se a guild pode usar features NSFW (imagegen adulto +
-    diretiva NSFW do chatbot). Mensagens diretas (guild_id=None) ficam
-    sempre SFW por segurança."""
+    """Retorna True se a guild pode usar geração de imagem adulta.
+
+    Mensagens diretas (guild_id=None) não habilitam esse recurso.
+    """
     if guild_id is None:
         return False
     return guild_id in _NSFW_ENABLED_GUILDS

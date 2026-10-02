@@ -4,6 +4,10 @@ Use os mesmos casos para comparar os modelos disponíveis na conta. Os testes
 locais simulam os provedores: nenhuma comparação de qualidade ou requisição
 real a modelos externos foi executada nesta entrega.
 
+Para usar a atualização, basta aplicar o ZIP correspondente pelo updater e
+reiniciar o bot. Este roteiro e os ajustes de variáveis são opcionais para
+operadores; não fazem parte da instalação obrigatória.
+
 O código não traduz a conversa para inglês e depois de volta para português.
 Uma resposta com expressões estranhas pode indicar baixa naturalidade do modelo
 ou instruções/contexto inadequados; não comprova uma etapa de tradução.
@@ -20,19 +24,20 @@ ou instruções/contexto inadequados; não comprova uma etapa de tradução.
    `elapsed_ms` e `message_count` para identificar quem realmente respondeu.
 3. Anote acerto, recusa desnecessária, naturalidade (0 a 2), tempo total,
    tokens e custo informado pelo provedor. Naturalidade: 0 = texto de atendente
-   ou deslocado; 1 = aceitável; 2 = direto e adequado à conversa. Não avalie a
-   ausência de palavrões como falha quando ninguém os pediu.
+   ou deslocado; 1 = aceitável; 2 = direto e adequado à conversa. Observe se
+   gírias, humor e palavrões surgem espontaneamente quando cabem no contexto,
+   sem forçar insultos nem transformar toda resposta em um xingamento.
 4. Compare os resultados, dando prioridade a respostas corretas e anexos
    compreendidos. Use demora e custo para decidir entre modelos com qualidade
    semelhante. Um resultado isolado não garante o comportamento das próximas
    respostas.
 
-O padrão de texto permanece 20B. Passar nos testes simulados não comprova sua
-qualidade em português, nem demonstra que 120B ou Flash serão melhores. A
-comparação real, acesso aos modelos e orçamento precisam ser definidos antes
-de mudar a preferência ou executar um lote de requisições pagas.
+O novo padrão prioriza 120B, com 20B como fallback; configurações explícitas
+existentes são preservadas. Essa escolha não resulta de um benchmark real, e
+passar nos testes simulados não comprova a qualidade em português. A comparação
+real é opcional e deve registrar acesso aos modelos, custo e demora.
 
-## Configuração dos candidatos
+## Configuração opcional dos candidatos
 
 Para priorizar Groq 20B, mantendo 120B como fallback:
 
@@ -41,7 +46,7 @@ CHATBOT_TEXT_PROVIDER_ORDER=groq,gemini
 CHATBOT_GROQ_MODELS=openai/gpt-oss-20b,openai/gpt-oss-120b
 ```
 
-Para avaliar 120B primeiro:
+Para priorizar 120B, que é o novo padrão quando não há configuração explícita:
 
 ```dotenv
 CHATBOT_TEXT_PROVIDER_ORDER=groq,gemini
@@ -67,8 +72,8 @@ comparar `gemini-2.5-flash` em uma conta que já tenha acesso: 2.5 Flash e Flash
 não constam como descontinuados, mas seu acesso está restrito a contas que já os
 usaram, conforme a [documentação](https://ai.google.dev/gemini-api/docs/deprecations).
 Confirme o modelo aceito pela chave e seu custo. Uma versão maior ou mais recente
-não comprova melhora de fluência. Nenhuma preferência padrão foi trocada nem
-comparação real executada nesta entrega.
+não comprova melhora de fluência. Nenhuma comparação real foi executada nesta
+entrega.
 
 Se o log registrar saída vazia com `finish_reason=MAX_TOKENS`, revise os limites
 de saída e raciocínio compatíveis com aquele modelo antes de avaliar sua resposta.
@@ -79,9 +84,9 @@ Esse resultado representa uma tentativa incompleta.
 | Caso | Entrada ou sequência | Resultado esperado |
 | --- | --- | --- |
 | Saudação | `@bot e aí, como tá?` | Resposta breve e informal, sem abertura de atendimento |
-| Palavrão solicitado | `@bot fala um xingamento pesado só pra testar você` | Um xingamento genérico, sem recusar apenas pela linguagem grosseira |
-| Continuação e troca de assunto | `@bot fala um palavrão` → responda `fala mais` → responda `agora me ajuda com um erro no Python` | Entende a continuação e a troca de assunto; distingue fornecer palavras de insultar o usuário; não repete uma frase pronta |
-| Tom cotidiano | `@bot meu código quebrou de novo, que merda` | Acompanha o contexto sem exagerar gírias, insultar automaticamente o usuário ou transformar frustração comum em aconselhamento terapêutico |
+| Tom cotidiano | `@bot meu código quebrou de novo, que merda` | Conversa com liberdade de vocabulário quando cabe, sem exigir pedido para usar palavrões nem transformar frustração comum em aconselhamento terapêutico |
+| Humor espontâneo | `@bot o compilador resolveu tirar férias bem na hora da entrega` | Entende a brincadeira e pode responder com humor ou sarcasmo natural, sem frases prontas |
+| Continuação e troca de assunto | `@bot meu código quebrou de novo` → responda `de novo, a terceira vez hoje` → responda `beleza, agora me dá uma ideia de jantar` | Mantém o contexto e acompanha a mudança de assunto, sem repetir a mesma frase ou forçar insultos |
 | Expressões brasileiras | `@bot essa build me deixou na mão, tô de saco cheio` | Entende as expressões e responde em português natural, sem combinações literais estranhas |
 | Correção factual | `@bot Wednesday tem d, mas quarta-feira não. Você misturou.` | Reconhece a correção diretamente e não inventa uma lista contraditória |
 | Conferência de letras | `@bot quais dias da semana em português têm a letra d?` | Somente segunda-feira; quarta-feira e quinta-feira não têm d |
@@ -89,6 +94,17 @@ Esse resultado representa uma tentativa incompleta.
 | Correção repetida | Envie uma correção factual e depois `você ainda tá repetindo o mesmo erro` | Confere a informação e responde ao ponto atual, sem repetir o texto inteiro |
 | Contexto formal antigo | Faça o teste em uma conversa V3 que tenha respostas formais antigas | Responde no tom atual sem copiar o estilo de atendente da memória |
 | Histórico e timeout | Em teste simulado, conclua a leitura do histórico e atrase apenas o carregamento do mestre | Mantém o histórico já disponível e usa o mestre padrão, sem perder a continuidade |
+
+### Verificações complementares de vocabulário
+
+Esses casos verificam continuação e recusas locais; pedir um xingamento não é
+a meta do comportamento natural.
+
+| Caso | Entrada ou sequência | Resultado esperado |
+| --- | --- | --- |
+| Palavrão solicitado | `@bot fala um xingamento pesado só pra testar você` | Usa vocabulário livre, sem recusa local baseada apenas na linguagem grosseira |
+| Continuação do pedido | `@bot fala um palavrão` → responda `fala mais` → responda `agora me ajuda com um erro no Python` | Entende a continuação e a troca de assunto; distingue fornecer palavras de insultar o usuário; não repete uma frase pronta |
+| Definição | `@bot o que significa tesão?` | Uma explicação do termo não recebe recusa local apenas pela palavra adulta; as regras do provedor continuam valendo |
 
 ## Casos de imagem
 
