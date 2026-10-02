@@ -14,11 +14,12 @@ from utility.commands.help import HelpCommandMixin
 from cogs.musica.integracoes.ajuda import musica_disponivel_para_ajuda
 from utility.help_center import HELP_TIMEOUT_SECONDS, HelpCenterView, help_autocomplete_choices
 from utility.commands.ping import PingCommandMixin
-from utility.commands.vps import VpsCommandMixin
+from utility.commands.base import BaseCommandMixin
+from utility.commands.status import StatusCommandMixin
 from utility.commands.workers import WorkersCommandMixin
 
 
-class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersCommandMixin, commands.Cog):
+class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusCommandMixin, WorkersCommandMixin, commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
@@ -30,6 +31,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
 
     def cog_unload(self):
         self._stop_core_worker_auto_wake_task()
+        self._stop_status_views()
 
     def _get_db(self):
         return getattr(self.bot, "settings_db", None)
@@ -292,7 +294,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         return f"{size:.2f} {units[idx]}"
 
     def _collect_health_snapshot(self) -> dict[str, Any]:
-        """Coleta métricas do bot/TTS reaproveitadas pelo painel `/vps`.
+        """Coleta métricas internas do bot/TTS.
 
         O nome fica preservado porque o webserver/healthcheck interno ainda usa
         `get_health_snapshot`; aqui não registra nem expõe o antigo comando /health.

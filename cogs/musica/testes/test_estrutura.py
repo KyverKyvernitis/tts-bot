@@ -33,7 +33,7 @@ def test_estrutura_principal_usa_nomes_em_portugues() -> None:
 
 
 def test_codigo_python_nao_importa_o_antigo_music_system() -> None:
-    arquivos = [RAIZ / "bot.py", RAIZ / "utility" / "commands" / "vps.py", *[p for p in MUSICA.rglob("*.py") if "testes" not in p.parts]]
+    arquivos = [RAIZ / "bot.py", *sorted((RAIZ / "utility" / "commands").glob("*.py")), *[p for p in MUSICA.rglob("*.py") if "testes" not in p.parts]]
     restos = []
     for arquivo in arquivos:
         texto = arquivo.read_text(encoding="utf-8")

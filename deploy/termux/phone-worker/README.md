@@ -1,5 +1,14 @@
 # Phone Worker Termux
 
+## Painéis técnicos do bot
+
+Desde a extração de outubro de 2026, use `_base` para anexar a Base Git leve e
+`_status` para Servidores e TTS. `_status tts` abre o resumo TTS, com telas de
+engines e de voz/conexão. O comando `/vps` foi removido; suas referências nas
+notas históricas abaixo descrevem versões anteriores. Os comandos técnicos
+continuam exclusivos do dono na guilda técnica configurada. A configuração de
+presença agora usa `_presenca` (alias `_presence`).
+
 ## Limpeza e lifecycle 1.11.5
 
 O supervisor reconhece processos `phone_worker.py` de releases históricos dentro de `.core-worker-runtime/releases/` como pertencentes ao Core Worker. Isso permite encerrar somente agents antigos confirmados antes de iniciar o `current`, evitando listeners órfãos em 8766/8768 sem usar `pkill` amplo. O builder Termux também mantém por padrão apenas 4 APKs recentes, 12 logs e 1 workdir.

@@ -3,7 +3,8 @@
 __all__ = [
     "help",
     "ping",
-    "vps",
+    "base",
+    "status",
     "workers",
     "workers_registry",
 ]

@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("discord")
 
-from cogs.application_presence_admin import _parse_duration
+from cogs.application_presence_admin import ApplicationPresenceAdminCog, _parse_duration
 from utility.application_presence import ApplicationPresenceService
 
 
@@ -75,6 +75,31 @@ def test_presence_duration_parser_is_human_and_guarded() -> None:
         _parse_duration("10s")
     with pytest.raises(ValueError):
         _parse_duration("amanhã")
+
+
+def test_presence_command_keeps_its_alias_and_frees_status_registration(tmp_path: Path) -> None:
+    import discord
+    from discord.ext import commands
+
+    async def scenario() -> None:
+        bot = commands.Bot(command_prefix="_", intents=discord.Intents.none(), help_command=None)
+        bot.application_presence = _service(tmp_path)
+        try:
+            await bot.add_cog(ApplicationPresenceAdminCog(bot))
+
+            @bot.command(name="status")
+            async def technical_status(ctx):
+                pass
+
+            presence = bot.get_command("presenca")
+            assert presence is not None
+            assert bot.get_command("presence") is presence
+            assert bot.get_command("status") is technical_status
+            assert presence is not technical_status
+        finally:
+            await bot.close()
+
+    asyncio.run(scenario())
 
 
 def test_single_status_has_no_rotation_timer(tmp_path: Path) -> None:

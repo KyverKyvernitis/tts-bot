@@ -115,7 +115,7 @@ def _mask_value(key: str, value: Any) -> Any:
 
 
 def _diagnostics_timezone():
-    """Fuso usado em nomes de anexos e timestamps do /vps.
+    """Fuso usado em nomes de anexos e timestamps dos diagnósticos.
 
     A VPS costuma estar em UTC, mas o comando é usado pelo dono do bot no Brasil.
     BOT_TIMEZONE permite trocar sem patch; o fallback é America/Sao_Paulo.
@@ -1443,284 +1443,30 @@ def _application_yml_head() -> str:
 
 
 
-BASE_ARCHIVE_ROOT_NAME = "tts-bot-main"
-BASE_ARCHIVE_MAX_BYTES = 23 * 1024 * 1024
-# Limite por arquivo da base leve. A base do /vps é para análise/patch,
-# não para transportar binários pesados toda vez.
-BASE_ARCHIVE_MAX_FILE_BYTES = 1_250_000
-BASE_ARCHIVE_SENSITIVE_NAMES = {
-    ".env",
-    "cookies.txt",
-    "cookie.txt",
-    "youtube-cookies.txt",
-}
-BASE_ARCHIVE_SENSITIVE_SUFFIXES = (
-    ".pem",
-    ".key",
-    ".p12",
-    ".pfx",
-)
-
-# A base gerada pelo /vps é enviada para análise de código, não para deploy.
-# Mantemos ela leve pulando assets, binários, builds e manifestos gerados.
-BASE_ARCHIVE_ASSET_EXTENSIONS = {
-    ".apng",
-    ".avif",
-    ".bmp",
-    ".flac",
-    ".gif",
-    ".ico",
-    ".jpeg",
-    ".jpg",
-    ".m4a",
-    ".mp3",
-    ".ogg",
-    ".opus",
-    ".otf",
-    ".png",
-    ".svg",
-    ".ttf",
-    ".wav",
-    ".webm",
-    ".webp",
-    ".woff",
-    ".woff2",
-}
-BASE_ARCHIVE_BINARY_EXTENSIONS = {
-    ".7z",
-    ".a",
-    ".aar",
-    ".apk",
-    ".apks",
-    ".bin",
-    ".class",
-    ".dat",
-    ".deb",
-    ".dex",
-    ".dll",
-    ".dylib",
-    ".elf",
-    ".exe",
-    ".gz",
-    ".jar",
-    ".lz4",
-    ".lzma",
-    ".o",
-    ".onnx",
-    ".pt",
-    ".rpm",
-    ".so",
-    ".tar",
-    ".tgz",
-    ".wasm",
-    ".xz",
-    ".zip",
-    ".zst",
-}
-BASE_ARCHIVE_BINARY_DIR_MARKERS = (
-    "android/core-worker-app/app/src/main/jnilibs/",
-    "android/core-worker-app/app/src/main/assets/core-linux/bin/",
-    "android/core-worker-app/app/src/main/assets/core-linux/rootfs/",
-    "android/core-worker-app/releases/",
-    "android/core-worker-app/app/build/",
-    "build/",
-    "dist/",
-)
-BASE_ARCHIVE_ASSET_DIR_NAMES = {
-    "assets",
-    "audio",
-    "fonts",
-    "images",
-    "media",
-    "sounds",
-    "sfx",
-}
-BASE_ARCHIVE_MANIFEST_NAMES = {
-    "asset-manifest.json",
-    "manifest.json",
-    "manifest.webmanifest",
-    "site.webmanifest",
-}
-
-
-def _git_cmd(
-    args: list[str],
-    *,
-    timeout: float = 10.0,
-    cwd: Path | None = None,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd or REPO_ROOT),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
+def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
+    """Compatibility API; light Git base generation belongs to Utility."""
+    from utility.base_archive import (
+        BaseArchiveError,
+        archive_filename,
+        build_git_tracked_base_archive_sync as build_base,
     )
 
-
-def _is_sensitive_tracked_file(rel: str) -> bool:
-    normalized = rel.replace("\\", "/").lstrip("/")
-    name = Path(normalized).name.lower()
-    lowered = normalized.lower()
-    if name in BASE_ARCHIVE_SENSITIVE_NAMES:
-        return True
-
-    # .env real e variantes locais são sensíveis.
-    # .env.example/.env.sample/.env.template são exemplos rastreados e devem ir no zip.
-    allowed_env_examples = {".env.example", ".env.sample", ".env.template"}
-    if name.startswith(".env") and name not in allowed_env_examples:
-        return True
-
-    if lowered.endswith(BASE_ARCHIVE_SENSITIVE_SUFFIXES):
-        return True
-    # Banco/log/cookies não deveriam estar rastreados, mas se estiverem, não anexa no Discord.
-    if lowered.endswith((".sqlite", ".sqlite3", ".db", ".log")):
-        return True
-    if "cookies" in lowered and lowered.endswith(".txt"):
-        return True
-    return False
-
-
-def _base_archive_skip_reason(rel: str, *, size: int | None = None) -> str | None:
-    normalized = rel.replace("\\", "/").lstrip("/")
-    lowered = normalized.lower()
-    parts = [part.lower() for part in normalized.split("/") if part]
-    name = parts[-1] if parts else ""
-    suffixes = [suffix.lower() for suffix in Path(name).suffixes]
-    suffix = suffixes[-1] if suffixes else ""
-
-    if name in BASE_ARCHIVE_MANIFEST_NAMES:
-        return "manifesto"
-    if len(parts) >= 2 and parts[-2] == ".vite" and name == "manifest.json":
-        return "manifesto"
-    if suffix in BASE_ARCHIVE_ASSET_EXTENSIONS:
-        return "asset"
-    if suffix in BASE_ARCHIVE_BINARY_EXTENSIONS:
-        return "binário"
-    if len(suffixes) >= 2 and "".join(suffixes[-2:]) in {".tar.gz", ".tar.xz", ".tar.zst"}:
-        return "binário"
-
-    # Diretórios de mídia/binários ficam fora mesmo quando o arquivo não tem extensão.
-    # Isso evita mandar Box64, libs nativas, APKs publicados, rootfs e assets pesados
-    # toda vez que o dono pede a base Git leve no /vps.
-    if any(part in BASE_ARCHIVE_ASSET_DIR_NAMES for part in parts):
-        return "asset"
-    if any(lowered.startswith(marker) or f"/{marker}" in lowered for marker in BASE_ARCHIVE_BINARY_DIR_MARKERS):
-        return "binário"
-    if "dist" in parts and any(part in {"assets", "audio", "images", "media"} for part in parts):
-        return "asset"
-    if "public" in parts and any(part in {"audio", "images", "assets", "media"} for part in parts):
-        return "asset"
-    if size is not None and size > BASE_ARCHIVE_MAX_FILE_BYTES:
-        return f"arquivo grande ({size / (1024 * 1024):.1f} MB)"
-    return None
-
-
-def _is_base_archive_asset_or_manifest(rel: str) -> bool:
-    return _base_archive_skip_reason(rel) is not None
-
-
-def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
-    """Cria um zip com os arquivos rastreados pelo git no estado atual do disco.
-
-    Usa `git ls-files`, então pega apenas arquivos rastreados pelo repositório,
-    mas com o conteúdo atual da VPS, inclusive mudanças ainda não commitadas.
-    Arquivos sensíveis, assets, binários pesados e manifestos gerados são pulados.
-    A base do /vps deve ser leve e voltada para análise de código; por isso
-    nenhum manifesto separado é retornado/anexado junto da base.
-    """
-    stamp = diagnostics_file_stamp()
-    filename = f"repo-{stamp}.zip"
-
     try:
-        root_check = _git_cmd(["rev-parse", "--show-toplevel"], timeout=8.0)
-    except Exception as exc:
-        return None, filename, f"Não consegui executar git: {type(exc).__name__}: {exc}", ""
-
-    if root_check.returncode != 0:
-        return None, filename, "Repo não parece ter .git acessível; não foi possível gerar a base rastreada pelo Git.", ""
-
-    repo_root_text = (root_check.stdout or "").strip()
-    if not repo_root_text:
-        return None, filename, "Git não retornou a raiz do repositório.", ""
-    repo_root = Path(repo_root_text).resolve()
-
-    # Importante: `git ls-files` executado a partir de um subdiretório limita a
-    # listagem àquele prefixo. Sempre rodar da raiz devolvida pelo próprio Git.
-    ls = _git_cmd(["ls-files", "-z"], timeout=20.0, cwd=repo_root)
-    if ls.returncode != 0:
-        return None, filename, f"git ls-files falhou: {redact(ls.stderr or ls.stdout)}", ""
-
-    rels = [item for item in ls.stdout.split("\0") if item]
-    if not rels:
-        return None, filename, "git ls-files não retornou arquivos rastreados.", ""
-
-    status = _git_cmd(["status", "--short"], timeout=12.0, cwd=repo_root)
-    commit = _git_cmd(["rev-parse", "HEAD"], timeout=8.0, cwd=repo_root)
-    branch = _git_cmd(["rev-parse", "--abbrev-ref", "HEAD"], timeout=8.0, cwd=repo_root)
-
-    skipped: list[str] = []
-    added = 0
-    bio = io.BytesIO()
-    try:
-        with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            manifest_lines = [
-                "Base gerada pelo /vps",
-                f"Gerado em: {_now_stamp()}",
-                f"Repo root: {repo_root}",
-                f"Branch: {(branch.stdout or '').strip() if branch.returncode == 0 else 'desconhecida'}",
-                f"Commit HEAD: {(commit.stdout or '').strip() if commit.returncode == 0 else 'desconhecido'}",
-                "Conteúdo: arquivos retornados por `git ls-files`, usando o conteúdo atual do disco.",
-                "Arquivos sensíveis, assets, binários pesados e manifestos gerados são pulados.",
-                "",
-                "# git status --short",
-                (status.stdout or "limpo").rstrip() if status.returncode == 0 else redact(status.stderr or status.stdout),
-                "",
-                "# arquivos pulados",
-            ]
-
-            for rel in rels:
-                safe_rel = rel.replace("\\", "/").lstrip("/")
-                if not safe_rel or safe_rel.startswith("../") or "/../" in safe_rel:
-                    skipped.append(rel)
-                    continue
-                if _is_sensitive_tracked_file(safe_rel):
-                    skipped.append(f"{safe_rel} (sensível)")
-                    continue
-                src = repo_root / safe_rel
-                if not src.is_file():
-                    skipped.append(f"{safe_rel} (não é arquivo regular)")
-                    continue
-                try:
-                    size = src.stat().st_size
-                except OSError:
-                    size = None
-                skip_reason = _base_archive_skip_reason(safe_rel, size=size)
-                if skip_reason:
-                    skipped.append(f"{safe_rel} ({skip_reason})")
-                    continue
-                zf.write(src, f"{BASE_ARCHIVE_ROOT_NAME}/{safe_rel}")
-                added += 1
-
-            manifest_lines.extend(skipped or ["nenhum"])
-            manifest_lines.extend(["", f"# total de arquivos anexados: {added}"])
-            manifest_text = redact("\n".join(manifest_lines)) + "\n"
-    except Exception as exc:
-        return None, filename, f"Falha ao montar zip da base: {type(exc).__name__}: {exc}", ""
-
-    payload = bio.getvalue()
-    if len(payload) > BASE_ARCHIVE_MAX_BYTES:
-        size_mb = len(payload) / (1024 * 1024)
-        return None, filename, f"Base zip ficou grande demais para anexar com segurança no Discord: {size_mb:.1f} MB.", ""
-
-    summary = f"Repositório leve anexado ({len(payload)} bytes)."
-    return payload, filename, summary, ""
+        result = build_base(REPO_ROOT)
+    except BaseArchiveError as exc:
+        return None, archive_filename(), str(exc), ""
+    return result.payload, result.filename, f"Repositório leve anexado ({len(result.payload)} bytes).", ""
 
 
 async def build_git_tracked_base_archive() -> tuple[bytes | None, str, str, str]:
-    return await asyncio.to_thread(build_git_tracked_base_archive_sync)
+    """Compatibility API using the shared generation and validated cache."""
+    from utility.base_archive import BaseArchiveError, archive_filename, get_base_archive_service
+
+    try:
+        result = await get_base_archive_service(REPO_ROOT).get_archive()
+    except BaseArchiveError as exc:
+        return None, archive_filename(), str(exc), ""
+    return result.payload, result.filename, f"Repositório leve anexado ({len(result.payload)} bytes).", ""
 
 
 def build_music_diagnostics_report_sync(router: Any, options: DiagnosticsOptions) -> str:
@@ -1894,7 +1640,7 @@ MUSIC_DIAGNOSTICS_ARCHIVE_MAX_BYTES = 24 * 1024 * 1024
 def build_music_diagnostics_emergency_report_sync(router: Any, options: DiagnosticsOptions, *, reason: str = "") -> str:
     """Relatório mínimo para quando o diagnóstico modular estourar timeout/falhar.
 
-    A ideia é nunca deixar o /vps preso em "pensando". Este relatório evita
+    A ideia é limitar a duração da coleta de diagnóstico. Este relatório evita
     testes REST longos e coleta só o essencial para debug imediato.
     """
     sections: list[tuple[str, str]] = []
@@ -1992,7 +1738,7 @@ def build_music_diagnostics_archive_sync(router: Any, options: DiagnosticsOption
     if len(payload) > MUSIC_DIAGNOSTICS_ARCHIVE_MAX_BYTES:
         return None, filename, f"Diagnóstico musical modular ficou grande demais para anexar: {len(payload) / (1024 * 1024):.1f} MB.", summary_text
     # Sucesso modular: o resumo já está dentro do zip. Não retorne fallback_report,
-    # para o comando /vps não anexar um segundo arquivo de resumo.
+    # para os chamadores não anexarem um segundo arquivo de resumo.
     return payload, filename, summary, ""
 
 
@@ -2535,7 +2281,7 @@ def _core_worker_apk_quick_lines() -> list[str]:
 
 
 def _safe_core_worker_app_json_snapshot(rel: str, *, max_chars: int = 500_000) -> str:
-    """Lê JSON do APK para anexos de /vps sem expor tokens/secrets."""
+    """Lê JSON do APK para anexos de diagnóstico sem expor tokens/secrets."""
     path = REPO_ROOT / rel
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

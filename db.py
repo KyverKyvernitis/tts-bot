@@ -2690,7 +2690,7 @@ SettingsDB.set_forms_config = _settingsdb_set_forms_config
 
 # -----------------------------------------------------------------------------
 # Estatísticas persistentes de TTS sintetizado por guild/engine.
-# Usado pelo /vps > Servidores. Fica no mesmo documento de guild do Mongo para
+# Usado pelo _status > Servidores. Fica no mesmo documento de guild do Mongo para
 # sobreviver a reinícios sem criar outro storage.
 # -----------------------------------------------------------------------------
 

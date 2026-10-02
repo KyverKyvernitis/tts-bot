@@ -435,7 +435,7 @@ MUSIC_WORKER_CONFIGURED_HEALTH_TIMEOUT_SECONDS = max(0.3, _parse_float(os.getenv
 # quando AUX_LAVALINK_* estiver configurado. Sem AUX, usa LAVALINK_* como node do worker.
 MUSIC_WORKER_LAVALINK_USE_AUX = _parse_bool(os.getenv("MUSIC_WORKER_LAVALINK_USE_AUX", "true"), True)
 
-# Uso do phone-worker fora do /vps: preparação de áudio TTS para Lavalink.
+# Uso do phone-worker na preparação de áudio TTS para Lavalink.
 # A VPS sempre mantém fallback local.
 MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED = _parse_bool(os.getenv("MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED", "true"), True)
 MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS = max(0.8, _parse_float(os.getenv("MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS", "3.5"), 3.5))

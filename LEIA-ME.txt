@@ -1,5 +1,11 @@
-CORREÇÃO INCREMENTAL DAS CAPAS DO FÓRUM
+EXTRAÇÃO DE _BASE E _STATUS — REMOÇÃO DE /VPS
 
-Aplique este ZIP na raiz do projeto depois da rodada musica-forum-arquivo-velocidade-20260929.zip. Se bot e agente estiverem em instalações separadas, atualize os dois e reinicie seus processos. Preserve o banco de dados.
+Atualização incremental para a base repo-20261002-001841.zip. Aplique pelo fluxo de ZIPs do updater e reinicie o bot. O update-manifest.json declara a exclusão de utility/commands/vps.py; a simples extração manual não executa essa exclusão. Preserve o banco de dados, configurações e arquivos de runtime.
 
-Posts existentes (v3) serão reparados em segundo plano, um por vez, no mesmo tópico. O áudio e o ID do anexo são mantidos. Se a capa não estiver disponível, o áudio continua utilizável e a capa será tentada novamente após uma hora.
+_base anexa diretamente a Base Git leve, incluindo alterações rastreadas sem commit. Reutiliza o ZIP quando os arquivos não mudaram, sem esperar relatórios de status.
+
+_status abre Servidores com paginação; _status tts abre o resumo TTS. O painel permite alternar abas, consultar engines e detalhes de voz e atualizar os dados. Os dois comandos continuam exclusivos do dono do bot na guilda técnica já configurada. Use o prefixo configurado no bot se for diferente de _.
+
+A configuração de presença passa de _status para _presenca, com alias _presence. /tts status continua funcionando. /vps não é mais registrado e será excluído dos registros global e das guildas configuradas no próximo boot ou reload. Uma falha de acesso ao Discord mantém a limpeza pendente para nova tentativa.
+
+Os outros diagnósticos deixam de ser opções de /vps. Seus serviços internos compartilhados permanecem disponíveis aos módulos que já os utilizavam.

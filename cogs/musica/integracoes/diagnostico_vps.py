@@ -91,7 +91,7 @@ async def gerar_diagnostico_musical_vps(
         resultado.gerado = True
         return resultado
     except Exception as exc:
-        LOG.exception("falha ao gerar diagnóstico musical via /vps")
+        LOG.exception("falha ao gerar diagnóstico musical da VPS")
         try:
             report = await _com_timeout(
                 build_music_diagnostics_emergency_report(

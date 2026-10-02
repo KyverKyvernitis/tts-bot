@@ -39,7 +39,8 @@ def test_base_archive_uses_git_toplevel_even_when_started_from_music_subdir(tmp_
 
     # Reproduz exatamente a regressão: o cwd inicial aponta para cogs/musica.
     monkeypatch.setattr(service, "REPO_ROOT", music_dir)
-    monkeypatch.setattr(service, "diagnostics_file_stamp", lambda: "test")
+    from utility import base_archive
+    monkeypatch.setattr(base_archive, "archive_filename", lambda: "repo-test.zip")
 
     payload, filename, summary, extra = service.build_git_tracked_base_archive_sync()
 

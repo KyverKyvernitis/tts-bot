@@ -53,13 +53,14 @@ def test_bot_nao_implementa_ciclo_de_vida_da_musica() -> None:
     assert "IntegracaoMusicaBot" in texto
 
 
-def test_vps_nao_implementa_diagnostico_musical() -> None:
-    texto = _texto("utility/commands/vps.py")
-    assert "build_music_diagnostics_archive" not in texto
-    assert "build_music_diagnostics_report" not in texto
-    assert "build_music_diagnostics_emergency_report" not in texto
-    assert "AudioRouter" not in texto
-    assert "gerar_diagnostico_musical_vps" in texto
+def test_comandos_tecnicos_nao_implementam_diagnostico_musical() -> None:
+    for caminho in ("utility/commands/base.py", "utility/commands/status.py"):
+        texto = _texto(caminho)
+        assert "build_music_diagnostics_archive" not in texto
+        assert "build_music_diagnostics_report" not in texto
+        assert "build_music_diagnostics_emergency_report" not in texto
+        assert "AudioRouter" not in texto
+        assert "cogs.musica" not in texto
 
 
 def test_tts_nao_acessa_audio_router_diretamente() -> None:

@@ -533,7 +533,7 @@ class ApplicationPresenceAdminCog(commands.Cog):
             else:
                 await interaction.followup.send(feedback, ephemeral=True)
 
-    @commands.command(name="status", aliases=["presenca", "presence"])
+    @commands.command(name="presenca", aliases=["presence"])
     async def presence_command(self, ctx: commands.Context) -> None:
         if not await _is_owner(self.bot, ctx.author):
             return

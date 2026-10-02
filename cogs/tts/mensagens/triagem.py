@@ -85,6 +85,17 @@ async def analisar_mensagem_para_tts(cog: Any, message: Any) -> DecisaoTriagemMe
             reason="prefix_command",
         )
 
+    # Comandos registrados na Bot, como base/status, pertencem a
+    # process_commands. Apenas analisa o contexto: não executa callbacks nem
+    # checks e evita falar o comando se um prefixo de voz também casar.
+    get_context = getattr(bot, "get_context", None)
+    if callable(get_context):
+        context = await get_context(message)
+        if bool(getattr(context, "valid", False)):
+            return DecisaoTriagemMensagem(
+                False, False, guild_defaults, reason="registered_bot_command"
+            )
+
     if not bool(guild_defaults.get("enabled", True)):
         return DecisaoTriagemMensagem(False, False, guild_defaults, reason="tts_guild_disabled")
 
