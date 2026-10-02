@@ -52,8 +52,9 @@ class _MasterCollection:
 
 
 @pytest.mark.asyncio
-async def test_old_published_default_upgrade_preserves_ownership_metadata_and_memory():
-    old_doc = _master_doc(C.LEGACY_DEFAULT_MASTER_PROMPTS[0], operator_note="keep me")
+@pytest.mark.parametrize("old_prompt", C.LEGACY_DEFAULT_MASTER_PROMPTS)
+async def test_old_published_default_upgrade_preserves_ownership_metadata_and_memory(old_prompt):
+    old_doc = _master_doc(old_prompt, operator_note="keep me")
     coll = _MasterCollection(old_doc)
     store = MasterPromptStore(coll)
 
@@ -66,14 +67,15 @@ async def test_old_published_default_upgrade_preserves_ownership_metadata_and_me
     assert coll.doc == {**old_doc, "prompt": C.DEFAULT_MASTER_PROMPT}
     assert coll.other_documents == [{"type": C.DOC_TYPE_MEMORY_V3, "content": "conversa antiga"}]
     query, update, upsert = coll.writes[0]
-    assert query == {"type": C.DOC_TYPE_MASTER, "prompt": C.LEGACY_DEFAULT_MASTER_PROMPTS[0]}
+    assert query == {"type": C.DOC_TYPE_MASTER, "prompt": old_prompt}
     assert set(update["$set"]) == {"schema_version", "prompt"}
     assert not upsert
 
 
 @pytest.mark.asyncio
-async def test_default_upgrade_is_cached_and_idempotent_after_restart():
-    coll = _MasterCollection(_master_doc(C.LEGACY_DEFAULT_MASTER_PROMPTS[0]))
+@pytest.mark.parametrize("old_prompt", C.LEGACY_DEFAULT_MASTER_PROMPTS)
+async def test_default_upgrade_is_cached_and_idempotent_after_restart(old_prompt):
+    coll = _MasterCollection(_master_doc(old_prompt))
     store = MasterPromptStore(coll)
 
     first = await store.get()
@@ -89,9 +91,8 @@ async def test_default_upgrade_is_cached_and_idempotent_after_restart():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("custom", [
     "Use as minhas instruções personalizadas.",
-    C.LEGACY_DEFAULT_MASTER_PROMPTS[0] + "\nMais uma instrução minha.",
-    C.LEGACY_DEFAULT_MASTER_PROMPTS[0] + " ",
-])
+] + [old + "\nMais uma instrução minha." for old in C.LEGACY_DEFAULT_MASTER_PROMPTS]
+  + [old + " " for old in C.LEGACY_DEFAULT_MASTER_PROMPTS])
 async def test_custom_prompts_are_preserved_even_without_edit_metadata(custom):
     doc = _master_doc(custom, updated_at=0.0, updated_by=0)
     coll = _MasterCollection(doc)

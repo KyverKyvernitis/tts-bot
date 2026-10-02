@@ -4,12 +4,18 @@ Este ZIP incremental contém somente os arquivos alterados e novos, nas pastas o
 
 O tom padrão é informal, direto e breve. Palavrões comuns e brincadeiras podem ser usados quando pedidos ou adequados à conversa, inclusive em canais sem NSFW. O bot reconhece correções sem explicações repetitivas. Instruções globais personalizadas são preservadas; padrões antigos reconhecidos recebem as novas orientações, sem apagar a memória V3.
 
+O tom padrão não inclui respostas prontas para copiar. A mensagem atual chega ao modelo sem o prefixo artificial [PEDIDO], e o histórico mantém pares completos de pergunta e resposta. O contexto coletivo entra somente em perguntas explícitas sobre o canal/servidor ou no modo espontâneo. Se o carregamento do mestre atrasar, um histórico já carregado continua disponível.
+
+Não há etapa que traduza a conversa para inglês e depois para português. O padrão de texto continua openai/gpt-oss-20b; ser um modelo de uso geral ou passar nos testes locais não comprova a naturalidade em português. O log result=success informa o provedor e o modelo que realmente responderam. O roteiro de avaliação compara diálogos completos entre 20B, 120B e Flash antes de escolher por qualidade, custo e demora.
+
+CHATBOT_TEXT_PROVIDER_ORDER controla somente a ordem de provedores para texto; o padrão é groq,gemini. Use gemini,groq para avaliar Gemini primeiro sem alterar visão. Os modelos também são configuráveis. Novas chaves podem não ter acesso à família Gemini 2.5; confira os IDs disponíveis na conta e os exemplos em docs/CHATBOT-AVALIACAO.md. Nenhuma preferência padrão ou orçamento foi alterado nesta revisão.
+
 A leitura de anexos prepara a imagem uma vez e usa os mesmos dados nas tentativas entre provedores. Uma menção ao bot pode incluir a imagem da mensagem explicitamente respondida, sem buscar o histórico do canal. Falhas no download do anexo são separadas de falhas na chave do provedor. O modelo de visão e os fallbacks são configuráveis; confira as variáveis em docs/CHATBOT-SIMPLIFICADO.md.
 
 Escolha o pacote conforme o código instalado e envie apenas o correspondente ao updater:
 
-- chatbot-conversa-visao-atualizacao.zip: para quem já aplicou chatbot-simplificado-incremental.zip. Contém somente as alterações posteriores, sem manifesto de exclusões.
-- chatbot-conversa-visao-desde-original.zip: para quem ainda usa o código do ZIP original, com os módulos antigos. Contém as alterações acumuladas e update-manifest.json para excluir cogs/chatbot/persona.py, profiles.py, extrovert.py e webhooks.py.
+- chatbot-conversa-natural-atualizacao.zip: para quem já aplicou chatbot-simplificado-incremental.zip ou uma atualização posterior de conversa/visão. Contém as alterações acumuladas desde a primeira simplificação, sem manifesto de exclusões.
+- chatbot-conversa-natural-desde-original.zip: para quem ainda usa o código do ZIP original, com os módulos antigos. Contém as alterações acumuladas e update-manifest.json para excluir cogs/chatbot/persona.py, profiles.py, extrovert.py e webhooks.py.
 
 O updater exige que os arquivos declarados para exclusão ainda existam. Portanto, não aplique o pacote desde-original após a simplificação anterior. Ambos atualizam os caminhos originais. Mantenha uma cópia do código e do MongoDB anterior para recuperação. Os pacotes são parciais: não substitua a pasta inteira do projeto pelo conteúdo deles.
 

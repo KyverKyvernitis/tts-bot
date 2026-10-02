@@ -55,6 +55,24 @@ substitui somente padrões antigos reconhecidos. A memória V3 existente não é
 apagada para mudar o tom. Restrições do modelo escolhido continuam valendo;
 a qualidade da conversa precisa ser verificada com as credenciais da instalação.
 
+As instruções de tom não incluem frases prontas para o modelo copiar. A mensagem
+atual chega sem o prefixo artificial `[PEDIDO]`; o histórico mantém pares
+completos de pergunta e resposta. O contexto coletivo entra em perguntas
+explícitas sobre o canal/servidor ou no modo espontâneo. Um atraso no carregamento
+do prompt mestre não descarta um histórico que já terminou de carregar.
+
+Não existe uma etapa de tradução para inglês e retradução da resposta. A escolha
+do modelo influencia a naturalidade em português: o padrão de texto continua
+`openai/gpt-oss-20b`, um modelo de uso geral. Não foi feita comparação real de
+fluência entre ele, `openai/gpt-oss-120b` e Gemini Flash. Os testes locais validam
+o fluxo, não essa qualidade. Compare diálogos completos antes de trocar o padrão.
+
+Nos logs em nível INFO, busque `chatbot: result=success`: o registro informa
+`provider`, `model`, `mode`, `elapsed_ms` e `message_count`. Esse é o modelo que
+realmente respondeu, inclusive após fallback; a primeira opção da lista pode
+não ser a vencedora. Falhas incluem etapa, tipo, status e motivo de término
+quando disponível. Os registros não incluem o texto privado da conversa.
+
 O índice de mensagens registra quais respostas pertencem ao chatbot. Responder
 a uma mensagem de música, jogos ou outra função do bot não inicia uma conversa
 com a IA. O índice persiste para reconhecer replies após reinícios por até
@@ -89,6 +107,12 @@ usam apenas o primeiro frame. PDFs e outros arquivos não são lidos como imagen
 | `CHATBOT_GEMINI_VISION_MODELS` | Lista independente de modelos Gemini para ler imagens |
 | `CHATBOT_GROQ_MODELS` | Modelos Groq para conversa de texto |
 | `CHATBOT_GEMINI_MODELS` | Modelos Gemini para conversa de texto |
+| `CHATBOT_TEXT_PROVIDER_ORDER` | Prioridade dos provedores de texto; padrão `groq,gemini` |
+
+`CHATBOT_TEXT_PROVIDER_ORDER=gemini,groq` tenta Gemini primeiro em conversas de
+texto, sem mudar a rota de imagens. Nomes desconhecidos e repetidos são ignorados;
+os demais provedores configurados continuam disponíveis como fallback. O roteiro
+de avaliação contém exemplos para comparar 20B, 120B e Flash.
 
 As listas usam IDs de modelo separados por vírgula. O padrão Groq de visão passa
 de `qwen/qwen3.6-27b` para `qwen/qwen3.8-27b`, que é preview. O modelo anterior
@@ -97,6 +121,15 @@ foi retirado em 14/09/2026 para contas gratuitas e de desenvolvedor, conforme a
 disponibilidade e custo na conta usada; variáveis de ambiente antigas continuam
 prevalecendo sobre os padrões. Ler anexos e gerar imagens por `/imagem` são
 operações diferentes, com configuração própria.
+
+A [lista oficial de modelos Gemini](https://ai.google.dev/gemini-api/docs/models)
+apresenta `gemini-3.8-flash` como estável. Conforme a
+[página de descontinuações](https://ai.google.dev/gemini-api/docs/deprecations),
+Gemini 2.5 Flash e Flash-Lite não foram descontinuados, mas o acesso está restrito
+a contas que já os usaram. Uma chave nova pode não aceitar os padrões 2.5 deste
+projeto. Confira acesso e custo na conta antes de configurar outro ID; versão
+mais recente ou modelo maior não demonstram melhor português. As cadeias padrão
+de texto e o orçamento permanecem iguais.
 
 O fluxo não guarda os bytes do anexo na memória de conversa. Ao voltar a uma
 imagem antiga, responda à mensagem que contém o anexo para fornecer a referência
@@ -109,8 +142,12 @@ relativos à raiz do repositório. Escolha um deles conforme o código instalado
 
 | Pacote | Base necessária | Exclusões |
 | --- | --- | --- |
-| `chatbot-conversa-visao-atualizacao.zip` | `chatbot-simplificado-incremental.zip` já aplicado | Nenhuma; os módulos antigos já foram retirados |
-| `chatbot-conversa-visao-desde-original.zip` | Código do ZIP original, ainda com os módulos antigos | Quatro módulos, via `update-manifest.json` |
+| `chatbot-conversa-natural-atualizacao.zip` | Primeira simplificação já aplicada, ou qualquer atualização posterior de conversa/visão | Nenhuma; os módulos antigos já foram retirados |
+| `chatbot-conversa-natural-desde-original.zip` | Código do ZIP original, ainda com os módulos antigos | Quatro módulos, via `update-manifest.json` |
+
+O pacote `atualizacao` reúne as mudanças posteriores à primeira simplificação
+(`chatbot-simplificado-incremental.zip`), permitindo atualizar também quem já
+aplicou os pacotes anteriores de conversa/visão.
 
 Envie somente o pacote correspondente ao updater. O pacote `desde-original`
 contém alterações acumuladas e declara quatro operações `delete`:

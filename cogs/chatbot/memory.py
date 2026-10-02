@@ -191,12 +191,16 @@ class MemoryStore:
         *,
         channel_id: int,
         visibility_scope: str,
+        include_collective: bool = True,
     ) -> tuple[MemoryEpoch, list[MemoryEntry], list[MemoryEntry]]:
         epoch = await self.capture_epoch(guild_id, user_id)
         user_query = self._query(
             scope="user", guild_id=guild_id, channel_id=channel_id,
             visibility_scope=visibility_scope, user_id=user_id, epoch=epoch,
         )
+        if not include_collective:
+            user_doc = await self._coll.find_one(user_query)
+            return epoch, self._flatten_turns(user_doc), []
         guild_query = self._query(
             scope="guild", guild_id=guild_id, channel_id=channel_id,
             visibility_scope=visibility_scope, user_id=0, epoch=epoch,

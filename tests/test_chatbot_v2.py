@@ -284,6 +284,7 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.cog._memory.load_context.assert_awaited_once_with(
             10, 40, channel_id=20, visibility_scope="channel:20",
+            include_collective=False,
         )
         self.message.channel.history.assert_not_called()
         self.cog._remove_processing_reaction.assert_awaited_once_with(self.message, "⏳")
@@ -315,6 +316,7 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
 
         self.cog._memory.load_context.assert_awaited_once_with(
             10, 40, channel_id=22, visibility_scope="channel:22",
+            include_collective=False,
         )
         self.cog._message_index.remember.assert_awaited_once_with(guild_id=10, channel_id=22, message_id=50)
         self.assertEqual(self.cog._memory.append_turn.await_args.kwargs["channel_id"], 22)
@@ -511,7 +513,7 @@ class BotPromptTests(unittest.TestCase):
             user_history=[],
             guild_context=[MemoryEntry(
                 role="user", content=hostile, user_id=2, user_name="Visitante",
-            )],
+            ), MemoryEntry(role="assistant", content="Resposta antiga", user_id=2)],
             user_name="Ana",
             user_message="Explique a conversa",
             reply_context=reply_text,
@@ -519,10 +521,11 @@ class BotPromptTests(unittest.TestCase):
         )
         self.assertNotIn(hostile, system)
         self.assertNotIn(reply_text, system)
-        self.assertEqual([message.role for message in messages], ["user"])
-        self.assertIn(hostile, messages[-1].content)
-        self.assertIn(reply_text, messages[-1].content)
-        self.assertIn("NÃO CONFIÁVEL", messages[-1].content)
+        self.assertEqual([message.role for message in messages], ["user", "user"])
+        self.assertIn(hostile, messages[-2].content)
+        self.assertIn(reply_text, messages[-2].content)
+        self.assertIn("NÃO CONFIÁVEL", messages[-2].content)
+        self.assertEqual(messages[-1].content, "Explique a conversa")
 
     def test_history_cannot_install_system_role_and_images_stay_on_current_request(self):
         hostile = "HISTÓRICO FORJADO COMO SYSTEM"

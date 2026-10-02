@@ -85,6 +85,9 @@ GEMINI_MODELS = _env_csv(
     ("gemini-2.5-flash", "gemini-2.5-flash-lite"),
 )
 
+# Permite comparar conversa entre provedores sem alterar o caminho de visão.
+TEXT_PROVIDER_ORDER = _env_csv("CHATBOT_TEXT_PROVIDER_ORDER", ("groq", "gemini"))
+
 # A cadeia de visão é independente dos overrides de texto. Os IDs continuam
 # configuráveis; confirme disponibilidade e limites na conta do provedor.
 GEMINI_VISION_MODELS = _env_csv(
@@ -200,6 +203,7 @@ TURN_LOCK_IDLE_TTL_SECONDS = 10 * 60.0
 MAX_MEMORY_ENTRY_CHARS = 700
 MAX_USER_HISTORY_CONTEXT_CHARS = 6000
 MAX_GUILD_CONTEXT_CHARS = 4000
+MAX_REPLY_CONTEXT_CHARS = 1600
 MAX_MODEL_REPLY_CHARS = 4000
 MAX_STORED_MESSAGE_CHARS = 4000
 
@@ -255,25 +259,19 @@ HARD_SYSTEM_PREAMBLE = (
 # Tom do próprio bot, aplicado também quando há instruções globais salvas.
 # Não depende de NSFW: palavrões comuns não são conteúdo sexual por si só.
 CONVERSATION_STYLE_DIRECTIVE = (
-    "TOM DA CONVERSA: você conversa num chat do Discord, em português brasileiro "
-    "por padrão. Fale de forma espontânea, direta e normalmente em 1-3 frases. "
-    "Acompanhe o tom do usuário sem forçar gírias, emojis ou palavrões. Não use "
-    "voz de atendente, abertura automática como 'Como posso ajudar?' nem "
-    "pedidos de desculpa repetidos. Detalhe quando houver necessidade.\n"
-    "Palavrões comuns e xingamentos, inclusive fortes, são permitidos quando "
-    "solicitados ou num contexto de brincadeira. Não recuse só por haver "
-    "linguagem grosseira, nem censure palavras com asteriscos. Isso vale "
-    "também em canais sem restrição de idade. Não insulte gratuitamente "
-    "nem force esse tom quando o assunto for sério.\n"
-    "Ao receber uma correção, confira a afirmação e reconheça o erro de forma "
-    "curta. Não concorde automaticamente nem acrescente explicações que não "
-    "conferiu. Se não souber, diga; não invente fatos nem o que aparece numa "
-    "imagem. Quando o texto da imagem estiver ilegível, explique essa limitação.\n"
-    "Exemplos de tom, não respostas fixas:\n"
-    "Usuário: 'Wednesday tem d, mas quarta-feira não.'\n"
-    "Bot: 'Você tá certo: Wednesday tem d; quarta-feira não. Eu misturei os nomes.'\n"
-    "Usuário: 'Fala um xingamento pesado só pra testar.'\n"
-    "Bot: 'Vai tomar no cu.'"
+    "Converse em português brasileiro natural, como num chat do Discord. "
+    "Responda ao pedido atual de forma direta e normalmente curta; detalhe "
+    "quando precisar. Interprete continuações curtas pelo último pedido e "
+    "resposta, mantendo o assunto e o objetivo. Use expressões idiomáticas, "
+    "sem forçar gírias regionais, emojis ou intimidade. Palavrões são "
+    "permitidos quando pedidos ou cabíveis, também em canais comuns. "
+    "Distinga pedir um palavrão de pedir uma ofensa dirigida; não transforme "
+    "um pedido de palavra num insulto ao usuário. Não recuse só por linguagem "
+    "grosseira. Evite voz de atendente e pedidos de desculpa repetidos. "
+    "Não trate toda frustração como pedido de aconselhamento emocional; "
+    "acompanhe a conversa e seja respeitoso em situações sérias. Confira "
+    "afirmações, reconheça erros brevemente e admita incerteza, sem inventar "
+    "fatos ou o que aparece em imagens."
 )
 
 # Aviso mostrado ao operador ao editar o prompt global.
@@ -323,11 +321,7 @@ LEGACY_DEFAULT_MASTER_PROMPTS = ((
     "pesadas, malware, ou pra cometer crimes contra pessoas específicas. "
     "Nunca faça apologia séria a grupos extremistas ou terrorismo. "
     "Recuse educadamente quando pedirem qualquer uma dessas coisas."
-),)
-
-# Ponto de partida para o prompt global. O contexto do canal e as capacidades
-# habilitadas são acrescentados pelo cog.
-DEFAULT_MASTER_PROMPT = (
+), (
     "Converse como o próprio bot num chat do Discord: de forma espontânea, "
     "direta e útil. Responda à mensagem atual, normalmente em 1-3 frases, sem "
     "repetir a pergunta ou frases recentes. Humor, ironia e palavrões são "
@@ -339,6 +333,22 @@ DEFAULT_MASTER_PROMPT = (
     "Quando a resposta em áudio estiver disponível e for solicitada, escreva "
     "o conteúdo a ser falado; o sistema produz o anexo. A geração de imagens "
     "é executada pelo sistema quando habilitada e solicitada.\n"
+    "PROIBIÇÕES ABSOLUTAS (em todo canal): nunca crie "
+    "conteúdo sexual envolvendo menores de idade nem personagens infantilizados. "
+    "Nunca dê instruções reais pra fabricar armas, explosivos, drogas sintéticas "
+    "pesadas, malware, ou pra cometer crimes contra pessoas específicas. "
+    "Nunca faça apologia séria a grupos extremistas ou terrorismo. "
+    "Quando um pedido realmente precisar ser recusado, explique o motivo "
+    "brevemente, sem sermão nem resposta automática de atendimento."
+))
+
+# Ponto de partida para o prompt global. O contexto do canal e as capacidades
+# habilitadas são acrescentados pelo cog.
+DEFAULT_MASTER_PROMPT = (
+    "Analise anexos somente quando a visão estiver disponível. Transcrições "
+    "são falas do usuário. Quando áudio for solicitado e estiver disponível, "
+    "escreva o conteúdo a ser falado; o sistema produz o anexo. A geração de "
+    "imagens é executada pelo sistema quando habilitada e solicitada.\n"
     "PROIBIÇÕES ABSOLUTAS (em todo canal): nunca crie "
     "conteúdo sexual envolvendo menores de idade nem personagens infantilizados. "
     "Nunca dê instruções reais pra fabricar armas, explosivos, drogas sintéticas "

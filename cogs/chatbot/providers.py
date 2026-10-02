@@ -22,6 +22,22 @@ from .media import ImagePreparationError, MediaAttachment, PreparedImage, prepar
 
 log = logging.getLogger(__name__)
 
+# Apenas valores documentados entram no diagnóstico. Esse campo vem da API e
+# não deve servir como caminho alternativo para registrar conteúdo da resposta.
+_DIAGNOSTIC_FINISH_REASONS = frozenset({
+    "stop", "length", "content_filter", "tool_calls", "function_call",
+    "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "LANGUAGE", "OTHER",
+    "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL",
+    "UNEXPECTED_TOOL_CALL", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT",
+    "IMAGE_OTHER", "NO_IMAGE", "FINISH_REASON_UNSPECIFIED",
+})
+
+
+def _diagnostic_finish_reason(reason: Optional[str]) -> str:
+    if reason is None:
+        return "none"
+    return reason if isinstance(reason, str) and reason in _DIAGNOSTIC_FINISH_REASONS else "other"
+
 
 class ProviderError(Exception):
     def __init__(
@@ -230,7 +246,10 @@ class _GroqClient:
             finish_reason = choice.get("finish_reason")
             message = choice["message"]
             if finish_reason == "content_filter":
-                raise ProviderError("resposta bloqueada pelo provider", kind="blocked", stage="output")
+                raise ProviderError(
+                    "resposta bloqueada pelo provider", kind="blocked", stage="output",
+                    finish_reason=finish_reason,
+                )
             content = message.get("content")
             if isinstance(content, list):
                 content = "".join(
@@ -298,10 +317,13 @@ class _GeminiClient:
             else:
                 for url in message.image_urls[:C.MAX_IMAGES_PER_MESSAGE]:
                     parts.append(await self._download_inline_image(url, deadline))
-            contents.append({
-                "role": "user" if message.role == "user" else "model",
-                "parts": parts,
-            })
+            role = "user" if message.role == "user" else "model"
+            # Contexto citado e mensagem atual podem ser blocos user seguidos.
+            # Preservar cada parte na ordem original, sem atravessar uma resposta.
+            if contents and contents[-1]["role"] == role:
+                contents[-1]["parts"].extend(parts)
+            else:
+                contents.append({"role": role, "parts": parts})
         payload = {
             "contents": contents,
             "systemInstruction": {"parts": [{"text": system}]},
@@ -408,7 +430,9 @@ class ProviderRouter:
         self, *, system: str, messages: list[ChatMessage],
         temperature: float = C.DEFAULT_TEMPERATURE,
     ) -> str:
+        started = time.monotonic()
         has_images = any(message.images or message.image_urls for message in messages)
+        mode = "vision" if has_images else "text"
         attempts: list[tuple[str, object, tuple[str, ...]]] = []
         if self._groq:
             attempts.append((
@@ -420,10 +444,17 @@ class ProviderRouter:
                 "gemini", self._gemini,
                 getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS) if has_images else C.GEMINI_MODELS,
             ))
+        if not has_images:
+            # Uma prioridade parcial mantém os outros providers como fallback.
+            # Ignorar nomes desconhecidos/repetidos não afeta a cadeia de visão.
+            by_provider = {attempt[0]: attempt for attempt in attempts}
+            priority = getattr(C, "TEXT_PROVIDER_ORDER", ("groq", "gemini"))
+            ordered_names = dict.fromkeys((*priority, *by_provider))
+            attempts = [by_provider[name] for name in ordered_names if name in by_provider]
         if not attempts:
             raise AllProvidersExhausted("nenhum provider configurado", kind="unconfigured", stage="routing")
 
-        deadline = time.monotonic() + C.PROVIDER_ROUTER_TIMEOUT_SECONDS
+        deadline = started + C.PROVIDER_ROUTER_TIMEOUT_SECONDS
         # Chamadores que ainda passam URLs também recebem o mesmo preparo único.
         # Nunca remover anexos para tentar um fallback apenas de texto.
         normalized: list[ChatMessage] = []
@@ -460,20 +491,30 @@ class ProviderRouter:
                         model=model, timeout_seconds=timeout,
                     )
                     state.mark_success()
+                    log.info(
+                        "chatbot: result=success provider=%s model=%s mode=%s elapsed_ms=%d message_count=%d",
+                        provider_name, model, mode,
+                        max(0, int((time.monotonic() - started) * 1000)), len(messages),
+                    )
                     return reply
                 except RateLimitError as exc:
                     last_error = exc
                     self._mark_provider_failure(
                         provider_name, models, float(exc.retry_after or 30.0), status=429,
                     )
-                    log.warning("chatbot: provider=%s model=%s stage=api kind=rate_limit status=429", provider_name, model)
+                    log.warning(
+                        "chatbot: provider=%s model=%s mode=%s stage=%s kind=rate_limit status=429 finish_reason=%s",
+                        provider_name, model, mode, exc.stage,
+                        _diagnostic_finish_reason(exc.finish_reason),
+                    )
                     break
                 except ProviderError as exc:
                     last_error = exc
                     status = int(exc.status or 0)
                     log.warning(
-                        "chatbot: provider=%s model=%s stage=%s kind=%s status=%s",
-                        provider_name, model, exc.stage, exc.kind, status,
+                        "chatbot: provider=%s model=%s mode=%s stage=%s kind=%s status=%s finish_reason=%s",
+                        provider_name, model, mode, exc.stage, exc.kind, status,
+                        _diagnostic_finish_reason(exc.finish_reason),
                     )
                     # Um anexo inválido ou bloqueio não indica indisponibilidade.
                     if exc.stage == "attachment" or exc.kind == "blocked":
