@@ -1,13 +1,22 @@
 CHATBOT DO PRÓPRIO BOT
 
-Este ZIP incremental contém somente os arquivos alterados e novos, nas pastas originais do projeto, e o update-manifest.json usado pelo updater. O chatbot usa a identidade do bot no Discord, sem personas ou profiles. Use /chatbot configurar para ativar, escolher canais e ajustar respostas espontâneas. Áudio é produzido quando solicitado; imagens e transcrição continuam disponíveis.
+Este ZIP incremental contém somente os arquivos alterados e novos, nas pastas originais do projeto. O chatbot usa a identidade do bot no Discord, sem personas ou profiles. Use /chatbot configurar para ativar, escolher canais e ajustar respostas espontâneas. Áudio é produzido quando solicitado; imagens e transcrição continuam disponíveis.
 
-Envie este ZIP ao updater do projeto. O update-manifest.json declara a exclusão automática dos quatro módulos antigos de cogs/chatbot: persona.py, profiles.py, extrovert.py e webhooks.py. Os arquivos restantes são adicionados ou atualizados nos caminhos originais. Mantenha uma cópia do código e do MongoDB anterior para recuperação. Este pacote é parcial: não substitua a pasta inteira do projeto pelo conteúdo dele.
+O tom padrão é informal, direto e breve. Palavrões comuns e brincadeiras podem ser usados quando pedidos ou adequados à conversa, inclusive em canais sem NSFW. O bot reconhece correções sem explicações repetitivas. Instruções globais personalizadas são preservadas; padrões antigos reconhecidos recebem as novas orientações, sem apagar a memória V3.
 
-Ao iniciar, a migração arquiva os dados antigos em chatbot_legacy_v2, preserva a ativação dos servidores existentes e inicia a memória V3 vazia. O prompt global antigo também é arquivado e substituído pelas instruções do bot único. A migração pode ser retomada após interrupção; falhas impedem a inicialização do chatbot até a preparação terminar.
+A leitura de anexos prepara a imagem uma vez e usa os mesmos dados nas tentativas entre provedores. Uma menção ao bot pode incluir a imagem da mensagem explicitamente respondida, sem buscar o histórico do canal. Falhas no download do anexo são separadas de falhas na chave do provedor. O modelo de visão e os fallbacks são configuráveis; confira as variáveis em docs/CHATBOT-SIMPLIFICADO.md.
+
+Escolha o pacote conforme o código instalado e envie apenas o correspondente ao updater:
+
+- chatbot-conversa-visao-atualizacao.zip: para quem já aplicou chatbot-simplificado-incremental.zip. Contém somente as alterações posteriores, sem manifesto de exclusões.
+- chatbot-conversa-visao-desde-original.zip: para quem ainda usa o código do ZIP original, com os módulos antigos. Contém as alterações acumuladas e update-manifest.json para excluir cogs/chatbot/persona.py, profiles.py, extrovert.py e webhooks.py.
+
+O updater exige que os arquivos declarados para exclusão ainda existam. Portanto, não aplique o pacote desde-original após a simplificação anterior. Ambos atualizam os caminhos originais. Mantenha uma cópia do código e do MongoDB anterior para recuperação. Os pacotes são parciais: não substitua a pasta inteira do projeto pelo conteúdo deles.
+
+Na primeira passagem de V1/V2 para V3, a migração arquiva os dados antigos em chatbot_legacy_v2, preserva a ativação dos servidores existentes e inicia a memória V3 vazia. O prompt global legado também é arquivado e substituído pelas instruções do bot único. A migração pode ser retomada após interrupção; falhas impedem a inicialização do chatbot até a preparação terminar. Instalações que já usam V3 mantêm sua memória nesta atualização.
 
 Para retirar os comandos antigos publicados globalmente no Discord, habilite a sincronização global conforme docs/CHATBOT-SIMPLIFICADO.md. Servidores novos começam desativados até a configuração.
 
-Validação local: 198 testes e 52 subtests passaram. Discord, provedores e MongoDB foram simulados nos testes; nenhuma instância de produção foi alterada.
+Os testes locais usam Discord, provedores e MongoDB simulados. Não houve teste com modelos externos nem alteração de instância de produção. Avaliação prática de conversa, leitura de imagens e comparação de modelos: docs/CHATBOT-AVALIACAO.md.
 
 Instruções completas, migração e recuperação: docs/CHATBOT-SIMPLIFICADO.md.

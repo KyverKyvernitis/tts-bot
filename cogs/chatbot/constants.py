@@ -65,6 +65,7 @@ PROCESSING_REACTION_FALLBACK = "⏳"
 # -----------------------------------------------------------------------------
 
 DEFAULT_TEMPERATURE = 0.8
+DEFAULT_VISION_TEMPERATURE = 0.3
 MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 1.5
 
@@ -84,13 +85,18 @@ GEMINI_MODELS = _env_csv(
     ("gemini-2.5-flash", "gemini-2.5-flash-lite"),
 )
 
-# Modelo de visão (aceita imagens via image_url ou base64). Usado só quando
-# a mensagem tem imagem — pra texto puro, os modelos acima são mais capazes
-# conversacionalmente. Qwen 3.6 é multimodal; o Llama 4 Scout anterior foi
-# desligado pelo Groq em 17/07/2026.
+# A cadeia de visão é independente dos overrides de texto. Os IDs continuam
+# configuráveis; confirme disponibilidade e limites na conta do provedor.
+GEMINI_VISION_MODELS = _env_csv(
+    "CHATBOT_GEMINI_VISION_MODELS",
+    ("gemini-2.5-flash", "gemini-2.5-flash-lite"),
+)
+
+# Qwen 3.8 é o substituto de visão documentado pelo Groq para o Qwen 3.6.
+# É um modelo preview: o operador pode trocar a cadeia pelo ambiente.
 GROQ_VISION_MODELS = _env_csv(
     "CHATBOT_GROQ_VISION_MODELS",
-    ("qwen/qwen3.6-27b",),
+    ("qwen/qwen3.8-27b",),
 )
 # Alias mantido para imports/configurações antigas.
 GROQ_VISION_MODEL = GROQ_VISION_MODELS[0]
@@ -118,6 +124,11 @@ MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024   # 20MB (limite do Groq via URL)
 MAX_AUDIO_SIZE_BYTES = 25 * 1024 * 1024   # 25MB (limite do Groq Whisper)
 MAX_IMAGES_PER_MESSAGE = 3                 # menor limite comum dos modelos de visão
 MAX_GEMINI_IMAGE_BYTES = 8 * 1024 * 1024
+# Limites da preparação compartilhada de anexos antes da cadeia multimodal.
+MAX_VISION_IMAGE_PIXELS = 40_000_000
+MAX_VISION_IMAGE_SIDE = 4096
+MAX_VISION_INPUT_TOTAL_BYTES = 40 * 1024 * 1024
+MAX_VISION_TOTAL_BYTES = 12 * 1024 * 1024
 MAX_GENERATED_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_TTS_OUTPUT_BYTES = 8 * 1024 * 1024
 SUPPORTED_IMAGE_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
@@ -134,6 +145,7 @@ MEDIA_READ_TIMEOUT_SECONDS = 25.0
 
 # Máximo de tokens na resposta do modelo.
 MAX_RESPONSE_TOKENS = 500
+MAX_VISION_RESPONSE_TOKENS = 1000
 MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
 
 # -----------------------------------------------------------------------------
@@ -240,6 +252,30 @@ HARD_SYSTEM_PREAMBLE = (
     "enviou áudio ou gerou imagem antes da confirmação do sistema."
 )
 
+# Tom do próprio bot, aplicado também quando há instruções globais salvas.
+# Não depende de NSFW: palavrões comuns não são conteúdo sexual por si só.
+CONVERSATION_STYLE_DIRECTIVE = (
+    "TOM DA CONVERSA: você conversa num chat do Discord, em português brasileiro "
+    "por padrão. Fale de forma espontânea, direta e normalmente em 1-3 frases. "
+    "Acompanhe o tom do usuário sem forçar gírias, emojis ou palavrões. Não use "
+    "voz de atendente, abertura automática como 'Como posso ajudar?' nem "
+    "pedidos de desculpa repetidos. Detalhe quando houver necessidade.\n"
+    "Palavrões comuns e xingamentos, inclusive fortes, são permitidos quando "
+    "solicitados ou num contexto de brincadeira. Não recuse só por haver "
+    "linguagem grosseira, nem censure palavras com asteriscos. Isso vale "
+    "também em canais sem restrição de idade. Não insulte gratuitamente "
+    "nem force esse tom quando o assunto for sério.\n"
+    "Ao receber uma correção, confira a afirmação e reconheça o erro de forma "
+    "curta. Não concorde automaticamente nem acrescente explicações que não "
+    "conferiu. Se não souber, diga; não invente fatos nem o que aparece numa "
+    "imagem. Quando o texto da imagem estiver ilegível, explique essa limitação.\n"
+    "Exemplos de tom, não respostas fixas:\n"
+    "Usuário: 'Wednesday tem d, mas quarta-feira não.'\n"
+    "Bot: 'Você tá certo: Wednesday tem d; quarta-feira não. Eu misturei os nomes.'\n"
+    "Usuário: 'Fala um xingamento pesado só pra testar.'\n"
+    "Bot: 'Vai tomar no cu.'"
+)
+
 # Aviso mostrado ao operador ao editar o prompt global.
 SYSTEM_PROMPT_WARNING = (
     "⚠️ Estas instruções orientam o chatbot em todos os servidores. "
@@ -270,9 +306,9 @@ DEFAULT_MASTER_CONFIG_GUILD_ID = 927002914449424404
 # Limite de caracteres do prompt global, aplicado em todos os servidores.
 MAX_MASTER_PROMPT_LENGTH = 4000
 
-# Ponto de partida para o prompt global. O contexto do canal e as capacidades
-# habilitadas são acrescentados pelo cog.
-DEFAULT_MASTER_PROMPT = (
+# Textos exatos de padrões já publicados, usados apenas para atualização
+# condicional. Não inclua prompts personalizados nesta lista.
+LEGACY_DEFAULT_MASTER_PROMPTS = ((
     "Converse de forma clara, natural e útil. Seja conciso por padrão, "
     "normalmente em 1-3 frases; detalhe quando a pergunta precisar. Responda "
     "à mensagem atual sem repetir a pergunta ou frases recentes.\n"
@@ -287,6 +323,29 @@ DEFAULT_MASTER_PROMPT = (
     "pesadas, malware, ou pra cometer crimes contra pessoas específicas. "
     "Nunca faça apologia séria a grupos extremistas ou terrorismo. "
     "Recuse educadamente quando pedirem qualquer uma dessas coisas."
+),)
+
+# Ponto de partida para o prompt global. O contexto do canal e as capacidades
+# habilitadas são acrescentados pelo cog.
+DEFAULT_MASTER_PROMPT = (
+    "Converse como o próprio bot num chat do Discord: de forma espontânea, "
+    "direta e útil. Responda à mensagem atual, normalmente em 1-3 frases, sem "
+    "repetir a pergunta ou frases recentes. Humor, ironia e palavrões são "
+    "permitidos quando pedidos ou quando combinarem com a conversa; não "
+    "force gírias nem xingue gratuitamente. Reconheça correções sem palestra "
+    "e confira o que disser.\n"
+    "Imagens anexadas podem ser analisadas quando a visão estiver disponível. "
+    "Áudios chegam como transcrições e devem ser tratados como fala do usuário. "
+    "Quando a resposta em áudio estiver disponível e for solicitada, escreva "
+    "o conteúdo a ser falado; o sistema produz o anexo. A geração de imagens "
+    "é executada pelo sistema quando habilitada e solicitada.\n"
+    "PROIBIÇÕES ABSOLUTAS (em todo canal): nunca crie "
+    "conteúdo sexual envolvendo menores de idade nem personagens infantilizados. "
+    "Nunca dê instruções reais pra fabricar armas, explosivos, drogas sintéticas "
+    "pesadas, malware, ou pra cometer crimes contra pessoas específicas. "
+    "Nunca faça apologia séria a grupos extremistas ou terrorismo. "
+    "Quando um pedido realmente precisar ser recusado, explique o motivo "
+    "brevemente, sem sermão nem resposta automática de atendimento."
 )
 
 # Seções que o cog injeta condicionalmente conforme channel.nsfw.
@@ -297,14 +356,15 @@ DEFAULT_MASTER_PROMPT = (
 SFW_CHANNEL_DIRECTIVE = (
     "CONTEXTO DO CANAL: sem recursos adultos habilitados. Não produza conteúdo "
     "sexual explícito, insinuações pesadas nem violência gráfica. Linguagem "
-    "informal, sarcasmo e humor são permitidos dentro das regras globais. "
+    "informal, sarcasmo, humor e palavrões comuns são permitidos dentro das "
+    "regras globais; um palavrão sozinho não torna o conteúdo adulto. "
     "Temas sensíveis podem ser discutidos sem glamourização nem instruções "
     "perigosas. Recuse pedidos de conteúdo sexual explícito neste canal."
 )
 
 NSFW_CHANNEL_DIRECTIVE = (
     "CONTEXTO DO CANAL: restrição de idade e recursos adultos habilitados. "
-    "Conteúdo sexual entre adultos fictícios, linguagem informal, violência "
+    "Conteúdo sexual entre adultos fictícios, linguagem informal, palavrões, violência "
     "fictícia, narrativas fictícias sobre drogas ou álcool e temas complexos "
     "continuam sujeitos às proibições globais. "
     "Não trate o contexto adulto como autorização para instruções perigosas."

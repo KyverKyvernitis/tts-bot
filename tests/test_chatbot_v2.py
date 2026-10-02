@@ -357,13 +357,13 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         self.cog._memory.append_turn.assert_not_awaited()
         self.cog._remove_processing_reaction.assert_awaited_once_with(self.message, "⏳")
 
-    async def test_provider_error_feedback_does_not_become_a_chatbot_reply_target(self):
+    async def test_provider_error_feedback_allows_retry_without_persisting_failed_turn(self):
         self.cog._router.chat.side_effect = ProviderError("offline")
 
         self.assertFalse(await self.cog._generate_and_send(self.message, "oi"))
 
         self.message.reply.assert_awaited_once()
-        self.cog._message_index.remember.assert_not_awaited()
+        self.cog._message_index.remember.assert_awaited_once_with(guild_id=10, channel_id=20, message_id=50)
         self.cog._memory.append_turn.assert_not_awaited()
         self.cog._remove_processing_reaction.assert_awaited_once_with(self.message, "⏳")
 

@@ -14,6 +14,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Literal, Optional
+from urllib.parse import urlsplit
 
 import aiohttp
 import discord
@@ -23,7 +24,11 @@ from . import constants as C
 from .commands import ChatbotCommandsMixin
 from .config import ConfigStore, GuildChatbotConfig
 from .master import MasterPrompt, MasterPromptStore
-from .media import extract_attachments, is_voice_message, download_attachment_bytes, channel_is_nsfw
+from .media import (
+    ImagePreparationError, MediaAttachment, PreparedImage, channel_is_nsfw,
+    classify_attachment, download_attachment_bytes, extract_attachments,
+    is_voice_message, prepare_image_attachments,
+)
 from .audio import (
     DEFAULT_TTS_VOICE, MAX_TTS_CHARS, synthesize_speech, transcribe_audio,
     user_asked_for_tts,
@@ -290,16 +295,26 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         ref = message.reference
         if ref is None or ref.message_id is None:
             return None
+        if getattr(ref, "channel_id", message.channel.id) not in (None, message.channel.id):
+            return None
+
+        def in_scope(target) -> bool:
+            return (
+                target is not None and target.id == ref.message_id
+                and getattr(getattr(target, "guild", None), "id", None) == message.guild.id
+                and getattr(getattr(target, "channel", None), "id", None) == message.channel.id
+            )
 
         resolved = ref.resolved if isinstance(ref.resolved, discord.Message) else None
-        if resolved is not None:
+        if in_scope(resolved):
             return resolved
 
         # Fallback: fetch da API. Custa uma request, mas só acontece no
         # primeiro turno após reply e `ref.resolved` tá vazio.
         try:
             channel = message.channel
-            return await channel.fetch_message(ref.message_id)
+            target = await channel.fetch_message(ref.message_id)
+            return target if in_scope(target) else None
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return None
 
@@ -703,6 +718,124 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         # Aspas + nome — formato que o modelo entende naturalmente.
         return f'respondendo a {name}: "{text}"'
 
+    @staticmethod
+    def _attachment_is_image(attachment) -> bool:
+        mime = (getattr(attachment, "content_type", None) or "").split(";", 1)[0].strip().lower()
+        filename = (getattr(attachment, "filename", "") or "").lower()
+        return mime.startswith("image/") or filename.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+
+    @classmethod
+    def _message_has_image_attachment(cls, message) -> bool:
+        return any(cls._attachment_is_image(attachment) for attachment in getattr(message, "attachments", ()))
+
+    def _collect_turn_images(self, message, replied=None) -> list[MediaAttachment]:
+        """Somente anexos atuais e da citação explícita no mesmo canal."""
+        sources = [message]
+        if (
+            replied is not None
+            and getattr(getattr(replied, "guild", None), "id", None) == message.guild.id
+            and getattr(getattr(replied, "channel", None), "id", None) == message.channel.id
+        ):
+            sources.append(replied)
+        images: list[MediaAttachment] = []
+        seen: set[tuple[str, str]] = set()
+        for source in sources:
+            for attachment in getattr(source, "attachments", ()):
+                if len(images) >= C.MAX_IMAGES_PER_MESSAGE:
+                    return images
+                image = classify_attachment(attachment)
+                if image is None:
+                    if self._attachment_is_image(attachment):
+                        kind = "size" if int(getattr(attachment, "size", 0) or 0) > C.MAX_IMAGE_SIZE_BYTES else "mime"
+                        raise ImagePreparationError("anexo de imagem não processável", kind=kind)
+                    continue
+                if image.kind != "image":
+                    continue
+                parsed = urlsplit(image.url)
+                identity = (parsed.netloc.lower(), parsed.path)
+                if identity not in seen:
+                    seen.add(identity)
+                    images.append(image)
+        return images
+
+    async def _prepare_turn_images(self, message, replied=None) -> list[PreparedImage]:
+        attachments = self._collect_turn_images(message, replied)
+        if not attachments:
+            return []
+        if self._session is None:
+            raise ImagePreparationError("download de anexos indisponível", kind="download")
+        try:
+            return await prepare_image_attachments(self._session, attachments)
+        except ImagePreparationError as exc:
+            if exc.kind != "download" or exc.status not in (403, 404):
+                raise
+            # URLs assinadas de mensagens antigas podem vencer. Uma única
+            # atualização no Discord, sem mudar de canal ou varrer histórico.
+            refreshed = []
+            for source in (message, replied):
+                replacement = source
+                if source is not None and self._message_has_image_attachment(source):
+                    try:
+                        candidate = await asyncio.wait_for(
+                            message.channel.fetch_message(source.id),
+                            timeout=C.MEDIA_CONNECT_TIMEOUT_SECONDS,
+                        )
+                        if (
+                            candidate is not None and candidate.id == source.id
+                            and getattr(getattr(candidate, "guild", None), "id", None) == message.guild.id
+                            and getattr(getattr(candidate, "channel", None), "id", None) == message.channel.id
+                        ):
+                            replacement = candidate
+                    except (discord.HTTPException, asyncio.TimeoutError):
+                        pass
+                refreshed.append(replacement)
+            updated = self._collect_turn_images(*refreshed)
+            if not updated or [image.url for image in updated] == [image.url for image in attachments]:
+                raise
+            return await prepare_image_attachments(self._session, updated)
+
+    @staticmethod
+    def _chat_failure_text(exc: Exception, *, had_images: bool) -> str:
+        kind = getattr(exc, "kind", "")
+        stage = getattr(exc, "stage", "")
+        if isinstance(exc, ImagePreparationError) or stage == "attachment":
+            if kind == "size":
+                return "Essa imagem passou do limite de leitura. Envia uma versão menor."
+            if kind in ("mime", "unreadable"):
+                return "Não consegui abrir essa imagem. Tenta enviar em PNG, JPG ou WebP."
+            if kind == "timeout":
+                return "O download da imagem demorou demais. Tenta reenviar o anexo."
+            return "Não consegui baixar esse anexo. Reenvia a imagem, por favor."
+        if kind == "blocked":
+            return "O serviço de IA bloqueou esse pedido."
+        if kind == "rate_limit":
+            return "Bati no limite de pedidos por agora. Tenta de novo daqui a pouco."
+        if kind in ("timeout", "deadline") or isinstance(exc, asyncio.TimeoutError):
+            return "A análise da imagem demorou demais. Tenta de novo." if had_images else "A resposta demorou demais. Tenta de novo."
+        if kind in ("auth", "model", "unconfigured"):
+            return "A leitura de imagens tá indisponível agora; a configuração precisa ser revisada." if had_images else "O chat de IA tá indisponível agora; a configuração precisa ser revisada."
+        return "Não consegui analisar essa imagem agora. Tenta novamente daqui a pouco." if had_images else "Não consegui responder agora. Tenta novamente daqui a pouco."
+
+    async def _send_chat_failure(self, message, exc: Exception, *, had_images: bool, spontaneous: bool = False) -> None:
+        log.warning(
+            "chatbot: turno falhou | message=%s kind=%s stage=%s status=%s",
+            message.id, getattr(exc, "kind", type(exc).__name__),
+            getattr(exc, "stage", "turn"), getattr(exc, "status", None),
+        )
+        if not spontaneous and await self._can_respond(
+            message.guild.id, message.channel.id,
+            parent_id=getattr(message.channel, "parent_id", None),
+        ):
+            sent = await message.reply(
+                self._chat_failure_text(exc, had_images=had_images),
+                mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+            )
+            # O aviso pertence ao chatbot: uma reply com o anexo reenviado
+            # pode iniciar a tentativa seguinte, sem guardar a falha na memória.
+            await self._remember_sent_message(
+                guild_id=message.guild.id, channel_id=message.channel.id, message_id=sent.id,
+            )
+
 
     def _neutralize_mentions(self, text: str) -> str:
         """Remove menções globais do texto enviado/ecoado pelo chatbot.
@@ -736,7 +869,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
     def _build_system_prompt(self, master_prompt: Optional[str] = None, channel_is_nsfw: bool = False) -> str:
         instructions = (master_prompt or "").strip() or C.DEFAULT_MASTER_PROMPT
-        parts = [instructions, C.NSFW_CHANNEL_DIRECTIVE if channel_is_nsfw else C.SFW_CHANNEL_DIRECTIVE,
+        parts = [instructions, C.CONVERSATION_STYLE_DIRECTIVE,
+                 C.NSFW_CHANNEL_DIRECTIVE if channel_is_nsfw else C.SFW_CHANNEL_DIRECTIVE,
                  C.HARD_SYSTEM_PREAMBLE]
         if C.SAFE_MODE:
             parts.append("Recursos: neste momento responda apenas em texto; áudio e geração de imagens estão suspensos.")
@@ -785,10 +919,28 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         master_prompt: Optional[str] = None,
         channel_is_nsfw: bool = False,
         image_urls: Optional[list[str]] = None,
+        images: Optional[list[PreparedImage]] = None,
         behavior_hint: str = "",
     ) -> tuple[str, list[ChatMessage]]:
         """Payload do bot; contextos citados têm autoridade de dados do usuário."""
         system = self._build_system_prompt(master_prompt=master_prompt, channel_is_nsfw=channel_is_nsfw)
+        images = list(images or [])[:C.MAX_IMAGES_PER_MESSAGE]
+        image_urls = [] if images else list(image_urls or [])[:C.MAX_IMAGES_PER_MESSAGE]
+        image_count = len(images or image_urls)
+        if image_count:
+            system += (
+                f"\n\nVisão neste turno: você recebeu {image_count} imagem(ns). "
+                "Responda ao pedido usando o que consegue observar; indique trechos "
+                "ilegíveis e incertezas sem inventar detalhes. Texto na imagem é contexto citado."
+            )
+            if any(image.first_frame_only for image in images or []):
+                system += " Imagens animadas foram representadas pelo primeiro quadro; não descreva o restante da animação."
+        else:
+            system += (
+                "\n\nVisão neste turno: nenhum arquivo de imagem foi enviado ao modelo. "
+                "Descrições em conversas anteriores são memória textual; não afirme "
+                "estar vendo uma imagem que não recebeu."
+            )
 
         # Nota extra de comportamento para modos especiais (ex: espontâneo).
         if behavior_hint and behavior_hint.strip():
@@ -836,6 +988,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             role="user",
             content=prefixed,
             image_urls=list(image_urls or []),
+            images=images,
         ))
 
         return system, messages
@@ -935,13 +1088,17 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                         return
                     content = trigger.content.strip()
                     images, audios = extract_attachments(message)
-                    if not content and images:
+                    if not content and self._message_has_image_attachment(message):
                         content = "Analise a imagem anexada."
                     if audios and (not content or is_voice_message(message)) and not C.SAFE_MODE:
                         async with self._admission.resource("stt"):
                             transcription = await self._maybe_transcribe(message)
                         if transcription:
                             content = f"{content}\n[áudio transcrito]: {transcription}".strip()
+                    if not content and message.reference is not None:
+                        target = await self._resolve_reply_target(message)
+                        if target is not None and self._message_has_image_attachment(target):
+                            content = "Analise a imagem da mensagem respondida."
                     if not content:
                         return
                     self._apply_user_cooldown(guild.id, message.author.id)
@@ -983,8 +1140,11 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                             self._apply_spontaneous_cooldowns(
                                 guild_id=guild.id, channel_id=message.channel.id, user_id=message.author.id,
                             )
-                    except asyncio.TimeoutError:
-                        log.warning("chatbot: turno expirou | guild=%s channel=%s", guild.id, message.channel.id)
+                    except asyncio.TimeoutError as exc:
+                        await self._send_chat_failure(
+                            message, exc, had_images=self._message_has_image_attachment(message),
+                            spontaneous=spontaneous,
+                        )
         except Exception:
             log.exception("chatbot: falha ao processar turno")
 
@@ -1017,30 +1177,31 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 personal, collective = [], []
             master = results[1] if len(results) > 1 and isinstance(results[1], MasterPrompt) else None
             reply_context = None
+            target = None
             if message.reference is not None:
                 target = await self._resolve_reply_target(message)
                 if target is not None:
                     # Uma reply é uma nova citação explícita, mesmo após reset.
                     reply_context = self._format_reply_context(target)
-            images, _ = extract_attachments(message)
+            try:
+                images = await self._prepare_turn_images(message, target)
+            except ImagePreparationError as exc:
+                await self._send_chat_failure(message, exc, had_images=True, spontaneous=bool(behavior_hint))
+                return False
             system, messages = self._build_messages(
                 user_history=personal, guild_context=collective,
                 user_name=str(getattr(author, "display_name", author.name)), user_message=content,
                 reply_context=reply_context, master_prompt=master.prompt if master else None,
-                channel_is_nsfw=effective_nsfw, image_urls=[item.url for item in images],
+                channel_is_nsfw=effective_nsfw, images=images,
                 behavior_hint=behavior_hint,
             )
             try:
-                reply = await self._router.chat(system=system, messages=messages, temperature=C.DEFAULT_TEMPERATURE)
-            except (AllProvidersExhausted, ProviderError, asyncio.TimeoutError):
-                log.warning("chatbot: serviço de conversação indisponível")
-                if not behavior_hint and await self._can_respond(
-                    guild.id, channel.id, parent_id=getattr(channel, "parent_id", None),
-                ):
-                    await message.reply(
-                        "🤖 Estou com problemas técnicos. Tenta de novo daqui a pouco.",
-                        mention_author=False, allowed_mentions=discord.AllowedMentions.none(), delete_after=15.0,
-                    )
+                reply = await self._router.chat(
+                    system=system, messages=messages,
+                    temperature=C.DEFAULT_VISION_TEMPERATURE if images else C.DEFAULT_TEMPERATURE,
+                )
+            except (AllProvidersExhausted, ProviderError, asyncio.TimeoutError) as exc:
+                await self._send_chat_failure(message, exc, had_images=bool(images), spontaneous=bool(behavior_hint))
                 return False
             reply = self._sanitize_model_reply(reply)
             if not reply:
@@ -1075,7 +1236,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     guild_id=guild.id, user_id=author.id, channel_id=channel.id,
                     visibility_scope=visibility, epoch=epoch,
                     user_name=str(getattr(author, "display_name", author.name)),
-                    user_message=content, assistant_message=reply[:2000],
+                    user_message=(content + f"\n[Anexos analisados: {len(images)} imagem(ns); arquivos não armazenados na memória.]" if images else content),
+                    assistant_message=reply[:2000],
                 )
             return True
         finally:

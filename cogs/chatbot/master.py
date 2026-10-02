@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from . import constants as C
@@ -96,6 +96,34 @@ class MasterPromptStore:
 
         doc = await self._coll.find_one({"type": C.DOC_TYPE_MASTER})
         mp = MasterPrompt.from_doc(doc) if doc else MasterPrompt.default()
+
+        # Atualiza somente padrões antigos conhecidos. Um prompt personalizado
+        # (mesmo nunca editado segundo os metadados) continua intacto. O filtro
+        # condicional evita sobrescrever uma edição feita durante este get().
+        if doc and mp.prompt in C.LEGACY_DEFAULT_MASTER_PROMPTS:
+            try:
+                result = await self._coll.update_one(
+                    {"type": C.DOC_TYPE_MASTER, "prompt": mp.prompt},
+                    {"$set": {
+                        "schema_version": C.CHATBOT_SCHEMA_VERSION,
+                        "prompt": C.DEFAULT_MASTER_PROMPT,
+                    }},
+                    upsert=False,
+                )
+                if result.matched_count:
+                    mp = replace(mp, prompt=C.DEFAULT_MASTER_PROMPT)
+                else:
+                    # Outro editor venceu a corrida, ou o documento foi
+                    # removido. Releia em vez de retornar o padrão atualizado.
+                    current = await self._coll.find_one({"type": C.DOC_TYPE_MASTER})
+                    mp = MasterPrompt.from_doc(current) if current else MasterPrompt.default()
+            except Exception as exc:
+                # Falha nesta melhoria não interrompe a conversa nem apaga
+                # instruções/memória. O próximo refresh tenta de novo.
+                log.warning(
+                    "Não foi possível atualizar o prompt padrão do chatbot (%s)",
+                    type(exc).__name__,
+                )
 
         self._cached = mp
         self._cache_ts = now
