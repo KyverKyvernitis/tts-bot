@@ -13,6 +13,13 @@ def _channel_ids(values: Iterable[int]) -> tuple[int, ...]:
     return tuple(dict.fromkeys(int(value) for value in values if int(value) > 0))
 
 
+def _audio_number(value, *, default: int, maximum: int) -> int:
+    try:
+        return max(0, min(maximum, int(value)))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 @dataclass(frozen=True)
 class GuildChatbotConfig:
     guild_id: int
@@ -26,6 +33,8 @@ class GuildChatbotConfig:
     voice_actions_enabled: bool = True
     moderation_actions_enabled: bool = True
     action_staff_role_ids: tuple[int, ...] = ()
+    audio_reply_chance_percent: int = C.AUDIO_REPLY_DEFAULT_CHANCE_PERCENT
+    audio_reply_cooldown_seconds: int = C.AUDIO_REPLY_DEFAULT_COOLDOWN_SECONDS
     schema_version: int = C.CHATBOT_SCHEMA_VERSION
     updated_at: float = 0.0
     updated_by: int = 0
@@ -66,6 +75,10 @@ class GuildChatbotConfig:
             voice_actions_enabled=bool(doc.get("voice_actions_enabled", True)),
             moderation_actions_enabled=bool(doc.get("moderation_actions_enabled", True)),
             action_staff_role_ids=_channel_ids(doc.get("action_staff_role_ids") or ()),
+            audio_reply_chance_percent=_audio_number(doc.get("audio_reply_chance_percent"),
+                default=C.AUDIO_REPLY_DEFAULT_CHANCE_PERCENT, maximum=100),
+            audio_reply_cooldown_seconds=_audio_number(doc.get("audio_reply_cooldown_seconds"),
+                default=C.AUDIO_REPLY_DEFAULT_COOLDOWN_SECONDS, maximum=C.AUDIO_REPLY_MAX_COOLDOWN_SECONDS),
             schema_version=int(doc.get("schema_version") or C.CHATBOT_SCHEMA_VERSION),
             updated_at=float(doc.get("updated_at") or 0.0),
             updated_by=int(doc.get("updated_by") or 0),
@@ -86,6 +99,8 @@ class GuildChatbotConfig:
             "voice_actions_enabled": self.voice_actions_enabled,
             "moderation_actions_enabled": self.moderation_actions_enabled,
             "action_staff_role_ids": list(self.action_staff_role_ids),
+            "audio_reply_chance_percent": self.audio_reply_chance_percent,
+            "audio_reply_cooldown_seconds": self.audio_reply_cooldown_seconds,
             "updated_at": self.updated_at,
             "updated_by": self.updated_by,
         }
@@ -156,7 +171,8 @@ class ConfigStore:
         # de ações salvas por outra pessoa enquanto o formulário estava aberto.
         document = config.to_doc()
         for key in ("actions_enabled", "audio_actions_enabled", "voice_actions_enabled",
-                    "moderation_actions_enabled", "action_staff_role_ids"):
+                    "moderation_actions_enabled", "action_staff_role_ids",
+                    "audio_reply_chance_percent", "audio_reply_cooldown_seconds"):
             document.pop(key)
         await self._coll.update_one(
             {"type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": config.guild_id},
@@ -181,6 +197,30 @@ class ConfigStore:
                 "voice_actions_enabled": bool(voice_actions_enabled),
                 "moderation_actions_enabled": bool(moderation_actions_enabled),
                 "action_staff_role_ids": list(_channel_ids(action_staff_role_ids)),
+                "updated_at": now, "updated_by": int(updated_by),
+            }, "$setOnInsert": {"created_at": now, "schema_version": C.CHATBOT_SCHEMA_VERSION}},
+            upsert=True,
+        )
+        return await self.get_config(guild_id, fresh=True)
+
+    async def save_audio_config(
+        self, *, guild_id: int, audio_reply_chance_percent: int,
+        audio_reply_cooldown_seconds: int, updated_by: int,
+    ) -> GuildChatbotConfig:
+        chance, cooldown = int(audio_reply_chance_percent), int(audio_reply_cooldown_seconds)
+        if not 0 <= chance <= 100:
+            raise ValueError("A chance de áudio deve ser um número inteiro de 0 a 100.")
+        if not 0 <= cooldown <= C.AUDIO_REPLY_MAX_COOLDOWN_SECONDS:
+            raise ValueError("O intervalo de áudio deve ser um número inteiro de 0 a 3600 segundos.")
+        now = time.time()
+        # Atualização parcial: abrir este painel não deve reviver ações ou
+        # canais desativados em outro formulário enquanto ele estava aberto.
+        await self._coll.update_one(
+            {"type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": int(guild_id)},
+            {"$set": {
+                "type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": int(guild_id),
+                "audio_reply_chance_percent": chance,
+                "audio_reply_cooldown_seconds": cooldown,
                 "updated_at": now, "updated_by": int(updated_by),
             }, "$setOnInsert": {"created_at": now, "schema_version": C.CHATBOT_SCHEMA_VERSION}},
             upsert=True,

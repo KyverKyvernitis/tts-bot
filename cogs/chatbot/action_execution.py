@@ -4,12 +4,17 @@ from __future__ import annotations
 import asyncio
 import inspect
 import io
+import logging
 from dataclasses import dataclass
 
 import discord
 
-from .action_policy import ActionDenied, _audio_channel, _fresh_member, validate_action
+from .action_policy import ActionDenied, _audio_channel, _enabled, _fresh_member, _origin_channel, validate_action
 from .audio import DEFAULT_TTS_VOICE
+from . import constants as C
+from .memory import MemoryEpoch
+
+log = logging.getLogger(__name__)
 
 
 class ActionExecutionUncertain(ActionDenied):
@@ -28,6 +33,29 @@ def _request_id(doc: dict) -> str:
 
 async def _await(value):
     return await value if inspect.isawaitable(value) else value
+
+
+async def _validate_mirror_context(bot, doc: dict, actor_id: int) -> None:
+    await validate_action(bot, doc, actor_id)
+    cog = bot.get_cog("Chatbot")
+    store = getattr(cog, "_config", None)
+    if C.SAFE_MODE or store is None:
+        raise ActionDenied("A reprodução do chatbot foi desativada.")
+    config = await store.get_config(int(doc["guild_id"]), fresh=True)
+    voice_enabled = config.get("voice_actions_enabled", True) if isinstance(config, dict) else getattr(config, "voice_actions_enabled", True)
+    if not voice_enabled or not _enabled(config, "send_audio"):
+        raise ActionDenied("A reprodução do chatbot foi desativada.")
+    guild = bot.get_guild(int(doc["guild_id"]))
+    if guild is None:
+        raise ActionDenied("O servidor da conversa não está disponível.")
+    _origin_channel(guild, doc, config)
+    epoch = doc.get("memory_epoch")
+    if epoch is not None:
+        memory = getattr(cog, "_memory", None)
+        if memory is None or await memory.capture_epoch(int(doc["guild_id"]), int(doc["requester_id"])) != MemoryEpoch(**epoch):
+            raise ActionDenied("A memória da conversa foi reiniciada.")
+    if C.SAFE_MODE:
+        raise ActionDenied("A reprodução do chatbot foi desativada.")
 
 
 async def execute_action(bot, doc: dict, *, actor_id: int) -> ExecutionResult:
@@ -94,6 +122,28 @@ async def execute_action(bot, doc: dict, *, actor_id: int) -> ExecutionResult:
             raise ActionExecutionUncertain("Não consegui confirmar o envio do áudio. Verifique o canal antes de tentar novamente.") from None
         finally:
             attachment.close()
+        cog = bot.get_cog("Chatbot")
+        record_audio = getattr(cog, "record_audio_reply_sent", None)
+        if callable(record_audio):
+            try:
+                await asyncio.wait_for(record_audio(guild_id=guild.id, channel_id=channel.id), timeout=2.0)
+            except Exception as exc:
+                log.warning("[chatbot] intervalo entre áudios não atualizado | guild=%s erro_tipo=%s", guild.id, type(exc).__name__)
+        mirror = getattr(tts, "chatbot_mirror_audio", None)
+        if callable(mirror):
+            async def before_mirror_effect():
+                await _validate_mirror_context(bot, doc, actor_id)
+            try:
+                await asyncio.wait_for(mirror(
+                    guild_id=guild.id, user_id=int(doc["requester_id"]),
+                    text_channel_id=channel.id, audio=audio, request_id=_request_id(doc),
+                    before_effect=before_mirror_effect,
+                ), timeout=8.0)
+            except Exception as exc:
+                # O envio já foi confirmado pelo Discord. A cópia opcional
+                # para a call não deve virar falha nem repetir o arquivo.
+                log.warning("[chatbot] cópia de áudio para call omitida | guild=%s request=%s erro_tipo=%s",
+                            guild.id, _request_id(doc), type(exc).__name__)
         return ExecutionResult("Áudio enviado.", message_id=int(sent.id))
     if action == "ban_member":
         target = await _fresh_member(guild, int(payload["target_id"]))

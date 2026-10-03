@@ -133,6 +133,10 @@ MAX_VISION_INPUT_TOTAL_BYTES = 40 * 1024 * 1024
 MAX_VISION_TOTAL_BYTES = 12 * 1024 * 1024
 MAX_GENERATED_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_TTS_OUTPUT_BYTES = 8 * 1024 * 1024
+# Formato da resposta: independente da chance de participar espontaneamente.
+AUDIO_REPLY_DEFAULT_CHANCE_PERCENT = 20
+AUDIO_REPLY_DEFAULT_COOLDOWN_SECONDS = 60
+AUDIO_REPLY_MAX_COOLDOWN_SECONDS = 3600
 SUPPORTED_IMAGE_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
 SUPPORTED_AUDIO_MIMES = {
     "audio/ogg", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a",
@@ -148,6 +152,7 @@ MEDIA_READ_TIMEOUT_SECONDS = 25.0
 # Máximo de tokens na resposta do modelo.
 MAX_RESPONSE_TOKENS = 500
 MAX_VISION_RESPONSE_TOKENS = 1000
+MAX_ACTION_RESPONSE_TOKENS = 2000
 MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
 
 # -----------------------------------------------------------------------------

@@ -309,7 +309,7 @@ class ActionConfigModalTests(unittest.IsolatedAsyncioTestCase):
             check_authorized=AsyncMock(return_value=True),
         )
         self.assertEqual([button.label for button in view.children], [
-            "Editar configuração", "Configurar ações",
+            "Editar configuração", "Configurar ações", "Configurar áudios",
         ])
         interaction = _interaction()
 

@@ -98,6 +98,9 @@ class ChatbotCommandsMixin:
             f"(áudio: {'sim' if config.audio_actions_enabled else 'não'}, "
             f"calls: {'sim' if config.voice_actions_enabled else 'não'}, "
             f"banimentos: {'sim' if config.moderation_actions_enabled else 'não'})\n\n"
+            f"**Respostas em áudio:** {config.audio_reply_chance_percent}% "
+            f"(intervalo por canal: {config.audio_reply_cooldown_seconds}s)\n"
+            "Pedidos de áudio são diretos; na call atual, o mesmo áudio também é reproduzido.\n\n"
             "Para conversar, mencione o bot ou responda a uma mensagem do chatbot."
         )
 
@@ -112,6 +115,7 @@ class ChatbotCommandsMixin:
                 requester_id=interaction.user.id, current_config=config,
                 on_submit_config=self._handle_config_modal,
                 on_submit_actions=self._handle_actions_modal,
+                on_submit_audio=self._handle_audio_modal,
                 check_authorized=self._config_staff_check,
             ),
         )
@@ -146,6 +150,20 @@ class ChatbotCommandsMixin:
             action_staff_role_ids=config.action_staff_role_ids, updated_by=interaction.user.id,
         )
         await _send(interaction, "Ações salvas.\n\n" + self._format_config(saved))
+
+    async def _handle_audio_modal(self, interaction: discord.Interaction, config: GuildChatbotConfig):
+        if not await self._config_staff_check(interaction):
+            return
+        if interaction.guild.id != config.guild_id:
+            await _send(interaction, "Esta configuração pertence a outro servidor.")
+            return
+        saved = await self._config.save_audio_config(
+            guild_id=interaction.guild.id,
+            audio_reply_chance_percent=config.audio_reply_chance_percent,
+            audio_reply_cooldown_seconds=config.audio_reply_cooldown_seconds,
+            updated_by=interaction.user.id,
+        )
+        await _send(interaction, "Áudios salvos.\n\n" + self._format_config(saved))
 
     async def _do_memoria_reset_server(self, interaction: discord.Interaction):
         if not await self._config_staff_check(interaction):

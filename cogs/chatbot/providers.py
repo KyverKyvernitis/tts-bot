@@ -199,16 +199,28 @@ async def _http_error(response: aiohttp.ClientResponse) -> ProviderError:
     return ProviderError("provider rejeitou a requisição", status=status, kind=kind)
 
 
-def _output_tokens(messages: list[ChatMessage]) -> int:
-    if any(message.images or message.image_urls for message in messages):
-        return getattr(C, "MAX_VISION_RESPONSE_TOKENS", C.MAX_RESPONSE_TOKENS)
-    return C.MAX_RESPONSE_TOKENS
+def _output_tokens(messages: list[ChatMessage], *, actions: tuple[str, ...] = ()) -> int:
+    tokens = (
+        getattr(C, "MAX_VISION_RESPONSE_TOKENS", C.MAX_RESPONSE_TOKENS)
+        if any(message.images or message.image_urls for message in messages)
+        else C.MAX_RESPONSE_TOKENS
+    )
+    # Quatro argumentos de ferramentas precisam de espaço além da resposta
+    # curta habitual. Sem ferramentas, preservamos o orçamento anterior.
+    return max(tokens, C.MAX_ACTION_RESPONSE_TOKENS) if actions else tokens
 
 
 def _action_reply(
     text: str, calls: list[tuple[object, object]], actions: tuple[str, ...],
     *, provider: str, model: str, finish_reason: Optional[str],
 ) -> ChatReply:
+    if calls and finish_reason in {"length", "MAX_TOKENS"}:
+        # Um prefixo JSON válido não prova que toda a sequência foi recebida.
+        # Nunca preparar uma cadeia parcial porque a API truncou sua saída.
+        raise ProviderError(
+            "provider truncou as propostas", kind="invalid_response", stage="output",
+            finish_reason=finish_reason,
+        )
     try:
         proposals = parse_proposals(calls, actions)
     except InvalidActionProposal as exc:
@@ -244,7 +256,7 @@ class _GroqClient:
             "messages": [{"role": "system", "content": system}]
             + [message.to_openai_payload() for message in messages],
             "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-            "max_completion_tokens": _output_tokens(messages),
+            "max_completion_tokens": _output_tokens(messages, actions=actions),
             "stream": False,
         }
         if actions:
@@ -386,7 +398,7 @@ class _GeminiClient:
             "systemInstruction": {"parts": [{"text": system}]},
             "generationConfig": {
                 "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-                "maxOutputTokens": _output_tokens(messages),
+                "maxOutputTokens": _output_tokens(messages, actions=actions),
             },
         }
         if actions:

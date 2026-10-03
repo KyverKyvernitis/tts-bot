@@ -503,6 +503,10 @@ class QueueItem:
     chatbot_no_auto_connect: bool = field(default=False, repr=False, compare=False)
     chatbot_playback_started: bool = field(default=False, repr=False, compare=False)
     chatbot_before_effect: Callable[[], Awaitable[None]] | None = field(default=None, repr=False, compare=False)
+    # Cópia de um anexo já enviado: nunca passa por síntese, cache ou handoff.
+    chatbot_mirror_audio: bytes | None = field(default=None, repr=False, compare=False)
+    chatbot_mirror_session: Any = field(default=None, repr=False, compare=False)
+    chatbot_is_mirror: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -783,6 +787,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
 
 
     def _estimate_playback_timeout(self, item: QueueItem | None = None) -> float:
+        if bool(getattr(item, "chatbot_is_mirror", False)):
+            # A cópia não carrega a transcrição privada no item da fila. Use
+            # o teto já existente, em vez do tamanho do rótulo do anexo.
+            return TTS_PLAYBACK_TIMEOUT_MAX_SECONDS
         text_len = len((getattr(item, "text", "") or "").strip()) if item is not None else 0
         timeout = TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + (min(text_len, 1600) * TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS)
         return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, timeout))
@@ -5912,7 +5920,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 if item is not None and getattr(item, "chatbot_no_auto_connect", False):
                     before_effect = getattr(item, "chatbot_before_effect", None)
                     if before_effect is not None:
-                        await before_effect()
+                        allowed = await before_effect()
+                        if getattr(item, "chatbot_is_mirror", False) and allowed is False:
+                            raise ValueError("O contexto do áudio mudou antes da reprodução.")
                     self._validate_chatbot_voice_item(item, vc)
                 play_call_started_at = time.monotonic()
                 setattr(self, "_tts_active_playbacks", int(getattr(self, "_tts_active_playbacks", 0) or 0) + 1)
@@ -6429,6 +6439,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
         prefetched_audio_task: Optional[asyncio.Task] = None
 
         async def _report_failure(item: QueueItem, reason_code: str, error: Exception | None = None) -> None:
+            # O arquivo já foi entregue no chat; falhar a cópia para a call não
+            # transforma o envio em erro nem publica avisos/transcrições.
+            if getattr(item, "chatbot_is_mirror", False):
+                return
             notifier = getattr(self, "_notify_tts_failure", None)
             if not callable(notifier):
                 return
@@ -6503,6 +6517,12 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     state.active_item = item
                     self._snapshot_tts_item(item)
                     if item.generation != generation or state.generation != generation:
+                        continue
+                    if getattr(item, "chatbot_is_mirror", False):
+                        # A fila mantém a ordem junto do TTS comum. Esta cópia
+                        # conserva a conexão capturada e os bytes do anexo, sem
+                        # rotear música, desconectar ou sintetizar novamente.
+                        await self._play_chatbot_mirror_item(item)
                         continue
                     if hasattr(self, "_should_block_for_voice_bot"):
                         target_channel = guild.get_channel(item.channel_id) or self.bot.get_channel(item.channel_id)
@@ -6715,6 +6735,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         prepared_playback.cleanup()
                     await self._cancel_remote_tts_request(item)
                     self._release_item_audio(item)
+                    if getattr(item, "chatbot_is_mirror", False):
+                        item.chatbot_mirror_audio = None
+                        item.chatbot_mirror_session = None
+                        item.chatbot_before_effect = None
                     if state.active_item is item:
                         state.active_item = None
                     if arrival_prefetch_task is not None:

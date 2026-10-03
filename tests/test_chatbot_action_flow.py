@@ -105,10 +105,9 @@ class _Supervisor:
         self.jobs = []
 
     def create(self, coroutine, *, name):
-        # Os executores são agendados somente depois do vínculo persistido.
-        assert self.collection.docs[-1]["state"] in {"pending", "executing"}
-        assert self.collection.docs[-1]["message_id"] == 60
-        assert any(event[0] == "reply_sent" for event in self.events)
+        # Áudio usa vínculo interno; ações privilegiadas exigem cartão próprio.
+        assert any(doc["state"] in {"created", "pending", "executing"}
+                   for doc in self.collection.docs)
         self.events.append(("scheduled", name))
         self.jobs.append(coroutine)
 
@@ -145,12 +144,20 @@ def world(monkeypatch):
     channel = MagicMock(spec=discord.TextChannel)
     channel.id, channel.guild, channel.nsfw = 30, guild, False
     channel.permissions_for.return_value = SimpleNamespace(view_channel=True, send_messages=True, attach_files=True)
-    channel.send = AsyncMock(return_value=SimpleNamespace(id=88))
-    card = SimpleNamespace(id=60, guild=guild, author=members[999], edit=AsyncMock())
+    card = SimpleNamespace(id=60, guild=guild, author=members[999], edit=AsyncMock(), delete=AsyncMock())
+
+    async def send(*args, **kwargs):
+        if "file" in kwargs:
+            events.append(("audio_sent", ""))
+            return SimpleNamespace(id=88)
+        events.append(("card_sent", kwargs.get("content", args[0] if args else "")))
+        return card
+
+    channel.send = AsyncMock(side_effect=send)
     channel.fetch_message = AsyncMock(return_value=card)
     channels = {20: voice, 30: channel}
     guild.get_channel = guild.get_channel_or_thread = channels.get
-    config = GuildChatbotConfig(10, enabled=True, channel_ids=(30,))
+    config = GuildChatbotConfig(10, enabled=True, channel_ids=(30,), audio_reply_chance_percent=0)
     tts = SimpleNamespace(
         synthesize_chatbot_attachment=AsyncMock(return_value=b"mp3 bytes"),
         chatbot_join_voice=AsyncMock(return_value={"ok": True, "status": "executed"}),
@@ -170,7 +177,7 @@ def world(monkeypatch):
             MemoryEntry("user", "assunto anterior", user_id=1),
             MemoryEntry("assistant", "resposta anterior", user_id=1),
         ], [])),
-        capture_epoch=AsyncMock(return_value=MemoryEpoch(9, 9, 9)), append_turn=AsyncMock(),
+        capture_epoch=AsyncMock(return_value=original_epoch), append_turn=AsyncMock(),
     )
     cog._config = SimpleNamespace(get_config=AsyncMock(return_value=config))
     cog._router = SimpleNamespace(chat=AsyncMock(return_value=ChatReply("oi")))
@@ -219,7 +226,9 @@ def _interaction(world, actor):
 
 
 def _public_output(world):
-    output = [world.message.reply.await_args.args[0]]
+    output = [call.args[0] or "" for call in world.message.reply.await_args_list]
+    output.extend(call.kwargs.get("content", call.args[0] if call.args else "")
+                  for call in world.channel.send.await_args_list if "file" not in call.kwargs)
     output.extend(call.kwargs.get("content", "") for call in world.card.edit.await_args_list)
     return "\n".join(output)
 
@@ -230,6 +239,7 @@ async def test_native_ban_proposal_becomes_bound_button_and_only_staff_executes(
         ActionProposal("ban_member", "m1", reason="spam repetido", ask_permission=False),
     ))
     assert await world.cog._generate_and_send(world.message, "peça para banir esse membro")
+    await world.cog._supervisor.drain()  # publica somente o cartão, sem executar
     options = world.cog._router.chat.await_args.kwargs
     assert set(options["actions"]) == {"send_audio", "speak_voice", "ban_member"}
     assert options["target_refs"] == ("autor", "m1")
@@ -240,9 +250,10 @@ async def test_native_ban_proposal_becomes_bound_button_and_only_staff_executes(
             request["requester_id"], request["message_id"]) == (10, 30, 50, 1, 60)
     assert request["payload"]["target_id"] == 3
     assert request["ask_permission"] and request["state"] == "pending"
-    view = world.message.reply.await_args.kwargs["view"]
+    assert "view" not in world.message.reply.await_args.kwargs
+    view = world.channel.send.await_args.kwargs["view"]
     assert view.is_persistent()
-    assert [button.label for button in view.children] == ["Aprovar banimento", "Rejeitar"]
+    assert [button.label for button in view.children] == ["Pode banir", "Não"]
     assert request["request_id"] in view.children[0].custom_id
     assert "spam repetido" in _public_output(world)
     world.members[3].ban.assert_not_awaited()
@@ -259,36 +270,112 @@ async def test_native_ban_proposal_becomes_bound_button_and_only_staff_executes(
     world.members[3].ban.assert_awaited_once()
     assert world.members[3].ban.await_args.kwargs["delete_message_seconds"] == 0
     assert request["approved_by"] == 2 and request["state"] == "succeeded"
-    assert "Banimento concluído" in _public_output(world)
+    world.card.delete.assert_awaited_once()
+    staff.followup.send.assert_not_awaited()
+    assert staff.response.defer.await_args.kwargs.get("thinking") is False
     world.channel.history.assert_not_called()
     world.channel.webhooks.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_two_native_bans_need_separate_cards_and_staff_approval_in_order(world):
+    world.members[4] = _member(world.guild, 4, rank=2)
+    world.message.mentions.append(world.members[4])
+    cards = [world.card, SimpleNamespace(id=61, guild=world.guild,
+             author=world.members[999], edit=AsyncMock(), delete=AsyncMock())]
+    world.channel.send.side_effect = cards
+    world.channel.fetch_message.side_effect = lambda identifier: next(
+        card for card in cards if card.id == identifier)
+    world.cog._router.chat.return_value = ChatReply("", (
+        ActionProposal("ban_member", "m1", reason="spam repetido"),
+        ActionProposal("ban_member", "m2", reason="flood repetido"),
+    ))
+    assert await world.cog._generate_and_send(world.message, "peça para banir os dois")
+    await world.cog._supervisor.drain()
+    first, second = world.collection.docs
+    assert [first["state"], second["state"]] == ["pending", "blocked"]
+    assert world.channel.send.await_count == 1
+    first_click = _interaction(world, 2)
+    await world.cog._actions.handle_interaction(first_click, first["request_id"], approve=True)
+    await world.cog._supervisor.drain()
+    world.members[3].ban.assert_awaited_once()
+    world.members[4].ban.assert_not_awaited()
+    assert [first["state"], second["state"]] == ["succeeded", "pending"]
+    assert second["message_id"] == 61 and world.channel.send.await_count == 2
+    # Repetir o clique antigo não aprova o segundo alvo.
+    await world.cog._actions.handle_interaction(_interaction(world, 2), first["request_id"], approve=True)
+    world.members[4].ban.assert_not_awaited()
+    second_click = _interaction(world, 2)
+    second_click.message = cards[1]
+    await world.cog._actions.handle_interaction(second_click, second["request_id"], approve=True)
+    await world.cog._supervisor.drain()
+    world.members[4].ban.assert_awaited_once()
+    assert second["state"] == "succeeded"
+    for card in cards:
+        card.delete.assert_awaited_once()
+    first_click.followup.send.assert_not_awaited()
+    second_click.followup.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_join_then_audio_waits_for_staff_and_mirrors_exact_attachment_without_second_permission(world):
+    world.guild.voice_client = None
+    world.members[999].voice = None
+    payload = b"audio unico gerado para chat e call"
+    world.tts.synthesize_chatbot_attachment.return_value = payload
+    world.tts.chatbot_mirror_audio = AsyncMock(return_value={"ok": True, "status": "enqueued"})
+
+    async def join(**kwargs):
+        await kwargs["before_effect"]()
+        world.guild.voice_client = SimpleNamespace(channel=world.voice)
+        world.members[999].voice = SimpleNamespace(channel=world.voice)
+        return {"ok": True, "status": "executed"}
+
+    world.tts.chatbot_join_voice.side_effect = join
+    world.cog._router.chat.return_value = ChatReply("texto que não deve antecipar a fala", (
+        ActionProposal("join_voice", "autor"),
+        ActionProposal("send_audio", text="Cheguei, bora conversar."),
+    ))
+    assert await world.cog._generate_and_send(world.message, "entre na call e mande um áudio")
+    await world.cog._supervisor.drain()
+    first, second = world.collection.docs
+    assert [first["state"], second["state"]] == ["pending", "blocked"]
+    world.tts.synthesize_chatbot_attachment.assert_not_awaited()
+    world.tts.chatbot_join_voice.assert_not_awaited()
+    world.message.reply.assert_not_awaited()
+    staff = _interaction(world, 2)
+    await world.cog._actions.handle_interaction(staff, first["request_id"], approve=True)
+    await world.cog._supervisor.drain()
+    assert [first["state"], second["state"]] == ["succeeded", "succeeded"]
+    assert world.channel.send.await_count == 2  # um pedido e um arquivo
+    world.tts.synthesize_chatbot_attachment.assert_awaited_once()
+    world.tts.chatbot_mirror_audio.assert_awaited_once()
+    assert world.tts.chatbot_mirror_audio.await_args.kwargs["audio"] is payload
+    assert second["approved_by"] == world.message.author.id
+    assert not second["ask_permission"] and second["message_id"] == 0
+    staff.followup.send.assert_not_awaited()
+
+
 @pytest.mark.parametrize("action", ["send_audio", "speak_voice"])
 @pytest.mark.asyncio
-async def test_optional_audio_never_shows_speech_or_starts_legacy_tts_before_common_approval(world, action):
+async def test_legacy_audio_permission_flag_is_ignored_without_preview_or_buttons(world, action):
     secret = "FALA PRIVADA QUE NÃO PODE APARECER NA PRÉVIA"
     world.cog._router.chat.return_value = ChatReply(secret, (
         ActionProposal(action, "autor", text=secret, reason=secret, ask_permission=True),
-        ActionProposal("ban_member", "m1", reason=secret),
     ))
     assert await world.cog._generate_and_send(world.message, "responda como preferir")
     assert len(world.collection.docs) == 1
     request = world.collection.docs[0]
     assert request["payload"]["text"] == secret and request["base_reply"] == ""
-    assert request["state"] == "pending"
+    assert request["state"] == "created" and not request["ask_permission"]
     assert secret not in _public_output(world)
-    view = world.message.reply.await_args.kwargs["view"]
-    assert view.is_persistent() and len(view.children) == 2
+    world.message.reply.assert_not_awaited()
+    world.channel.send.assert_not_awaited()
     world.tts.synthesize_chatbot_attachment.assert_not_awaited()
     world.tts.chatbot_speak_voice.assert_not_awaited()
     world.cog._maybe_generate_tts.assert_not_awaited()
-    assert not world.cog._supervisor.jobs
+    assert len(world.cog._supervisor.jobs) == 1
     assert secret not in str(world.cog._memory.append_turn.await_args_list)
-    await view.children[0].callback(_interaction(world, 2))
-    assert request["state"] == "pending"  # Staff não substitui o consentimento do autor.
-    await view.children[0].callback(_interaction(world, 1))
-    assert request["state"] == "executing"
     await world.cog._supervisor.drain()
     adapter = world.tts.synthesize_chatbot_attachment if action == "send_audio" else world.tts.chatbot_speak_voice
     adapter.assert_awaited_once()
@@ -307,10 +394,11 @@ async def test_spontaneous_audio_schedules_after_binding_and_executes_once_witho
     world.cog._router.chat.return_value = ChatReply("", (ActionProposal(action, text=secret),))
     assert await world.cog._generate_and_send(world.message, "oi")
     request = deepcopy(world.collection.docs[0])
-    assert request["state"] == "pending" and not request["ask_permission"]
-    assert world.message.reply.await_args.kwargs["view"] is None
+    assert request["state"] == "created" and not request["ask_permission"]
+    world.message.reply.assert_not_awaited()
+    world.channel.send.assert_not_awaited()
     assert len(world.cog._supervisor.jobs) == 1
-    assert [event[0] for event in world.events[:4]] == ["created", "reply_sent", "pending", "scheduled"]
+    assert "message_id" not in request
     world.tts.synthesize_chatbot_attachment.assert_not_awaited()
     world.tts.chatbot_speak_voice.assert_not_awaited()
     world.cog._maybe_generate_tts.assert_not_awaited()
@@ -319,15 +407,16 @@ async def test_spontaneous_audio_schedules_after_binding_and_executes_once_witho
     adapter = world.tts.synthesize_chatbot_attachment if action == "send_audio" else world.tts.chatbot_speak_voice
     adapter.assert_awaited_once()
     assert world.collection.docs[0]["state"] == "succeeded"
-    assert world.cog._memory.append_turn.await_count == 2
+    assert world.collection.docs[0]["message_id"] == 0
+    assert world.cog._memory.append_turn.await_count == 1
     assert world.cog._memory.append_turn.await_args.kwargs["epoch"] == world.epoch
     assert secret not in _public_output(world)
     if action == "send_audio":
         world.channel.send.assert_awaited_once()
         kwargs = world.channel.send.await_args.kwargs
-        assert "content" not in kwargs and kwargs["reference"].message_id == 60
+        assert "content" not in kwargs and kwargs["reference"].message_id == 50
         assert kwargs["allowed_mentions"].to_dict() == {"parse": []}
-        assert world.cog._message_index.remember.await_count == 2
+        assert world.cog._message_index.remember.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -378,21 +467,22 @@ async def test_denied_optional_audio_reports_safe_host_reason_without_preview_or
 
 
 @pytest.mark.asyncio
-async def test_failed_public_reply_leaves_unbound_request_without_execution(world):
-    world.cog._router.chat.return_value = ChatReply("", (ActionProposal("send_audio", text="fala privada"),))
-    world.message.reply.side_effect = RuntimeError("Discord indisponível")
-    with pytest.raises(RuntimeError):
-        await world.cog._generate_and_send(world.message, "oi")
+async def test_failed_permission_card_does_not_execute_privileged_action(world):
+    world.cog._router.chat.return_value = ChatReply("", (ActionProposal("ban_member", "m1", reason="spam"),))
+    world.channel.send.side_effect = RuntimeError("Discord indisponível")
+    assert await world.cog._generate_and_send(world.message, "oi")
+    await world.cog._supervisor.drain()
     request = world.collection.docs[0]
-    assert request["state"] == "created" and "message_id" not in request
+    assert request["state"] in {"failed", "uncertain", "publishing"} and "message_id" not in request
     assert not world.cog._supervisor.jobs
     world.tts.synthesize_chatbot_attachment.assert_not_awaited()
+    world.members[3].ban.assert_not_awaited()
     world.cog._memory.append_turn.assert_not_awaited()
     world.cog._remove_processing_reaction.assert_awaited_once_with(world.message, "⏳")
 
 
 @pytest.mark.asyncio
-async def test_failed_audio_does_not_put_unheard_speech_into_conversation(world):
+async def test_failed_audio_delivers_text_fallback_and_remembers_only_delivered_text(world):
     secret = "Essa fala nunca foi entregue."
     world.tts.synthesize_chatbot_attachment.return_value = b""
     world.cog._router.chat.return_value = ChatReply("", (ActionProposal("send_audio", text=secret),))
@@ -400,9 +490,10 @@ async def test_failed_audio_does_not_put_unheard_speech_into_conversation(world)
     await world.cog._supervisor.drain()
     assert world.collection.docs[0]["state"] == "failed"
     assert "text" not in world.collection.docs[0]["payload"]
-    assert secret not in str(world.cog._memory.append_turn.await_args_list)
-    assert secret not in _public_output(world)
-    world.channel.send.assert_not_awaited()
+    assert secret in _public_output(world)
+    assert world.channel.send.await_count == 1
+    assert "file" not in world.channel.send.await_args.kwargs
+    assert world.cog._memory.append_turn.await_args.kwargs["assistant_message"] == secret
 
 
 @pytest.mark.asyncio
@@ -483,7 +574,7 @@ async def test_revocation_during_legacy_synthesis_closes_attachment_and_never_se
     world.tts.synthesize_chatbot_attachment.assert_awaited_once()
     assert len(attachments) == 1 and attachments[0].closed_by_cog
     assert world.message.reply.await_args.kwargs["files"] is discord.utils.MISSING
-    assert world.message.reply.await_args.args[0] == "O áudio foi desativado antes do envio."
+    assert world.message.reply.await_args.args[0] == "A resposta que seria sintetizada."
     world.tts._enqueue_tts_item.assert_not_awaited()
     world.channel.send.assert_not_awaited()
     assert not world.collection.docs

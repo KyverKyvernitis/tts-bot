@@ -11,6 +11,7 @@ from pymongo import ReturnDocument
 
 from cogs.chatbot.action_store import (
     ActionStore, DOC_TYPE_ACTION_REQUEST, REQUEST_LIFETIME, RESULT_RETENTION,
+    MAX_PLAN_STEPS, TERMINAL_STATES,
 )
 from cogs.chatbot.db import ensure_indexes
 
@@ -33,6 +34,9 @@ def _matches(doc, query):
             for op, value in expected.items():
                 if op == "$in":
                     if actual not in value:
+                        return False
+                elif op == "$ne":
+                    if actual == value:
                         return False
                 elif actual is _MISSING:
                     return False
@@ -349,6 +353,359 @@ async def test_action_indexes_never_ttl_on_permission_expiry(state):
     assert cleanup["keys"] == [("delete_at", 1)]
     assert cleanup["expireAfterSeconds"] == 0
     assert cleanup["partialFilterExpression"] == {"type": DOC_TYPE_ACTION_REQUEST}
+    plan_lookup = coll.indexes["chatbot_action_plan_lookup"]
+    assert plan_lookup["keys"] == [("type", 1), ("plan_id", 1), ("step_index", 1)]
+    assert plan_lookup["partialFilterExpression"] == {"type": DOC_TYPE_ACTION_REQUEST}
     assert not any(index.get("expireAfterSeconds") == 0 and
                    index.get("partialFilterExpression") == {"type": DOC_TYPE_ACTION_REQUEST} and
                    ("expires_at", 1) in index["keys"] for index in coll.indexes.values())
+
+
+def _plan_data():
+    return [
+        _data(action="join_voice", ask_permission=True,
+              payload={"target_id": 44, "voice_channel_id": 77}),
+        _data(action="speak_voice", ask_permission=False,
+              payload={"text": "Fala privada depois da entrada.", "voice_channel_id": 77}),
+        _data(action="ban_member", ask_permission=True,
+              payload={"target_id": 88, "reason": "Motivo da primeira moderação."}),
+        _data(action="ban_member", ask_permission=True,
+              payload={"target_id": 99, "reason": "Motivo da segunda moderação."}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plan_makes_only_first_step_ready_and_keeps_independent_authorization(state):
+    store, _, clock = state
+    docs = await store.create_plan(_plan_data())
+    assert len(docs) == MAX_PLAN_STEPS
+    assert len({doc["plan_id"] for doc in docs}) == 1
+    assert [doc["state"] for doc in docs] == ["created", "blocked", "blocked", "blocked"]
+    assert [doc["step_index"] for doc in docs] == list(range(4))
+    assert docs[0]["depends_on"] == []
+    assert docs[1]["depends_on"] == [docs[0]["request_id"]]
+    assert [doc["request_id"] for doc in await store.recover_ready()] == [docs[0]["request_id"]]
+    for doc in docs[1:]:
+        assert not await store.bind(doc["request_id"], 66)
+        assert not await store.arm_automatic(doc["request_id"])
+        assert await store.claim(doc["request_id"], **_binding()) is None
+    assert await store.bind(docs[0]["request_id"], 66)
+    entered = await store.claim(docs[0]["request_id"], **_binding(actor_id=111))
+    clock.advance(250)
+    assert await store.finish(docs[0]["request_id"], entered["execution_token"],
+                              state="succeeded", public_result="Entrei na call.")
+    next_doc = await store.get(docs[1]["request_id"])
+    assert next_doc["state"] == "created"
+    assert next_doc["expires_at"] == clock.now + REQUEST_LIFETIME
+    assert "approved_by" not in next_doc and "execution_token" not in next_doc
+    assert (await store.get(docs[2]["request_id"]))["state"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_chain_speech_uses_requester_and_each_ban_gets_its_own_card_and_claim(state):
+    store, _, _ = state
+    docs = await store.create_plan(_plan_data())
+    ids = [doc["request_id"] for doc in docs]
+    assert await store.bind(ids[0], 66)
+    entered = await store.claim(ids[0], **_binding(actor_id=111))
+    assert await store.finish(ids[0], entered["execution_token"],
+                              state="succeeded", public_result="Entrei.")
+    assert await store.arm_automatic(ids[1])
+    assert await store.claim_automatic(ids[1], guild_id=11, channel_id=22, actor_id=111) is None
+    spoken = await store.claim_automatic(ids[1], guild_id=11, channel_id=22, actor_id=44)
+    assert spoken["approved_by"] == 44 and spoken["message_id"] == 0
+    assert await store.finish(ids[1], spoken["execution_token"],
+                              state="succeeded", public_result="Falei na call.")
+    assert not await store.arm_automatic(ids[2])
+    assert await store.claim(ids[2], **_binding()) is None
+    assert await store.bind(ids[2], 67)
+    assert await store.claim(ids[2], **_binding()) is None
+    first_ban = await store.claim(ids[2], **_binding(message_id=67, actor_id=111))
+    assert await store.finish(ids[2], first_ban["execution_token"],
+                              state="succeeded", public_result="Membro banido.")
+    assert (await store.get(ids[3]))["state"] == "created"
+    assert await store.claim(ids[3], **_binding(message_id=67, actor_id=111)) is None
+    assert await store.bind(ids[3], 68)
+    second_ban = await store.claim(ids[3], **_binding(message_id=68, actor_id=222))
+    assert second_ban["approved_by"] == 222
+    assert first_ban["execution_token"] != second_ban["execution_token"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state_name", ["failed", "uncertain", "rejected", "expired"])
+async def test_non_success_cancels_entire_tail_and_purges_all_private_speech(state, state_name):
+    store, _, clock = state
+    docs = await store.create_plan([_data(), _data(), _data(), _data()])
+    ids = [doc["request_id"] for doc in docs]
+    assert await store.bind(ids[0], 66)
+    if state_name == "rejected":
+        assert await store.reject(ids[0], **_binding())
+    elif state_name == "expired":
+        clock.advance(300)
+        await store.expire_pending()
+    else:
+        claimed = await store.claim(ids[0], **_binding())
+        assert await store.finish(ids[0], claimed["execution_token"],
+                                  state=state_name, public_result="Não concluído.")
+    persisted = [await store.get(rid) for rid in ids]
+    assert [doc["state"] for doc in persisted] == [state_name, "cancelled", "cancelled", "cancelled"]
+    assert "cancelled" in TERMINAL_STATES
+    assert all("text" not in doc["payload"] for doc in persisted)
+    assert await store.recover_ready() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["send_audio", "speak_voice"])
+async def test_automatic_audio_claim_is_once_bound_to_requester_and_requires_no_card(state, action):
+    store, _, _ = state
+    doc = await store.create(_data(action=action, ask_permission=False))
+    rid = doc["request_id"]
+    assert await store.claim_automatic(rid, guild_id=11, channel_id=22, actor_id=44) is None
+    assert await store.arm_automatic(rid)
+    assert not await store.arm_automatic(rid)
+    assert await store.pending() == []
+    assert await store.claim(rid, **_binding(message_id=0)) is None
+    for wrong in ({"guild_id": 99}, {"channel_id": 99}, {"actor_id": 99}, {"actor_id": 0}):
+        scope = {"guild_id": 11, "channel_id": 22, "actor_id": 44, **wrong}
+        assert await store.claim_automatic(rid, **scope) is None
+    claims = await asyncio.gather(*(
+        store.claim_automatic(rid, guild_id=11, channel_id=22, actor_id=44)
+        for _ in range(12)
+    ))
+    winners = [value for value in claims if value is not None]
+    assert len(winners) == 1 and winners[0]["message_id"] == 0
+    assert await store.finish(rid, winners[0]["execution_token"],
+                              state="succeeded", public_result="Áudio enviado.")
+    assert "text" not in (await store.get(rid))["payload"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action,asks", [("ban_member", False), ("join_voice", False),
+                                        ("send_audio", True), ("speak_voice", True)])
+async def test_automatic_claim_never_arms_privileged_or_permission_requested_actions(state, action, asks):
+    store, _, _ = state
+    doc = await store.create(_data(action=action, ask_permission=asks))
+    assert not await store.arm_automatic(doc["request_id"])
+    assert await store.claim_automatic(doc["request_id"], guild_id=11, channel_id=22,
+                                       actor_id=44) is None
+
+
+@pytest.mark.asyncio
+async def test_restart_recovers_pending_auto_but_never_executing_or_completed(state):
+    store, coll, clock = state
+    doc = await store.create(_data(ask_permission=False))
+    rid = doc["request_id"]
+    assert await store.arm_automatic(rid)
+    restored = ActionStore(coll, clock=clock)
+    assert [doc["request_id"] for doc in await restored.recover_ready()] == [rid]
+    claimed = await restored.claim_automatic(rid, guild_id=11, channel_id=22, actor_id=44)
+    assert await ActionStore(coll, clock=clock).recover_ready() == []
+    clock.advance(600)
+    await restored.recover_stale_executing()
+    assert await restored.recover_ready() == []
+    assert not await store.finish(rid, claimed["execution_token"],
+                                  state="succeeded", public_result="Retorno atrasado.")
+
+
+@pytest.mark.asyncio
+async def test_restart_repairs_only_successor_after_commit_before_advance(state, monkeypatch):
+    store, coll, clock = state
+    docs = await store.create_plan(_plan_data())
+    ids = [doc["request_id"] for doc in docs]
+    assert await store.bind(ids[0], 66)
+    claimed = await store.claim(ids[0], **_binding())
+
+    async def interrupted(doc):
+        raise RuntimeError("Process stopped after recording success")
+
+    monkeypatch.setattr(store, "_advance", interrupted)
+    with pytest.raises(RuntimeError):
+        await store.finish(ids[0], claimed["execution_token"],
+                           state="succeeded", public_result="Entrei.")
+    assert (await store.get(ids[1]))["state"] == "blocked"
+    restored = ActionStore(coll, clock=clock)
+    ready = await restored.recover_ready()
+    assert [doc["request_id"] for doc in ready] == [ids[1]]
+    assert (await restored.get(ids[2]))["state"] == "blocked"
+    assert await restored.claim(ids[0], **_binding()) is None
+
+
+@pytest.mark.asyncio
+async def test_restart_repairs_interrupted_tail_cancellation(state, monkeypatch):
+    store, coll, clock = state
+    docs = await store.create_plan([_data(), _data(), _data()])
+    assert await store.bind(docs[0]["request_id"], 66)
+
+    async def interrupted(doc, **kwargs):
+        raise RuntimeError("Process stopped after recording rejection")
+
+    monkeypatch.setattr(store, "_cancel_descendants", interrupted)
+    with pytest.raises(RuntimeError):
+        await store.reject(docs[0]["request_id"], **_binding())
+    restored = ActionStore(coll, clock=clock)
+    assert await restored.recover_ready() == []
+    for doc in docs[1:]:
+        persisted = await restored.get(doc["request_id"])
+        assert persisted["state"] == "cancelled" and "text" not in persisted["payload"]
+
+
+@pytest.mark.asyncio
+async def test_stale_execution_cancels_chain_without_retry_after_restart(state):
+    store, coll, clock = state
+    docs = await store.create_plan(_plan_data())
+    assert await store.bind(docs[0]["request_id"], 66)
+    await store.claim(docs[0]["request_id"], **_binding())
+    clock.advance(600)
+    restored = ActionStore(coll, clock=clock)
+    changed = await restored.recover_stale_executing()
+    assert [doc["state"] for doc in changed] == ["uncertain", "cancelled", "cancelled", "cancelled"]
+    assert await restored.recover_ready() == []
+    assert all("text" not in doc["payload"] for doc in changed)
+
+
+@pytest.mark.asyncio
+async def test_plan_limits_scope_validation_and_untrusted_plan_metadata(state):
+    store, _, _ = state
+    for data in ([], [_data()] * 5, [_data(), _data(requester_id=99)],
+                 [_data(), _data(channel_id=99)], [_data(), _data(origin_message_id=99)]):
+        with pytest.raises(ValueError):
+            await store.create_plan(data)
+    docs = await store.create_plan([_data(plan_id="attacker", step_index=3,
+                                         depends_on=["made-up"], predecessor_id="made-up")])
+    assert docs[0]["plan_id"] != "attacker"
+    assert docs[0]["step_index"] == 0 and docs[0]["predecessor_id"] is None
+    assert docs[0]["depends_on"] == []
+    assert await store.recover_ready(limit=0) == []
+
+
+@pytest.mark.asyncio
+async def test_interrupted_partial_plan_never_becomes_executable_and_private_text_expires(state, monkeypatch):
+    store, coll, clock = state
+    original_insert = coll.insert_one
+
+    async def partial_insert(doc):
+        if len(coll.docs) == 1:
+            raise RuntimeError("Stopped during plan insertion")
+        await original_insert(doc)
+
+    monkeypatch.setattr(coll, "insert_one", partial_insert)
+    with pytest.raises(RuntimeError):
+        await store.create_plan([_data(), _data(), _data()])
+    restored = ActionStore(coll, clock=clock)
+    assert len(coll.docs) == 1 and coll.docs[0]["state"] == "blocked"
+    assert await restored.recover_ready() == []
+    assert not await restored.bind(coll.docs[0]["request_id"], 66)
+    clock.advance(300)
+    changed = await restored.expire_pending()
+    assert len(changed) == 1 and changed[0]["state"] == "expired"
+    assert "text" not in changed[0]["payload"]
+
+
+@pytest.mark.asyncio
+async def test_publication_has_one_winner_and_source_reply_never_authorizes_card(state):
+    store, _, _ = state
+    doc = await store.create(_data(action="ban_member"))
+    rid = doc["request_id"]
+    assert await store.bind_context(rid, 70)
+    publications = await asyncio.gather(*(store.claim_publication(rid) for _ in range(10)))
+    winners = [doc for doc in publications if doc is not None]
+    assert len(winners) == 1 and winners[0]["state"] == "publishing"
+    assert winners[0]["publishing_token"]
+    assert await store.recover_ready() == []
+    assert await store.claim(rid, **_binding(message_id=70)) is None
+    assert await store.bind(rid, 66)
+    assert await store.claim(rid, **_binding(message_id=70)) is None
+    claimed = await store.claim(rid, **_binding())
+    assert claimed and claimed["source_reply_message_id"] == 70
+
+
+@pytest.mark.asyncio
+async def test_restart_of_uncertain_publication_never_sends_new_card_or_advances_chain(state):
+    store, coll, clock = state
+    docs = await store.create_plan([_data(action="ban_member"), _data(ask_permission=False)])
+    rid = docs[0]["request_id"]
+    assert await store.claim_publication(rid)
+    clock.advance(300)
+    restored = ActionStore(coll, clock=clock)
+    changed = await restored.recover_stale_publishing()
+    assert [doc["state"] for doc in changed] == ["uncertain", "cancelled"]
+    assert await restored.claim_publication(rid) is None
+    assert not await restored.bind(rid, 66)
+    assert await restored.recover_ready() == []
+    assert all("text" not in doc["payload"] for doc in changed)
+
+
+@pytest.mark.asyncio
+async def test_legacy_audio_approvals_are_cancelled_and_never_converted_to_auto(state):
+    store, _, _ = state
+    old_audio = await _pending(store)
+    old_speech = await _pending(store, action="speak_voice")
+    moderation = await _pending(store, action="ban_member")
+    automatic = await store.create(_data(ask_permission=False))
+    assert await store.arm_automatic(automatic["request_id"])
+    docs = await store.create_plan([_data(), _data(action="ban_member")])
+    changed = await store.cancel_legacy_audio_approvals()
+    assert {doc["request_id"] for doc in changed} == {
+        old_audio, old_speech, docs[0]["request_id"], docs[1]["request_id"],
+    }
+    assert all(doc["state"] == "cancelled" and "text" not in doc["payload"] for doc in changed)
+    assert [doc["request_id"] for doc in await store.pending()] == [moderation]
+    assert [doc["request_id"] for doc in await store.recover_ready()] == [automatic["request_id"]]
+    assert await store.cancel_legacy_audio_approvals() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_pre_card_failure_immediately_terminalizes_request_and_dependents(state, uncertain):
+    store, _, _ = state
+    docs = await store.create_plan([_data(action="ban_member"), _data(ask_permission=False)])
+    rid = docs[0]["request_id"]
+    assert await store.claim_publication(rid)
+    assert await store.fail_unpublished(rid, public_result="Não consegui publicar o pedido.",
+                                        uncertain=uncertain)
+    first = await store.get(rid)
+    assert first["state"] == ("uncertain" if uncertain else "failed")
+    assert "text" not in first["payload"]
+    tail = await store.get(docs[1]["request_id"])
+    assert tail["state"] == "cancelled" and "text" not in tail["payload"]
+    assert not await store.fail_unpublished(rid, public_result="Não sobrescrever.")
+    assert await store.recover_ready() == []
+
+
+@pytest.mark.asyncio
+async def test_pre_card_failure_never_changes_bound_or_executing_request(state):
+    store, _, _ = state
+    rid = await _pending(store)
+    assert not await store.fail_unpublished(rid, public_result="Não sobrescrever.")
+    assert (await store.get(rid))["state"] == "pending"
+    await store.claim(rid, **_binding())
+    assert not await store.fail_unpublished(rid, public_result="Não sobrescrever.")
+    assert (await store.get(rid))["state"] == "executing"
+
+
+@pytest.mark.asyncio
+async def test_consumed_card_cleanup_is_persistent_scoped_and_keeps_auth_message_id(state):
+    store, coll, clock = state
+    pending = await _pending(store, action="ban_member")
+    executing = await _pending(store, action="ban_member")
+    rejected = await _pending(store, action="ban_member")
+    await store.claim(executing, **_binding())
+    assert await store.reject(rejected, **_binding())
+    automatic = await store.create(_data(ask_permission=False))
+    assert await store.arm_automatic(automatic["request_id"])
+    await store.claim_automatic(automatic["request_id"], guild_id=11, channel_id=22, actor_id=44)
+    # Pedidos legados sem o novo campo também são encontrados para remoção.
+    for doc in coll.docs:
+        if doc["request_id"] == rejected:
+            doc.pop("card_removed")
+    restored = ActionStore(coll, clock=clock)
+    assert {doc["request_id"] for doc in await restored.cards_to_remove()} == {executing, rejected}
+    assert len(await restored.cards_to_remove(limit=1)) == 1
+    assert await restored.cards_to_remove(limit=0) == []
+    assert not await restored.mark_card_removed(pending)
+    assert not await restored.mark_card_removed(automatic["request_id"])
+    assert await restored.mark_card_removed(executing)
+    assert await restored.mark_card_removed(rejected)
+    assert await restored.cards_to_remove() == []
+    assert (await restored.get(executing))["message_id"] == 66
+    assert await restored.claim(executing, **_binding()) is None

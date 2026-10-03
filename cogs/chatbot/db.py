@@ -110,6 +110,13 @@ async def ensure_indexes(coll) -> None:
             },
         ),
         (
+            [("type", 1), ("plan_id", 1), ("step_index", 1)],
+            {
+                "name": "chatbot_action_plan_lookup",
+                "partialFilterExpression": {"type": DOC_TYPE_ACTION_REQUEST},
+            },
+        ),
+        (
             [("type", 1), ("guild_id", 1), ("channel_id", 1),
              ("requester_id", 1), ("finished_at", -1)],
             {

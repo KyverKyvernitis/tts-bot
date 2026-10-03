@@ -131,14 +131,25 @@ class _OpenModalView(discord.ui.View):
 class EditConfigView(_OpenModalView):
     def __init__(self, *, requester_id: int, current_config: GuildChatbotConfig,
                  on_submit_config: ConfigCallback, check_authorized: AuthorizationCheck,
-                 on_submit_actions: Optional[ConfigCallback] = None):
+                 on_submit_actions: Optional[ConfigCallback] = None,
+                 on_submit_audio: Optional[ConfigCallback] = None):
         super().__init__(requester_id=requester_id, check_authorized=check_authorized, label="Editar configuração")
         self._config = current_config
         self._on_submit_config = on_submit_config
         self._on_submit_actions = on_submit_actions or on_submit_config
+        self._on_submit_audio = on_submit_audio or on_submit_config
         button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Configurar ações")
         button.callback = self._open_actions
         self.add_item(button)
+        audio_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Configurar áudios")
+        audio_button.callback = self._open_audio
+        self.add_item(audio_button)
+
+    async def _open_audio(self, interaction: discord.Interaction):
+        await self._open_with(interaction, lambda: AudioReplyConfigModal(
+            requester_id=self._requester_id, current_config=self._config,
+            on_submit_config=self._on_submit_audio, check_authorized=self._check_authorized,
+        ))
 
     async def _open_actions(self, interaction: discord.Interaction):
         await self._open_with(interaction, lambda: ActionConfigModal(
@@ -171,7 +182,7 @@ class ActionConfigModal(discord.ui.Modal, title="Ações do chatbot"):
                             for role_id in current_config.action_staff_role_ids[:10]],
         )
         self.add_item(_label("Ações da IA", self.actions_group, "Permite usar os recursos abaixo durante a conversa."))
-        self.add_item(_label("Áudios", self.audio_group, "Pode mandar sem aprovação. Pedidos opcionais não mostram a fala."))
+        self.add_item(_label("Áudios", self.audio_group, "Pode mandar sem aprovação e reproduzir o mesmo áudio na call atual."))
         self.add_item(_label("Calls", self.voice_group, "Entrar exige staff; falar na call atual é permitido a membros comuns."))
         self.add_item(_label("Banimentos", self.moderation_group, "Sempre exige aprovação com Banir membros e hierarquia válida."))
         self.add_item(_label("Cargos de staff", self.staff_roles, "Opcional. Gerenciar servidor permite aprovar entrada; banir exige sua permissão."))
@@ -196,6 +207,47 @@ class ActionConfigModal(discord.ui.Modal, title="Ações do chatbot"):
         except Exception:
             log.exception("chatbot: falha ao salvar ações")
             await _notice(interaction, "Não consegui salvar as ações. Tente novamente.")
+
+
+class AudioReplyConfigModal(discord.ui.Modal, title="Áudios da conversa"):
+    def __init__(self, *, requester_id: int, current_config: GuildChatbotConfig,
+                 on_submit_config: ConfigCallback, check_authorized: AuthorizationCheck):
+        super().__init__(timeout=600.0)
+        self._requester_id = int(requester_id)
+        self._config = current_config
+        self._on_submit_config = on_submit_config
+        self._check_authorized = check_authorized
+        self.chance_input = discord.ui.TextInput(
+            custom_id="chatbot_audio_reply_chance", default=str(current_config.audio_reply_chance_percent),
+            min_length=1, max_length=3, required=True,
+        )
+        self.cooldown_input = discord.ui.TextInput(
+            custom_id="chatbot_audio_reply_cooldown", default=str(current_config.audio_reply_cooldown_seconds),
+            min_length=1, max_length=4, required=True,
+        )
+        self.add_item(_label("Respostas aleatórias em áudio (%)", self.chance_input,
+                             "De 0 a 100. Padrão: 20%. Zero desativa o sorteio; pedidos de áudio continuam."))
+        self.add_item(_label("Intervalo entre áudios aleatórios (s)", self.cooldown_input,
+                             "Por canal, de 0 a 3600 segundos. Padrão: 60. Pedidos explícitos não esperam."))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if int(getattr(interaction.user, "id", 0) or 0) != self._requester_id:
+            await _notice(interaction, "Esta configuração não é para você.")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            if not await self._check_authorized(interaction):
+                return
+            config = replace(self._config,
+                audio_reply_chance_percent=int(self.chance_input.value),
+                audio_reply_cooldown_seconds=int(self.cooldown_input.value),
+            )
+            await self._on_submit_config(interaction, config)
+        except ValueError as exc:
+            await _notice(interaction, f"Não consegui salvar: {exc}")
+        except Exception:
+            log.exception("chatbot: falha ao salvar áudios")
+            await _notice(interaction, "Não consegui salvar os áudios. Tente novamente.")
 
 
 class ConfirmView(discord.ui.View):

@@ -110,6 +110,10 @@ async def test_native_tool_schema_function_only_and_original_image_bytes(provide
     assert tool["name"] == TOOL_NAME
     assert tool["parameters"]["properties"]["action"]["enum"] == ["send_audio", "join_voice", "ban_member"]
     assert "enum" not in tool["parameters"]["properties"]["target_ref"]
+    assert "ask_permission" not in tool["parameters"]["properties"]
+    assert "ask_permission" not in tool["description"]
+    assert "No máximo uma proposta de áudio ou fala" in tool["description"]
+    assert "não combine send_audio com speak_voice" in tool["description"]
     assert speech not in json.dumps(payload)
     assert "PRIVADO" in tool["description"]
 
@@ -133,7 +137,7 @@ async def test_native_schema_uses_only_concrete_host_target_refs_and_audio_omits
 
 @pytest.mark.parametrize("provider", ["groq", "gemini"])
 @pytest.mark.asyncio
-async def test_asked_audio_suppresses_accidentally_repeated_private_reply(provider):
+async def test_legacy_asked_audio_becomes_automatic_without_repeating_private_reply(provider):
     factory = _groq if provider == "groq" else _gemini
     reply, _ = await _call(provider, factory("Vou dizer: fala privada", [(TOOL_NAME, {
         "action": "send_audio", "text": "fala privada", "ask_permission": True,
@@ -142,7 +146,7 @@ async def test_asked_audio_suppresses_accidentally_repeated_private_reply(provid
     assert reply.text == ""
     assert reply.proposals[0].text == "fala privada"
     assert reply.proposals[0].reason == "justificativa privada"
-    assert reply.proposals[0].ask_permission
+    assert reply.proposals[0].ask_permission is False
 
 
 @pytest.mark.parametrize("provider", ["groq", "gemini"])
@@ -193,7 +197,7 @@ def test_unknown_function_disabled_action_and_too_many_calls_are_rejected():
         parse_proposal(TOOL_NAME, {"action": "ban_member", "target_ref": "m1"}, ("send_audio",))
     call = (TOOL_NAME, {"action": "send_audio", "text": "oi"})
     with pytest.raises(InvalidActionProposal):
-        parse_proposals([call] * 3, ("send_audio",))
+        parse_proposals([call] * 5, ("send_audio",))
 
 
 @pytest.mark.parametrize("provider", ["groq", "gemini"])
@@ -205,7 +209,7 @@ async def test_two_valid_proposals_keep_order_without_performing_them(provider):
         (TOOL_NAME, {"action": "send_audio", "text": "fala privada"}),
     ]))
     assert [proposal.action for proposal in reply.proposals] == ["join_voice", "send_audio"]
-    assert reply.text == "Vou solicitar."
+    assert reply.text == ""  # Qualquer fala nativa fica fora da resposta pública.
     assert reply.proposals[0].ask_permission is False  # Staff approval is enforced by the host.
 
 
@@ -228,11 +232,60 @@ async def test_invalid_mixed_batch_cannot_leak_optional_audio_preview(provider, 
     factory = _groq if provider == "groq" else _gemini
     secret = "FALA PRIVADA DO ÁUDIO"
     private_call = (TOOL_NAME, {"action": "send_audio", "text": secret, "ask_permission": True})
-    calls = [private_call, ("unknown", {"private": secret})] if invalid_second else [private_call] * 3
+    calls = [private_call, ("unknown", {"private": secret})] if invalid_second else [private_call] * 5
     with pytest.raises(ProviderError) as failure:
         await _call(provider, factory(secret, calls))
     assert failure.value.kind == "invalid_response"
     assert secret not in str(failure.value) and secret not in caplog.text
+
+
+@pytest.mark.parametrize("provider", ["groq", "gemini"])
+@pytest.mark.asyncio
+async def test_four_native_proposals_preserve_chain_order_and_distinct_ban_targets(provider):
+    factory = _groq if provider == "groq" else _gemini
+    calls = [
+        (TOOL_NAME, {"action": "join_voice", "target_ref": "autor"}),
+        (TOOL_NAME, {"action": "speak_voice", "text": "Fala depois da entrada."}),
+        (TOOL_NAME, {"action": "ban_member", "target_ref": "m1", "reason": "motivo para A"}),
+        (TOOL_NAME, {"action": "ban_member", "target_ref": "m2", "reason": "motivo para B"}),
+    ]
+    reply, payload = await _call(
+        provider, factory("Não publique a fala antes da execução.", calls),
+        actions=("send_audio", "speak_voice", "join_voice", "ban_member"),
+        target_refs=("autor", "m1", "m2"),
+    )
+    assert [(proposal.action, proposal.target_ref) for proposal in reply.proposals] == [
+        ("join_voice", "autor"), ("speak_voice", ""), ("ban_member", "m1"), ("ban_member", "m2"),
+    ]
+    assert reply.text == ""
+    tool = payload["tools"][0]["function"] if provider == "groq" else payload["tools"][0]["functionDeclarations"][0]
+    assert "Até quatro propostas" in tool["description"]
+    assert "join_voice antes de speak_voice" in tool["description"]
+    assert "aprovação separada" in tool["description"]
+
+
+@pytest.mark.parametrize("provider", ["groq", "gemini"])
+@pytest.mark.parametrize("vision", [False, True])
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.asyncio
+async def test_only_native_action_payload_receives_budget_for_four_proposals(provider, vision, native):
+    factory = _groq if provider == "groq" else _gemini
+    images = [PreparedImage("image/png", b"prepared image bytes")] if vision else []
+    _, payload = await _call(provider, factory("texto"), images=images, actions=("send_audio",) if native else ())
+    tokens = payload["max_completion_tokens"] if provider == "groq" else payload["generationConfig"]["maxOutputTokens"]
+    assert tokens == (2000 if native else 1000 if vision else 500)
+
+
+@pytest.mark.parametrize("provider", ["groq", "gemini"])
+@pytest.mark.asyncio
+async def test_truncated_native_tools_never_return_even_a_valid_first_proposal(provider):
+    factory = _groq if provider == "groq" else _gemini
+    finish = "length" if provider == "groq" else "MAX_TOKENS"
+    with pytest.raises(ProviderError) as failure:
+        await _call(provider, factory(calls=[(TOOL_NAME, {
+            "action": "ban_member", "target_ref": "m1", "reason": "motivo válido",
+        })], finish=finish))
+    assert failure.value.kind == "invalid_response" and failure.value.finish_reason == finish
 
 
 @pytest.mark.parametrize("provider", ["groq", "gemini"])

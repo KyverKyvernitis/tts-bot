@@ -1,6 +1,6 @@
 """Autorizações reais de ações e execução sem exposição da fala privada."""
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import discord
 import pytest
@@ -45,7 +45,10 @@ def world():
                              moderation_actions_enabled=True, action_staff_role_ids=())
     tts = SimpleNamespace(synthesize_chatbot_attachment=AsyncMock(return_value=b"mp3 bytes"),
                           chatbot_join_voice=AsyncMock(return_value={"ok": True, "status": "executed"}),
-                          chatbot_speak_voice=AsyncMock(return_value={"ok": True, "status": "executed"}))
+                          chatbot_speak_voice=AsyncMock(return_value={"ok": True, "status": "executed"}),
+                          chatbot_mirror_audio=AsyncMock(return_value={"ok": True, "status": "executed"}),
+                          _chatbot_mirror_precheck=Mock(side_effect=lambda **kwargs: (
+                              guild, getattr(guild.voice_client, "channel", None), guild.voice_client, None)))
     config_store = SimpleNamespace(get_config=AsyncMock(return_value=config))
     cogs = {"TTSVoice": tts, "Chatbot": SimpleNamespace(_config=config_store)}
     bot = SimpleNamespace(user=members[999], get_guild=lambda gid: guild if gid == 10 else None,
@@ -86,12 +89,76 @@ async def test_context_only_uses_real_same_guild_direct_targets_and_clean_labels
 async def test_context_voice_capabilities_require_exact_call_and_actual_adapter(world):
     in_call(world)
     context = await build_action_context(world.bot, world.message, world.config)
-    assert "join_voice" in context.actions and "speak_voice" not in context.actions
+    assert "join_voice" in context.actions and "speak_voice" in context.actions
+    assert "etapa seguinte a join_voice" in context.description
     in_call(world, bot=True)
     context = await build_action_context(world.bot, world.message, world.config)
     assert "speak_voice" in context.actions
+    assert "Reprodução na call disponível: send_audio" in context.description
+    assert "No máximo uma proposta de áudio ou fala" in context.description
     world.tts.chatbot_speak_voice = None
     assert "speak_voice" not in (await build_action_context(world.bot, world.message, world.config)).actions
+
+
+@pytest.mark.asyncio
+async def test_context_uses_bot_current_call_for_audio_mirror_and_respects_voice_flag(world):
+    in_call(world, bot=True)
+    world.config.voice_actions_enabled = False
+    context = await build_action_context(world.bot, world.message, world.config)
+    assert "send_audio" in context.actions and "Reprodução na call disponível" not in context.description
+    assert "continua somente no chat" in context.description
+    world.config.voice_actions_enabled = True
+    other = MagicMock(spec=discord.VoiceChannel)
+    other.id, other.guild = 21, world.guild
+    world.guild.voice_client = SimpleNamespace(channel=other)
+    context = await build_action_context(world.bot, world.message, world.config)
+    assert "send_audio" in context.actions and "Reprodução na call disponível" in context.description
+    assert "na call atual do bot" in context.description
+    assert "speak_voice" not in context.actions
+
+
+@pytest.mark.asyncio
+async def test_mirror_availability_does_not_require_requester_in_call_or_use_speech_precheck(world):
+    in_call(world, bot=True)
+    world.members[1].voice = None
+    world.tts._chatbot_voice_precheck = Mock(return_value=(world.guild, world.voice, "fala indisponível"))
+    context = await build_action_context(world.bot, world.message, world.config)
+    assert "send_audio" in context.actions and "speak_voice" not in context.actions
+    assert "Reprodução na call disponível" in context.description
+    assert "na call atual do bot" in context.description
+    world.tts._chatbot_voice_precheck.assert_not_called()
+    world.tts._chatbot_mirror_precheck.assert_called_once_with(
+        guild_id=10, user_id=1, text_channel_id=30, session=world.guild.voice_client, channel_id=20,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mirror_context_defers_to_real_audience_gate_without_exposing_private_error(world):
+    in_call(world, bot=True)
+    world.members[1].voice = None
+    private_error = "NOME PRIVADO DA AUDIÊNCIA NÃO PODE ABRIR O CANAL"
+    world.tts._chatbot_mirror_precheck.side_effect = None
+    world.tts._chatbot_mirror_precheck.return_value = (world.guild, world.voice, world.guild.voice_client, private_error)
+    context = await build_action_context(world.bot, world.message, world.config)
+    assert "send_audio" in context.actions
+    assert "Reprodução na call disponível" not in context.description
+    assert "continua somente no chat" in context.description
+    assert private_error not in context.description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_checker", [True, False])
+async def test_unknown_mirror_precheck_uses_conditional_description_instead_of_false_unavailability(world, missing_checker):
+    in_call(world, bot=True)
+    world.members[1].voice = None
+    if missing_checker:
+        world.tts._chatbot_mirror_precheck = None
+    else:
+        world.tts._chatbot_mirror_precheck.side_effect = RuntimeError("detalhes privados")
+    context = await build_action_context(world.bot, world.message, world.config)
+    assert "também pode reproduzir o anexo na call atual do bot" in context.description
+    assert "continua somente no chat" not in context.description
+    assert "detalhes privados" not in context.description
 
 
 @pytest.mark.asyncio
@@ -111,6 +178,83 @@ async def test_prepare_pins_host_identity_and_private_audio_without_staff_approv
     assert not prepared["ask_permission"]
     assert (prepared["guild_id"], prepared["channel_id"], prepared["requester_id"], prepared["origin_message_id"]) == (10, 30, 1, 50)
     assert prepared["payload"]["target_id"] == world.message.author.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["send_audio", "speak_voice"])
+async def test_legacy_permission_field_cannot_turn_audio_into_an_approval_request(world, action):
+    in_call(world, bot=True)
+    prepared = await prepare_action(
+        world.bot, world.message, ActionProposal(action, text="Fala automática.", ask_permission=True),
+        targets={"autor": world.members[1]}, config=world.config,
+    )
+    assert prepared["ask_permission"] is False
+
+
+@pytest.mark.asyncio
+async def test_join_can_prepare_deferred_speech_but_execution_stays_blocked_until_connected(world):
+    in_call(world)
+    join = await prepare_action(
+        world.bot, world.message, ActionProposal("join_voice", "autor"),
+        targets={"autor": world.members[1]}, config=world.config,
+    )
+    speech = await prepare_action(
+        world.bot, world.message, ActionProposal("speak_voice", text="Fala depois da entrada."),
+        targets={"autor": world.members[1]}, config=world.config,
+        deferred_voice_channel_id=join["payload"]["voice_channel_id"],
+    )
+    assert join["ask_permission"] is True and speech["ask_permission"] is False
+    assert speech["payload"]["voice_channel_id"] == 20 and speech["payload"]["target_id"] == 1
+    with pytest.raises(ActionDenied, match="continuar na call"):
+        await validate_action(world.bot, speech, 1)
+    in_call(world, bot=True)
+    await validate_action(world.bot, speech, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [None, 21, True, -1, "20"])
+async def test_deferred_speech_cannot_bypass_missing_or_wrong_trusted_call_pin(world, pinned):
+    in_call(world)
+    with pytest.raises(ActionDenied):
+        await prepare_action(
+            world.bot, world.message, ActionProposal("speak_voice", text="Fala privada."),
+            targets={"autor": world.members[1]}, config=world.config,
+            deferred_voice_channel_id=pinned,
+        )
+
+
+@pytest.mark.asyncio
+async def test_conditional_speech_is_not_available_for_another_members_call_without_requester(world):
+    in_call(world, 3)
+    context = await build_action_context(world.bot, world.message, world.config)
+    assert "join_voice" in context.actions and "speak_voice" not in context.actions
+    with pytest.raises(ActionDenied):
+        await prepare_action(
+            world.bot, world.message, ActionProposal("speak_voice", "m1", text="Fala privada."),
+            targets=context.targets, config=world.config, deferred_voice_channel_id=20,
+        )
+
+
+@pytest.mark.asyncio
+async def test_deferred_speech_never_moves_existing_bot_call_or_ignores_visibility(world):
+    in_call(world)
+    other = MagicMock(spec=discord.VoiceChannel)
+    other.id, other.guild = 21, world.guild
+    world.guild.voice_client = SimpleNamespace(channel=other)
+    with pytest.raises(ActionDenied, match="outra call"):
+        await prepare_action(
+            world.bot, world.message, ActionProposal("speak_voice", text="Fala privada."),
+            targets={"autor": world.members[1]}, config=world.config, deferred_voice_channel_id=20,
+        )
+    world.guild.voice_client = None
+    world.voice.permissions_for.side_effect = lambda member: SimpleNamespace(
+        view_channel=member.id != 1, connect=True, speak=True,
+    )
+    with pytest.raises(ActionDenied, match="indisponível"):
+        await prepare_action(
+            world.bot, world.message, ActionProposal("speak_voice", text="Fala privada."),
+            targets={"autor": world.members[1]}, config=world.config, deferred_voice_channel_id=20,
+        )
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from typing import Any
 
 TOOL_NAME = "propor_acao"
 ALLOWED_ACTIONS = ("send_audio", "speak_voice", "join_voice", "ban_member")
-MAX_PROPOSALS = 2
+MAX_PROPOSALS = 4
 MAX_AUDIO_TEXT = 800
 MAX_REASON = 500
 MAX_ARGUMENT_BYTES = 8192
@@ -52,10 +52,16 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
             "fornecidas pelo sistema, como autor ou m1. "
             "Pode escolher enviar áudio ou falar na call espontaneamente, sem pedir autorização. "
             "Para send_audio/speak_voice, omita target_ref: o sistema fixa o autor da conversa como alvo. "
-            "Para perguntar antes de um áudio/fala, use ask_permission=true: text é PRIVADO e nunca "
-            "deve ser repetido na resposta pública, nem resumido ou antecipado. Entrar na call "
-            "e banir sempre dependem da aprovação da staff, mesmo quando ask_permission=false. "
-            "Não diga que executou; o sistema informa o resultado. No máximo duas propostas. "
+            "Áudio e fala são automáticos quando disponíveis. text é PRIVADO e nunca deve ser repetido "
+            "na resposta pública, nem resumido ou antecipado. Entrar na call e banir sempre dependem "
+            "da aprovação da staff. Até quatro propostas na ordem desejada formam uma sequência: cada "
+            "etapa só acontece depois do sucesso da anterior. Para entrar e falar na call do autor, "
+            "proponha join_voice antes de speak_voice; a fala aguarda a aprovação e o sucesso da entrada. "
+            "Pode propor banimentos de membros distintos, com aprovação separada de cada banimento. "
+            "No máximo uma proposta de áudio ou fala por sequência. Quando o sistema informar reprodução "
+            "disponível na call, send_audio já envia o áudio no chat e o reproduz na call atual do bot; "
+            "não combine send_audio com speak_voice para a mesma resposta. "
+            "Não repita a mesma ação para o mesmo alvo. Não diga que executou; o sistema informa o resultado. "
             "Se o alvo for ambíguo, pergunte em texto em vez de propor."
         ),
         "parameters": {
@@ -75,7 +81,6 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
                     "description": "Fala privada para send_audio/speak_voice; obrigatória nessas ações.",
                 },
                 "reason": {"type": "string", "maxLength": MAX_REASON},
-                "ask_permission": {"type": "boolean"},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -142,6 +147,10 @@ def parse_proposal(name: Any, arguments: Any, actions: tuple[str, ...]) -> Actio
     ask = arguments.get("ask_permission", False)
     if not isinstance(ask, bool):
         raise InvalidActionProposal("proposta inválida")
+    # Compatibilidade com respostas de modelos e prompts anteriores: áudio
+    # agora é automático; este campo legado não cria um pedido de aprovação.
+    if action in {"send_audio", "speak_voice"}:
+        ask = False
     return ActionProposal(action=action, ask_permission=ask, **values)
 
 
@@ -153,7 +162,7 @@ def parse_proposals(calls: list[tuple[Any, Any]], actions: tuple[str, ...]) -> t
 
 def private_reply_text(text: str, proposals: tuple[ActionProposal, ...]) -> str:
     # Não dependemos de obediência do modelo para impedir que antecipe a fala.
-    # O host monta o pedido público, sem mostrar texto nem justificativa privados.
-    if any(proposal.ask_permission and proposal.action in {"send_audio", "speak_voice"} for proposal in proposals):
+    # O host monta o andamento público, sem mostrar texto nem justificativa privados.
+    if any(proposal.action in {"send_audio", "speak_voice"} for proposal in proposals):
         return ""
     return text

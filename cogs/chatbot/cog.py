@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Optional
 from urllib.parse import urlsplit
 
@@ -33,6 +33,7 @@ from .audio import (
     DEFAULT_TTS_VOICE, MAX_TTS_CHARS, synthesize_speech, transcribe_audio,
     user_asked_for_tts,
 )
+from .audio_format import AudioReplySelector, prefers_text
 from .imagegen import build_image_failure_message, generated_image_extension, parse_image_intent
 from .image_service import ImageService
 from .memory import MemoryStore, MemoryEntry, MemoryEpoch, visibility_scope_for
@@ -81,6 +82,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._spontaneous_channel_cooldowns: dict[tuple[int, int], float] = {}
         self._spontaneous_user_cooldowns: dict[tuple[int, int], float] = {}
         self._spontaneous_guild_cooldowns: dict[int, float] = {}
+        self._audio_reply_selector = AudioReplySelector()
         self._cleanup_task: Optional[asyncio.Task] = None
 
     async def cog_load(self):
@@ -173,6 +175,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
                 # Limpa cooldowns espontâneos para manter RAM bounded.
                 self._cleanup_spontaneous_cooldowns(now)
+                self._audio_reply_selector.cleanup(now)
                 if self._message_index is not None:
                     try:
                         await self._message_index.cleanup_old()
@@ -508,9 +511,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
     async def _maybe_generate_tts(
         self, *, content: str, reply: str,
         guild_id: int | None = None, user_id: int | None = None,
+        force: bool = False,
     ) -> Optional[discord.File]:
-        """Sintetiza resposta somente quando o usuário pede áudio."""
-        if C.SAFE_MODE or not user_asked_for_tts(content):
+        """Sintetiza uma resposta pedida ou selecionada pelo host como áudio."""
+        if C.SAFE_MODE or not (force or user_asked_for_tts(content)):
             return None
         if guild_id and not await self._legacy_audio_allowed(guild_id):
             return None
@@ -519,7 +523,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         spoken_reply = self._sanitize_audio_capability_claim(
             reply,
             audio_will_be_sent=True,
-        )
+        )[:MAX_TTS_CHARS].rstrip()
         audio_bytes: Optional[bytes] = None
         adapter_attempted = False
         tts_cog = self.bot.get_cog("TTSVoice")
@@ -558,13 +562,108 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 log.warning("chatbot: TTS timeout")
                 return None
 
-        if not audio_bytes:
+        if not audio_bytes or len(audio_bytes) > C.MAX_TTS_OUTPUT_BYTES:
             return None
 
         if not adapter_attempted:
             await self._record_chatbot_tts_synt(guild_id, "edge")
 
         return discord.File(io.BytesIO(audio_bytes), filename="resposta.mp3")
+
+    def _audio_selector(self) -> AudioReplySelector:
+        selector = getattr(self, "_audio_reply_selector", None)
+        if selector is None:
+            selector = self._audio_reply_selector = AudioReplySelector()
+        return selector
+
+    async def record_audio_reply_sent(self, *, guild_id: int, channel_id: int) -> None:
+        """Uma fala nativa também adia o próximo sorteio no mesmo canal."""
+        store = getattr(self, "_config", None)
+        cfg = await store.get_config(guild_id, fresh=True) if store is not None else None
+        self._audio_selector().record_sent(
+            guild_id=guild_id, channel_id=channel_id,
+            cooldown_seconds=cfg.audio_reply_cooldown_seconds if cfg else C.AUDIO_REPLY_DEFAULT_COOLDOWN_SECONDS,
+        )
+
+    async def _select_audio_format(
+        self, *, guild_id: int, channel_id: int, content: str, reply: str,
+        eligible: bool,
+    ) -> tuple[str, GuildChatbotConfig | None]:
+        if C.SAFE_MODE or not eligible:
+            return "text", None
+        store = getattr(self, "_config", None)
+        try:
+            config = await store.get_config(guild_id, fresh=True) if store is not None else GuildChatbotConfig(
+                guild_id=guild_id, enabled=True, audio_reply_chance_percent=0,
+            )
+        except Exception as exc:
+            log.warning("chatbot: formato de áudio indisponível (%s)", type(exc).__name__)
+            return "text", None
+        return self._audio_selector().select(
+            config=config, guild_id=guild_id, channel_id=channel_id,
+            content=content, reply=reply, eligible=eligible,
+        ), config
+
+    @staticmethod
+    def _attachment_audio_bytes(file: discord.File) -> bytes:
+        # Discord consome e fecha o arquivo no envio. Guardar os bytes antes
+        # permite tocar exatamente a mesma síntese, sem outra ida ao provedor.
+        try:
+            position = file.fp.tell()
+            file.fp.seek(0)
+            data = file.fp.read(C.MAX_TTS_OUTPUT_BYTES + 1)
+            file.fp.seek(position)
+            return data if isinstance(data, bytes) and len(data) <= C.MAX_TTS_OUTPUT_BYTES else b""
+        except Exception:
+            return b""
+
+    @staticmethod
+    def _can_attach_audio(message) -> bool:
+        member = getattr(message.guild, "me", None)
+        permissions_for = getattr(message.channel, "permissions_for", None)
+        if member is None or not callable(permissions_for):
+            return True
+        permissions = permissions_for(member)
+        send = (getattr(permissions, "send_messages_in_threads", False)
+                if isinstance(message.channel, discord.Thread)
+                else getattr(permissions, "send_messages", False))
+        return bool(getattr(permissions, "view_channel", False)
+                    and send and getattr(permissions, "attach_files", False))
+
+    async def _mirror_sent_audio(
+        self, *, guild_id: int, user_id: int, channel_id: int,
+        parent_id: int | None, message_id: int, audio: bytes,
+        epoch: MemoryEpoch | None,
+    ) -> None:
+        tts = self.bot.get_cog("TTSVoice")
+        adapter = getattr(tts, "chatbot_mirror_audio", None)
+        if not audio or not callable(adapter):
+            return
+
+        async def before_effect() -> None:
+            if C.SAFE_MODE:
+                raise ValueError("O áudio foi desativado.")
+            store = getattr(self, "_config", None)
+            if store is None:
+                raise ValueError("A configuração de áudio não está disponível.")
+            cfg = await store.get_config(guild_id, fresh=True)
+            if not (cfg.enabled and cfg.actions_enabled and cfg.audio_actions_enabled
+                    and cfg.voice_actions_enabled and cfg.allows_channel(channel_id, parent_id=parent_id)):
+                raise ValueError("O contexto de áudio mudou.")
+            if epoch is None or self._memory is None:
+                raise ValueError("A memória da conversa não está disponível.")
+            if await self._memory.capture_epoch(guild_id, user_id) != epoch:
+                raise ValueError("A memória da conversa foi reiniciada.")
+
+        try:
+            await asyncio.wait_for(adapter(
+                guild_id=int(guild_id), user_id=int(user_id), text_channel_id=int(channel_id),
+                audio=audio, request_id=f"reply-{int(message_id)}", before_effect=before_effect,
+            ), timeout=3.0)
+        except Exception as exc:
+            # O anexo já chegou ao chat. Uma falha na call não deve repetir
+            # síntese, arquivo ou fala nem transformar o turno em erro.
+            log.warning("chatbot: espelhamento na call indisponível (%s)", type(exc).__name__)
 
     def _sanitize_audio_capability_claim(self, reply: str, *, audio_will_be_sent: bool) -> str:
         """Remove contradições quando o bot efetivamente envia áudio.
@@ -1211,6 +1310,15 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             action_plan = None
             action_failed = False
             if isinstance(reply, ChatReply):
+                if prefers_text(content):
+                    audio_proposals = tuple(item for item in reply.proposals
+                                            if item.action in {"send_audio", "speak_voice"})
+                    proposals = tuple(item for item in reply.proposals
+                                      if item.action not in {"send_audio", "speak_voice"})
+                    text = reply.text
+                    if audio_proposals and not proposals and not text.strip():
+                        text = audio_proposals[0].text
+                    reply = replace(reply, text=text, proposals=proposals)
                 if reply.proposals and action_context is not None:
                     action_plan = await action_service.plan(
                         message, reply, action_context, config, epoch=epoch, visibility_scope=visibility,
@@ -1224,19 +1332,23 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 else:
                     reply = reply.text
             reply = self._sanitize_model_reply(reply)
-            if not reply:
+            if not reply and action_plan is None:
                 return False
             limit = 2000 if action_plan else (C.SPONTANEOUS_MAX_REPLY_CHARS if behavior_hint else 2000)
             reply = reply[:limit].rstrip()
             tts_file = None
-            if not behavior_hint and action_plan is None and not action_failed:
+            audio_format, audio_config = await self._select_audio_format(
+                guild_id=guild.id, channel_id=channel.id, content=content, reply=reply,
+                eligible=action_plan is None and not action_failed and self._can_attach_audio(message),
+            )
+            if audio_format != "text":
                 tts_file = await self._maybe_generate_tts(
                     content=content, reply=reply, guild_id=guild.id, user_id=author.id,
+                    force=True,
                 )
                 if tts_file is not None and not await self._legacy_audio_allowed(guild.id):
                     tts_file.close()
                     tts_file = None
-                    reply = "O áudio foi desativado antes do envio."
             reply = self._sanitize_audio_capability_claim(reply, audio_will_be_sent=tts_file is not None)
             if tts_file is not None:
                 reply = reply[:MAX_TTS_CHARS].rstrip()
@@ -1247,19 +1359,34 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 if tts_file is not None:
                     tts_file.close()
                 return False
-            reply_options = {}
+            sent = None
+            audio_bytes = self._attachment_audio_bytes(tts_file) if tts_file is not None else b""
+            if reply or tts_file is not None:
+                try:
+                    sent = await message.reply(
+                        None if tts_file is not None else reply[:2000],
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+                        files=[tts_file] if tts_file is not None else discord.utils.MISSING,
+                    )
+                except BaseException:
+                    if tts_file is not None:
+                        tts_file.close()
+                    raise
+                await self._remember_sent_message(guild_id=guild.id, channel_id=channel.id, message_id=sent.id)
+            if tts_file is not None and sent is not None:
+                self._audio_selector().record_sent(
+                    guild_id=guild.id, channel_id=channel.id,
+                    cooldown_seconds=(audio_config.audio_reply_cooldown_seconds if audio_config
+                                      else C.AUDIO_REPLY_DEFAULT_COOLDOWN_SECONDS),
+                )
+                await self._mirror_sent_audio(
+                    guild_id=guild.id, user_id=author.id, channel_id=channel.id,
+                    parent_id=getattr(channel, "parent_id", None), message_id=sent.id,
+                    audio=audio_bytes, epoch=epoch,
+                )
             if action_plan is not None:
-                reply_options["view"] = action_service.view(action_plan)
-            sent = await message.reply(
-                reply[:2000], mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
-                files=[tts_file] if tts_file is not None else discord.utils.MISSING,
-                **reply_options,
-            )
-            await self._remember_sent_message(guild_id=guild.id, channel_id=channel.id, message_id=sent.id)
-            if action_plan is not None:
-                action_service.track_view(sent.id, reply_options.get("view"))
                 await action_service.bind_and_start(action_plan, sent)
-            if epoch is not None:
+            if epoch is not None and sent is not None and reply:
                 await self._persist_turn(
                     guild_id=guild.id, user_id=author.id, channel_id=channel.id,
                     visibility_scope=visibility, epoch=epoch,

@@ -13,6 +13,7 @@ profiles ou identidade por webhook.
 | Ativar e escolher canais | `/chatbot configurar` |
 | Configurar respostas espontâneas | `/chatbot configurar` |
 | Configurar áudios, calls e banimentos | `/chatbot configurar` → **Configurar ações** |
+| Ajustar chance e intervalo de respostas em áudio | `/chatbot configurar` → **Configurar áudios** |
 | Apagar sua memória | `/reset` |
 | Apagar a memória do servidor | `/chatbot memoria` |
 | Gerar uma imagem | `/imagem <prompt>` |
@@ -35,6 +36,7 @@ isolamento da memória.
 O comando mostra o estado atual e o botão **Editar configuração**, que abre o
 formulário de ativação, canais e modo espontâneo. O botão **Configurar ações**
 abre outro formulário: ações da IA, áudios, calls, banimentos e cargos de staff.
+**Configurar áudios** ajusta a chance de resposta em áudio e seu intervalo.
 As quatro opções de ações começam ativadas, mas o chatbot de um servidor novo
 continua desativado até a configuração. Os cargos são opcionais; escolher cargos
 de staff não concede a permissão de banir. `/imagem` também respeita a
@@ -98,19 +100,28 @@ O bot pode propor recursos durante a conversa. Nesta versão, há quatro ações
 estruturadas: `send_audio`, `speak_voice`, `join_voice` e `ban_member`, descritas
 abaixo. Uma declaração na resposta textual, por si só, não executa essas ações. Ativação,
 canais permitidos e configuração de ações continuam sendo conferidos antes da
-execução. O bot informa o resultado obtido, sem anunciar sucesso antecipadamente.
+execução. Pedidos de permissão ficam em mensagens separadas da conversa.
 
 | Recurso | Quem pode participar | Aprovação |
 | --- | --- | --- |
-| Enviar um áudio no chat | Qualquer membro na conversa | Pode ser automático; o bot também pode perguntar antes |
-| Falar na call atual | Membro e bot na mesma call de voz | Pode ser automático; o bot também pode perguntar antes |
+| Enviar um áudio no chat | Qualquer membro na conversa | Automático, sem botão de aprovação |
+| Falar na call atual | Membro e bot na mesma call de voz | Automático, sem botão de aprovação |
 | Entrar em call | Bot desconectado e membro em uma call identificada no pedido | Sempre exige staff autorizada |
 | Banir um membro | Alvo identificado neste servidor | Sempre exige aprovação com **Banir membros**, autorização e hierarquias válidas |
 
-Quando o bot pergunta antes de enviar áudio ou falar, o pedido mostra somente a
-ação e os botões **Pode mandar/Pode falar** e **Agora não**. A fala não aparece,
-nem é resumida ou antecipada no texto. Somente o membro envolvido responde a
-esse pedido. Um áudio automático dispensa esse clique.
+Áudios são enviados diretamente, sem transcrição antecipada. Além de atender
+pedidos explícitos, o sistema pode escolher uma resposta em áudio: por padrão,
+20% das respostas elegíveis, com intervalo de 60 segundos por canal. Isso não
+cria mensagens extras; escolhe o formato de uma resposta que já aconteceria.
+A chance e o intervalo podem ser alterados em `/chatbot configurar`.
+Se a síntese falhar antes do envio, a resposta pode ser entregue em texto.
+
+Somente entrada em call e banimento geram pedidos para a staff. O bot pergunta
+na primeira pessoa, como **Posso colar na call de @membro?** e **Posso banir
+@membro por spam?**. O clique válido é confirmado silenciosamente, e a mensagem
+do pedido é excluída após aprovação, rejeição ou expiração. O resultado continua
+registrado internamente. Se a exclusão for recusada pelo Discord, os botões
+são desativados para impedir reutilização.
 
 Para aprovar entrada em call, valem o dono do servidor, **Gerenciar servidor**,
 **Administrador** ou um dos cargos de staff configurados. O canal de voz fica
@@ -123,6 +134,15 @@ Os pedidos expiram em cinco minutos e seus botões ficam vinculados ao servidor,
 canal e mensagem originais. O estado é persistente; dois cliques não executam a
 mesma ação duas vezes. Pedidos pendentes ainda válidos podem reaparecer após
 reiniciar. Uma execução com resultado incerto não é repetida automaticamente.
+Pedidos antigos de aprovação de áudio/fala são encerrados sem reproduzir o
+conteúdo guardado.
+
+Uma resposta pode propor até quatro etapas em sequência. Por exemplo: pedir
+entrada em call → receber aprovação da staff → entrar → falar automaticamente.
+Dois banimentos geram dois pedidos separados: aprovar o primeiro não aprova o
+segundo. A próxima etapa aguarda o sucesso da anterior; rejeição, falha ou
+resultado incerto encerram as etapas dependentes. Cada pedido de permissão
+recebe seu prazo quando fica disponível.
 
 A entrada em call é temporária e não é restaurada após reiniciar o bot. Para
 entrar, o bot precisa estar desconectado: esta versão não muda uma sessão ativa
@@ -131,10 +151,17 @@ Para falar, o bot e o membro precisam continuar na mesma call. O bot não escuta
 transcreve conversas ao vivo; anexos de áudio enviados no chat continuam tendo
 seu fluxo próprio de transcrição.
 
-Áudios anexados ao chat não são espelhados automaticamente na fila da call.
-A fala em call usa somente `speak_voice`, com as verificações do adaptador de
-voz. Se o provedor não aceitar ferramentas, um pedido de áudio ainda pode
-receber um anexo no chat pelo fluxo existente, sem entrar na fila da call.
+Quando o bot já está conectado em uma call do mesmo servidor, o áudio enviado
+no chat também entra na fila dessa call. A síntese acontece uma vez: o arquivo
+enviado e a reprodução usam os mesmos bytes. Não é necessário que o autor
+esteja na call para esse espelhamento. Para preservar canais privados, os
+participantes da call precisam ter acesso ao canal de texto original.
+Áudios de threads privadas permanecem no chat.
+A reprodução respeita a fila e não muda a sessão de voz. Se o bot sair ou
+trocar de call antes de tocar, o áudio permanece no chat e essa resposta não
+faz o bot entrar novamente. Falha no espelhamento não repete o envio no chat.
+Esse comportamento também vale para áudio aleatório e para o fluxo sem
+ferramentas do provedor.
 
 ## Leitura de imagens
 

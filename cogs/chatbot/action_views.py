@@ -17,18 +17,17 @@ class _InteractionHandler(Protocol):
 
 
 _LABELS = {
-    "join_voice": ("Aprovar entrada", "Rejeitar"),
-    "ban_member": ("Aprovar banimento", "Rejeitar"),
-    "send_audio": ("Pode mandar", "Agora não"),
-    "speak_voice": ("Pode falar", "Agora não"),
+    "join_voice": ("Pode entrar", "Agora não"),
+    "ban_member": ("Pode banir", "Não"),
 }
 _AUDIO_ACTIONS = {"send_audio", "speak_voice"}
-_PENDING_STATES = {"created", "pending"}
-_MAX_REQUESTS = 2
+_PENDING_STATES = {"created", "publishing", "pending"}
+_MAX_REQUESTS = 1
 
 
 def _requests_for_message(requests: list[dict]) -> list[dict]:
-    return [request for request in requests if request.get("action") in _LABELS][:_MAX_REQUESTS]
+    return [request for request in requests if request.get("action") in _LABELS
+            and request.get("state", "pending") in _PENDING_STATES][:_MAX_REQUESTS]
 
 
 def _value(request: dict, field: str, default: Any = None) -> Any:
@@ -78,30 +77,18 @@ def _safe_reason(reason: Any) -> str:
 def _request_description(request: dict) -> str:
     action = request["action"]
     requester = _user(request, "requester_id", "o solicitante")
-    pending = str(request.get("state") or "pending") in _PENDING_STATES and _needs_approval(request)
     if action == "join_voice":
-        if pending:
-            target = _user(request, "target_id", "o usuário informado")
-            return f"Pediu permissão: entrar na call de {target} ({_voice_channel(request)}). Pedido de {requester}."
-        return f"Entrada em {_voice_channel(request)}, solicitada por {requester}."
+        target = _user(request, "target_id", "o usuário informado")
+        return f"Posso entrar na call de {target}?\nCanal: {_voice_channel(request)}.\nEstou conversando com {requester}."
     if action == "ban_member":
         target = _user(request, "target_id", "o usuário informado")
-        description = (
-            f"Pediu permissão: banir {target}. Pedido de {requester}."
-            if pending else f"Banimento de {target}, solicitado por {requester}."
-        )
+        description = f"Posso banir {target}?\nEstou conversando com {requester}."
         reason = _safe_reason(_value(request, "reason"))
         if reason:
-            description += f" Motivo: {reason}"
-        description += " Sem apagar o histórico de mensagens."
+            description += f"\nMotivo: {reason}"
+        description += "\nVou preservar o histórico de mensagens."
         return description
-    if action == "send_audio":
-        if pending:
-            return f"Pediu permissão: enviar áudio para {requester}."
-        return f"Áudio para {requester}."
-    if pending:
-        return f"Pediu permissão: falar na call ({_voice_channel(request)}). Pedido de {requester}."
-    return f"Fala em {_voice_channel(request)}, solicitada por {requester}."
+    return ""
 
 
 def _request_status(request: dict) -> str:
@@ -133,7 +120,7 @@ def _request_status(request: dict) -> str:
 def render_action_requests(requests: list[dict]) -> str:
     """Resumo público baseado nos campos de controle, sem transcrição da fala."""
     return "\n\n".join(
-        f"{_request_description(request)}\n{_request_status(request)}"
+        _request_description(request)
         for request in _requests_for_message(requests)
     )
 
@@ -163,7 +150,7 @@ class _ActionDecisionButton(discord.ui.Button):
 
 
 class ActionRequestView(discord.ui.View):
-    """No máximo dois pedidos e quatro botões, restauráveis após um restart."""
+    """Uma permissão por etapa, com dois botões e recuperação após restart."""
     def __init__(self, service: _InteractionHandler, requests: list[dict]):
         super().__init__(timeout=None)
         for row, request in enumerate(_requests_for_message(requests)):

@@ -366,7 +366,7 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         self.message.channel.history.assert_not_called()
         self.cog._remove_processing_reaction.assert_awaited_once_with(self.message, "⏳")
 
-    async def test_audio_attachment_keeps_reply_text_and_same_memory(self):
+    async def test_audio_attachment_has_no_transcript_and_remembers_delivered_speech(self):
         audio = discord.File(io.BytesIO(b"fake audio"), filename="resposta.mp3")
         self.addCleanup(audio.close)
         self.cog._maybe_generate_tts.return_value = audio
@@ -374,9 +374,9 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.cog._generate_and_send(self.message, "responda em áudio"))
 
         args, kwargs = self.message.reply.await_args
-        self.assertEqual(args, ("Olá, Ana!",))
+        self.assertEqual(args, (None,))
         self.assertEqual(kwargs["files"], [audio])
-        self.assertEqual(self.cog._memory.append_turn.await_args.kwargs["assistant_message"], args[0])
+        self.assertEqual(self.cog._memory.append_turn.await_args.kwargs["assistant_message"], "Olá, Ana!")
 
     async def test_allowed_thread_keeps_memory_and_message_index_scoped_to_thread(self):
         thread = Mock(spec=discord.Thread)

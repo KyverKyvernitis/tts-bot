@@ -135,18 +135,27 @@ real separada e não foi medida nesta entrega.
 | Caso | Situação | Resultado esperado |
 | --- | --- | --- |
 | Áudio para membro comum | O modelo propõe áudio espontâneo ou responde a um pedido de áudio | Pode enviar sem aprovação da staff, quando habilitado |
-| Perguntar antes do áudio | O modelo escolhe pedir autorização | Mostra ação e botões; não mostra, resume ou antecipa a fala |
+| Modelo pede aprovação de áudio | A proposta inclui o campo antigo de permissão | O host ignora o pedido de aprovação e envia diretamente, sem cartão nem prévia |
+| Áudio aleatório | O sorteio do sistema escolhe áudio em uma resposta elegível | Envia uma resposta em áudio, respeita o intervalo e usa texto se a síntese falhar |
 | Fala na call atual | Bot e membro comum estão na mesma call | Pode falar sem aprovação da staff, quando habilitado |
 | Entrada em call | Bot desconectado e membro indicado em uma call | Aguarda staff; o canal de voz aprovado é o mesmo fixado no pedido |
 | Bot já conectado | O membro pede entrada em outra call | Não muda a sessão ativa para outra call |
 | Música ou TTS ocupado | A sessão de voz está ocupada | As ações de call não ficam disponíveis naquele turno |
-| Provedor sem ferramentas | Um pedido de áudio é atendido pelo fluxo de anexo no chat | Pode anexar áudio no chat; não o espelha na fila da call |
+| Áudio com bot em call | Bot já conectado em call do mesmo servidor | Envia no chat e enfileira os mesmos bytes na call, sem nova síntese nem aprovação |
+| Bot sai antes da reprodução | Há áudio espelhado aguardando na fila | Mantém o arquivo no chat; descarta a reprodução e não reconecta |
+| Canal privado | Há participante da call sem acesso ao canal de texto | Mantém o áudio no chat, sem reproduzir conteúdo privado na call |
+| Provedor sem ferramentas | Um pedido de áudio é atendido pelo fluxo de anexo no chat | Envia anexo e também o espelha na call atual, quando disponível |
 | Membro muda de call | Membro sai ou muda depois da proposta | Não segue o membro automaticamente; exige novo pedido |
 | Banimento | A ferramenta propõe um membro identificado e um motivo | Sempre aguarda aprovação com Banir membros e hierarquias válidas |
 | Alvo ambíguo | O texto menciona um nome que não identifica um alvo confiável | Pergunta quem é o alvo, sem adivinhar ou executar |
 | Declaração sem ferramenta | Resposta textual diz que entrou, falou na call ou baniu, sem proposta estruturada | Não executa essas ações a partir da declaração |
 | Configuração revogada | Staff desativa a ação enquanto o pedido aguarda | Revalida a configuração atual antes de executar |
 | Dois cliques ou expiração | Aprovações concorrentes ou clique após cinco minutos | Executa no máximo uma vez; pedido expirado não executa |
+| Cartão aprovado ou rejeitado | Staff clica em um pedido válido | Confirma silenciosamente e exclui somente o pedido, preservando a conversa |
+| Entrada seguida de fala | Duas etapas: entrar na call e falar | Mostra pedido de entrada; após conexão confirmada, fala sem nova aprovação |
+| Dois banimentos em sequência | Duas propostas com alvos distintos | Exige aprovação separada para cada alvo; só apresenta a segunda após sucesso da primeira |
+| Etapa anterior falha | Uma etapa é rejeitada, expira, falha ou tem resultado incerto | Não executa nem oferece aprovação das etapas dependentes |
+| Reinício entre etapas | Etapa anterior terminou e a seguinte ainda não começou | Recupera a etapa pronta sem repetir o efeito já confirmado |
 | Reinício | Pedido válido está pendente; bot tinha entrado temporariamente em call | Restaura o pedido válido, sem restaurar a entrada temporária na call |
 | Pergunta sobre áudio ao vivo | Membro pergunta o que alguém disse na call | Não inventa acesso ao som da call; o bot não escuta conversas ao vivo |
 
