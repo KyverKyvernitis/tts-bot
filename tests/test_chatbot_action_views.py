@@ -263,3 +263,123 @@ def test_invalid_control_ids_use_generic_labels_and_never_represent_private_obje
     assert "o solicitante" in rendered
     assert PRIVATE_SPEECH not in rendered
     assert "<@" not in rendered and "<#" not in rendered
+
+
+PRIVILEGED_CARD_CASES = [
+    ("timeout_member", "Posso silenciar <@41> por 1 minuto e 1 segundo?", "Pode silenciar"),
+    ("untimeout_member", "Posso retirar o timeout de <@41>?", "Pode liberar"),
+    ("kick_member", "Posso expulsar <@41> do servidor?", "Pode expulsar"),
+    ("unban_member", "Posso desbanir <@41>?", "Pode desbanir"),
+    ("purge_messages", "Posso apagar 2 mensagens de <#60>?", "Pode apagar"),
+    ("assign_role", "Posso adicionar o cargo <@&70> a <@41>?", "Pode adicionar"),
+    ("remove_role", "Posso remover o cargo <@&70> de <@41>?", "Pode remover"),
+    ("change_nickname", "Posso alterar o apelido de <@41>?", "Pode alterar"),
+    ("edit_channel", "Posso alterar <#60>?", "Pode alterar"),
+    ("move_voice", "Posso mudar minha sessão de voz para a call de <@41>?", "Pode mover"),
+    ("leave_voice", "Posso sair da call <#50>?", "Pode sair"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action,description,label", PRIVILEGED_CARD_CASES)
+async def test_expanded_staff_catalog_has_exact_host_targets_first_person_and_no_private_speech(action, description, label):
+    item = request(action, ask_permission=False)
+    item["ask_permission"] = False
+    item["payload"].update({
+        "duration_seconds": 61, "role_id": 70, "nickname": "novo-apelido",
+        "channel_id": 60, "channel_changes": {"name": "nova-sala", "topic": "novo tópico", "slowmode_delay": 10},
+        "message_ids": [111, 112, 111],
+    })
+    item["public_result"] = PRIVATE_SPEECH
+    rendered = render_action_requests([item])
+    view = ActionRequestView(SimpleNamespace(handle_interaction=AsyncMock()), [item])
+    assert rendered.startswith(description)
+    assert "Estou conversando com <@40>." in rendered
+    assert "Motivo: motivo de teste" in rendered
+    assert [button.label for button in view.children] == [label, "Agora não" if action == "leave_voice" else "Não"]
+    assert len(view.children) == 2 and all(not button.disabled for button in view.children)
+    assert PRIVATE_SPEECH not in rendered and PRIVATE_SPEECH not in json.dumps(view.to_components())
+    if action in {"kick_member", "purge_messages"}:
+        assert view.children[0].style == discord.ButtonStyle.danger
+
+
+def test_purge_card_displays_only_the_exact_fixed_message_ids_up_to_twenty_five():
+    item = request("purge_messages")
+    item["payload"].update({"channel_id": 60, "message_ids": list(range(100, 130))})
+    rendered = render_action_requests([item])
+    assert "Posso apagar 25 mensagens de <#60>?" in rendered
+    assert "`100`" in rendered and "`124`" in rendered
+    assert "`125`" not in rendered and "`129`" not in rendered
+    item["payload"]["message_ids"] = {"text": PRIVATE_SPEECH}
+    assert PRIVATE_SPEECH not in render_action_requests([item])
+
+
+def test_channel_card_exposes_proposed_values_and_neutralizes_mentions_without_unknown_fields():
+    item = request("edit_channel")
+    item["payload"].update({"channel_id": 60, "channel_changes": {
+        "name": "**sala** <@999>", "topic": "@everyone <#998>", "slowmode_delay": 0,
+        "text": PRIVATE_SPEECH, "permissions": {"text": PRIVATE_SPEECH},
+    }})
+    rendered = render_action_requests([item])
+    assert "Nome novo:" in rendered and "Tópico novo:" in rendered and "Modo lento novo: 0 segundos" in rendered
+    assert "<@999>" not in rendered and "<#998>" not in rendered and "@everyone" not in rendered
+    assert "**sala**" not in rendered and PRIVATE_SPEECH not in rendered and "permissions" not in rendered
+    item["payload"]["channel_changes"] = {"name": {"text": PRIVATE_SPEECH}, "topic": None}
+    rendered = render_action_requests([item])
+    assert "(valor inválido)" in rendered and "(remover tópico)" in rendered
+    assert PRIVATE_SPEECH not in rendered
+
+
+def test_nickname_card_shows_removal_or_escaped_exact_new_nickname():
+    item = request("change_nickname")
+    item["payload"]["nickname"] = "**novo** <@999>"
+    rendered = render_action_requests([item])
+    assert "Apelido novo:" in rendered
+    assert "**novo**" not in rendered and "<@999>" not in rendered
+    item["payload"]["nickname"] = None
+    assert "(remover apelido)" in render_action_requests([item])
+
+
+def test_nickname_and_channel_cards_show_safe_before_and_after_snapshots():
+    nick = request("change_nickname")
+    nick["payload"].update({"nickname_before": "antigo", "nickname": "novo"})
+    rendered = render_action_requests([nick])
+    assert "Apelido atual: antigo" in rendered and "Apelido novo: novo" in rendered
+    channel = request("edit_channel")
+    channel["payload"].update({
+        "channel_id": 60,
+        "channel_before": {"name": "antiga", "topic": "antigo tópico", "slowmode_delay": 0},
+        "channel_changes": {"name": "nova", "topic": "novo tópico", "slowmode_delay": 10},
+    })
+    rendered = render_action_requests([channel])
+    assert "Nome atual: antiga" in rendered and "Nome novo: nova" in rendered
+    assert "Tópico atual: antigo tópico" in rendered and "Tópico novo: novo tópico" in rendered
+    assert "Modo lento atual: 0 segundos" in rendered and "Modo lento novo: 10 segundos" in rendered
+    channel["payload"]["channel_before"] = {"name": {"text": PRIVATE_SPEECH}, "topic": {"text": PRIVATE_SPEECH}}
+    assert PRIVATE_SPEECH not in render_action_requests([channel])
+
+
+def test_channel_card_keeps_full_proposed_values_with_explicit_old_summary_and_fits_discord():
+    item = request("edit_channel")
+    item["guild_id"] = item["requester_id"] = 12345678901234567890
+    item["payload"].update({
+        "channel_id": 12345678901234567890, "reason": "*" * 150,
+        "channel_before": {"name": "*" * 100, "topic": "*" * 1024, "slowmode_delay": 21600},
+        "channel_changes": {"name": "*" * 100, "topic": "*" * 500, "slowmode_delay": 21600},
+    })
+    rendered = render_action_requests([item])
+    assert "Tópico novo: " + "\\*" * 500 in rendered
+    assert "Nome novo: " + "\\*" * 100 in rendered
+    assert "… (resumo)" in rendered
+    assert len(rendered) <= 2000
+    item["payload"]["channel_changes"]["topic"] = "*" * 501
+    assert "(valor inválido: excede 500 caracteres)" in render_action_requests([item])
+
+
+@pytest.mark.parametrize("seconds", [True, -1, 0, 29 * 86400, {"text": PRIVATE_SPEECH}])
+def test_timeout_card_never_represents_invalid_or_private_duration(seconds):
+    item = request("timeout_member")
+    item["payload"]["duration_seconds"] = seconds
+    rendered = render_action_requests([item])
+    assert "por o período informado" in rendered
+    assert PRIVATE_SPEECH not in rendered

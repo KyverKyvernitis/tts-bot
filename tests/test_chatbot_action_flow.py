@@ -15,6 +15,7 @@ from cogs.chatbot.actions import ActionService
 from cogs.chatbot.cog import ChatbotCog
 from cogs.chatbot.config import GuildChatbotConfig
 from cogs.chatbot.memory import MemoryEntry, MemoryEpoch
+from cogs.chatbot.preferences import ConversationPreferences
 
 
 def _value(doc, key):
@@ -241,7 +242,7 @@ async def test_native_ban_proposal_becomes_bound_button_and_only_staff_executes(
     assert await world.cog._generate_and_send(world.message, "peça para banir esse membro")
     await world.cog._supervisor.drain()  # publica somente o cartão, sem executar
     options = world.cog._router.chat.await_args.kwargs
-    assert set(options["actions"]) == {"send_audio", "speak_voice", "ban_member"}
+    assert {"send_audio", "speak_voice", "ban_member", "unban_member"}.issubset(options["actions"])
     assert options["target_refs"] == ("autor", "m1")
     assert "Alvo autor:" in options["system"] and "Alvo m1:" in options["system"]
     assert options["messages"][-1].content == "peça para banir esse membro"
@@ -509,6 +510,9 @@ async def test_unready_action_service_keeps_router_in_legacy_text_mode(world):
 def _restore_legacy_audio_generation(world):
     # Exercitar os gates reais; só os serviços externos de síntese/fila são mocks.
     world.cog._maybe_generate_tts = ChatbotCog._maybe_generate_tts.__get__(world.cog)
+    # O formato agora vem de preferência semântica confirmada, não de uma
+    # busca por palavras no texto da mensagem. Os gates continuam reais.
+    world.cog.get_conversation_preferences = AsyncMock(return_value=ConversationPreferences(mode="audio"))
     world.tts._enqueue_tts_item = AsyncMock(return_value=(True, False, False))
 
 

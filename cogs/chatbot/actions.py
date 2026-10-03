@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 from dataclasses import dataclass, replace
 import discord
 from . import constants as C
 from .action_execution import ActionExecutionUncertain, execute_action
-from .action_policy import ActionDenied, _can_view_voice, _fresh_member, _requester_can_view, build_action_context, prepare_action, validate_action
+from .action_policy import (ActionDenied, STAFF_ACTIONS, _enabled, _can_view_voice, _fresh_member,
+                            _requester_can_view, _resource_visibility_gate, _voice_visibility_gate,
+                            build_action_context, prepare_action, validate_action)
 from .action_protocol import MAX_PROPOSALS
 from .action_store import ActionStore
 from .action_views import ActionRequestView, render_action_requests
@@ -15,7 +18,7 @@ from .memory import MemoryEpoch
 
 log = logging.getLogger(__name__)
 _AUDIO = {"send_audio", "speak_voice"}
-_STAFF = {"join_voice", "ban_member"}
+_STAFF = STAFF_ACTIONS
 
 @dataclass
 class ActionPlan:
@@ -90,31 +93,38 @@ class ActionService:
             log.warning("chatbot: resultados de ações indisponíveis (%s)", type(exc).__name__)
         return context
 
-    async def plan(self, message, reply, context, config, *, epoch=None, visibility_scope=""):
+    async def plan(self, message, reply, context, config, *, epoch=None, visibility_scope="", original_user_text=None):
         proposals = reply.proposals[:MAX_PROPOSALS]
         base = "" if any(p.action in _AUDIO for p in proposals) else self.cog._sanitize_model_reply(reply.text)[:1200]
-        steps, seen, join_channel = [], set(), None
+        steps, seen, join_channel, source_channel = [], set(), None, None
         for proposal in proposals:
+            if proposal.action == "speak_voice" and any(step["action"] == "leave_voice" for step in steps):
+                return ActionPlan(base, [], "Não posso planejar uma fala depois de sair da call.")
             if proposal.action not in context.actions:
                 return ActionPlan(base, [], "Essa ação não está disponível neste momento.")
             try:
                 options = {"deferred_voice_channel_id": join_channel} if proposal.action == "speak_voice" and join_channel is not None else {}
-                data = await prepare_action(self.bot, message, proposal, targets=context.targets, config=config, **options)
+                if options and source_channel is not None:
+                    options["deferred_voice_source_channel_id"] = source_channel
+                data = await prepare_action(self.bot, message, proposal, targets=context.targets,
+                                            resources=getattr(context, "resources", {}), config=config, **options)
             except ActionDenied as exc:
                 return ActionPlan(base, [], str(exc))
             payload = data["payload"]
-            fingerprint = (data["action"], payload.get("target_id"), payload.get("voice_channel_id"),
-                           payload.get("text", ""), payload.get("reason", ""))
+            fingerprint = (data["action"], json.dumps(payload, sort_keys=True, ensure_ascii=False))
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)
             if data["action"] in _AUDIO and any(step["action"] in _AUDIO for step in steps):
                 return ActionPlan(base, [], "Cada resposta pode ter um único áudio ou fala na call.")
-            if data["action"] == "join_voice":
-                if join_channel is not None:
-                    return ActionPlan(base, [], "Uma sequência pode pedir entrada em uma única call.")
+            if data["action"] in {"join_voice", "move_voice", "leave_voice"}:
+                if any(step["action"] in {"join_voice", "move_voice", "leave_voice"} for step in steps):
+                    return ActionPlan(base, [], "Uma sequência pode alterar a sessão de voz uma única vez.")
                 join_channel = payload["voice_channel_id"]
+                source_channel = payload.get("source_voice_channel_id")
             data["ask_permission"], data["base_reply"] = data["action"] in _STAFF, ""
+            data["original_user_text"] = str(getattr(message, "content", "") or "") if original_user_text is None else str(original_user_text)
+            data["provider"], data["model"] = str(getattr(reply, "provider", "") or ""), str(getattr(reply, "model", "") or "")
             if epoch is not None:
                 data["memory_epoch"] = {"global_generation": epoch.global_generation, "guild_generation": epoch.guild_generation, "user_generation": epoch.user_generation}
                 data["visibility_scope"] = visibility_scope
@@ -175,9 +185,7 @@ class ActionService:
             raise ActionDenied("O canal original não está disponível.")
         if not config.enabled or not config.actions_enabled or not config.allows_channel(request["channel_id"], parent_id=getattr(channel, "parent_id", None)):
             raise ActionDenied("O chatbot ou as ações foram desativados neste canal.")
-        enabled = {"send_audio": config.audio_actions_enabled, "speak_voice": config.voice_actions_enabled,
-                   "join_voice": config.voice_actions_enabled, "ban_member": config.moderation_actions_enabled}.get(request["action"], False)
-        if not enabled:
+        if not _enabled(config, request["action"]):
             raise ActionDenied("Esta ação foi desativada pela staff.")
         return config
 
@@ -185,27 +193,40 @@ class ActionService:
         claimed = await self.store.claim_publication(request["request_id"])
         if claimed is None:
             return
+        sent, view, bound = None, None, False
         try:
             await self._current_config(claimed)
             guild = self.bot.get_guild(claimed["guild_id"])
             requester = await _fresh_member(guild, claimed["requester_id"])
             channel = self.bot.get_channel(claimed["channel_id"])
             await _requester_can_view(channel, requester)
-            if claimed["action"] == "join_voice" and not _can_view_voice(guild.get_channel(claimed["payload"]["voice_channel_id"]), requester):
-                raise ActionDenied("O solicitante precisa poder ver a call autorizada.")
+            _voice_visibility_gate(guild, claimed, requester, requester)
+            _resource_visibility_gate(guild, claimed, requester, requester)
             view = ActionRequestView(self, [claimed])
             reference = discord.MessageReference(message_id=claimed["origin_message_id"], channel_id=channel.id, guild_id=guild.id, fail_if_not_exists=False)
             sent = await channel.send(render_action_requests([claimed]), view=view, reference=reference, allowed_mentions=discord.AllowedMentions.none())
             if not await self.store.bind(claimed["request_id"], sent.id):
-                await sent.delete()
-                view.stop()
                 return
+            bound = True
             self.track_view(sent.id, view)
         except ActionDenied as exc:
             await self.store.fail_unpublished(claimed["request_id"], public_result=str(exc))
         except Exception as exc:
             await self.store.fail_unpublished(claimed["request_id"], public_result="Não consegui confirmar a publicação do pedido.", uncertain=True)
             log.warning("chatbot: pedido não publicado (%s)", type(exc).__name__)
+        finally:
+            if sent is not None and not bound:
+                # Discord may have accepted the card before persistence failed.
+                # Its known local object must not leave a live orphaned view.
+                if view is not None:
+                    view.stop()
+                try:
+                    await sent.delete()
+                except Exception:
+                    try:
+                        await sent.edit(view=None)
+                    except Exception:
+                        pass
 
     async def _start_automatic(self, request):
         if request["action"] not in _AUDIO or request.get("ask_permission"):
@@ -294,7 +315,7 @@ class ActionService:
             try:
                 await self.cog._persist_turn(guild_id=request["guild_id"], user_id=request["requester_id"], channel_id=request["channel_id"],
                     visibility_scope=request["visibility_scope"], epoch=MemoryEpoch(**epoch), user_name="",
-                    user_message="[Resposta em áudio à mensagem anterior]" if audio else "[Resposta textual após falha do áudio]",
+                    user_message=str(request.get("original_user_text") or ""),
                     assistant_message=self.cog._sanitize_model_reply(spoken))
             except Exception as exc:
                 # Memória indisponível não muda o resultado de um efeito que
@@ -326,6 +347,13 @@ class ActionService:
                 return
             sent = await channel.send(self.cog._sanitize_model_reply(text)[:2000], allowed_mentions=discord.AllowedMentions.none())
             await self.cog._remember_sent_message(guild_id=request["guild_id"], channel_id=channel.id, message_id=sent.id)
+            replies = getattr(self.cog, "_reply_store", None)
+            if callable(getattr(replies, "record_sent", None)):
+                await replies.record_sent(guild_id=request["guild_id"], channel_id=channel.id,
+                    requester_id=request["requester_id"], origin_message_id=request["origin_message_id"], message_id=sent.id,
+                    original_user_text=str(request.get("original_user_text") or ""),
+                    text=self.cog._sanitize_model_reply(text)[:2000], format="text", epoch=request.get("memory_epoch"),
+                    provider=str(request.get("provider") or ""), model=str(request.get("model") or ""))
             await self._record_spoken(request, audio=False)
         except Exception as exc:
             log.warning("chatbot: resposta textual após falha do áudio indisponível (%s)", type(exc).__name__)
@@ -393,3 +421,33 @@ class ActionService:
     async def refresh_message(self, request):
         if request.get("state") not in {"created", "publishing", "pending", "blocked"}:
             await self._delete_card(request)
+
+    async def _own_scope(self, *, guild_id, channel_id, requester_id):
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is None:
+            raise ActionDenied("O servidor dessa conversa não está disponível.")
+        channel = guild.get_channel_or_thread(int(channel_id))
+        if channel is None or getattr(getattr(channel, "guild", None), "id", None) != int(guild_id):
+            raise ActionDenied("O canal dessa conversa não está disponível.")
+        requester = await _fresh_member(guild, int(requester_id))
+        if requester.bot:
+            raise ActionDenied("Essa consulta precisa ser feita por um membro do servidor.")
+        await _requester_can_view(channel, requester)
+        return requester
+
+    async def list_pending(self, *, guild_id, channel_id, requester_id, limit=5):
+        await self._own_scope(guild_id=guild_id, channel_id=channel_id, requester_id=requester_id)
+        return await self.store.pending_for_requester(guild_id=int(guild_id), channel_id=int(channel_id),
+                                                      requester_id=int(requester_id), limit=min(5, max(1, int(limit))))
+
+    async def cancel_pending(self, request_id, *, guild_id, channel_id, requester_id):
+        await self._own_scope(guild_id=guild_id, channel_id=channel_id, requester_id=requester_id)
+        changed = await self.store.cancel_own_pending(str(request_id), guild_id=int(guild_id),
+                                                     channel_id=int(channel_id), requester_id=int(requester_id))
+        if changed:
+            # Descendants may already own a card from a recovered process. The
+            # store determines which consumed cards need removal; no replay.
+            for request in await self.store.cards_to_remove():
+                if request["guild_id"] == int(guild_id) and request["channel_id"] == int(channel_id) and request["requester_id"] == int(requester_id):
+                    await self._delete_card(request)
+        return changed

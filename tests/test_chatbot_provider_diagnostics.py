@@ -138,7 +138,7 @@ async def test_gemini_first_success_does_not_call_groq(chains, caplog, monkeypat
     router._groq = _Client("must not be requested")
     router._gemini = _Client("private gemini reply")
 
-    assert await router.chat(system="private prompt", messages=[ChatMessage("user", "private message")]) == "private gemini reply"
+    assert await router.chat(system="private prompt", messages=[ChatMessage("user", "private message")], text_provider_order=("gemini", "groq")) == "private gemini reply"
     assert router._gemini.models == ["gemini-text-first"]
     assert not router._groq.models
     assert "result=success provider=gemini model=gemini-text-first mode=text" in caplog.text
@@ -154,7 +154,7 @@ async def test_gemini_priority_failure_preserves_context_in_groq_fallback(chains
     router._groq = _Client("private fallback reply")
     messages = [ChatMessage("assistant", "private earlier answer"), ChatMessage("user", "private follow-up")]
 
-    assert await router.chat(system="private system", messages=messages, temperature=.65) == "private fallback reply"
+    assert await router.chat(system="private system", messages=messages, temperature=.65, text_provider_order=("gemini",)) == "private fallback reply"
     assert router._gemini.models == ["gemini-text-first"]
     assert router._groq.models == ["groq-text"]
     first, fallback = router._gemini.requests[0], router._groq.requests[0]
@@ -182,7 +182,7 @@ async def test_invalid_or_duplicate_priority_keeps_each_configured_attempt_once(
     )
 
     with pytest.raises(AllProvidersExhausted):
-        await router.chat(system="private system", messages=[])
+        await router.chat(system="private system", messages=[], text_provider_order=priority)
 
     attempted = [
         re.search(r" model=(\S+)", record.getMessage()).group(1)

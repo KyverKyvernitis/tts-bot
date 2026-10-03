@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import io
+import json
 import logging
 import os
 import re
@@ -33,7 +34,8 @@ from .audio import (
     DEFAULT_TTS_VOICE, MAX_TTS_CHARS, synthesize_speech, transcribe_audio,
     user_asked_for_tts,
 )
-from .audio_format import AudioReplySelector, prefers_text
+from .audio_format import AudioReplySelector
+from .preferences import ConversationPreferences, PreferenceStale, PreferenceStore
 from .imagegen import build_image_failure_message, generated_image_extension, parse_image_intent
 from .image_service import ImageService
 from .memory import MemoryStore, MemoryEntry, MemoryEpoch, visibility_scope_for
@@ -74,6 +76,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._message_index: Optional[ChatbotMessageIndex] = None
         self._image_service: Optional[ImageService] = None
         self._actions: Optional[ActionService] = None
+        self._preferences: Optional[PreferenceStore] = None
+        self._reply_store = None
         self._admission = AdmissionController()
         self._supervisor = TaskSupervisor()
         self._user_cooldowns: dict[tuple[int, int], float] = {}
@@ -104,6 +108,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._session = aiohttp.ClientSession(connector=connector)
         self._config = ConfigStore(coll)
         self._memory = MemoryStore(coll)
+        self._preferences = PreferenceStore(coll, memory=self._memory)
+        from .reply_store import ReplyStore
+        self._reply_store = ReplyStore(coll)
         self._master = MasterPromptStore(coll)
         self._message_index = ChatbotMessageIndex(coll)
         groq_key = os.environ.get("GROQ_API_KEY", "").strip()
@@ -511,19 +518,17 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
     async def _maybe_generate_tts(
         self, *, content: str, reply: str,
         guild_id: int | None = None, user_id: int | None = None,
+        channel_id: int | None = None,
         force: bool = False,
     ) -> Optional[discord.File]:
         """Sintetiza uma resposta pedida ou selecionada pelo host como áudio."""
-        if C.SAFE_MODE or not (force or user_asked_for_tts(content)):
+        if C.SAFE_MODE or not force:
             return None
         if guild_id and not await self._legacy_audio_allowed(guild_id):
             return None
         # Sanitiza ANTES de sintetizar para o áudio não falar uma negativa
         # contraditória do tipo "não posso responder com áudio".
-        spoken_reply = self._sanitize_audio_capability_claim(
-            reply,
-            audio_will_be_sent=True,
-        )[:MAX_TTS_CHARS].rstrip()
+        spoken_reply = (reply or "").strip()
         audio_bytes: Optional[bytes] = None
         adapter_attempted = False
         tts_cog = self.bot.get_cog("TTSVoice")
@@ -539,12 +544,15 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 if inspect.isawaitable(resolved):
                     resolved = await resolved
                 settings = dict(resolved or {})
+                preferences = await self.get_conversation_preferences(
+                    int(guild_id), int(channel_id or 0), int(user_id),
+                ) if channel_id else ConversationPreferences()
                 audio_bytes = await adapter(
                     guild_id=int(guild_id),
                     user_id=int(user_id),
                     text=spoken_reply,
-                    voice=str(settings.get("edge_voice") or DEFAULT_TTS_VOICE),
-                    language=str(settings.get("gtts_language", settings.get("language", "pt-br")) or "pt-br"),
+                    voice=preferences.voice or str(settings.get("edge_voice") or DEFAULT_TTS_VOICE),
+                    language=preferences.language or str(settings.get("gtts_language", settings.get("language", "pt-br")) or "pt-br"),
                     rate=str(settings.get("edge_rate", settings.get("rate", "+0%")) or "+0%"),
                     pitch=str(settings.get("edge_pitch", settings.get("pitch", "+0Hz")) or "+0Hz"),
                 )
@@ -554,6 +562,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         # may still be completing after our deadline. Starting edge-tts again
         # here would duplicate network and CPU work.
         if not audio_bytes and not adapter_attempted:
+            # O fallback legado aceita até 800 caracteres. Uma preferência
+            # persistente nunca deve transformar metade da resposta em áudio.
+            if len(spoken_reply) > MAX_TTS_CHARS:
+                return None
             try:
                 audio_bytes = await asyncio.wait_for(
                     synthesize_speech(spoken_reply), timeout=15.0,
@@ -576,6 +588,16 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             selector = self._audio_reply_selector = AudioReplySelector()
         return selector
 
+    async def get_conversation_preferences(
+        self, guild_id: int, channel_id: int, user_id: int,
+        epoch: MemoryEpoch | None = None,
+    ) -> ConversationPreferences:
+        store = getattr(self, "_preferences", None)
+        if store is None or channel_id <= 0:
+            return ConversationPreferences()
+        current = epoch or await self._memory.capture_epoch(guild_id, user_id)
+        return await store.get_current(guild_id, channel_id, user_id, current)
+
     async def record_audio_reply_sent(self, *, guild_id: int, channel_id: int) -> None:
         """Uma fala nativa também adia o próximo sorteio no mesmo canal."""
         store = getattr(self, "_config", None)
@@ -587,7 +609,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
     async def _select_audio_format(
         self, *, guild_id: int, channel_id: int, content: str, reply: str,
-        eligible: bool,
+        eligible: bool, mode: str = "auto",
     ) -> tuple[str, GuildChatbotConfig | None]:
         if C.SAFE_MODE or not eligible:
             return "text", None
@@ -601,7 +623,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return "text", None
         return self._audio_selector().select(
             config=config, guild_id=guild_id, channel_id=channel_id,
-            content=content, reply=reply, eligible=eligible,
+            content=content, reply=reply, eligible=eligible, mode=mode,
         ), config
 
     @staticmethod
@@ -664,6 +686,175 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             # O anexo já chegou ao chat. Uma falha na call não deve repetir
             # síntese, arquivo ou fala nem transformar o turno em erro.
             log.warning("chatbot: espelhamento na call indisponível (%s)", type(exc).__name__)
+
+    async def _record_delivered_reply(
+        self, *, message, sent, original_user_text: str, text: str,
+        spoken_text: str, epoch: MemoryEpoch | None, audio: bool,
+        provider: str = "", model: str = "",
+    ) -> None:
+        store = getattr(self, "_reply_store", None)
+        if store is None or epoch is None:
+            return
+        try:
+            attachment = None
+            if audio:
+                files = getattr(sent, "attachments", ()) or ()
+                if isinstance(files, (list, tuple)) and files:
+                    file = files[0]
+                    attachment = {"id": int(file.id), "filename": str(file.filename)[:150], "size": int(file.size)}
+            await store.record_sent(
+                guild_id=message.guild.id, channel_id=message.channel.id, requester_id=message.author.id,
+                origin_message_id=message.id, message_id=sent.id,
+                original_user_text=original_user_text, text=text, spoken_text=spoken_text,
+                format="audio" if audio else "text", provider=provider, model=model,
+                epoch=epoch, attachment=attachment,
+            )
+        except Exception as exc:
+            log.warning("chatbot: vínculo da resposta indisponível (%s)", type(exc).__name__)
+
+    async def _run_native_tools(
+        self, *, message, system: str, messages: list[ChatMessage], config: GuildChatbotConfig,
+        preferences: ConversationPreferences, epoch: MemoryEpoch | None, visibility: str,
+        reply_target, action_context, temperature: float, router_options: dict,
+    ):
+        """Rodadas limitadas do modelo; somente o catálogo pode executar ferramentas."""
+        registry = None
+        if getattr(self, "_preferences", None) is not None and epoch is not None:
+            from .tool_runtime import build_tool_registry
+            registry = await build_tool_registry(
+                self, message, config, epoch=epoch, visibility_scope=visibility,
+                reply_target=reply_target, action_context=action_context,
+            )
+        state = {"delivered": False, "audio_sent": False, "uncertain": False, "action_failed": False,
+                 "preferences": preferences}
+        current_voice = getattr(getattr(message.guild, "voice_client", None), "channel", None)
+        visible_voice = current_voice is not None and bool(
+            getattr(current_voice.permissions_for(message.author), "view_channel", False)
+        )
+        me = getattr(message.guild, "me", None) or getattr(self.bot, "user", None)
+        actual_state = {
+            "guild_id": int(message.guild.id), "channel_id": int(message.channel.id),
+            "user_id": int(message.author.id),
+            "bot_id": int(getattr(getattr(self.bot, "user", None), "id", 0) or 0),
+            "bot_name": str(getattr(me, "display_name", "bot"))[:80],
+            "voice_connected": current_voice is not None,
+            "voice_channel_id": int(current_voice.id) if visible_voice else None,
+            "preferences": preferences.to_result(),
+        }
+        actual = "Estado confirmado deste turno: " + json.dumps(actual_state, ensure_ascii=False)
+        if preferences.mode == "audio":
+            actual += f"\nA resposta de conversa será entregue em áudio. Seja completo em até {MAX_TTS_CHARS} caracteres; não antecipe a fala em texto."
+        if preferences.language:
+            actual += "\nIdioma solicitado para esta conversa: " + preferences.language
+        if action_context is not None:
+            actual += "\n" + action_context.description
+        if registry is None:
+            reply = await self._router.chat(system=actual + "\n\n" + system, messages=messages,
+                                            temperature=temperature, **router_options)
+            return reply, None, state
+        from .tool_runtime import execute_native_tool
+        started = time.monotonic()
+        calls_used = 0
+        results_by_id: dict[str, tuple[str, str, dict]] = {}
+        effect_results: dict[tuple[str, str], dict] = {}
+        latest = ChatReply("")
+        for _round in range(C.MAX_TOOL_ROUNDS):
+            remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
+            if remaining <= 0:
+                break
+            # Resolvers podem ter ampliado o catálogo da rodada anterior.
+            try:
+                current_preferences = await asyncio.wait_for(self.get_conversation_preferences(
+                    message.guild.id, message.channel.id, message.author.id, epoch,
+                ), timeout=remaining)
+            except asyncio.TimeoutError:
+                state["deadline"] = True
+                break
+            effective_mode = getattr(getattr(registry, "runtime", None), "response_format", None) or current_preferences.mode
+            state["preferences"] = current_preferences
+            actual_state["preferences"] = {**current_preferences.to_result(), "effective_mode": effective_mode}
+            current = "Estado confirmado deste turno: " + json.dumps(actual_state, ensure_ascii=False)
+            if effective_mode == "audio":
+                current += f"\nEntregue a resposta de conversa em áudio, completa em até {MAX_TTS_CHARS} caracteres, sem prévia em texto."
+            if current_preferences.language:
+                current += "\nIdioma solicitado para esta conversa: " + current_preferences.language
+            context = getattr(getattr(registry, "runtime", None), "action_context", action_context)
+            if context is not None:
+                current += "\n" + context.description
+            remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
+            if remaining <= 0:
+                state["deadline"] = True
+                break
+            latest = await self._router.chat(
+                system=registry.summary() + "\n\n" + current + "\n\n" + system,
+                messages=messages, temperature=temperature, tool_specs=registry.get_specs(),
+                text_provider_order=config.text_provider_order, budget_seconds=remaining,
+            )
+            if not isinstance(latest, ChatReply) or not latest.tool_calls:
+                return latest, registry, state
+            calls = latest.tool_calls
+            messages.append(ChatMessage("assistant", latest.text, tool_calls=list(calls)))
+            has_proposal = False
+            for call in calls:
+                if calls_used >= C.MAX_TOOL_CALLS:
+                    result = {"ok": False, "status": "limit_reached", "error": "Limite de ferramentas deste turno atingido."}
+                else:
+                    calls_used += 1
+                    spec = registry.get(call.name)
+                    arguments = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, allow_nan=False)
+                    fingerprint = call.name, arguments
+                    is_effect = bool(spec is not None and spec.permission != "read") or call.name == "propor_acao"
+                    cached = results_by_id.get(call.id)
+                    if cached is not None:
+                        result = cached[2] if cached[:2] == fingerprint else {
+                            "ok": False, "status": "invalid_call", "error": "A identificação da ferramenta já foi usada."}
+                    elif is_effect and fingerprint in effect_results:
+                        result = effect_results[fingerprint]
+                    else:
+                        tool_remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
+                        if tool_remaining <= 0:
+                            result = {"ok": False, "status": "deadline", "error": "O prazo deste turno foi atingido."}
+                        else:
+                            try:
+                                result = await asyncio.wait_for(execute_native_tool(registry, call), timeout=tool_remaining)
+                            except asyncio.TimeoutError:
+                                result = {"ok": False, "status": "uncertain" if is_effect else "deadline",
+                                          "error": "Não consegui confirmar o resultado desta ferramenta."}
+                        if not isinstance(result, dict):
+                            result = {"ok": False, "status": "uncertain" if is_effect else "failed",
+                                      "error": "Não consegui confirmar o resultado desta ferramenta."}
+                        if is_effect:
+                            effect_results[fingerprint] = result
+                        results_by_id[call.id] = (*fingerprint, result)
+                status = result.get("status")
+                if call.name == "set_conversation_preferences" and result.get("ok"):
+                    saved = result.get("data")
+                    if isinstance(saved, dict) and saved.get("mode") in {"auto", "audio", "text"}:
+                        state["preferences"] = ConversationPreferences(
+                            saved["mode"], str(saved.get("voice") or ""), str(saved.get("language") or ""),
+                        )
+                state["delivered"] = state["delivered"] or status in {"image_sent", "audio_sent", "reply_sent"}
+                state["audio_sent"] = state["audio_sent"] or status in {"audio_sent", "reply_sent"}
+                state["uncertain"] = state["uncertain"] or status == "uncertain"
+                state["deadline"] = state.get("deadline", False) or status == "deadline"
+                has_proposal = has_proposal or (call.name == "propor_acao" and bool(result.get("ok")))
+                state["action_failed"] = state["action_failed"] or (call.name == "propor_acao" and not result.get("ok"))
+                serialized = json.dumps(result, ensure_ascii=False, allow_nan=False)
+                if len(serialized) > 12000:
+                    serialized = json.dumps({"ok": bool(result.get("ok")), "status": status,
+                                             "data": {"truncated": True, "preview": serialized[:11000]}}, ensure_ascii=False)
+                messages.append(ChatMessage("tool", serialized, tool_call_id=call.id, name=call.name))
+                if state["uncertain"] or state["action_failed"] or state.get("deadline"):
+                    break
+            if calls_used >= C.MAX_TOOL_CALLS and not has_proposal:
+                state["limit_reached"] = True
+            if state["uncertain"] or state["action_failed"] or state.get("deadline") or has_proposal or calls_used >= C.MAX_TOOL_CALLS:
+                break
+        else:
+            state["limit_reached"] = True
+        # Não publicar a fala intermediária que acompanhou ferramentas; ela
+        # pode antecipar um áudio ou efeito ainda aguardando aprovação.
+        return replace(latest, text="", proposals=()) if isinstance(latest, ChatReply) else "", registry, state
 
     def _sanitize_audio_capability_claim(self, reply: str, *, audio_will_be_sent: bool) -> str:
         """Remove contradições quando o bot efetivamente envia áudio.
@@ -926,9 +1117,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
     def _build_system_prompt(self, master_prompt: Optional[str] = None, channel_is_nsfw: bool = False) -> str:
         instructions = (master_prompt or "").strip() or C.DEFAULT_MASTER_PROMPT
-        parts = [instructions, C.CONVERSATION_STYLE_DIRECTIVE,
-                 C.NSFW_CHANNEL_DIRECTIVE if channel_is_nsfw else C.SFW_CHANNEL_DIRECTIVE,
-                 C.HARD_SYSTEM_PREAMBLE]
+        parts = [C.HARD_SYSTEM_PREAMBLE, instructions, C.CONVERSATION_STYLE_DIRECTIVE]
         if C.SAFE_MODE:
             parts.append("Recursos: neste momento responda apenas em texto; áudio e geração de imagens estão suspensos.")
         else:
@@ -1186,29 +1375,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     if not content:
                         return
                     self._apply_user_cooldown(guild.id, message.author.id)
-                    intent = self._detect_user_intent(content)
-                    if intent.kind in ("image_safe", "image_adult"):
-                        if C.SAFE_MODE:
-                            await message.reply(
-                                "🛠️ Geração de imagem está temporariamente em modo de recuperação.",
-                                mention_author=False, allowed_mentions=discord.AllowedMentions.none(), delete_after=15.0,
-                            )
-                            return
-                        # Resposta espontânea permanece textual e barata.
-                        if not spontaneous:
-                            if not await lease.switch_kind("image"):
-                                await message.reply(
-                                    "⏳ A fila de imagens está cheia.", mention_author=False,
-                                    allowed_mentions=discord.AllowedMentions.none(), delete_after=12.0,
-                                )
-                                return
-                            handled = await self._maybe_generate_image(
-                                message=message, prompt_text=content, image_prompt=intent.prompt,
-                            )
-                            if handled:
-                                return
-                            if not await lease.switch_kind("chat"):
-                                return
                     try:
                         sent = await asyncio.wait_for(
                             self._generate_and_send(message, content, behavior_hint=trigger.behavior_hint),
@@ -1235,7 +1401,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             effective_nsfw = channel_is_nsfw(channel) and C.nsfw_enabled_for_guild(guild.id)
             private = isinstance(channel, discord.Thread) and channel.is_private()
             visibility = visibility_scope_for(channel.id, is_nsfw=effective_nsfw, is_private=private)
-            include_collective = self._wants_collective_context(content, behavior_hint=behavior_hint)
+            # Consultas de contexto durante a conversa passam pelas ferramentas.
+            # A participação espontânea tem escopo operacional de canal.
+            include_collective = bool(behavior_hint)
             tasks = [asyncio.create_task(self._memory.load_context(
                 guild.id, author.id, channel_id=channel.id, visibility_scope=visibility,
                 include_collective=include_collective,
@@ -1264,6 +1432,14 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 epoch = await self._capture_turn_epoch(guild.id, author.id)
                 personal, collective = [], []
             master = results[1] if len(results) > 1 and isinstance(results[1], MasterPrompt) else None
+            config_store = getattr(self, "_config", None)
+            config = await config_store.get_config(guild.id) if config_store is not None else GuildChatbotConfig(
+                guild_id=guild.id, enabled=True, audio_reply_chance_percent=0,
+            )
+            try:
+                preferences = await self.get_conversation_preferences(guild.id, channel.id, author.id, epoch)
+            except PreferenceStale:
+                return False
             reply_context = None
             target = None
             if message.reference is not None:
@@ -1287,11 +1463,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             action_context = None
             if action_service is not None and action_service.ready:
                 try:
-                    config = await self._config.get_config(guild.id)
                     action_context = await asyncio.wait_for(
                         action_service.describe(message, config, reply_target=target), timeout=3.0,
                     )
-                    system += "\n\n" + action_context.description
                 except Exception as exc:
                     log.warning("chatbot: capacidades de ações indisponíveis (%s)", type(exc).__name__)
             router_options = {}
@@ -1299,18 +1473,47 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 router_options["actions"] = action_context.actions
                 router_options["target_refs"] = tuple(action_context.targets)
             try:
-                reply = await self._router.chat(
-                    system=system, messages=messages,
+                reply, registry, tool_state = await self._run_native_tools(
+                    message=message, system=system, messages=messages, config=config,
+                    preferences=preferences, epoch=epoch, visibility=visibility,
+                    reply_target=target, action_context=action_context,
                     temperature=C.DEFAULT_VISION_TEMPERATURE if images else C.DEFAULT_TEMPERATURE,
-                    **router_options,
+                    router_options=router_options,
                 )
             except (AllProvidersExhausted, ProviderError, asyncio.TimeoutError) as exc:
                 await self._send_chat_failure(message, exc, had_images=bool(images), spontaneous=bool(behavior_hint))
                 return False
+            reply_provider, reply_model = getattr(reply, "provider", ""), getattr(reply, "model", "")
+            effective_mode = preferences.mode
+            if registry is not None:
+                from .tool_runtime import drain_action_proposals
+                proposals = drain_action_proposals(registry)
+                runtime_context = getattr(registry, "runtime", None)
+                action_context = getattr(runtime_context, "action_context", action_context)
+                if proposals and not (tool_state.get("uncertain") or tool_state.get("action_failed")):
+                    reply = replace(reply, proposals=proposals) if isinstance(reply, ChatReply) else ChatReply(str(reply or ""), proposals)
+                preferences = tool_state.get("preferences", preferences)
+                effective_mode = getattr(runtime_context, "response_format", None) or preferences.mode
+                if getattr(runtime_context, "response_format", None) is None and any(
+                    item.action in {"send_audio", "speak_voice"} for item in proposals
+                ):
+                    effective_mode = "audio"
+            if tool_state.get("audio_sent") and not (isinstance(reply, ChatReply) and reply.proposals):
+                # Uma ferramenta já entregou o arquivo correspondente ao
+                # turno. A fala e seu vínculo foram registrados pelo handler.
+                return True
             action_plan = None
-            action_failed = False
+            action_failed = bool(tool_state.get("uncertain") or tool_state.get("action_failed")
+                                 or tool_state.get("deadline") or tool_state.get("limit_reached"))
+            if action_failed:
+                if tool_state.get("uncertain"):
+                    reply = "Não consegui confirmar essa ação. Confira o resultado antes de tentar novamente."
+                elif tool_state.get("action_failed"):
+                    reply = "Não consegui preparar a sequência solicitada. Nenhuma etapa foi autorizada."
+                else:
+                    reply = "Não consegui terminar esse pedido dentro do limite deste turno."
             if isinstance(reply, ChatReply):
-                if prefers_text(content):
+                if effective_mode == "text":
                     audio_proposals = tuple(item for item in reply.proposals
                                             if item.action in {"send_audio", "speak_voice"})
                     proposals = tuple(item for item in reply.proposals
@@ -1322,6 +1525,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 if reply.proposals and action_context is not None:
                     action_plan = await action_service.plan(
                         message, reply, action_context, config, epoch=epoch, visibility_scope=visibility,
+                        original_user_text=content,
                     )
                     if action_plan.requests:
                         reply = action_service.content(action_plan)
@@ -1333,25 +1537,23 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     reply = reply.text
             reply = self._sanitize_model_reply(reply)
             if not reply and action_plan is None:
-                return False
+                return bool(tool_state.get("delivered"))
             limit = 2000 if action_plan else (C.SPONTANEOUS_MAX_REPLY_CHARS if behavior_hint else 2000)
             reply = reply[:limit].rstrip()
             tts_file = None
             audio_format, audio_config = await self._select_audio_format(
                 guild_id=guild.id, channel_id=channel.id, content=content, reply=reply,
-                eligible=action_plan is None and not action_failed and self._can_attach_audio(message),
+                eligible=action_plan is None and not action_failed and not tool_state.get("delivered")
+                and self._can_attach_audio(message), mode=effective_mode,
             )
             if audio_format != "text":
                 tts_file = await self._maybe_generate_tts(
                     content=content, reply=reply, guild_id=guild.id, user_id=author.id,
-                    force=True,
+                    channel_id=channel.id, force=True,
                 )
                 if tts_file is not None and not await self._legacy_audio_allowed(guild.id):
                     tts_file.close()
                     tts_file = None
-            reply = self._sanitize_audio_capability_claim(reply, audio_will_be_sent=tts_file is not None)
-            if tts_file is not None:
-                reply = reply[:MAX_TTS_CHARS].rstrip()
             if not await self._can_respond(
                 guild.id, channel.id, spontaneous=bool(behavior_hint),
                 parent_id=getattr(channel, "parent_id", None),
@@ -1373,6 +1575,12 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                         tts_file.close()
                     raise
                 await self._remember_sent_message(guild_id=guild.id, channel_id=channel.id, message_id=sent.id)
+                await self._record_delivered_reply(
+                    message=message, sent=sent, original_user_text=content,
+                    text=reply, spoken_text=reply if tts_file is not None else "",
+                    epoch=epoch, audio=tts_file is not None,
+                    provider=reply_provider, model=reply_model,
+                )
             if tts_file is not None and sent is not None:
                 self._audio_selector().record_sent(
                     guild_id=guild.id, channel_id=channel.id,

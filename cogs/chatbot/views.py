@@ -132,18 +132,42 @@ class EditConfigView(_OpenModalView):
     def __init__(self, *, requester_id: int, current_config: GuildChatbotConfig,
                  on_submit_config: ConfigCallback, check_authorized: AuthorizationCheck,
                  on_submit_actions: Optional[ConfigCallback] = None,
-                 on_submit_audio: Optional[ConfigCallback] = None):
+                 on_submit_audio: Optional[ConfigCallback] = None,
+                 on_submit_allowlists: Optional[ConfigCallback] = None,
+                 on_submit_provider: Optional[ConfigCallback] = None):
         super().__init__(requester_id=requester_id, check_authorized=check_authorized, label="Editar configuração")
         self._config = current_config
         self._on_submit_config = on_submit_config
         self._on_submit_actions = on_submit_actions or on_submit_config
         self._on_submit_audio = on_submit_audio or on_submit_config
+        self._on_submit_allowlists = on_submit_allowlists
+        self._on_submit_provider = on_submit_provider
         button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Configurar ações")
         button.callback = self._open_actions
         self.add_item(button)
         audio_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Configurar áudios")
         audio_button.callback = self._open_audio
         self.add_item(audio_button)
+        if on_submit_allowlists is not None:
+            allowlists_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Autorizar cargos e canais")
+            allowlists_button.callback = self._open_allowlists
+            self.add_item(allowlists_button)
+        if on_submit_provider is not None:
+            provider_button = discord.ui.Button(style=discord.ButtonStyle.secondary, label="Provedor de conversa")
+            provider_button.callback = self._open_provider
+            self.add_item(provider_button)
+
+    async def _open_allowlists(self, interaction: discord.Interaction):
+        await self._open_with(interaction, lambda: ActionAllowlistModal(
+            requester_id=self._requester_id, current_config=self._config,
+            on_submit_config=self._on_submit_allowlists, check_authorized=self._check_authorized,
+        ))
+
+    async def _open_provider(self, interaction: discord.Interaction):
+        await self._open_with(interaction, lambda: ProviderConfigModal(
+            requester_id=self._requester_id, current_config=self._config,
+            on_submit_config=self._on_submit_provider, check_authorized=self._check_authorized,
+        ))
 
     async def _open_audio(self, interaction: discord.Interaction):
         await self._open_with(interaction, lambda: AudioReplyConfigModal(
@@ -183,8 +207,8 @@ class ActionConfigModal(discord.ui.Modal, title="Ações do chatbot"):
         )
         self.add_item(_label("Ações da IA", self.actions_group, "Permite usar os recursos abaixo durante a conversa."))
         self.add_item(_label("Áudios", self.audio_group, "Pode mandar sem aprovação e reproduzir o mesmo áudio na call atual."))
-        self.add_item(_label("Calls", self.voice_group, "Entrar exige staff; falar na call atual é permitido a membros comuns."))
-        self.add_item(_label("Banimentos", self.moderation_group, "Sempre exige aprovação com Banir membros e hierarquia válida."))
+        self.add_item(_label("Calls", self.voice_group, "Entrar, sair ou mover exigem staff; falar na call atual é automático."))
+        self.add_item(_label("Moderação", self.moderation_group, "Banir, expulsar e silenciar exigem staff, suas permissões e hierarquia."))
         self.add_item(_label("Cargos de staff", self.staff_roles, "Opcional. Gerenciar servidor permite aprovar entrada; banir exige sua permissão."))
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -207,6 +231,82 @@ class ActionConfigModal(discord.ui.Modal, title="Ações do chatbot"):
         except Exception:
             log.exception("chatbot: falha ao salvar ações")
             await _notice(interaction, "Não consegui salvar as ações. Tente novamente.")
+
+
+class ActionAllowlistModal(discord.ui.Modal, title="Autorizar cargos e canais"):
+    def __init__(self, *, requester_id: int, current_config: GuildChatbotConfig,
+                 on_submit_config: ConfigCallback, check_authorized: AuthorizationCheck):
+        super().__init__(timeout=600.0)
+        self._requester_id = int(requester_id)
+        self._config = current_config
+        self._on_submit_config = on_submit_config
+        self._check_authorized = check_authorized
+        self.allowed_roles = discord.ui.RoleSelect(
+            custom_id="chatbot_action_allowed_roles", min_values=0, max_values=10, required=False,
+            default_values=[discord.SelectDefaultValue(id=role_id, type=discord.SelectDefaultValueType.role)
+                            for role_id in current_config.action_allowed_role_ids[:10]],
+        )
+        self.allowed_channels = _channel_select("chatbot_action_allowed_channels", current_config.action_allowed_channel_ids)
+        self.add_item(_label("Cargos que posso adicionar ou remover", self.allowed_roles,
+                             "Somente cargos sem privilégios. Vazio desativa alterações de cargos. A staff aprova cada ação."))
+        self.add_item(_label("Canais que posso alterar ou limpar", self.allowed_channels,
+                             "Vazio desativa alterações e limpeza. Esta lista não substitui as permissões da staff."))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if int(getattr(interaction.user, "id", 0) or 0) != self._requester_id:
+            await _notice(interaction, "Esta configuração não é para você.")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            if not await self._check_authorized(interaction):
+                return
+            config = replace(self._config,
+                action_allowed_role_ids=tuple(int(role.id) for role in self.allowed_roles.values),
+                action_allowed_channel_ids=tuple(int(channel.id) for channel in self.allowed_channels.values),
+            )
+            await self._on_submit_config(interaction, config)
+        except ValueError as exc:
+            await _notice(interaction, f"Não consegui salvar: {exc}")
+        except Exception:
+            log.exception("chatbot: falha ao salvar cargos e canais autorizados")
+            await _notice(interaction, "Não consegui salvar os cargos e canais. Tente novamente.")
+
+
+class ProviderConfigModal(discord.ui.Modal, title="Provedor de conversa"):
+    def __init__(self, *, requester_id: int, current_config: GuildChatbotConfig,
+                 on_submit_config: ConfigCallback, check_authorized: AuthorizationCheck):
+        super().__init__(timeout=600.0)
+        self._requester_id = int(requester_id)
+        self._config = current_config
+        self._on_submit_config = on_submit_config
+        self._check_authorized = check_authorized
+        self.provider_group = discord.ui.RadioGroup(custom_id="chatbot_text_provider", required=True)
+        preferred = current_config.text_provider_order[0] if current_config.text_provider_order else "groq"
+        self.provider_group.add_option(label="Groq primeiro (padrão)", value="groq", default=preferred != "gemini")
+        self.provider_group.add_option(label="Gemini primeiro", value="gemini", default=preferred == "gemini")
+        self.add_item(_label("Primeiro provedor da conversa", self.provider_group,
+                             "O outro provedor serve de fallback. Configure aqui, sem editar arquivos."))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if int(getattr(interaction.user, "id", 0) or 0) != self._requester_id:
+            await _notice(interaction, "Esta configuração não é para você.")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            if not await self._check_authorized(interaction):
+                return
+            preferred = self.provider_group.value
+            if preferred not in {"groq", "gemini"}:
+                raise ValueError("Escolha Groq ou Gemini.")
+            config = replace(self._config,
+                text_provider_order=("groq", "gemini") if preferred == "groq" else ("gemini", "groq"),
+            )
+            await self._on_submit_config(interaction, config)
+        except ValueError as exc:
+            await _notice(interaction, f"Não consegui salvar: {exc}")
+        except Exception:
+            log.exception("chatbot: falha ao salvar provedor da conversa")
+            await _notice(interaction, "Não consegui salvar o provedor. Tente novamente.")
 
 
 class AudioReplyConfigModal(discord.ui.Modal, title="Áudios da conversa"):

@@ -5,6 +5,9 @@ import logging
 
 from . import constants as C
 from .action_store import DOC_TYPE_ACTION_REQUEST
+from .preferences import DOC_TYPE_PREFERENCES
+from .reply_store import DOC_TYPE_REPLY
+from .tool_memory import FACT_TYPE
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +142,26 @@ async def ensure_indexes(coll) -> None:
             },
         ),
     ]
+    for kind, name, keys in (
+        (DOC_TYPE_PREFERENCES, "chatbot_preferences_lookup",
+         [("type", 1), ("guild_id", 1), ("channel_id", 1), ("user_id", 1),
+          ("global_generation", 1), ("guild_generation", 1), ("user_generation", 1)]),
+        (DOC_TYPE_REPLY, "chatbot_reply_lookup",
+         [("type", 1), ("guild_id", 1), ("channel_id", 1), ("requester_id", 1), ("sent_at", -1)]),
+        (FACT_TYPE, "chatbot_fact_lookup",
+         [("type", 1), ("guild_id", 1), ("channel_id", 1), ("user_id", 1),
+          ("visibility_scope", 1), ("global_generation", 1), ("guild_generation", 1),
+          ("user_generation", 1), ("updated_at", -1)]),
+    ):
+        specs.append((keys, {"name": name, "partialFilterExpression": {"type": kind}}))
+    specs.extend([
+        ([("type", 1), ("message_id", 1)],
+         {"name": "chatbot_reply_unique", "unique": True,
+          "partialFilterExpression": {"type": DOC_TYPE_REPLY}}),
+        ([("expires_at", 1)],
+         {"name": "chatbot_reply_ttl", "expireAfterSeconds": 0,
+          "partialFilterExpression": {"type": DOC_TYPE_REPLY}}),
+    ])
     for keys, kwargs in specs:
         try:
             await coll.create_index(keys, **kwargs)

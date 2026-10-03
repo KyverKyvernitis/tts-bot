@@ -19,6 +19,8 @@ import json
 import logging
 import re
 import unicodedata
+import hashlib
+import inspect
 from typing import Optional
 
 import aiohttp
@@ -121,6 +123,89 @@ DEFAULT_TTS_VOICE = "pt-BR-FranciscaNeural"
 # Limite de tamanho do texto — TTS pode demorar e gerar arquivo grande.
 # Respostas do bot são tipicamente curtas; cap defensivo.
 MAX_TTS_CHARS = 800
+
+
+async def recorded_reply_audio(bot, record: dict, *, user_id: int, before_effect=None) -> Optional[bytes]:
+    """Conversão nativa fiel: reaproveita o anexo ou sintetiza o texto uma vez.
+
+    Não interpreta frases do usuário e não usa URLs escolhidas pela IA. O
+    registro foi criado após o envio; sua mensagem, acesso e época são novos.
+    O chamador só pode enviar os bytes depois de revalidar seu próprio turno.
+    """
+    from .reply_store import MAX_REPLY_AUDIO_BYTES, MAX_REPLY_CHARS, validate_recorded_reply
+    from .action_policy import _enabled
+
+    async def guard():
+        if C.SAFE_MODE:
+            return None
+        cog = bot.get_cog("Chatbot")
+        store = getattr(cog, "_config", None)
+        if store is None:
+            return None
+        config = await store.get_config(int(record["guild_id"]), fresh=True)
+        if not _enabled(config, "send_audio"):
+            return None
+        if before_effect is not None:
+            allowed = before_effect()
+            if (await allowed if inspect.isawaitable(allowed) else allowed) is False:
+                return None
+        return await validate_recorded_reply(bot, record, user_id=int(user_id))
+
+    try:
+        message = await guard()
+        if message is None:
+            return None
+        if record.get("format") == "audio":
+            stored = record.get("attachment")
+            if not isinstance(stored, dict):
+                return None
+            attachment = next((item for item in message.attachments if int(item.id) == int(stored["id"])), None)
+            if (attachment is None or attachment.filename != stored["filename"]
+                    or int(attachment.size) != int(stored["size"])
+                    or not 0 < int(attachment.size) <= MAX_REPLY_AUDIO_BYTES):
+                return None
+            data = await asyncio.wait_for(attachment.read(), timeout=15.0)
+            if not isinstance(data, bytes) or len(data) != int(stored["size"]) or len(data) > MAX_REPLY_AUDIO_BYTES:
+                return None
+            digest = stored.get("sha256")
+            if digest and hashlib.sha256(data).hexdigest() != digest:
+                return None
+        else:
+            text = record.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > MAX_REPLY_CHARS:
+                return None  # não converter somente uma parte da resposta
+            tts = bot.get_cog("TTSVoice")
+            adapter = getattr(tts, "synthesize_chatbot_attachment", None)
+            resolver = getattr(getattr(bot, "settings_db", None), "resolve_tts", None)
+            if not callable(adapter) or not callable(resolver):
+                return None
+            settings = resolver(int(record["guild_id"]), int(user_id))
+            settings = dict((await settings if inspect.isawaitable(settings) else settings) or {})
+            voice = str(settings.get("edge_voice") or DEFAULT_TTS_VOICE)
+            language = str(settings.get("gtts_language", settings.get("language", "pt-br")) or "pt-br")
+            preferences = getattr(bot.get_cog("Chatbot"), "get_conversation_preferences", None)
+            if callable(preferences):
+                pref = await preferences(int(record["guild_id"]), int(record["channel_id"]), int(user_id))
+                voice = str(getattr(pref, "voice", None) or voice)
+                language = str(getattr(pref, "language", None) or language)
+            data = await asyncio.wait_for(adapter(
+                guild_id=int(record["guild_id"]), user_id=int(user_id), text=text,
+                voice=voice, language=language,
+                rate=str(settings.get("edge_rate", settings.get("rate", "+0%")) or "+0%"),
+                pitch=str(settings.get("edge_pitch", settings.get("pitch", "+0Hz")) or "+0Hz"),
+                max_bytes=MAX_REPLY_AUDIO_BYTES, max_text_chars=MAX_REPLY_CHARS,
+                timeout_seconds=25.0,
+            ), timeout=30.0)
+            if not isinstance(data, bytes) or not data or len(data) > MAX_REPLY_AUDIO_BYTES:
+                return None
+        if await guard() is None:
+            return None
+        return data
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("chatbot: conversão de resposta indisponível (%s)", type(exc).__name__)
+        return None
 
 
 async def synthesize_speech(

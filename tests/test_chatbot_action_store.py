@@ -709,3 +709,110 @@ async def test_consumed_card_cleanup_is_persistent_scoped_and_keeps_auth_message
     assert await restored.cards_to_remove() == []
     assert (await restored.get(executing))["message_id"] == 66
     assert await restored.claim(executing, **_binding()) is None
+
+
+@pytest.mark.asyncio
+async def test_pending_for_requester_is_scoped_bounded_and_contains_only_public_summaries(state):
+    store, _, clock = state
+    expired = await _pending(store, action="ban_member")
+    clock.advance(300)
+    docs = await store.create_plan(_plan_data())
+    first = docs[0]["request_id"]
+    assert await store.claim_publication(first)
+    other_member = await store.create(_data(requester_id=99))
+    other_channel = await store.create(_data(channel_id=99))
+    other_guild = await store.create(_data(guild_id=99))
+    cancelled = await _pending(store)
+    assert await store.reject(cancelled, **_binding())
+    summaries = await store.pending_for_requester(11, 22, 44)
+    assert [doc["request_id"] for doc in summaries] == [doc["request_id"] for doc in docs]
+    assert [doc["state"] for doc in summaries] == ["publishing", "blocked", "blocked", "blocked"]
+    assert summaries[0]["target_id"] == 44 and summaries[0]["voice_channel_id"] == 77
+    assert all("payload" not in doc and "base_reply" not in doc and "execution_token" not in doc
+               and "publishing_token" not in doc and "text" not in doc for doc in summaries)
+    assert "Fala privada" not in str(summaries)
+    assert len(await store.pending_for_requester(11, 22, 44, limit=2)) == 2
+    assert await store.pending_for_requester(11, 22, 44, limit=0) == []
+    assert [doc["request_id"] for doc in await store.pending_for_requester(11, 22, 99)] == [other_member["request_id"]]
+    assert [doc["request_id"] for doc in await store.pending_for_requester(11, 99, 44)] == [other_channel["request_id"]]
+    assert [doc["request_id"] for doc in await store.pending_for_requester(99, 22, 44)] == [other_guild["request_id"]]
+    assert expired not in {doc["request_id"] for doc in summaries}
+
+
+@pytest.mark.asyncio
+async def test_public_pending_summary_filters_private_structured_values_and_keeps_fixed_purge_count(state):
+    store, _, _ = state
+    doc = await store.create(_data(action="purge_messages", payload={
+        "text": "PRIVATE_SENTINEL", "reason": {"text": "PRIVATE_SENTINEL"},
+        "target_id": True, "role_id": {"text": "PRIVATE_SENTINEL"}, "duration_seconds": 60,
+        "channel_id": 88, "message_ids": [101, 101, 102, True, -1, {"text": "PRIVATE_SENTINEL"}],
+    }))
+    summary, = await store.pending_for_requester(11, 22, 44)
+    assert summary["request_id"] == doc["request_id"]
+    assert summary["channel_id"] == 22 and summary["affected_channel_id"] == 88
+    assert summary["message_count"] == 2 and summary["duration_seconds"] == 60
+    assert "target_id" not in summary and "role_id" not in summary
+    assert "PRIVATE_SENTINEL" not in str(summary)
+
+
+@pytest.mark.asyncio
+async def test_owner_can_cancel_own_staff_request_without_approving_it_and_purges_chain(state):
+    store, _, _ = state
+    docs = await store.create_plan([_data(action="ban_member"), _data(ask_permission=False)])
+    rid = docs[0]["request_id"]
+    assert await store.bind(rid, 66)
+    for scope in ({"guild_id": 99}, {"channel_id": 99}, {"requester_id": 99}, {"requester_id": 0}):
+        fields = {"guild_id": 11, "channel_id": 22, "requester_id": 44, **scope}
+        assert not await store.cancel_own_pending(rid, **fields)
+    assert await store.cancel_own_pending(rid, guild_id=11, channel_id=22, requester_id=44)
+    assert not await store.cancel_own_pending(rid, guild_id=11, channel_id=22, requester_id=44)
+    assert await store.claim(rid, **_binding(actor_id=111)) is None
+    for doc in docs:
+        updated = await store.get(doc["request_id"])
+        assert updated["state"] == "cancelled" and "text" not in updated["payload"]
+    assert await store.pending_for_requester(11, 22, 44) == []
+    assert [doc["request_id"] for doc in await store.cards_to_remove()] == [rid]
+
+
+@pytest.mark.asyncio
+async def test_cancel_future_step_keeps_executing_predecessor_and_stops_later_steps(state):
+    store, _, _ = state
+    docs = await store.create_plan(_plan_data())
+    assert await store.bind(docs[0]["request_id"], 66)
+    first = await store.claim(docs[0]["request_id"], **_binding(actor_id=111))
+    assert not await store.cancel_own_pending(first["request_id"], guild_id=11, channel_id=22, requester_id=44)
+    assert await store.cancel_own_pending(docs[1]["request_id"], guild_id=11, channel_id=22, requester_id=44)
+    assert (await store.get(first["request_id"]))["state"] == "executing"
+    assert await store.finish(first["request_id"], first["execution_token"],
+                              state="succeeded", public_result="Entrei.")
+    assert await store.recover_ready() == []
+    for doc in docs[1:]:
+        assert (await store.get(doc["request_id"]))["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_owner_cancellation_and_staff_approval_have_only_one_winner(state):
+    store, _, _ = state
+    rid = await _pending(store, action="ban_member")
+    cancelled, claimed = await asyncio.gather(
+        store.cancel_own_pending(rid, guild_id=11, channel_id=22, requester_id=44),
+        store.claim(rid, **_binding(actor_id=111)),
+    )
+    assert int(cancelled) + int(claimed is not None) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["succeeded", "failed", "uncertain", "cancelled"])
+async def test_terminal_steps_remove_original_user_text_after_delivery_or_cancellation(state, outcome):
+    store, _, _ = state
+    created = await store.create(_data(action="ban_member", original_user_text="pergunta privada original"))
+    rid = created["request_id"]
+    if outcome == "cancelled":
+        assert await store.cancel_own_pending(rid, guild_id=11, channel_id=22, requester_id=44)
+    else:
+        assert await store.bind(rid, 66)
+        claimed = await store.claim(rid, **_binding(actor_id=111))
+        assert claimed["original_user_text"] == "pergunta privada original"
+        assert await store.finish(rid, claimed["execution_token"], state=outcome, public_result="resultado")
+    retained = await store.get(rid)
+    assert "original_user_text" not in retained and "text" not in retained["payload"]

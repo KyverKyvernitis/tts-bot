@@ -14,6 +14,7 @@ from cogs.chatbot.cog import ChatbotCog
 from cogs.chatbot.image_service import ImageService
 from cogs.chatbot.imagegen import GeneratedImage, ImageGenerationResult
 from cogs.chatbot.memory import MemoryEntry, MemoryEpoch, MemoryStore
+from cogs.chatbot.preferences import ConversationPreferences
 from cogs.chatbot.providers import AllProvidersExhausted, ProviderError, ProviderRouter
 from cogs.chatbot.runtime import AdmissionController, TaskSupervisor
 
@@ -370,6 +371,7 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         audio = discord.File(io.BytesIO(b"fake audio"), filename="resposta.mp3")
         self.addCleanup(audio.close)
         self.cog._maybe_generate_tts.return_value = audio
+        self.cog.get_conversation_preferences = AsyncMock(return_value=ConversationPreferences(mode="audio"))
 
         self.assertTrue(await self.cog._generate_and_send(self.message, "responda em áudio"))
 
@@ -423,6 +425,7 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabling_chatbot_during_generation_discards_output_and_audio(self):
         audio = Mock(spec=discord.File)
         self.cog._maybe_generate_tts.return_value = audio
+        self.cog.get_conversation_preferences = AsyncMock(return_value=ConversationPreferences(mode="audio"))
         self.cog._can_respond.return_value = False
 
         self.assertFalse(await self.cog._generate_and_send(self.message, "responda em áudio"))
@@ -571,11 +574,12 @@ class BotPromptTests(unittest.TestCase):
     def setUp(self):
         self.cog = object.__new__(ChatbotCog)
 
-    def test_single_bot_prompt_preserves_master_and_channel_directives(self):
+    def test_single_bot_prompt_preserves_master_and_language_without_image_rules_in_general_chat(self):
         master = "Responda em português com clareza."
         system = self.cog._build_system_prompt(master_prompt=master)
         self.assertIn(master, system)
-        self.assertIn(C.SFW_CHANNEL_DIRECTIVE.strip(), system)
+        self.assertNotIn(C.SFW_CHANNEL_DIRECTIVE.strip(), system)
+        self.assertIn(C.CONVERSATION_STYLE_DIRECTIVE, system)
         self.assertNotIn("invocado temporariamente", system)
         self.assertNotIn("profile ativo", system)
         self.assertNotIn("Personalidade:", system)

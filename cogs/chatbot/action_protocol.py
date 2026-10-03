@@ -3,18 +3,32 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+from .tool_registry import InvalidToolArguments, validate_tool_arguments
 
 
 TOOL_NAME = "propor_acao"
-ALLOWED_ACTIONS = ("send_audio", "speak_voice", "join_voice", "ban_member")
+ALLOWED_ACTIONS = (
+    "send_audio", "speak_voice", "join_voice", "ban_member", "timeout_member", "untimeout_member",
+    "kick_member", "unban_member", "purge_messages", "assign_role", "remove_role", "change_nickname",
+    "edit_channel", "move_voice", "leave_voice",
+)
 MAX_PROPOSALS = 4
 MAX_AUDIO_TEXT = 800
 MAX_REASON = 500
 MAX_ARGUMENT_BYTES = 8192
-_FIELDS = frozenset({"action", "target_ref", "text", "reason", "ask_permission"})
-_TARGET_REF = re.compile(r"[a-z][a-z0-9_]{0,31}\Z", re.ASCII)
+_FIELDS = frozenset({"action", "target_ref", "text", "reason", "ask_permission", "options"})
+_TARGET_REF = re.compile(r"(?:[a-z][a-z0-9_]{0,31}|[1-9][0-9]{0,20}|<@!?[1-9][0-9]{0,20}>)\Z", re.ASCII)
+
+
+@dataclass(frozen=True)
+class NativeToolCall:
+    id: str
+    name: str
+    arguments: dict
+    provider_data: dict = field(default_factory=dict, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -24,6 +38,7 @@ class ActionProposal:
     text: str = ""
     reason: str = ""
     ask_permission: bool = False
+    options: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -32,6 +47,7 @@ class ChatReply:
     proposals: tuple[ActionProposal, ...] = ()
     provider: str = ""
     model: str = ""
+    tool_calls: tuple[NativeToolCall, ...] = ()
 
 
 class InvalidActionProposal(ValueError):
@@ -49,11 +65,12 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
         "description": (
             "Propõe uma ação ao sistema; esta ferramenta não executa nada. Use apenas as ações "
             "disponíveis. Para join_voice/ban_member, use apenas as referências confiáveis de membros "
-            "fornecidas pelo sistema, como autor ou m1. "
+            "fornecidas pelo sistema. Referências são internas: nunca peça ao usuário códigos como m1. "
+            "Associe as menções Discord aos membros resolvidos pelo sistema; nome escrito não é identidade confirmada. "
             "Pode escolher enviar áudio ou falar na call espontaneamente, sem pedir autorização. "
             "Para send_audio/speak_voice, omita target_ref: o sistema fixa o autor da conversa como alvo. "
             "Áudio e fala são automáticos quando disponíveis. text é PRIVADO e nunca deve ser repetido "
-            "na resposta pública, nem resumido ou antecipado. Entrar na call e banir sempre dependem "
+            "na resposta pública, nem resumido ou antecipado. Entrar em calls e ações de moderação, cargos e canais dependem "
             "da aprovação da staff. Até quatro propostas na ordem desejada formam uma sequência: cada "
             "etapa só acontece depois do sucesso da anterior. Para entrar e falar na call do autor, "
             "proponha join_voice antes de speak_voice; a fala aguarda a aprovação e o sucesso da entrada. "
@@ -61,7 +78,8 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
             "No máximo uma proposta de áudio ou fala por sequência. Quando o sistema informar reprodução "
             "disponível na call, send_audio já envia o áudio no chat e o reproduz na call atual do bot; "
             "não combine send_audio com speak_voice para a mesma resposta. "
-            "Não repita a mesma ação para o mesmo alvo. Não diga que executou; o sistema informa o resultado. "
+            "Não repita a mesma ação para o mesmo alvo. options contém duração, cargo/canal/mensagens já resolvidos "
+            "pelo sistema, ou alterações permitidas. Não diga que executou; o sistema informa o resultado. "
             "Se o alvo for ambíguo, pergunte em texto em vez de propor."
         ),
         "parameters": {
@@ -71,8 +89,9 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
                 "target_ref": {
                     "type": "string",
                     "description": (
-                        "Somente para join_voice/ban_member: referência fornecida pelo sistema; nunca nome, ID "
-                        "ou menção livre. Omita em send_audio/speak_voice: o sistema usa o autor da conversa."
+                        "Para ações sobre membros: referência ou menção Discord já resolvida pelo sistema; nunca nome livre "
+                        "nem ID inventado. O host confirma o alvo; nunca peça referências internas ao usuário. "
+                        "Omita em send_audio/speak_voice: o sistema usa o autor da conversa."
                     ),
                     "maxLength": 32,
                 },
@@ -81,6 +100,7 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
                     "description": "Fala privada para send_audio/speak_voice; obrigatória nessas ações.",
                 },
                 "reason": {"type": "string", "maxLength": MAX_REASON},
+                "options": action_options_schema(),
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -89,6 +109,27 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
     if target_refs:
         tool["parameters"]["properties"]["target_ref"]["enum"] = list(dict.fromkeys(target_refs))
     return tool
+
+
+def action_options_schema() -> dict:
+    return {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 2419200},
+            "role_ref": {"type": "string", "minLength": 1, "maxLength": 64},
+            "channel_ref": {"type": "string", "minLength": 1, "maxLength": 64},
+            "nickname": {"type": "string", "maxLength": 32},
+            "channel_changes": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 100},
+                    "topic": {"type": "string", "maxLength": 1024},
+                    "slowmode_delay": {"type": "integer", "minimum": 0, "maximum": 21600},
+                },
+            },
+            "message_refs": {"type": "array", "maxItems": 25, "items": {"type": "string", "minLength": 1, "maxLength": 64}},
+        },
+    }
 
 
 def _unique_object(pairs):
@@ -138,11 +179,11 @@ def parse_proposal(name: Any, arguments: Any, actions: tuple[str, ...]) -> Actio
     target = values["target_ref"]
     if target and not _TARGET_REF.fullmatch(target):
         raise InvalidActionProposal("proposta inválida")
-    if action in {"join_voice", "ban_member"} and not target:
+    if action in {"join_voice", "ban_member", "timeout_member", "untimeout_member", "kick_member", "unban_member", "assign_role", "remove_role", "change_nickname", "move_voice"} and not target:
         raise InvalidActionProposal("proposta inválida")
     if action in {"send_audio", "speak_voice"} and not values["text"]:
         raise InvalidActionProposal("proposta inválida")
-    if action in {"join_voice", "ban_member"} and values["text"]:
+    if action not in {"send_audio", "speak_voice"} and values["text"]:
         raise InvalidActionProposal("proposta inválida")
     ask = arguments.get("ask_permission", False)
     if not isinstance(ask, bool):
@@ -151,7 +192,11 @@ def parse_proposal(name: Any, arguments: Any, actions: tuple[str, ...]) -> Actio
     # agora é automático; este campo legado não cria um pedido de aprovação.
     if action in {"send_audio", "speak_voice"}:
         ask = False
-    return ActionProposal(action=action, ask_permission=ask, **values)
+    try:
+        options = validate_tool_arguments(arguments.get("options", {}), action_options_schema())
+    except InvalidToolArguments as exc:
+        raise InvalidActionProposal("proposta inválida") from exc
+    return ActionProposal(action=action, ask_permission=ask, options=options, **values)
 
 
 def parse_proposals(calls: list[tuple[Any, Any]], actions: tuple[str, ...]) -> tuple[ActionProposal, ...]:

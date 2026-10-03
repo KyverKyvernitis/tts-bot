@@ -259,6 +259,7 @@ async def test_automatic_audio_binds_and_executes_without_approval(environment):
 async def test_speech_enters_memory_only_after_confirmed_execution_with_original_epoch(environment):
     w = environment
     epoch = MemoryEpoch(global_generation=3, guild_generation=4, user_generation=5)
+    w.bot.get_cog("Chatbot")._memory = SimpleNamespace(capture_epoch=AsyncMock(return_value=epoch))
     p = await w.service.plan(w.message, ChatReply("fala", (ActionProposal("send_audio", text="fala", ask_permission=True),)),
                              await build_action_context(w.bot, w.message, w.config), w.config, epoch=epoch, visibility_scope="private:30")
     await w.service.bind_and_start(p, None)
@@ -553,3 +554,110 @@ async def test_two_distinct_audio_steps_reject_the_whole_plan(environment):
         ActionProposal("send_audio", text="um"), ActionProposal("speak_voice", text="dois"))),
         await build_action_context(w.bot, w.message, w.config), w.config)
     assert not p.requests and not w.coll.docs and "único" in p.public_error
+
+
+@pytest.mark.asyncio
+async def test_native_plan_preserves_real_original_user_text_and_provider_metadata(environment):
+    w = environment
+    w.message.content = "áudio da pergunta"
+    reply = ChatReply("", (ActionProposal("send_audio", text="resposta"),), provider="groq", model="modelo")
+    p = await w.service.plan(w.message, reply, await build_action_context(w.bot, w.message, w.config),
+                             w.config, original_user_text="pergunta transcrita completa")
+    assert p.requests[0]["original_user_text"] == "pergunta transcrita completa"
+    assert p.requests[0]["provider"] == "groq" and p.requests[0]["model"] == "modelo"
+    assert "pergunta transcrita" not in w.service.content(p)
+
+
+@pytest.mark.asyncio
+async def test_own_pending_reads_never_disclose_private_speech_and_cancel_stops_chain(environment):
+    w = environment
+    p = await w.service.plan(w.message, ChatReply("", (
+        ActionProposal("ban_member", "m1", reason="spam"),
+        ActionProposal("send_audio", text="fala privada"))),
+        await build_action_context(w.bot, w.message, w.config), w.config)
+    await w.service.bind_and_start(p)
+    await w.supervisor.drain()
+    own = await w.service.list_pending(guild_id=10, channel_id=30, requester_id=1)
+    assert len(own) == 2
+    assert "fala privada" not in str(own) and "payload" not in str(own) and "execution_token" not in str(own)
+    assert await w.service.list_pending(guild_id=10, channel_id=30, requester_id=2) == []
+    assert not await w.service.cancel_pending(p.requests[0]["request_id"], guild_id=10, channel_id=30, requester_id=2)
+    w.config.actions_enabled = False  # cancelling old work still available
+    assert await w.service.cancel_pending(p.requests[0]["request_id"], guild_id=10, channel_id=30, requester_id=1)
+    for request in p.requests:
+        current = await w.service.store.get(request["request_id"])
+        assert current["state"] == "cancelled" and "text" not in current["payload"]
+    w.executor.assert_not_awaited()
+    w.card.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_own_pending_access_checked_fresh_even_for_cancel(environment):
+    w = environment
+    r = await _request(w)
+    w.chat.permissions_for.side_effect = lambda m: SimpleNamespace(view_channel=m.id != 1)
+    for operation in (
+        w.service.list_pending(guild_id=10, channel_id=30, requester_id=1),
+        w.service.cancel_pending(r["request_id"], guild_id=10, channel_id=30, requester_id=1),
+    ):
+        with pytest.raises(ActionDenied):
+            await operation
+    assert (await w.service.store.get(r["request_id"]))["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_expanded_privileged_sequence_gets_separate_staff_approvals(environment):
+    from test_chatbot_action_policy import expanded
+    w = expanded.__wrapped__(environment)
+    w.message.mentions.append(w.members[4])
+    context = await build_action_context(w.bot, w.message, w.config)
+    p = await w.service.plan(w.message, ChatReply("vou pedir", (
+        ActionProposal("timeout_member", "m1", reason="spam", options={"duration_seconds": 30}),
+        ActionProposal("kick_member", "m2", reason="abuso"))), context, w.config)
+    assert len(p.requests) == 2
+    await w.service.bind_and_start(p)
+    await w.supervisor.drain()
+    first, second = p.requests
+    assert (await w.service.store.get(first["request_id"]))["state"] == "pending"
+    assert (await w.service.store.get(second["request_id"]))["state"] == "blocked"
+    await w.service.handle_interaction(_interaction(w), first["request_id"], approve=True)
+    await w.supervisor.drain()
+    assert w.executor.await_count == 1
+    assert (await w.service.store.get(second["request_id"]))["state"] == "pending"
+    assert not (await w.service.store.get(second["request_id"])).get("approved_by")
+    await w.service.handle_interaction(_interaction(w), second["request_id"], approve=True)
+    await w.supervisor.drain()
+    assert w.executor.await_count == 2 and not w.service._active_users
+    assert (await w.service.store.get(second["request_id"]))["state"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_invalid_expanded_predecessor_never_persists_or_executes_following_ban(environment):
+    from test_chatbot_action_policy import expanded
+    w = expanded.__wrapped__(environment)
+    context = await build_action_context(w.bot, w.message, w.config)
+    p = await w.service.plan(w.message, ChatReply("", (
+        ActionProposal("edit_channel", reason="pedido", options={"channel_ref": "inventado", "channel_changes": {"name": "novo"}}),
+        ActionProposal("ban_member", "m1", reason="spam"))), context, w.config)
+    assert not p.requests and not w.coll.docs and p.public_error
+    w.executor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_fails", [False, True])
+async def test_db_failure_after_card_send_removes_or_disables_known_orphan(environment, monkeypatch, delete_fails):
+    w = environment
+    if delete_fails:
+        w.card.delete.side_effect = RuntimeError("Discord indisponível")
+    monkeypatch.setattr(w.service.store, "bind", AsyncMock(side_effect=RuntimeError("banco indisponível")))
+    plan = await w.service.plan(w.message, ChatReply("", (ActionProposal("ban_member", "m1", reason="spam"),)),
+                                await build_action_context(w.bot, w.message, w.config), w.config)
+    await w.service.bind_and_start(plan)
+    await w.supervisor.drain()
+    current = await w.service.store.get(plan.requests[0]["request_id"])
+    assert current["state"] == "uncertain"
+    w.card.delete.assert_awaited_once()
+    if delete_fails:
+        w.card.edit.assert_awaited_once_with(view=None)
+    assert not w.service._views
+    w.executor.assert_not_awaited()

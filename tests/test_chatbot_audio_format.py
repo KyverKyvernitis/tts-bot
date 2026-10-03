@@ -11,7 +11,8 @@ import pytest
 
 from cogs.chatbot import constants as C
 from cogs.chatbot.action_protocol import ActionProposal, ChatReply
-from cogs.chatbot.audio_format import AudioReplySelector, prefers_text
+from cogs.chatbot.audio_format import AudioReplySelector
+from cogs.chatbot.preferences import ConversationPreferences
 from cogs.chatbot.cog import ChatbotCog
 from cogs.chatbot.config import ConfigStore, GuildChatbotConfig
 from cogs.chatbot.memory import MemoryEpoch
@@ -37,14 +38,14 @@ def test_audio_disabled_does_not_draw_or_accept_explicit_audio(setting):
     selector = AudioReplySelector(draw=draw)
     cfg = replace(config(), **{setting: False})
     assert selector.select(config=cfg, guild_id=10, channel_id=20,
-                           content="responda em áudio", reply="Oi!") == "text"
+                           requested=True, reply="Oi!") == "text"
     draw.assert_not_called()
 
 
 @pytest.mark.parametrize("changes", [
     {"eligible": False}, {"reply": ""}, {"reply": "```python\nprint(1)\n```"},
-    {"reply": "x" * 801}, {"content": "responde em texto"},
-    {"content": "sem áudio, por favor"}, {"config": config(audio_reply_chance_percent=0)},
+    {"reply": "x" * 801}, {"mode": "text"},
+    {"config": config(audio_reply_chance_percent=0)},
 ])
 def test_ineligible_operational_long_code_or_text_preference_never_draws(changes):
     draw = Mock(return_value=0)
@@ -59,7 +60,7 @@ def test_explicit_audio_ignores_random_chance_and_cooldown_without_draw():
     selector = AudioReplySelector(draw=draw, clock=lambda: 100)
     selector.record_sent(guild_id=10, channel_id=20, cooldown_seconds=60)
     assert selector.select(config=config(audio_reply_chance_percent=0), guild_id=10,
-                           channel_id=20, content="manda um áudio", reply="Oi!") == "requested"
+                           channel_id=20, requested=True, reply="Oi!") == "requested"
     draw.assert_not_called()
 
 
@@ -81,10 +82,22 @@ def test_random_cooldown_is_per_channel_and_only_after_actual_send():
     assert not selector._cooldowns
 
 
-@pytest.mark.parametrize("text", ["Só texto", "não mande áudio", "não responda em áudio", "apenas em texto",
-                                  "não quero áudio", "não manda um áudio", "sem voz", "prefiro texto"])
-def test_portuguese_explicit_text_preference(text):
-    assert prefers_text(text)
+@pytest.mark.parametrize("text", ["Só texto", "responda em áudio", "A partir de agora só converse em áudio"])
+def test_free_text_does_not_act_as_an_operational_command(text):
+    draw = Mock(return_value=0.8)
+    selector = AudioReplySelector(draw=draw)
+    assert selector.select(config=config(), guild_id=10, channel_id=20,
+                           content=text, reply="Oi!") == "text"
+    draw.assert_called_once()
+
+
+def test_saved_audio_mode_ignores_random_cooldown_between_turns():
+    draw = Mock(return_value=0.99)
+    selector = AudioReplySelector(draw=draw, clock=lambda: 100)
+    selector.record_sent(guild_id=10, channel_id=20, cooldown_seconds=60)
+    assert selector.select(config=config(audio_reply_chance_percent=0), guild_id=10,
+                           channel_id=20, mode="audio", reply="Como foi o seu dia?") == "requested"
+    draw.assert_not_called()
 
 
 class Collection:
@@ -170,6 +183,7 @@ def turn(monkeypatch):
         load_context=AsyncMock(return_value=(epoch, [], [])),
         capture_epoch=AsyncMock(return_value=epoch), append_turn=AsyncMock(),
     )
+    cog.get_conversation_preferences = AsyncMock(return_value=ConversationPreferences())
     cog._router = SimpleNamespace(chat=AsyncMock(return_value="E aí, bora jogar?"))
     cog._message_index = SimpleNamespace(remember=AsyncMock())
     cog._can_respond = AsyncMock(return_value=True)
@@ -244,6 +258,7 @@ async def test_random_audio_without_attach_permission_stays_text_without_synthes
 
 @pytest.mark.asyncio
 async def test_mirror_failure_never_repeats_synthesis_or_loses_delivered_memory(turn):
+    turn.cog.get_conversation_preferences.return_value = ConversationPreferences(mode="audio")
     turn.tts.chatbot_mirror_audio.side_effect = RuntimeError("call ended")
     assert await turn.cog._generate_and_send(turn.message, "manda um áudio")
     turn.tts.synthesize_chatbot_attachment.assert_awaited_once()
@@ -291,6 +306,7 @@ async def test_confirmed_native_audio_also_limits_following_random_format(turn):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["send_audio", "speak_voice"])
 async def test_explicit_text_preference_overrides_even_a_native_audio_proposal(turn, action):
+    turn.cog.get_conversation_preferences.return_value = ConversationPreferences(mode="text")
     service = turn.cog._actions = SimpleNamespace(
         ready=True, describe=AsyncMock(return_value=SimpleNamespace(
             description="Pode mandar áudio.", actions=(action,), targets={},
@@ -308,6 +324,7 @@ async def test_explicit_text_preference_overrides_even_a_native_audio_proposal(t
 
 @pytest.mark.asyncio
 async def test_text_preference_preserves_separate_privileged_permission_step(turn):
+    turn.cog.get_conversation_preferences.return_value = ConversationPreferences(mode="text")
     plan = SimpleNamespace(requests=[{"action": "join_voice"}])
     service = turn.cog._actions = SimpleNamespace(
         ready=True, describe=AsyncMock(return_value=SimpleNamespace(

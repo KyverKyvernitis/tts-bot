@@ -81,7 +81,7 @@ async def test_context_only_uses_real_same_guild_direct_targets_and_clean_labels
     context = await build_action_context(world.bot, world.message, world.config, reply)
     assert context.targets == {"autor": world.members[1], "m1": world.members[3], "m2": world.members[2]}
     assert "@everyone" not in context.description and "`" not in context.description
-    assert context.actions == ("send_audio", "ban_member")
+    assert context.actions == ("send_audio", "ban_member", "unban_member")
     assert "não escuta" in context.description
 
 
@@ -693,3 +693,502 @@ async def test_cross_guild_voice_channel_is_never_available_or_pinned(world):
     with pytest.raises(ActionDenied, match="poder ver"):
         await prepare_action(world.bot, world.message, ActionProposal("join_voice", "m1"),
                              targets=context.targets, config=world.config)
+
+# Expanded tools verify actual Discord authority rather than a generic staff bit.
+@pytest.fixture
+def expanded(world):
+    from datetime import datetime, timezone
+    w = world
+    w.message.content = "modere <@3>"
+    w.config.action_allowed_role_ids = (70,)
+    w.config.action_allowed_channel_ids = (30,)
+    permissions = ("kick_members", "moderate_members", "manage_messages", "manage_roles", "manage_nicknames", "manage_channels")
+    for mid in (2, 99, 999):
+        for permission in permissions:
+            setattr(w.members[mid].guild_permissions, permission, True)
+    for m in w.members.values():
+        m.nick = None
+        m.timeout, m.kick, m.add_roles, m.remove_roles, m.edit = (AsyncMock() for _ in range(5))
+    w.chat.name, w.chat.topic, w.chat.slowmode_delay = "geral", "antes", 0
+    w.chat.permissions_for.side_effect = lambda m: SimpleNamespace(
+        view_channel=True, send_messages=True, attach_files=True,
+        manage_messages=m.id in (2, 99, 999), manage_channels=m.id in (2, 99, 999))
+    w.chat.edit, w.chat.delete_messages = AsyncMock(), AsyncMock()
+    role = MagicMock(spec=discord.Role)
+    role.id, role.guild, role.managed, role.position = 70, w.guild, False, 3
+    role.is_default.return_value = False
+    role.permissions = discord.Permissions.none()
+    role.__lt__.side_effect = lambda rank: 3 < rank
+    w.role = role
+    w.guild.get_role = lambda rid: role if rid == 70 else None
+    w.guild.fetch_ban = AsyncMock(return_value=SimpleNamespace(user=SimpleNamespace(id=42)))
+    w.guild.unban = AsyncMock()
+    item = MagicMock(spec=discord.Message)
+    item.id, item.guild, item.channel, item.created_at = 100, w.guild, w.chat, datetime.now(timezone.utc)
+    w.item = item
+    w.chat.fetch_message = AsyncMock(return_value=item)
+    w.resources = {"r1": role, "c1": w.chat, "msg1": item}
+    w.targets = {"autor": w.members[1], "m1": w.members[3]}
+    return w
+
+
+async def _expanded_request(w, action, **options):
+    return await prepare_action(w.bot, w.message, ActionProposal(action, "m1", reason="motivo concreto", options=options),
+                                targets=w.targets, resources=w.resources, config=w.config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action, options", [
+    ("timeout_member", {"duration_seconds": 60}), ("untimeout_member", {}), ("kick_member", {}),
+    ("assign_role", {"role_ref": "r1"}), ("remove_role", {"role_ref": "r1"}),
+    ("change_nickname", {"nickname": "apelido novo"}),
+    ("edit_channel", {"channel_ref": "c1", "channel_changes": {"topic": "novo", "slowmode_delay": 5}}),
+    ("purge_messages", {"message_refs": ["msg1"]}),
+])
+async def test_expanded_member_channel_actions_require_staff_and_execute_exact_parameters(expanded, action, options):
+    w = expanded
+    prepared = await _expanded_request(w, action, **options)
+    assert prepared["ask_permission"] is True
+    with pytest.raises(ActionDenied):
+        await validate_action(w.bot, prepared, 1)
+    await validate_action(w.bot, prepared, 2)
+    result = await execute_action(w.bot, prepared, actor_id=2)
+    assert result.public_result
+    calls = {
+        "timeout_member": w.members[3].timeout, "untimeout_member": w.members[3].timeout,
+        "kick_member": w.members[3].kick, "assign_role": w.members[3].add_roles,
+        "remove_role": w.members[3].remove_roles, "change_nickname": w.members[3].edit,
+        "edit_channel": w.chat.edit, "purge_messages": w.chat.delete_messages,
+    }
+    calls[action].assert_awaited_once()
+    kwargs = calls[action].await_args.kwargs
+    assert "aprovação 2" in kwargs["reason"] and "pedido" in kwargs["reason"]
+    if action == "purge_messages":
+        assert calls[action].await_args.args == ([w.item],)
+    if action == "change_nickname":
+        assert kwargs["nick"] == "apelido novo"
+    if action == "edit_channel":
+        assert kwargs["topic"] == "novo" and kwargs["slowmode_delay"] == 5
+        assert "permissions" not in kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action, permission", [
+    ("kick_member", "kick_members"), ("timeout_member", "moderate_members"),
+    ("assign_role", "manage_roles"), ("change_nickname", "manage_nicknames"),
+])
+async def test_manage_guild_or_configured_role_never_grants_specific_authority(expanded, action, permission):
+    w = expanded
+    opts = {"duration_seconds": 10} if action == "timeout_member" else {"role_ref": "r1"} if action == "assign_role" else {"nickname": "n"} if action == "change_nickname" else {}
+    prepared = await _expanded_request(w, action, **opts)
+    w.members[4].roles = [SimpleNamespace(id=888)]
+    w.config.action_staff_role_ids = (888,)
+    with pytest.raises(ActionDenied):
+        await validate_action(w.bot, prepared, 4)
+    setattr(w.members[4].guild_permissions, permission, True)
+    await validate_action(w.bot, prepared, 4)
+    w.members[3].top_role = 6
+    with pytest.raises(ActionDenied, match="acima"):
+        await validate_action(w.bot, prepared, 4)
+
+
+@pytest.mark.asyncio
+async def test_bot_members_can_be_banned_or_kicked_when_hierarchy_allows(expanded):
+    w = expanded
+    w.members[3].bot = True
+    for action in ("ban_member", "kick_member"):
+        prepared = await _expanded_request(w, action)
+        await execute_action(w.bot, prepared, actor_id=2)
+    w.members[3].ban.assert_awaited_once()
+    w.members[3].kick.assert_awaited_once()
+    with pytest.raises(ActionDenied):
+        await _expanded_request(w, "timeout_member", duration_seconds=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ref", ["<@3>", "<@!3>", "3"])
+async def test_discord_mentions_resolve_known_targets_without_internal_code_questions(expanded, ref):
+    w = expanded
+    prepared = await prepare_action(w.bot, w.message, ActionProposal("kick_member", ref, reason="spam"),
+                                    targets=w.targets, config=w.config)
+    assert prepared["payload"]["target_id"] == 3
+
+
+@pytest.mark.asyncio
+async def test_explicit_unknown_id_is_bounded_fetched_but_invented_id_is_denied(expanded):
+    w = expanded
+    w.message.content = "expulse <@3>"
+    prepared = await prepare_action(w.bot, w.message, ActionProposal("kick_member", "<@3>", reason="spam"),
+                                    targets={"autor": w.members[1]}, config=w.config)
+    assert prepared["payload"]["target_id"] == 3
+    w.guild.fetch_member.assert_awaited_once_with(3)
+    with pytest.raises(ActionDenied):
+        await prepare_action(w.bot, w.message, ActionProposal("kick_member", "4", reason="spam"),
+                             targets={"autor": w.members[1]}, config=w.config)
+    w.guild.fetch_member.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe", ["managed", "default", "administrator", "manage_roles", "ban_members", "staff", "not_allowed"])
+async def test_role_writes_deny_privilege_escalation_and_empty_allowlists(expanded, unsafe):
+    w = expanded
+    if unsafe == "managed": w.role.managed = True
+    elif unsafe == "default": w.role.is_default.return_value = True
+    elif unsafe == "staff": w.config.action_staff_role_ids = (70,)
+    elif unsafe == "not_allowed": w.config.action_allowed_role_ids = ()
+    else: setattr(w.role.permissions, unsafe, True)
+    with pytest.raises(ActionDenied):
+        await _expanded_request(w, "assign_role", role_ref="r1")
+    w.members[3].add_roles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_role_and_channel_allowlist_revocation_before_effect_blocks_writes(expanded):
+    w = expanded
+    role_request = await _expanded_request(w, "remove_role", role_ref="r1")
+    channel_request = await _expanded_request(w, "edit_channel", channel_ref="c1", channel_changes={"name": "outro"})
+    w.config.action_allowed_role_ids = ()
+    w.config.action_allowed_channel_ids = ()
+    for prepared in (role_request, channel_request):
+        with pytest.raises(ActionDenied):
+            await execute_action(w.bot, prepared, actor_id=2)
+    w.members[3].remove_roles.assert_not_awaited()
+    w.chat.edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [{"permissions": {}}, {"name": ""}, {"topic": "x" * 501}, {"slowmode_delay": True}, {"slowmode_delay": 21601}])
+async def test_channel_mutation_fields_are_bounded_and_exact(expanded, changes):
+    with pytest.raises(ActionDenied):
+        await _expanded_request(expanded, "edit_channel", channel_ref="c1", channel_changes=changes)
+
+
+@pytest.mark.asyncio
+async def test_member_and_channel_snapshots_require_new_approval_when_changed(expanded):
+    w = expanded
+    nickname = await _expanded_request(w, "change_nickname", nickname="novo")
+    channel = await _expanded_request(w, "edit_channel", channel_ref="c1", channel_changes={"topic": "novo"})
+    w.members[3].nick, w.chat.topic = "modificado", "modificado"
+    for request in (nickname, channel):
+        with pytest.raises(ActionDenied, match="mudou"):
+            await execute_action(w.bot, request, actor_id=2)
+
+
+@pytest.mark.asyncio
+async def test_unban_exact_id_does_not_read_private_banlist_before_staff_approval(expanded):
+    w = expanded
+    w.message.content = "desbana <@42>"
+    prepared = await prepare_action(w.bot, w.message, ActionProposal("unban_member", "<@42>", reason="revisão"),
+                                    targets=w.targets, config=w.config)
+    w.guild.fetch_ban.assert_not_awaited()
+    with pytest.raises(ActionDenied):
+        await validate_action(w.bot, prepared, 1)
+    w.guild.fetch_ban.assert_not_awaited()
+    await execute_action(w.bot, prepared, actor_id=2)
+    assert w.guild.unban.await_args.args[0].id == 42
+    w.guild.unban.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fixed_purge_revalidates_permissions_after_message_fetch(expanded):
+    w = expanded
+    prepared = await _expanded_request(w, "purge_messages", message_refs=["msg1"])
+    async def fetch(mid):
+        w.chat.permissions_for.side_effect = lambda m: SimpleNamespace(view_channel=True, manage_messages=False)
+        return w.item
+    w.chat.fetch_message.side_effect = fetch
+    with pytest.raises(ActionDenied):
+        await execute_action(w.bot, prepared, actor_id=2)
+    w.chat.delete_messages.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_purge_rejects_cross_channel_old_untrusted_and_more_than25(expanded):
+    from datetime import datetime, timedelta, timezone
+    w = expanded
+    for refs in (["inventada"], ["msg1"] * 26):
+        with pytest.raises(ActionDenied):
+            await _expanded_request(w, "purge_messages", message_refs=refs)
+    w.item.created_at = datetime.now(timezone.utc) - timedelta(days=15)
+    with pytest.raises(ActionDenied):
+        await _expanded_request(w, "purge_messages", message_refs=["msg1"])
+    w.item.created_at = datetime.now(timezone.utc)
+    w.item.channel = SimpleNamespace(id=456)
+    with pytest.raises(ActionDenied):
+        await _expanded_request(w, "purge_messages", message_refs=["msg1"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["kick_member", "timeout_member", "purge_messages", "edit_channel"])
+async def test_unknown_effect_outcome_never_becomes_definite_failure(expanded, action):
+    import asyncio
+    w = expanded
+    options = {"duration_seconds": 10} if action == "timeout_member" else {"message_refs": ["msg1"]} if action == "purge_messages" else {"channel_ref": "c1", "channel_changes": {"name": "novo"}} if action == "edit_channel" else {}
+    request = await _expanded_request(w, action, **options)
+    operation = {"kick_member": w.members[3].kick, "timeout_member": w.members[3].timeout,
+                 "purge_messages": w.chat.delete_messages, "edit_channel": w.chat.edit}[action]
+    operation.side_effect = asyncio.TimeoutError
+    with pytest.raises(ActionExecutionUncertain):
+        await execute_action(w.bot, request, actor_id=2)
+    operation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_native_audio_records_original_message_and_uploaded_file_without_preview(expanded):
+    w = expanded
+    replies = SimpleNamespace(record_sent=AsyncMock())
+    w.bot.get_cog("Chatbot")._reply_store = replies
+    sent = SimpleNamespace(id=88, attachments=[SimpleNamespace(id=90, filename="resposta.mp3", size=123)])
+    w.chat.send.return_value = sent
+    request = doc("send_audio", ask=False)
+    request.update(original_user_text="minha pergunta verdadeira", provider="groq", model="modelo", memory_epoch=None)
+    await execute_action(w.bot, request, actor_id=1)
+    kwargs = replies.record_sent.await_args.kwargs
+    assert kwargs["original_user_text"] == "minha pergunta verdadeira" and kwargs["text"] == ""
+    assert kwargs["spoken_text"] == "conteúdo privado" and kwargs["attachment"]["id"] == 90
+    assert "content" not in w.chat.send.await_args.kwargs
+
+
+def _expanded_voice(w):
+    in_call(w, bot=True)
+    destination = MagicMock(spec=discord.VoiceChannel)
+    destination.id, destination.guild = 21, w.guild
+    destination.permissions_for.return_value = SimpleNamespace(view_channel=True, connect=True, speak=True)
+    old_lookup = w.guild.get_channel
+    w.guild.get_channel = lambda cid: destination if cid == 21 else old_lookup(cid)
+    w.members[3].voice = SimpleNamespace(channel=destination)
+    w.tts.chatbot_voice_session_ref = Mock(return_value="session-original")
+    w.tts.chatbot_move_voice = AsyncMock(return_value={"ok": True, "status": "executed"})
+    w.tts.chatbot_leave_voice = AsyncMock(return_value={"ok": True, "status": "executed"})
+    return destination
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["move_voice", "leave_voice"])
+async def test_voice_session_controls_require_staff_and_pin_own_session(expanded, action):
+    w = expanded
+    _expanded_voice(w)
+    prepared = await _expanded_request(w, action)
+    payload = prepared["payload"]
+    assert payload["voice_session_ref"] == "session-original"
+    assert payload["voice_channel_id"] == (21 if action == "move_voice" else 20)
+    with pytest.raises(ActionDenied):
+        await validate_action(w.bot, prepared, 1)
+    await execute_action(w.bot, prepared, actor_id=4)
+    adapter = getattr(w.tts, "chatbot_" + action)
+    adapter.assert_awaited_once()
+    assert adapter.await_args.kwargs["session_ref"] == "session-original"
+    assert callable(adapter.await_args.kwargs["before_effect"])
+    w.tts.chatbot_voice_session_ref.return_value = "another-session"
+    with pytest.raises(ActionDenied, match="sessão"):
+        await validate_action(w.bot, prepared, 4)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private_for", [1, 4])
+async def test_voice_move_staff_role_never_bypasses_visibility_of_source_or_destination(expanded, private_for):
+    w = expanded
+    destination = _expanded_voice(w)
+    prepared = await _expanded_request(w, "move_voice")
+    for channel in (w.voice, destination):
+        channel.permissions_for.side_effect = lambda m: SimpleNamespace(view_channel=m.id != private_for, connect=True, speak=True)
+        with pytest.raises(ActionDenied):
+            await validate_action(w.bot, prepared, 4)
+        channel.permissions_for.side_effect = None
+    w.tts.chatbot_move_voice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_voice_adapter_guard_revocation_prevents_effect_and_busy_session_not_advertised(expanded):
+    w = expanded
+    _expanded_voice(w)
+    prepared = await _expanded_request(w, "leave_voice")
+    async def adapter(**kwargs):
+        w.config.voice_actions_enabled = False
+        await kwargs["before_effect"]()
+        pytest.fail("revoked voice effect must not proceed")
+    w.tts.chatbot_leave_voice.side_effect = adapter
+    with pytest.raises(ActionDenied):
+        await execute_action(w.bot, prepared, actor_id=4)
+    w.config.voice_actions_enabled = True
+    w.tts.chatbot_voice_session_ref.return_value = None
+    context = await build_action_context(w.bot, w.message, w.config)
+    assert "leave_voice" not in context.actions and "move_voice" not in context.actions
+
+
+@pytest.mark.asyncio
+async def test_extended_actions_revalidate_after_resource_fetch_and_config_await(expanded):
+    w = expanded
+    request = await _expanded_request(w, "kick_member")
+    calls = 0
+    async def config_after_fetch(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            w.config.moderation_actions_enabled = False
+        return w.config
+    w.store.get_config.side_effect = config_after_fetch
+    with pytest.raises(ActionDenied):
+        await execute_action(w.bot, request, actor_id=2)
+    w.members[3].kick.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_channel_overrides_require_actor_target_channel_permission_not_manage_guild(expanded):
+    w = expanded
+    request = await _expanded_request(w, "edit_channel", channel_ref="c1", channel_changes={"name": "novo"})
+    # Actor may have ManageChannels only in this channel; that is legitimate.
+    w.members[2].guild_permissions.manage_channels = False
+    await validate_action(w.bot, request, 2)
+    w.members[4].guild_permissions.manage_channels = True
+    with pytest.raises(ActionDenied):
+        await validate_action(w.bot, request, 4)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duration", [0, True, 2419201])
+async def test_timeout_exact_duration_bounds(expanded, duration):
+    with pytest.raises(ActionDenied):
+        await _expanded_request(expanded, "timeout_member", duration_seconds=duration)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protected", [1, 99, 999])
+async def test_punitive_actions_protect_owner_requester_and_bot_itself(expanded, protected):
+    w = expanded
+    w.targets["m1"] = w.members[protected]
+    for action in ("ban_member", "kick_member", "timeout_member"):
+        with pytest.raises(ActionDenied):
+            await _expanded_request(w, action, duration_seconds=10)
+
+
+@pytest.mark.asyncio
+async def test_planned_move_then_speech_is_host_dependency_and_exec_remains_exact_call(expanded):
+    w = expanded
+    destination = _expanded_voice(w)
+    w.members[1].voice = SimpleNamespace(channel=destination)
+    context = await build_action_context(w.bot, w.message, w.config)
+    assert "move_voice" in context.actions and "speak_voice" in context.actions
+    prepared = await prepare_action(w.bot, w.message, ActionProposal("speak_voice", text="fala privada"),
+                                    targets=w.targets, config=w.config,
+                                    deferred_voice_channel_id=21, deferred_voice_source_channel_id=20)
+    assert prepared["payload"]["voice_channel_id"] == 21
+    with pytest.raises(ActionDenied):
+        await validate_action(w.bot, prepared, 1)
+    w.guild.voice_client.channel = destination
+    w.members[999].voice = SimpleNamespace(channel=destination)
+    await validate_action(w.bot, prepared, 1)
+
+
+@pytest.mark.asyncio
+async def test_epoch_reset_revokes_native_audio_after_synthesis_without_text_or_file_send(world):
+    from cogs.chatbot.memory import MemoryEpoch
+    w = world
+    epoch = MemoryEpoch(1, 2, 3)
+    memory = SimpleNamespace(capture_epoch=AsyncMock(return_value=epoch))
+    w.bot.get_cog("Chatbot")._memory = memory
+    request = doc("send_audio", ask=False)
+    request["memory_epoch"] = {"global_generation": 1, "guild_generation": 2, "user_generation": 3}
+    async def synthesize(**kwargs):
+        memory.capture_epoch.return_value = MemoryEpoch(2, 2, 3)
+        return b"mp3"
+    w.tts.synthesize_chatbot_attachment.side_effect = synthesize
+    with pytest.raises(ActionDenied, match="reiniciada"):
+        await execute_action(w.bot, request, actor_id=1)
+    w.chat.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cosmetic_role_cannot_grant_channel_moderation_through_overwrite(expanded):
+    w = expanded
+    protected = MagicMock(spec=discord.TextChannel)
+    protected.overwrites_for.return_value = discord.PermissionOverwrite(manage_messages=True)
+    w.guild.channels = [protected]
+    with pytest.raises(ActionDenied):
+        await _expanded_request(w, "assign_role", role_ref="r1")
+    w.members[3].add_roles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_exception_is_definite_unsent_failure_with_no_private_details(world):
+    world.tts.synthesize_chatbot_attachment.side_effect = OSError("segredo da API")
+    with pytest.raises(ActionDenied, match="gerar o áudio") as caught:
+        await execute_action(world.bot, doc("send_audio", ask=False), actor_id=1)
+    assert not isinstance(caught.value, ActionExecutionUncertain)
+    assert "segredo" not in str(caught.value)
+    world.chat.send.assert_not_awaited()
+    world.tts.chatbot_mirror_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_purge_requires_configured_channel_scope_and_fresh_revocation_blocks_delete(expanded):
+    w = expanded
+    request = await _expanded_request(w, "purge_messages", message_refs=["msg1"])
+    w.config.action_allowed_channel_ids = ()
+    with pytest.raises(ActionDenied):
+        await execute_action(w.bot, request, actor_id=2)
+    with pytest.raises(ActionDenied):
+        await _expanded_request(w, "purge_messages", message_refs=["msg1"])
+    assert "purge_messages" not in (await build_action_context(w.bot, w.message, w.config)).actions
+    w.chat.delete_messages.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["send_audio", "speak_voice"])
+@pytest.mark.parametrize("voice, language", [("pt-BR-AntonioNeural", "pt-br"), ("", "")])
+async def test_native_audio_and_speech_honor_scoped_preferences_without_touching_rate_pitch(world, action, voice, language):
+    from cogs.chatbot.memory import MemoryEpoch
+    w = world
+    in_call(w, bot=True)
+    epoch = MemoryEpoch(1, 2, 3)
+    cog = w.bot.get_cog("Chatbot")
+    cog._memory = SimpleNamespace(capture_epoch=AsyncMock(return_value=epoch))
+    cog.get_conversation_preferences = AsyncMock(return_value=SimpleNamespace(mode="auto", voice=voice, language=language))
+    w.bot.settings_db.resolve_tts.return_value = {"edge_voice": "baseVoice", "gtts_language": "en", "edge_rate": "+5%", "edge_pitch": "+2Hz"}
+    request = doc(action, voice=20, ask=False)
+    request["memory_epoch"] = {"global_generation": 1, "guild_generation": 2, "user_generation": 3}
+    await execute_action(w.bot, request, actor_id=1)
+    cog.get_conversation_preferences.assert_awaited_with(10, 30, 1, epoch)
+    if action == "send_audio":
+        kwargs = w.tts.synthesize_chatbot_attachment.await_args.kwargs
+        assert kwargs["voice"] == (voice or "baseVoice") and kwargs["language"] == (language or "en")
+        assert kwargs["rate"] == "+5%" and kwargs["pitch"] == "+2Hz"
+    else:
+        kwargs = w.tts.chatbot_speak_voice.await_args.kwargs
+        assert kwargs.get("voice_override", "") == voice and kwargs.get("language_override", "") == language
+        assert "rate" not in kwargs and "pitch" not in kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observed", [False, True])
+async def test_speech_result_claims_playback_only_after_observed_first_frame(world, observed):
+    in_call(world, bot=True)
+    world.tts.chatbot_speak_voice.return_value = {"ok": True, "status": "executed", "first_frame_observed": observed}
+    result = await execute_action(world.bot, doc("speak_voice", voice=20), actor_id=1)
+    assert ("reproduzida" if observed else "enfileirada") in result.public_result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["send_audio", "ban_member", "kick_member"])
+async def test_reset_during_last_config_lookup_never_sends_or_moderates_from_old_turn(expanded, action):
+    from cogs.chatbot.memory import MemoryEpoch
+    w = expanded
+    epoch = MemoryEpoch(1, 2, 3)
+    memory = SimpleNamespace(capture_epoch=AsyncMock(return_value=epoch))
+    w.bot.get_cog("Chatbot")._memory = memory
+    request = doc(action, target=1 if action == "send_audio" else 3)
+    request["memory_epoch"] = {"global_generation": 1, "guild_generation": 2, "user_generation": 3}
+    reads = 0
+    async def config(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            memory.capture_epoch.return_value = MemoryEpoch(2, 2, 3)
+        return w.config
+    w.store.get_config.side_effect = config
+    with pytest.raises(ActionDenied, match="reiniciada"):
+        await execute_action(w.bot, request, actor_id=1 if action == "send_audio" else 2)
+    w.chat.send.assert_not_awaited()
+    w.tts.synthesize_chatbot_attachment.assert_not_awaited()
+    w.members[3].ban.assert_not_awaited()
+    w.members[3].kick.assert_not_awaited()

@@ -2,28 +2,11 @@
 from __future__ import annotations
 
 import random
-import re
 import time
-import unicodedata
 from typing import Callable
 
-from .audio import MAX_TTS_CHARS, user_asked_for_tts
+from .audio import MAX_TTS_CHARS
 from .config import GuildChatbotConfig
-
-
-def prefers_text(content: str) -> bool:
-    text = "".join(char for char in unicodedata.normalize("NFKD", content or "")
-                   if not unicodedata.combining(char)).casefold()
-    return bool(re.search(
-        r"\b(?:sem|nada\s+de)\s+(?:audio|voz)\b"
-        r"|\b(?:nao|nunca|nem)\s+(?:me\s+)?(?:manda|mande|mandar|envia|envie|enviar|"
-        r"responde|responda|responder|fala|fale|falar|quero|queria|preciso)\s+"
-        r"(?:\w+\s+){0,8}(?:audio|voz)\b"
-        r"|\b(?:so|somente|apenas)\s+(?:em\s+)?texto\b"
-        r"|\b(?:prefiro|quero)\s+(?:em\s+)?texto\b"
-        r"|\b(?:responda|responde|fale|fala)\s+(?:em|por)\s+texto\b",
-        text,
-    ))
 
 
 class AudioReplySelector:
@@ -34,14 +17,17 @@ class AudioReplySelector:
         self._cooldowns: dict[tuple[int, int], float] = {}
 
     def select(self, *, config: GuildChatbotConfig, guild_id: int, channel_id: int,
-               content: str, reply: str, eligible: bool = True) -> str:
+               content: str = "", reply: str, eligible: bool = True,
+               mode: str = "auto", requested: bool = False) -> str:
         """Retorna text, requested ou random; nenhum sorteio em turnos inelegíveis."""
         if not (eligible and reply.strip() and config.enabled
                 and config.actions_enabled and config.audio_actions_enabled):
             return "text"
-        if prefers_text(content):
+        # Intenção vem de ferramenta nativa e preferência estruturada. Texto
+        # livre nunca é interpretado aqui como comando operacional.
+        if mode == "text":
             return "text"
-        if user_asked_for_tts(content):
+        if requested or mode == "audio":
             return "requested"
         # Conteúdo longo ou com código precisa continuar legível. O sorteio
         # nunca trunca uma resposta normal escolhida como texto.

@@ -234,6 +234,13 @@ class ChatbotAudioMirrorTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(voice.sent_packets)
             probe.synthesize_chatbot_attachment.assert_not_awaited()
             probe.channel.connect.assert_not_awaited()
+            # Outros testes simulam a ausência de libopus. Libere este encoder
+            # real enquanto sua biblioteca ainda está disponível, sem depender
+            # de uma coleta posterior dentro daquela simulação.
+            if hasattr(voice, "encoder"):
+                encoder = voice.encoder
+                del voice.encoder
+                del encoder
 
 
 @pytest.mark.asyncio

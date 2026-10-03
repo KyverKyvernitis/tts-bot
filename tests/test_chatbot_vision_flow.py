@@ -319,7 +319,10 @@ class _Lease:
 
 def setup_process(turn, *, content="", via="mention"):
     cog = turn.cog
-    cog._config = object()
+    from cogs.chatbot.config import GuildChatbotConfig
+    cog._config = SimpleNamespace(get_config=AsyncMock(return_value=GuildChatbotConfig(
+        guild_id=turn.message.guild.id, enabled=True, audio_reply_chance_percent=0,
+    )))
     cog._resolve_trigger = AsyncMock(return_value=TriggerInfo(content=content, via=via))
     cog._is_user_on_cooldown = Mock(return_value=False)
     cog._admission = SimpleNamespace(try_admit=AsyncMock(return_value=_Lease()))

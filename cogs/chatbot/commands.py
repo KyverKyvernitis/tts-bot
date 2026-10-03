@@ -88,6 +88,13 @@ class ChatbotCommandsMixin:
     def _format_config(config: GuildChatbotConfig) -> str:
         channels = ", ".join(f"<#{channel}>" for channel in config.channel_ids) or "todos os canais"
         spontaneous_channels = ", ".join(f"<#{channel}>" for channel in config.spontaneous_channel_ids) or "nenhum"
+        allowed_roles = ", ".join(f"<@&{role}>" for role in config.action_allowed_role_ids[:5]) or "nenhum (alterações de cargos desativadas)"
+        allowed_channels = ", ".join(f"<#{channel}>" for channel in config.action_allowed_channel_ids[:5]) or "nenhum (alterações e limpeza desativadas)"
+        if len(config.action_allowed_role_ids) > 5:
+            allowed_roles += f" e mais {len(config.action_allowed_role_ids) - 5}"
+        if len(config.action_allowed_channel_ids) > 5:
+            allowed_channels += f" e mais {len(config.action_allowed_channel_ids) - 5}"
+        provider_order = " → ".join("Groq" if provider == "groq" else "Gemini" for provider in config.text_provider_order)
         return (
             f"**Chatbot:** {'ativado' if config.enabled else 'desativado'}\n"
             f"**Canais permitidos:** {channels}\n"
@@ -97,7 +104,10 @@ class ChatbotCommandsMixin:
             f"**Ações:** {'ativadas' if config.actions_enabled else 'desativadas'} "
             f"(áudio: {'sim' if config.audio_actions_enabled else 'não'}, "
             f"calls: {'sim' if config.voice_actions_enabled else 'não'}, "
-            f"banimentos: {'sim' if config.moderation_actions_enabled else 'não'})\n\n"
+            f"moderação: {'sim' if config.moderation_actions_enabled else 'não'})\n"
+            f"**Cargos autorizados para alteração:** {allowed_roles}\n"
+            f"**Canais autorizados para alteração/limpeza:** {allowed_channels}\n"
+            f"**Provedores de conversa:** {provider_order}\n\n"
             f"**Respostas em áudio:** {config.audio_reply_chance_percent}% "
             f"(intervalo por canal: {config.audio_reply_cooldown_seconds}s)\n"
             "Pedidos de áudio são diretos; na call atual, o mesmo áudio também é reproduzido.\n\n"
@@ -116,6 +126,8 @@ class ChatbotCommandsMixin:
                 on_submit_config=self._handle_config_modal,
                 on_submit_actions=self._handle_actions_modal,
                 on_submit_audio=self._handle_audio_modal,
+                on_submit_allowlists=self._handle_allowlists_modal,
+                on_submit_provider=self._handle_provider_modal,
                 check_authorized=self._config_staff_check,
             ),
         )
@@ -164,6 +176,59 @@ class ChatbotCommandsMixin:
             updated_by=interaction.user.id,
         )
         await _send(interaction, "Áudios salvos.\n\n" + self._format_config(saved))
+
+    async def _handle_allowlists_modal(self, interaction: discord.Interaction, config: GuildChatbotConfig):
+        if not await self._config_staff_check(interaction):
+            return
+        guild = interaction.guild
+        if guild.id != config.guild_id:
+            await _send(interaction, "Esta configuração pertence a outro servidor.")
+            return
+        from .action_policy import is_safe_assignable_role
+
+        try:
+            roles = tuple(dict.fromkeys(config.action_allowed_role_ids))
+            channels = tuple(dict.fromkeys(config.action_allowed_channel_ids))
+            if len(roles) > 10 or len(channels) > 10:
+                raise ValueError("Escolha até 10 cargos e 10 canais.")
+            current = await self._config.get_config(guild.id, fresh=True)
+            for role_id in roles:
+                if not isinstance(role_id, int) or isinstance(role_id, bool) or role_id <= 0:
+                    raise ValueError("Escolha cargos deste servidor.")
+                role = guild.get_role(role_id)
+                if role is None or role_id in current.action_staff_role_ids or not is_safe_assignable_role(guild, role, guild.me):
+                    raise ValueError("Cargos de staff, gerenciados ou com privilégios não podem entrar nesta lista.")
+            for channel_id in channels:
+                if not isinstance(channel_id, int) or isinstance(channel_id, bool) or channel_id <= 0:
+                    raise ValueError("Escolha canais deste servidor.")
+                channel = guild.get_channel(channel_id)
+                if channel is None or getattr(getattr(channel, "guild", None), "id", None) != guild.id:
+                    raise ValueError("Escolha canais existentes neste servidor.")
+            if not await self._config_staff_check(interaction):
+                return
+            saved = await self._config.save_action_allowlists(
+                guild_id=guild.id, action_allowed_role_ids=roles,
+                action_allowed_channel_ids=channels, updated_by=interaction.user.id,
+            )
+        except ValueError as exc:
+            await _send(interaction, f"Não consegui salvar: {exc}")
+            return
+        await _send(interaction, "Cargos e canais autorizados salvos.\n\n" + self._format_config(saved))
+
+    async def _handle_provider_modal(self, interaction: discord.Interaction, config: GuildChatbotConfig):
+        if not await self._config_staff_check(interaction):
+            return
+        if interaction.guild.id != config.guild_id:
+            await _send(interaction, "Esta configuração pertence a outro servidor.")
+            return
+        if config.text_provider_order not in (("groq", "gemini"), ("gemini", "groq")):
+            await _send(interaction, "Escolha Groq ou Gemini como primeiro provedor.")
+            return
+        saved = await self._config.save_provider_config(
+            guild_id=interaction.guild.id, text_provider_order=config.text_provider_order,
+            updated_by=interaction.user.id,
+        )
+        await _send(interaction, "Provedor salvo.\n\n" + self._format_config(saved))
 
     async def _do_memoria_reset_server(self, interaction: discord.Interaction):
         if not await self._config_staff_check(interaction):

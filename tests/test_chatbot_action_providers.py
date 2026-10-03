@@ -172,8 +172,8 @@ async def test_disabled_actions_leave_old_string_api_and_payload_untouched(provi
 
 @pytest.mark.parametrize("arguments", [
     {"action": "delete_server"},
-    {"action": "ban_member", "target_ref": "<@123>"},
-    {"action": "ban_member", "target_ref": "123"},
+    {"action": "ban_member", "target_ref": "<@&123>"},
+    {"action": "ban_member", "target_ref": "0"},
     {"action": "ban_member"},
     {"action": "send_audio", "text": ""},
     {"action": "send_audio", "text": "x" * 801},

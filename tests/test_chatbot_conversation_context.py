@@ -285,7 +285,7 @@ async def test_ordinary_continuation_uses_real_personal_memory_without_other_use
     ("content", "behavior_hint"),
     [("o que a galera falou no canal?", ""), ("fala mais", "Entre brevemente na conversa.")],
 )
-async def test_channel_question_or_spontaneous_turn_loads_collective_context(cog, message, content, behavior_hint):
+async def test_only_spontaneous_turn_preloads_collective_context_without_phrase_matching(cog, message, content, behavior_hint):
     coll = _Collection()
     cog._memory = MemoryStore(coll)
     cog._memory.append_turn = AsyncMock()
@@ -293,9 +293,15 @@ async def test_channel_question_or_spontaneous_turn_loads_collective_context(cog
     assert await cog._generate_and_send(message, content, behavior_hint=behavior_hint)
 
     payload = cog._router.chat.await_args.kwargs
-    assert {query["scope"] for query in coll.find_one_queries} == {"user", "guild"}
-    assert "OUTRO_USUARIO_FALOU" in payload["messages"][-2].content
-    assert payload["messages"][-2].role == "user"
+    if behavior_hint:
+        assert {query["scope"] for query in coll.find_one_queries} == {"user", "guild"}
+        assert "OUTRO_USUARIO_FALOU" in payload["messages"][-2].content
+        assert payload["messages"][-2].role == "user"
+    else:
+        # Perguntas sobre o canal devem escolher uma ferramenta de contexto;
+        # a frase do usuário não abre automaticamente memória coletiva.
+        assert {query["scope"] for query in coll.find_one_queries} == {"user"}
+        assert not any("OUTRO_USUARIO_FALOU" in entry.content for entry in payload["messages"])
     assert payload["messages"][-1].content == content
     assert "OUTRO_USUARIO_FALOU" not in payload["system"]
 
@@ -343,7 +349,7 @@ async def test_slow_memory_preserves_completed_custom_master_and_captures_fresh_
         assert await cog._generate_and_send(message, "fala mais")
 
     payload = cog._router.chat.await_args.kwargs
-    assert payload["system"].startswith("CUSTOM_MASTER_ALREADY_LOADED")
+    assert "CUSTOM_MASTER_ALREADY_LOADED" in payload["system"]
     assert [(entry.role, entry.content) for entry in payload["messages"]] == [("user", "fala mais")]
     cog._memory.capture_epoch.assert_awaited_once_with(10, 40)
     assert cog._memory.append_turn.await_args.kwargs["epoch"] == MemoryEpoch(8, 9, 10)
@@ -367,7 +373,7 @@ async def test_failed_memory_and_slow_master_finish_without_leaking_context_task
         assert await cog._generate_and_send(message, "fala mais")
 
     payload = cog._router.chat.await_args.kwargs
-    assert payload["system"].startswith(C.DEFAULT_MASTER_PROMPT)
+    assert C.DEFAULT_MASTER_PROMPT in payload["system"]
     assert [(entry.role, entry.content) for entry in payload["messages"]] == [("user", "fala mais")]
     cog._memory.capture_epoch.assert_awaited_once_with(10, 40)
     assert cancelled.is_set()

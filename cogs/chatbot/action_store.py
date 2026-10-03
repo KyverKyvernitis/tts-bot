@@ -61,7 +61,7 @@ class ActionStore:
                 "finished_at": now,
                 "delete_at": now + RESULT_RETENTION,
             },
-            "$unset": {"payload.text": ""},
+            "$unset": {"payload.text": "", "original_user_text": ""},
         }
 
     def _new_doc(self, data: dict, *, now: datetime) -> dict:
@@ -384,6 +384,70 @@ class ActionStore:
         if int(limit) <= 0:
             return []
         return [doc async for doc in cursor]
+
+    async def pending_for_requester(
+        self, guild_id: int, channel_id: int, requester_id: int, limit: int = 5,
+    ) -> list[dict]:
+        """Lista etapas do próprio membro sem expor falas ou tokens de controle."""
+        if int(limit) <= 0:
+            return []
+        now = self._now()
+        cursor = self._coll.find({
+            "type": DOC_TYPE_ACTION_REQUEST, "guild_id": int(guild_id),
+            "channel_id": int(channel_id), "requester_id": int(requester_id),
+            "state": {"$in": ["created", "publishing", "pending", "blocked"]},
+        }).sort("created_at", 1)
+        fields = (
+            "request_id", "plan_id", "step_index", "predecessor_id", "action", "state",
+            "guild_id", "channel_id", "origin_message_id", "message_id", "requester_id",
+            "created_at", "expires_at",
+        )
+        summaries = []
+        async for doc in cursor:
+            expiry = doc.get("expires_at")
+            if doc["state"] != "blocked":
+                if not isinstance(expiry, datetime):
+                    continue
+                expiry = expiry.replace(tzinfo=timezone.utc) if expiry.tzinfo is None else expiry
+                if expiry <= now:
+                    continue
+            summary = {key: deepcopy(doc[key]) for key in fields if key in doc}
+            payload = doc.get("payload")
+            if isinstance(payload, dict):
+                for key in ("target_id", "voice_channel_id", "role_id", "duration_seconds"):
+                    value = payload.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                        summary[key] = value
+                target_channel = payload.get("affected_channel_id") or payload.get("channel_id")
+                if isinstance(target_channel, int) and not isinstance(target_channel, bool) and target_channel > 0:
+                    summary["affected_channel_id"] = target_channel
+                identifiers = payload.get("message_ids")
+                if isinstance(identifiers, list):
+                    summary["message_count"] = len({
+                        value for value in identifiers[:25]
+                        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+                    })
+            summaries.append(summary)
+            if len(summaries) >= min(int(limit), 20):
+                break
+        return summaries
+
+    async def cancel_own_pending(
+        self, request_id: str, *, guild_id: int, channel_id: int, requester_id: int,
+    ) -> bool:
+        if min(int(guild_id), int(channel_id), int(requester_id)) <= 0:
+            return False
+        now = self._now()
+        updated = await self._coll.find_one_and_update(
+            {**self._query(request_id), "guild_id": int(guild_id),
+             "channel_id": int(channel_id), "requester_id": int(requester_id),
+             "state": {"$in": ["created", "publishing", "pending", "blocked"]}},
+            self._terminal_update(now, state="cancelled", public_result="Pedido cancelado pelo solicitante."),
+            return_document=ReturnDocument.AFTER,
+        )
+        if updated is not None:
+            await self._cancel_descendants(updated, now=now)
+        return updated is not None
 
     async def cards_to_remove(self, limit: int = 500) -> list[dict]:
         if int(limit) <= 0:

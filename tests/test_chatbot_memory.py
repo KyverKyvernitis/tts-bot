@@ -80,6 +80,30 @@ class _Collection:
         return SimpleNamespace(deleted_count=old_count - len(self.docs))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset", ["user", "guild", "global"])
+async def test_reset_physically_removes_preferences_facts_and_reply_references(reset):
+    coll = _Collection()
+    store = MemoryStore(coll)
+    kinds = [("chatbot_conversation_preferences", "user_id"),
+             ("chatbot_conversation_fact", "user_id"),
+             ("chatbot_sent_reply", "requester_id")]
+    for kind, field in kinds:
+        for gid, uid in ((1, 1), (1, 2), (2, 1)):
+            coll.docs.append({"type": kind, "guild_id": gid, field: uid, "content": "private"})
+    if reset == "user":
+        assert await store.clear_user_history(1, 1) == 3
+    elif reset == "guild":
+        assert await store.clear_all_guild_memory(1) == 6
+    else:
+        assert await store.clear_all_memory_everywhere() == 9
+    for kind, field in kinds:
+        remaining = [doc for doc in coll.docs if doc["type"] == kind]
+        expected = 2 if reset == "user" else 1 if reset == "guild" else 0
+        assert len(remaining) == expected
+        assert not any(doc["guild_id"] == 1 and (reset != "user" or doc[field] == 1) for doc in remaining)
+
+
 async def _append(store, *, guild_id=1, channel_id=10, user_id=1, visibility="channel:10", text="hello", epoch=None, history_size=4):
     epoch = epoch or await store.capture_epoch(guild_id, user_id)
     await store.append_turn(

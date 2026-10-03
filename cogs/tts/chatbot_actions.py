@@ -14,6 +14,7 @@ import tempfile
 import time
 import weakref
 from collections import OrderedDict
+from uuid import uuid4
 from typing import Any, Awaitable, Callable
 
 import discord
@@ -30,6 +31,174 @@ def _result(ok: bool, message: str, *, uncertain: bool = False) -> dict[str, Any
 
 
 class ChatbotVoiceActionsMixin:
+    def chatbot_voice_session_ref(self, guild_id: int, *, require_idle: bool = True) -> str | None:
+        """Referência opaca da sessão local atual, sem autoridade embutida."""
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is None:
+            return None
+        vc = self._get_voice_client_for_guild(guild)
+        channel = self._voice_client_channel(vc)
+        if (not self._voice_client_is_connected(vc) or not isinstance(channel, discord.VoiceChannel)
+                or getattr(self._get_bot_voice_state_channel(guild), "id", None) != channel.id):
+            return None
+        if ((hasattr(vc, "listen") and hasattr(vc, "is_listening"))
+                or self._voice_client_owned_by_music(vc) or self._music_player_is_active(guild.id)
+                or self._music_should_own_voice(guild)):
+            return None
+        state = self._get_state(guild.id)
+        if not state.accepting or not state.dashboard_enabled or getattr(self, "_tts_shutting_down", False):
+            return None
+        if require_idle and (self._voice_client_is_playing_or_paused(vc) or state.active_item is not None
+                             or state.prefetch_item is not None or not state.queue.empty()
+                             or bool(getattr(self, "_chatbot_voice_speaking", {}).get(guild.id))):
+            return None
+        signature = (id(getattr(vc, "_connection", None)), int(channel.id), str(getattr(vc, "session_id", None) or ""))
+        previous = getattr(vc, "_chatbot_session_identity", None)
+        if not isinstance(previous, tuple) or previous[0] != signature:
+            previous = (signature, uuid4().hex)
+            vc._chatbot_session_identity = previous
+        return previous[1]
+
+    def _register_chatbot_speech(self, item, vc, source) -> None:
+        token = self.chatbot_voice_session_ref(int(item.guild_id), require_idle=False)
+        if token is None:
+            return
+        active = getattr(self, "_chatbot_owned_speech", None)
+        if active is None:
+            active = self._chatbot_owned_speech = {}
+        active[int(item.guild_id)] = {"vc": vc, "source": source, "item": item, "session_ref": token,
+                                      "voice_channel_id": int(item.channel_id), "request_id": str(item.request_id),
+                                      "user_id": int(item.author_id)}
+
+    def _forget_chatbot_speech(self, guild_id, vc, source) -> None:
+        active = getattr(self, "_chatbot_owned_speech", {})
+        owned = active.get(int(guild_id))
+        if owned and owned["vc"] is vc and owned["source"] is source:
+            active.pop(int(guild_id), None)
+
+    def chatbot_own_speech_ref(self, guild_id: int, user_id: int) -> dict | None:
+        owned = getattr(self, "_chatbot_owned_speech", {}).get(int(guild_id))
+        if not owned or owned["user_id"] != int(user_id):
+            return None
+        guild = self.bot.get_guild(int(guild_id))
+        vc = self._get_voice_client_for_guild(guild) if guild else None
+        if (vc is not owned["vc"] or not self._voice_client_is_playing_or_paused(vc)
+                or getattr(vc, "source", owned["source"]) is not owned["source"]
+                or self.chatbot_voice_session_ref(int(guild_id), require_idle=False) != owned["session_ref"]):
+            return None
+        return {key: owned[key] for key in ("session_ref", "voice_channel_id", "request_id")}
+
+    async def chatbot_interrupt_speech(
+        self, *, guild_id: int, user_id: int, channel_id: int, request_id: str,
+        session_ref: str | None = None, speech_request_id: str | None = None,
+        before_effect: Callable[[], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        captured = self.chatbot_own_speech_ref(guild_id, user_id)
+        if (captured is None or captured["voice_channel_id"] != int(channel_id)
+                or (session_ref is not None and captured["session_ref"] != session_ref)
+                or (speech_request_id is not None and captured["request_id"] != speech_request_id)):
+            return _result(False, "Esta fala não está mais em reprodução ou pertence a outra conversa.")
+        if before_effect is not None and await before_effect() is False:
+            return _result(False, "O contexto da fala mudou.")
+        if self.chatbot_own_speech_ref(guild_id, user_id) != captured:
+            return _result(False, "A fala mudou antes da interrupção.")
+        owned = self._chatbot_owned_speech[int(guild_id)]
+        try:
+            owned["item"].chatbot_interrupted = True
+            owned["vc"].stop()
+        except Exception:
+            return _result(False, "Não consegui confirmar a interrupção; não vou repeti-la automaticamente.", uncertain=True)
+        return _result(True, "Interrompi esta fala.")
+
+    async def _chatbot_change_voice(
+        self, *, action: str, guild_id: int, user_id: int, channel_id: int, request_id: str,
+        session_ref: str | None, before_effect: Callable[[], Awaitable[None]] | None,
+    ) -> dict[str, Any]:
+        captured = self.chatbot_voice_session_ref(guild_id)
+        if captured is None or (session_ref is not None and captured != session_ref):
+            return _result(False, "A sessão aprovada mudou ou está ocupada por outra fala ou recurso.")
+        guild = self.bot.get_guild(int(guild_id))
+        vc = self._get_voice_client_for_guild(guild)
+        source_channel_id = int(self._voice_client_channel(vc).id)
+
+        def check_destination():
+            if self.chatbot_voice_session_ref(guild_id) != captured or self._get_voice_client_for_guild(guild) is not vc:
+                raise ChatbotVoiceActionBlocked("A sessão de voz mudou; faça um novo pedido.")
+            if action == "leave":
+                if source_channel_id != int(channel_id):
+                    raise ChatbotVoiceActionBlocked("O bot não está mais na call aprovada.")
+                return None
+            channel = guild.get_channel(int(channel_id))
+            member = guild.get_member(int(user_id))
+            if not isinstance(channel, discord.VoiceChannel) or getattr(getattr(getattr(member, "voice", None), "channel", None), "id", None) != int(channel_id):
+                raise ChatbotVoiceActionBlocked("O membro saiu ou mudou da call aprovada.")
+            perms = channel.permissions_for(guild.me)
+            if not all(getattr(perms, name, False) for name in ("view_channel", "connect", "speak")):
+                raise ChatbotVoiceActionBlocked("O bot perdeu as permissões da call de destino.")
+            return channel
+
+        started = False
+        try:
+            async with self._get_voice_connect_lock(int(guild_id)):
+                async with self._get_tts_playback_lock(int(guild_id)):
+                    check_destination()
+                    if before_effect is not None and await before_effect() is False:
+                        return _result(False, "O contexto da ação mudou.")
+                    destination = check_destination()
+                    started = True
+                    if action == "move":
+                        await vc.move_to(destination)
+                        if not self._voice_client_is_connected(vc) or getattr(self._voice_client_channel(vc), "id", None) != int(channel_id):
+                            return _result(False, "Não consegui confirmar a mudança de call.", uncertain=True)
+                        temporary = getattr(self, "_chatbot_temporary_voice_channels", None)
+                        if temporary is None:
+                            temporary = self._chatbot_temporary_voice_channels = {}
+                        temporary[int(guild_id)] = int(channel_id)
+                        remember = getattr(self, "_remember_expected_voice_channel", None)
+                        if callable(remember):
+                            remember(int(guild_id), int(channel_id))
+                        return _result(True, "Mudei para a call aprovada.")
+                    for name in ("_mark_manual_voice_disconnect", "_cancel_runtime_voice_restore"):
+                        handler = getattr(self, name, None)
+                        if callable(handler):
+                            handler(int(guild_id))
+                    remember = getattr(self, "_remember_expected_voice_channel", None)
+                    if callable(remember):
+                        remember(int(guild_id), None)
+                    await vc.disconnect(force=False)
+                    if self._voice_client_is_connected(vc):
+                        return _result(False, "Não consegui confirmar a saída da call.", uncertain=True)
+                    getattr(self, "_chatbot_temporary_voice_channels", {}).pop(int(guild_id), None)
+                    clear = getattr(self, "_clear_remembered_voice_channel", None)
+                    if callable(clear):
+                        await clear(int(guild_id))
+                    return _result(True, "Saí da call aprovada.")
+        except ChatbotVoiceActionBlocked as exc:
+            return _result(False, str(exc))
+        except ValueError:
+            if not started:
+                raise
+            return _result(False, "Não consegui confirmar o resultado da ação de voz.", uncertain=True)
+        except asyncio.CancelledError:
+            raise
+        except discord.HTTPException as exc:
+            return _result(False, "O Discord não confirmou a ação de voz.", uncertain=not 400 <= exc.status < 500)
+        except Exception:
+            log.warning("[tts_voice] mudança autorizada não confirmada | guild=%s request=%s", guild_id, request_id)
+            return _result(False, "Não consegui confirmar o resultado da ação de voz.", uncertain=started)
+
+    async def chatbot_move_voice(self, *, guild_id: int, user_id: int, channel_id: int, request_id: str,
+                                 session_ref: str | None = None, before_effect=None) -> dict[str, Any]:
+        return await self._chatbot_change_voice(action="move", guild_id=guild_id, user_id=user_id,
+                                               channel_id=channel_id, request_id=request_id,
+                                               session_ref=session_ref, before_effect=before_effect)
+
+    async def chatbot_leave_voice(self, *, guild_id: int, user_id: int, channel_id: int, request_id: str,
+                                  session_ref: str | None = None, before_effect=None) -> dict[str, Any]:
+        return await self._chatbot_change_voice(action="leave", guild_id=guild_id, user_id=user_id,
+                                               channel_id=channel_id, request_id=request_id,
+                                               session_ref=session_ref, before_effect=before_effect)
+
     def _chatbot_mirror_precheck(
         self, *, guild_id: int, user_id: int, text_channel_id: int,
         session: Any = None, channel_id: int | None = None, require_idle: bool = False,
@@ -140,6 +309,7 @@ class ChatbotVoiceActionsMixin:
             text_channel_id=int(text_channel_id), chatbot_no_auto_connect=True,
             chatbot_before_effect=before_effect, chatbot_mirror_audio=audio,
             chatbot_mirror_session=vc, chatbot_is_mirror=True,
+            chatbot_mirror_session_ref=self.chatbot_voice_session_ref(int(guild_id), require_idle=False) or "",
         )
         item._dedup_signature = f"chatbot-mirror:{int(guild_id)}:{item.request_id}"
         accepted, _dropped, _deduplicated = await self._enqueue_tts_item(int(guild_id), item)
@@ -233,7 +403,8 @@ class ChatbotVoiceActionsMixin:
                 guild_id=item.guild_id, user_id=item.author_id, text_channel_id=item.text_channel_id,
                 session=item.chatbot_mirror_session, channel_id=item.channel_id, require_idle=True,
             )
-            if error or current is not vc:
+            if (error or current is not vc or (item.chatbot_mirror_session_ref
+                    and self.chatbot_voice_session_ref(int(item.guild_id), require_idle=False) != item.chatbot_mirror_session_ref)):
                 raise ChatbotVoiceActionBlocked(error or "A sessão de voz foi substituída.")
             return
         guild, _channel, error = self._chatbot_voice_precheck(
@@ -288,6 +459,7 @@ class ChatbotVoiceActionsMixin:
     async def chatbot_speak_voice(
         self, *, guild_id: int, user_id: int, channel_id: int, request_id: str, text: str,
         before_effect: Callable[[], Awaitable[None]] | None = None,
+        voice_override: str = "", language_override: str = "",
     ) -> dict[str, Any]:
         from .audio import QueueItem
 
@@ -323,6 +495,10 @@ class ChatbotVoiceActionsMixin:
                 "rate": str(settings.get("edge_rate", settings.get("rate", "+0%")) or "+0%"),
                 "pitch": str(settings.get("edge_pitch", settings.get("pitch", "+0Hz")) or "+0Hz"),
             }
+            if voice_override:
+                options["voice"] = str(voice_override)
+            if language_override:
+                options["language"] = str(language_override)
             data = await self.synthesize_chatbot_attachment(
                 guild_id=int(guild_id), user_id=int(user_id), text=clean_text, **options,
             )
@@ -345,7 +521,9 @@ class ChatbotVoiceActionsMixin:
                 result = await self._play_file(vc, path, item=item)
             if not isinstance(result, dict) or result.get("first_frame_observed") is not True or result.get("tts_discarded") or result.get("ok") is False or result.get("music_route_failed"):
                 return _result(False, "A sessão não confirmou a reprodução do áudio.", uncertain=True)
-            return _result(True, "Falei o áudio na call aprovada.")
+            if result.get("chatbot_interrupted"):
+                return _result(False, "A fala foi interrompida.")
+            return {**_result(True, "Falei o áudio na call aprovada."), "first_frame_observed": True}
         except ChatbotVoiceActionBlocked as exc:
             return _result(False, str(exc))
         except ValueError:

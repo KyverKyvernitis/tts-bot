@@ -374,7 +374,24 @@ class MemoryStore:
         pulled = await self._coll.update_many(
             guild_query, {"$pull": {"turns": {"user_id": uid}}},
         )
-        return int(removed.deleted_count + pulled.modified_count)
+        extra = await self._clear_conversation_data(guild_id=gid, user_id=uid)
+        return int(removed.deleted_count + pulled.modified_count + extra)
+
+    async def _clear_conversation_data(self, *, guild_id=None, user_id=None) -> int:
+        # Além da invalidação por geração, resets removem o conteúdo pessoal
+        # já armazenado. Request logs de moderação permanecem separados.
+        removed = 0
+        for kind, user_field in (("chatbot_conversation_preferences", "user_id"),
+                                 ("chatbot_conversation_fact", "user_id"),
+                                 ("chatbot_sent_reply", "requester_id")):
+            query = {"type": kind}
+            if guild_id is not None:
+                query["guild_id"] = int(guild_id)
+            if user_id is not None:
+                query[user_field] = int(user_id)
+            result = await self._coll.delete_many(query)
+            removed += int(result.deleted_count)
+        return removed
 
     async def clear_guild_history(self, guild_id: int) -> int:
         return await self.clear_all_guild_memory(guild_id)
@@ -398,7 +415,8 @@ class MemoryStore:
             "guild_id": gid,
         }
         result = await self._coll.delete_many(query)
-        return int(result.deleted_count)
+        extra = await self._clear_conversation_data(guild_id=gid)
+        return int(result.deleted_count + extra)
 
     async def clear_all_memory_everywhere(self) -> int:
         await self._coll.update_one(
@@ -415,4 +433,5 @@ class MemoryStore:
         result = await self._coll.delete_many({
             "type": C.DOC_TYPE_MEMORY_V3,
         })
-        return int(result.deleted_count)
+        extra = await self._clear_conversation_data()
+        return int(result.deleted_count + extra)

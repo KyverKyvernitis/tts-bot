@@ -33,6 +33,9 @@ class GuildChatbotConfig:
     voice_actions_enabled: bool = True
     moderation_actions_enabled: bool = True
     action_staff_role_ids: tuple[int, ...] = ()
+    action_allowed_role_ids: tuple[int, ...] = ()
+    action_allowed_channel_ids: tuple[int, ...] = ()
+    text_provider_order: tuple[str, ...] = ("groq", "gemini")
     audio_reply_chance_percent: int = C.AUDIO_REPLY_DEFAULT_CHANCE_PERCENT
     audio_reply_cooldown_seconds: int = C.AUDIO_REPLY_DEFAULT_COOLDOWN_SECONDS
     schema_version: int = C.CHATBOT_SCHEMA_VERSION
@@ -75,6 +78,9 @@ class GuildChatbotConfig:
             voice_actions_enabled=bool(doc.get("voice_actions_enabled", True)),
             moderation_actions_enabled=bool(doc.get("moderation_actions_enabled", True)),
             action_staff_role_ids=_channel_ids(doc.get("action_staff_role_ids") or ()),
+            action_allowed_role_ids=_channel_ids(doc.get("action_allowed_role_ids") or ()),
+            action_allowed_channel_ids=_channel_ids(doc.get("action_allowed_channel_ids") or ()),
+            text_provider_order=("gemini", "groq") if doc.get("text_provider_order") == ["gemini", "groq"] else ("groq", "gemini"),
             audio_reply_chance_percent=_audio_number(doc.get("audio_reply_chance_percent"),
                 default=C.AUDIO_REPLY_DEFAULT_CHANCE_PERCENT, maximum=100),
             audio_reply_cooldown_seconds=_audio_number(doc.get("audio_reply_cooldown_seconds"),
@@ -99,6 +105,9 @@ class GuildChatbotConfig:
             "voice_actions_enabled": self.voice_actions_enabled,
             "moderation_actions_enabled": self.moderation_actions_enabled,
             "action_staff_role_ids": list(self.action_staff_role_ids),
+            "action_allowed_role_ids": list(self.action_allowed_role_ids),
+            "action_allowed_channel_ids": list(self.action_allowed_channel_ids),
+            "text_provider_order": list(self.text_provider_order),
             "audio_reply_chance_percent": self.audio_reply_chance_percent,
             "audio_reply_cooldown_seconds": self.audio_reply_cooldown_seconds,
             "updated_at": self.updated_at,
@@ -172,6 +181,7 @@ class ConfigStore:
         document = config.to_doc()
         for key in ("actions_enabled", "audio_actions_enabled", "voice_actions_enabled",
                     "moderation_actions_enabled", "action_staff_role_ids",
+                    "action_allowed_role_ids", "action_allowed_channel_ids", "text_provider_order",
                     "audio_reply_chance_percent", "audio_reply_cooldown_seconds"):
             document.pop(key)
         await self._coll.update_one(
@@ -200,6 +210,35 @@ class ConfigStore:
                 "updated_at": now, "updated_by": int(updated_by),
             }, "$setOnInsert": {"created_at": now, "schema_version": C.CHATBOT_SCHEMA_VERSION}},
             upsert=True,
+        )
+        return await self.get_config(guild_id, fresh=True)
+
+    async def save_action_allowlists(
+        self, *, guild_id: int, action_allowed_role_ids: Iterable[int],
+        action_allowed_channel_ids: Iterable[int], updated_by: int,
+    ) -> GuildChatbotConfig:
+        now = time.time()
+        await self._coll.update_one(
+            {"type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": int(guild_id)},
+            {"$set": {"type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": int(guild_id),
+                      "action_allowed_role_ids": list(_channel_ids(action_allowed_role_ids)),
+                      "action_allowed_channel_ids": list(_channel_ids(action_allowed_channel_ids)),
+                      "updated_at": now, "updated_by": int(updated_by)},
+             "$setOnInsert": {"created_at": now, "schema_version": C.CHATBOT_SCHEMA_VERSION}}, upsert=True,
+        )
+        return await self.get_config(guild_id, fresh=True)
+
+    async def save_provider_config(self, *, guild_id: int, text_provider_order: Iterable[str],
+                                   updated_by: int) -> GuildChatbotConfig:
+        order = tuple(text_provider_order)
+        if order not in (("groq", "gemini"), ("gemini", "groq")):
+            raise ValueError("Escolha Groq ou Gemini como primeiro provedor.")
+        now = time.time()
+        await self._coll.update_one(
+            {"type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": int(guild_id)},
+            {"$set": {"type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": int(guild_id),
+                      "text_provider_order": list(order), "updated_at": now, "updated_by": int(updated_by)},
+             "$setOnInsert": {"created_at": now, "schema_version": C.CHATBOT_SCHEMA_VERSION}}, upsert=True,
         )
         return await self.get_config(guild_id, fresh=True)
 

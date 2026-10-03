@@ -507,6 +507,8 @@ class QueueItem:
     chatbot_mirror_audio: bytes | None = field(default=None, repr=False, compare=False)
     chatbot_mirror_session: Any = field(default=None, repr=False, compare=False)
     chatbot_is_mirror: bool = field(default=False, repr=False, compare=False)
+    chatbot_mirror_session_ref: str = field(default="", repr=False, compare=False)
+    chatbot_interrupted: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -621,13 +623,14 @@ class TTSAudioMixin(SharedSynthesisMixin):
         pitch: str = "+0Hz",
         timeout_seconds: float = 18.0,
         max_bytes: int = 8 * 1024 * 1024,
+        max_text_chars: int = 800,
     ) -> bytes | None:
         """Adapter público e estreito para o chatbot reutilizar cache/singleflight.
 
         A marca de prefetch mantém a prioridade abaixo da fala normal da call;
         se a mesma fala for enfileirada em seguida, ela reaproveita o cache.
         """
-        clean_text = str(text or "").strip()[:800]
+        clean_text = str(text or "").strip()[:max(1, min(2000, int(max_text_chars)))]
         if not _has_speakable_tts_text(clean_text):
             return None
         item = QueueItem(
@@ -5932,6 +5935,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         item.chatbot_playback_started = True
                     vc.play(source, after=_after_playback)
                     source_handed_to_player = True
+                    register_speech = getattr(self, "_register_chatbot_speech", None)
+                    if item is not None and callable(register_speech):
+                        register_speech(item, vc, source)
                 except Exception as exc:
                     if self._is_tts_audio_source_error(exc):
                         raise TTSPlaybackError("audio_source_failed") from exc
@@ -5980,6 +5986,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     "playback_source": source_kind,
                     "audio_format": self._path_audio_format(path),
                 }
+                if bool(getattr(item, "chatbot_interrupted", False)):
+                    result["chatbot_interrupted"] = True
                 if edge_stream is not None:
                     stream_engine = str(edge_stream.engine or "edge")
                     result["progressive_stream"] = True
@@ -6003,6 +6011,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
                             vc.stop()
                 raise
             finally:
+                forget_speech = getattr(self, "_forget_chatbot_speech", None)
+                if source is not None and callable(forget_speech):
+                    forget_speech(guild_id, vc, source)
                 if prepared is not None:
                     prepared.cleanup()
                 if source is not None and not source_handed_to_player:

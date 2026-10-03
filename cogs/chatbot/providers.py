@@ -11,17 +11,20 @@ import base64
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from copy import deepcopy
 from typing import Optional
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import aiohttp
 
 from . import constants as C
 from .action_protocol import (
-    ChatReply, InvalidActionProposal, MAX_PROPOSALS, enabled_actions, parse_proposals,
+    ChatReply, InvalidActionProposal, MAX_PROPOSALS, NativeToolCall, TOOL_NAME, enabled_actions, parse_proposal, parse_proposals,
     private_reply_text, proposal_tool,
 )
+from .tool_registry import InvalidToolArguments, ToolSpec, validate_tool_arguments
 from .media import ImagePreparationError, MediaAttachment, PreparedImage, prepare_image_attachments
 
 log = logging.getLogger(__name__)
@@ -34,6 +37,9 @@ _DIAGNOSTIC_FINISH_REASONS = frozenset({
     "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL",
     "UNEXPECTED_TOOL_CALL", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT",
     "IMAGE_OTHER", "NO_IMAGE", "FINISH_REASON_UNSPECIFIED",
+})
+_INCOMPLETE_TOOL_FINISH_REASONS = frozenset({
+    "length", "MAX_TOKENS", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL",
 })
 
 
@@ -78,8 +84,22 @@ class ChatMessage:
     content: str
     image_urls: list[str] = field(default_factory=list)
     images: list[PreparedImage] = field(default_factory=list)
+    tool_calls: tuple[NativeToolCall, ...] = ()
+    tool_call_id: str = ""
+    name: str = ""
 
     def to_openai_payload(self) -> dict:
+        if self.role == "tool":
+            payload = {"role": "tool", "content": self.content, "tool_call_id": self.tool_call_id}
+            if self.name:
+                payload["name"] = self.name
+            return payload
+        if self.tool_calls:
+            return {"role": self.role, "content": self.content or None, "tool_calls": [
+                {"id": call.id, "type": "function", "function": {"name": call.name,
+                 "arguments": json.dumps(call.arguments, ensure_ascii=False, allow_nan=False)}}
+                for call in self.tool_calls
+            ]}
         if not self.images and not self.image_urls:
             return {"role": self.role, "content": self.content}
         blocks: list[dict] = [{"type": "text", "text": self.content}]
@@ -214,7 +234,7 @@ def _action_reply(
     text: str, calls: list[tuple[object, object]], actions: tuple[str, ...],
     *, provider: str, model: str, finish_reason: Optional[str],
 ) -> ChatReply:
-    if calls and finish_reason in {"length", "MAX_TOKENS"}:
+    if calls and finish_reason in _INCOMPLETE_TOOL_FINISH_REASONS:
         # Um prefixo JSON válido não prova que toda a sequência foi recebida.
         # Nunca preparar uma cadeia parcial porque a API truncou sua saída.
         raise ProviderError(
@@ -238,6 +258,66 @@ def _action_reply(
     return ChatReply(private_reply_text(text, proposals), proposals, provider, model)
 
 
+def _native_reply(text, raw_calls, specs, actions, *, provider, model, finish_reason):
+    """Um lote estritamente validado; nenhuma ferramenta é executada aqui."""
+    if len(raw_calls) > getattr(C, "MAX_TOOL_CALLS", 8) or (raw_calls and finish_reason in _INCOMPLETE_TOOL_FINISH_REASONS):
+        raise ProviderError("provider retornou ferramentas incompletas", kind="invalid_response", stage="output", finish_reason=finish_reason)
+    by_name = {spec.name: spec for spec in specs}
+    calls, proposals, ids = [], [], set()
+    try:
+        for call_id, name, arguments, opaque in raw_calls:
+            spec = by_name.get(name)
+            if spec is None:
+                raise InvalidToolArguments("Ferramenta inválida.")
+            if isinstance(arguments, str):
+                if len(arguments.encode("utf-8")) > 8192:
+                    raise InvalidToolArguments("Argumentos inválidos.")
+                def unique(pairs):
+                    result = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise InvalidToolArguments("Argumentos inválidos.")
+                        result[key] = value
+                    return result
+                def constant(value):
+                    raise InvalidToolArguments("Argumentos inválidos.")
+                arguments = json.loads(arguments, object_pairs_hook=unique, parse_constant=constant)
+            if name == TOOL_NAME:
+                # Validação do envelope inteiro antes de separar campos. O
+                # schema legado aceita ask_permission, mas o host o ignora.
+                schema = deepcopy(spec.parameters)
+                schema.setdefault("properties", {})["ask_permission"] = {"type": "boolean"}
+                arguments = validate_tool_arguments(arguments, schema)
+                allowed = tuple(spec.parameters.get("properties", {}).get("action", {}).get("enum", ())) or actions
+                proposal = parse_proposal(name, arguments, allowed)
+                proposals.append(proposal)
+                arguments.pop("ask_permission", None)
+                if len(proposals) > MAX_PROPOSALS:
+                    raise InvalidToolArguments("Propostas inválidas.")
+            else:
+                arguments = validate_tool_arguments(arguments, spec.parameters)
+            call_id = f"call_{uuid4().hex}" if call_id is None else call_id
+            if not isinstance(call_id, str) or not call_id or len(call_id) > 200 or call_id in ids:
+                raise InvalidToolArguments("Chamada inválida.")
+            ids.add(call_id)
+            calls.append(NativeToolCall(call_id, name, arguments, deepcopy(opaque)))
+    except (InvalidToolArguments, InvalidActionProposal, ValueError, TypeError, UnicodeError, RecursionError) as exc:
+        raise ProviderError("provider retornou ferramentas inválidas", kind="invalid_response", stage="output", finish_reason=finish_reason) from exc
+    if not text and not calls:
+        raise ProviderError("provider retornou resposta vazia", kind="empty", stage="output", finish_reason=finish_reason)
+    return ChatReply(private_reply_text(text, tuple(proposals)), tuple(proposals), provider, model, tuple(calls))
+
+
+def _tool_declarations(actions, target_refs, tool_specs):
+    specs = tuple(spec for spec in tool_specs if spec.available)
+    declarations = [spec.native_declaration() for spec in specs]
+    if actions and not any(spec.name == TOOL_NAME for spec in specs):
+        declaration = proposal_tool(actions, target_refs)
+        declarations.append(declaration)
+        specs += (ToolSpec(declaration["name"], declaration["description"], declaration["parameters"], permission="staff/automatic"),)
+    return specs, declarations
+
+
 class _GroqClient:
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -249,18 +329,20 @@ class _GroqClient:
         self, *, system: str, messages: list[ChatMessage], temperature: float,
         model: str, timeout_seconds: float, actions: tuple[str, ...] = (),
         target_refs: tuple[str, ...] = (),
+        tool_specs: tuple[ToolSpec, ...] = (),
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
+        specs, declarations = _tool_declarations(actions, target_refs, tool_specs)
         payload = {
             "model": model,
             "messages": [{"role": "system", "content": system}]
             + [message.to_openai_payload() for message in messages],
             "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-            "max_completion_tokens": _output_tokens(messages, actions=actions),
+            "max_completion_tokens": _output_tokens(messages, actions=actions or tuple(spec.name for spec in specs)),
             "stream": False,
         }
-        if actions:
-            payload["tools"] = [{"type": "function", "function": proposal_tool(actions, target_refs)}]
+        if declarations:
+            payload["tools"] = [{"type": "function", "function": declaration} for declaration in declarations]
             payload["tool_choice"] = "auto"
         # Evita gastar tokens de raciocínio oculto em conversa casual.
         if model.startswith("openai/gpt-oss"):
@@ -272,7 +354,7 @@ class _GroqClient:
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        timeout = aiohttp.ClientTimeout(total=max(0.1, timeout_seconds))
+        timeout = aiohttp.ClientTimeout(total=max(0.001, timeout_seconds))
         try:
             async with self._session.post(
                 self.BASE_URL, json=payload, headers=headers, timeout=timeout,
@@ -316,6 +398,20 @@ class _GroqClient:
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError("Groq resposta malformada", kind="invalid_response", stage="output") from exc
         reply = content.strip() if isinstance(content, str) else ""
+        if tool_specs:
+            native_calls = []
+            raw_calls = message.get("tool_calls") or []
+            if not isinstance(raw_calls, list):
+                raw_calls = [None]
+            for call in raw_calls if not refusal_present else []:
+                function = call.get("function") if isinstance(call, dict) else None
+                if not isinstance(function, dict) or call.get("type", "function") != "function":
+                    native_calls.append((None, None, None, {}))
+                else:
+                    native_calls.append((call.get("id"), function.get("name"), function.get("arguments"), {}))
+                if len(native_calls) > getattr(C, "MAX_TOOL_CALLS", 8):
+                    break
+            return _native_reply(reply, native_calls, specs, actions, provider="groq", model=model, finish_reason=finish_reason)
         if actions:
             calls = []
             raw_calls = message.get("tool_calls") or []
@@ -375,12 +471,36 @@ class _GeminiClient:
         self, *, system: str, messages: list[ChatMessage], temperature: float,
         model: str, timeout_seconds: float, actions: tuple[str, ...] = (),
         target_refs: tuple[str, ...] = (),
+        tool_specs: tuple[ToolSpec, ...] = (),
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
-        deadline = time.monotonic() + max(0.1, timeout_seconds)
+        specs, declarations = _tool_declarations(actions, target_refs, tool_specs)
+        deadline = time.monotonic() + max(0.001, timeout_seconds)
         contents: list[dict] = []
+        prior_calls = {call.id: call for message in messages for call in message.tool_calls}
         for message in messages:
+            if message.role == "tool":
+                try:
+                    result = json.loads(message.content)
+                except (ValueError, TypeError):
+                    result = {"result": message.content}
+                if not isinstance(result, dict):
+                    result = {"result": result}
+                part = {"functionResponse": {"name": message.name, "response": result}}
+                prior = prior_calls.get(message.tool_call_id)
+                native_id = (prior.provider_data.get("part", {}).get("functionCall", {}).get("id") if prior else None)
+                if native_id:
+                    part["functionResponse"]["id"] = native_id
+                if contents and contents[-1]["role"] == "user":
+                    contents[-1]["parts"].append(part)
+                else:
+                    contents.append({"role": "user", "parts": [part]})
+                continue
             parts: list[dict] = [{"text": message.content}]
+            if message.tool_calls:
+                parts = ([{"text": message.content}] if message.content else [])
+                for call in message.tool_calls:
+                    parts.append(call.provider_data.get("part") or {"functionCall": {"name": call.name, "args": call.arguments}})
             if message.images:
                 parts.extend(self._image_part(image) for image in message.images[:C.MAX_IMAGES_PER_MESSAGE])
             else:
@@ -398,15 +518,23 @@ class _GeminiClient:
             "systemInstruction": {"parts": [{"text": system}]},
             "generationConfig": {
                 "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-                "maxOutputTokens": _output_tokens(messages, actions=actions),
+                "maxOutputTokens": _output_tokens(messages, actions=actions or tuple(spec.name for spec in specs)),
             },
         }
-        if actions:
-            tool = proposal_tool(actions, target_refs)
+        if declarations:
             # Gemini usa o subconjunto OpenAPI de Schema. A validação estrita
             # continua no host, incluindo a rejeição de propriedades extras.
-            tool["parameters"].pop("additionalProperties", None)
-            payload["tools"] = [{"functionDeclarations": [tool]}]
+            def gemini_schema(node):
+                if isinstance(node, dict):
+                    node.pop("additionalProperties", None)
+                    for child in node.values():
+                        gemini_schema(child)
+                elif isinstance(node, list):
+                    for child in node:
+                        gemini_schema(child)
+            for tool in declarations:
+                gemini_schema(tool["parameters"])
+            payload["tools"] = [{"functionDeclarations": declarations}]
             payload["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
         # Flash/Lite 2.5 aceitam desativar pensamento para conversa curta.
         # Sem isso o orçamento de saída pode acabar antes do texto visível.
@@ -453,6 +581,19 @@ class _GeminiClient:
             ).strip()
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError("Gemini resposta malformada", kind="invalid_response", stage="output") from exc
+        if tool_specs:
+            native_calls = []
+            for part in parts:
+                if not isinstance(part, dict) or part.get("thought") or "functionCall" not in part:
+                    continue
+                function = part["functionCall"]
+                if not isinstance(function, dict):
+                    native_calls.append((None, None, None, {}))
+                else:
+                    native_calls.append((function.get("id"), function.get("name"), function.get("args"), {"part": part}))
+                if len(native_calls) > getattr(C, "MAX_TOOL_CALLS", 8):
+                    break
+            return _native_reply(reply, native_calls, specs, actions, provider="gemini", model=model, finish_reason=finish_reason)
         if actions:
             calls = []
             for part in parts:
@@ -522,6 +663,9 @@ class ProviderRouter:
         self, *, system: str, messages: list[ChatMessage],
         temperature: float = C.DEFAULT_TEMPERATURE, actions: tuple[str, ...] = (),
         target_refs: tuple[str, ...] = (),
+        tool_specs: tuple[ToolSpec, ...] = (),
+        text_provider_order: tuple[str, ...] | None = None,
+        budget_seconds: float | None = None,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         started = time.monotonic()
@@ -542,13 +686,15 @@ class ProviderRouter:
             # Uma prioridade parcial mantém os outros providers como fallback.
             # Ignorar nomes desconhecidos/repetidos não afeta a cadeia de visão.
             by_provider = {attempt[0]: attempt for attempt in attempts}
-            priority = getattr(C, "TEXT_PROVIDER_ORDER", ("groq", "gemini"))
+            # O padrão atual é Groq primeiro, inclusive quando uma variável
+            # antiga invertia a ordem. Só a opção explícita do painel a altera.
+            priority = text_provider_order if text_provider_order is not None else ("groq", "gemini")
             ordered_names = dict.fromkeys((*priority, *by_provider))
             attempts = [by_provider[name] for name in ordered_names if name in by_provider]
         if not attempts:
             raise AllProvidersExhausted("nenhum provider configurado", kind="unconfigured", stage="routing")
 
-        deadline = started + C.PROVIDER_ROUTER_TIMEOUT_SECONDS
+        deadline = started + min(C.PROVIDER_ROUTER_TIMEOUT_SECONDS, max(.01, budget_seconds) if budget_seconds is not None else C.PROVIDER_ROUTER_TIMEOUT_SECONDS)
         # Chamadores que ainda passam URLs também recebem o mesmo preparo único.
         # Nunca remover anexos para tentar um fallback apenas de texto.
         normalized: list[ChatMessage] = []
@@ -564,7 +710,7 @@ class ProviderRouter:
                 images = await prepare_image_attachments(
                     self._session, attachments, timeout_seconds=_remaining(deadline),
                 )
-                normalized.append(ChatMessage(message.role, message.content, images=images))
+                normalized.append(replace(message, image_urls=[], images=images))
         except ImagePreparationError as exc:
             raise AllProvidersExhausted(
                 str(exc), kind=exc.kind, stage=exc.stage, status=exc.status,
@@ -572,10 +718,15 @@ class ProviderRouter:
         messages = normalized
         last_error: Optional[ProviderError] = None
         attempted = 0
+        text_fallbacks = []
+        wants_tools = bool(actions or tool_specs)
         for provider_name, client, models in attempts:
             for model in models:
                 state = self._state(provider_name, model)
                 if not state.is_available():
+                    continue
+                if wants_tools and (provider_name, model) in self._unsupported_tool_models:
+                    text_fallbacks.append((provider_name, client, model))
                     continue
                 try:
                     timeout = _remaining(deadline)
@@ -590,21 +741,20 @@ class ProviderRouter:
                         kwargs["actions"] = actions
                         if target_refs:
                             kwargs["target_refs"] = target_refs
+                    if tool_specs:
+                        kwargs["tool_specs"] = tool_specs
                     try:
                         reply = await client.chat(**kwargs)
                     except ProviderError as exc:
-                        if exc.kind != "tools_unsupported" or "actions" not in kwargs:
+                        if exc.kind != "tools_unsupported" or not wants_tools:
                             raise
                         # A API recusou a capacidade antes de gerar resposta.
                         # Este modelo passa a conversar apenas em texto, sem
                         # transformar uma frase comum numa ação executável.
                         self._unsupported_tool_models.add((provider_name, model))
-                        kwargs.pop("actions")
-                        kwargs.pop("target_refs", None)
-                        kwargs["timeout_seconds"] = _remaining(deadline)
-                        attempted += 1
-                        reply = await client.chat(**kwargs)
-                    if actions and isinstance(reply, str):
+                        text_fallbacks.append((provider_name, client, model))
+                        continue
+                    if wants_tools and isinstance(reply, str):
                         reply = ChatReply(reply, provider=provider_name, model=model)
                     state.mark_success()
                     log.info(
@@ -662,6 +812,42 @@ class ProviderRouter:
                         break
             if time.monotonic() >= deadline:
                 break
+        # Conversa somente em texto é o último recurso, depois de esgotar
+        # modelos com suporte nativo. O prompt não promete ações neste modo.
+        for provider_name, client, model in text_fallbacks:
+            if not self._state(provider_name, model).is_available():
+                continue
+            try:
+                attempted += 1
+                reply = await client.chat(
+                    system=system + "\n\nNeste turno as ferramentas estão indisponíveis. Responda apenas em texto; não crie pedidos, não afirme executar ações e não peça códigos internos ao usuário.",
+                    messages=messages, temperature=temperature, model=model, timeout_seconds=_remaining(deadline),
+                )
+                self._state(provider_name, model).mark_success()
+                log.info(
+                    "chatbot: result=success provider=%s model=%s mode=%s elapsed_ms=%d message_count=%d",
+                    provider_name, model, mode,
+                    max(0, int((time.monotonic() - started) * 1000)), len(messages),
+                )
+                return ChatReply(reply, provider=provider_name, model=model)
+            except ProviderError as exc:
+                last_error = exc
+                status = int(exc.status or 0)
+                log.warning(
+                    "chatbot: provider=%s model=%s mode=%s stage=%s kind=%s status=%s finish_reason=%s",
+                    provider_name, model, mode, exc.stage, exc.kind, status,
+                    _diagnostic_finish_reason(exc.finish_reason),
+                )
+                if exc.kind == "blocked":
+                    raise AllProvidersExhausted("pedido não pôde ser processado", kind="blocked", stage=exc.stage) from exc
+                models = next(item[2] for item in attempts if item[0] == provider_name)
+                if exc.kind in {"rate_limit", "auth", "network", "timeout"}:
+                    cooldown = float(exc.retry_after or 30.0) if exc.kind == "rate_limit" else 900.0 if exc.kind == "auth" else 20.0
+                    self._mark_provider_failure(provider_name, models, cooldown, status=status)
+                elif exc.kind == "model":
+                    self._state(provider_name, model).mark_failure(300.0, status=status)
+                if time.monotonic() >= deadline:
+                    break
         if attempted == 0:
             if last_error and last_error.kind == "deadline":
                 raise AllProvidersExhausted("prazo dos providers esgotado", kind="deadline", stage="routing")

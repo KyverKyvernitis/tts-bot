@@ -50,6 +50,8 @@ class _CodecVoice(discord.VoiceClient):
 
     def play(self, source, *, after=None):
         super().play(source, after=after)
+        if not source.is_opus():
+            self._encoder_library = discord.opus._lib
         self.play_calls += 1
 
     def send_audio_packet(self, data, *, encode=True):
@@ -64,6 +66,19 @@ class _CodecVoice(discord.VoiceClient):
             if player.is_alive():
                 player.stop()
                 await asyncio.to_thread(player.join, 2)
+        # O VoiceClient e o AudioPlayer mantêm um ciclo. Uma coleta posterior
+        # pode ocorrer quando outro teste substituiu discord.opus._lib por
+        # None. Destrua o encoder desta fixture com sua biblioteca original
+        # depois de juntar a thread, sem depender daquela variável global.
+        encoder = getattr(self, "encoder", None)
+        if encoder is not None:
+            del self.encoder
+            native = getattr(self, "_encoder_library", None)
+            state = getattr(encoder, "_state", None)
+            if native is not None and state is not None:
+                native.opus_encoder_destroy(state)
+                del encoder._state  # evita uma segunda destruição em __del__
+            del encoder
 
 
 def _make_codec_fixture(directory):
