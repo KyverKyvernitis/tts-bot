@@ -42,7 +42,6 @@ def cog():
     instance._add_processing_reaction = AsyncMock(return_value="⏳")
     instance._remove_processing_reaction = AsyncMock()
     instance._maybe_generate_tts = AsyncMock(return_value=None)
-    instance._maybe_enqueue_voice_call_tts = AsyncMock()
     return instance
 
 

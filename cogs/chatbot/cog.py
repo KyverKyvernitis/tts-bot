@@ -40,6 +40,8 @@ from .message_index import ChatbotMessageIndex
 from .runtime import AdmissionController, TaskSupervisor
 from .spontaneous import is_spontaneous_candidate, roll_chance, spontaneous_prompt_hint
 from .providers import AllProvidersExhausted, ChatMessage, ProviderError, ProviderRouter
+from .action_protocol import ChatReply
+from .actions import ActionService
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +72,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._router: Optional[ProviderRouter] = None
         self._message_index: Optional[ChatbotMessageIndex] = None
         self._image_service: Optional[ImageService] = None
+        self._actions: Optional[ActionService] = None
         self._admission = AdmissionController()
         self._supervisor = TaskSupervisor()
         self._user_cooldowns: dict[tuple[int, int], float] = {}
@@ -107,6 +110,12 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             self._session, groq_key=groq_key or None, gemini_key=gemini_key or None,
         )
         self._image_service = ImageService(self._session, self._admission)
+        self._actions = ActionService(self, coll)
+        try:
+            await asyncio.wait_for(self._actions.initialize(), timeout=10.0)
+        except Exception as exc:
+            self._actions.ready = False
+            log.warning("chatbot: ações indisponíveis na inicialização (%s)", type(exc).__name__)
         self._cleanup_task = self._supervisor.create(
             self._cooldown_cleanup_loop(), name="chatbot-cleanup",
         )
@@ -115,6 +124,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         log.info("chatbot: bot único carregado (schema=%s)", C.CHATBOT_SCHEMA_VERSION)
 
     async def cog_unload(self):
+        if getattr(self, "_actions", None) is not None:
+            self._actions.shutdown()
         await self._supervisor.shutdown()
         self._cleanup_task = None
         if self._session is not None:
@@ -123,6 +134,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._config = None
         self._router = None
         self._image_service = None
+        self._actions = None
 
     def _is_user_on_cooldown(self, guild_id: int, user_id: int) -> bool:
         key = (int(guild_id), int(user_id))
@@ -166,6 +178,11 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                         await self._message_index.cleanup_old()
                     except Exception:
                         log.exception("chatbot: falha ao limpar message index")
+                if self._actions is not None:
+                    try:
+                        await self._actions.cleanup()
+                    except Exception as exc:
+                        log.warning("chatbot: limpeza de ações falhou (%s)", type(exc).__name__)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -495,6 +512,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         """Sintetiza resposta somente quando o usuário pede áudio."""
         if C.SAFE_MODE or not user_asked_for_tts(content):
             return None
+        if guild_id and not await self._legacy_audio_allowed(guild_id):
+            return None
         # Sanitiza ANTES de sintetizar para o áudio não falar uma negativa
         # contraditória do tipo "não posso responder com áudio".
         spoken_reply = self._sanitize_audio_capability_claim(
@@ -620,70 +639,18 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         return "Te mandei o áudio."
 
 
-    async def _maybe_enqueue_voice_call_tts(
-        self,
-        *,
-        message: discord.Message,
-        spoken_text: str,
-        audio_was_sent: bool,
-    ) -> None:
-        """Enfileira fala na call atual quando já houve resposta em áudio no chat."""
-        if not audio_was_sent:
-            return
-        guild = message.guild
-        if guild is None:
-            return
-
-        tts_cog = self.bot.get_cog("TTSVoice")
-        if tts_cog is None:
-            return
-
-        member_voice = getattr(message.author, "voice", None)
-        member_channel = getattr(member_voice, "channel", None)
-        me = getattr(guild, "me", None)
-        me_voice = getattr(me, "voice", None)
-        bot_channel = getattr(me_voice, "channel", None)
-        if member_channel is None or bot_channel is None or int(member_channel.id) != int(bot_channel.id):
-            return
-
-        db = getattr(self.bot, "settings_db", None)
-        if db is None or not hasattr(db, "resolve_tts"):
-            return
-
+    async def _legacy_audio_allowed(self, guild_id: int) -> bool:
+        if C.SAFE_MODE:
+            return False
+        config_store = getattr(self, "_config", None)
+        if config_store is None:
+            return True
         try:
-            resolved = await tts_cog._maybe_await(db.resolve_tts(guild.id, message.author.id))
-            resolved = dict(resolved or {})
-            # Texto idêntico ao anexo => mesma chave do cache/singleflight.
-            text_for_call = spoken_text.strip()
-            if not text_for_call:
-                return
-
-            # O anexo de áudio do chatbot é sempre gerado com edge-tts.
-            # Ao espelhar essa mesma fala na call, força a mesma engine em vez
-            # de herdar o engine pessoal do TTS da call, que pode estar em gTTS.
-            from cogs.tts.audio import QueueItem
-            queue_item = QueueItem(
-                guild_id=guild.id,
-                channel_id=member_channel.id,
-                author_id=message.author.id,
-                text=text_for_call,
-                engine="edge",
-                voice=str(resolved.get("edge_voice") or DEFAULT_TTS_VOICE),
-                language=str(resolved.get("gtts_language", resolved.get("language", "pt-br")) or "pt-br"),
-                rate=str(resolved.get("edge_rate", resolved.get("rate", "+0%")) or "+0%"),
-                pitch=str(resolved.get("edge_pitch", resolved.get("pitch", "+0Hz")) or "+0Hz"),
-            )
-            enqueued, _dropped, deduplicated = await tts_cog._enqueue_tts_item(guild.id, queue_item)
-            if enqueued:
-                log.info(
-                    "chatbot: fala enfileirada na call | guild=%s user=%s channel=%s dedup=%s",
-                    guild.id,
-                    message.author.id,
-                    member_channel.id,
-                    deduplicated,
-                )
-        except Exception:
-            log.exception("chatbot: falha ao enfileirar fala na call")
+            config = await config_store.get_config(guild_id, fresh=True)
+            return bool(config.enabled and config.actions_enabled and config.audio_actions_enabled)
+        except Exception as exc:
+            log.warning("chatbot: opções de áudio indisponíveis (%s)", type(exc).__name__)
+            return False
 
 
     def _format_reply_context(
@@ -866,7 +833,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if C.SAFE_MODE:
             parts.append("Recursos: neste momento responda apenas em texto; áudio e geração de imagens estão suspensos.")
         else:
-            parts.append("Áudio só é tentado quando solicitado. Não anuncie que enviou um anexo antes da confirmação do envio.")
+            parts.append("Use áudio e ações conforme as capacidades informadas neste turno. Não anuncie que enviou um anexo ou executou uma ação antes da confirmação do sistema.")
         return "\n\n".join(part.strip() for part in parts if part.strip())
 
     @staticmethod
@@ -1217,24 +1184,56 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 channel_is_nsfw=effective_nsfw, images=images,
                 behavior_hint=behavior_hint,
             )
+            action_service = getattr(self, "_actions", None)
+            action_context = None
+            if action_service is not None and action_service.ready:
+                try:
+                    config = await self._config.get_config(guild.id)
+                    action_context = await asyncio.wait_for(
+                        action_service.describe(message, config, reply_target=target), timeout=3.0,
+                    )
+                    system += "\n\n" + action_context.description
+                except Exception as exc:
+                    log.warning("chatbot: capacidades de ações indisponíveis (%s)", type(exc).__name__)
+            router_options = {}
+            if action_context is not None and action_context.actions:
+                router_options["actions"] = action_context.actions
             try:
                 reply = await self._router.chat(
                     system=system, messages=messages,
                     temperature=C.DEFAULT_VISION_TEMPERATURE if images else C.DEFAULT_TEMPERATURE,
+                    **router_options,
                 )
             except (AllProvidersExhausted, ProviderError, asyncio.TimeoutError) as exc:
                 await self._send_chat_failure(message, exc, had_images=bool(images), spontaneous=bool(behavior_hint))
                 return False
+            action_plan = None
+            if isinstance(reply, ChatReply):
+                if reply.proposals and action_context is not None:
+                    action_plan = await action_service.plan(
+                        message, reply, action_context, config, epoch=epoch, visibility_scope=visibility,
+                    )
+                    if action_plan.requests:
+                        reply = action_service.content(action_plan)
+                    else:
+                        action_plan = None
+                        reply = "Não consegui preparar essa ação agora. Confira o membro ou tente novamente."
+                else:
+                    reply = reply.text
             reply = self._sanitize_model_reply(reply)
             if not reply:
                 return False
-            limit = C.SPONTANEOUS_MAX_REPLY_CHARS if behavior_hint else 2000
+            limit = 2000 if action_plan else (C.SPONTANEOUS_MAX_REPLY_CHARS if behavior_hint else 2000)
             reply = reply[:limit].rstrip()
             tts_file = None
-            if not behavior_hint:
+            if not behavior_hint and action_plan is None:
                 tts_file = await self._maybe_generate_tts(
                     content=content, reply=reply, guild_id=guild.id, user_id=author.id,
                 )
+                if tts_file is not None and not await self._legacy_audio_allowed(guild.id):
+                    tts_file.close()
+                    tts_file = None
+                    reply = "O áudio foi desativado antes do envio."
             reply = self._sanitize_audio_capability_claim(reply, audio_will_be_sent=tts_file is not None)
             if tts_file is not None:
                 reply = reply[:MAX_TTS_CHARS].rstrip()
@@ -1245,14 +1244,18 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 if tts_file is not None:
                     tts_file.close()
                 return False
+            reply_options = {}
+            if action_plan is not None:
+                reply_options["view"] = action_service.view(action_plan)
             sent = await message.reply(
                 reply[:2000], mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
                 files=[tts_file] if tts_file is not None else discord.utils.MISSING,
+                **reply_options,
             )
             await self._remember_sent_message(guild_id=guild.id, channel_id=channel.id, message_id=sent.id)
-            await self._maybe_enqueue_voice_call_tts(
-                message=message, spoken_text=reply, audio_was_sent=tts_file is not None,
-            )
+            if action_plan is not None:
+                action_service.track_view(sent.id, reply_options.get("view"))
+                await action_service.bind_and_start(action_plan, sent)
             if epoch is not None:
                 await self._persist_turn(
                     guild_id=guild.id, user_id=author.id, channel_id=channel.id,

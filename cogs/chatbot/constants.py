@@ -185,6 +185,8 @@ CONTEXT_LOAD_TIMEOUT_SECONDS = 6.0
 # Tempo máximo de um turno de chat comum. Imagegen fica fora desse limite
 # porque provedores de imagem podem demorar mais e já têm controles próprios.
 CHAT_TURN_TIMEOUT_SECONDS = 68.0
+ACTION_EXECUTION_TIMEOUT_SECONDS = 110.0
+MAX_CONCURRENT_ACTIONS = 2
 
 # Modo de recuperação: mantém só chat textual direto. Não responde espontaneamente,
 # transcrição nem geração de imagem. Útil para recuperar provider/cota sem
@@ -347,14 +349,19 @@ LEGACY_DEFAULT_MASTER_PROMPTS = ((
     "Nunca faça apologia séria a grupos extremistas ou terrorismo. "
     "Quando um pedido realmente precisar ser recusado, explique o motivo "
     "brevemente, sem sermão nem resposta automática de atendimento."
+), (
+    "Analise anexos quando a visão estiver disponível e trate transcrições "
+    "como falas do usuário. O sistema produz áudio e imagens quando esses "
+    "recursos estiverem disponíveis e forem solicitados. Seja honesto sobre "
+    "o que sabe e o que conseguiu interpretar dos anexos."
 ))
 
 # Ponto de partida para o prompt global. O contexto do canal e as capacidades
 # habilitadas são acrescentados pelo cog.
 DEFAULT_MASTER_PROMPT = (
     "Analise anexos quando a visão estiver disponível e trate transcrições "
-    "como falas do usuário. O sistema produz áudio e imagens quando esses "
-    "recursos estiverem disponíveis e forem solicitados. Seja honesto sobre "
+    "como falas do usuário. Use áudio, imagens e ações conforme as capacidades "
+    "informadas neste turno. Seja honesto sobre "
     "o que sabe e o que conseguiu interpretar dos anexos."
 )
 

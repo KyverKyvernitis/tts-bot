@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from . import constants as C
+from .action_store import DOC_TYPE_ACTION_REQUEST
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +86,49 @@ async def ensure_indexes(coll) -> None:
             {
                 "name": "chatbot_migration_unique", "unique": True,
                 "partialFilterExpression": {"type": C.DOC_TYPE_MIGRATION},
+            },
+        ),
+        (
+            [("type", 1), ("request_id", 1)],
+            {
+                "name": "chatbot_action_request_unique", "unique": True,
+                "partialFilterExpression": {"type": DOC_TYPE_ACTION_REQUEST},
+            },
+        ),
+        (
+            [("delete_at", 1)],
+            {
+                "name": "chatbot_action_request_cleanup", "expireAfterSeconds": 0,
+                "partialFilterExpression": {"type": DOC_TYPE_ACTION_REQUEST},
+            },
+        ),
+        (
+            [("type", 1), ("guild_id", 1), ("channel_id", 1), ("message_id", 1)],
+            {
+                "name": "chatbot_action_message_lookup",
+                "partialFilterExpression": {"type": DOC_TYPE_ACTION_REQUEST},
+            },
+        ),
+        (
+            [("type", 1), ("guild_id", 1), ("channel_id", 1),
+             ("requester_id", 1), ("finished_at", -1)],
+            {
+                "name": "chatbot_action_result_lookup",
+                "partialFilterExpression": {"type": DOC_TYPE_ACTION_REQUEST},
+            },
+        ),
+        (
+            [("type", 1), ("state", 1), ("expires_at", 1)],
+            {
+                "name": "chatbot_action_pending_lookup",
+                "partialFilterExpression": {"type": DOC_TYPE_ACTION_REQUEST},
+            },
+        ),
+        (
+            [("type", 1), ("state", 1), ("executing_at", 1)],
+            {
+                "name": "chatbot_action_recovery_lookup",
+                "partialFilterExpression": {"type": DOC_TYPE_ACTION_REQUEST},
             },
         ),
     ]

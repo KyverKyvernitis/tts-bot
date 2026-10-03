@@ -12,6 +12,7 @@ profiles ou identidade por webhook.
 | Conversar | Mencionar o bot no início da mensagem ou responder a uma mensagem do chatbot |
 | Ativar e escolher canais | `/chatbot configurar` |
 | Configurar respostas espontâneas | `/chatbot configurar` |
+| Configurar áudios, calls e banimentos | `/chatbot configurar` → **Configurar ações** |
 | Apagar sua memória | `/reset` |
 | Apagar a memória do servidor | `/chatbot memoria` |
 | Gerar uma imagem | `/imagem <prompt>` |
@@ -32,7 +33,11 @@ mantêm memória própria, isolada pelo ID de cada thread. A restrição de idad
 herdada do canal pai e a allowlist existente continuam sendo consideradas no
 isolamento da memória.
 O comando mostra o estado atual e o botão **Editar configuração**, que abre o
-formulário de ativação, canais e modo espontâneo. `/imagem` também respeita a
+formulário de ativação, canais e modo espontâneo. O botão **Configurar ações**
+abre outro formulário: ações da IA, áudios, calls, banimentos e cargos de staff.
+As quatro opções de ações começam ativadas, mas o chatbot de um servidor novo
+continua desativado até a configuração. Os cargos são opcionais; escolher cargos
+de staff não concede a permissão de banir. `/imagem` também respeita a
 ativação e os canais permitidos. O chatbot atende nos servidores; mensagens
 diretas não iniciam o fluxo de IA.
 
@@ -45,7 +50,7 @@ o histórico do Discord.
 
 O comportamento vem de um prompt global. Imagens, análise de anexos, transcrição,
 fallback entre provedores e integração TTS continuam no fluxo do chatbot. Áudio
-é produzido quando solicitado, junto com a resposta em texto.
+pode ser produzido espontaneamente ou a pedido, conforme os controles de ações.
 
 O padrão de conversa usa português brasileiro informal, respostas curtas e
 reconhecimento direto de correções. A orientação é ser mais livre com as palavras:
@@ -86,6 +91,50 @@ com a IA. O índice persiste para reconhecer replies após reinícios por até
 14 dias a partir do envio, inclusive para imagens produzidas por `/imagem`.
 Depois desse prazo, comece uma nova conversa mencionando o bot. Respostas
 às mensagens dos personagens antigos não iniciam a conversa nova.
+
+## Áudios, calls e banimentos
+
+O bot pode propor recursos durante a conversa. Nesta versão, há quatro ações
+estruturadas: `send_audio`, `speak_voice`, `join_voice` e `ban_member`, descritas
+abaixo. Uma declaração na resposta textual, por si só, não executa essas ações. Ativação,
+canais permitidos e configuração de ações continuam sendo conferidos antes da
+execução. O bot informa o resultado obtido, sem anunciar sucesso antecipadamente.
+
+| Recurso | Quem pode participar | Aprovação |
+| --- | --- | --- |
+| Enviar um áudio no chat | Qualquer membro na conversa | Pode ser automático; o bot também pode perguntar antes |
+| Falar na call atual | Membro e bot na mesma call de voz | Pode ser automático; o bot também pode perguntar antes |
+| Entrar em call | Bot desconectado e membro em uma call identificada no pedido | Sempre exige staff autorizada |
+| Banir um membro | Alvo identificado neste servidor | Sempre exige aprovação com **Banir membros**, autorização e hierarquias válidas |
+
+Quando o bot pergunta antes de enviar áudio ou falar, o pedido mostra somente a
+ação e os botões **Pode mandar/Pode falar** e **Agora não**. A fala não aparece,
+nem é resumida ou antecipada no texto. Somente o membro envolvido responde a
+esse pedido. Um áudio automático dispensa esse clique.
+
+Para aprovar entrada em call, valem o dono do servidor, **Gerenciar servidor**,
+**Administrador** ou um dos cargos de staff configurados. O canal de voz fica
+fixado no pedido: se o membro mudar de call, faça um novo pedido. Para banir,
+o aprovador precisa de **Banir membros**; os cargos configurados restringem a
+autorização, e a hierarquia do aprovador e do bot é conferida novamente antes
+da execução. A IA não pode conceder essas permissões.
+
+Os pedidos expiram em cinco minutos e seus botões ficam vinculados ao servidor,
+canal e mensagem originais. O estado é persistente; dois cliques não executam a
+mesma ação duas vezes. Pedidos pendentes ainda válidos podem reaparecer após
+reiniciar. Uma execução com resultado incerto não é repetida automaticamente.
+
+A entrada em call é temporária e não é restaurada após reiniciar o bot. Para
+entrar, o bot precisa estar desconectado: esta versão não muda uma sessão ativa
+de outra call. Música ou TTS ocupado deixam as ações de call indisponíveis.
+Para falar, o bot e o membro precisam continuar na mesma call. O bot não escuta nem
+transcreve conversas ao vivo; anexos de áudio enviados no chat continuam tendo
+seu fluxo próprio de transcrição.
+
+Áudios anexados ao chat não são espelhados automaticamente na fila da call.
+A fala em call usa somente `speak_voice`, com as verificações do adaptador de
+voz. Se o provedor não aceitar ferramentas, um pedido de áudio ainda pode
+receber um anexo no chat pelo fluxo existente, sem entrar na fila da call.
 
 ## Leitura de imagens
 
@@ -153,8 +202,8 @@ relativos à raiz do repositório. Escolha um deles conforme o código instalado
 
 | Pacote | Base necessária | Exclusões |
 | --- | --- | --- |
-| `chatbot-linguagem-livre-atualizacao.zip` | Primeira simplificação já aplicada, ou qualquer atualização posterior de conversa/visão | Nenhuma; os módulos antigos já foram retirados |
-| `chatbot-linguagem-livre-desde-original.zip` | Código do ZIP original, ainda com os módulos antigos | Quatro módulos, via `update-manifest.json` |
+| `chatbot-acoes-atualizacao.zip` | Primeira simplificação já aplicada, ou qualquer atualização posterior do chatbot | Nenhuma; os módulos antigos já foram retirados |
+| `chatbot-acoes-desde-original.zip` | Código do ZIP original, ainda com os módulos antigos | Quatro módulos, via `update-manifest.json` |
 
 O pacote `atualizacao` reúne as mudanças posteriores à primeira simplificação
 (`chatbot-simplificado-incremental.zip`), permitindo atualizar também quem já
@@ -255,8 +304,7 @@ que ficará em produção.
 
 ## Validação local
 
-Na validação local, 302 testes e 52 subtests passaram. Para repetir a suíte com
-as dependências do projeto:
+Execute a suíte local com as dependências do projeto:
 
 ```sh
 python -m pytest -q tests/test_chatbot*.py tests/test_tts_helpers.py tests/test_antibot.py
@@ -265,7 +313,7 @@ python -m pytest -q tests/test_chatbot*.py tests/test_tts_helpers.py tests/test_
 Discord, provedores e MongoDB foram simulados nos testes; nenhuma instância
 de produção foi alterada. A validação cobre migração retomável, isolamento,
 resets concorrentes, comandos e permissões, replies após reinício, threads,
-imagens, áudio e cancelamento de tarefas. Esses testes verificam o fluxo e os
+imagens, áudio, configuração de ações e cancelamento de tarefas. Esses testes verificam o fluxo e os
 payloads; não comprovam a qualidade de respostas de modelos externos. Use o
 roteiro [CHATBOT-AVALIACAO.md](CHATBOT-AVALIACAO.md) para avaliar comportamento,
 precisão, leitura de prints, custo e demora com as credenciais da instalação.

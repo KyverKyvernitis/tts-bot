@@ -6,6 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -372,6 +373,9 @@ class MusicAgentVoiceOwnershipRegressionTests(unittest.TestCase):
             "MUSIC_AGENT_TTS_ROUTE_ENABLED": True,
             "config": SimpleNamespace(MUSIC_AGENT_STATUS_TIMEOUT_SECONDS=5.0),
             "time": time,
+            # Estes métodos são extraídos sem os imports do módulo. O refresh
+            # remoto é simulado para testar a decisão de posse sem rede.
+            "atualizar_estado_controle_remoto": AsyncMock(return_value={"status": "idle"}),
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), "<music-voice-route>", "exec"), namespace)
         router_type = type("VoiceRouter", (), {node.name: namespace[node.name] for node in selected})

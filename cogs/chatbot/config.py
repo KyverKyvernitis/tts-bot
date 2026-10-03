@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Optional
 
 from . import constants as C
@@ -21,6 +21,11 @@ class GuildChatbotConfig:
     spontaneous_enabled: bool = False
     spontaneous_channel_ids: tuple[int, ...] = ()
     spontaneous_chance_percent: int = C.SPONTANEOUS_DEFAULT_CHANCE_PERCENT
+    actions_enabled: bool = True
+    audio_actions_enabled: bool = True
+    voice_actions_enabled: bool = True
+    moderation_actions_enabled: bool = True
+    action_staff_role_ids: tuple[int, ...] = ()
     schema_version: int = C.CHATBOT_SCHEMA_VERSION
     updated_at: float = 0.0
     updated_by: int = 0
@@ -56,6 +61,11 @@ class GuildChatbotConfig:
             and valid_spontaneous_channels,
             spontaneous_channel_ids=spontaneous_channels,
             spontaneous_chance_percent=chance,
+            actions_enabled=bool(doc.get("actions_enabled", True)),
+            audio_actions_enabled=bool(doc.get("audio_actions_enabled", True)),
+            voice_actions_enabled=bool(doc.get("voice_actions_enabled", True)),
+            moderation_actions_enabled=bool(doc.get("moderation_actions_enabled", True)),
+            action_staff_role_ids=_channel_ids(doc.get("action_staff_role_ids") or ()),
             schema_version=int(doc.get("schema_version") or C.CHATBOT_SCHEMA_VERSION),
             updated_at=float(doc.get("updated_at") or 0.0),
             updated_by=int(doc.get("updated_by") or 0),
@@ -71,6 +81,11 @@ class GuildChatbotConfig:
             "spontaneous_enabled": self.spontaneous_enabled,
             "spontaneous_channel_ids": list(self.spontaneous_channel_ids),
             "spontaneous_chance_percent": self.spontaneous_chance_percent,
+            "actions_enabled": self.actions_enabled,
+            "audio_actions_enabled": self.audio_actions_enabled,
+            "voice_actions_enabled": self.voice_actions_enabled,
+            "moderation_actions_enabled": self.moderation_actions_enabled,
+            "action_staff_role_ids": list(self.action_staff_role_ids),
             "updated_at": self.updated_at,
             "updated_by": self.updated_by,
         }
@@ -84,10 +99,10 @@ class ConfigStore:
             ttl_seconds=C.CONFIG_CACHE_TTL_SECONDS,
         )
 
-    async def get_config(self, guild_id: int) -> GuildChatbotConfig:
+    async def get_config(self, guild_id: int, *, fresh: bool = False) -> GuildChatbotConfig:
         gid = int(guild_id)
         cached = self._cache.get(gid)
-        if cached is not None:
+        if cached is not None and not fresh:
             return cached
         doc = await self._coll.find_one({"type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": gid})
         config = GuildChatbotConfig.from_doc(doc, guild_id=gid)
@@ -126,7 +141,8 @@ class ConfigStore:
             raise ValueError("Escolha ao menos um canal para respostas espontâneas.")
         if channels and not set(spontaneous_channels).issubset(channels):
             raise ValueError("Os canais espontâneos devem estar entre os canais permitidos.")
-        config = GuildChatbotConfig(
+        previous = await self.get_config(guild_id, fresh=True)
+        config = replace(previous,
             guild_id=int(guild_id),
             enabled=bool(enabled),
             channel_ids=channels,
@@ -136,10 +152,37 @@ class ConfigStore:
             updated_at=time.time(),
             updated_by=int(updated_by),
         )
+        # Este formulário altera somente a conversa. Não sobrescrever opções
+        # de ações salvas por outra pessoa enquanto o formulário estava aberto.
+        document = config.to_doc()
+        for key in ("actions_enabled", "audio_actions_enabled", "voice_actions_enabled",
+                    "moderation_actions_enabled", "action_staff_role_ids"):
+            document.pop(key)
         await self._coll.update_one(
             {"type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": config.guild_id},
-            {"$set": config.to_doc(), "$setOnInsert": {"created_at": config.updated_at}},
+            {"$set": document, "$setOnInsert": {"created_at": config.updated_at}},
             upsert=True,
         )
         self._cache.set(config.guild_id, config)
         return config
+
+    async def save_action_config(
+        self, *, guild_id: int, actions_enabled: bool, audio_actions_enabled: bool,
+        voice_actions_enabled: bool, moderation_actions_enabled: bool,
+        action_staff_role_ids: Iterable[int], updated_by: int,
+    ) -> GuildChatbotConfig:
+        now = time.time()
+        await self._coll.update_one(
+            {"type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": int(guild_id)},
+            {"$set": {
+                "type": C.DOC_TYPE_GUILD_CONFIG, "guild_id": int(guild_id),
+                "actions_enabled": bool(actions_enabled),
+                "audio_actions_enabled": bool(audio_actions_enabled),
+                "voice_actions_enabled": bool(voice_actions_enabled),
+                "moderation_actions_enabled": bool(moderation_actions_enabled),
+                "action_staff_role_ids": list(_channel_ids(action_staff_role_ids)),
+                "updated_at": now, "updated_by": int(updated_by),
+            }, "$setOnInsert": {"created_at": now, "schema_version": C.CHATBOT_SCHEMA_VERSION}},
+            upsert=True,
+        )
+        return await self.get_config(guild_id, fresh=True)

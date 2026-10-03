@@ -130,7 +130,7 @@ class ConfigStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached.spontaneous_chance_percent, 10)
         self.assertEqual(cached.updated_by, 40)
         self.assertGreater(cached.updated_at, 0)
-        self.collection.find_one.assert_awaited_once()
+        self.assertEqual(self.collection.find_one.await_count, 2)
         self.assertFalse(self.store.quick_might_apply(10, 20))
         self.assertTrue(self.store.quick_might_apply(10, 30))
         self.assertFalse(self.store.quick_might_apply(10, 99))

@@ -123,6 +123,33 @@ objetos fáceis de identificar. Guarde os mesmos arquivos para todos os modelos.
 | Primeiro provedor falha | Em ambiente de teste, indisponibilize o primeiro modelo de visão | Tenta o próximo modelo de visão com a mesma imagem, dentro do prazo |
 | Download falha | Em ambiente de teste, provoque falha ao obter o anexo; depois converse sem imagem | Explica a falha do anexo e mantém o fluxo de texto disponível |
 
+## Casos de ações
+
+Teste áudio e calls em um servidor de teste. Banimentos, disputas entre cliques,
+expiração e reinícios durante execução devem ser verificados com o Discord
+simulado da suíte, para conferir a decisão e o efeito sem banir pessoas reais.
+Uma proposta é feita por ferramenta estruturada; não basta procurar uma frase
+na resposta. A qualidade de escolha da ferramenta pelo modelo exige avaliação
+real separada e não foi medida nesta entrega.
+
+| Caso | Situação | Resultado esperado |
+| --- | --- | --- |
+| Áudio para membro comum | O modelo propõe áudio espontâneo ou responde a um pedido de áudio | Pode enviar sem aprovação da staff, quando habilitado |
+| Perguntar antes do áudio | O modelo escolhe pedir autorização | Mostra ação e botões; não mostra, resume ou antecipa a fala |
+| Fala na call atual | Bot e membro comum estão na mesma call | Pode falar sem aprovação da staff, quando habilitado |
+| Entrada em call | Bot desconectado e membro indicado em uma call | Aguarda staff; o canal de voz aprovado é o mesmo fixado no pedido |
+| Bot já conectado | O membro pede entrada em outra call | Não muda a sessão ativa para outra call |
+| Música ou TTS ocupado | A sessão de voz está ocupada | As ações de call não ficam disponíveis naquele turno |
+| Provedor sem ferramentas | Um pedido de áudio é atendido pelo fluxo de anexo no chat | Pode anexar áudio no chat; não o espelha na fila da call |
+| Membro muda de call | Membro sai ou muda depois da proposta | Não segue o membro automaticamente; exige novo pedido |
+| Banimento | A ferramenta propõe um membro identificado e um motivo | Sempre aguarda aprovação com Banir membros e hierarquias válidas |
+| Alvo ambíguo | O texto menciona um nome que não identifica um alvo confiável | Pergunta quem é o alvo, sem adivinhar ou executar |
+| Declaração sem ferramenta | Resposta textual diz que entrou, falou na call ou baniu, sem proposta estruturada | Não executa essas ações a partir da declaração |
+| Configuração revogada | Staff desativa a ação enquanto o pedido aguarda | Revalida a configuração atual antes de executar |
+| Dois cliques ou expiração | Aprovações concorrentes ou clique após cinco minutos | Executa no máximo uma vez; pedido expirado não executa |
+| Reinício | Pedido válido está pendente; bot tinha entrado temporariamente em call | Restaura o pedido válido, sem restaurar a entrada temporária na call |
+| Pergunta sobre áudio ao vivo | Membro pergunta o que alguém disse na call | Não inventa acesso ao som da call; o bot não escuta conversas ao vivo |
+
 Falhas induzidas são verificadas também por testes simulados. Não troque chaves
 nem interrompa o provedor de uma instalação de produção para reproduzi-las.
 Nos registros de diagnóstico, guarde modelo, etapa, status e tempo; não registre

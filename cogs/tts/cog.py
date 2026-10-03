@@ -10,7 +10,7 @@ import os
 import re
 import weakref
 import unicodedata
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import discord
 from discord import app_commands
@@ -30,6 +30,7 @@ from cogs.musica.integracoes.tts import (
 
 logger = logging.getLogger(__name__)
 from .audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED, TTS_TEMP_DIR
+from .chatbot_actions import ChatbotVoiceActionsMixin, ChatbotVoiceActionBlocked
 from .common import (
     _guild_scoped,
     _shorten,
@@ -170,7 +171,7 @@ _VOICE_INCIDENT_RECOVERY_STABILITY_SECONDS = 1.4
 _VOICE_INCIDENT_BOOT_CONTEXT_SECONDS = 3 * 60
 
 
-class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_description="Comandos de texto para fala"):
+class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group_name="tts", group_description="Comandos de texto para fala"):
     server = app_commands.Group(name="server", description="Configurações padrão do servidor")
     voices = app_commands.Group(name="voices", description="Listas de vozes e idiomas")
 
@@ -185,6 +186,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         self._tts_entry_seen: OrderedDict[int, float] = OrderedDict()
         self._tts_message_tasks: dict[int, asyncio.Task] = {}
         self._voice_connect_locks: dict[int, asyncio.Lock] = {}
+        self._chatbot_temporary_voice_channels: dict[int, int] = {}
         self._prefix_panel_cooldowns: dict[tuple[int, int, str], float] = {}
         self._active_prefix_panels: dict[tuple[int, int, str], tuple[discord.Message, discord.ui.View]] = {}
         self._public_panel_states: dict[int, dict] = {}
@@ -1766,6 +1768,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             self._schedule_owner_voice_incident_refresh(incident, force=str(incident.get("status")) == "recovered")
 
     async def _set_remembered_voice_channel(self, guild_id: int, channel_id: int | None) -> None:
+        temporary = getattr(self, "_chatbot_temporary_voice_channels", {})
+        if int(guild_id) in temporary:
+            if channel_id is None or int(channel_id) == temporary[int(guild_id)]:
+                return
+            temporary.pop(int(guild_id), None)
         db = self._get_db()
         if db is None or not hasattr(db, "set_tts_voice_channel_id"):
             return
@@ -2079,6 +2086,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return until > time.monotonic()
 
     async def _runtime_should_restore_voice(self, guild_id: int) -> bool:
+        if int(guild_id) in getattr(self, "_chatbot_temporary_voice_channels", {}):
+            return False
         if not self._voice_auto_restore_enabled:
             return False
         try:
@@ -3030,6 +3039,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         notify_owner_on_failure: bool | None = None,
         failure_context: str = "entrada na call",
         defer_post_connect: bool = False,
+        chatbot_target_user_id: int | None = None,
+        chatbot_before_effect: Callable[[], Awaitable[None]] | None = None,
     ) -> Optional[discord.VoiceClient]:
         # Compatibilidade com callers anteriores ao sistema de incidentes.
         # O worker de áudio vive em outro módulo e uma troca unilateral do nome
@@ -3072,6 +3083,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 return True
 
         async def _ensure_expected_voice_state() -> None:
+            if chatbot_target_user_id is not None:
+                # Uma entrada aprovada não altera uma sessão que já estava
+                # conectada; a conexão nova recebe self_deaf no handshake.
+                return
             should_self_deaf = await _desired_self_deaf()
             last_error = None
             for _ in range(3):
@@ -3107,7 +3122,28 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         lock = self._get_voice_connect_lock(guild.id)
         async with lock:
+            def _check_chatbot_destination() -> None:
+                if chatbot_target_user_id is None:
+                    return
+                _guild, _channel, error = self._chatbot_voice_precheck(
+                    guild_id=guild.id, user_id=chatbot_target_user_id,
+                    channel_id=voice_channel.id,
+                )
+                if error:
+                    raise ChatbotVoiceActionBlocked(error)
+
+            if chatbot_before_effect is not None:
+                await chatbot_before_effect()
+            _check_chatbot_destination()
             vc = self._get_voice_client_for_guild(guild)
+            temporary = getattr(self, "_chatbot_temporary_voice_channels", None)
+            if temporary is None:
+                temporary = self._chatbot_temporary_voice_channels = {}
+            if chatbot_target_user_id is None:
+                # Um comando normal de TTS pode assumir e lembrar a sessão.
+                temporary.pop(guild.id, None)
+            elif not self._voice_client_is_connected(vc):
+                temporary[guild.id] = int(voice_channel.id)
             if self._is_voice_client_stale(guild, vc):
                 await self._recover_stale_voice_client(guild, reason="ensure_connected")
                 vc = self._get_voice_client_for_guild(guild)
@@ -3153,6 +3189,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
             async def _fresh_connect() -> Optional[discord.VoiceClient]:
                 connect_kwargs = await _build_connect_kwargs()
+                if chatbot_before_effect is not None:
+                    await chatbot_before_effect()
+                _check_chatbot_destination()
                 new_vc = await voice_channel.connect(**connect_kwargs)
                 self._remember_expected_voice_channel(guild.id, getattr(voice_channel, "id", None))
                 self._runtime_voice_restore_failures[guild.id] = 0
@@ -3260,6 +3299,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 return await _fresh_connect()
 
             except Exception as e:
+                if chatbot_target_user_id is not None:
+                    if isinstance(e, (ChatbotVoiceActionBlocked, ValueError)):
+                        raise
+                    # A ação aprovada não move nem repete conexões que ficaram
+                    # ambíguas; o controlador de ações reportará a falha.
+                    return None
                 msg = str(e).lower()
                 current_vc = self._get_voice_client_for_guild(guild)
                 if self._voice_client_owned_by_music(current_vc):
@@ -3534,6 +3579,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 manual_or_intentional = (
                     self._is_manual_voice_disconnect_recent(guild.id)
                     or self._runtime_voice_restore_is_suppressed(guild.id)
+                    or guild.id in getattr(self, "_chatbot_temporary_voice_channels", {})
                     or not has_restore_target
                 )
                 if manual_or_intentional:
@@ -3542,6 +3588,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     self._runtime_voice_restore_next_allowed_at[guild.id] = 0.0
                     self._remember_expected_voice_channel(guild.id, None)
                     await self._clear_remembered_voice_channel(guild.id)
+                    getattr(self, "_chatbot_temporary_voice_channels", {}).pop(guild.id, None)
                     print(f"[tts_voice] saída intencional/guardada; restore ignorado | guild={guild.id}")
                 else:
                     target_channel_id = before_channel_id or expected_channel_id or remembered_channel_id

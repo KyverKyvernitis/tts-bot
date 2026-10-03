@@ -252,7 +252,6 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         self.cog._add_processing_reaction = AsyncMock(return_value="⏳")
         self.cog._remove_processing_reaction = AsyncMock()
         self.cog._maybe_generate_tts = AsyncMock(return_value=None)
-        self.cog._maybe_enqueue_voice_call_tts = AsyncMock()
         channel = Mock(spec=discord.TextChannel)
         channel.id = 20
         channel.nsfw = False
@@ -299,9 +298,6 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         args, kwargs = self.message.reply.await_args
         self.assertEqual(args, ("Olá, Ana!",))
         self.assertEqual(kwargs["files"], [audio])
-        self.cog._maybe_enqueue_voice_call_tts.assert_awaited_once_with(
-            message=self.message, spoken_text="Olá, Ana!", audio_was_sent=True,
-        )
         self.assertEqual(self.cog._memory.append_turn.await_args.kwargs["assistant_message"], args[0])
 
     async def test_allowed_thread_keeps_memory_and_message_index_scoped_to_thread(self):

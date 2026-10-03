@@ -18,6 +18,10 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from . import constants as C
+from .action_protocol import (
+    ChatReply, InvalidActionProposal, MAX_PROPOSALS, enabled_actions, parse_proposals,
+    private_reply_text, proposal_tool,
+)
 from .media import ImagePreparationError, MediaAttachment, PreparedImage, prepare_image_attachments
 
 log = logging.getLogger(__name__)
@@ -173,6 +177,12 @@ async def _http_error(response: aiohttp.ClientResponse) -> ProviderError:
         kind = "network"
     elif any(marker in excerpt for marker in ("content_filter", "safety blocked", "prohibited_content")):
         kind = "blocked"
+    elif status in (400, 422) and any(marker in excerpt for marker in (
+        "does not support tool", "tools are not supported", "tool calling is not supported",
+        "function calling is not supported", "tool use is not supported",
+        "does not support function calling", "does not support function declarations",
+    )):
+        kind = "tools_unsupported"
     elif status == 404 or any(marker in excerpt for marker in (
         "model_not_found", "model_decommissioned", "model has been decommissioned",
         "not a valid model", "model is not supported", "unknown model",
@@ -195,6 +205,27 @@ def _output_tokens(messages: list[ChatMessage]) -> int:
     return C.MAX_RESPONSE_TOKENS
 
 
+def _action_reply(
+    text: str, calls: list[tuple[object, object]], actions: tuple[str, ...],
+    *, provider: str, model: str, finish_reason: Optional[str],
+) -> ChatReply:
+    try:
+        proposals = parse_proposals(calls, actions)
+    except InvalidActionProposal as exc:
+        # Um lote inválido pode misturar pedido privado com outra chamada
+        # malformada. Descartar também o texto público, que pode antecipar a fala.
+        raise ProviderError(
+            "provider retornou proposta inválida", kind="invalid_response",
+            stage="output", finish_reason=finish_reason,
+        ) from exc
+    if not text and not proposals:
+        raise ProviderError(
+            "provider retornou resposta vazia", kind="empty", stage="output",
+            finish_reason=finish_reason,
+        )
+    return ChatReply(private_reply_text(text, proposals), proposals, provider, model)
+
+
 class _GroqClient:
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -204,8 +235,9 @@ class _GroqClient:
 
     async def chat(
         self, *, system: str, messages: list[ChatMessage], temperature: float,
-        model: str, timeout_seconds: float,
-    ) -> str:
+        model: str, timeout_seconds: float, actions: tuple[str, ...] = (),
+    ) -> str | ChatReply:
+        actions = enabled_actions(actions)
         payload = {
             "model": model,
             "messages": [{"role": "system", "content": system}]
@@ -214,6 +246,9 @@ class _GroqClient:
             "max_completion_tokens": _output_tokens(messages),
             "stream": False,
         }
+        if actions:
+            payload["tools"] = [{"type": "function", "function": proposal_tool(actions)}]
+            payload["tool_choice"] = "auto"
         # Evita gastar tokens de raciocínio oculto em conversa casual.
         if model.startswith("openai/gpt-oss"):
             payload.update({"reasoning_effort": "low", "include_reasoning": False})
@@ -251,6 +286,7 @@ class _GroqClient:
                     finish_reason=finish_reason,
                 )
             content = message.get("content")
+            refusal_present = bool(message.get("refusal"))
             if isinstance(content, list):
                 content = "".join(
                     part.get("text", "") for part in content
@@ -267,6 +303,24 @@ class _GroqClient:
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError("Groq resposta malformada", kind="invalid_response", stage="output") from exc
         reply = content.strip() if isinstance(content, str) else ""
+        if actions:
+            calls = []
+            raw_calls = message.get("tool_calls") or []
+            # Uma recusa explícita é terminal e não carrega ações anexas.
+            if not refusal_present:
+                if not isinstance(raw_calls, list):
+                    raw_calls = [None]
+                for call in raw_calls:
+                    function = call.get("function") if isinstance(call, dict) else None
+                    if not isinstance(function, dict) or call.get("type", "function") != "function":
+                        calls.append((None, None))
+                    else:
+                        calls.append((function.get("name"), function.get("arguments")))
+                    if len(calls) > MAX_PROPOSALS:
+                        break
+            return _action_reply(
+                reply, calls, actions, provider="groq", model=model, finish_reason=finish_reason,
+            )
         if not reply:
             raise ProviderError(
                 "Groq retornou resposta vazia", kind="empty", stage="output",
@@ -306,8 +360,9 @@ class _GeminiClient:
 
     async def chat(
         self, *, system: str, messages: list[ChatMessage], temperature: float,
-        model: str, timeout_seconds: float,
-    ) -> str:
+        model: str, timeout_seconds: float, actions: tuple[str, ...] = (),
+    ) -> str | ChatReply:
+        actions = enabled_actions(actions)
         deadline = time.monotonic() + max(0.1, timeout_seconds)
         contents: list[dict] = []
         for message in messages:
@@ -332,6 +387,13 @@ class _GeminiClient:
                 "maxOutputTokens": _output_tokens(messages),
             },
         }
+        if actions:
+            tool = proposal_tool(actions)
+            # Gemini usa o subconjunto OpenAPI de Schema. A validação estrita
+            # continua no host, incluindo a rejeição de propriedades extras.
+            tool["parameters"].pop("additionalProperties", None)
+            payload["tools"] = [{"functionDeclarations": [tool]}]
+            payload["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
         # Flash/Lite 2.5 aceitam desativar pensamento para conversa curta.
         # Sem isso o orçamento de saída pode acabar antes do texto visível.
         if model.startswith(("gemini-2.5-flash", "gemini-2.5-flash-lite")):
@@ -377,6 +439,21 @@ class _GeminiClient:
             ).strip()
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError("Gemini resposta malformada", kind="invalid_response", stage="output") from exc
+        if actions:
+            calls = []
+            for part in parts:
+                if not isinstance(part, dict) or part.get("thought") or "functionCall" not in part:
+                    continue
+                function = part["functionCall"]
+                if not isinstance(function, dict):
+                    calls.append((None, None))
+                else:
+                    calls.append((function.get("name"), function.get("args")))
+                if len(calls) > MAX_PROPOSALS:
+                    break
+            return _action_reply(
+                reply, calls, actions, provider="gemini", model=model, finish_reason=finish_reason,
+            )
         if not reply:
             raise ProviderError(
                 "Gemini retornou resposta vazia", kind="empty", stage="output",
@@ -394,6 +471,7 @@ class ProviderRouter:
         self._groq = _GroqClient(session, groq_key) if groq_key else None
         self._gemini = _GeminiClient(session, gemini_key) if gemini_key else None
         self._states: dict[tuple[str, str], _ProviderState] = {}
+        self._unsupported_tool_models: set[tuple[str, str]] = set()
         if not self._groq and not self._gemini:
             log.warning("ProviderRouter: nenhuma API key configurada")
 
@@ -428,8 +506,9 @@ class ProviderRouter:
 
     async def chat(
         self, *, system: str, messages: list[ChatMessage],
-        temperature: float = C.DEFAULT_TEMPERATURE,
-    ) -> str:
+        temperature: float = C.DEFAULT_TEMPERATURE, actions: tuple[str, ...] = (),
+    ) -> str | ChatReply:
+        actions = enabled_actions(actions)
         started = time.monotonic()
         has_images = any(message.images or message.image_urls for message in messages)
         mode = "vision" if has_images else "text"
@@ -486,10 +565,29 @@ class ProviderRouter:
                 try:
                     timeout = _remaining(deadline)
                     attempted += 1
-                    reply = await client.chat(
+                    kwargs = dict(
                         system=system, messages=messages, temperature=temperature,
                         model=model, timeout_seconds=timeout,
                     )
+                    # Não adicionar um argumento sequer aos chamadores/mocks
+                    # antigos quando nenhuma ferramenta foi disponibilizada.
+                    if actions and (provider_name, model) not in self._unsupported_tool_models:
+                        kwargs["actions"] = actions
+                    try:
+                        reply = await client.chat(**kwargs)
+                    except ProviderError as exc:
+                        if exc.kind != "tools_unsupported" or "actions" not in kwargs:
+                            raise
+                        # A API recusou a capacidade antes de gerar resposta.
+                        # Este modelo passa a conversar apenas em texto, sem
+                        # transformar uma frase comum numa ação executável.
+                        self._unsupported_tool_models.add((provider_name, model))
+                        kwargs.pop("actions")
+                        kwargs["timeout_seconds"] = _remaining(deadline)
+                        attempted += 1
+                        reply = await client.chat(**kwargs)
+                    if actions and isinstance(reply, str):
+                        reply = ChatReply(reply, provider=provider_name, model=model)
                     state.mark_success()
                     log.info(
                         "chatbot: result=success provider=%s model=%s mode=%s elapsed_ms=%d message_count=%d",

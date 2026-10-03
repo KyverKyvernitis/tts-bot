@@ -55,7 +55,6 @@ def turn():
     cog._add_processing_reaction = AsyncMock(return_value="⏳")
     cog._remove_processing_reaction = AsyncMock()
     cog._maybe_generate_tts = AsyncMock(return_value=None)
-    cog._maybe_enqueue_voice_call_tts = AsyncMock()
     channel = Mock(spec=discord.TextChannel)
     channel.id = 20
     channel.nsfw = False

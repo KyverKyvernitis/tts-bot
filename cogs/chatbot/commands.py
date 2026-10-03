@@ -94,6 +94,10 @@ class ChatbotCommandsMixin:
             f"**Espontâneo:** {'ativado' if config.spontaneous_enabled else 'desativado'} "
             f"({config.spontaneous_chance_percent}%)\n"
             f"**Canais espontâneos:** {spontaneous_channels}\n\n"
+            f"**Ações:** {'ativadas' if config.actions_enabled else 'desativadas'} "
+            f"(áudio: {'sim' if config.audio_actions_enabled else 'não'}, "
+            f"calls: {'sim' if config.voice_actions_enabled else 'não'}, "
+            f"banimentos: {'sim' if config.moderation_actions_enabled else 'não'})\n\n"
             "Para conversar, mencione o bot ou responda a uma mensagem do chatbot."
         )
 
@@ -107,6 +111,7 @@ class ChatbotCommandsMixin:
             view=EditConfigView(
                 requester_id=interaction.user.id, current_config=config,
                 on_submit_config=self._handle_config_modal,
+                on_submit_actions=self._handle_actions_modal,
                 check_authorized=self._config_staff_check,
             ),
         )
@@ -126,6 +131,21 @@ class ChatbotCommandsMixin:
             updated_by=interaction.user.id,
         )
         await _send(interaction, "Configuração salva.\n\n" + self._format_config(saved))
+
+    async def _handle_actions_modal(self, interaction: discord.Interaction, config: GuildChatbotConfig):
+        if not await self._config_staff_check(interaction):
+            return
+        if interaction.guild.id != config.guild_id:
+            await _send(interaction, "Esta configuração pertence a outro servidor.")
+            return
+        saved = await self._config.save_action_config(
+            guild_id=interaction.guild.id, actions_enabled=config.actions_enabled,
+            audio_actions_enabled=config.audio_actions_enabled,
+            voice_actions_enabled=config.voice_actions_enabled,
+            moderation_actions_enabled=config.moderation_actions_enabled,
+            action_staff_role_ids=config.action_staff_role_ids, updated_by=interaction.user.id,
+        )
+        await _send(interaction, "Ações salvas.\n\n" + self._format_config(saved))
 
     async def _do_memoria_reset_server(self, interaction: discord.Interaction):
         if not await self._config_staff_check(interaction):

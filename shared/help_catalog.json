@@ -46,9 +46,9 @@
     },
     {
       "key": "chatbot",
-      "label": "Chatbot e imagens",
+      "label": "Chatbot, áudio e imagens",
       "emoji": "🤖",
-      "description": "Converse com o bot ou crie imagens.",
+      "description": "Converse com o bot, envie áudios ou crie imagens.",
       "accent": "fuchsia",
       "search_terms": [
         "chatbot",
@@ -58,7 +58,10 @@
         "imagens",
         "memoria",
         "configurar chatbot",
-        "resposta espontanea"
+        "resposta espontanea",
+        "audio",
+        "call",
+        "acoes"
       ]
     },
     {
@@ -809,6 +812,21 @@
       ]
     },
     {
+      "key": "chatbot_acoes",
+      "category": "chatbot",
+      "group": "Conversar",
+      "description": "O bot pode enviar áudio, falar em call ou propor ações durante a conversa.",
+      "usage": "@bot mensagem",
+      "search_terms": [
+        "audio chatbot",
+        "falar call",
+        "entrar call",
+        "banimento ia",
+        "aprovar acao"
+      ],
+      "detail_note": "Áudio e fala na call atual podem ser automáticos. Entrar em call e banir sempre exigem aprovação autorizada."
+    },
+    {
       "key": "imagem",
       "category": "chatbot",
       "group": "Criar",
@@ -840,7 +858,7 @@
       "key": "chatbot_configurar",
       "category": "chatbot",
       "group": "Staff",
-      "description": "Configura ativação, canais e modo espontâneo do chatbot.",
+      "description": "Configura ativação, canais, modo espontâneo e ações do chatbot.",
       "usage": "/chatbot configurar",
       "search_terms": [
         "configurar chatbot",
@@ -848,12 +866,16 @@
         "desativar chatbot",
         "canais chatbot",
         "modo espontaneo",
-        "resposta espontanea"
+        "resposta espontanea",
+        "configurar acoes",
+        "audio chatbot",
+        "calls chatbot",
+        "cargos staff"
       ],
       "permission": "manage_guild",
       "slash_root": "chatbot",
       "slash_path": "chatbot configurar",
-      "detail_note": "Requer Gerenciar servidor."
+      "detail_note": "Requer Gerenciar servidor. Use o botão Configurar ações para controlar áudio, calls, banimentos e cargos de staff."
     },
     {
       "key": "chatbot_memoria",

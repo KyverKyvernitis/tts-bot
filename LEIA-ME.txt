@@ -1,6 +1,10 @@
 CHATBOT DO PRÓPRIO BOT
 
-Este ZIP incremental contém somente os arquivos alterados e novos, nas pastas originais do projeto. O chatbot usa a identidade do bot no Discord, sem personas ou profiles. Use /chatbot configurar para ativar, escolher canais e ajustar respostas espontâneas. Áudio é produzido quando solicitado; imagens e transcrição continuam disponíveis.
+Este ZIP incremental contém somente os arquivos alterados e novos, nas pastas originais do projeto. O chatbot usa a identidade do bot no Discord, sem personas ou profiles. Use /chatbot configurar para ativar, escolher canais e ajustar respostas espontâneas. O botão Configurar ações controla áudios, calls, banimentos e os cargos de staff.
+
+O bot pode enviar áudio ou falar na call atual espontaneamente ou a pedido de qualquer membro, conforme a configuração. Se perguntar antes, o pedido não mostra nem antecipa a fala. Falar exige que o bot e o membro continuem na mesma call. Entrar exige que o bot esteja desconectado e sempre pede aprovação da staff; esta versão não muda o bot de outra call. Música ou TTS ocupado deixam as ações de call indisponíveis. Banir exige aprovação com Banir membros e hierarquias válidas. Os pedidos expiram em cinco minutos. A entrada temporária em call não é restaurada após reiniciar, e o bot não escuta conversas ao vivo.
+
+Áudio anexado ao chat não é enviado automaticamente à call. A fala em call depende da proposta específica da IA e das verificações de voz. Um provedor sem suporte às ferramentas ainda pode responder a um pedido de áudio com anexo no chat.
 
 O tom padrão é informal, direto e breve: seja mais livre com as palavras. Gírias, palavrões, humor e sarcasmo podem aparecer espontaneamente quando combinam com a conversa, inclusive em canais sem NSFW. Não é preciso pedir para o bot xingar, e ele não deve forçar insultos nem copiar frases prontas. Instruções globais personalizadas são preservadas; padrões antigos reconhecidos recebem as novas orientações, sem apagar a memória V3.
 
@@ -12,8 +16,8 @@ A leitura de anexos prepara a imagem uma vez e usa os mesmos dados nas tentativa
 
 Escolha o pacote conforme o código instalado e envie apenas o correspondente ao updater:
 
-- chatbot-linguagem-livre-atualizacao.zip: para quem já aplicou chatbot-simplificado-incremental.zip ou uma atualização posterior de conversa/visão. Contém as alterações acumuladas desde a primeira simplificação, sem manifesto de exclusões.
-- chatbot-linguagem-livre-desde-original.zip: para quem ainda usa o código do ZIP original, com os módulos antigos. Contém as alterações acumuladas e update-manifest.json para excluir cogs/chatbot/persona.py, profiles.py, extrovert.py e webhooks.py.
+- chatbot-acoes-atualizacao.zip: para quem já aplicou chatbot-simplificado-incremental.zip ou uma atualização posterior do chatbot. Contém as alterações acumuladas desde a primeira simplificação, sem manifesto de exclusões.
+- chatbot-acoes-desde-original.zip: para quem ainda usa o código do ZIP original, com os módulos antigos. Contém as alterações acumuladas e update-manifest.json para excluir cogs/chatbot/persona.py, profiles.py, extrovert.py e webhooks.py.
 
 O updater exige que os arquivos declarados para exclusão ainda existam. Portanto, não aplique o pacote desde-original após a simplificação anterior. Ambos atualizam os caminhos originais. Mantenha uma cópia do código e do MongoDB anterior para recuperação. Os pacotes são parciais: não substitua a pasta inteira do projeto pelo conteúdo deles.
 
@@ -21,6 +25,6 @@ Na primeira passagem de V1/V2 para V3, a migração arquiva os dados antigos em 
 
 Para retirar os comandos antigos publicados globalmente no Discord, habilite a sincronização global conforme docs/CHATBOT-SIMPLIFICADO.md. Servidores novos começam desativados até a configuração.
 
-Na validação local, 302 testes e 52 subtests passaram usando Discord, provedores e MongoDB simulados. Não houve teste com modelos externos nem alteração de instância de produção. Avaliação prática de conversa, leitura de imagens e comparação de modelos: docs/CHATBOT-AVALIACAO.md.
+Os testes locais usam Discord, provedores e MongoDB simulados. Não houve teste com modelos externos nem alteração de instância de produção. Avaliação prática de conversa, leitura de imagens, ações e comparação de modelos: docs/CHATBOT-AVALIACAO.md.
 
 Instruções completas, migração e recuperação: docs/CHATBOT-SIMPLIFICADO.md.
