@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from test_tts_helpers import tts_audio, QueueItem, GuildTTSState
-from cogs.tts.runtime import MemoryBudget, PathLeases, ReplayBuffer, split_text, unlink_if_unlocked
+from cogs.tts.runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, unlink_if_unlocked, cancel_task_once
 
 
 class Probe(tts_audio.TTSAudioMixin):
@@ -37,7 +37,72 @@ def item(text='olá!', guild=1):
                      language='pt', rate='+0%', pitch='+0Hz')
 
 
+class _LegacyTask:
+    """Interface de Task sem cancelling(), como no Python 3.10."""
+    def __init__(self, *, done=False):
+        self.finished = done
+        self.cancel_calls = 0
+        self.callbacks = []
+
+    def done(self):
+        return self.finished
+
+    def cancel(self):
+        self.cancel_calls += 1
+        return True
+
+    def add_done_callback(self, callback):
+        self.callbacks.append(callback)
+
+    def finish(self):
+        self.finished = True
+        for callback in self.callbacks:
+            callback(self)
+
+
 class RuntimePrimitiveTests(unittest.IsolatedAsyncioTestCase):
+    def test_completed_task_is_not_cancelled_again(self):
+        task = _LegacyTask(done=True)
+        cancel_task_once(task)
+        self.assertEqual(task.cancel_calls, 0)
+
+    def test_native_pending_cancellation_is_not_requested_again(self):
+        class Task(_LegacyTask):
+            def cancelling(self):
+                return 1
+        task = Task()
+        cancel_task_once(task)
+        self.assertEqual(task.cancel_calls, 0)
+
+    def test_releasing_shared_job_without_cancelling_api_cancels_once_and_cleans_after_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Probe()
+            task = _LegacyTask()
+            buffer = ReplayBuffer(directory, MemoryBudget(1024), memory_limit=1024, max_bytes=4096)
+            job = StreamJob(key='legacy-job', item=item(), buffer=buffer, started_at=0,
+                            task=task, references=1)
+            probe._shared_synthesis_jobs()[job.key] = job
+            probe._release_shared_job(job)
+            probe._release_shared_job(job)
+            self.assertTrue(job.stop.is_set())
+            self.assertEqual(task.cancel_calls, 1)
+            self.assertFalse(buffer.closed)
+            self.assertEqual(len(task.callbacks), 1)
+            task.finish()
+            self.assertTrue(buffer.closed)
+            self.assertEqual(probe._shared_synthesis_jobs(), {})
+
+    def test_shutdown_without_cancelling_api_cancels_workers_and_prefetch_once(self):
+        probe = Probe()
+        state = probe._get_state(1)
+        state.worker_task = _LegacyTask()
+        state.prefetch_task = _LegacyTask()
+        probe._shutdown_tts_runtime()
+        probe._shutdown_tts_runtime()
+        self.assertFalse(state.accepting)
+        self.assertEqual(state.worker_task.cancel_calls, 1)
+        self.assertEqual(state.prefetch_task.cancel_calls, 1)
+
     def test_text_and_encoded_limits_include_truncation_marker(self):
         for edge, text, limit in ((False, 'a' * 4000, 420),
                 (True, ('á<&你. ' * 2000), 3000)):

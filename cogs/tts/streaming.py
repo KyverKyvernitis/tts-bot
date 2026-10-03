@@ -7,7 +7,7 @@ import os
 import time
 from dataclasses import replace
 
-from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, await_physical_completion
+from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, await_physical_completion, cancel_task_once
 
 
 async def _iter_with_deadline(stream, deadline: float):
@@ -92,8 +92,7 @@ class SharedSynthesisMixin:
             return
         if not job.buffer.ended and job.task is not None and not job.task.done():
             job.stop.set()
-            if not job.task.cancelling():
-                job.task.cancel()
+            cancel_task_once(job.task)
         self._close_shared_job_when_idle(job)
 
     def _close_shared_job_when_idle(self, job: StreamJob) -> None:
@@ -177,11 +176,6 @@ class SharedSynthesisMixin:
             # provider remains local when an older worker is connected.
             worker_stream = getattr(self, '_produce_worker_stream_job', None)
             use_worker = callable(worker_stream) and self._worker_stream_available_for(job.item)
-            preferred, decision_reason = self._tts_agent_should_try_worker(job.item)
-            if not use_worker and preferred:
-                decision_reason = 'worker_stream_unavailable'
-            self._observe_tts_route_decision(worker=use_worker, reason=decision_reason)
-            effective_reason = decision_reason
             if use_worker:
                 try:
                     await worker_stream(job)
@@ -191,7 +185,6 @@ class SharedSynthesisMixin:
                     if job.buffer.size:
                         raise
                     job.route = 'local_fallback'
-                    effective_reason = 'worker_fallback'
                     use_worker = False
             if not use_worker:
                 if engine == 'edge':
@@ -230,11 +223,6 @@ class SharedSynthesisMixin:
             await job.buffer.finish()
             duration = (time.monotonic() - job.started_at) * 1000.0
             self._record_engine_success(engine, duration)
-            effective_route = 'worker' if job.route == 'worker' else 'vps'
-            cached = effective_route == 'worker' and bool(getattr(job.item, '_tts_worker_cache_hit', False))
-            self._record_route_engine_result(job.actual_engine, effective_route, duration, cached=cached)
-            if not cached:
-                self._observe_tts_effective_route(route=effective_route, reason=effective_reason)
             self._record_latency_sample(f'synthesis:{engine}:{job.route}', duration - job.slot_wait_ms)
             cached = bool(getattr(job.item, '_tts_worker_cache_hit', False))
             history = self._route_measurements()
@@ -257,10 +245,6 @@ class SharedSynthesisMixin:
             job.stop.set()
             await job.buffer.finish(error)
             self._record_engine_failure(engine, error, duration_ms=(time.monotonic() - started) * 1000)
-            # Worker failures are recorded in the producer, including failures
-            # that recover through local synthesis before this outer handler.
-            if job.route != 'worker':
-                self._record_route_engine_result(engine, 'vps', (time.monotonic() - started) * 1000, error=error)
             metrics = self._get_metrics_store()
             metrics[f'{engine}_stream_failures'] = int(metrics.get(f'{engine}_stream_failures', 0)) + 1
         finally:
@@ -430,5 +414,4 @@ class SharedSynthesisMixin:
             raise
         except Exception as error:
             self._mark_tts_agent_synth_failure(error)
-            self._record_route_engine_result(job.item.engine, 'worker', (time.monotonic() - started) * 1000, error=error)
             raise

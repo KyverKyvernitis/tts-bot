@@ -22,6 +22,7 @@ import discord
 
 from test_chatbot_voice_actions import _Probe
 from cogs.tts import audio as tts_audio
+from cogs.tts import cog as tts_cog
 from cogs.tts.cog import TTSVoice
 
 
@@ -204,6 +205,92 @@ class ChatbotJoinPrefixIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg não instalado")
 class ChatbotJoinRealCodecIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_actual_cog_initialization_and_load_allow_short_prefixes_after_approved_join(self):
+        """Instância TTSVoice normal, com bootstrap e helpers de produção reais."""
+        with tempfile.TemporaryDirectory() as directory:
+            _, mp3_path = _make_codec_fixture(directory)
+            external = _Probe(connected=False)
+            external.member.bot = False
+            external.member.display_name = "Membro"
+            external.member.roles = []
+            external.channel.user_limit = 0
+            external.channel.members = [external.member]
+            external.guild.name = "Servidor de teste"
+            external.guild.me.bot = True
+            bot = external.bot
+            bot.voice_clients = []
+            bot.user = external.guild.me
+            bot.settings_db = external.db
+            bot.get_cog = lambda _: None
+            bot.get_channel = external.guild.get_channel
+            bot.wait_until_ready = asyncio.Event().wait
+            bot.is_closed = lambda: False
+            bot.guilds = [external.guild]
+            external.db.guild_cache = {1: {}}
+            external.db.get_guild_tts_defaults = lambda _: {
+                "enabled": True, "edge_prefix": ".", "gtts_prefix": ",", "bot_prefix": "_",
+                "tts_prefix": "_", "auto_leave": False, "announce_author": False,
+            }
+            external.db.resolve_tts = lambda *_: {"engine": "gtts", "language": "pt-br"}
+            text_channel = SimpleNamespace(id=30, send=AsyncMock())
+
+            async def connect(**kwargs):
+                voice = _CodecVoice(external.guild, external.channel)
+                external.guild.voice_client = voice
+                external.guild.me.voice.channel = external.channel
+                bot.voice_clients.append(voice)
+                return voice
+
+            external.channel.connect = AsyncMock(side_effect=connect)
+            edge_requests = []
+
+            async def edge_stream(communicate):
+                edge_requests.append(communicate)
+                yield {"type": "audio", "data": mp3_path.read_bytes()}
+
+            encoded = base64.b64encode(mp3_path.read_bytes()).decode("ascii")
+            response = Mock()
+            response.iter_lines.return_value = [('jQ1olc","[\\"' + encoded + '\\"]').encode("ascii")]
+            with _offline_runtime(directory), patch.object(tts_cog, "TTS_TEMP_DIR", directory), patch.multiple(
+                tts_audio, PHONE_WORKER_ENABLED=False, WORKER_VOICE_AGENT_ENABLED=False,
+                TTS_WORKER_AGENT_ENABLED=False, TTS_FFMPEG_PRIME_ENABLED=True,
+            ), patch.object(tts_audio.edge_tts.Communicate, "stream", edge_stream), patch.object(
+                tts_audio.edge_tts, "list_voices", AsyncMock(return_value=[{"ShortName": "pt-BR-FranciscaNeural"}]),
+            ), patch.object(tts_audio.requests.Session, "send", return_value=response) as send:
+                cog = TTSVoice(bot)
+                try:
+                    await cog.cog_load()
+                    self.assertTrue(cog._tts_runtime_primed)
+                    joined = await cog.chatbot_join_voice(guild_id=1, user_id=2, channel_id=20, request_id="join-init")
+                    self.assertTrue(joined["ok"])
+                    voice = external.guild.voice_client
+                    for index, content in enumerate((". Ajanabav", ", A"), start=1):
+                        message = SimpleNamespace(id=400 + index, guild=external.guild, author=external.member,
+                                                  channel=text_channel, content=content, attachments=[],
+                                                  mentions=[], role_mentions=[], channel_mentions=[])
+                        await cog.on_message(message)
+                        await asyncio.wait_for(cog._get_state(1).queue.join(), 5)
+                        await voice.finish_thread()
+                        self.assertEqual(voice.play_calls, index)
+                    self.assertEqual(len(edge_requests), 1)
+                    send.assert_called_once()
+                    self.assertEqual(cog._get_engine_metrics("edge")["synth_failures"], 0)
+                    self.assertEqual(cog._get_engine_metrics("gtts")["synth_failures"], 0)
+                    text_channel.send.assert_not_awaited()
+                    external.db.set_tts_voice_channel_id.assert_not_awaited()
+                    self.assertEqual(cog._chatbot_temporary_voice_channels, {1: 20})
+                    external.channel.connect.assert_awaited_once()
+                    self.assertEqual(voice.move_calls, [])
+                finally:
+                    cog.cog_unload()
+                    tasks = set(cog._get_tts_background_tasks())
+                    tasks.update(task for task in (cog._voice_restore_task, cog._voice_incident_report_worker_task)
+                                 if task is not None)
+                    tasks.update(state.worker_task for state in cog.guild_states.values() if state.worker_task)
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    if external.guild.voice_client:
+                        await external.guild.voice_client.finish_thread()
+
     @unittest.skipUnless(os.name == "posix" and callable(getattr(os, "mkfifo", None)), "FIFO POSIX indisponível")
     async def test_short_prefixes_use_real_provider_producer_and_prime_after_approved_join(self):
         """Exercita os textos da falha relatada sem simular o producer compartilhado."""

@@ -47,7 +47,7 @@ from cogs.musica.integracoes.tts import (
 )
 
 from .helpers import validate_voice
-from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion
+from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
 from .streaming import SharedSynthesisMixin
 from .routing import RouteMeasurements
 from .prepared import PreparedOpusCache
@@ -2390,8 +2390,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             state.generation += 1
             state.accepting = False
             for task in (state.worker_task, state.prefetch_task):
-                if task is not None and not task.done() and not task.cancelling():
-                    task.cancel()
+                cancel_task_once(task)
         for task in list(getattr(self, "_tts_message_tasks", {}).values()):
             if not task.done():
                 task.cancel()

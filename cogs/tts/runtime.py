@@ -89,6 +89,19 @@ async def await_physical_completion(task):
         raise
 
 
+def cancel_task_once(task) -> None:
+    """Solicita cancelamento uma vez, inclusive em Task do Python 3.10."""
+    if task is None or task.done() or getattr(task, "_tts_cancel_requested", False):
+        return
+    cancelling = getattr(task, "cancelling", None)
+    if callable(cancelling) and cancelling():
+        return
+    # Python 3.10 não expõe cancelling(). O marcador pertence à própria task,
+    # sem estado global nem dependência de atributos internos do asyncio.
+    task.cancel()
+    task._tts_cancel_requested = True
+
+
 class MemoryBudget:
     def __init__(self, limit: int):
         self.limit = max(0, int(limit))

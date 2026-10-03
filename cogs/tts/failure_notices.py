@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import socket
 import ssl
+import sys
 import time
+from types import ModuleType, TracebackType
 from urllib.error import HTTPError as UrllibHTTPError
 
 import aiohttp
@@ -64,6 +67,16 @@ _CONNECTION_ERRORS = (ConnectionError,) + _exception_types(
 _REQUEST_HTTP_ERRORS = _exception_types(requests.exceptions, "HTTPError")
 _AIOHTTP_RESPONSE_ERRORS = _exception_types(aiohttp, "ClientResponseError")
 _INTERNAL_ERRORS = (TypeError, AttributeError, NameError, KeyError, IndexError, AssertionError, NotImplementedError)
+_INTERNAL_FRAME_FILES = {
+    "cogs.tts.audio": "cogs/tts/audio.py",
+    "cogs.tts.streaming": "cogs/tts/streaming.py",
+    "cogs.tts.runtime": "cogs/tts/runtime.py",
+    "cogs.tts.prepared": "cogs/tts/prepared.py",
+    "cogs.tts.routing": "cogs/tts/routing.py",
+    "cogs.tts.cog": "cogs/tts/cog.py",
+}
+_FUNCTION_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}", re.ASCII)
+_VERSION = re.compile(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(?:(?:a|b|rc)[0-9]{1,3}|\.(?:post|dev)[0-9]{1,3})?", re.ASCII)
 
 
 def _exception_chain(error: BaseException | None) -> tuple[BaseException, ...]:
@@ -150,6 +163,62 @@ def failure_code(reason_code: str, error: Exception | None = None) -> str:
     return reason_code if reason_code in _MESSAGES else "tts_failed"
 
 
+def _safe_runtime_versions() -> str:
+    """Versões já em memória; sem importação, leitura de arquivo ou ambiente."""
+    versions = []
+    python = sys.version_info
+    if isinstance(python, tuple) and len(python) >= 3:
+        numbers = python[:3]
+        if all(type(number) is int and 0 <= number <= 999 for number in numbers):
+            versions.append("Python " + ".".join(str(number) for number in numbers))
+    for module_name, label in (("gtts", "gTTS"), ("edge_tts", "Edge"), ("discord", "discord.py")):
+        module = sys.modules.get(module_name)
+        if type(module) is not ModuleType:
+            continue
+        version = module.__dict__.get("__version__")
+        # Não chamar str() em objetos de flags, nem aceitar metadados livres.
+        if type(version) is str and _VERSION.fullmatch(version):
+            versions.append(f"{label} {version}")
+    return " | ".join(versions)
+
+
+def _safe_internal_location(error: BaseException) -> str:
+    last = ""
+    visited = set()
+    # Usar o descritor nativo evita um __traceback__ substituto de subclasses.
+    trace = BaseException.__traceback__.__get__(error, BaseException)
+    for _ in range(64):
+        if type(trace) is not TracebackType or id(trace) in visited:
+            break
+        visited.add(id(trace))
+        frame, line = trace.tb_frame, trace.tb_lineno
+        module_name = frame.f_globals.get("__name__")
+        relative = _INTERNAL_FRAME_FILES.get(module_name) if type(module_name) is str else None
+        filename, function = frame.f_code.co_filename, frame.f_code.co_name
+        if relative is not None and type(filename) is str and type(function) is str:
+            normalized = filename.replace("\\", "/")
+            if (normalized == relative or normalized.endswith("/" + relative)) and _FUNCTION_NAME.fullmatch(function):
+                if type(line) is int and 1 <= line <= 1_000_000:
+                    last = f"{relative.rsplit('/', 1)[-1]}:{function}:{line}"
+        trace = trace.tb_next
+    return last
+
+
+def internal_failure_details(error: BaseException | None) -> str:
+    """Detalhes públicos restritos da mesma causa que justifica internal_error."""
+    for cause in _exception_chain(error):
+        canonical = next((kind.__name__ for kind in _INTERNAL_ERRORS if isinstance(cause, kind)), None)
+        if canonical is None:
+            continue
+        details = [canonical]
+        location = _safe_internal_location(cause)
+        if location:
+            details.append(location)
+        versions = _safe_runtime_versions()
+        return (" · ".join(details) + (" | " + versions if versions else ""))[:250]
+    return ""
+
+
 async def notify_tts_failure(cog, item, reason_code: str, error: Exception | None = None) -> None:
     """Responde apenas ao prefixo original e limita avisos repetidos por membro."""
     message_id = int(getattr(item, "message_id", 0) or 0)
@@ -193,12 +262,13 @@ async def notify_tts_failure(cog, item, reason_code: str, error: Exception | Non
             notices.pop(min(notices, key=notices.get), None)
         notices[key] = now
         code = failure_code(reason_code, error)
+        details = internal_failure_details(error) if code == "internal_error" else ""
         engine = {"edge": "Edge", "gtts": "gTTS"}.get(str(getattr(item, "engine", "")), "TTS")
         reference = discord.MessageReference(
             message_id=message_id, channel_id=channel_id, guild_id=guild_id, fail_if_not_exists=False,
         )
         await channel.send(
-            f"{engine}: {_MESSAGES[code]} Código: `{code}`.", reference=reference,
+            f"{engine}: {_MESSAGES[code]} Código: `{code}`{(' · ' + details) if details else ''}.", reference=reference,
             allowed_mentions=discord.AllowedMentions.none(),
         )
     except asyncio.CancelledError:

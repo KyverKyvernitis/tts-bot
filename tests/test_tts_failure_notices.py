@@ -4,8 +4,9 @@ from __future__ import annotations
 import asyncio
 import socket
 import ssl
+import sys
 import unittest
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
@@ -16,9 +17,10 @@ from gtts.tts import gTTSError
 
 from cogs.tts.audio import QueueItem, TTSPlaybackError
 from cogs.tts.cog import TTSVoice
-from cogs.tts.failure_notices import failure_code, notify_tts_failure
+from cogs.tts.failure_notices import failure_code, internal_failure_details, notify_tts_failure
 from cogs.tts.mensagens.despacho import despachar_mensagem_tts
 from cogs.tts.mensagens.preparacao import PayloadTTSMensagem
+from cogs.tts.streaming import _iter_with_deadline
 
 
 class _Fixture:
@@ -113,6 +115,44 @@ class FailureNoticeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("certificados", content)
                 for private in ("secret-key", "https://", "<@999>", "fala privada", "secret certificate"):
                     self.assertNotIn(private, content)
+
+    async def test_internal_notice_uses_nested_cause_real_tts_frame_and_safe_versions(self):
+        async def private_stream():
+            yield b"private speech"
+
+        try:
+            async for _ in _iter_with_deadline(private_stream(), None):
+                pass
+        except TypeError as actual_error:
+            wrapper = RuntimeError("secret-key https://private.example <@999>")
+            wrapper.__cause__ = actual_error
+        fixture = _Fixture()
+        modules = {}
+        for name, version in (("gtts", "2.5.4"), ("edge_tts", "7.2.1"), ("discord", "2.6.4")):
+            module = modules[name] = ModuleType(name)
+            module.__version__ = version
+        with patch.dict(sys.modules, modules), patch("cogs.tts.failure_notices.sys.version_info", (3, 10, 14)):
+            await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed", wrapper)
+        content = fixture.channel.send.await_args.args[0]
+        self.assertIn("internal_error", content)
+        self.assertIn("TypeError", content)
+        self.assertRegex(content, r"streaming\.py:_iter_with_deadline:[0-9]+")
+        self.assertIn("Python 3.10.14", content)
+        self.assertIn("gTTS 2.5.4", content)
+        self.assertIn("Edge 7.2.1", content)
+        self.assertIn("discord.py 2.6.4", content)
+        for private in ("RuntimeError", "secret-key", "https://", "<@999>", "private speech", "/workspace/", "private_stream"):
+            self.assertNotIn(private, content)
+
+    async def test_runtime_details_are_not_added_to_non_internal_failure_notice(self):
+        fixture = _Fixture()
+        error = requests.exceptions.ConnectionError("secret-key private URL")
+        error.__context__ = TypeError("private internal context")
+        await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed", error)
+        content = fixture.channel.send.await_args.args[0]
+        self.assertIn("network_failed", content)
+        for internal_detail in ("TypeError", "Python ", "gTTS ", "discord.py ", "private internal context"):
+            self.assertNotIn(internal_detail, content)
 
     async def test_missing_message_or_text_channel_binding_skips_notice(self):
         for field in ("message_id", "text_channel_id"):
@@ -290,6 +330,77 @@ class FailureClassificationTests(unittest.TestCase):
         self.assertEqual(failure_code("synthesis_failed", wrapper), "synthesis_failed")
         nested.__cause__ = ssl.SSLCertVerificationError(1, "secret TLS text")
         self.assertEqual(failure_code("synthesis_failed", wrapper), "tls_failed")
+
+
+class InternalFailureDetailsTests(unittest.TestCase):
+    def _captured_error(self, module_name, filename, function_name="trusted_step"):
+        namespace = {"__name__": module_name}
+        source = (
+            "def trusted_step():\n"
+            "    private_local = 'secret-key https://private.example <@999>'\n"
+            "    raise TypeError(private_local)\n"
+        )
+        exec(compile(source, filename, "exec"), namespace)
+        function = namespace["trusted_step"]
+        function.__code__ = function.__code__.replace(co_name=function_name)
+        try:
+            function()
+        except TypeError as error:
+            return error
+        self.fail("Expected a real TypeError traceback")
+
+    def test_frame_requires_matching_approved_module_path_and_ascii_function_name(self):
+        cases = (
+            ("cogs.tts.streaming", "/private/secret-folder/cogs/tts/streaming.py", "trusted_step", True),
+            ("cogs.tts.streaming", "/private/secret-folder/streaming.py", "trusted_step", False),
+            ("private.module", "/private/secret-folder/cogs/tts/streaming.py", "trusted_step", False),
+            ("cogs.tts.streaming", "/private/secret-folder/cogs/tts/streaming.py", "bad<@999>", False),
+            ("cogs.tts.streaming", "/private/secret-folder/cogs/tts/streaming.py", "função", False),
+        )
+        for module, filename, function, allowed in cases:
+            with self.subTest(module=module, allowed=allowed, function=function):
+                error = self._captured_error(module, filename, function)
+                details = internal_failure_details(error)
+                self.assertIn("TypeError", details)
+                if allowed:
+                    self.assertIn("streaming.py:trusted_step:3", details)
+                else:
+                    self.assertNotIn("streaming.py:", details)
+                for private in ("/private/", "secret-folder", "secret-key", "https://", "<@999>", "private_local", "função"):
+                    self.assertNotIn(private, details)
+                self.assertLessEqual(len(details), 250)
+
+    def test_no_traceback_and_cyclic_context_show_only_canonical_class_and_versions(self):
+        private_type = type("SecretKeyTypeError", (TypeError,), {})
+        error = private_type("secret-key exception payload")
+        wrapper = RuntimeError("secret wrapper")
+        wrapper.__context__, error.__cause__ = error, wrapper
+        details = internal_failure_details(wrapper)
+        self.assertTrue(details.startswith("TypeError | Python "))
+        for private in ("SecretKeyTypeError", "secret", "RuntimeError", ".py:"):
+            self.assertNotIn(private, details)
+        self.assertEqual(internal_failure_details(RuntimeError("secret payload")), "")
+
+    def test_version_metadata_requires_plain_str_strict_version_and_real_module(self):
+        class PrivateFlag:
+            def __str__(self):
+                raise AssertionError("Private version flag must never be stringified")
+
+        invalid_versions = (PrivateFlag(), "2.5.4+secret-key", "2.5.4\nhttps://private.example <@999>")
+        for version in invalid_versions:
+            with self.subTest(version_type=type(version).__name__):
+                module = ModuleType("gtts")
+                module.__version__ = version
+                other = ModuleType("edge_tts")
+                other.__version__ = PrivateFlag()
+                with patch.dict(sys.modules, {
+                    "gtts": module, "edge_tts": other,
+                    "discord": SimpleNamespace(__version__="2.6.4"),
+                }):
+                    details = internal_failure_details(TypeError("secret error"))
+                self.assertIn("Python ", details)
+                for forbidden in ("gTTS", "Edge", "discord.py", "secret", "https://", "<@999>"):
+                    self.assertNotIn(forbidden, details)
 
 
 class GateFailureNoticeTests(unittest.IsolatedAsyncioTestCase):
