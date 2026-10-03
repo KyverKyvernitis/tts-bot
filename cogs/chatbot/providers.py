@@ -236,6 +236,7 @@ class _GroqClient:
     async def chat(
         self, *, system: str, messages: list[ChatMessage], temperature: float,
         model: str, timeout_seconds: float, actions: tuple[str, ...] = (),
+        target_refs: tuple[str, ...] = (),
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         payload = {
@@ -247,7 +248,7 @@ class _GroqClient:
             "stream": False,
         }
         if actions:
-            payload["tools"] = [{"type": "function", "function": proposal_tool(actions)}]
+            payload["tools"] = [{"type": "function", "function": proposal_tool(actions, target_refs)}]
             payload["tool_choice"] = "auto"
         # Evita gastar tokens de raciocínio oculto em conversa casual.
         if model.startswith("openai/gpt-oss"):
@@ -361,6 +362,7 @@ class _GeminiClient:
     async def chat(
         self, *, system: str, messages: list[ChatMessage], temperature: float,
         model: str, timeout_seconds: float, actions: tuple[str, ...] = (),
+        target_refs: tuple[str, ...] = (),
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         deadline = time.monotonic() + max(0.1, timeout_seconds)
@@ -388,7 +390,7 @@ class _GeminiClient:
             },
         }
         if actions:
-            tool = proposal_tool(actions)
+            tool = proposal_tool(actions, target_refs)
             # Gemini usa o subconjunto OpenAPI de Schema. A validação estrita
             # continua no host, incluindo a rejeição de propriedades extras.
             tool["parameters"].pop("additionalProperties", None)
@@ -507,6 +509,7 @@ class ProviderRouter:
     async def chat(
         self, *, system: str, messages: list[ChatMessage],
         temperature: float = C.DEFAULT_TEMPERATURE, actions: tuple[str, ...] = (),
+        target_refs: tuple[str, ...] = (),
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         started = time.monotonic()
@@ -573,6 +576,8 @@ class ProviderRouter:
                     # antigos quando nenhuma ferramenta foi disponibilizada.
                     if actions and (provider_name, model) not in self._unsupported_tool_models:
                         kwargs["actions"] = actions
+                        if target_refs:
+                            kwargs["target_refs"] = target_refs
                     try:
                         reply = await client.chat(**kwargs)
                     except ProviderError as exc:
@@ -583,6 +588,7 @@ class ProviderRouter:
                         # transformar uma frase comum numa ação executável.
                         self._unsupported_tool_models.add((provider_name, model))
                         kwargs.pop("actions")
+                        kwargs.pop("target_refs", None)
                         kwargs["timeout_seconds"] = _remaining(deadline)
                         attempted += 1
                         reply = await client.chat(**kwargs)

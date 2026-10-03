@@ -232,6 +232,7 @@ async def test_native_ban_proposal_becomes_bound_button_and_only_staff_executes(
     assert await world.cog._generate_and_send(world.message, "peça para banir esse membro")
     options = world.cog._router.chat.await_args.kwargs
     assert set(options["actions"]) == {"send_audio", "speak_voice", "ban_member"}
+    assert options["target_refs"] == ("autor", "m1")
     assert "Alvo autor:" in options["system"] and "Alvo m1:" in options["system"]
     assert options["messages"][-1].content == "peça para banir esse membro"
     request = world.collection.docs[0]
@@ -342,13 +343,38 @@ async def test_plain_text_permission_claim_creates_no_request_or_execution(world
 
 @pytest.mark.asyncio
 async def test_untrusted_target_reference_does_not_create_a_request(world):
+    _restore_legacy_audio_generation(world)
     world.cog._router.chat.return_value = ChatReply("Não identifiquei esse membro.", (
         ActionProposal("ban_member", "m77", reason="motivo"),
     ))
-    assert await world.cog._generate_and_send(world.message, "banir alguém")
+    # O pedido por áudio normalmente ativa a síntese legada. Uma ferramenta
+    # recusada deve produzir somente o motivo real, sem sintetizar o erro.
+    assert await world.cog._generate_and_send(world.message, "banir alguém e responda em áudio")
     assert not world.collection.docs and not world.cog._supervisor.jobs
     assert "view" not in world.message.reply.await_args.kwargs
+    assert _public_output(world) == "Preciso de um membro identificado nesta conversa para essa ação."
+    world.tts.synthesize_chatbot_attachment.assert_not_awaited()
+    world.tts._enqueue_tts_item.assert_not_awaited()
+    world.tts.chatbot_speak_voice.assert_not_awaited()
     world.members[3].ban.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_denied_optional_audio_reports_safe_host_reason_without_preview_or_error_synthesis(world):
+    _restore_legacy_audio_generation(world)
+    secret = "TEXTO PRIVADO MUITO COMPRIDO " * 40
+    world.cog._router.chat.return_value = ChatReply(secret, (
+        ActionProposal("send_audio", "usuario", text=secret, ask_permission=True),
+    ))
+    assert await world.cog._generate_and_send(world.message, "responda em áudio")
+    assert _public_output(world) == "Não consegui preparar essa fala. Peça uma resposta mais curta."
+    assert secret not in _public_output(world)
+    assert not world.collection.docs and not world.cog._supervisor.jobs
+    assert "view" not in world.message.reply.await_args.kwargs
+    world.tts.synthesize_chatbot_attachment.assert_not_awaited()
+    world.tts._enqueue_tts_item.assert_not_awaited()
+    world.tts.chatbot_speak_voice.assert_not_awaited()
+    assert secret not in str(world.cog._memory.append_turn.await_args_list)
 
 
 @pytest.mark.asyncio

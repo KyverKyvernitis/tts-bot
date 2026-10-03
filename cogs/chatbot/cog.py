@@ -1198,6 +1198,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             router_options = {}
             if action_context is not None and action_context.actions:
                 router_options["actions"] = action_context.actions
+                router_options["target_refs"] = tuple(action_context.targets)
             try:
                 reply = await self._router.chat(
                     system=system, messages=messages,
@@ -1208,6 +1209,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 await self._send_chat_failure(message, exc, had_images=bool(images), spontaneous=bool(behavior_hint))
                 return False
             action_plan = None
+            action_failed = False
             if isinstance(reply, ChatReply):
                 if reply.proposals and action_context is not None:
                     action_plan = await action_service.plan(
@@ -1216,8 +1218,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     if action_plan.requests:
                         reply = action_service.content(action_plan)
                     else:
+                        reply = action_plan.public_error or "Não consegui preparar essa ação agora. Tente novamente."
                         action_plan = None
-                        reply = "Não consegui preparar essa ação agora. Confira o membro ou tente novamente."
+                        action_failed = True
                 else:
                     reply = reply.text
             reply = self._sanitize_model_reply(reply)
@@ -1226,7 +1229,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             limit = 2000 if action_plan else (C.SPONTANEOUS_MAX_REPLY_CHARS if behavior_hint else 2000)
             reply = reply[:limit].rstrip()
             tts_file = None
-            if not behavior_hint and action_plan is None:
+            if not behavior_hint and action_plan is None and not action_failed:
                 tts_file = await self._maybe_generate_tts(
                     content=content, reply=reply, guild_id=guild.id, user_id=author.id,
                 )

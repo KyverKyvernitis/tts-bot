@@ -118,6 +118,52 @@ async def test_optional_audio_in_mixed_plan_hides_every_persisted_base_reply(env
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("first_failure", ["unavailable_call", "invalid_speech"])
+async def test_optional_audio_tries_second_valid_proposal_without_revealing_either_speech(environment, first_failure):
+    world = environment
+    first_secret = "Primeira fala que não deve ser mostrada."
+    second_secret = "Segunda fala reservada até a aprovação."
+    if first_failure == "unavailable_call":
+        world.members[1].voice = None
+        first = ActionProposal("speak_voice", "m1", text=first_secret, ask_permission=True)
+    else:
+        # Falha de preparação, mesmo com o tipo de ação disponível.
+        first = ActionProposal("send_audio", text=" " * 5, ask_permission=True)
+    context = await build_action_context(world.bot, world.message, world.config)
+    reply = ChatReply(first_secret + second_secret, (
+        first, ActionProposal("send_audio", "usuario", text=second_secret, ask_permission=True),
+    ))
+    plan = await world.service.plan(world.message, reply, context, world.config)
+    assert len(plan.requests) == len(world.coll.docs) == 1
+    request = plan.requests[0]
+    assert request["action"] == "send_audio"
+    assert request["payload"]["text"] == second_secret
+    assert request["payload"]["target_id"] == world.message.author.id
+    assert request["ask_permission"] and request["base_reply"] == plan.base_reply == ""
+    assert plan.public_error == ""
+    assert first_secret not in world.service.content(plan)
+    assert second_secret not in world.service.content(plan)
+    assert len(world.service.view(plan).children) == 2
+    assert world.executor.await_count == 0 and not world.supervisor.pending
+
+
+@pytest.mark.asyncio
+async def test_preparation_error_reports_host_reason_without_private_tool_arguments(environment):
+    world = environment
+    context = await build_action_context(world.bot, world.message, world.config)
+    secret = "SEGREDO QUE NÃO PODE VIRAR DIAGNÓSTICO " * 30
+    plan = await world.service.plan(
+        world.message, ChatReply(secret, (ActionProposal("send_audio", text=secret, ask_permission=True),)),
+        context, world.config,
+    )
+    assert not plan.requests and not world.coll.docs
+    assert plan.base_reply == ""
+    assert plan.public_error == "Não consegui preparar essa fala. Peça uma resposta mais curta."
+    assert secret not in plan.public_error
+    assert world.executor.await_count == 0 and not world.supervisor.pending
+
+
+@pytest.mark.asyncio
 async def test_hidden_speech_remains_hidden_when_card_refreshes_after_rejection(environment):
     world = environment
     context = await build_action_context(world.bot, world.message, world.config)

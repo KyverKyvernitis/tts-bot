@@ -42,16 +42,18 @@ def enabled_actions(actions: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(action for action in dict.fromkeys(actions) if action in ALLOWED_ACTIONS)
 
 
-def proposal_tool(actions: tuple[str, ...]) -> dict:
+def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -> dict:
     """Schema comum; o adaptador monta o envelope específico de cada API."""
-    return {
+    tool = {
         "name": TOOL_NAME,
         "description": (
             "Propõe uma ação ao sistema; esta ferramenta não executa nada. Use apenas as ações "
-            "disponíveis e referências confiáveis de membros fornecidas pelo sistema, como autor ou m1. "
+            "disponíveis. Para join_voice/ban_member, use apenas as referências confiáveis de membros "
+            "fornecidas pelo sistema, como autor ou m1. "
             "Pode escolher enviar áudio ou falar na call espontaneamente, sem pedir autorização. "
+            "Para send_audio/speak_voice, omita target_ref: o sistema fixa o autor da conversa como alvo. "
             "Para perguntar antes de um áudio/fala, use ask_permission=true: text é PRIVADO e nunca "
-            "deve ser repetido na resposta pública, nem resumido ou antecipado. Entrar/mudar de call "
+            "deve ser repetido na resposta pública, nem resumido ou antecipado. Entrar na call "
             "e banir sempre dependem da aprovação da staff, mesmo quando ask_permission=false. "
             "Não diga que executou; o sistema informa o resultado. No máximo duas propostas. "
             "Se o alvo for ambíguo, pergunte em texto em vez de propor."
@@ -62,7 +64,10 @@ def proposal_tool(actions: tuple[str, ...]) -> dict:
                 "action": {"type": "string", "enum": list(enabled_actions(actions))},
                 "target_ref": {
                     "type": "string",
-                    "description": "Referência do membro fornecida pelo sistema; nunca nome, ID ou menção livre.",
+                    "description": (
+                        "Somente para join_voice/ban_member: referência fornecida pelo sistema; nunca nome, ID "
+                        "ou menção livre. Omita em send_audio/speak_voice: o sistema usa o autor da conversa."
+                    ),
                     "maxLength": 32,
                 },
                 "text": {
@@ -76,6 +81,9 @@ def proposal_tool(actions: tuple[str, ...]) -> dict:
             "additionalProperties": False,
         },
     }
+    if target_refs:
+        tool["parameters"]["properties"]["target_ref"]["enum"] = list(dict.fromkeys(target_refs))
+    return tool
 
 
 def _unique_object(pairs):

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import discord
 
 from cogs.chatbot import constants as C
+from cogs.chatbot.audio import user_asked_for_tts
 from cogs.chatbot.cog import ChatbotCog
 from cogs.chatbot.image_service import ImageService
 from cogs.chatbot.imagegen import GeneratedImage, ImageGenerationResult
@@ -57,6 +58,83 @@ class _MemoryCollection:
         if query.get("scope") == "guild":
             return self.guild_doc
         return None
+
+
+class AudioRequestDetectionTests(unittest.TestCase):
+    def test_direct_audio_requests_cover_formal_and_informal_imperatives(self):
+        for text in (
+            "Mande um áudio",
+            "Fale alguma coisa em áudio",
+            "Envie um áudio, por favor",
+            "Responda por áudio",
+            "Gere um áudio",
+            "Crie um áudio",
+            "Faça um áudio",
+            "Grave um áudio",
+            "manda um audio",
+            "me envia um áudio",
+            "responde isso em áudio",
+            "fala por voz",
+            "fale isso",
+            "por favor, mande mais um áudio",
+            "Pode me enviar um áudio?",
+            "Você consegue responder em áudio?",
+            "Queria um áudio",
+            "Gostaria de um áudio",
+            "Gerar áudio",
+            "Áudio da resposta",
+            "em áudio",
+            "por voz!",
+            "Áudio, por favor",
+            "<@123456789> Mande um áudio",
+            "\n MANDE    UM ÁUDIO \n",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(user_asked_for_tts(text))
+
+    def test_negative_audio_requests_do_not_generate_speech(self):
+        for text in (
+            "Não mande áudio",
+            "Não mande um áudio",
+            "não me mande áudio",
+            "Não envie um áudio",
+            "Nao envie nada em audio",
+            "não responda em áudio",
+            "não me responda por voz",
+            "Não fale alguma coisa em áudio",
+            "não gere um áudio",
+            "não crie áudio",
+            "não faça áudio",
+            "não grave um áudio",
+            "não quero áudio",
+            "não precisa mandar em áudio",
+            "responda sem áudio",
+            "fale isso sem voz",
+            "nunca mande áudio",
+            "não fale isso",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(user_asked_for_tts(text))
+
+    def test_mentions_of_audio_are_not_requests(self):
+        for text in (
+            "ele enviou áudio",
+            "ele respondeu em áudio",
+            "como enviar áudio?",
+            "como gerar um áudio?",
+            "quero saber como enviar áudio",
+            "quero saber por que ele respondeu em áudio",
+            "pode explicar como enviar um áudio?",
+            "o vídeo tem voz em português",
+            "fale sobre o áudio",
+            "responda sobre o áudio do vídeo",
+            "responda se ele falou em áudio",
+            "fale alguma coisa",
+            "estou sem audio",
+            "",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(user_asked_for_tts(text))
 
 
 class AdmissionTests(unittest.IsolatedAsyncioTestCase):

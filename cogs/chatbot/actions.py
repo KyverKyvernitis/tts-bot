@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 class ActionPlan:
     base_reply: str
     requests: list[dict]
+    public_error: str = ""
 
 
 class ActionService:
@@ -110,20 +111,28 @@ class ActionService:
         if private_requests:
             # Uma outra proposta poderia copiar a fala para seu motivo público.
             # Pedidos opcionais de áudio ficam sozinhos, sem campos de prévia.
-            proposals = (private_requests[0],)
+            proposals = tuple(private_requests)
             base = ""
         requests = []
         seen = set()
+        public_error = ""
         for proposal in proposals:
-            if proposal.action not in context.actions or proposal.action in seen:
+            if proposal.action not in context.actions:
+                public_error = "Essa ação não está disponível neste momento. Confira as opções do chatbot e o estado da call."
+                log.info("chatbot: proposta rejeitada | guild=%s stage=capabilities", message.guild.id)
+                continue
+            if proposal.action in seen:
                 continue
             try:
                 data = await prepare_action(
                     self.bot, message, proposal, targets=context.targets, config=config,
                 )
-            except ActionDenied:
+            except ActionDenied as exc:
                 # Uma proposta malformada nunca vira ação. Não reproduzir os
                 # argumentos privados da ferramenta numa mensagem de erro.
+                public_error = str(exc)
+                log.info("chatbot: proposta rejeitada | guild=%s action=%s stage=prepare reason=%s",
+                         message.guild.id, proposal.action, public_error)
                 continue
             seen.add(proposal.action)
             if data["action"] in {"send_audio", "speak_voice"} and data["ask_permission"]:
@@ -137,13 +146,17 @@ class ActionService:
                 }
                 data["visibility_scope"] = visibility_scope
             requests.append(await self.store.create(data))
+            if private_requests:
+                # Um pedido opcional fica sozinho; tentar o próximo só quando
+                # o primeiro não pôde ser preparado, sempre sem prévia pública.
+                break
         # Um pedido opcional de áudio não pode expor o texto de outro campo
         # da resposta, inclusive quando há mais de uma proposta no mesmo turno.
         if any(r["action"] in {"send_audio", "speak_voice"} and r["ask_permission"] for r in requests):
             base = ""
         for request in requests:
             request["base_reply"] = base
-        return ActionPlan(base, requests)
+        return ActionPlan(base, requests, public_error=public_error if not requests else "")
 
     @staticmethod
     def content(plan: ActionPlan) -> str:

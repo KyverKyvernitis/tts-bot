@@ -217,8 +217,13 @@ async def prepare_action(bot, message, proposal: ActionProposal, *, targets, con
     guild = getattr(message, "guild", None)
     if guild is None or not _enabled(config, proposal.action):
         raise ActionDenied("Essa ação está desativada neste servidor.")
-    target_ref = proposal.target_ref or "autor"
-    target = targets.get(target_ref)
+    # Áudio é uma resposta à conversa atual, não uma operação sobre um alvo
+    # escolhido pelo modelo. Referências de membro só controlam entrada/ban.
+    if proposal.action in {"send_audio", "speak_voice"}:
+        target = message.author
+    else:
+        target_ref = proposal.target_ref or "autor"
+        target = targets.get(target_ref)
     if not _member_in_guild(target, guild) or target.bot:
         raise ActionDenied("Preciso de um membro identificado nesta conversa para essa ação.")
     text, reason = proposal.text.strip(), proposal.reason.strip()

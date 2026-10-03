@@ -67,12 +67,14 @@ def _gemini(text=None, calls=(), *, finish="STOP"):
     return {"candidates": [{"content": {"parts": parts}, "finishReason": finish}]}
 
 
-async def _call(provider, data, *, actions=("send_audio", "join_voice", "ban_member"), images=()):
+async def _call(
+    provider, data, *, actions=("send_audio", "join_voice", "ban_member"), images=(), target_refs=(),
+):
     session = _Session(_Response(data))
     client = (_GroqClient if provider == "groq" else _GeminiClient)(session, "private-api-key")
     reply = await client.chat(
         system="private system", messages=[ChatMessage("user", "private message", images=list(images))],
-        temperature=.8, model="test-model", timeout_seconds=5, actions=actions,
+        temperature=.8, model="test-model", timeout_seconds=5, actions=actions, target_refs=target_refs,
     )
     return reply, session.requests[0][1]["json"]
 
@@ -107,8 +109,26 @@ async def test_native_tool_schema_function_only_and_original_image_bytes(provide
     assert base64.b64decode(encoded) == image.data
     assert tool["name"] == TOOL_NAME
     assert tool["parameters"]["properties"]["action"]["enum"] == ["send_audio", "join_voice", "ban_member"]
+    assert "enum" not in tool["parameters"]["properties"]["target_ref"]
     assert speech not in json.dumps(payload)
     assert "PRIVADO" in tool["description"]
+
+
+@pytest.mark.parametrize("provider", ["groq", "gemini"])
+@pytest.mark.asyncio
+async def test_native_schema_uses_only_concrete_host_target_refs_and_audio_omits_target(provider):
+    factory = _groq if provider == "groq" else _gemini
+    reply, payload = await _call(provider, factory(calls=[(TOOL_NAME, {
+        "action": "send_audio", "text": "uma fala sem alvo escolhido pela IA",
+    })]), target_refs=("autor", "m1", "m1", "m2"))
+    tool = payload["tools"][0]["function"] if provider == "groq" else payload["tools"][0]["functionDeclarations"][0]
+    target_schema = tool["parameters"]["properties"]["target_ref"]
+    assert target_schema["enum"] == ["autor", "m1", "m2"]
+    assert "omita target_ref" in tool["description"]
+    assert "Entrar/mudar" not in tool["description"]
+    assert "Omita em send_audio/speak_voice" in target_schema["description"]
+    assert "target_ref" not in tool["parameters"]["required"]
+    assert reply.proposals[0].target_ref == ""
 
 
 @pytest.mark.parametrize("provider", ["groq", "gemini"])
@@ -139,7 +159,7 @@ async def test_plain_permission_footer_never_creates_action(provider):
 @pytest.mark.asyncio
 async def test_disabled_actions_leave_old_string_api_and_payload_untouched(provider):
     factory = _groq if provider == "groq" else _gemini
-    reply, payload = await _call(provider, factory("oi", [(TOOL_NAME, {"action": "ban_member", "target_ref": "m1"})]), actions=())
+    reply, payload = await _call(provider, factory("oi", [(TOOL_NAME, {"action": "ban_member", "target_ref": "m1"})]), actions=(), target_refs=("autor", "m1"))
     assert reply == "oi"
     assert "tools" not in payload
     assert "tool_choice" not in payload
@@ -262,6 +282,26 @@ async def test_router_returns_only_successful_fallback_proposals(monkeypatch, ca
 
 
 @pytest.mark.asyncio
+async def test_router_preserves_host_target_enum_across_native_provider_fallback(monkeypatch):
+    monkeypatch.setattr(C, "GROQ_MODELS", ("groq-model",))
+    monkeypatch.setattr(C, "GEMINI_MODELS", ("gemini-model",))
+    monkeypatch.setattr(C, "TEXT_PROVIDER_ORDER", ("groq", "gemini"))
+    session = _Session(
+        _Response({"error": {"code": "model_not_found"}}, status=404),
+        _Response(_gemini(calls=[(TOOL_NAME, {"action": "ban_member", "target_ref": "m1", "reason": "spam"})])),
+    )
+    reply = await ProviderRouter(session, groq_key="key", gemini_key="key").chat(
+        system="s", messages=[ChatMessage("user", "pedido")],
+        actions=("ban_member",), target_refs=("autor", "m1"),
+    )
+    assert reply.proposals == (ActionProposal("ban_member", "m1", reason="spam"),)
+    groq_tool = session.requests[0][1]["json"]["tools"][0]["function"]
+    gemini_tool = session.requests[1][1]["json"]["tools"][0]["functionDeclarations"][0]
+    assert groq_tool["parameters"]["properties"]["target_ref"]["enum"] == ["autor", "m1"]
+    assert gemini_tool["parameters"]["properties"]["target_ref"]["enum"] == ["autor", "m1"]
+
+
+@pytest.mark.asyncio
 async def test_router_does_not_forward_private_failed_output_to_fallback_or_public_reply(monkeypatch, caplog):
     monkeypatch.setattr(C, "GROQ_MODELS", ("groq-model",))
     monkeypatch.setattr(C, "GEMINI_MODELS", ("gemini-model",))
@@ -302,8 +342,8 @@ async def test_unsupported_tool_model_keeps_text_chat_and_remembers_capability(m
         _Response(_groq("continuando", finish="stop")),
     )
     router = ProviderRouter(session, groq_key="key")
-    first = await router.chat(system="s", messages=[], actions=("send_audio",))
-    second = await router.chat(system="s", messages=[], actions=("send_audio",))
+    first = await router.chat(system="s", messages=[], actions=("send_audio",), target_refs=("autor",))
+    second = await router.chat(system="s", messages=[], actions=("send_audio",), target_refs=("autor",))
     assert first == ChatReply("posso conversar", provider="groq", model="text-only-model")
     assert second == ChatReply("continuando", provider="groq", model="text-only-model")
     assert "tools" in session.requests[0][1]["json"]
@@ -322,4 +362,18 @@ async def test_absent_actions_does_not_add_keyword_to_legacy_client(monkeypatch)
 
     router = ProviderRouter(object(), groq_key="key")
     router._groq = LegacyClient()
-    assert await router.chat(system="s", messages=[]) == "legacy text"
+    assert await router.chat(system="s", messages=[], target_refs=("autor", "m1")) == "legacy text"
+
+
+@pytest.mark.asyncio
+async def test_absent_target_refs_preserves_previous_action_client_keyword_contract(monkeypatch):
+    monkeypatch.setattr(C, "GROQ_MODELS", ("legacy-actions",))
+
+    class ExistingActionClient:
+        async def chat(self, *, system, messages, temperature, model, timeout_seconds, actions):
+            assert actions == ("send_audio",)
+            return ChatReply("resposta comum")
+
+    router = ProviderRouter(object(), groq_key="key")
+    router._groq = ExistingActionClient()
+    assert (await router.chat(system="s", messages=[], actions=("send_audio",))).text == "resposta comum"

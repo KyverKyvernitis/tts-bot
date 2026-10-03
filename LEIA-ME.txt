@@ -1,5 +1,13 @@
 CHATBOT DO PRÓPRIO BOT
 
+CORREÇÃO POSTERIOR AO PACOTE DE AÇÕES
+
+Se já aplicou chatbot-acoes-atualizacao.zip ou chatbot-acoes-desde-original.zip, envie chatbot-audio-correcao.zip ao updater e reinicie o bot. Esse pacote contém somente as diferenças posteriores, nas pastas originais, sem exclusões.
+
+Áudio agora fica vinculado diretamente ao autor da conversa, sem depender da referência de membro escolhida pela IA. Entrada em call e banimento continuam usando apenas referências confiáveis e aprovação da staff. Pedidos como "Mande um áudio" são reconhecidos também no fallback sem ferramentas. Uma ação recusada informa o motivo e não sintetiza esse aviso como resposta em áudio. A fala privada continua fora da prévia de aprovação.
+
+O fluxo de prefixo após entrada aprovada foi testado com a fila e o playback reais, simulando síntese e Discord. Isso não comprova o funcionamento do serviço de voz na instalação: se um prefixo continuar sem falar, registre o prefixo, a engine e o erro do console para identificar a falha externa ou de configuração.
+
 Este ZIP incremental contém somente os arquivos alterados e novos, nas pastas originais do projeto. O chatbot usa a identidade do bot no Discord, sem personas ou profiles. Use /chatbot configurar para ativar, escolher canais e ajustar respostas espontâneas. O botão Configurar ações controla áudios, calls, banimentos e os cargos de staff.
 
 O bot pode enviar áudio ou falar na call atual espontaneamente ou a pedido de qualquer membro, conforme a configuração. Se perguntar antes, o pedido não mostra nem antecipa a fala. Falar exige que o bot e o membro continuem na mesma call. Entrar exige que o bot esteja desconectado e sempre pede aprovação da staff; esta versão não muda o bot de outra call. Música ou TTS ocupado deixam as ações de call indisponíveis. Banir exige aprovação com Banir membros e hierarquias válidas. Os pedidos expiram em cinco minutos. A entrada temporária em call não é restaurada após reiniciar, e o bot não escuta conversas ao vivo.

@@ -110,9 +110,58 @@ async def test_prepare_pins_host_identity_and_private_audio_without_staff_approv
     assert prepared["payload"]["text"] == "fala secreta"
     assert not prepared["ask_permission"]
     assert (prepared["guild_id"], prepared["channel_id"], prepared["requester_id"], prepared["origin_message_id"]) == (10, 30, 1, 50)
-    with pytest.raises(ActionDenied):
-        await prepare_action(world.bot, world.message, ActionProposal("send_audio", "m1", text="fala"),
-                             targets={"m1": world.members[3]}, config=world.config)
+    assert prepared["payload"]["target_id"] == world.message.author.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_ref", ["", "autor", "m1", "requester", "usuario"])
+@pytest.mark.parametrize("action", ["send_audio", "speak_voice"])
+async def test_audio_replies_pin_the_author_even_when_model_names_another_target(world, target_ref, action):
+    in_call(world, bot=True)
+    # Uma menção não deve redirecionar a fala nem exigir que o modelo escolha
+    # um membro para responder à conversa atual.
+    another_call = MagicMock(spec=discord.VoiceChannel)
+    another_call.id, another_call.guild = 21, world.guild
+    world.members[3].voice = SimpleNamespace(channel=another_call)
+    prepared = await prepare_action(
+        world.bot, world.message, ActionProposal(action, target_ref, text="fala privada"),
+        targets={"m1": world.members[3]}, config=world.config,
+    )
+    assert prepared["payload"]["target_id"] == world.message.author.id
+    assert prepared["payload"]["voice_channel_id"] == (20 if action == "speak_voice" else 0)
+    assert prepared["requester_id"] == world.message.author.id
+
+
+@pytest.mark.asyncio
+async def test_speech_cannot_follow_a_mentioned_member_when_author_is_outside_the_bot_call(world):
+    in_call(world, 3, bot=True)
+    # m1 está junto do bot; o autor está fora da call. O alvo do modelo não
+    # pode servir como autorização para falar em nome de quem pediu.
+    with pytest.raises(ActionDenied, match="mesma call"):
+        await prepare_action(
+            world.bot, world.message, ActionProposal("speak_voice", "m1", text="fala privada"),
+            targets={"m1": world.members[3]}, config=world.config,
+        )
+    other_call = MagicMock(spec=discord.VoiceChannel)
+    other_call.id, other_call.guild = 21, world.guild
+    world.members[1].voice = SimpleNamespace(channel=other_call)
+    with pytest.raises(ActionDenied, match="mesma call"):
+        await prepare_action(
+            world.bot, world.message, ActionProposal("speak_voice", "m1", text="fala privada"),
+            targets={"m1": world.members[3]}, config=world.config,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["join_voice", "ban_member"])
+@pytest.mark.parametrize("target_ref", ["requester", "usuario", "m77"])
+async def test_operations_on_members_still_require_trusted_target_references(world, action, target_ref):
+    in_call(world, 3)
+    with pytest.raises(ActionDenied, match="membro identificado"):
+        await prepare_action(
+            world.bot, world.message, ActionProposal(action, target_ref, reason="spam repetido"),
+            targets={"autor": world.members[1], "m1": world.members[3]}, config=world.config,
+        )
 
 
 @pytest.mark.asyncio
