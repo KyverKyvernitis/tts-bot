@@ -2,11 +2,15 @@ CHATBOT DO PRÓPRIO BOT
 
 CORREÇÃO POSTERIOR AO PACOTE DE AÇÕES
 
-Se já aplicou chatbot-acoes-atualizacao.zip ou chatbot-acoes-desde-original.zip, envie chatbot-audio-correcao.zip ao updater e reinicie o bot. Esse pacote contém somente as diferenças posteriores, nas pastas originais, sem exclusões.
+Se já aplicou chatbot-acoes-atualizacao.zip ou chatbot-acoes-desde-original.zip, envie chatbot-audio-prefixos-correcao.zip ao updater e reinicie o bot. Esse pacote contém somente as diferenças posteriores, nas pastas originais, sem exclusões. Ele também inclui a correção de chatbot-audio-correcao.zip e pode ser aplicado depois dela.
 
 Áudio agora fica vinculado diretamente ao autor da conversa, sem depender da referência de membro escolhida pela IA. Entrada em call e banimento continuam usando apenas referências confiáveis e aprovação da staff. Pedidos como "Mande um áudio" são reconhecidos também no fallback sem ferramentas. Uma ação recusada informa o motivo e não sintetiza esse aviso como resposta em áudio. A fala privada continua fora da prévia de aprovação.
 
-O fluxo de prefixo após entrada aprovada foi testado com a fila e o playback reais, simulando síntese e Discord. Isso não comprova o funcionamento do serviço de voz na instalação: se um prefixo continuar sem falar, registre o prefixo, a engine e o erro do console para identificar a falha externa ou de configuração.
+Edge e gTTS agora usam transcodificação Opus pelo FFmpeg quando a libopus do processo Python não carrega. Essa alternativa é escolhida antes de consumir o áudio progressivo; não reconecta nem muda o bot de call. Arquivos OGG/Opus já prontos preservam a reprodução sem transcodificação. Erros de arquivo, codec e EOF sem quadros de áudio não causam reconexão de uma call saudável nem contam como fala bem-sucedida.
+
+Falhas dos prefixos aparecem como resposta à mensagem original, com código curto, sem transcrição da fala nem detalhes privados de serviços. Também há avisos de TTS desativado, fila indisponível, cargo ignorado e bot silenciado. Os avisos respeitam acesso ao canal/thread e ficam limitados a um por membro a cada 30 segundos. O destino de cada item é fixado antes de dividir mensagens longas.
+
+O fluxo de prefixo após entrada aprovada foi testado com FFmpeg, decoder, fila, AudioPlayer e VoiceClient.play reais, simulando o serviço de síntese e o transporte do Discord. Os testes reproduzem a ausência do codec nativo e validam a alternativa para WAV/MP3, Edge e gTTS. Isso não comprova o funcionamento dos serviços de voz ou do transporte na instalação do usuário, nem confirma que nela falta libopus. Se persistir, o aviso e seu código permitem localizar a etapa da falha.
 
 Este ZIP incremental contém somente os arquivos alterados e novos, nas pastas originais do projeto. O chatbot usa a identidade do bot no Discord, sem personas ou profiles. Use /chatbot configurar para ativar, escolher canais e ajustar respostas espontâneas. O botão Configurar ações controla áudios, calls, banimentos e os cargos de staff.
 

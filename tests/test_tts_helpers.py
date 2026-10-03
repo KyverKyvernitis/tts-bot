@@ -474,6 +474,255 @@ class PlaybackRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe.reset_calls, 0)
         self.assertIs(probe.asserted_voice_client, recovered_voice_client)
 
+    async def test_audio_failures_do_not_reset_or_reconnect_a_healthy_call(self):
+        class Probe(TTSAudioMixin):
+            def __init__(self, error):
+                self.guild_states = {}
+                self.error = error
+                self.play_calls = self.ensure_calls = self.reset_calls = 0
+
+            async def _play_file(self, vc, path, *, item=None):
+                self.play_calls += 1
+                raise self.error
+
+            async def _ensure_connected_fast(self, guild, item):
+                self.ensure_calls += 1
+
+            async def _reset_voice_client(self, guild, *, reason="unknown"):
+                self.reset_calls += 1
+
+        errors = [tts_audio.TTSPlaybackError("no_frames"), tts_audio.TTSPlaybackError("route_failed"),
+                  FileNotFoundError("arquivo ausente"), RuntimeError("FFmpeg decoding failed"),
+                  type("OpusNotLoaded", (Exception,), {})()]
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                probe = Probe(error)
+                item = QueueItem(77, 55, 66, "teste", "gtts", "", "pt", "+0%", "+0Hz")
+                with self.assertRaises(type(error)):
+                    await probe._play_file_with_recovery(SimpleNamespace(id=77), item, object(), "/tmp/audio.mp3")
+                self.assertEqual((probe.play_calls, probe.ensure_calls, probe.reset_calls), (1, 0, 0))
+
+
+class PlaybackConfirmationTests(unittest.IsolatedAsyncioTestCase):
+    def _probe(self, frames=()):
+        class Source:
+            def __init__(self):
+                self.frames = iter(frames)
+                self.cleaned = False
+            def read(self):
+                return next(self.frames, b"")
+            def is_opus(self):
+                return False
+            def cleanup(self):
+                self.cleaned = True
+
+        source = Source()
+        guild = SimpleNamespace(id=77)
+        class Voice:
+            def __init__(self):
+                self.guild = guild
+                self.play_calls = 0
+            def play(self, source, *, after):
+                self.play_calls += 1
+                while source.read():
+                    pass
+                source.cleanup()
+                after(None)
+
+        voice = Voice()
+        class Probe(TTSAudioMixin):
+            def __init__(self):
+                self.guild_states = {}
+                self.bot = SimpleNamespace(audio_router=None)
+            def _voice_client_is_connected(self, vc):
+                return True
+            def _voice_client_is_playing_or_paused(self, vc):
+                return False
+            def _make_discord_tts_source(self, path):
+                return source, "test_source"
+
+        return Probe(), voice, source
+
+    async def test_discord_callback_without_audio_frames_is_a_failure(self):
+        probe, voice, source = self._probe()
+        item = QueueItem(77, 55, 66, "teste", "gtts", "", "pt", "+0%", "+0Hz")
+        with self.assertRaises(tts_audio.TTSPlaybackError) as caught:
+            await probe._play_file(voice, "/tmp/audio.mp3", item=item)
+        self.assertEqual(caught.exception.code, "no_frames")
+        self.assertEqual(voice.play_calls, 1)
+        self.assertTrue(source.cleaned)
+
+    async def test_observed_audio_frame_still_completes_playback(self):
+        probe, voice, _source = self._probe((b"pcm-frame",))
+        item = QueueItem(77, 55, 66, "teste", "gtts", "", "pt", "+0%", "+0Hz")
+        result = await probe._play_file(voice, "/tmp/audio.mp3", item=item)
+        self.assertTrue(result["first_frame_observed"])
+        self.assertEqual(voice.play_calls, 1)
+
+    async def test_router_failures_never_start_local_playback_or_report_success(self):
+        for result in (None, "accepted", {"ok": False}, {"first_frame_observed": False}, {"tts_discarded": True}):
+            with self.subTest(result=result):
+                probe, voice, _source = self._probe((b"pcm-frame",))
+                class Router:
+                    async def play_tts(self, **kwargs):
+                        return result
+                probe.bot.audio_router = Router()
+                item = QueueItem(77, 55, 66, "teste", "gtts", "", "pt", "+0%", "+0Hz")
+                with self.assertRaises(tts_audio.TTSPlaybackError):
+                    await probe._play_file(voice, "/tmp/audio.mp3", item=item)
+                self.assertEqual(voice.play_calls, 0)
+
+    async def test_legacy_router_metrics_remain_accepted(self):
+        probe, voice, _source = self._probe()
+        class Router:
+            async def play_tts(self, **kwargs):
+                return {"playback_ms": 10.0}
+        probe.bot.audio_router = Router()
+        result = await probe._play_file(voice, "/tmp/audio.mp3")
+        self.assertEqual(result, {"playback_ms": 10.0})
+        self.assertEqual(voice.play_calls, 0)
+
+    def test_missing_python_opus_uses_ffmpeg_transcoding_before_reading_source(self):
+        class OpusNotLoaded(Exception):
+            pass
+        calls = []
+        opus = SimpleNamespace(is_loaded=lambda: False, Encoder=lambda: (_ for _ in ()).throw(OpusNotLoaded()))
+        def opus_source(path, **kwargs):
+            calls.append((path, kwargs))
+            return object()
+        probe, _voice, _source = self._probe()
+        with patch.object(tts_audio.discord, "opus", opus, create=True), \
+             patch.object(tts_audio.discord, "FFmpegOpusAudio", opus_source, create=True), \
+             patch.object(tts_audio, "TTS_OPUS_PLAYBACK_ENABLED", False):
+            _source, kind = TTSAudioMixin._make_discord_tts_source(probe, "/tmp/audio.mp3")
+        self.assertEqual(kind, "ffmpeg_opus_fallback")
+        self.assertIsNone(calls[0][1].get("codec"))
+
+    def test_ogg_opus_copy_does_not_need_native_opus_encoder(self):
+        class OpusNotLoaded(Exception):
+            pass
+        calls = []
+        def encoder():
+            calls.append("encoder")
+            raise OpusNotLoaded()
+        def opus_source(path, **kwargs):
+            calls.append((path, kwargs))
+            return object()
+        probe, _voice, _source = self._probe()
+        opus = SimpleNamespace(is_loaded=lambda: False, Encoder=encoder)
+        with patch.object(tts_audio.discord, "opus", opus, create=True), \
+             patch.object(tts_audio.discord, "FFmpegOpusAudio", opus_source, create=True), \
+             patch.object(tts_audio, "TTS_OPUS_PLAYBACK_ENABLED", True), \
+             patch.object(tts_audio, "TTS_OPUS_PLAYBACK_COPY_CODEC", True):
+            _source, kind = TTSAudioMixin._make_discord_tts_source(probe, "/tmp/audio.ogg")
+        self.assertEqual(kind, "ffmpeg_opus_copy")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["codec"], "copy")
+
+    def test_normal_discord_opus_autoload_keeps_pcm_path(self):
+        calls = []
+        opus = SimpleNamespace(is_loaded=lambda: False, Encoder=lambda: calls.append("autoload") or object())
+        def pcm_source(path, **kwargs):
+            calls.append("pcm")
+            return object()
+        probe, _voice, _source = self._probe()
+        with patch.object(tts_audio.discord, "opus", opus, create=True), \
+             patch.object(tts_audio.discord, "FFmpegPCMAudio", pcm_source):
+            _source, kind = TTSAudioMixin._make_discord_tts_source(probe, "/tmp/audio.mp3")
+        self.assertEqual(kind, "ffmpeg_pcm")
+        self.assertEqual(calls, ["autoload", "pcm"])
+
+
+class WorkerFailureNotificationTests(unittest.IsolatedAsyncioTestCase):
+    async def _run_worker(self, *, connected=True, missing=False, playback=None, synth_error=None, notifier_error=False):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "audio.mp3")
+            if not missing:
+                Path(path).write_bytes(b"test-audio")
+            guild = SimpleNamespace(id=77, get_channel=lambda _id: SimpleNamespace(id=55))
+            voice = SimpleNamespace(guild=guild, channel=SimpleNamespace(id=55))
+            class Probe(TTSAudioMixin):
+                def __init__(self):
+                    self.guild_states = {}
+                    self.bot = SimpleNamespace(audio_router=None, get_guild=lambda _id: guild, get_channel=guild.get_channel)
+                    self.notices = []
+                    self.timings = []
+                    self.play_calls = 0
+                def _try_get_cached_path(self, state, item):
+                    return None
+                async def _try_worker_voice_direct_tts(self, guild, item):
+                    return None
+                def _get_voice_client_for_guild(self, guild):
+                    return voice
+                def _voice_client_channel(self, vc):
+                    return vc.channel
+                def _voice_client_is_connected(self, vc):
+                    return connected
+                async def _ensure_connected_fast(self, guild, item):
+                    return voice if connected else None
+                async def _resolve_audio_path(self, state, item, **kwargs):
+                    if synth_error:
+                        raise synth_error
+                    return path, False
+                async def _resolve_and_prime_audio(self, task, item):
+                    current_path, cleanup = await task
+                    return current_path, cleanup, None
+                async def _play_file_with_recovery(self, *args, **kwargs):
+                    self.play_calls += 1
+                    if isinstance(playback, Exception):
+                        raise playback
+                    return playback
+                async def _notify_tts_failure(self, item, reason_code, error=None):
+                    self.notices.append((item.message_id, item.text_channel_id, reason_code, error))
+                    self._get_state(77).accepting = False
+                    if notifier_error:
+                        raise RuntimeError("notification unavailable")
+                def _record_queue_timing(self, **kwargs):
+                    self.timings.append(kwargs)
+                    self._get_state(77).accepting = False
+                def _schedule_cache_maintenance(self, *args, **kwargs):
+                    pass
+            probe = Probe()
+            item = QueueItem(77, 55, 66, "teste", "gtts", "", "pt", "+0%", "+0Hz", message_id=100, text_channel_id=200)
+            state = probe._get_state(77)
+            await probe._enqueue_tts_item(77, item)
+            await asyncio.wait_for(probe._worker_loop(77), timeout=1)
+            await asyncio.wait_for(state.queue.join(), timeout=1)
+            return probe
+
+    async def test_connection_and_missing_audio_report_the_original_message(self):
+        for options, code in (({"connected": False}, "connection_failed"), ({"missing": True}, "audio_missing")):
+            with self.subTest(code=code):
+                probe = await self._run_worker(**options)
+                self.assertEqual(probe.notices[0][:3], (100, 200, code))
+                self.assertEqual(probe.play_calls, 0)
+                self.assertEqual(probe.timings, [])
+
+    async def test_synthesis_failure_is_reported_without_playback(self):
+        failure = RuntimeError("test-provider-offline")
+        probe = await self._run_worker(synth_error=failure)
+        self.assertEqual(probe.notices[0][2], "synthesis_failed")
+        self.assertIs(probe.notices[0][3], failure)
+        self.assertEqual(probe.play_calls, 0)
+        self.assertEqual(probe.timings, [])
+
+    async def test_failed_or_discarded_playback_is_never_recorded_as_success(self):
+        for result in (None, {"ok": False}, {"tts_discarded": True}, {"first_frame_observed": False}, tts_audio.TTSPlaybackError("no_frames")):
+            with self.subTest(result=result):
+                probe = await self._run_worker(playback=result)
+                self.assertEqual(probe.notices[0][2], "playback_failed")
+                self.assertEqual(probe.timings, [])
+
+    async def test_notification_failure_does_not_prevent_queue_cleanup(self):
+        probe = await self._run_worker(playback={"ok": False}, notifier_error=True)
+        self.assertEqual(len(probe.notices), 1)
+        self.assertEqual(probe.timings, [])
+
+    async def test_legacy_success_metrics_do_not_raise_a_failure_notice(self):
+        probe = await self._run_worker(playback={"playback_ms": 1.0})
+        self.assertEqual(probe.notices, [])
+        self.assertEqual(len(probe.timings), 1)
+
 
 class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

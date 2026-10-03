@@ -46,6 +46,7 @@ async def despachar_mensagem_tts(
         return ResultadoDespachoMensagem(None, False, 0, False, (time.monotonic() - dispatch_started) * 1000.0, payload_ms)
 
     payload.queue_item.message_id = int(getattr(message, "id", 0) or 0)
+    payload.queue_item.text_channel_id = int(getattr(message.channel, "id", 0) or 0)
     payload.queue_item.enqueued_at_monotonic = dispatch_started
     state = cog._get_state(message.guild.id)
     state.last_text_channel_id = getattr(message.channel, "id", None)

@@ -454,6 +454,26 @@ def _tts_temp_dirs_snapshot() -> dict[str, object]:
 _ensure_tts_temp_dirs()
 
 
+class TTSPlaybackError(RuntimeError):
+    """Falha de áudio que não é corrigida reconectando a mesma call."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def _validate_tts_playback_result(result: Any) -> dict[str, Any]:
+    # Roteadores antigos retornam só métricas, sem confirmação de frames.
+    # Preserve esse contrato, mas nunca aceite uma falha explícita como fala.
+    if not isinstance(result, dict):
+        raise TTSPlaybackError("route_failed")
+    if result.get("ok") is False or result.get("tts_discarded") or result.get("music_route_failed"):
+        raise TTSPlaybackError("route_failed")
+    if result.get("first_frame_observed") is False:
+        raise TTSPlaybackError("no_frames")
+    return result
+
+
 @dataclass
 class QueueItem:
     guild_id: int
@@ -477,6 +497,7 @@ class QueueItem:
     piper_model: str = field(default="", repr=False, compare=False)
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex, repr=False, compare=False)
     message_id: int = field(default=0, repr=False, compare=False)
+    text_channel_id: int = field(default=0, repr=False, compare=False)
     generation: int = field(default=0, repr=False, compare=False)
     tld: str = field(default="com", repr=False, compare=False)
     chatbot_no_auto_connect: bool = field(default=False, repr=False, compare=False)
@@ -4244,6 +4265,27 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     ), "ffmpeg_opus"
                 except Exception as exc:
                     logger.debug("[tts_voice] FFmpegOpusAudio falhou; usando PCM fallback | path=%s erro=%s", path, exc)
+        opus = getattr(discord, "opus", None)
+        is_loaded = getattr(opus, "is_loaded", None)
+        if callable(is_loaded) and not is_loaded():
+            try:
+                # Preserve a descoberta automática feita pelo discord.py.
+                # Faça isso antes de ler/pré-consumir um FIFO progressivo.
+                encoder = opus.Encoder()
+                del encoder
+            except Exception as exc:
+                if type(exc).__name__ != "OpusNotLoaded":
+                    raise
+                opus_cls = getattr(discord, "FFmpegOpusAudio", None)
+                if not callable(opus_cls):
+                    raise TTSPlaybackError("audio_source_failed") from exc
+                # Sem codec explícito, FFmpegOpusAudio transcodifica em libopus.
+                # Passar "opus"/"libopus" ativa COPY no discord.py; isso só
+                # serve para entrada já Opus e deixaria MP3/WAV sem áudio.
+                return opus_cls(
+                    path, before_options=before_options,
+                    options=TTS_FFMPEG_OPTIONS,
+                ), "ffmpeg_opus_fallback"
         return discord.FFmpegPCMAudio(
             path,
             before_options=before_options,
@@ -5368,6 +5410,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             pitch="+0Hz",
             enqueued_at_monotonic=item.enqueued_at_monotonic,
             request_id=item.request_id, message_id=item.message_id,
+            text_channel_id=item.text_channel_id,
             generation=item.generation, tld=item.tld,
         )
         if bool(getattr(item, "_tts_prefetch", False)):
@@ -5794,7 +5837,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         item=item,
                     )
                     if not (isinstance(router_result, dict) and router_result.get("music_route_failed")):
-                        return router_result
+                        return _validate_tts_playback_result(router_result)
 
                     reason = str(router_result.get("music_route_error") or router_result.get("error") or "music_route_failed")
                     fallback_vc = await preparar_fallback_local_apos_rota_musical(
@@ -5809,7 +5852,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                             reason,
                         )
                     else:
-                        return router_result
+                        return _validate_tts_playback_result(router_result)
 
                 await self._wait_until_voice_playable_for_tts(vc, item=item)
                 if item is not None and getattr(item, "chatbot_no_auto_connect", False):
@@ -5820,13 +5863,16 @@ class TTSAudioMixin(SharedSynthesisMixin):
 
                 source_setup_started_at = time.monotonic()
                 source_prime_ms = 0.0
-                if prepared is not None:
-                    source = prepared.take_source()
-                    source_kind = prepared.source_kind
-                    source_prime_ms = prepared.prime_ms
-                    used_prepared_source = True
-                else:
-                    source, source_kind = self._make_discord_tts_source(path)
+                try:
+                    if prepared is not None:
+                        source = prepared.take_source()
+                        source_kind = prepared.source_kind
+                        source_prime_ms = prepared.prime_ms
+                        used_prepared_source = True
+                    else:
+                        source, source_kind = self._make_discord_tts_source(path)
+                except Exception as exc:
+                    raise TTSPlaybackError("audio_source_failed") from exc
                 if callable(getattr(source, "read", None)):
                     source = _FirstFrameAudioSource(
                         source,
@@ -5848,7 +5894,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         item.chatbot_playback_started = True
                     vc.play(source, after=_after_playback)
                     source_handed_to_player = True
-                except Exception:
+                except Exception as exc:
+                    if self._is_tts_audio_source_error(exc):
+                        raise TTSPlaybackError("audio_source_failed") from exc
                     raise
                 play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
 
@@ -5866,6 +5914,13 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 first_frame_at = playback_started_at
                 first_read_ms = 0.0
                 first_frame_observed = bool(first_frame.done() and not first_frame.cancelled())
+                if not first_frame_observed:
+                    metrics = self._get_metrics_store()
+                    metrics["first_frame_unobserved"] = int(metrics.get("first_frame_unobserved", 0) or 0) + 1
+                    # FFmpeg pode fechar com EOF sem propagar um erro ao
+                    # callback do Discord. Não transforme esse silêncio em
+                    # sucesso nem derrube uma conexão de voz saudável.
+                    raise TTSPlaybackError("no_frames")
                 if first_frame_observed:
                     with contextlib.suppress(Exception):
                         first_frame_at, first_read_ms = first_frame.result()
@@ -5873,9 +5928,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 if first_frame_observed:
                     self._record_latency_sample("first_frame", first_frame_ms)
                     self._record_latency_sample("first_source_read", first_read_ms)
-                else:
-                    metrics = self._get_metrics_store()
-                    metrics["first_frame_unobserved"] = int(metrics.get("first_frame_unobserved", 0) or 0) + 1
                 result = {
                     "source_setup_ms": source_setup_ms,
                     "play_call_ms": play_call_ms,
@@ -5945,6 +5997,18 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 "closing transport",
             )
         )
+
+    def _is_tts_audio_source_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (TTSPlaybackError, FileNotFoundError, PermissionError, IsADirectoryError)):
+            return True
+        if type(exc).__name__ in {"OpusNotLoaded", "OpusError"}:
+            return True
+        message = str(exc or "").lower()
+        return any(marker in message for marker in (
+            "ffmpeg", "opus not loaded", "opus library", "encoder not found",
+            "decoder not found", "invalid data found when processing input",
+            "no such file or directory",
+        ))
 
     def _is_music_active_for_guild(self, guild_id: int) -> bool:
         return musica_ativa(getattr(self, "bot", None), guild_id)
@@ -6023,6 +6087,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 )
             except Exception as exc:
                 last_error = exc
+                if self._is_tts_audio_source_error(exc) and not self._is_voice_disconnected_error(exc):
+                    # Arquivo, codec, EOF e falha lógica do roteador são
+                    # problemas da fala; reconectar só repetiria a mesma falha.
+                    raise
                 music_active = self._is_music_active_for_guild(guild.id)
                 if music_active:
                     logger.warning(
@@ -6332,6 +6400,17 @@ class TTSAudioMixin(SharedSynthesisMixin):
         prefetched_item: Optional[QueueItem] = None
         prefetched_audio_task: Optional[asyncio.Task] = None
 
+        async def _report_failure(item: QueueItem, reason_code: str, error: Exception | None = None) -> None:
+            notifier = getattr(self, "_notify_tts_failure", None)
+            if not callable(notifier):
+                return
+            try:
+                await self._maybe_await(notifier(item, reason_code, error=error))
+            except Exception as exc:
+                # A notificação é auxiliar e não pode encerrar a fila ou
+                # registrar o texto privado carregado por uma exceção.
+                logger.warning("[tts_voice] aviso de falha indisponível | guild=%s erro_tipo=%s", guild_id, type(exc).__name__)
+
         try:
             while True:
                 if generation != state.generation or not state.accepting:
@@ -6348,6 +6427,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 resolved_audio_task = None
                 active_audio_task = None
                 prepared_playback = None
+                failure_stage = "tts_failed"
 
                 if not state.dashboard_enabled:
                     if prefetched_audio_task is not None:
@@ -6424,6 +6504,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     if audio_task is None:
                         direct_worker_result = await self._try_worker_voice_direct_tts(guild, item)
                     if direct_worker_result is not None:
+                        failure_stage = "playback_failed"
+                        # O wrapper remoto não observa frames no player local;
+                        # valide a confirmação do worker, quando disponível.
+                        remote_result = direct_worker_result.get("worker_result") if isinstance(direct_worker_result, dict) else None
+                        _validate_tts_playback_result(remote_result if isinstance(remote_result, dict) else direct_worker_result)
                         dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
                         playback_started_at = float(direct_worker_result.get("playback_started_at", time.monotonic()) or time.monotonic())
                         queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)
@@ -6475,6 +6560,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         )
 
                     try:
+                        failure_stage = "connection_failed"
                         vc = await connect_task
                     except BaseException:
                         await self._abandon_resolved_audio_task(resolved_audio_task)
@@ -6485,8 +6571,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         if now >= float(getattr(state, "connection_warning_logged_until", 0.0) or 0.0):
                             logger.warning("[tts_voice] Worker não conseguiu conectar | guild=%s channel=%s", guild_id, item.channel_id)
                             state.connection_warning_logged_until = now + 20.0
+                        await _report_failure(item, "connection_failed")
                         continue
 
+                    failure_stage = "synthesis_failed"
                     current_path, should_cleanup, prepared_playback = await resolved_audio_task
                     if state.generation != generation or not state.accepting:
                         continue
@@ -6508,12 +6596,14 @@ class TTSAudioMixin(SharedSynthesisMixin):
                             prepared_playback.cleanup()
                         if should_cleanup and current_path:
                             await self._discard_edge_stream_path(current_path)
+                        await _report_failure(item, "audio_missing")
                         continue
 
                     dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
                     queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)
 
                     try:
+                        failure_stage = "playback_failed"
                         playback_result = await self._play_file_with_recovery(
                             guild,
                             item,
@@ -6521,6 +6611,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                             current_path,
                             prepared=prepared_playback,
                         )
+                        playback_result = _validate_tts_playback_result(playback_result)
                         playback_started_at = float(playback_result.get("playback_started_at", time.monotonic()) or time.monotonic())
                         first_frame_at = float(playback_result.get("first_frame_at", playback_started_at) or playback_started_at)
                         source_setup_ms = max(0.0, float(playback_result.get("source_setup_ms", 0.0) or 0.0))
@@ -6572,7 +6663,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         state.warmed_until = time.monotonic() + TTS_WARM_HOLD_SECONDS
 
                 except Exception as e:
-                    logger.exception("[tts_voice] Erro no worker da guild %s: %s", guild_id, e)
+                    logger.warning(
+                        "[tts_voice] fala falhou | guild=%s request=%s etapa=%s erro_tipo=%s",
+                        guild_id, item.request_id, failure_stage, type(e).__name__,
+                    )
+                    await _report_failure(item, failure_stage, e)
                 finally:
                     if connect_task is not None and not connect_task.done():
                         connect_task.cancel()

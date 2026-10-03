@@ -31,6 +31,7 @@ from cogs.musica.integracoes.tts import (
 logger = logging.getLogger(__name__)
 from .audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED, TTS_TEMP_DIR
 from .chatbot_actions import ChatbotVoiceActionsMixin, ChatbotVoiceActionBlocked
+from .failure_notices import notify_tts_failure
 from .common import (
     _guild_scoped,
     _shorten,
@@ -60,7 +61,7 @@ from .utils.embed import (
     status_voice_channel_text,
     spoken_name_status_text,
 )
-from .prefix import dispatch_prefix_control_command
+from .prefix import dispatch_prefix_control_command, build_prefix_routing_config, match_engine_prefix
 from .mensagens.referencias import (
     descricoes_anexos_tts,
     referencia_canal_tts,
@@ -2459,6 +2460,56 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         except Exception:
             pass
 
+    async def _notify_tts_failure(self, item, reason_code: str, error: Exception | None = None) -> None:
+        try:
+            await asyncio.wait_for(notify_tts_failure(self, item, reason_code, error), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.warning("[tts_voice] aviso de falha excedeu o prazo")
+
+    async def _notify_tts_gate_failure(self, message, gate, reason_code: str) -> None:
+        # Uma mensagem comum continua silenciosa. Só avisar quando o conteúdo
+        # corresponde a um prefixo de fala configurado, sem copiar esse texto.
+        if (message.guild is None or getattr(message.author, "bot", False)
+                or getattr(message, "webhook_id", None)):
+            return
+        guard = getattr(self.bot, "antibot_should_block_message", None)
+        if callable(guard) and guard(message):
+            return
+        engine, prefix = gate.forced_engine, gate.active_prefix
+        if not engine or not prefix:
+            defaults = gate.guild_defaults
+            if reason_code == "tts_disabled":
+                # A triagem global sai antes de consultar a configuração.
+                # SettingsDB fornece estes prefixos pelo cache da guild.
+                try:
+                    db = self._get_db()
+                    getter = getattr(db, "get_guild_tts_defaults", None)
+                    if callable(getter):
+                        value = getter(message.guild.id)
+                        defaults = (await value if inspect.isawaitable(value) else value) or {}
+                except Exception as exc:
+                    logger.warning("[tts_voice] prefixos indisponíveis para aviso | type=%s", type(exc).__name__)
+                    return
+            routing = build_prefix_routing_config(
+                defaults,
+                bot_prefix_default=str(getattr(config, "BOT_PREFIX", "_") or "_"),
+                atts_prefix_default=str(getattr(config, "TTS_ATTS_PREFIX", "%") or "%"),
+                teto_prefix_default=str(getattr(config, "TTS_TETO_PREFIX", "'") or "'"),
+            )
+            engine, prefix = match_engine_prefix(
+                str(getattr(message, "content", "") or ""),
+                atts_prefix=routing.atts_prefix, teto_prefix=routing.teto_prefix,
+                edge_prefix=routing.edge_prefix, gtts_prefix=routing.gtts_prefix,
+            )
+        if not engine or not prefix or message.guild is None:
+            return
+        item = QueueItem(
+            guild_id=message.guild.id, channel_id=0, author_id=message.author.id,
+            text="", engine=engine, voice="", language="", rate="", pitch="",
+            message_id=message.id, text_channel_id=message.channel.id,
+        )
+        await self._notify_tts_failure(item, reason_code)
+
     async def handle_message_from_bot_on_message(self, message: discord.Message) -> None:
         # Ponte explícita usada por bot.py. Mesmo que o dispatcher de listeners do
         # discord.py mude/atrase, o TTS continua recebendo mensagens. O cache
@@ -3440,6 +3491,8 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             # o último motivo de gate. Isso evita outro caso de queue_enqueued=0
             # sem pista nenhuma.
             self._record_tts_message_gate(message, gate.reason or "ignored", matched=False)
+            if gate.reason in {"tts_disabled", "tts_guild_disabled"}:
+                await self._notify_tts_gate_failure(message, gate, gate.reason)
             return
 
         guild_defaults = gate.guild_defaults
@@ -3455,6 +3508,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 getattr(message.channel, "id", None),
                 getattr(message.author, "id", None),
             )
+            await self._notify_tts_gate_failure(message, gate, "ignored_role")
             return
 
         if self._was_tts_message_seen(message.id):
@@ -3471,6 +3525,14 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 getattr(message.channel, "id", None),
                 getattr(message.author, "id", None),
             )
+            await self._notify_tts_gate_failure(message, gate, "author_not_in_voice")
+            return
+
+        bot_voice = getattr(getattr(message.guild, "me", None), "voice", None)
+        if (getattr(getattr(bot_voice, "channel", None), "id", None) == voice_channel.id
+                and (getattr(bot_voice, "mute", False) or getattr(bot_voice, "suppress", False))):
+            self._record_tts_message_gate(message, "bot_muted", matched=False)
+            await self._notify_tts_gate_failure(message, gate, "bot_muted")
             return
 
         logger.info(
@@ -3532,6 +3594,8 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 dispatch_result.deduplicated,
                 dispatch_result.dropped_count,
             )
+            if not dispatch_result.deduplicated:
+                await self._notify_tts_failure(payload.queue_item, "queue_unavailable")
 
         self._ensure_worker(message.guild.id)
 
