@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import socket
+import ssl
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import aiohttp
 import discord
+import requests
+from edge_tts.exceptions import NoAudioReceived
+from gtts.tts import gTTSError
 
 from cogs.tts.audio import QueueItem, TTSPlaybackError
 from cogs.tts.cog import TTSVoice
@@ -93,6 +99,20 @@ class FailureNoticeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(mentions.users)
                 self.assertFalse(mentions.roles)
                 self.assertFalse(mentions.replied_user)
+
+    async def test_specific_network_notice_for_both_engines_exposes_only_static_diagnosis(self):
+        for engine in ("edge", "gtts"):
+            with self.subTest(engine=engine):
+                fixture = _Fixture()
+                fixture.item.engine = engine
+                error = requests.exceptions.ConnectionError("secret-key https://private.example <@999>")
+                error.__context__ = ssl.SSLCertVerificationError(1, "fala privada secret certificate URL")
+                await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed", error)
+                content = fixture.channel.send.await_args.args[0]
+                self.assertIn("tls_failed", content)
+                self.assertIn("certificados", content)
+                for private in ("secret-key", "https://", "<@999>", "fala privada", "secret certificate"):
+                    self.assertNotIn(private, content)
 
     async def test_missing_message_or_text_channel_binding_skips_notice(self):
         for field in ("message_id", "text_channel_id"):
@@ -203,6 +223,73 @@ class FailureClassificationTests(unittest.TestCase):
         for reason, error, expected in cases:
             with self.subTest(error=type(error).__name__, expected=expected):
                 self.assertEqual(failure_code(reason, error), expected)
+
+    def test_wrapped_network_causes_and_implicit_contexts_keep_specific_diagnosis(self):
+        cases = (
+            (ssl.SSLCertVerificationError(1, "secret certificate URL"), "tls_failed"),
+            (ssl.SSLError(1, "secret TLS payload"), "tls_failed"),
+            (requests.exceptions.ConnectTimeout("secret request URL"), "network_timeout"),
+            (TimeoutError("secret URL"), "network_timeout"),
+            (socket.gaierror(-2, "secret hostname"), "dns_failed"),
+            (aiohttp.ClientConnectionError("secret URL"), "network_failed"),
+        )
+        for underlying, expected in cases:
+            with self.subTest(expected=expected, error=type(underlying).__name__):
+                outer_connection = requests.exceptions.ConnectionError("secret request payload")
+                outer_connection.__cause__ = underlying
+                wrapper = gTTSError(msg="secret synthesis payload")
+                wrapper.__context__ = outer_connection
+                self.assertEqual(failure_code("synthesis_failed", wrapper), expected)
+
+    def test_known_http_statuses_are_read_from_trusted_provider_response_types(self):
+        for status, expected in ((429, "voice_rate_limited"), (401, "voice_auth_failed"), (403, "voice_auth_failed"), (503, "voice_service_failed")):
+            response = requests.Response()
+            response.status_code, response.url = status, "https://private.example/secret-key"
+            errors = (
+                requests.exceptions.HTTPError("secret HTTP payload", response=response),
+                gTTSError(msg="secret gTTS payload", response=response),
+                aiohttp.ClientResponseError(
+                    SimpleNamespace(real_url="https://private.example/secret-key"), (),
+                    status=status, message="secret Edge payload",
+                ),
+            )
+            for error in errors:
+                with self.subTest(status=status, provider=type(error).__module__):
+                    self.assertEqual(failure_code("synthesis_failed", error), expected)
+
+    def test_audio_storage_and_programming_failures_have_distinct_static_codes(self):
+        cases = (
+            (NoAudioReceived("secret synthesis text"), "no_audio_received"),
+            (PermissionError(13, "secret storage payload", "/private/audio.mp3"), "storage_denied"),
+            (TypeError("secret speech argument"), "internal_error"),
+            (NameError("secret missing function"), "internal_error"),
+            (AttributeError("secret attribute"), "internal_error"),
+        )
+        for underlying, expected in cases:
+            with self.subTest(expected=expected):
+                wrapper = RuntimeError("private wrapper")
+                wrapper.__cause__ = underlying
+                self.assertEqual(failure_code("synthesis_failed", wrapper), expected)
+
+    def test_unknown_error_text_status_and_spoofed_type_do_not_invent_diagnosis(self):
+        arbitrary = RuntimeError("certificate verify failed timeout 429 401 secret-key https://private.example")
+        arbitrary.status, arbitrary.status_code = 429, 503
+        arbitrary.response = SimpleNamespace(status_code=403)
+        fake_no_audio = type("NoAudioReceived", (Exception,), {})("secret payload")
+        for error in (arbitrary, fake_no_audio):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(failure_code("synthesis_failed", error), "synthesis_failed")
+        response = requests.Response()
+        response.status_code = "429"  # Even a real response must have a numeric status.
+        error = requests.exceptions.HTTPError("secret payload", response=response)
+        self.assertEqual(failure_code("synthesis_failed", error), "synthesis_failed")
+
+    def test_cyclic_cause_and_context_links_terminate_without_losing_real_error(self):
+        wrapper, nested = RuntimeError("secret wrapper"), RuntimeError("secret nested")
+        wrapper.__cause__, nested.__context__ = nested, wrapper
+        self.assertEqual(failure_code("synthesis_failed", wrapper), "synthesis_failed")
+        nested.__cause__ = ssl.SSLCertVerificationError(1, "secret TLS text")
+        self.assertEqual(failure_code("synthesis_failed", wrapper), "tls_failed")
 
 
 class GateFailureNoticeTests(unittest.IsolatedAsyncioTestCase):

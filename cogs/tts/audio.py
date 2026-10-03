@@ -873,7 +873,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         check()
         official_stream = getattr(tts, 'stream', None)
         prepare = getattr(tts, '_prepare_requests', None)
-        if not TTS_GTTS_PERSISTENT_SESSION_ENABLED or not callable(prepare):
+        if not callable(prepare):
             if not callable(official_stream):
                 raise RuntimeError('versão instalada do gTTS não oferece stream()')
             for chunk in official_stream():
@@ -887,50 +887,79 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 check()
                 yield chunk
             return
-        for request in prepared_requests:
-            response = None
-            last_error = None
-            for attempt in range(2):
-                check()
-                session, proxies = self._get_gtts_thread_session()
-                timeout = getattr(tts, 'timeout', None)
-                if deadline is not None:
-                    remaining = max(.05, deadline - time.monotonic())
-                    limits = timeout if isinstance(timeout, tuple) else (timeout, timeout)
-                    timeout = tuple(min(float(value or remaining), remaining) for value in limits)
-                try:
-                    response = session.send(request=request, verify=True, proxies=proxies,
-                                            timeout=timeout, stream=True)
-                    break
-                except requests.exceptions.RequestException as error:
-                    last_error = error
-                    self._invalidate_gtts_thread_session()
-                    check()
-                    if attempt:
-                        raise gTTSError(tts=tts) from error
-            if response is None:
-                raise gTTSError(tts=tts) from last_error
-            found = False
-            try:
-                response.raise_for_status()
-                for line in response.iter_lines(chunk_size=1024):
-                    check()
-                    if b'jQ1olc' not in line:
-                        continue
-                    match = _GTTS_AUDIO_LINE_RE.search(line.decode('utf-8'))
-                    if match is not None:
-                        chunk = base64.b64decode(match.group(1))
-                        if chunk:
-                            found = True
-                            yield chunk
-            except requests.exceptions.RequestException as error:
+        persistent = TTS_GTTS_PERSISTENT_SESSION_ENABLED
+        temporary_session = None
+
+        def invalidate_session():
+            nonlocal temporary_session
+            if persistent:
                 self._invalidate_gtts_thread_session()
-                raise gTTSError(tts=tts, response=response) from error
-            finally:
+            elif temporary_session is not None:
                 with contextlib.suppress(Exception):
-                    response.close()
-            if not found:
-                raise gTTSError(tts=tts, response=response)
+                    temporary_session.close()
+                temporary_session = None
+
+        try:
+            for request in prepared_requests:
+                response = None
+                last_error = None
+                for attempt in range(2):
+                    check()
+                    if persistent:
+                        session, proxies = self._get_gtts_thread_session()
+                    else:
+                        if temporary_session is None:
+                            temporary_session = requests.Session()
+                        session, proxies = temporary_session, urllib.request.getproxies()
+                    timeout = getattr(tts, 'timeout', None)
+                    if deadline is not None:
+                        remaining = max(.05, deadline - time.monotonic())
+                        limits = timeout if isinstance(timeout, tuple) else (timeout, timeout)
+                        timeout = tuple(min(float(value or remaining), remaining) for value in limits)
+                    try:
+                        transport_options = {"verify": True, "proxies": proxies, "stream": True}
+                        merge_settings = getattr(session, "merge_environment_settings", None)
+                        if callable(merge_settings):
+                            # Session.send de PreparedRequest não aplica sozinho
+                            # CA/proxy do ambiente. A opção de persistência só
+                            # controla reúso; ambos os modos verificam TLS.
+                            transport_options = merge_settings(
+                                request.url, proxies=proxies, stream=True, verify=True, cert=None,
+                            )
+                        response = session.send(request=request, timeout=timeout, **transport_options)
+                        break
+                    except requests.exceptions.RequestException as error:
+                        last_error = error
+                        invalidate_session()
+                        check()
+                        if attempt:
+                            raise gTTSError(tts=tts) from error
+                if response is None:
+                    raise gTTSError(tts=tts) from last_error
+                found = False
+                try:
+                    response.raise_for_status()
+                    for line in response.iter_lines(chunk_size=1024):
+                        check()
+                        if b'jQ1olc' not in line:
+                            continue
+                        match = _GTTS_AUDIO_LINE_RE.search(line.decode('utf-8'))
+                        if match is not None:
+                            chunk = base64.b64decode(match.group(1))
+                            if chunk:
+                                found = True
+                                yield chunk
+                except requests.exceptions.RequestException as error:
+                    invalidate_session()
+                    raise gTTSError(tts=tts, response=response) from error
+                finally:
+                    with contextlib.suppress(Exception):
+                        response.close()
+                if not found:
+                    raise gTTSError(tts=tts, response=response)
+        finally:
+            if not persistent:
+                invalidate_session()
 
     def _get_gtts_rate_lock(self) -> asyncio.Lock:
         lock = getattr(self, "_tts_gtts_rate_lock", None)

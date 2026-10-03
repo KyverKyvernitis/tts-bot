@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections import OrderedDict
 from contextlib import ExitStack
 import math
@@ -162,6 +163,10 @@ class _DecodedPrefixProbe(_PrefixProbe):
         return result
 
 
+class _RealProducerPrefixProbe(_DecodedPrefixProbe):
+    _produce_shared_job = tts_audio.TTSAudioMixin._produce_shared_job
+
+
 class ChatbotJoinPrefixIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_approved_temporary_join_allows_edge_and_gtts_prefixes_without_new_approval(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -199,6 +204,71 @@ class ChatbotJoinPrefixIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg não instalado")
 class ChatbotJoinRealCodecIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(os.name == "posix" and callable(getattr(os, "mkfifo", None)), "FIFO POSIX indisponível")
+    async def test_short_prefixes_use_real_provider_producer_and_prime_after_approved_join(self):
+        """Exercita os textos da falha relatada sem simular o producer compartilhado."""
+        with tempfile.TemporaryDirectory() as directory:
+            _, mp3_path = _make_codec_fixture(directory)
+            probe = _RealProducerPrefixProbe(mp3_path)
+            edge_requests = []
+
+            async def edge_stream(communicate):
+                edge_requests.append(communicate)
+                yield {"type": "audio", "data": probe.provider_audio}
+
+            # Mantém gTTS(), preparação HTTP, parser e bridge de thread reais.
+            # Apenas a resposta externa contém o MP3 audível gerado acima.
+            encoded = base64.b64encode(probe.provider_audio).decode("ascii")
+            response = Mock()
+            response.iter_lines.return_value = [('jQ1olc","[\\"' + encoded + '\\"]').encode("ascii")]
+            with _offline_runtime(directory), patch.object(discord.opus, "_lib", None), patch.object(discord.opus, "_load_default", return_value=False), patch.multiple(
+                tts_audio, TTS_EDGE_VPS_FAST_PATH_ENABLED=True, TTS_EDGE_STREAMING_ENABLED=True,
+                TTS_GTTS_STREAMING_ENABLED=True, TTS_GTTS_STREAM_MIN_CHARS=100,
+                TTS_FFMPEG_PRIME_ENABLED=True, TTS_GTTS_PERSISTENT_SESSION_ENABLED=True,
+            ), patch.object(tts_audio.edge_tts.Communicate, "stream", edge_stream), patch.object(
+                tts_audio.requests.Session, "send", return_value=response,
+            ) as send:
+                joined = await probe.chatbot_join_voice(guild_id=1, user_id=2, channel_id=20, request_id="join-short")
+                self.assertTrue(joined["ok"])
+                voice = probe.guild.voice_client
+                try:
+                    for index, content in enumerate((". Aaakjaha", ", A"), start=1):
+                        message = SimpleNamespace(id=300 + index, guild=probe.guild, author=probe.member,
+                                                  channel=SimpleNamespace(id=30), content=content)
+                        await probe.on_message(message)
+                        await asyncio.wait_for(probe._get_state(1).queue.join(), 5)
+                        await voice.finish_thread()
+                        self.assertEqual(voice.play_calls, index)
+                        result = probe.playback_kinds[-1]
+                        self.assertTrue(result["first_frame_observed"])
+                        self.assertTrue(result["source_primed"])
+                        self.assertEqual(result["playback_source"], "ffmpeg_opus_fallback")
+                        self.assertEqual(bool(result.get("progressive_stream")), index == 1)
+                    self.assertEqual(len(edge_requests), 1)
+                    send.assert_called_once()
+                    self.assertEqual(probe.metrics["edge_stream_completed"], 1)
+                    self.assertEqual(probe.metrics["gtts_stream_completed"], 1)
+                    self.assertEqual(probe.metrics.get("edge_stream_failures", 0), 0)
+                    self.assertEqual(probe.metrics.get("gtts_stream_failures", 0), 0)
+                    self.assertEqual(probe._chatbot_temporary_voice_channels, {1: 20})
+                    probe.db.set_tts_voice_channel_id.assert_not_awaited()
+                    probe.channel.connect.assert_awaited_once()
+                    self.assertEqual(voice.move_calls, [])
+                finally:
+                    state = probe._get_state(1)
+                    if state.worker_task:
+                        state.worker_task.cancel()
+                        await asyncio.gather(state.worker_task, return_exceptions=True)
+                    await voice.finish_thread()
+                    probe._shutdown_shared_synthesis()
+                    background = list(probe._get_tts_background_tasks())
+                    for task in background:
+                        task.cancel()
+                    await asyncio.gather(*background, return_exceptions=True)
+                    executor = getattr(probe, "_tts_gtts_executor", None)
+                    if executor:
+                        await asyncio.to_thread(executor.shutdown, wait=True)
+
     async def test_missing_native_opus_reproduces_old_pcm_failure_and_actual_fallback_playback(self):
         with tempfile.TemporaryDirectory() as directory:
             wav_path, mp3_path = _make_codec_fixture(directory)
