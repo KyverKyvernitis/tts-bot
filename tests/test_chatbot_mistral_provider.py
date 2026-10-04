@@ -23,10 +23,22 @@ async def test_mistral_client_uses_official_chat_endpoint_and_disables_reasoning
     assert url == "https://api.mistral.ai/v1/chat/completions"
     assert payload["model"] == C.MISTRAL_MODELS[0]
     assert payload["reasoning_effort"] == "none"
-    assert payload["prompt_cache_key"].startswith("chatbot-system-")
+    assert payload["prompt_cache_key"].startswith("tts-bot-chatbot-")
     assert "prefixo estável" not in payload["prompt_cache_key"]
-    assert payload["max_tokens"] == C.MIN_RESPONSE_TOKENS
+    assert payload["max_tokens"] == C.TINY_RESPONSE_TOKENS
     assert "include_reasoning" not in payload
+
+
+@pytest.mark.asyncio
+async def test_mistral_cache_key_does_not_change_with_dynamic_system_suffix():
+    first = _Session(_Response(_groq("ok", finish="stop")))
+    second = _Session(_Response(_groq("ok", finish="stop")))
+    for session, system in ((first, "base\nestado=1"), (second, "base\nestado=2")):
+        await P._MistralClient(session, "offline-key").chat(
+            system=system, messages=[P.ChatMessage("user", "oi")], temperature=.8,
+            model=C.MISTRAL_MODELS[0], timeout_seconds=5,
+        )
+    assert first.requests[0][1]["json"]["prompt_cache_key"] == second.requests[0][1]["json"]["prompt_cache_key"]
 
 
 @pytest.mark.asyncio
@@ -71,3 +83,16 @@ async def test_mistral_reserve_runs_before_cloudflare_neuron_reserve(monkeypatch
     assert await router.chat(system="s", messages=[P.ChatMessage("user", "oi")]) == "mistral ok"
     assert len(session.requests) == 1
     assert session.requests[0][0] == "https://api.mistral.ai/v1/chat/completions"
+
+
+@pytest.mark.asyncio
+async def test_optional_work_never_uses_mistral_or_cloudflare_reserves():
+    session = _Session(_Response(_groq("should not run", finish="stop")))
+    router = P.ProviderRouter(
+        session, mistral_key="m", mistral_enabled=True,
+        cloudflare_key="c", cloudflare_account_id="a" * 32, cloudflare_enabled=True,
+    )
+    with pytest.raises(P.AllProvidersExhausted):
+        await router.chat(system="s", messages=[P.ChatMessage("user", "oi")],
+                          allow_protected_reserves=False)
+    assert session.requests == []

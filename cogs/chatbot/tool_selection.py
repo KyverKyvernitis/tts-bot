@@ -140,10 +140,16 @@ class ToolSelection:
 
     def availability_state(self):
         snapshot = self.registry.snapshot()
+        selected = set(self.selected_names)
+        # O índice estável já anuncia o catálogo inteiro. Repetir todos os
+        # indisponíveis e todos os enums em cada rodada só infla o contexto.
+        # Aqui entram apenas contratos efetivamente carregados/consultados.
         state = {"loaded": list(self.selected_names),
                  "unavailable": {spec.name: spec.why[:180] or "Indisponível neste turno."
-                                 for spec in snapshot if not spec.available}}
+                                 for spec in snapshot if not spec.available and spec.name in selected}}
         for spec in snapshot:
+            if spec.name not in selected:
+                continue
             if getattr(spec, "capabilities", ()):
                 state[spec.name + "_actions"] = (list(spec.parameters.get("properties", {})
                                                     .get("action", {}).get("enum", ()))

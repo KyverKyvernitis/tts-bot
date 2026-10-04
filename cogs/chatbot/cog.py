@@ -859,12 +859,18 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         """Captura o relatório próprio da chamada, inclusive fallback e reparo."""
         report = {}
         supported = False
+        parameters = {}
+        accepts_kwargs = False
         try:
             parameters = inspect.signature(self._router.chat).parameters
-            supported = "request_report" in parameters or any(
-                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+            accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+            supported = "request_report" in parameters or accepts_kwargs
         except (TypeError, ValueError):
             pass
+        # Opção nova do router não deve quebrar adaptadores/mocks antigos.
+        if "allow_protected_reserves" in options and not (
+                "allow_protected_reserves" in parameters or accepts_kwargs):
+            options.pop("allow_protected_reserves", None)
         if supported:
             options["request_report"] = report
         usage = _TURN_USAGE.get()
@@ -933,10 +939,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 state["reason"] = str(exc)
                 return ChatReply(""), None, state
         voice_state = build_voice_snapshot(self.bot, message.guild, message.author)
-        from .tool_runtime import conversation_references, safe_provider_state
+        from .tool_runtime import conversation_references
         me = getattr(message.guild, "me", None) or getattr(self.bot, "user", None)
         actual_state = {
-            "providers": safe_provider_state(self._router),
             "guild_id": int(message.guild.id), "channel_id": int(message.channel.id),
             "user_id": int(message.author.id),
             "bot_id": int(getattr(getattr(self.bot, "user", None), "id", 0) or 0),
@@ -1003,6 +1008,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         calls_used = 0
         results_by_id: dict[str, tuple[str, str, dict]] = {}
         effect_results: dict[tuple[str, str], dict] = {}
+        # Leituras idênticas na mesma versão do estado não precisam bater de
+        # novo em Discord/Mongo/APIs. Qualquer efeito confirmado/incerto limpa
+        # esse cache porque pode ter alterado o que uma leitura retornaria.
+        read_results: dict[tuple[str, str], tuple[str, dict]] = {}
         latest = ChatReply("")
         can_finalize = False
         force_final = False
@@ -1043,7 +1052,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             actual_state["voice_channel_id"] = voice_state["bot"]["channel_id"]
             actual_state["action_draft"] = getattr(runtime_context, "action_draft", None)
             actual_state["action_draft_error"] = getattr(runtime_context, "action_draft_error", "")
-            actual_state["providers"] = safe_provider_state(self._router)
             context = getattr(runtime_context, "action_context", action_context)
             actual_state["references"] = conversation_references(self, message, context)
             actual_state["tools"] = registry.selection.availability_state()
@@ -1067,8 +1075,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             # O catálogo/schema contém as regras uma única vez. O estado só
             # acrescenta identidades, acesso e preferências reais deste turno.
             current += ("\nRespeite o idioma de preferences.language quando definido. "
-                        "providers retrata circuitos locais, sem testar a conexão: available indica "
-                        "elegibilidade, não garantia de que a API responderá. Não invente cotas restantes. "
                         "Use o estado confirmado já fornecido; consulte só dados ausentes ou que precisam de atualização. "
                         "Agrupe consultas de leitura independentes na mesma rodada.")
             remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
@@ -1089,9 +1095,11 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                             "confirmados; não faça novas chamadas de ferramentas neste fechamento.")
             try:
                 latest = await self._call_chat(
-                    system=capability_index + "\n\n" + system + "\n\n" + current,
+                    # Prefixo estável primeiro para maximizar cache implícito.
+                    system=system + "\n\n" + capability_index + "\n\n" + current,
                     messages=messages, temperature=temperature, tool_specs=registry.selection.get_specs(),
                     text_provider_order=config.text_provider_order, budget_seconds=request_budget, **final_options,
+                    allow_protected_reserves=router_options.get("allow_protected_reserves", True),
                     **repair_options,
                 )
             except (ProviderError, asyncio.TimeoutError) as exc:
@@ -1123,11 +1131,17 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             has_proposal = False
             batch_read_success = bool(calls)
             batch_failed = False
+            batch_only_reused_reads = bool(calls)
             answered_calls = 0
             for call in calls:
+                turn_usage = _TURN_USAGE.get()
+                if turn_usage is not None:
+                    turn_usage.record_tool_call()
                 registry.selection.mark_used((call.name,))
                 spec = registry.get(call.name)
                 is_effect = bool(spec is not None and spec.permission != "read") or call.name == "propor_acao"
+                reused_read = False
+                reused_from = ""
                 if calls_used >= C.MAX_TOOL_CALLS:
                     result = {"ok": False, "status": "limit_reached", "error": "Limite de ferramentas deste turno atingido."}
                 else:
@@ -1140,6 +1154,12 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                             "ok": False, "status": "invalid_call", "error": "A identificação da ferramenta já foi usada."}
                     elif is_effect and fingerprint in effect_results:
                         result = effect_results[fingerprint]
+                    elif not is_effect and fingerprint in read_results:
+                        reused_from, result = read_results[fingerprint]
+                        reused_read = True
+                        results_by_id[call.id] = (*fingerprint, result)
+                        if turn_usage is not None:
+                            turn_usage.record_tool_call(reused_read=True, seen=False)
                     else:
                         tool_remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
                         if not is_effect:
@@ -1148,6 +1168,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                             result = {"ok": False, "status": "deadline", "error": "O prazo deste turno foi atingido."}
                         else:
                             try:
+                                if turn_usage is not None:
+                                    turn_usage.record_tool_call(executed=True, seen=False)
                                 caller = asyncio.current_task()
                                 cancellation_count = getattr(caller, "cancelling", None)
                                 cancelling = cancellation_count() if callable(cancellation_count) else 0
@@ -1162,6 +1184,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                                       "error": "Não consegui confirmar o resultado desta ferramenta."}
                         if is_effect:
                             effect_results[fingerprint] = result
+                        elif result.get("ok") is True:
+                            read_results[fingerprint] = (str(call.id or "")[:120], result)
                         results_by_id[call.id] = (*fingerprint, result)
                 status = result.get("status")
                 if call.name == "set_conversation_preferences" and result.get("ok"):
@@ -1171,6 +1195,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                             saved["mode"], str(saved.get("voice") or ""), str(saved.get("language") or ""),
                         )
                 succeeded = result.get("ok") is True
+                batch_only_reused_reads = batch_only_reused_reads and reused_read
+                if is_effect and call.name != "propor_acao" and (succeeded or status == "uncertain"):
+                    read_results.clear()
                 if call.name == "preparar_resposta" and succeeded:
                     prepared_in_batch = True
                 elif not is_effect:
@@ -1208,7 +1235,12 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                                        or result.get("reason") or "Não consegui preparar essa ação.")
                 # Resultados extensos não podem apagar o comprovante de um
                 # envio confirmado, nem copiar detalhes privados numa prévia.
-                serialized = json.dumps(compact_tool_result(result), ensure_ascii=False,
+                serialized_result = (
+                    {"ok": True, "status": "reused_read", "source_tool_call_id": reused_from,
+                     "detail": "Resultado idêntico já está no histórico desta rodada; não repetir a consulta."}
+                    if reused_read else compact_tool_result(result)
+                )
+                serialized = json.dumps(serialized_result, ensure_ascii=False,
                                         allow_nan=False, separators=(",", ":"))
                 messages.append(ChatMessage("tool", serialized, tool_call_id=call.id, name=call.name))
                 answered_calls += 1
@@ -1233,6 +1265,13 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 continue
             if state["uncertain"] or state["action_failed"] or state.get("deadline") or state["partial"] or has_proposal:
                 break
+            if batch_only_reused_reads:
+                # O modelo não obteve nenhuma informação nova. Dar outra
+                # rodada com ferramentas só permitiria repetir o mesmo loop;
+                # fechar usando o resultado que já está no histórico.
+                state["duplicate_read_loop_short_circuited"] = True
+                can_finalize = force_final = True
+                continue
             # Termine a conversão depois do lote inteiro: chamadas independentes
             # já recebidas continuam executando, mas não pedimos outro texto ao modelo.
             if state["response_complete"]:
@@ -1956,7 +1995,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     )
                 except Exception as exc:
                     log.warning("chatbot: capacidades de ações indisponíveis (%s)", type(exc).__name__)
-            router_options = {}
+            # Participação espontânea nunca consome as reservas independentes
+            # Mistral/Cloudflare. Menções/replies continuam com a cadeia total.
+            router_options = {"allow_protected_reserves": not bool(behavior_hint)}
             if action_context is not None and action_context.actions:
                 router_options["actions"] = action_context.actions
                 router_options["target_refs"] = tuple(action_context.targets)

@@ -35,12 +35,17 @@ class TurnUsage:
     successful_usage: dict = field(default_factory=dict)
     wasted_resources: dict = field(default_factory=dict)
     successful_resources: dict = field(default_factory=dict)
+    provider_usage: dict = field(default_factory=dict)
+    model_usage: dict = field(default_factory=dict)
     context_sent: dict = field(default_factory=dict)
     context_peak: dict = field(default_factory=dict)
     context_calls: int = 0
     repair_attempts: int = 0
     fallback_attempts: int = 0
     failed_generation_attempts: int = 0
+    tool_calls_seen: int = 0
+    tool_calls_executed: int = 0
+    tool_reads_reused: int = 0
     complete: bool = True
     requests_known: bool = True
 
@@ -58,6 +63,15 @@ class TurnUsage:
         for name, value in clean.items():
             self.context_sent[name] = self.context_sent.get(name, 0) + value
             self.context_peak[name] = max(self.context_peak.get(name, 0), value)
+
+    def record_tool_call(self, *, executed: bool = False, reused_read: bool = False, seen: bool = True):
+        """Telemetria local: não altera limites nem semântica das ferramentas."""
+        if seen:
+            self.tool_calls_seen += 1
+        if executed:
+            self.tool_calls_executed += 1
+        if reused_read:
+            self.tool_reads_reused += 1
 
     @staticmethod
     def _sum_usage(target, values):
@@ -110,15 +124,33 @@ class TurnUsage:
             for attempt in attempts_list:
                 if not isinstance(attempt, dict):
                     continue
+                provider = attempt.get("provider") if isinstance(attempt.get("provider"), str) else ""
+                model = attempt.get("model") if isinstance(attempt.get("model"), str) else ""
+                attempt_usage = attempt.get("usage") if isinstance(attempt.get("usage"), dict) else {}
+                if provider:
+                    bucket = self.provider_usage.setdefault(provider, {"attempts": 0, "successes": 0, "failed": 0,
+                                                                       "usage": {}, "resources": {}})
+                    bucket["attempts"] += 1
+                    bucket["successes" if attempt.get("kind") == "success" else "failed"] += 1
+                    self._sum_usage(bucket["usage"], attempt_usage)
+                    self._sum_resources(bucket["resources"], attempt_usage)
+                if provider and model:
+                    key = f"{provider}/{model}"
+                    bucket = self.model_usage.setdefault(key, {"attempts": 0, "successes": 0, "failed": 0,
+                                                                "usage": {}, "resources": {}})
+                    bucket["attempts"] += 1
+                    bucket["successes" if attempt.get("kind") == "success" else "failed"] += 1
+                    self._sum_usage(bucket["usage"], attempt_usage)
+                    self._sum_resources(bucket["resources"], attempt_usage)
                 if attempt.get("repair") is True:
                     self.repair_attempts += 1
                 if attempt.get("kind") != "success":
                     self.failed_generation_attempts += 1
-                    self._sum_usage(self.wasted_usage, attempt.get("usage"))
-                    self._sum_resources(self.wasted_resources, attempt.get("usage"))
+                    self._sum_usage(self.wasted_usage, attempt_usage)
+                    self._sum_resources(self.wasted_resources, attempt_usage)
                 else:
-                    self._sum_usage(self.successful_usage, attempt.get("usage"))
-                    self._sum_resources(self.successful_resources, attempt.get("usage"))
+                    self._sum_usage(self.successful_usage, attempt_usage)
+                    self._sum_resources(self.successful_resources, attempt_usage)
         coverage = report.get("usage_field_attempts")
         if isinstance(coverage, dict):
             for name in USAGE_FIELDS:
@@ -148,6 +180,10 @@ class TurnUsage:
             result["wasted_resources"] = {name: round(value, 6) for name, value in self.wasted_resources.items()}
         if self.successful_resources:
             result["successful_resources"] = {name: round(value, 6) for name, value in self.successful_resources.items()}
+        if self.provider_usage:
+            result["providers"] = self._usage_breakdown(self.provider_usage)
+        if self.model_usage:
+            result["models"] = self._usage_breakdown(self.model_usage)
         if self.context_calls:
             result["context"] = {"calls": self.context_calls, "sent": dict(self.context_sent),
                                  "peak": dict(self.context_peak)}
@@ -159,10 +195,33 @@ class TurnUsage:
         reasoning_tokens = self.usage.get("reasoning_tokens")
         if type(output_tokens) is int and output_tokens > 0 and type(reasoning_tokens) is int:
             result["reasoning_ratio"] = round(reasoning_tokens / output_tokens, 4)
+        total_tokens = self.usage.get("total_tokens")
+        wasted_tokens = self.wasted_usage.get("total_tokens")
+        if type(total_tokens) is int and total_tokens > 0 and type(wasted_tokens) is int:
+            result["wasted_token_ratio"] = round(wasted_tokens / total_tokens, 4)
+        neurons = self.resources.get("neurons")
+        wasted_neurons = self.wasted_resources.get("neurons")
+        if isinstance(neurons, (int, float)) and neurons > 0 and isinstance(wasted_neurons, (int, float)):
+            result["wasted_neuron_ratio"] = round(wasted_neurons / neurons, 4)
+        if self.tool_calls_seen:
+            result["tools"] = {"seen": self.tool_calls_seen, "executed": self.tool_calls_executed,
+                               "reused_reads": self.tool_reads_reused}
         if self.requests_known or self.request_count:
             result["request_count"] = self.request_count
         if self.discovery_request_count:
             result["discovery_request_count"] = self.discovery_request_count
+        return result
+
+    @staticmethod
+    def _usage_breakdown(source):
+        result = {}
+        for key, bucket in source.items():
+            item = {name: bucket[name] for name in ("attempts", "successes", "failed")}
+            if bucket.get("usage"):
+                item["usage"] = dict(bucket["usage"])
+            if bucket.get("resources"):
+                item["resources"] = {name: round(value, 6) for name, value in bucket["resources"].items()}
+            result[key] = item
         return result
 
 
@@ -209,20 +268,10 @@ def compact_operational_state(state):
     if isinstance(draft, dict):
         for name in ("target_id", "draft_id", "revision", "expires_at"):
             draft.pop(name, None)
-    providers = result.get("providers")
-    if isinstance(providers, dict):
-        # Métricas ficam no painel/log; números do pedido anterior não ajudam
-        # a decidir uma ação nem representam uma cota remota restante.
-        providers.pop("last_request", None)
-        records = []
-        for item in providers.get("availability", ()):
-            if not isinstance(item, dict) or item.get("configured") is False:
-                continue
-            compact = {key: item[key] for key in ("provider", "model", "available", "modes") if key in item}
-            if item.get("available") is not True:
-                compact.update({key: item[key] for key in ("cause_kind", "cooldown_seconds", "tools_support") if item.get(key)})
-            records.append(compact)
-        providers["availability"] = records
+    # Provider/model/cota são decisões do host. Expor esse diagnóstico em toda
+    # geração só repete tokens e pode induzir o modelo a opinar sobre um
+    # fallback que ele não controla. O painel/log preserva o snapshot completo.
+    result.pop("providers", None)
     return result
 
 
@@ -241,9 +290,26 @@ def spontaneous_quota_factor(diagnostics):
         groups.setdefault(item.get("provider"), []).append(item)
     if not groups:
         return 1.0
+    # Espontâneo usa apenas os provedores primários. Reservas independentes
+    # (Mistral/Cloudflare) ficam guardadas para menções e replies; portanto não
+    # sortear uma resposta que o router já sabe que não pode atender.
+    primary = [item for provider in ("groq", "gemini") for item in groups.get(provider, ())]
+    if not primary and any(name in groups for name in ("mistral", "cloudflare")):
+        # Reservas protegidas nunca justificam iniciar fala espontânea. Sem um
+        # primário configurado, nem vale sortear/gerar um turno que o router
+        # recusará por política.
+        return 0.0
+    if primary and not any(item.get("available") is True for item in primary):
+        return 0.0
     known = [item for group in groups.values() for item in group if type(item.get("available")) is bool]
     if known and len(known) == sum(map(len, groups.values())) and not any(item["available"] for item in known):
         return 0.0
+    primary_groups = {name: groups[name] for name in ("groq", "gemini") if name in groups}
     limited = sum(all(item.get("available") is False and item.get("cause_kind") == "rate_limit"
-                      for item in group) for group in groups.values())
-    return 0.25 if limited and limited * 2 >= len(groups) else 1.0
+                      for item in group) for group in primary_groups.values())
+    if limited and limited * 2 >= max(1, len(primary_groups)):
+        return 0.25
+    if primary_groups and any(not any(item.get("available") is True for item in group)
+                              for group in primary_groups.values()):
+        return 0.5
+    return 1.0

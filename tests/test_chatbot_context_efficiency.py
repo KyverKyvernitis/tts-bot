@@ -33,6 +33,7 @@ def test_compaction_keeps_authority_in_host_and_live_voice_preferences_in_prompt
         "voice_connected": True, "voice_channel_id": 5,
         "voice_state": {"author": {"channel_id": "5"}, "bot": {"connected": True}},
         "preferences": {"mode": "audio", "voice": "pt-BR-FranciscaNeural", "language": "pt-BR"},
+        "providers": {"availability": [{"provider": "groq", "model": "x", "available": True}]},
         "references": {"members": {"m1": {"id": "123456789012345678", "name": "Flora"}}},
         "action_draft": {"target_id": "123456789012345678", "target_ref": "m1", "action": "timeout_member",
                          "missing_fields": ["duration_seconds"], "draft_id": "internal-draft", "revision": 2},
@@ -46,6 +47,7 @@ def test_compaction_keeps_authority_in_host_and_live_voice_preferences_in_prompt
     assert reduced["action_draft"] == {"target_ref": "m1", "action": "timeout_member",
                                       "missing_fields": ["duration_seconds"]}
     assert "guild_id" not in reduced and "voice_connected" not in reduced
+    assert "providers" not in reduced
 
 
 def test_measured_cache_is_subset_and_missing_attempt_marks_turn_partial():
@@ -72,9 +74,15 @@ def test_turn_telemetry_separates_wasted_usage_neurons_and_context_without_conte
                             "cached_tokens": 150, "neurons": 1.25},
                   "usage_field_attempts": {"input_tokens": 2, "output_tokens": 2, "total_tokens": 2},
                   "attempts": [
-                      {"kind": "rate_limit", "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110, "neurons": .4}},
-                      {"kind": "success", "usage": {"input_tokens": 200, "output_tokens": 30, "total_tokens": 230, "neurons": .85}},
+                      {"provider": "cloudflare", "model": "qwen", "kind": "rate_limit",
+                       "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110, "neurons": .4}},
+                      {"provider": "mistral", "model": "small", "kind": "success",
+                       "usage": {"input_tokens": 200, "output_tokens": 30, "total_tokens": 230, "neurons": .85}},
                   ]})
+    usage.record_tool_call()
+    usage.record_tool_call(executed=True, seen=False)
+    usage.record_tool_call()
+    usage.record_tool_call(reused_read=True, seen=False)
     result = usage.result()
     assert result["resources"]["neurons"] == 1.25
     assert result["wasted_usage"]["total_tokens"] == 110
@@ -84,14 +92,27 @@ def test_turn_telemetry_separates_wasted_usage_neurons_and_context_without_conte
     assert result["fallback_attempts"] == 1
     assert result["cache_hit_ratio"] == .5
     assert result["context"]["peak"]["history_chars"] == 800
+    assert result["wasted_token_ratio"] == pytest.approx(110 / 340, abs=1e-4)
+    assert result["wasted_neuron_ratio"] == .32
+    assert result["providers"]["cloudflare"]["failed"] == 1
+    assert result["models"]["mistral/small"]["successes"] == 1
+    assert result["tools"] == {"seen": 2, "executed": 1, "reused_reads": 1}
 
 
-@pytest.mark.parametrize("blocked,eligible,expected", [(2, 0, 0), (1, 1, .25), (0, 2, 1)])
-def test_spontaneous_participation_tracks_known_quota_pressure(blocked, eligible, expected):
-    records = [{"provider": f"provider-{index}", "configured": True, "modes": ["text"],
-                "available": False, "cause_kind": "rate_limit"} for index in range(blocked)]
-    records += [{"provider": f"eligible-{index}", "configured": True, "modes": ["text"],
-                 "available": True} for index in range(eligible)]
+@pytest.mark.parametrize("records,expected", [
+    ([{"provider": "groq", "configured": True, "modes": ["text"], "available": False, "cause_kind": "rate_limit"},
+      {"provider": "gemini", "configured": True, "modes": ["text"], "available": False, "cause_kind": "rate_limit"},
+      {"provider": "mistral", "configured": True, "modes": ["text"], "available": True}], 0),
+    ([{"provider": "groq", "configured": True, "modes": ["text"], "available": False, "cause_kind": "rate_limit"},
+      {"provider": "gemini", "configured": True, "modes": ["text"], "available": True}], .25),
+    ([{"provider": "groq", "configured": True, "modes": ["text"], "available": False, "cause_kind": "network"},
+      {"provider": "gemini", "configured": True, "modes": ["text"], "available": True}], .5),
+    ([{"provider": "groq", "configured": True, "modes": ["text"], "available": True},
+      {"provider": "gemini", "configured": True, "modes": ["text"], "available": True}], 1),
+    ([{"provider": "mistral", "configured": True, "modes": ["text"], "available": True},
+      {"provider": "cloudflare", "configured": True, "modes": ["text"], "available": True}], 0),
+])
+def test_spontaneous_participation_tracks_primary_quota_pressure(records, expected):
     assert spontaneous_quota_factor({"availability": records}) == expected
 
 

@@ -83,6 +83,18 @@ def test_qwen_daily_quota_wait_is_shown_for_the_fixed_model():
     assert "PRIVATE" not in rendered and "arbitrary" not in rendered
 
 
+def test_qwen_local_budget_separates_measured_and_uncertain_without_secrets():
+    rendered = _render({
+        "configured": {"cloudflare": True}, "circuits": {},
+        "cloudflare_setup": {"budget": {"limit_neurons": 10000, "measured_neurons": 12.5,
+                                          "uncertain_reserved_neurons": 1.25,
+                                          "api_token": "PRIVATE"}},
+    })
+    assert "Reserva local Cloudflare:** 12.500 + 1.250 reservados/incertos / 10000 neurons" in rendered
+    assert "0.1% contabilizado neste processo" in rendered
+    assert "PRIVATE" not in rendered
+
+
 def test_existing_image_credentials_do_not_imply_chat_activation():
     rendered = _render({
         "configured": {"cloudflare": False}, "circuits": {},
@@ -103,11 +115,18 @@ def test_whole_turn_usage_includes_cache_and_reasoning_without_double_counting()
                   "cached_tokens": 2300, "reasoning_tokens": 25,
                   "prompt": "PRIVATE PROMPT"},
         "request_count": 3, "usage_complete": True,
+        "wasted_usage": {"total_tokens": 315}, "wasted_token_ratio": .1,
+        "providers": {"groq": {"usage": {"total_tokens": 2000}},
+                      "mistral": {"usage": {"total_tokens": 1150}}},
+        "tools": {"seen": 3, "executed": 2, "reused_reads": 1},
     })
     assert "Tokens do último turno medido:** entrada 3000, saída 150" in rendered
     assert "cache 2300 (incluído na entrada)" in rendered
     assert "raciocínio 25 (incluído na saída)" in rendered
     assert "3 tentativas" in rendered
+    assert "descartados 315 (10.0%)" in rendered
+    assert "Uso por provedor:** Groq 2000, Mistral 1150 tokens" in rendered
+    assert "Ferramentas no último turno:** 2 execuções; 1 leitura(s) repetida(s) reaproveitada(s)" in rendered
     assert "contagem parcial" not in rendered and "última tentativa" not in rendered
     assert "PRIVATE" not in rendered
 

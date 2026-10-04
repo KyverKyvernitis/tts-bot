@@ -1,4 +1,4 @@
-# Tokens e reserva Qwen gratuita
+# Tokens e reservas de IA econômicas
 
 O projeto mantém Groq como prioridade, Gemini como alternativa e prepara uma terceira reserva de texto: Qwen3-30B-A3B pela Cloudflare Workers AI. O modelo é fixo, `@cf/qwen/qwen3-30b-a3b-fp8`; esta integração não escolhe modelos pagos nem contrata planos. A reserva começa desativada, mesmo se já houver credenciais Cloudflare para imagens, e exige `CHATBOT_CLOUDFLARE_ENABLED=true`. A preferência já salva entre Groq e Gemini continua válida. Imagens seguem a cadeia de visão existente, pois esse Qwen aceita texto.
 
@@ -82,7 +82,7 @@ MISTRAL_API_KEY=<sua chave da Mistral>
 CHATBOT_MISTRAL_ENABLED=true
 ```
 
-O cliente envia `reasoning_effort=none` para o Mistral Small 4 e um `prompt_cache_key` derivado por hash apenas do prefixo de sistema estável. Ferramentas continuam usando function calling nativo e o circuito de falhas/fallback é o mesmo dos demais provedores. A chave nunca é mostrada no painel nem entra no estado passado ao modelo.
+O cliente envia `reasoning_effort=none` para o Mistral Small 4 e um `prompt_cache_key` derivado por hash apenas das instruções estáveis, sem misturar estado dinâmico da conversa. Ferramentas continuam usando function calling nativo e o circuito de falhas/fallback é o mesmo dos demais provedores. A chave nunca é mostrada no painel nem entra no estado passado ao modelo.
 
 ## Economia adicional desta rodada
 
@@ -92,3 +92,18 @@ O cliente envia `reasoning_effort=none` para o Mistral Small 4 e um `prompt_cach
 - O catálogo inicial de ferramentas caiu para no máximo 5 contratos e cerca de 4.800 caracteres; `carregar_ferramentas` continua disponível para buscar contratos adicionais.
 - Recuperação automática de memória/conhecimento e resultados extensos de ferramentas usam limites menores; recibos de efeitos confirmados continuam preservados para impedir replay.
 - A telemetria do turno agora separa uso bem-sucedido de tokens gastos em tentativas descartadas, mede cache/raciocínio, registra neurons reportados pela Cloudflare e mede apenas tamanhos de contexto, sem persistir o conteúdo do prompt.
+
+
+## Segunda rodada de eficiência
+
+A parte estável do prompt de sistema agora fica antes do índice de capacidades e de qualquer estado dinâmico. O estado de disponibilidade dos provedores não é repetido para o modelo: fallback, circuit breaker, quota e reservas são decisões do host e continuam disponíveis no painel e nos logs. Isso aumenta a chance de reutilizar prefixos idênticos sem retirar do modelo informação necessária para responder ao usuário.
+
+As reservas Mistral e Cloudflare são **protegidas para turnos solicitados**. Participação espontânea usa apenas Groq/Gemini; se não houver provedor primário utilizável, a fala espontânea nem é sorteada. Menções, replies e comandos continuam podendo cair para Mistral e depois Cloudflare.
+
+Dentro de uma mesma rodada agentic, leituras idênticas são deduplicadas pelo host. Se o modelo repetir exatamente a mesma ferramenta de leitura com os mesmos argumentos, o resultado anterior é reutilizado e a consulta externa não é executada de novo. Se uma rodada inteira consistir apenas nessas repetições, o host encerra o loop de ferramentas e pede o fechamento sem ferramentas. Qualquer efeito confirmado ou de resultado incerto invalida esse cache de leitura para não reutilizar dados potencialmente obsoletos.
+
+Os tetos normais de saída são adaptativos: mensagens mínimas reservam menos tokens, pedidos maiores crescem por faixas e ações ainda têm espaço superior. O teto é um limite, não uma meta de comprimento. Ferramentas recebem orçamento próprio para não truncar chamadas estruturadas.
+
+A contabilidade da Cloudflare separa `measured_neurons` reportados pela API de `uncertain_reserved_neurons` de tentativas sem medição conclusiva. Uma requisição bem-sucedida com consumo reportado substitui a reserva estimada pelo valor real; falhas sem telemetria permanecem conservadoramente contabilizadas até a janela local expirar. O painel também expõe tokens descartados, uso por provedor e reutilização de leituras, para que otimizações futuras sejam baseadas em desperdício observado.
+
+Fontes adicionais: [Mistral Chat Completions](https://docs.mistral.ai/api/endpoint/chat), [Mistral reasoning](https://docs.mistral.ai/capabilities/reasoning/), [Mistral Small](https://docs.mistral.ai/getting-started/models/models_overview/).

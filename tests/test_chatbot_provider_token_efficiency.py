@@ -179,7 +179,7 @@ async def test_same_prefix_and_native_history_survive_economical_reasoning(chain
     payload = session.requests[0][1]["json"]
     assert result.text == "done" and payload["messages"][0]["content"] == "exact stable prefix"
     assert payload["messages"][1:] == [message.to_openai_payload() for message in history]
-    assert payload["tool_choice"] == "none" and payload["max_completion_tokens"] == C.MAX_RESPONSE_TOKENS
+    assert payload["tool_choice"] == "none" and payload["max_completion_tokens"] == C.SHORT_RESPONSE_TOKENS
 
 
 
@@ -206,7 +206,7 @@ async def test_short_text_prefers_smaller_primary_models_but_tools_keep_strong_o
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["groq", "gemini", "cloudflare"])
-@pytest.mark.parametrize("stage,expected", [("text", C.MIN_RESPONSE_TOKENS), ("read", C.MAX_TOOL_RESPONSE_TOKENS), ("actions", C.MAX_ACTION_RESPONSE_TOKENS), ("closing", C.MAX_RESPONSE_TOKENS)])
+@pytest.mark.parametrize("stage,expected", [("text", C.TINY_RESPONSE_TOKENS), ("read", C.MAX_TOOL_RESPONSE_TOKENS), ("actions", C.MAX_ACTION_RESPONSE_TOKENS), ("closing", C.SHORT_RESPONSE_TOKENS)])
 async def test_output_budget_follows_generation_stage_without_removing_declarations(provider, stage, expected):
     spec = ToolSpec("consultar_ferramentas", "Descobre ferramentas.",
                     {"type": "object", "properties": {}, "additionalProperties": False})
@@ -243,12 +243,12 @@ async def test_vision_and_final_response_budgets_remain_unchanged(provider, stag
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["groq", "gemini", "cloudflare"])
-async def test_legacy_action_declarations_retain_2000_token_budget(provider):
+async def test_legacy_action_declarations_use_bounded_action_budget(provider):
     session = _Session(_Response((_gemini if provider == "gemini" else _groq)("oi")))
     await provider_client(provider, session).chat(system="s", messages=[], temperature=.8,
         model=C.CLOUDFLARE_MODELS[0] if provider == "cloudflare" else "test-model", timeout_seconds=5,
         actions=("send_audio", "join_voice"), target_refs=("autor",))
-    assert output_cap(provider, session.requests[0][1]["json"]) == 2000
+    assert output_cap(provider, session.requests[0][1]["json"]) == C.MAX_ACTION_RESPONSE_TOKENS
 
 
 @pytest.mark.asyncio

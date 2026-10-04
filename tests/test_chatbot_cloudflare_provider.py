@@ -91,7 +91,7 @@ async def test_final_closing_keeps_declarations_and_disables_tools():
     result = await chat(P._CloudflareClient(session, KEY, ACCOUNT), tool_specs=(read_spec(),), allow_tool_calls=False)
     assert result.text == "pronto"
     payload = session.requests[0][1]["json"]
-    assert payload["tool_choice"] == "none" and payload["max_tokens"] == C.MAX_RESPONSE_TOKENS
+    assert payload["tool_choice"] == "none" and payload["max_tokens"] == C.SHORT_RESPONSE_TOKENS
     assert payload["tools"][0]["function"]["name"] == "consulta"
 
 
@@ -193,6 +193,10 @@ async def test_reported_neurons_override_local_token_estimate_when_available():
     client = P._CloudflareClient(_Session(_Response(data)), KEY, ACCOUNT)
     assert await chat(client) == "oi"
     assert client._budget_spent == pytest.approx(0.75)
+    state = client.budget_diagnostics()
+    assert state["measured_neurons"] == pytest.approx(.75)
+    assert state["uncertain_reserved_neurons"] == 0
+    assert state["estimated"] is False
 
 
 @pytest.mark.asyncio
@@ -208,7 +212,8 @@ async def test_concurrent_reservations_do_not_both_fit_the_last_budget(monkeypat
     response.content = Body()
     session = _Session(response)
     client = P._CloudflareClient(session, KEY, ACCOUNT)
-    monkeypatch.setattr(C, "CLOUDFLARE_DAILY_NEURON_BUDGET", 20)
+    # Com o teto curto de 160 tokens, uma reserva cabe sozinha mas duas não.
+    monkeypatch.setattr(C, "CLOUDFLARE_DAILY_NEURON_BUDGET", 10)
     first = asyncio.create_task(chat(client))
     await started.wait()
     with pytest.raises(P.RateLimitError):

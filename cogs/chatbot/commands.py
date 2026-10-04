@@ -234,6 +234,22 @@ class ChatbotCommandsMixin:
                     lines.append(f"{model}: {reason}{suffix}.")
                     shown += 1
 
+        cloudflare_setup = data.get("cloudflare_setup")
+        if isinstance(cloudflare_setup, dict):
+            budget = cloudflare_setup.get("budget")
+            if isinstance(budget, dict):
+                limit = budget.get("limit_neurons")
+                measured = budget.get("measured_neurons")
+                uncertain = budget.get("uncertain_reserved_neurons")
+                if all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                       and math.isfinite(value) and value >= 0 for value in (limit, measured, uncertain)) and limit > 0:
+                    used = min(float(limit), float(measured) + float(uncertain))
+                    suffix = f" + {float(uncertain):.3f} reservados/incertos" if uncertain else ""
+                    lines.append(
+                        f"**Reserva local Cloudflare:** {float(measured):.3f}{suffix} / {float(limit):.0f} neurons "
+                        f"({used / float(limit) * 100:.1f}% contabilizado neste processo)."
+                    )
+
         # Somente números reportados: não mostramos prompt, respostas, IDs ou
         # credenciais, e cache/raciocínio são parcelas já contidas nos totais.
         turn = getattr(self, "_last_turn_usage", None)
@@ -255,10 +271,32 @@ class ChatbotCommandsMixin:
                     parts.append(f"{requests} tentativas")
                 if turn.get("usage_complete") is not True:
                     parts.append("contagem parcial")
+                wasted = turn.get("wasted_usage")
+                if isinstance(wasted, dict) and token_number(wasted.get("total_tokens")) and wasted["total_tokens"]:
+                    ratio = turn.get("wasted_token_ratio")
+                    ratio_text = f" ({float(ratio) * 100:.1f}%)" if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) else ""
+                    parts.append(f"descartados {wasted['total_tokens']}{ratio_text}")
                 lines.append("**Tokens do último turno medido:** " + ", ".join(parts) + ".")
                 resources = turn.get("resources")
                 if isinstance(resources, dict) and isinstance(resources.get("neurons"), (int, float)):
                     lines.append(f"**Cloudflare no último turno:** {resources['neurons']:.3f} neurons reportados.")
+                providers = turn.get("providers")
+                if isinstance(providers, dict):
+                    provider_parts = []
+                    labels = {"groq": "Groq", "gemini": "Gemini", "mistral": "Mistral", "cloudflare": "Cloudflare"}
+                    for name in ("groq", "gemini", "mistral", "cloudflare"):
+                        item = providers.get(name)
+                        item_usage = item.get("usage") if isinstance(item, dict) else None
+                        if isinstance(item_usage, dict) and token_number(item_usage.get("total_tokens")):
+                            provider_parts.append(f"{labels[name]} {item_usage['total_tokens']}")
+                    if provider_parts:
+                        lines.append("**Uso por provedor:** " + ", ".join(provider_parts) + " tokens.")
+                tools = turn.get("tools")
+                if isinstance(tools, dict) and token_number(tools.get("reused_reads")) and tools.get("reused_reads"):
+                    lines.append(
+                        f"**Ferramentas no último turno:** {tools.get('executed', 0)} execuções; "
+                        f"{tools['reused_reads']} leitura(s) repetida(s) reaproveitada(s)."
+                    )
                 return "\n".join(lines)
 
         last = data.get("last_request")

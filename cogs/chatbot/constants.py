@@ -174,11 +174,12 @@ MEDIA_READ_TIMEOUT_SECONDS = 25.0
 # Tetos, não reservas fixas. O cliente escolhe um limite menor para pedidos
 # curtos; manter os tetos evita regressão em respostas realmente longas.
 MAX_RESPONSE_TOKENS = 500
-MIN_RESPONSE_TOKENS = 220
-SHORT_RESPONSE_TOKENS = 320
+TINY_RESPONSE_TOKENS = 160
+MIN_RESPONSE_TOKENS = 240
+SHORT_RESPONSE_TOKENS = 384
 MAX_VISION_RESPONSE_TOKENS = 900
 MAX_TOOL_RESPONSE_TOKENS = 768
-MAX_ACTION_RESPONSE_TOKENS = 2000
+MAX_ACTION_RESPONSE_TOKENS = 1400
 MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
 
 # -----------------------------------------------------------------------------

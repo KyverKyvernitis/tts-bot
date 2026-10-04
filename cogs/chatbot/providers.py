@@ -526,10 +526,12 @@ def _output_tokens(
         latest = next((message.content for message in reversed(messages)
                        if message.role == "user" and isinstance(message.content, str)), "")
         visible = len(latest.strip())
-        if visible <= 180:
-            tokens = getattr(C, "MIN_RESPONSE_TOKENS", 220)
-        elif visible <= 700:
-            tokens = getattr(C, "SHORT_RESPONSE_TOKENS", 320)
+        if visible <= 80:
+            tokens = getattr(C, "TINY_RESPONSE_TOKENS", 160)
+        elif visible <= 280:
+            tokens = getattr(C, "MIN_RESPONSE_TOKENS", 240)
+        elif visible <= 900:
+            tokens = getattr(C, "SHORT_RESPONSE_TOKENS", 384)
         else:
             tokens = C.MAX_RESPONSE_TOKENS
     # Propostas de ação preservam o teto antigo porque podem conter várias
@@ -538,7 +540,9 @@ def _output_tokens(
     if TOOL_NAME in actions or enabled_actions(actions):
         return max(tokens, C.MAX_ACTION_RESPONSE_TOKENS)
     if has_tools:
-        return max(tokens, C.MAX_TOOL_RESPONSE_TOKENS if allow_tool_calls else C.MAX_RESPONSE_TOKENS)
+        # Tool calls precisam de margem para argumentos estruturados. No
+        # fechamento sem novas chamadas, o teto conversacional já basta.
+        return max(tokens, C.MAX_TOOL_RESPONSE_TOKENS if allow_tool_calls else C.SHORT_RESPONSE_TOKENS)
     return tokens
 
 
@@ -833,11 +837,12 @@ class _MistralClient(_GroqClient):
         # Mistral Small 4 permite desligar a exposição/uso de raciocínio
         # desnecessário para conversa cotidiana e tool routing simples.
         payload["reasoning_effort"] = "none"
-        # A chave não contém IDs nem conteúdo do usuário; deriva apenas do
-        # prefixo system exato para favorecer o prompt cache do provedor.
-        system = str(payload.get("messages", [{}])[0].get("content", ""))
-        digest = hashlib.sha256(system.encode("utf-8", "surrogatepass")).hexdigest()[:24]
-        payload["prompt_cache_key"] = "chatbot-system-" + digest
+        # O cache key deve permanecer estável entre turnos. Hash do system
+        # completo seria contraproducente porque estado/capacidades dinâmicos
+        # mudam a cada rodada; o provedor ainda valida o prefixo compatível.
+        stable = C.HARD_SYSTEM_PREAMBLE + "\0" + C.CONVERSATION_STYLE_DIRECTIVE
+        digest = hashlib.sha256(stable.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        payload["prompt_cache_key"] = "tts-bot-chatbot-" + digest
 
 
 class _CloudflareClient(_GroqClient):
@@ -855,7 +860,10 @@ class _CloudflareClient(_GroqClient):
         super().__init__(session, api_key)
         self.BASE_URL = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions"
         self._budget_day = int(time.time() // 86400)
-        self._budget_spent = 0.0
+        self._budget_actual = 0.0
+        # Reservas sem medição incluem chamadas em voo e falhas cujo provider
+        # pode ter consumido neurons antes de o host receber usage.
+        self._budget_uncertain = 0.0
 
     def _validate_request(self, model, messages) -> None:
         if model not in C.CLOUDFLARE_MODELS:
@@ -871,14 +879,33 @@ class _CloudflareClient(_GroqClient):
     def _rotate_budget(self) -> None:
         day = int(time.time() // 86400)
         if day != self._budget_day:
-            self._budget_day, self._budget_spent = day, 0.0
+            self._budget_day = day
+            self._budget_actual = self._budget_uncertain = 0.0
+
+    @property
+    def _budget_spent(self) -> float:
+        """Compatibilidade diagnóstica com a métrica agregada antiga."""
+        return self._budget_actual + self._budget_uncertain
+
+    @_budget_spent.setter
+    def _budget_spent(self, value: float) -> None:
+        try:
+            number = max(0.0, float(value))
+        except (TypeError, ValueError, OverflowError):
+            number = 0.0
+        self._budget_actual, self._budget_uncertain = number, 0.0
 
     def budget_diagnostics(self) -> dict:
         self._rotate_budget()
+        spent = self._budget_actual + self._budget_uncertain
+        limit = float(C.CLOUDFLARE_DAILY_NEURON_BUDGET)
         return {"limit_neurons": C.CLOUDFLARE_DAILY_NEURON_BUDGET,
-                "reserved_or_used_neurons": round(self._budget_spent, 3),
-                "remaining_neurons": round(max(0.0, C.CLOUDFLARE_DAILY_NEURON_BUDGET - self._budget_spent), 3),
-                "scope": "process_daily", "estimated": True,
+                "measured_neurons": round(self._budget_actual, 3),
+                "uncertain_reserved_neurons": round(self._budget_uncertain, 3),
+                "reserved_or_used_neurons": round(spent, 3),
+                "remaining_neurons": round(max(0.0, limit - spent), 3),
+                "usage_ratio": round(min(1.0, spent / limit), 4) if limit > 0 else 1.0,
+                "scope": "process_daily", "estimated": bool(self._budget_uncertain),
                 "reset_seconds": max(1.0, 86400 - (time.time() % 86400))}
 
     def _reserve_request(self, payload: dict):
@@ -890,12 +917,12 @@ class _CloudflareClient(_GroqClient):
         input_upper = len(serialized) + 512 + 64 * (len(payload["messages"]) + len(payload.get("tools", [])))
         reservation = (input_upper * self._INPUT_NEURONS_PER_TOKEN
                        + payload["max_tokens"] * self._OUTPUT_NEURONS_PER_TOKEN)
-        if self._budget_spent + reservation > C.CLOUDFLARE_DAILY_NEURON_BUDGET:
+        if self._budget_actual + self._budget_uncertain + reservation > C.CLOUDFLARE_DAILY_NEURON_BUDGET:
             raise RateLimitError("orçamento local diário Cloudflare esgotado", stage="routing", quota_scope="account",
                                  retry_after=86400 - (time.time() % 86400))
         # Sem awaits entre conferir e reservar: duas conversas não passam
         # simultaneamente pela mesma franquia disponível deste processo.
-        self._budget_spent += reservation
+        self._budget_uncertain += reservation
         return self._budget_day, reservation
 
     def _settle_request(self, reservation, usage: dict) -> None:
@@ -909,7 +936,8 @@ class _CloudflareClient(_GroqClient):
                       + usage["output_tokens"] * self._OUTPUT_NEURONS_PER_TOKEN)
         else:
             return  # Sem medição, manter reserva; timeout pode ter consumido.
-        self._budget_spent = max(0.0, self._budget_spent - reservation[1] + actual)
+        self._budget_uncertain = max(0.0, self._budget_uncertain - reservation[1])
+        self._budget_actual += actual
 
     def _visible_content(self, content):
         if not isinstance(content, str) or not content.lstrip().startswith("<think>"):
@@ -1432,6 +1460,7 @@ class ProviderRouter:
         target_refs: tuple[str, ...] = (), tool_specs: tuple[ToolSpec, ...] = (),
         text_provider_order: tuple[str, ...] | None = None,
         budget_seconds: float | None = None, allow_tool_calls: bool = True,
+        allow_protected_reserves: bool = True,
         repair_state: dict | None = None,
         request_report: dict | None = None,
     ) -> str | ChatReply:
@@ -1444,7 +1473,9 @@ class ProviderRouter:
             return await self._chat(system=system, messages=messages, temperature=temperature, actions=actions,
                                     target_refs=target_refs, tool_specs=tool_specs,
                                     text_provider_order=text_provider_order, budget_seconds=budget_seconds,
-                                    allow_tool_calls=allow_tool_calls, repair_state=repair_state, request_report=report)
+                                    allow_tool_calls=allow_tool_calls,
+                                    allow_protected_reserves=allow_protected_reserves,
+                                    repair_state=repair_state, request_report=report)
         finally:
             _REQUEST_REPORT.reset(token)
 
@@ -1454,6 +1485,7 @@ class ProviderRouter:
         target_refs: tuple[str, ...] = (), tool_specs: tuple[ToolSpec, ...] = (),
         text_provider_order: tuple[str, ...] | None = None,
         budget_seconds: float | None = None, allow_tool_calls: bool = True,
+        allow_protected_reserves: bool = True,
         repair_state: dict | None = None, request_report: dict | None = None,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
@@ -1468,9 +1500,9 @@ class ProviderRouter:
             cached = tuple(model for model in self._catalog_models(has_images=has_images)
                            if model not in configured and self._available("gemini", model))[:2]
             attempts.append(("gemini", self._gemini, (*configured, *cached)))
-        if self._mistral and not has_images:
+        if self._mistral and not has_images and allow_protected_reserves:
             attempts.append(("mistral", self._mistral, C.MISTRAL_MODELS))
-        if self._cloudflare and not has_images:
+        if self._cloudflare and not has_images and allow_protected_reserves:
             attempts.append(("cloudflare", self._cloudflare, C.CLOUDFLARE_MODELS))
         if not has_images:
             by_provider = {attempt[0]: attempt for attempt in attempts}
@@ -1483,7 +1515,8 @@ class ProviderRouter:
         report = request_report if isinstance(request_report, dict) else {}
         report.clear()
         report.update(outcome="pending", mode=mode, attempts=[], skips=[], attempt_count=0,
-                      request_count=0, discovery_request_count=0)
+                      request_count=0, discovery_request_count=0,
+                      protected_reserves_allowed=bool(allow_protected_reserves))
         self._last_request = report
 
         def finish(kind: str, *, cause_kind=None, retry_after=None, outcome="failed"):

@@ -137,7 +137,38 @@ async def test_mutating_duplicate_call_ids_and_new_ids_do_not_repeat_effect(nati
 
 
 @pytest.mark.asyncio
-async def test_prompt_catalog_precedes_real_state_identity_and_style(native):
+async def test_repeated_identical_read_is_reused_and_forces_final_round(native):
+    reads = []
+
+    async def read(arguments):
+        reads.append(dict(arguments))
+        return {"ok": True, "status": "found", "data": {"value": "resultado grande" * 20}}
+
+    native.extra_specs.append(ToolSpec(
+        "read_test", "Consulte o mesmo dado sem efeitos.",
+        {"type": "object", "properties": {"query": {"type": "string"}},
+         "required": ["query"], "additionalProperties": False},
+        permission="read", handler=read,
+    ))
+    native.cog._router.chat.side_effect = [
+        ChatReply("", tool_calls=(call("read-a", "read_test", query="x"),)),
+        ChatReply("", tool_calls=(call("read-b", "read_test", query="x"),)),
+        ChatReply("Fechado."),
+    ]
+    assert await native.cog._generate_and_send(native.message, "consulte x")
+    assert reads == [{"query": "x"}]
+    assert native.cog._router.chat.await_count == 3
+    messages = native.cog._router.chat.await_args.kwargs["messages"]
+    second = next(item for item in messages if item.role == "tool" and item.tool_call_id == "read-b")
+    assert json.loads(second.content) == {
+        "ok": True, "status": "reused_read", "source_tool_call_id": "read-a",
+        "detail": "Resultado idêntico já está no histórico desta rodada; não repetir a consulta.",
+    }
+    assert native.cog._last_turn_usage["tools"] == {"seen": 2, "executed": 1, "reused_reads": 1}
+
+
+@pytest.mark.asyncio
+async def test_prompt_stable_identity_precedes_catalog_and_real_state(native):
     native.cog._router.chat.return_value = ChatReply("Oi!")
     voice = SimpleNamespace(id=777, permissions_for=lambda _member: SimpleNamespace(view_channel=False))
     native.message.guild.me = SimpleNamespace(id=999, display_name="Osaka do servidor",
@@ -146,8 +177,8 @@ async def test_prompt_catalog_precedes_real_state_identity_and_style(native):
     assert await native.cog._generate_and_send(native.message, "quais recursos você tem?")
     options = native.cog._router.chat.await_args.kwargs
     system = options["system"]
-    assert system.startswith("Ferramentas reais do bot:")
-    assert system.index("set_conversation_preferences") < system.index("Você é o próprio bot") < system.index("Estado confirmado")
+    assert system.startswith("Você é o próprio bot")
+    assert system.index("Você é o próprio bot") < system.index("set_conversation_preferences") < system.index("Estado confirmado")
     assert confirmed_state(system)["bot_name"] == "Osaka do servidor"
     assert confirmed_state(system)["voice_state"]["bot"]["connected"] is True
     assert confirmed_state(system)["voice_state"]["bot"]["channel_id"] is None

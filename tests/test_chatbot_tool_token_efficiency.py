@@ -92,8 +92,8 @@ def test_stable_index_does_not_evaluate_availability_or_change_with_operational_
     assert "ban_member" in before and "Backend ausente." not in before
     selection = ToolSelection(registry)
     state = selection.availability_state()
-    assert state["unavailable"]["efeito_delimitado"] == "Backend ausente."
-    assert state["efeito_delimitado_actions"] == []
+    assert "efeito_delimitado" not in state["unavailable"]
+    assert "efeito_delimitado_actions" not in state
 
 
 def test_used_schema_stays_in_native_history_but_never_restores_execution_availability():
