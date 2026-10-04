@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from dataclasses import dataclass, replace
 import discord
 from . import constants as C
-from .action_execution import ActionExecutionUncertain, execute_action
+from .action_execution import ActionExecutionUncertain, ExecutionResult, execute_action
 from .action_policy import (ActionDenied, AUTOMATIC_ACTIONS, NAVIGATION_ACTIONS, STAFF_ACTIONS, _enabled, _can_view_voice, _fresh_member,
                             _requester_can_view, _resource_visibility_gate, _voice_visibility_gate,
                             build_action_context, prepare_action, validate_action)
@@ -23,6 +23,7 @@ _AUDIO = {"send_audio", "speak_voice"}
 _AUTOMATIC = AUTOMATIC_ACTIONS
 _NAVIGATION = NAVIGATION_ACTIONS
 _STAFF = STAFF_ACTIONS
+_DELIVERY_METADATA_TIMEOUT_SECONDS = 2.0
 
 @dataclass
 class ActionPlan:
@@ -99,7 +100,7 @@ class ActionService:
         return context
 
     async def plan(self, message, reply, context, config, *, epoch=None, visibility_scope="", original_user_text=None,
-                   action_draft=None):
+                   action_draft=None, response_format=None):
         proposals = reply.proposals[:MAX_PROPOSALS]
         # O cartão ou a execução já comunica a ação. Não antecipe sucesso nem
         # envie uma segunda mensagem dizendo que vai pedir permissão.
@@ -133,6 +134,10 @@ class ActionService:
             data["ask_permission"], data["base_reply"] = data["action"] in _STAFF, ""
             data["original_user_text"] = str(getattr(message, "content", "") or "") if original_user_text is None else str(original_user_text)
             data["provider"], data["model"] = str(getattr(reply, "provider", "") or ""), str(getattr(reply, "model", "") or "")
+            # Override somente do estado do host deste turno. Um argumento de
+            # ação, texto do usuário ou opção persistente não concede esse campo.
+            if data["action"] in _AUDIO and response_format == "audio":
+                data["response_format"] = "audio"
             if epoch is not None:
                 data["memory_epoch"] = {"global_generation": epoch.global_generation, "guild_generation": epoch.guild_generation, "user_generation": epoch.user_generation}
                 data["visibility_scope"] = visibility_scope
@@ -449,7 +454,7 @@ class ActionService:
 
     async def _audio_fallback(self, request):
         text = request.get("payload", {}).get("text")
-        if request["action"] != "send_audio" or not text:
+        if request["action"] not in _AUDIO or not text or C.SAFE_MODE:
             return
         try:
             config = await self.cog._config.get_config(request["guild_id"], fresh=True)
@@ -460,57 +465,140 @@ class ActionService:
             requester = await _fresh_member(channel.guild, request["requester_id"])
             await _requester_can_view(channel, requester)
             epoch, memory = request.get("memory_epoch"), getattr(self.cog, "_memory", None)
-            if epoch and memory is not None and await memory.capture_epoch(channel.guild.id, requester.id) != MemoryEpoch(**epoch):
+            if epoch and (memory is None or await memory.capture_epoch(channel.guild.id, requester.id) != MemoryEpoch(**epoch)):
                 return
             me = await _fresh_member(channel.guild, self.bot.user.id)
             config = await self.cog._config.get_config(request["guild_id"], fresh=True)
             permissions = channel.permissions_for(me)
             send_permission = "send_messages_in_threads" if isinstance(channel, discord.Thread) else "send_messages"
-            if (not config.enabled or not config.allows_channel(channel.id, parent_id=getattr(channel, "parent_id", None))
+            if (C.SAFE_MODE or not config.enabled or not config.allows_channel(channel.id, parent_id=getattr(channel, "parent_id", None))
                     or not getattr(channel.permissions_for(requester), "view_channel", False)
                     or not all(getattr(permissions, name, False) for name in ("view_channel", send_permission))):
                 return
+            if epoch and (memory is None or await memory.capture_epoch(channel.guild.id, requester.id) != MemoryEpoch(**epoch)):
+                return
             sent = await channel.send(self.cog._sanitize_model_reply(text)[:2000], allowed_mentions=discord.AllowedMentions.none())
-            await self.cog._remember_sent_message(guild_id=request["guild_id"], channel_id=channel.id, message_id=sent.id)
+            note_delivery = getattr(self.cog, "note_public_delivery", None)
+            if callable(note_delivery):
+                try:
+                    note_delivery(sent.id)
+                except Exception as exc:
+                    log.warning("chatbot: recibo do fallback confirmado indisponível (%s)", type(exc).__name__)
+            try:
+                await asyncio.wait_for(self.cog._remember_sent_message(guild_id=request["guild_id"],
+                    channel_id=channel.id, message_id=sent.id), timeout=_DELIVERY_METADATA_TIMEOUT_SECONDS)
+            except Exception as exc:
+                log.warning("chatbot: índice do fallback confirmado indisponível (%s)", type(exc).__name__)
             replies = getattr(self.cog, "_reply_store", None)
             if callable(getattr(replies, "record_sent", None)):
-                await replies.record_sent(guild_id=request["guild_id"], channel_id=channel.id,
-                    requester_id=request["requester_id"], origin_message_id=request["origin_message_id"], message_id=sent.id,
-                    original_user_text=str(request.get("original_user_text") or ""),
-                    text=self.cog._sanitize_model_reply(text)[:2000], format="text", epoch=request.get("memory_epoch"),
-                    provider=str(request.get("provider") or ""), model=str(request.get("model") or ""))
-            await self._record_spoken(request, audio=False)
+                try:
+                    await asyncio.wait_for(replies.record_sent(guild_id=request["guild_id"], channel_id=channel.id,
+                        requester_id=request["requester_id"], origin_message_id=request["origin_message_id"], message_id=sent.id,
+                        original_user_text=str(request.get("original_user_text") or ""),
+                        text=self.cog._sanitize_model_reply(text)[:2000], format="text", epoch=request.get("memory_epoch"),
+                        provider=str(request.get("provider") or ""), model=str(request.get("model") or "")),
+                        timeout=_DELIVERY_METADATA_TIMEOUT_SECONDS)
+                except Exception as exc:
+                    log.warning("chatbot: registro do fallback confirmado indisponível (%s)", type(exc).__name__)
+            try:
+                await asyncio.wait_for(self._record_spoken(request, audio=False), timeout=_DELIVERY_METADATA_TIMEOUT_SECONDS)
+            except Exception as exc:
+                log.warning("chatbot: histórico do fallback confirmado indisponível (%s)", type(exc).__name__)
         except Exception as exc:
             log.warning("chatbot: resposta textual após falha do áudio indisponível (%s)", type(exc).__name__)
 
     async def _execute_reserved(self, request, actor_id):
         state, public_result = "failed", "Não consegui executar a ação."
+        execution_task, result = None, None
+        caller = asyncio.current_task()
+        cancellation_count = getattr(caller, "cancelling", lambda: 0)
+        initial_cancellations = cancellation_count()
         try:
             async with self._processing(request):
                 await self._current_config(request)
                 await validate_action(self.bot, request, actor_id)
-                result = await asyncio.wait_for(execute_action(self.bot, request, actor_id=actor_id), timeout=C.ACTION_EXECUTION_TIMEOUT_SECONDS)
-                state, public_result = "succeeded", result.public_result
+                execution_task = asyncio.create_task(execute_action(self.bot, request, actor_id=actor_id))
+                result = await asyncio.wait_for(execution_task, timeout=C.ACTION_EXECUTION_TIMEOUT_SECONDS)
+                if cancellation_count() > initial_cancellations:
+                    raise asyncio.CancelledError
+                state, public_result = self._execution_outcome(request, result)
                 if result.message_id:
-                    await self.cog._remember_sent_message(guild_id=request["guild_id"], channel_id=request["channel_id"], message_id=result.message_id)
-                await self._record_spoken(request)
+                    try:
+                        await asyncio.wait_for(self.cog._remember_sent_message(guild_id=request["guild_id"],
+                            channel_id=request["channel_id"], message_id=result.message_id),
+                            timeout=_DELIVERY_METADATA_TIMEOUT_SECONDS)
+                    except Exception as exc:
+                        log.warning("chatbot: índice da ação confirmada indisponível (%s)", type(exc).__name__)
+                try:
+                    await asyncio.wait_for(self._record_spoken(request), timeout=_DELIVERY_METADATA_TIMEOUT_SECONDS)
+                except Exception as exc:
+                    log.warning("chatbot: histórico da ação confirmada indisponível (%s)", type(exc).__name__)
+                if cancellation_count() > initial_cancellations:
+                    raise asyncio.CancelledError
         except (ActionExecutionUncertain, asyncio.TimeoutError):
             state, public_result = "uncertain", "Não consegui confirmar o resultado. Não vou repetir automaticamente."
         except ActionDenied as exc:
             public_result = str(exc)
-            await self._audio_fallback(request)
-        except asyncio.CancelledError:
             try:
-                await asyncio.shield(self.store.finish(request["request_id"], request["execution_token"], state="uncertain",
-                    public_result="A execução foi interrompida; confira o resultado antes de tentar novamente."))
+                await self._audio_fallback(request)
+                if cancellation_count() > initial_cancellations:
+                    raise asyncio.CancelledError
+            except asyncio.CancelledError:
+                try:
+                    await self._finish_execution(request, state="failed", public_result=public_result)
+                finally:
+                    raise
+        except asyncio.CancelledError:
+            # wait_for cancela seu filho antes de propagar cancelamento do
+            # serviço. O executor pode ter devolvido um recibo confirmado ao
+            # ser cancelado depois do envio; recuperar esse resultado impede
+            # que índice, histórico ou mirror apaguem a entrega real.
+            if result is None and execution_task is not None and execution_task.done() and not execution_task.cancelled():
+                try:
+                    result = execution_task.result()
+                except Exception:
+                    result = None
+            confirmed = (isinstance(result, ExecutionResult) and
+                         (request["action"] not in _AUDIO or
+                          type(result.message_id) is int and result.message_id > 0))
+            cancelled_state, cancelled_result = (self._execution_outcome(request, result) if confirmed else
+                ("uncertain", "A execução foi interrompida; confira o resultado antes de tentar novamente."))
+            try:
+                await self._finish_execution(request,
+                    state=cancelled_state, public_result=cancelled_result)
             finally:
                 raise
         except Exception as exc:
             state, public_result = "uncertain", "Não consegui confirmar o resultado. Não vou repetir automaticamente."
             log.warning("chatbot: resultado de ação incerto (%s)", type(exc).__name__)
-        await self.store.finish(request["request_id"], request["execution_token"], state=state, public_result=public_result)
+        await self._finish_execution(request, state=state, public_result=public_result)
         await self._delete_card(request)
         return state, public_result
+
+    @staticmethod
+    def _execution_outcome(request, result):
+        if request["action"] == "speak_voice" and result.chat_audio_sent:
+            if result.voice_status == "enqueued":
+                return "succeeded", "O áudio está no chat e foi enfileirado na call."
+            if result.voice_status == "skipped":
+                return "failed", "O áudio está no chat, mas não consegui enfileirar a fala na call."
+            if result.voice_status == "uncertain" or result.voice_status is None:
+                return "uncertain", "O áudio está no chat, mas não consegui confirmar a fala na call. Não vou repetir."
+        return "succeeded", result.public_result
+
+    async def _finish_execution(self, request, *, state, public_result):
+        # Depois de iniciar o CAS terminal, o cancelamento do chamador não
+        # interrompe nem reinicia o write. Ele continua com o mesmo token e
+        # resultado, sem abrir caminho para repetição do efeito.
+        finish = asyncio.create_task(self.store.finish(request["request_id"], request["execution_token"],
+            state=state, public_result=public_result))
+        try:
+            return await asyncio.shield(finish)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(finish)
+            finally:
+                raise
 
     async def _delete_card(self, request):
         if not request.get("message_id") or (request["action"] not in _STAFF and not (

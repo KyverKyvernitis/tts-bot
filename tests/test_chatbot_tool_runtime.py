@@ -54,6 +54,8 @@ def install_replies(w, monkeypatch, *, original_format="audio"):
     w.cog._reply_store = SimpleNamespace(resolve=AsyncMock(return_value=record), record_sent=AsyncMock())
     w.cog._remember_sent_message = AsyncMock()
     w.cog._mirror_sent_audio = AsyncMock()
+    w.cog._capture_audio_mirror_session = Mock(return_value=(20, "session-original"))
+    w.cog.note_public_delivery = Mock()
     w.cog.record_audio_reply_sent = AsyncMock()
     validate = AsyncMock(return_value=w.card)
     synthesis = AsyncMock(return_value=b"exact-original-mp3")
@@ -226,6 +228,8 @@ async def test_audio_conversion_delivers_and_mirrors_identical_bytes_despite_aux
     assert captured == [b"exact-original-mp3"] and registry.runtime.response_sent
     world.cog._mirror_sent_audio.assert_awaited_once()
     assert world.cog._mirror_sent_audio.await_args.kwargs["audio"] == captured[0]
+    assert world.cog._mirror_sent_audio.await_args.kwargs["captured_session"] == (20, "session-original")
+    world.cog.note_public_delivery.assert_called_once_with(88)
     synthesis.assert_awaited_once()
     validator.assert_awaited_once_with(world.cog.bot, record, user_id=1)
     world.tts.synthesize_chatbot_attachment.assert_not_awaited()
@@ -264,6 +268,68 @@ async def test_delivered_audio_remains_confirmed_if_turn_is_cancelled_during_met
     assert result["status"] == "audio_sent" and registry.runtime.response_sent
     world.channel.send.assert_awaited_once()
     world.cog._mirror_sent_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_conversion_pins_existing_session_before_synthesis_and_does_not_follow_move(world, monkeypatch):
+    _record, _validator, synthesis = install_replies(world, monkeypatch, original_format="text")
+    events = []
+
+    def capture(guild_id):
+        events.append("capture")
+        return (20, "session-original")
+
+    async def generate(*args, **kwargs):
+        assert events == ["capture"]
+        events.append("synthesis")
+        world.cog._capture_audio_mirror_session.return_value = (21, "session-new")
+        return b"exact-original-mp3"
+
+    world.cog._capture_audio_mirror_session.side_effect = capture
+    synthesis.side_effect = generate
+    registry = await registry_for(world)
+    result = await call(registry, "convert_reply_audio")
+
+    assert result["status"] == "audio_sent" and events == ["capture", "synthesis"]
+    world.cog._capture_audio_mirror_session.assert_called_once_with(10)
+    assert world.cog._mirror_sent_audio.await_args.kwargs["captured_session"] == (20, "session-original")
+    synthesis.assert_awaited_once()
+    world.channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_conversion_without_initial_call_does_not_mirror_into_a_later_call(world, monkeypatch):
+    _record, _validator, synthesis = install_replies(world, monkeypatch)
+    world.cog._capture_audio_mirror_session.return_value = None
+
+    async def generate(*args, **kwargs):
+        world.cog._capture_audio_mirror_session.return_value = (20, "joined-later")
+        return b"exact-original-mp3"
+
+    synthesis.side_effect = generate
+    registry = await registry_for(world)
+    result = await call(registry, "convert_reply_audio")
+
+    assert result["status"] == "audio_sent"
+    world.cog._mirror_sent_audio.assert_not_awaited()
+    world.channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,status", [("convert_reply_audio", "audio_sent"), ("convert_reply_text", "reply_sent")])
+async def test_conversion_records_public_receipt_before_cancellable_metadata(world, monkeypatch, name, status):
+    install_replies(world, monkeypatch)
+
+    async def metadata(**kwargs):
+        world.cog.note_public_delivery.assert_called_once_with(88)
+        raise asyncio.CancelledError
+
+    world.cog._remember_sent_message.side_effect = metadata
+    registry = await registry_for(world)
+    result = await call(registry, name)
+
+    assert result["status"] == status and registry.runtime.response_sent
+    world.channel.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio

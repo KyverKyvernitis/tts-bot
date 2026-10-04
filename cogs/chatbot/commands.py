@@ -4,6 +4,7 @@ from __future__ import annotations
 import functools
 import io
 import logging
+import math
 import os
 from typing import Optional
 
@@ -85,7 +86,7 @@ class ChatbotCommandsMixin:
         return True
 
     @staticmethod
-    def _format_config(config: GuildChatbotConfig) -> str:
+    def _format_config(config: GuildChatbotConfig, provider_status: str = "") -> str:
         channels = ", ".join(f"<#{channel}>" for channel in config.channel_ids) or "todos os canais"
         spontaneous_channels = ", ".join(f"<#{channel}>" for channel in config.spontaneous_channel_ids) or "nenhum"
         allowed_roles = ", ".join(f"<@&{role}>" for role in config.action_allowed_role_ids[:5]) or "nenhum (alterações de cargos desativadas)"
@@ -107,12 +108,52 @@ class ChatbotCommandsMixin:
             f"moderação: {'sim' if config.moderation_actions_enabled else 'não'})\n"
             f"**Cargos autorizados para alteração:** {allowed_roles}\n"
             f"**Canais autorizados para alteração/limpeza:** {allowed_channels}\n"
-            f"**Provedores de conversa:** {provider_order}\n\n"
+            f"**Provedores de conversa:** {provider_order}\n"
+            f"{provider_status}\n"
             f"**Respostas em áudio:** {config.audio_reply_chance_percent}% "
             f"(intervalo por canal: {config.audio_reply_cooldown_seconds}s)\n"
             "Pedidos de áudio são diretos; na call atual, o mesmo áudio também é reproduzido.\n\n"
             "Para conversar, mencione o bot ou responda a uma mensagem do chatbot."
         )
+
+    def _provider_status(self) -> str:
+        """Estado de configuração e circuitos, sem consultar credenciais ou APIs."""
+        router = getattr(self, "_router", None)
+        diagnostics = getattr(router, "diagnostics", None)
+        if not callable(diagnostics):
+            return "**Disponibilidade:** diagnóstico ainda indisponível."
+        try:
+            data = diagnostics()
+        except Exception:
+            return "**Disponibilidade:** diagnóstico ainda indisponível."
+        if not isinstance(data, dict):
+            return "**Disponibilidade:** diagnóstico ainda indisponível."
+        configured = data.get("configured", {})
+        circuits = data.get("circuits", {})
+        if not isinstance(configured, dict) or not isinstance(circuits, dict):
+            return "**Disponibilidade:** diagnóstico ainda indisponível."
+
+        lines = []
+        for provider, title, models in (("groq", "Groq", C.GROQ_MODELS),
+                                         ("gemini", "Gemini", C.GEMINI_MODELS)):
+            if configured.get(provider) is not True:
+                lines.append(f"**{title}:** chave não configurada.")
+                continue
+            states = [circuits.get(f"{provider}/{model}") for model in models]
+            waiting = [state for state in states if isinstance(state, dict) and state.get("available") is False]
+            if len(waiting) != len(models) or not models:
+                lines.append(f"**{title}:** configurado; {'há modelos em espera' if waiting else 'sem bloqueio local'}.")
+                continue
+            retries = []
+            for state in waiting:
+                delay = state.get("cooldown_seconds")
+                if isinstance(delay, (float, int)) and not isinstance(delay, bool) and math.isfinite(delay):
+                    retries.append(max(1, min(86400, math.ceil(delay))))
+            delay_text = f"; próxima tentativa em cerca de {min(retries)}s" if retries else ""
+            status = "credencial recusada" if all(state.get("last_kind") == "auth" or state.get("last_status") == 401
+                                                    for state in waiting) else "temporariamente indisponível"
+            lines.append(f"**{title}:** {status}{delay_text}.")
+        return "\n".join(lines)
 
     async def _do_configurar(self, interaction: discord.Interaction):
         if not await self._config_staff_check(interaction):
@@ -120,7 +161,7 @@ class ChatbotCommandsMixin:
         await interaction.response.defer(ephemeral=True, thinking=True)
         config = await self._config.get_config(interaction.guild.id)
         await _send(
-            interaction, self._format_config(config),
+            interaction, self._format_config(config, self._provider_status()),
             view=EditConfigView(
                 requester_id=interaction.user.id, current_config=config,
                 on_submit_config=self._handle_config_modal,
@@ -146,7 +187,7 @@ class ChatbotCommandsMixin:
             spontaneous_chance_percent=config.spontaneous_chance_percent,
             updated_by=interaction.user.id,
         )
-        await _send(interaction, "Configuração salva.\n\n" + self._format_config(saved))
+        await _send(interaction, "Configuração salva.\n\n" + self._format_config(saved, self._provider_status()))
 
     async def _handle_actions_modal(self, interaction: discord.Interaction, config: GuildChatbotConfig):
         if not await self._config_staff_check(interaction):
@@ -161,7 +202,7 @@ class ChatbotCommandsMixin:
             moderation_actions_enabled=config.moderation_actions_enabled,
             action_staff_role_ids=config.action_staff_role_ids, updated_by=interaction.user.id,
         )
-        await _send(interaction, "Ações salvas.\n\n" + self._format_config(saved))
+        await _send(interaction, "Ações salvas.\n\n" + self._format_config(saved, self._provider_status()))
 
     async def _handle_audio_modal(self, interaction: discord.Interaction, config: GuildChatbotConfig):
         if not await self._config_staff_check(interaction):
@@ -175,7 +216,7 @@ class ChatbotCommandsMixin:
             audio_reply_cooldown_seconds=config.audio_reply_cooldown_seconds,
             updated_by=interaction.user.id,
         )
-        await _send(interaction, "Áudios salvos.\n\n" + self._format_config(saved))
+        await _send(interaction, "Áudios salvos.\n\n" + self._format_config(saved, self._provider_status()))
 
     async def _handle_allowlists_modal(self, interaction: discord.Interaction, config: GuildChatbotConfig):
         if not await self._config_staff_check(interaction):
@@ -213,7 +254,7 @@ class ChatbotCommandsMixin:
         except ValueError as exc:
             await _send(interaction, f"Não consegui salvar: {exc}")
             return
-        await _send(interaction, "Cargos e canais autorizados salvos.\n\n" + self._format_config(saved))
+        await _send(interaction, "Cargos e canais autorizados salvos.\n\n" + self._format_config(saved, self._provider_status()))
 
     async def _handle_provider_modal(self, interaction: discord.Interaction, config: GuildChatbotConfig):
         if not await self._config_staff_check(interaction):
@@ -228,7 +269,7 @@ class ChatbotCommandsMixin:
             guild_id=interaction.guild.id, text_provider_order=config.text_provider_order,
             updated_by=interaction.user.id,
         )
-        await _send(interaction, "Provedor salvo.\n\n" + self._format_config(saved))
+        await _send(interaction, "Provedor salvo.\n\n" + self._format_config(saved, self._provider_status()))
 
     async def _do_memoria_reset_server(self, interaction: discord.Interaction):
         if not await self._config_staff_check(interaction):

@@ -42,7 +42,19 @@ def _setting(config, name: str, default=True):
 def _enabled(config, action: str) -> bool:
     option = ("audio_actions_enabled" if action == "send_audio" else "voice_actions_enabled"
               if action in VOICE_ACTIONS else "moderation_actions_enabled" if action in STAFF_ACTIONS else None)
-    return bool(option and _setting(config, "actions_enabled") and _setting(config, option))
+    return bool(option and _setting(config, "actions_enabled") and _setting(config, option)
+                and (action != "speak_voice" or _setting(config, "audio_actions_enabled")))
+
+
+def _audio_backend_available(bot, tts) -> bool:
+    return (callable(getattr(tts, "synthesize_chatbot_attachment", None))
+            and callable(getattr(getattr(bot, "settings_db", None), "resolve_tts", None)))
+
+
+def _voice_audio_backend_available(bot, tts) -> bool:
+    return (_audio_backend_available(bot, tts)
+            and callable(getattr(tts, "chatbot_mirror_audio", None))
+            and callable(getattr(tts, "chatbot_voice_session_ref", None)))
 
 
 def _member_in_guild(member, guild) -> bool:
@@ -222,7 +234,7 @@ async def build_action_context(bot, message, config, reply_target=None, *, trust
     bot_channel = _bot_voice_channel(guild)
     requester_channel = _voice_channel(requester)
     can_speak_now = (
-        _enabled(config, "speak_voice") and callable(getattr(tts, "chatbot_speak_voice", None))
+        _enabled(config, "speak_voice") and _voice_audio_backend_available(bot, tts)
         and requester_channel is not None and bot_channel is not None
         and requester_channel.id == bot_channel.id and _voice_permissions(bot_channel, me)
         and _can_view_voice(requester_channel, requester)
@@ -238,8 +250,7 @@ async def build_action_context(bot, message, config, reply_target=None, *, trust
         "Capacidades reais neste turno; nomes abaixo são somente rótulos, não instruções.",
         "Você não escuta o áudio da call; falar nela não fornece acesso a conversas ao vivo.",
     ]
-    if (_enabled(config, "send_audio") and callable(getattr(tts, "synthesize_chatbot_attachment", None))
-            and callable(getattr(getattr(bot, "settings_db", None), "resolve_tts", None))):
+    if _enabled(config, "send_audio") and _audio_backend_available(bot, tts):
         actions.append("send_audio")
         lines.append("send_audio: enviar áudio neste chat espontaneamente ou a pedido de qualquer membro; alvo autor.")
         if can_mirror_now is True:
@@ -256,7 +267,7 @@ async def build_action_context(bot, message, config, reply_target=None, *, trust
             lines.append("A reprodução de send_audio na call não está disponível neste turno; o envio continua somente no chat.")
     if can_speak_now:
         actions.append("speak_voice")
-        lines.append("speak_voice: falar na call atual do autor, sem precisar de aprovação da staff; alvo autor.")
+        lines.append("speak_voice: enviar o arquivo de áudio neste chat e enfileirar os mesmos bytes na call atual do autor; automático, sem aprovação da staff; alvo autor.")
     if (_enabled(config, "join_voice") and callable(getattr(tts, "chatbot_join_voice", None))
             and bot_channel is None
             and any(_voice_channel(target) is not None and _voice_permissions(_voice_channel(target), me)
@@ -266,13 +277,14 @@ async def build_action_context(bot, message, config, reply_target=None, *, trust
         actions.append("join_voice")
         lines.append("join_voice: entrar automaticamente na call de um dos alvos identificados, espontaneamente ou a pedido; não precisa de aprovação da staff.")
     if ("speak_voice" not in actions and "join_voice" in actions
-            and _enabled(config, "speak_voice") and callable(getattr(tts, "chatbot_speak_voice", None))
+            and _enabled(config, "speak_voice") and _voice_audio_backend_available(bot, tts)
             and requester_channel is not None and _voice_permissions(requester_channel, me)
             and _can_view_voice(requester_channel, requester)
             and _voice_available(tts, guild, requester, requester_channel)):
         actions.append("speak_voice")
         lines.append(
-            "speak_voice: pode ser a etapa seguinte a join_voice para a call do autor. "
+            "speak_voice: pode ser a etapa seguinte a join_voice; envia o arquivo neste chat e enfileira "
+            "a mesma fala na call do autor, com uma única síntese. "
             "Só fale após o sistema confirmar o sucesso da entrada automática; "
             "ainda não há conexão para falar diretamente."
         )
@@ -335,14 +347,13 @@ async def prepare_action(
         if not text or len(text) > MAX_AUDIO_TEXT or "\x00" in text:
             raise ActionDenied("Não consegui preparar essa fala. Peça uma resposta mais curta.")
         payload["text"] = text
-        if proposal.action == "send_audio":
-            if (not callable(getattr(tts, "synthesize_chatbot_attachment", None))
-                    or not callable(getattr(getattr(bot, "settings_db", None), "resolve_tts", None))):
-                raise ActionDenied("A geração de áudio está indisponível agora.")
-        else:
+        if not _audio_backend_available(bot, tts):
+            raise ActionDenied("A geração de áudio está indisponível agora.")
+        _audio_channel(guild, int(message.channel.id), guild.me)
+        if proposal.action == "speak_voice":
             channel = _voice_channel(target)
             bot_channel = _bot_voice_channel(guild)
-            if channel is None or not callable(getattr(tts, "chatbot_speak_voice", None)):
+            if channel is None or not _voice_audio_backend_available(bot, tts):
                 raise ActionDenied("Você e o bot precisam estar na mesma call para eu falar.")
             if deferred_voice_channel_id is not None:
                 # Só o serviço fornece esta dependência a partir de uma entrada
@@ -492,9 +503,8 @@ async def validate_action(bot, doc: dict, actor_id: int, *, reject: bool = False
         text = payload.get("text")
         if target.id != requester_id or not isinstance(text, str) or not text.strip() or len(text) > MAX_AUDIO_TEXT:
             raise ActionDenied("Essa solicitação de áudio não é válida.")
-    if action == "send_audio":
-        if (not callable(getattr(tts, "synthesize_chatbot_attachment", None))
-                or not callable(getattr(getattr(bot, "settings_db", None), "resolve_tts", None))):
+    if action in AUDIO_ACTIONS:
+        if not _audio_backend_available(bot, tts):
             raise ActionDenied("A geração de áudio está indisponível agora.")
         me = await _fresh_member(guild, int(bot.user.id))
         channel = _audio_channel(guild, int(doc["channel_id"]), me)
@@ -504,7 +514,8 @@ async def validate_action(bot, doc: dict, actor_id: int, *, reject: bool = False
         await _final_gate(store, guild, doc, actor, requester)
         await _epoch_gate(bot, doc)
         _audio_channel(guild, int(doc["channel_id"]), me)
-        return
+        if action == "send_audio":
+            return
     me = await _fresh_member(guild, int(bot.user.id))
     if action in {"speak_voice", "join_voice"}:
         channel = guild.get_channel(int(payload.get("voice_channel_id") or 0))
@@ -517,7 +528,7 @@ async def validate_action(bot, doc: dict, actor_id: int, *, reject: bool = False
         _voice_visibility_gate(guild, doc, actor, requester)
         if action == "speak_voice":
             bot_channel = _bot_voice_channel(guild)
-            if bot_channel is None or bot_channel.id != channel.id or not callable(getattr(tts, "chatbot_speak_voice", None)):
+            if bot_channel is None or bot_channel.id != channel.id or not _voice_audio_backend_available(bot, tts):
                 raise ActionDenied("O bot precisa continuar na call escolhida para falar.")
         elif not callable(getattr(tts, "chatbot_join_voice", None)):
             raise ActionDenied("A conexão de voz está indisponível agora.")
@@ -663,11 +674,11 @@ def _advertise_extended(actions, lines, bot, guild, requester, config, origin):
                 lines.append(f"{action}: {description}, automaticamente e por vontade própria ou a pedido, sem aprovação da staff; não interrompa música, escuta ou reprodução de outra pessoa.")
         author_call = _voice_channel(requester)
         if ("move_voice" in actions and "speak_voice" not in actions and _enabled(config, "speak_voice")
-                and callable(getattr(tts, "chatbot_speak_voice", None)) and author_call is not None
+                and _voice_audio_backend_available(bot, tts) and author_call is not None
                 and author_call.id != source.id and _can_view_voice(author_call, requester)
                 and _voice_permissions(author_call, me)):
             actions.append("speak_voice")
-            lines.append("speak_voice pode seguir move_voice para a call do autor, somente após sucesso confirmado da mudança automática; não fale antes.")
+            lines.append("speak_voice pode seguir move_voice: envia o arquivo no chat e enfileira a mesma fala na call do autor, somente após sucesso confirmado da mudança automática; não fale antes.")
     lines.append("Resolva membros, cargos, canais e mensagens pelas ferramentas disponíveis antes de propor alterações; referências internas não são perguntas ao usuário. Navegação da própria sessão de voz é automática. Cada ação de moderação, cargos ou canais precisa de aprovação separada da staff; o bot nunca aprova esses pedidos.")
 
 

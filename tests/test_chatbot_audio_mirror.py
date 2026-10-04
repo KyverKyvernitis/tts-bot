@@ -16,7 +16,7 @@ from cogs.chatbot.action_execution import execute_action
 from cogs.chatbot.memory import MemoryEpoch
 from cogs.tts import audio as tts_audio
 from cogs.tts.audio import QueueItem, TTSAudioMixin
-from test_chatbot_action_policy import doc, world
+from test_chatbot_action_policy import doc, in_call, world
 from test_chatbot_voice_actions import _Probe
 from test_tts_chatbot_join_integration import _CodecVoice, _make_codec_fixture
 
@@ -245,6 +245,7 @@ class ChatbotAudioMirrorTests(unittest.IsolatedAsyncioTestCase):
 
 @pytest.mark.asyncio
 async def test_native_audio_mirror_receives_exact_delivered_bytes_after_one_synthesis(world):
+    in_call(world, bot=True)
     events = []
     data = b"delivered-mp3"
     world.tts.synthesize_chatbot_attachment.return_value = data
@@ -276,6 +277,7 @@ async def test_native_audio_mirror_receives_exact_delivered_bytes_after_one_synt
 @pytest.mark.asyncio
 @pytest.mark.parametrize("revocation", ["voice_disabled", "memory_reset", "safe_mode"])
 async def test_native_mirror_guard_rechecks_voice_setting_and_memory_after_enqueue(world, revocation, monkeypatch):
+    in_call(world, bot=True)
     from cogs.chatbot import constants as C
     action = doc("send_audio")
     action["memory_epoch"] = {"global_generation": 1, "guild_generation": 2, "user_generation": 3}
@@ -298,6 +300,7 @@ async def test_native_mirror_guard_rechecks_voice_setting_and_memory_after_enque
 
 @pytest.mark.asyncio
 async def test_mirror_failure_preserves_confirmed_chat_send_without_retry(world):
+    in_call(world, bot=True)
     world.tts.chatbot_mirror_audio = AsyncMock(side_effect=RuntimeError("failed"))
     result = await execute_action(world.bot, doc("send_audio"), actor_id=1)
     assert result.public_result == "Áudio enviado." and result.message_id == 88
@@ -307,6 +310,7 @@ async def test_mirror_failure_preserves_confirmed_chat_send_without_retry(world)
 
 @pytest.mark.asyncio
 async def test_chat_send_failure_never_enqueues_mirror(world):
+    in_call(world, bot=True)
     world.tts.chatbot_mirror_audio = AsyncMock()
     world.chat.send.side_effect = asyncio.TimeoutError()
     with pytest.raises(ValueError):

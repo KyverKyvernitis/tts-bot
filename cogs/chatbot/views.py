@@ -206,7 +206,7 @@ class ActionConfigModal(discord.ui.Modal, title="Ações do chatbot"):
                             for role_id in current_config.action_staff_role_ids[:10]],
         )
         self.add_item(_label("Ações da IA", self.actions_group, "Permite usar os recursos abaixo durante a conversa."))
-        self.add_item(_label("Áudios", self.audio_group, "Pode mandar sem aprovação e reproduzir o mesmo áudio na call atual."))
+        self.add_item(_label("Áudios", self.audio_group, "Envia o arquivo no chat e pode tocar o mesmo áudio na call, sem aprovação."))
         self.add_item(_label("Calls", self.voice_group, "Entrar, sair, mudar de call e falar são automáticos, sem aprovação da staff."))
         self.add_item(_label("Moderação", self.moderation_group, "Banir, expulsar e silenciar exigem staff, suas permissões e hierarquia."))
         self.add_item(_label("Cargos de staff", self.staff_roles, "Opcional. Ações administrativas exigem a permissão Discord correspondente."))

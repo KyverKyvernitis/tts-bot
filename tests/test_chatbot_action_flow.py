@@ -163,6 +163,8 @@ def world(monkeypatch):
         synthesize_chatbot_attachment=AsyncMock(return_value=b"mp3 bytes"),
         chatbot_join_voice=AsyncMock(return_value={"ok": True, "status": "executed"}),
         chatbot_speak_voice=AsyncMock(return_value={"ok": True, "status": "executed"}),
+        chatbot_mirror_audio=AsyncMock(return_value={"ok": True, "status": "enqueued"}),
+        chatbot_voice_session_ref=MagicMock(side_effect=lambda gid, **kwargs: f"session-{id(guild.voice_client)}" if guild.voice_client is not None else None),
     )
     cog = object.__new__(ChatbotCog)
     cogs = {"TTSVoice": tts, "Chatbot": cog}
@@ -319,7 +321,8 @@ async def test_two_native_bans_need_separate_cards_and_staff_approval_in_order(w
 
 
 @pytest.mark.asyncio
-async def test_join_then_audio_runs_without_staff_and_mirrors_exact_attachment(world):
+@pytest.mark.parametrize("audio_action", ["send_audio", "speak_voice"])
+async def test_join_then_audio_runs_without_staff_and_mirrors_exact_attachment(world, audio_action):
     world.guild.voice_client = None
     world.members[999].voice = None
     payload = b"audio unico gerado para chat e call"
@@ -335,7 +338,7 @@ async def test_join_then_audio_runs_without_staff_and_mirrors_exact_attachment(w
     world.tts.chatbot_join_voice.side_effect = join
     world.cog._router.chat.return_value = ChatReply("texto que não deve antecipar a fala", (
         ActionProposal("join_voice", "autor"),
-        ActionProposal("send_audio", text="Cheguei, bora conversar."),
+        ActionProposal(audio_action, text="Cheguei, bora conversar."),
     ))
     assert await world.cog._generate_and_send(world.message, "entre na call e mande um áudio")
     await world.cog._supervisor.drain()
@@ -374,7 +377,7 @@ async def test_legacy_audio_permission_flag_is_ignored_without_preview_or_button
     assert len(world.cog._supervisor.jobs) == 1
     assert secret not in str(world.cog._memory.append_turn.await_args_list)
     await world.cog._supervisor.drain()
-    adapter = world.tts.synthesize_chatbot_attachment if action == "send_audio" else world.tts.chatbot_speak_voice
+    adapter = world.tts.synthesize_chatbot_attachment
     adapter.assert_awaited_once()
     assert adapter.await_args.kwargs["text"] == secret
     assert request["state"] == "succeeded" and "text" not in request["payload"]
@@ -401,19 +404,19 @@ async def test_spontaneous_audio_schedules_after_binding_and_executes_once_witho
     world.cog._maybe_generate_tts.assert_not_awaited()
     await world.cog._supervisor.drain()
     await world.cog._actions._start_automatic(request)
-    adapter = world.tts.synthesize_chatbot_attachment if action == "send_audio" else world.tts.chatbot_speak_voice
+    adapter = world.tts.synthesize_chatbot_attachment
     adapter.assert_awaited_once()
     assert world.collection.docs[0]["state"] == "succeeded"
     assert world.collection.docs[0]["message_id"] == 0
     assert world.cog._memory.append_turn.await_count == 1
     assert world.cog._memory.append_turn.await_args.kwargs["epoch"] == world.epoch
     assert secret not in _public_output(world)
-    if action == "send_audio":
-        world.channel.send.assert_awaited_once()
-        kwargs = world.channel.send.await_args.kwargs
-        assert "content" not in kwargs and kwargs["reference"].message_id == 50
-        assert kwargs["allowed_mentions"].to_dict() == {"parse": []}
-        assert world.cog._message_index.remember.await_count == 1
+    world.channel.send.assert_awaited_once()
+    kwargs = world.channel.send.await_args.kwargs
+    assert "content" not in kwargs and kwargs["reference"].message_id == 50
+    assert kwargs["allowed_mentions"].to_dict() == {"parse": []}
+    assert world.cog._message_index.remember.await_count == 1
+    world.tts.chatbot_speak_voice.assert_not_awaited()
 
 
 @pytest.mark.asyncio

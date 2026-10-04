@@ -261,6 +261,7 @@ class ChatbotVoiceActionsMixin:
     async def chatbot_mirror_audio(
         self, *, guild_id: int, user_id: int, text_channel_id: int, audio: bytes,
         request_id: str, before_effect: Callable[[], Awaitable[None]] | None = None,
+        expected_voice_channel_id: int | None = None, expected_session_ref: str | None = None,
     ) -> dict[str, Any]:
         """Enfileira os bytes exatos já enviados no chat para a call atual.
 
@@ -270,6 +271,16 @@ class ChatbotVoiceActionsMixin:
         from .audio import QueueItem
 
         if not isinstance(audio, bytes) or not audio or len(audio) > 8 * 1024 * 1024:
+            return {"ok": False, "status": "skipped"}
+        if expected_voice_channel_id is not None and (
+            not isinstance(expected_voice_channel_id, int) or isinstance(expected_voice_channel_id, bool)
+            or expected_voice_channel_id <= 0
+        ):
+            return {"ok": False, "status": "skipped"}
+        if expected_session_ref is not None and (
+            not isinstance(expected_session_ref, str) or not expected_session_ref
+            or self.chatbot_voice_session_ref(int(guild_id), require_idle=False) != expected_session_ref
+        ):
             return {"ok": False, "status": "skipped"}
         mirror_id = f"{int(guild_id)}:{str(request_id)[:64]}"
         seen = getattr(self, "_chatbot_mirror_seen", None)
@@ -282,8 +293,12 @@ class ChatbotVoiceActionsMixin:
             return {"ok": False, "status": "skipped"}
         guild, channel, vc, error = self._chatbot_mirror_precheck(
             guild_id=guild_id, user_id=user_id, text_channel_id=text_channel_id,
+            channel_id=expected_voice_channel_id,
         )
         if error:
+            return {"ok": False, "status": "skipped"}
+        captured_session_ref = self.chatbot_voice_session_ref(int(guild_id), require_idle=False)
+        if expected_session_ref is not None and captured_session_ref != expected_session_ref:
             return {"ok": False, "status": "skipped"}
         if before_effect is not None and await before_effect() is False:
             return {"ok": False, "status": "skipped"}
@@ -292,6 +307,8 @@ class ChatbotVoiceActionsMixin:
             session=vc, channel_id=channel.id,
         )
         if error:
+            return {"ok": False, "status": "skipped"}
+        if self.chatbot_voice_session_ref(int(guild_id), require_idle=False) != captured_session_ref:
             return {"ok": False, "status": "skipped"}
         state = self._get_state(guild.id)
         # Um espelho nunca remove falas comuns já aguardando na fila.
@@ -309,7 +326,7 @@ class ChatbotVoiceActionsMixin:
             text_channel_id=int(text_channel_id), chatbot_no_auto_connect=True,
             chatbot_before_effect=before_effect, chatbot_mirror_audio=audio,
             chatbot_mirror_session=vc, chatbot_is_mirror=True,
-            chatbot_mirror_session_ref=self.chatbot_voice_session_ref(int(guild_id), require_idle=False) or "",
+            chatbot_mirror_session_ref=captured_session_ref or "",
         )
         item._dedup_signature = f"chatbot-mirror:{int(guild_id)}:{item.request_id}"
         accepted, _dropped, _deduplicated = await self._enqueue_tts_item(int(guild_id), item)

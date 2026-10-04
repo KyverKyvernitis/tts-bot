@@ -10,9 +10,12 @@ import asyncio
 import base64
 import json
 import logging
+import math
+import re
 import time
 from dataclasses import dataclass, field, replace
 from copy import deepcopy
+from email.utils import parsedate_to_datetime
 from typing import Optional
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -54,10 +57,11 @@ class ProviderError(Exception):
         self, message: str, *, status: Optional[int] = None,
         retry_after: Optional[float] = None, kind: Optional[str] = None,
         stage: str = "api", finish_reason: Optional[str] = None,
+        quota_scope: str = "model", cause_kind: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.status = status
-        self.retry_after = retry_after
+        self.retry_after = _bounded_retry(retry_after)
         self.stage = stage
         self.finish_reason = finish_reason
         self.kind = kind or (
@@ -65,6 +69,8 @@ class ProviderError(Exception):
             "rate_limit" if status == 429 else
             "model" if status in (400, 404, 422) else "network"
         )
+        self.quota_scope = "account" if quota_scope == "account" else "model"
+        self.cause_kind = cause_kind or self.kind
 
 
 class RateLimitError(ProviderError):
@@ -120,27 +126,65 @@ class _ProviderState:
     next_allowed_monotonic: float = 0.0
     consecutive_failures: int = 0
     last_status: int = 0
+    last_kind: str = ""
+    last_stage: str = "api"
+    quota_scope: str = "model"
+    failure_generation: int = 0
 
     def is_available(self) -> bool:
         return time.monotonic() >= self.next_allowed_monotonic
 
-    def mark_success(self) -> None:
+    def mark_success(self, *, expected_generation: Optional[int] = None) -> bool:
+        # Respostas simultâneas podem chegar fora de ordem. Um sucesso iniciado
+        # antes de uma quota/auth/rede mais recente não reabre seu circuito.
+        if expected_generation is not None and expected_generation != self.failure_generation:
+            return False
         self.consecutive_failures = 0
         self.next_allowed_monotonic = 0.0
         self.last_status = 0
+        self.last_kind = ""
+        self.last_stage = "api"
+        self.quota_scope = "model"
+        return True
 
-    def mark_failure(self, cooldown_seconds: float, *, status: int = 0) -> None:
+    def mark_failure(
+        self, cooldown_seconds: float, *, status: int = 0,
+        kind: str = "network", stage: str = "api", quota_scope: str = "model",
+        explicit_retry: bool = False,
+    ) -> None:
         self.consecutive_failures += 1
-        factor = 2 ** min(self.consecutive_failures - 1, 4)
-        self.next_allowed_monotonic = time.monotonic() + min(900.0, cooldown_seconds * factor)
+        self.failure_generation += 1
+        factor = 1 if explicit_retry else 2 ** min(self.consecutive_failures - 1, 4)
+        bound = _MAX_RETRY_SECONDS if explicit_retry else 900.0
+        self.next_allowed_monotonic = time.monotonic() + min(bound, cooldown_seconds * factor)
         self.last_status = int(status)
+        self.last_kind, self.last_stage = kind, stage
+        self.quota_scope = quota_scope
+
+
+# A API pode devolver um número arbitrário. Nunca agendar espera infinita ou
+# negativa; um dia permite representar quotas diárias sem multiplicar RetryInfo.
+_MAX_RETRY_SECONDS = 86400.0
+
+
+def _bounded_retry(value) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(1.0, min(_MAX_RETRY_SECONDS, seconds)) if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def _retry_after(resp: aiohttp.ClientResponse) -> Optional[float]:
-    raw = resp.headers.get("retry-after")
+    raw = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+    seconds = _bounded_retry(raw)
+    if seconds is not None:
+        return seconds
     try:
-        return max(1.0, min(900.0, float(raw))) if raw else None
-    except (TypeError, ValueError):
+        return _bounded_retry(parsedate_to_datetime(raw).timestamp() - time.time()) if raw else None
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
 
 
@@ -175,20 +219,108 @@ async def _read_json_limited(response: aiohttp.ClientResponse):
     )
     try:
         return json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ProviderError("provider retornou JSON inválido", kind="invalid_response", stage="output") from exc
 
 
+def _retry_duration(value) -> Optional[float]:
+    if isinstance(value, dict):
+        if not any(key in value for key in ("seconds", "nanos")):
+            return None
+        try:
+            return _bounded_retry(float(value.get("seconds", 0)) + float(value.get("nanos", 0)) / 1e9)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if not isinstance(value, str) or len(value) > 80:
+        return _bounded_retry(value)
+    # RetryInfo usa protobuf Duration; Groq também publica resets como 1m2.5s.
+    if not re.fullmatch(r"(?:\d+(?:\.\d+)?[hms])+", value):
+        return None
+    return _bounded_retry(sum(float(number) * {"h": 3600, "m": 60, "s": 1}[unit]
+                              for number, unit in re.findall(r"(\d+(?:\.\d+)?)([hms])", value)))
+
+
+def _quota_scope(error: dict) -> str:
+    """Só evidência estruturada explícita pode abrir o circuito da conta."""
+    details = error.get("details")
+    details = details[:20] if isinstance(details, list) else []
+    scope, code = error.get("quota_scope"), error.get("code")
+    account = isinstance(scope, str) and scope in {"account", "organization", "project"}
+    account |= isinstance(code, str) and code in {"account_quota_exceeded", "organization_quota_exceeded", "billing_hard_limit_reached"}
+    for detail in details:
+        if not isinstance(detail, dict) or not str(detail.get("@type", "")).endswith(".QuotaFailure"):
+            continue
+        violations = detail.get("violations")
+        for violation in violations[:20] if isinstance(violations, list) else []:
+            if not isinstance(violation, dict):
+                continue
+            dimensions = violation.get("quotaDimensions")
+            dimensions = dimensions if isinstance(dimensions, dict) else {}
+            quota_id = str(violation.get("quotaId", "")).lower()
+            metric = str(violation.get("quotaMetric", "")).lower()
+            if any("model" in str(key).lower() for key in dimensions) or "permodel" in quota_id or "per_model" in metric:
+                continue
+            # Um QuotaFailure identifica a dimensão efetivamente limitada.
+            # Nome do projeto numa mensagem comum não prova alcance global.
+            if (any(str(key).lower() in {"project", "organization", "account"} for key in dimensions)
+                    or quota_id.endswith(("perproject", "perorganization", "peraccount"))):
+                account = True
+    return "account" if account else "model"
+
+
 async def _http_error(response: aiohttp.ClientResponse) -> ProviderError:
-    """Extrai apenas a categoria; o corpo pode conter prompt ou dados da conta."""
+    """Extrai apenas categorias e esperas; nunca preserva corpo/identificadores."""
     body = bytearray()
     async for chunk in response.content.iter_chunked(1024):
-        body.extend(chunk)
-        if len(body) >= 4096:
+        body.extend(chunk[:max(0, 8192 - len(body))])
+        if len(body) >= 8192:
             break
-    excerpt = bytes(body[:4096]).decode("utf-8", errors="replace").lower()
+    decoded = bytes(body).decode("utf-8", errors="replace")
+    excerpt = decoded.lower()
+    try:
+        data = json.loads(decoded)
+    except (ValueError, RecursionError):
+        data = {}
+    error = data.get("error", {}) if isinstance(data, dict) else {}
+    error = error if isinstance(error, dict) else {}
     status = response.status
-    if status == 401 or (status == 403 and any(marker in excerpt for marker in (
+    if status == 429:
+        waits = [_retry_after(response), _bounded_retry(error.get("retry_after"))]
+        details = error.get("details")
+        for detail in details[:20] if isinstance(details, list) else []:
+            if isinstance(detail, dict) and str(detail.get("@type", "")).endswith(".RetryInfo"):
+                waits.append(_retry_duration(detail.get("retryDelay")))
+        message = error.get("message")
+        if isinstance(message, str):
+            hint = re.search(r"try again in\s+((?:\d+(?:\.\d+)?[hms])+)", message[:4096], re.I)
+            if hint:
+                waits.append(_retry_duration(hint.group(1)))
+        explicit_waits = [wait for wait in waits if wait is not None]
+        if not explicit_waits:
+            # Um bucket saudável pode ter reset longo. Somente o bucket
+            # comprovadamente esgotado é uma pista útil, e nunca prevalece
+            # sobre RetryAfter/RetryInfo ou a espera explícita da API.
+            for bucket in ("requests", "tokens"):
+                raw = response.headers.get(f"x-ratelimit-remaining-{bucket}")
+                try:
+                    remaining = float(raw)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(remaining) and remaining == 0:
+                    waits.append(_retry_duration(response.headers.get(f"x-ratelimit-reset-{bucket}")))
+        return RateLimitError(
+            "provider atingiu um limite temporário", retry_after=max((wait for wait in waits if wait is not None), default=None),
+            quota_scope=_quota_scope(error),
+        )
+    auth_parts = [error.get("message"), error.get("code"), error.get("status")]
+    details = error.get("details")
+    for detail in details[:20] if isinstance(details, list) else []:
+        if isinstance(detail, dict) and str(detail.get("@type", "")).endswith(".ErrorInfo"):
+            auth_parts.append(detail.get("reason"))
+    auth_excerpt = " ".join(part.lower() for part in auth_parts if isinstance(part, str))
+    if not error:
+        auth_excerpt = excerpt
+    if status == 401 or (status in (400, 403) and any(marker in auth_excerpt for marker in (
         "invalid_api_key", "api_key_invalid", "invalid api key", "api key not valid",
         "api key expired", "authentication_error",
     ))):
@@ -318,6 +450,27 @@ def _tool_declarations(actions, target_refs, tool_specs):
     return specs, declarations
 
 
+def _gemini_schema(schema: dict) -> dict:
+    """Exporta o Schema OpenAPI da API; o original continua validando no host."""
+    supported = {"type", "format", "title", "description", "nullable", "enum", "items", "minItems", "maxItems",
+                 "properties", "required", "minProperties", "maxProperties", "minimum", "maximum", "anyOf",
+                 "propertyOrdering", "default", "example"}
+    result = {key: deepcopy(value) for key, value in schema.items() if key in supported}
+    bounds = []
+    for key, label in (("minLength", "mínimo de caracteres"), ("maxLength", "máximo de caracteres")):
+        if key in schema:
+            bounds.append(f"{label}: {schema[key]}")
+    if bounds:
+        result["description"] = (str(result.get("description", "")) + " " + "; ".join(bounds) + ".").strip()
+    if isinstance(result.get("properties"), dict):
+        result["properties"] = {name: _gemini_schema(child) for name, child in result["properties"].items()}
+    if isinstance(result.get("items"), dict):
+        result["items"] = _gemini_schema(result["items"])
+    if isinstance(result.get("anyOf"), list):
+        result["anyOf"] = [_gemini_schema(child) for child in result["anyOf"]]
+    return result
+
+
 class _GroqClient:
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -330,6 +483,7 @@ class _GroqClient:
         model: str, timeout_seconds: float, actions: tuple[str, ...] = (),
         target_refs: tuple[str, ...] = (),
         tool_specs: tuple[ToolSpec, ...] = (),
+        allow_tool_calls: bool = True,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         specs, declarations = _tool_declarations(actions, target_refs, tool_specs)
@@ -338,12 +492,12 @@ class _GroqClient:
             "messages": [{"role": "system", "content": system}]
             + [message.to_openai_payload() for message in messages],
             "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-            "max_completion_tokens": _output_tokens(messages, actions=actions or tuple(spec.name for spec in specs)),
+            "max_completion_tokens": _output_tokens(messages, actions=(actions or tuple(spec.name for spec in specs)) if allow_tool_calls else ()),
             "stream": False,
         }
         if declarations:
             payload["tools"] = [{"type": "function", "function": declaration} for declaration in declarations]
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = "auto" if allow_tool_calls else "none"
         # Evita gastar tokens de raciocínio oculto em conversa casual.
         if model.startswith("openai/gpt-oss"):
             payload.update({"reasoning_effort": "low", "include_reasoning": False})
@@ -359,11 +513,6 @@ class _GroqClient:
             async with self._session.post(
                 self.BASE_URL, json=payload, headers=headers, timeout=timeout,
             ) as resp:
-                if resp.status == 429:
-                    raise RateLimitError(
-                        f"Groq rate-limit ({model})", status=429,
-                        retry_after=_retry_after(resp),
-                    )
                 if resp.status >= 400:
                     raise await _http_error(resp)
                 data = await _read_json_limited(resp)
@@ -398,6 +547,8 @@ class _GroqClient:
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError("Groq resposta malformada", kind="invalid_response", stage="output") from exc
         reply = content.strip() if isinstance(content, str) else ""
+        if not allow_tool_calls and message.get("tool_calls"):
+            raise ProviderError("provider ignorou o fechamento sem ferramentas", kind="invalid_response", stage="output", finish_reason=finish_reason)
         if tool_specs:
             native_calls = []
             raw_calls = message.get("tool_calls") or []
@@ -472,6 +623,7 @@ class _GeminiClient:
         model: str, timeout_seconds: float, actions: tuple[str, ...] = (),
         target_refs: tuple[str, ...] = (),
         tool_specs: tuple[ToolSpec, ...] = (),
+        allow_tool_calls: bool = True,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         specs, declarations = _tool_declarations(actions, target_refs, tool_specs)
@@ -518,24 +670,14 @@ class _GeminiClient:
             "systemInstruction": {"parts": [{"text": system}]},
             "generationConfig": {
                 "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-                "maxOutputTokens": _output_tokens(messages, actions=actions or tuple(spec.name for spec in specs)),
+                "maxOutputTokens": _output_tokens(messages, actions=(actions or tuple(spec.name for spec in specs)) if allow_tool_calls else ()),
             },
         }
         if declarations:
-            # Gemini usa o subconjunto OpenAPI de Schema. A validação estrita
-            # continua no host, incluindo a rejeição de propriedades extras.
-            def gemini_schema(node):
-                if isinstance(node, dict):
-                    node.pop("additionalProperties", None)
-                    for child in node.values():
-                        gemini_schema(child)
-                elif isinstance(node, list):
-                    for child in node:
-                        gemini_schema(child)
             for tool in declarations:
-                gemini_schema(tool["parameters"])
+                tool["parameters"] = _gemini_schema(tool["parameters"])
             payload["tools"] = [{"functionDeclarations": declarations}]
-            payload["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
+            payload["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO" if allow_tool_calls else "NONE"}}
         # Flash/Lite 2.5 aceitam desativar pensamento para conversa curta.
         # Sem isso o orçamento de saída pode acabar antes do texto visível.
         if model.startswith(("gemini-2.5-flash", "gemini-2.5-flash-lite")):
@@ -547,11 +689,6 @@ class _GeminiClient:
                 self.BASE_URL.format(model=model), json=payload,
                 headers=headers, timeout=timeout,
             ) as resp:
-                if resp.status == 429:
-                    raise RateLimitError(
-                        f"Gemini rate-limit ({model})", status=429,
-                        retry_after=_retry_after(resp),
-                    )
                 if resp.status >= 400:
                     raise await _http_error(resp)
                 data = await _read_json_limited(resp)
@@ -581,6 +718,8 @@ class _GeminiClient:
             ).strip()
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError("Gemini resposta malformada", kind="invalid_response", stage="output") from exc
+        if not allow_tool_calls and any(isinstance(part, dict) and "functionCall" in part for part in parts):
+            raise ProviderError("provider ignorou o fechamento sem ferramentas", kind="invalid_response", stage="output", finish_reason=finish_reason)
         if tool_specs:
             native_calls = []
             for part in parts:
@@ -627,45 +766,127 @@ class ProviderRouter:
         self._gemini = _GeminiClient(session, gemini_key) if gemini_key else None
         self._states: dict[tuple[str, str], _ProviderState] = {}
         self._unsupported_tool_models: set[tuple[str, str]] = set()
+        self._last_request: dict = {}
+        log.info("chatbot: configuration groq_configured=%s gemini_configured=%s", bool(self._groq), bool(self._gemini))
         if not self._groq and not self._gemini:
             log.warning("ProviderRouter: nenhuma API key configurada")
 
     def _state(self, provider: str, model: str) -> _ProviderState:
         return self._states.setdefault((provider, model), _ProviderState())
 
+    @staticmethod
+    def _all_models(provider: str, models: tuple[str, ...]) -> tuple[str, ...]:
+        configured = ((*C.GROQ_MODELS, *C.GROQ_VISION_MODELS) if provider == "groq" else
+                      (*C.GEMINI_MODELS, *getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS)))
+        return tuple(dict.fromkeys((*models, *configured)))
+
     def _mark_provider_failure(
-        self,
-        provider: str,
-        models: tuple[str, ...],
-        cooldown_seconds: float,
-        *,
-        status: int,
+        self, provider: str, models: tuple[str, ...], cooldown_seconds: float, *, status: int,
+        kind: str = "network", stage: str = "api", quota_scope: str = "account", explicit_retry: bool = False,
     ) -> None:
-        """Abre o circuito de todos os modelos quando a falha é da conta/rede."""
         for candidate in models:
             self._state(provider, candidate).mark_failure(
-                cooldown_seconds, status=status,
+                cooldown_seconds, status=status, kind=kind, stage=stage,
+                quota_scope=quota_scope, explicit_retry=explicit_retry,
             )
 
-    def snapshot(self) -> dict[str, dict[str, float | int | bool]]:
+    def _record_failure(
+        self, provider: str, model: str, models: tuple[str, ...], error: ProviderError,
+        *, expected_generation: Optional[int] = None,
+    ) -> tuple[bool, ProviderError]:
+        """Circuito e causa efetiva, preservando falhas simultâneas mais novas."""
+        state = self._state(provider, model)
+        if expected_generation is not None and expected_generation != state.failure_generation:
+            if not state.is_available() and state.last_kind:
+                effective = ProviderError(
+                    "circuito mais recente preservado", kind=state.last_kind, stage=state.last_stage,
+                    status=state.last_status or None, quota_scope=state.quota_scope,
+                    retry_after=max(0.0, state.next_allowed_monotonic - time.monotonic()),
+                )
+                stop = state.quota_scope == "account" or state.last_kind in {"auth", "network", "timeout"}
+                return stop, effective
+            return False, error
+        status = int(error.status or 0)
+        metadata = dict(status=status, kind=error.kind, stage=error.stage, quota_scope=error.quota_scope)
+        if error.kind == "rate_limit":
+            metadata["explicit_retry"] = error.retry_after is not None
+            cooldown = error.retry_after or 30.0
+            if error.quota_scope == "account":
+                self._mark_provider_failure(provider, self._all_models(provider, models), cooldown, **metadata)
+                return True, error
+            state.mark_failure(cooldown, **metadata)
+        elif error.kind == "auth":
+            self._mark_provider_failure(provider, self._all_models(provider, models), 900.0, **metadata)
+            return True, error
+        elif error.kind in {"network", "timeout"}:
+            self._mark_provider_failure(provider, models, 20.0, **metadata)
+            return True, error
+        elif error.kind == "model":
+            state.mark_failure(300.0, **metadata)
+        elif error.kind in {"empty", "invalid_response"} and error.finish_reason not in {"length", "MAX_TOKENS"}:
+            state.mark_failure(20.0, **metadata)
+        return error.kind == "deadline", error
+
+    def snapshot(self) -> dict[str, dict]:
         now = time.monotonic()
         return {
             f"{provider}/{model}": {
-                "available": state.is_available(),
+                "available": now >= state.next_allowed_monotonic,
                 "cooldown_seconds": max(0.0, state.next_allowed_monotonic - now),
                 "failures": state.consecutive_failures,
                 "last_status": state.last_status,
+                "last_kind": state.last_kind,
+                "quota_scope": state.quota_scope,
             }
             for (provider, model), state in self._states.items()
         }
 
+    def diagnostics(self) -> dict:
+        """Metadados operacionais; nenhuma chave, mensagem ou corpo HTTP."""
+        circuits = self.snapshot()
+        waits = [item["cooldown_seconds"] for item in circuits.values() if not item["available"]]
+        return {
+            "configured": {"groq": self._groq is not None, "gemini": self._gemini is not None},
+            "circuits": circuits,
+            "earliest_retry_seconds": min(waits) if waits else None,
+            "last_request": deepcopy(self._last_request),
+        }
+
+    def _available(self, provider: str, model: str) -> bool:
+        state = self._states.get((provider, model))
+        return state is None or state.is_available()
+
+    def _retry_context(self, attempts) -> tuple[Optional[float], Optional[str], Optional[int]]:
+        now = time.monotonic()
+        waiting = [state for provider, _, models in attempts for model in models
+                   if (state := self._states.get((provider, model))) is not None and not state.is_available()]
+        if not waiting:
+            return None, None, None
+        earliest = min(waiting, key=lambda state: state.next_allowed_monotonic)
+        return max(0.0, earliest.next_allowed_monotonic - now), earliest.last_kind or None, earliest.last_status or None
+
+    @staticmethod
+    def _attempt_timeout(deadline: float, *, siblings: int = 0) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError("prazo da tentativa esgotado", kind="deadline", stage="routing")
+        # Reservar até 3s por irmão. Com pouco prazo, dividir o que existe;
+        # não inventar um timeout mínimo que ultrapasse o deadline do turno.
+        reserve = min(3.0 * siblings, remaining * .5) if siblings else 0.0
+        return min(C.PROVIDER_TIMEOUT_SECONDS, remaining - reserve)
+
+    async def _call(self, client, kwargs) -> str | ChatReply:
+        try:
+            return await asyncio.wait_for(client.chat(**kwargs), timeout=kwargs["timeout_seconds"])
+        except asyncio.TimeoutError as exc:
+            raise ProviderError("tempo da tentativa esgotado", kind="timeout") from exc
+
     async def chat(
         self, *, system: str, messages: list[ChatMessage],
         temperature: float = C.DEFAULT_TEMPERATURE, actions: tuple[str, ...] = (),
-        target_refs: tuple[str, ...] = (),
-        tool_specs: tuple[ToolSpec, ...] = (),
+        target_refs: tuple[str, ...] = (), tool_specs: tuple[ToolSpec, ...] = (),
         text_provider_order: tuple[str, ...] | None = None,
-        budget_seconds: float | None = None,
+        budget_seconds: float | None = None, allow_tool_calls: bool = True,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         started = time.monotonic()
@@ -673,189 +894,195 @@ class ProviderRouter:
         mode = "vision" if has_images else "text"
         attempts: list[tuple[str, object, tuple[str, ...]]] = []
         if self._groq:
-            attempts.append((
-                "groq", self._groq,
-                C.GROQ_VISION_MODELS if has_images else C.GROQ_MODELS,
-            ))
+            attempts.append(("groq", self._groq, C.GROQ_VISION_MODELS if has_images else C.GROQ_MODELS))
         if self._gemini:
-            attempts.append((
-                "gemini", self._gemini,
-                getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS) if has_images else C.GEMINI_MODELS,
-            ))
+            attempts.append(("gemini", self._gemini,
+                             getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS) if has_images else C.GEMINI_MODELS))
         if not has_images:
-            # Uma prioridade parcial mantém os outros providers como fallback.
-            # Ignorar nomes desconhecidos/repetidos não afeta a cadeia de visão.
             by_provider = {attempt[0]: attempt for attempt in attempts}
-            # O padrão atual é Groq primeiro, inclusive quando uma variável
-            # antiga invertia a ordem. Só a opção explícita do painel a altera.
             priority = text_provider_order if text_provider_order is not None else ("groq", "gemini")
-            ordered_names = dict.fromkeys((*priority, *by_provider))
-            attempts = [by_provider[name] for name in ordered_names if name in by_provider]
-        if not attempts:
-            raise AllProvidersExhausted("nenhum provider configurado", kind="unconfigured", stage="routing")
+            attempts = [by_provider[name] for name in dict.fromkeys((*priority, *by_provider)) if name in by_provider]
+        self._last_request = {"outcome": "pending", "mode": mode, "attempts": [], "skips": [], "attempt_count": 0}
+        report = self._last_request
 
-        deadline = started + min(C.PROVIDER_ROUTER_TIMEOUT_SECONDS, max(.01, budget_seconds) if budget_seconds is not None else C.PROVIDER_ROUTER_TIMEOUT_SECONDS)
-        # Chamadores que ainda passam URLs também recebem o mesmo preparo único.
-        # Nunca remover anexos para tentar um fallback apenas de texto.
+        def finish(kind: str, *, cause_kind=None, retry_after=None, outcome="failed"):
+            report.update(outcome=outcome, kind=kind, cause_kind=cause_kind or kind,
+                          retry_after=retry_after, attempt_count=len(report["attempts"]),
+                          elapsed_ms=max(0, int((time.monotonic() - started) * 1000)))
+
+        def skip(provider: str, model: str, reason: str, *, retry_after=None):
+            report["skips"].append({"provider": provider, "model": model, "reason": reason, "retry_after": retry_after})
+            log.info("chatbot: skip provider=%s model=%s mode=%s reason=%s retry_after=%s", provider, model, mode, reason, retry_after)
+
+        if not attempts:
+            finish("unconfigured")
+            raise AllProvidersExhausted("nenhum provider configurado", kind="unconfigured", stage="routing")
+        budget = C.PROVIDER_ROUTER_TIMEOUT_SECONDS
+        # Um budget menor que 1s é válido e mantém o prazo exato do host.
+        if budget_seconds is not None:
+            try:
+                budget = float(budget_seconds)
+            except (TypeError, ValueError, OverflowError):
+                budget = 0.0
+            if not math.isfinite(budget):
+                budget = 0.0
+        deadline = started + min(C.PROVIDER_ROUTER_TIMEOUT_SECONDS, max(0.0, budget))
         normalized: list[ChatMessage] = []
         try:
             for message in messages:
                 if message.images or not message.image_urls:
                     normalized.append(message)
                     continue
-                attachments = [
-                    MediaAttachment(url, urlsplit(url).path.rsplit("/", 1)[-1], "", 0, "image")
-                    for url in message.image_urls[:C.MAX_IMAGES_PER_MESSAGE]
-                ]
-                images = await prepare_image_attachments(
-                    self._session, attachments, timeout_seconds=_remaining(deadline),
-                )
+                attachments = [MediaAttachment(url, urlsplit(url).path.rsplit("/", 1)[-1], "", 0, "image")
+                               for url in message.image_urls[:C.MAX_IMAGES_PER_MESSAGE]]
+                images = await prepare_image_attachments(self._session, attachments, timeout_seconds=_remaining(deadline))
                 normalized.append(replace(message, image_urls=[], images=images))
         except ImagePreparationError as exc:
-            raise AllProvidersExhausted(
-                str(exc), kind=exc.kind, stage=exc.stage, status=exc.status,
-            ) from exc
+            finish(exc.kind)
+            raise AllProvidersExhausted(str(exc), kind=exc.kind, stage=exc.stage, status=exc.status) from exc
+        except ProviderError as exc:
+            finish(exc.kind)
+            raise AllProvidersExhausted("prazo dos providers esgotado", kind=exc.kind, stage=exc.stage) from exc
         messages = normalized
         last_error: Optional[ProviderError] = None
-        attempted = 0
         text_fallbacks = []
         wants_tools = bool(actions or tool_specs)
-        for provider_name, client, models in attempts:
-            for model in models:
-                state = self._state(provider_name, model)
+        has_native_history = any(message.tool_calls or message.role == "tool" for message in messages)
+
+        async def attempt(provider: str, client, model: str, timeout: float, *, text_only=False):
+            began = time.monotonic()
+            state = self._state(provider, model)
+            generation = state.failure_generation
+            entry = {"provider": provider, "model": model, "budget_ms": max(0, int(timeout * 1000)), "text_only": text_only}
+            report["attempts"].append(entry)
+            kwargs = dict(system=system, messages=messages, temperature=temperature, model=model, timeout_seconds=timeout)
+            if text_only:
+                kwargs["system"] += "\n\nNeste turno as ferramentas estão indisponíveis. Responda apenas em texto; não crie pedidos, não afirme executar ações e não peça códigos internos ao usuário."
+            else:
+                # Chamadores antigos recebem exatamente os kwargs anteriores.
+                if actions:
+                    kwargs["actions"] = actions
+                    if target_refs:
+                        kwargs["target_refs"] = target_refs
+                if tool_specs:
+                    kwargs["tool_specs"] = tool_specs
+                if not allow_tool_calls:
+                    kwargs["allow_tool_calls"] = False
+            try:
+                reply = await self._call(client, kwargs)
+                if not allow_tool_calls and isinstance(reply, ChatReply) and (reply.tool_calls or reply.proposals):
+                    raise ProviderError("provider ignorou o fechamento sem ferramentas", kind="invalid_response", stage="output")
+            except ProviderError as exc:
+                entry.update(kind=exc.kind, stage=exc.stage, status=int(exc.status or 0),
+                             retry_after=exc.retry_after, quota_scope=exc.quota_scope,
+                             elapsed_ms=max(0, int((time.monotonic() - began) * 1000)))
+                log.warning(
+                    "chatbot: provider=%s model=%s mode=%s stage=%s kind=%s status=%s finish_reason=%s elapsed_ms=%d budget_ms=%d quota_scope=%s retry_after=%s",
+                    provider, model, mode, exc.stage, exc.kind, int(exc.status or 0),
+                    _diagnostic_finish_reason(exc.finish_reason), entry["elapsed_ms"], entry["budget_ms"], exc.quota_scope, exc.retry_after,
+                )
+                raise
+            entry.update(kind="success", status=200, elapsed_ms=max(0, int((time.monotonic() - began) * 1000)))
+            state.mark_success(expected_generation=generation)
+            finish("success", outcome="success")
+            log.info("chatbot: result=success provider=%s model=%s mode=%s elapsed_ms=%d message_count=%d",
+                     provider, model, mode, report["elapsed_ms"], len(messages))
+            if text_only or (wants_tools and isinstance(reply, str)):
+                return ChatReply(reply, provider=provider, model=model)
+            return reply
+
+        def terminal(error: ProviderError):
+            if error.stage == "attachment" or error.kind == "blocked":
+                finish(error.kind, retry_after=error.retry_after)
+                raise AllProvidersExhausted("pedido não pôde ser processado", kind=error.kind, stage=error.stage,
+                                            status=error.status, finish_reason=error.finish_reason) from error
+
+        for index, (provider, client, models) in enumerate(attempts):
+            remaining = max(0.0, deadline - time.monotonic())
+            later = [item for item in attempts[index + 1:] if any(self._available(item[0], model) for model in item[2])]
+            # O prazo deste provider é fixo durante sua cadeia. Recalcular a
+            # reserva a cada modelo permitiria consumir aos poucos todo o fallback.
+            reserve = min(10.0, remaining * .5) if later else 0.0
+            provider_deadline = deadline - reserve
+            for model_index, model in enumerate(models):
+                state = self._state(provider, model)
+                generation = state.failure_generation
                 if not state.is_available():
+                    skip(provider, model, "cooldown", retry_after=max(0.0, state.next_allowed_monotonic - time.monotonic()))
                     continue
-                if wants_tools and (provider_name, model) in self._unsupported_tool_models:
-                    text_fallbacks.append((provider_name, client, model))
+                if wants_tools and (provider, model) in self._unsupported_tool_models:
+                    text_fallbacks.append((provider, client, model))
+                    skip(provider, model, "tools_unsupported")
                     continue
+                if time.monotonic() >= provider_deadline:
+                    skip(provider, model, "fallback_reserved" if later else "deadline")
+                    continue
+                siblings = sum(self._available(provider, candidate) and not (wants_tools and (provider, candidate) in self._unsupported_tool_models)
+                               for candidate in models[model_index + 1:])
                 try:
-                    timeout = _remaining(deadline)
-                    attempted += 1
-                    kwargs = dict(
-                        system=system, messages=messages, temperature=temperature,
-                        model=model, timeout_seconds=timeout,
-                    )
-                    # Não adicionar um argumento sequer aos chamadores/mocks
-                    # antigos quando nenhuma ferramenta foi disponibilizada.
-                    if actions and (provider_name, model) not in self._unsupported_tool_models:
-                        kwargs["actions"] = actions
-                        if target_refs:
-                            kwargs["target_refs"] = target_refs
-                    if tool_specs:
-                        kwargs["tool_specs"] = tool_specs
-                    try:
-                        reply = await client.chat(**kwargs)
-                    except ProviderError as exc:
-                        if exc.kind != "tools_unsupported" or not wants_tools:
-                            raise
-                        # A API recusou a capacidade antes de gerar resposta.
-                        # Este modelo passa a conversar apenas em texto, sem
-                        # transformar uma frase comum numa ação executável.
-                        self._unsupported_tool_models.add((provider_name, model))
-                        text_fallbacks.append((provider_name, client, model))
-                        continue
-                    if wants_tools and isinstance(reply, str):
-                        reply = ChatReply(reply, provider=provider_name, model=model)
-                    state.mark_success()
-                    log.info(
-                        "chatbot: result=success provider=%s model=%s mode=%s elapsed_ms=%d message_count=%d",
-                        provider_name, model, mode,
-                        max(0, int((time.monotonic() - started) * 1000)), len(messages),
-                    )
-                    return reply
-                except RateLimitError as exc:
-                    last_error = exc
-                    self._mark_provider_failure(
-                        provider_name, models, float(exc.retry_after or 30.0), status=429,
-                    )
-                    log.warning(
-                        "chatbot: provider=%s model=%s mode=%s stage=%s kind=rate_limit status=429 finish_reason=%s",
-                        provider_name, model, mode, exc.stage,
-                        _diagnostic_finish_reason(exc.finish_reason),
-                    )
-                    break
+                    timeout = self._attempt_timeout(provider_deadline, siblings=siblings)
+                    return await attempt(provider, client, model, timeout)
                 except ProviderError as exc:
                     last_error = exc
-                    status = int(exc.status or 0)
-                    log.warning(
-                        "chatbot: provider=%s model=%s mode=%s stage=%s kind=%s status=%s finish_reason=%s",
-                        provider_name, model, mode, exc.stage, exc.kind, status,
-                        _diagnostic_finish_reason(exc.finish_reason),
-                    )
-                    # Um anexo inválido ou bloqueio não indica indisponibilidade.
-                    if exc.stage == "attachment" or exc.kind == "blocked":
-                        raise AllProvidersExhausted(
-                            "pedido não pôde ser processado", kind=exc.kind,
-                            stage=exc.stage, status=exc.status, finish_reason=exc.finish_reason,
-                        ) from exc
-                    if exc.kind == "auth":
-                        all_models = tuple(dict.fromkeys(
-                            (*C.GROQ_MODELS, *C.GROQ_VISION_MODELS) if provider_name == "groq" else
-                            (*C.GEMINI_MODELS, *getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS))
-                        ))
-                        self._mark_provider_failure(provider_name, all_models, 900.0, status=status)
-                        break
-                    if exc.kind == "model":
-                        state.mark_failure(300.0, status=status)
-                    elif exc.kind in {"network", "timeout"}:
-                        self._mark_provider_failure(provider_name, models, 20.0, status=status)
-                        break
-                    elif exc.kind in {"empty", "invalid_response"}:
-                        # Resposta inválida pertence à tentativa/modelo, não à conta.
-                        # Esgotar tokens é um limite desta saída, não indisponibilidade.
-                        if exc.finish_reason not in {"length", "MAX_TOKENS"}:
-                            state.mark_failure(20.0, status=status)
-                    elif exc.kind == "deadline":
-                        break
-                    # Erro do payload não coloca um modelo válido em cooldown.
-                    if time.monotonic() >= deadline:
+                    terminal(exc)
+                    if exc.kind == "tools_unsupported" and wants_tools:
+                        self._unsupported_tool_models.add((provider, model))
+                        text_fallbacks.append((provider, client, model))
+                        continue
+                    stop, last_error = self._record_failure(provider, model, models, exc, expected_generation=generation)
+                    if stop:
+                        for candidate in models[model_index + 1:]:
+                            skip(provider, candidate, "account_cooldown" if last_error.quota_scope == "account" or last_error.kind == "auth" else "provider_unavailable")
                         break
             if time.monotonic() >= deadline:
                 break
-        # Conversa somente em texto é o último recurso, depois de esgotar
-        # modelos com suporte nativo. O prompt não promete ações neste modo.
-        for provider_name, client, model in text_fallbacks:
-            if not self._state(provider_name, model).is_available():
+
+        # Apenas depois dos modelos nativos, degradar para conversa sem ações.
+        for index, (provider, client, model) in enumerate(text_fallbacks):
+            if has_native_history:
+                # Um modelo sem suporte a ferramentas não recebe envelopes
+                # nativos anteriores nem uma narrativa inventada de efeitos.
+                skip(provider, model, "native_history_requires_tools")
                 continue
+            if not self._available(provider, model):
+                skip(provider, model, "cooldown")
+                continue
+            if time.monotonic() >= deadline:
+                skip(provider, model, "deadline")
+                break
             try:
-                attempted += 1
-                reply = await client.chat(
-                    system=system + "\n\nNeste turno as ferramentas estão indisponíveis. Responda apenas em texto; não crie pedidos, não afirme executar ações e não peça códigos internos ao usuário.",
-                    messages=messages, temperature=temperature, model=model, timeout_seconds=_remaining(deadline),
-                )
-                self._state(provider_name, model).mark_success()
-                log.info(
-                    "chatbot: result=success provider=%s model=%s mode=%s elapsed_ms=%d message_count=%d",
-                    provider_name, model, mode,
-                    max(0, int((time.monotonic() - started) * 1000)), len(messages),
-                )
-                return ChatReply(reply, provider=provider_name, model=model)
+                generation = self._state(provider, model).failure_generation
+                timeout = self._attempt_timeout(deadline, siblings=len(text_fallbacks) - index - 1)
+                return await attempt(provider, client, model, timeout, text_only=True)
             except ProviderError as exc:
                 last_error = exc
-                status = int(exc.status or 0)
-                log.warning(
-                    "chatbot: provider=%s model=%s mode=%s stage=%s kind=%s status=%s finish_reason=%s",
-                    provider_name, model, mode, exc.stage, exc.kind, status,
-                    _diagnostic_finish_reason(exc.finish_reason),
-                )
-                if exc.kind == "blocked":
-                    raise AllProvidersExhausted("pedido não pôde ser processado", kind="blocked", stage=exc.stage) from exc
-                models = next(item[2] for item in attempts if item[0] == provider_name)
-                if exc.kind in {"rate_limit", "auth", "network", "timeout"}:
-                    cooldown = float(exc.retry_after or 30.0) if exc.kind == "rate_limit" else 900.0 if exc.kind == "auth" else 20.0
-                    self._mark_provider_failure(provider_name, models, cooldown, status=status)
-                elif exc.kind == "model":
-                    self._state(provider_name, model).mark_failure(300.0, status=status)
-                if time.monotonic() >= deadline:
-                    break
-        if attempted == 0:
-            if last_error and last_error.kind == "deadline":
-                raise AllProvidersExhausted("prazo dos providers esgotado", kind="deadline", stage="routing")
-            raise AllProvidersExhausted("todos os modelos estão em cooldown", kind="cooldown", stage="routing")
+                terminal(exc)
+                models = next(item[2] for item in attempts if item[0] == provider)
+                _, last_error = self._record_failure(provider, model, models, exc, expected_generation=generation)
+
+        retry_after, cooldown_kind, cooldown_status = self._retry_context(attempts)
+        attempted = len(report["attempts"])
+        if time.monotonic() >= deadline:
+            kind, stage = "deadline", "routing"
+        elif attempted == 0 and retry_after is not None:
+            kind, stage = "cooldown", "routing"
+        elif attempted == 0 and has_native_history and text_fallbacks:
+            kind, stage = "tools_unsupported", "routing"
+        elif attempted == 0:
+            kind, stage = "cooldown", "routing"
+        else:
+            kind = last_error.kind if last_error else "network"
+            stage = last_error.stage if last_error else "api"
+        cause_kind = cooldown_kind if kind == "cooldown" else last_error.kind if last_error else kind
+        if kind not in {"cooldown", "rate_limit"}:
+            retry_after = last_error.retry_after if last_error else None
+        finish(kind, cause_kind=cause_kind, retry_after=retry_after)
+        log.info("chatbot: exhausted mode=%s kind=%s cause_kind=%s attempts=%d elapsed_ms=%d earliest_retry=%s",
+                 mode, kind, cause_kind, attempted, report["elapsed_ms"], retry_after)
         raise AllProvidersExhausted(
-            "todos os providers falharam",
-            kind=last_error.kind if last_error else "network",
-            stage=last_error.stage if last_error else "api",
-            status=last_error.status if last_error else None,
+            "todos os providers estão temporariamente indisponíveis" if kind == "cooldown" else "todos os providers falharam",
+            kind=kind, cause_kind=cause_kind, stage=stage, retry_after=retry_after,
+            status=(cooldown_status if kind == "cooldown" else last_error.status if last_error else None),
+            quota_scope=last_error.quota_scope if last_error else "model",
             finish_reason=last_error.finish_reason if last_error else None,
         )

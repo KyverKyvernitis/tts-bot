@@ -92,8 +92,19 @@ def register_module_tools(registry, cog, message, config, *, epoch,
                 return _result("failed", ok=False, reason="Não foi possível publicar a imagem neste canal.")
             except Exception:
                 return _result("uncertain", ok=False, reason="O envio não foi confirmado; não repetir automaticamente.")
+            notifier = getattr(cog, "note_public_delivery", None)
+            if callable(notifier):
+                try:
+                    notifier(sent.id)
+                except Exception as exc:
+                    log.warning("chatbot: recibo da imagem confirmada indisponível (%s)", type(exc).__name__)
             try:
-                await cog._remember_sent_message(guild_id=guild.id, channel_id=channel.id, message_id=sent.id)
+                await asyncio.wait_for(cog._remember_sent_message(guild_id=guild.id,
+                    channel_id=channel.id, message_id=sent.id), timeout=2)
+            except asyncio.CancelledError:
+                # A publicação já foi confirmada. Devolver o recibo permite
+                # ao turno propagar seu cancelamento sem replay da imagem.
+                pass
             except Exception as exc:
                 # A imagem já existe no Discord; falha no índice nunca deve
                 # transformá-la em uma operação que o modelo tenta repetir.

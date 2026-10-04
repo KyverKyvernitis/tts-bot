@@ -47,7 +47,8 @@ def world():
     tts = SimpleNamespace(synthesize_chatbot_attachment=AsyncMock(return_value=b"mp3 bytes"),
                           chatbot_join_voice=AsyncMock(return_value={"ok": True, "status": "executed"}),
                           chatbot_speak_voice=AsyncMock(return_value={"ok": True, "status": "executed"}),
-                          chatbot_mirror_audio=AsyncMock(return_value={"ok": True, "status": "executed"}),
+                          chatbot_mirror_audio=AsyncMock(return_value={"ok": True, "status": "enqueued"}),
+                          chatbot_voice_session_ref=Mock(side_effect=lambda gid, **kwargs: f"session-{id(guild.voice_client)}" if guild.voice_client is not None else None),
                           _chatbot_mirror_precheck=Mock(side_effect=lambda **kwargs: (
                               guild, getattr(guild.voice_client, "channel", None), guild.voice_client, None)))
     config_store = SimpleNamespace(get_config=AsyncMock(return_value=config))
@@ -97,7 +98,7 @@ async def test_context_voice_capabilities_require_exact_call_and_actual_adapter(
     assert "speak_voice" in context.actions
     assert "Reprodução na call disponível: send_audio" in context.description
     assert "No máximo uma proposta de áudio ou fala" in context.description
-    world.tts.chatbot_speak_voice = None
+    world.tts.chatbot_mirror_audio = None
     assert "speak_voice" not in (await build_action_context(world.bot, world.message, world.config)).actions
 
 
@@ -458,17 +459,21 @@ async def test_oversize_audio_or_missing_attach_permission_sends_nothing(world):
 
 
 @pytest.mark.asyncio
-async def test_speech_adapter_receives_private_text_and_uncertain_does_not_retry(world):
+async def test_speech_confirmed_chat_and_uncertain_queue_never_resends_private_audio(world):
     in_call(world, bot=True)
-    world.tts.chatbot_speak_voice.return_value = {"ok": False, "status": "uncertain"}
-    with pytest.raises(ActionExecutionUncertain) as error:
-        await execute_action(world.bot, doc("speak_voice", voice=20), actor_id=1)
-    assert "conteúdo privado" not in str(error.value)
-    kwargs = world.tts.chatbot_speak_voice.await_args.kwargs
-    assert (kwargs["guild_id"], kwargs["user_id"], kwargs["channel_id"], kwargs["request_id"], kwargs["text"]) == (
-        10, 1, 20, "abc123", "conteúdo privado")
-    assert callable(kwargs["before_effect"])
-    world.tts.chatbot_speak_voice.assert_awaited_once()
+    world.tts.chatbot_mirror_audio.return_value = {"ok": False, "status": "uncertain"}
+    result = await execute_action(world.bot, doc("speak_voice", voice=20), actor_id=1)
+    assert result.chat_audio_sent and result.message_id == 88 and result.voice_status == "uncertain"
+    assert "conteúdo privado" not in str(result)
+    kwargs = world.tts.synthesize_chatbot_attachment.await_args.kwargs
+    assert (kwargs["guild_id"], kwargs["user_id"], kwargs["text"]) == (10, 1, "conteúdo privado")
+    copied = world.tts.chatbot_mirror_audio.await_args.kwargs
+    assert copied["audio"] == b"mp3 bytes" and copied["expected_voice_channel_id"] == 20
+    assert callable(copied["before_effect"])
+    world.tts.synthesize_chatbot_attachment.assert_awaited_once()
+    world.chat.send.assert_awaited_once()
+    world.tts.chatbot_mirror_audio.assert_awaited_once()
+    world.tts.chatbot_speak_voice.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -626,15 +631,16 @@ async def test_absent_config_store_fails_closed(world):
 
 
 @pytest.mark.asyncio
-async def test_voice_adapter_receives_guard_that_checks_live_authority_after_waits(world):
+async def test_voice_copy_guard_checks_live_authority_and_preserves_delivered_chat(world):
     in_call(world, bot=True)
     async def adapter(**kwargs):
         world.config.voice_actions_enabled = False
         await kwargs["before_effect"]()
         raise AssertionError("must not reach voice effect")
-    world.tts.chatbot_speak_voice.side_effect = adapter
-    with pytest.raises(ActionDenied):
-        await execute_action(world.bot, doc("speak_voice", voice=20), actor_id=1)
+    world.tts.chatbot_mirror_audio.side_effect = adapter
+    result = await execute_action(world.bot, doc("speak_voice", voice=20), actor_id=1)
+    assert result.chat_audio_sent and result.message_id == 88 and result.voice_status == "skipped"
+    world.chat.send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1280,23 +1286,20 @@ async def test_native_audio_and_speech_honor_scoped_preferences_without_touching
     request["memory_epoch"] = {"global_generation": 1, "guild_generation": 2, "user_generation": 3}
     await execute_action(w.bot, request, actor_id=1)
     cog.get_conversation_preferences.assert_awaited_with(10, 30, 1, epoch)
-    if action == "send_audio":
-        kwargs = w.tts.synthesize_chatbot_attachment.await_args.kwargs
-        assert kwargs["voice"] == (voice or "baseVoice") and kwargs["language"] == (language or "en")
-        assert kwargs["rate"] == "+5%" and kwargs["pitch"] == "+2Hz"
-    else:
-        kwargs = w.tts.chatbot_speak_voice.await_args.kwargs
-        assert kwargs.get("voice_override", "") == voice and kwargs.get("language_override", "") == language
-        assert "rate" not in kwargs and "pitch" not in kwargs
+    kwargs = w.tts.synthesize_chatbot_attachment.await_args.kwargs
+    assert kwargs["voice"] == (voice or "baseVoice") and kwargs["language"] == (language or "en")
+    assert kwargs["rate"] == "+5%" and kwargs["pitch"] == "+2Hz"
+    w.tts.chatbot_speak_voice.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("observed", [False, True])
-async def test_speech_result_claims_playback_only_after_observed_first_frame(world, observed):
+async def test_speech_result_does_not_claim_playback_when_only_queue_is_confirmed(world, observed):
     in_call(world, bot=True)
-    world.tts.chatbot_speak_voice.return_value = {"ok": True, "status": "executed", "first_frame_observed": observed}
+    world.tts.chatbot_mirror_audio.return_value = {"ok": True, "status": "enqueued", "first_frame_observed": observed}
     result = await execute_action(world.bot, doc("speak_voice", voice=20), actor_id=1)
-    assert ("reproduzida" if observed else "enfileirada") in result.public_result
+    assert result.public_result == "Áudio enviado no chat e enfileirado para a call." and result.chat_audio_sent and result.voice_status == "enqueued"
+    assert "reproduzida" not in result.public_result
 
 
 @pytest.mark.asyncio

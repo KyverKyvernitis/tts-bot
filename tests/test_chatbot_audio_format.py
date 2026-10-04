@@ -171,6 +171,7 @@ def turn(monkeypatch):
     tts = SimpleNamespace(
         synthesize_chatbot_attachment=AsyncMock(return_value=b"the exact mp3 bytes"),
         chatbot_mirror_audio=AsyncMock(return_value={"ok": True, "status": "enqueued"}),
+        chatbot_voice_session_ref=Mock(return_value="voice-session-10"),
     )
     cog = object.__new__(ChatbotCog)
     cog.bot = SimpleNamespace(
@@ -195,10 +196,11 @@ def turn(monkeypatch):
     channel.id, channel.nsfw = 20, False
     channel.typing = AsyncMock()
     message = SimpleNamespace(
-        id=30, guild=SimpleNamespace(id=10), channel=channel,
+        id=30, guild=SimpleNamespace(id=10, voice_client=SimpleNamespace(channel=SimpleNamespace(id=777))), channel=channel,
         author=SimpleNamespace(id=40, name="ana", display_name="Ana", voice=None),
         reference=None, attachments=[], reply=AsyncMock(return_value=SimpleNamespace(id=50)),
     )
+    cog.bot.get_guild = lambda identifier: message.guild if identifier == 10 else None
     yield SimpleNamespace(cog=cog, message=message, tts=tts, config=cfg, draw=draw, epoch=epoch)
     for call in message.reply.await_args_list:
         files = call.kwargs.get("files")

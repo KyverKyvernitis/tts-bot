@@ -1,4 +1,5 @@
 """Fronteiras dos módulos: efeitos confirmados, acesso atual e ausência de replay."""
+import asyncio
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 
@@ -80,6 +81,26 @@ async def test_image_uncertain_network_send_never_replayed():
     assert (await handler({"prompt": "gato"}))["status"] == "uncertain"
     env.message.reply.assert_awaited_once()
     env.cog._remember_sent_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [OSError("índice fora do ar"), asyncio.CancelledError()])
+async def test_confirmed_image_has_immediate_receipt_and_metadata_cannot_trigger_replay(failure):
+    env = setup_modules()
+    env.cog.note_public_delivery = Mock()
+
+    async def metadata(**kwargs):
+        env.cog.note_public_delivery.assert_called_once_with(50)
+        raise failure
+
+    env.cog._remember_sent_message.side_effect = metadata
+    handler = env.registry.get("generate_image").handler
+    result = await handler({"prompt": "gato"})
+
+    assert result["status"] == "image_sent" and result["data"]["message_id"] == "50"
+    assert await handler({"prompt": "gato"}) == result
+    env.message.reply.assert_awaited_once()
+    env.cog._image_service.generate.assert_awaited_once()
 
 
 @pytest.mark.asyncio

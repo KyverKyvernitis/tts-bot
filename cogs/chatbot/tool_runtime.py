@@ -56,6 +56,30 @@ def _actions_ready(cog):
     return getattr(getattr(cog, "_actions", None), "ready", False) is True
 
 
+def _note_delivery(cog, message_id):
+    notifier = getattr(cog, "note_public_delivery", None)
+    if callable(notifier):
+        try:
+            notifier(message_id)
+        except Exception as exc:
+            log.warning("chatbot: recibo da conversão confirmada indisponível (%s)", type(exc).__name__)
+
+
+def _capture_mirror_session(cog, guild_id):
+    capture = getattr(cog, "_capture_audio_mirror_session", None)
+    if not callable(capture):
+        return None
+    try:
+        session = capture(guild_id)
+    except Exception:
+        return None
+    if (not isinstance(session, tuple) or len(session) != 2
+            or type(session[0]) is not int or session[0] <= 0
+            or not isinstance(session[1], str) or not session[1]):
+        return None
+    return session
+
+
 async def _after_delivery(operations):
     """Depois do envio confirmado, metadados nunca autorizam um segundo envio."""
     for label, operation in operations:
@@ -663,6 +687,7 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
         record = await reply_record(arguments)
         if record is None:
             raise policy.ActionDenied("Não encontrei uma resposta confirmada que possa converter neste canal.")
+        captured_session = _capture_mirror_session(cog, runtime.guild_id)
         async def before_effect():
             await runtime.guard(audio=True)
         audio = await recorded_reply_audio(cog.bot, record, user_id=runtime.user_id, before_effect=before_effect)
@@ -685,6 +710,7 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
         finally:
             attachment.close()
         runtime.response_sent = True
+        _note_delivery(cog, sent.id)
         spoken = record.get("spoken_text") or record.get("text", "")
         files = getattr(sent, "attachments", ())
         auxiliary = [
@@ -699,10 +725,10 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
         if callable(recorder):
             auxiliary.append(("intervalo", lambda: recorder(guild_id=runtime.guild_id, channel_id=runtime.channel_id)))
         remaining = await _after_delivery(auxiliary)
-        if remaining:
+        if remaining and captured_session is not None:
             await _after_delivery([("cópia na call", lambda: cog._mirror_sent_audio(guild_id=runtime.guild_id, user_id=runtime.user_id,
                 channel_id=runtime.channel_id, parent_id=getattr(channel, "parent_id", None),
-                message_id=sent.id, audio=audio, epoch=runtime.epoch))])
+                message_id=sent.id, audio=audio, epoch=runtime.epoch, captured_session=captured_session))])
         return _result({"message_id": str(sent.id), "reused_audio": record["format"] == "audio"}, status="audio_sent")
 
     async def convert_text(arguments):
@@ -725,6 +751,7 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
         except asyncio.TimeoutError:
             return {"ok": False, "status": "uncertain", "reason": "Não consegui confirmar o envio do texto. Confira o canal antes de tentar novamente."}
         runtime.response_sent = True
+        _note_delivery(cog, sent.id)
         await _after_delivery([
             ("índice", lambda: cog._remember_sent_message(guild_id=runtime.guild_id, channel_id=runtime.channel_id, message_id=sent.id)),
             ("registro", lambda: cog._reply_store.record_sent(guild_id=runtime.guild_id, channel_id=runtime.channel_id,
