@@ -297,6 +297,16 @@ class ChatbotCommandsMixin:
                         f"**Ferramentas no último turno:** {tools.get('executed', 0)} execuções; "
                         f"{tools['reused_reads']} leitura(s) repetida(s) reaproveitada(s)."
                     )
+                savings = turn.get("local_savings_chars")
+                if isinstance(savings, dict):
+                    saved_parts = []
+                    labels = {"tool_preface_history": "prévias privadas", "closing_state": "estado de fechamento"}
+                    for key in ("tool_preface_history", "closing_state"):
+                        value = savings.get(key)
+                        if token_number(value) and value:
+                            saved_parts.append(f"{labels[key]} {value}")
+                    if saved_parts:
+                        lines.append("**Caracteres locais não reenviados:** " + ", ".join(saved_parts) + ".")
                 selection = turn.get("tool_selection")
                 if isinstance(selection, dict):
                     catalog_chars = selection.get("catalog_schema_chars")

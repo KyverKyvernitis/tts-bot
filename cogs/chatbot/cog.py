@@ -50,7 +50,7 @@ from .providers import AllProvidersExhausted, ChatMessage, ProviderError, Provid
 from .action_protocol import ChatReply
 from .actions import ActionService
 from .context_efficiency import (
-    TurnUsage, annotate_delivery, compact_operational_state, deduplicate_reply_context, spontaneous_quota_factor,
+    TurnUsage, annotate_delivery, compact_closing_state, compact_operational_state, deduplicate_reply_context, spontaneous_quota_factor,
 )
 
 log = logging.getLogger(__name__)
@@ -1100,30 +1100,30 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             if remaining <= 0:
                 state["deadline"] = True
                 break
-            try:
-                current_preferences = await asyncio.wait_for(self.get_conversation_preferences(
-                    message.guild.id, message.channel.id, message.author.id, epoch,
-                ), timeout=remaining)
-            except asyncio.TimeoutError:
-                state["deadline"] = True
-                break
+            # A preferência já foi lida no início do turno e este canal é
+            # serializado pelo lock. Reconsultar Mongo em toda rodada só rouba
+            # deadline; set_conversation_preferences atualiza state abaixo.
+            current_preferences = state["preferences"]
             effective_mode = getattr(runtime_context, "response_format", None) or current_preferences.mode
-            state["preferences"] = current_preferences
             actual_state["preferences"] = {**current_preferences.to_result(), "effective_mode": effective_mode}
-            compact_state = compact_operational_state(actual_state)
+            full_compact_state = compact_operational_state(actual_state)
+            compact_state = compact_closing_state(actual_state) if final_round else full_compact_state
             if final_round:
-                # No fechamento não existem novas chamadas. Repetir lista de
-                # ferramentas/capacidades só aumenta o prompt sem poder mudar
-                # a decisão do host. O histórico já contém resultados e nomes.
-                compact_state.pop("tools", None)
+                usage = _TURN_USAGE.get()
+                if usage is not None:
+                    full_chars = len(json.dumps(full_compact_state, ensure_ascii=False, separators=(",", ":")))
+                    closing_chars = len(json.dumps(compact_state, ensure_ascii=False, separators=(",", ":")))
+                    usage.record_local_saving("closing_state", max(0, full_chars - closing_chars))
             current = "Estado confirmado deste turno: " + json.dumps(compact_state, ensure_ascii=False, separators=(",", ":"))
             if effective_mode == "audio":
                 current += f"\nEntregue a resposta de conversa em áudio, completa em até {MAX_TTS_CHARS} caracteres, sem prévia em texto."
-            # O catálogo/schema contém as regras uma única vez. O estado só
-            # acrescenta identidades, acesso e preferências reais deste turno.
-            current += ("\nRespeite o idioma de preferences.language quando definido. "
-                        "Use o estado confirmado já fornecido; consulte só dados ausentes ou que precisam de atualização. "
-                        "Agrupe consultas de leitura independentes na mesma rodada.")
+            if final_round:
+                current += "\nFechamento: use somente os resultados confirmados já presentes; não faça novas ferramentas."
+            else:
+                # O catálogo/schema contém as regras uma única vez. O estado só
+                # acrescenta identidades, acesso e preferências reais deste turno.
+                current += ("\nRespeite preferences.language quando definido. Consulte só dados ausentes/voláteis "
+                            "e agrupe leituras independentes na mesma rodada.")
             remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
             if remaining <= 0:
                 state["deadline"] = True
@@ -1137,9 +1137,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     state["deadline"] = True
                     break
             final_options = {"allow_tool_calls": False} if final_round else {}
-            if final_round:
-                current += ("\nAs consultas deste turno terminaram. Responda usando somente os resultados "
-                            "confirmados; não faça novas chamadas de ferramentas neste fechamento.")
             try:
                 # Fechamento é somente síntese de resultados já confirmados:
                 # não reenviar schemas nem o índice de capacidades. Além de
@@ -1152,9 +1149,15 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     index_builder = getattr(registry, "capability_index", None)
                     if callable(index_builder):
                         try:
-                            round_index = index_builder(exclude_names=tuple(spec.name for spec in round_specs))
+                            round_index = index_builder(
+                                exclude_names=tuple(spec.name for spec in round_specs),
+                                detail_names=registry.selection.index_hints(),
+                            )
                         except TypeError:
-                            round_index = index_builder()
+                            try:
+                                round_index = index_builder(exclude_names=tuple(spec.name for spec in round_specs))
+                            except TypeError:
+                                round_index = index_builder()
                     else:
                         round_index = registry.summary()
                     round_system = system + "\n\n" + round_index + "\n\n" + current
@@ -1187,7 +1190,16 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 )
                 return latest, registry, state
             calls = latest.tool_calls
-            messages.append(ChatMessage("assistant", latest.text, tool_calls=list(calls)))
+            # Texto que acompanha tool_calls é uma prévia privada: não foi
+            # entregue e não é necessário para parear o histórico nativo.
+            # Reenviá-lo em todas as rodadas cobra entrada de novo; os calls
+            # preservam integralmente nome/argumentos/IDs. ``latest`` mantém o
+            # texto localmente para o caso seguro de reutilização pós-efeito.
+            hidden_preface = latest.text if isinstance(latest.text, str) else ""
+            messages.append(ChatMessage("assistant", "", tool_calls=list(calls)))
+            turn_usage = _TURN_USAGE.get()
+            if turn_usage is not None and hidden_preface:
+                turn_usage.record_local_saving("tool_preface_history", len(hidden_preface))
             # Uma resposta preparada pertence apenas a este lote. Nunca
             # reutilizar a prévia de um lote cuja consulta/ajuste falhou.
             if runtime_context is not None:
@@ -1747,13 +1759,24 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         latest_index = len(turns) - 1
         latest = prepared(latest_index)
         latest_cost = sum(len(item.content) for item in latest)
-        budget = max_budget if not str(query).strip() else min(max_budget, max(target_budget, latest_cost))
-        if latest_cost > max_budget:
-            half = max(1, max_budget // 2)
-            latest[0].content = self._clean_prompt_text(latest[0].content, half)
-            latest[1].content = self._clean_prompt_text(latest[1].content, max_budget - len(latest[0].content))
+        query_text = str(query or "").strip()
+        latest_terms = set(text_terms(latest[0].content + " " + latest[1].content))
+        overlap = bool(query_terms & latest_terms)
+        # Seguimentos curtos podem depender fortemente do turno imediatamente
+        # anterior mesmo sem repetir substantivos ("e depois?", "por quê?").
+        # Já uma pergunta nova, longa e lexicalmente independente não deve
+        # carregar automaticamente até 6k de um assunto antigo. Ainda conserva
+        # 2.8k para referências indiretas, sem tentar adivinhar intenção.
+        likely_followup = len(query_text) <= 160 or len(query_terms) <= 3 or overlap
+        latest_limit = max_budget if (not query_text or likely_followup) else target_budget
+        if latest_cost > latest_limit:
+            user_share = max(1, int(latest_limit * .45))
+            latest[0].content = self._clean_prompt_text(latest[0].content, user_share)
+            latest[1].content = self._clean_prompt_text(
+                latest[1].content, max(1, latest_limit - len(latest[0].content))
+            )
             latest_cost = sum(len(item.content) for item in latest)
-            budget = max_budget
+        budget = max_budget if not query_text else min(max_budget, max(target_budget, latest_cost))
         selected[latest_index] = latest
         total = latest_cost
 

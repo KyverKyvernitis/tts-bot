@@ -49,6 +49,7 @@ class TurnUsage:
     tool_reads_reused: int = 0
     speculative_tools_pruned: int = 0
     tool_selection_metrics: dict = field(default_factory=dict)
+    local_savings: dict = field(default_factory=dict)
     complete: bool = True
     requests_known: bool = True
 
@@ -88,6 +89,13 @@ class TurnUsage:
         if reused_read:
             self.tool_reads_reused += 1
 
+    def record_local_saving(self, name: str, chars: int) -> None:
+        """Conta caracteres evitados localmente, sem estimar tokens do provider."""
+        if not isinstance(name, str) or not name or type(chars) is not int or chars <= 0:
+            return
+        key = name[:48]
+        self.local_savings[key] = self.local_savings.get(key, 0) + min(chars, 10**9)
+
     def record_tool_selection(self, metrics=None, *, pruned: int = 0):
         """Registra economia de schemas sem guardar nomes/argumentos de tools."""
         if isinstance(metrics, dict):
@@ -103,7 +111,7 @@ class TurnUsage:
                 if type(value) is int and 0 <= value <= 10**9:
                     self.tool_selection_metrics.setdefault(initial, value)
                     self.tool_selection_metrics[current] = value
-            for name in ("explicit_tools", "used_tools"):
+            for name in ("explicit_tools", "used_tools", "index_hint_tools"):
                 value = metrics.get(name)
                 if type(value) is int and 0 <= value <= 10**9:
                     self.tool_selection_metrics[name] = value
@@ -260,6 +268,8 @@ class TurnUsage:
         if self.tool_calls_seen:
             result["tools"] = {"seen": self.tool_calls_seen, "executed": self.tool_calls_executed,
                                "reused_reads": self.tool_reads_reused}
+        if self.local_savings:
+            result["local_savings_chars"] = dict(self.local_savings)
         if self.tool_selection_metrics or self.speculative_tools_pruned:
             selection = dict(self.tool_selection_metrics)
             if self.speculative_tools_pruned:
@@ -379,6 +389,26 @@ def compact_operational_state(state):
     # geração só repete tokens e pode induzir o modelo a opinar sobre um
     # fallback que ele não controla. O painel/log preserva o snapshot completo.
     result.pop("providers", None)
+    return result
+
+
+def compact_closing_state(state):
+    """Estado mínimo para síntese final, quando novas ferramentas são proibidas.
+
+    Referências, presença de voz e rascunhos só servem para decidir/executar
+    chamadas. Depois que o host fecha as tools, repeti-los não pode mudar nada e
+    apenas aumenta a entrada. Preferências ainda orientam idioma/formato.
+    """
+    result = {}
+    preferences = state.get("preferences") if isinstance(state, dict) else None
+    if isinstance(preferences, dict):
+        kept = {}
+        for name in ("effective_mode", "mode", "language"):
+            value = preferences.get(name)
+            if isinstance(value, str) and value:
+                kept[name] = value
+        if kept:
+            result["preferences"] = kept
     return result
 
 

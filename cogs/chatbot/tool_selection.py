@@ -68,6 +68,10 @@ class ToolSelection:
         # à próxima rodada. Já os candidatos especulativos do ranking inicial
         # podem ser descartados depois do primeiro lote se não foram usados.
         self._explicit = set()
+        # Candidatos relevantes que não couberam no orçamento inicial. Seus
+        # nomes já aparecem no enum de carregar_ferramentas; guardamos poucos
+        # hints descritivos para não repetir o catálogo inteiro no system.
+        self._index_hints = ()
         # Adapters de teste/legados sem descoberta mantêm seu contrato integral.
         self.enabled = registry.get(DISCOVERY_TOOL) is not None
         specs = tuple(registry.get_specs())
@@ -88,20 +92,31 @@ class ToolSelection:
                            for term in terms & (current | recent))
 
             size = sum(declaration_chars(spec) for spec in specs if spec.name in self._selected)
-            ranked = sorted(specs, key=lambda spec: (-score(spec), spec.name))
-            for spec in ranked:
-                if spec.name in self._selected or score(spec) <= 0:
+            scored = [(score(spec), spec) for spec in specs]
+            ranked = sorted(scored, key=lambda item: (-item[0], item[1].name))
+            omitted_relevant = []
+            for relevance, spec in ranked:
+                if spec.name in self._selected or relevance <= 0:
                     continue
                 cost = declaration_chars(spec)
                 if len(self._selected) >= max(1, int(max_initial)) or size + cost > max(1, int(max_chars)):
+                    omitted_relevant.append(spec.name)
                     continue
                 self._selected.add(spec.name)
                 size += cost
+            # Só candidatos que realmente combinaram com a mensagem precisam de
+            # descrição fora dos schemas. O enum da ferramenta de descoberta
+            # já contém todos os demais nomes reais do catálogo.
+            self._index_hints = tuple(omitted_relevant[:6])
         registry.selection = self
 
     @property
     def selected_names(self):
         return tuple(spec.name for spec in self.get_specs())
+
+    def index_hints(self):
+        """Nomes relevantes omitidos dos schemas por limite de tamanho/quantidade."""
+        return tuple(name for name in self._index_hints if name not in self._selected)
 
     def mark_used(self, names):
         if isinstance(names, str):
@@ -174,4 +189,5 @@ class ToolSelection:
                 "catalog_schema_chars": sum(declaration_chars(spec) for spec in full),
                 "loaded_schema_chars": sum(declaration_chars(spec) for spec in selected),
                 "explicit_tools": len(self._explicit),
-                "used_tools": len(self._used)}
+                "used_tools": len(self._used),
+                "index_hint_tools": len(self.index_hints())}

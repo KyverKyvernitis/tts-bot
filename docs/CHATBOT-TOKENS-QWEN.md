@@ -129,3 +129,15 @@ Resultados extensos de ferramentas passam por um limite de fallback menor (`MAX_
 Recuperação local de lembretes pessoais e conhecimento publicado agora roda em paralelo, com um único prazo curto. Essas leituras não chamam modelo; o objetivo é preservar mais do deadline para a geração útil e reduzir turnos que precisariam cair em timeout/fallback.
 
 A auditoria registra o tamanho do catálogo completo, schemas realmente carregados na primeira rodada, tamanho depois da poda e quantos candidatos especulativos foram removidos. `/chatbot configurar` mostra essa redução sem armazenar nomes, argumentos ou conteúdo das ferramentas.
+
+## Quinta rodada de eficiência
+
+O índice textual de capacidades deixa de repetir o catálogo completo em toda rodada. O schema de `carregar_ferramentas` já contém no enum `names` os nomes reais disponíveis; por isso o system prompt passa a descrever somente candidatos semanticamente relacionados à mensagem que não couberam no orçamento inicial de schemas. Em conversa comum, quando nenhum candidato ficou de fora, o índice vira apenas uma instrução curta de descoberta. O modo detalhado do `ToolRegistry` continua disponível para diagnóstico e compatibilidade.
+
+Texto que acompanha uma resposta com `tool_calls` continua privado até o resultado real das ferramentas, mas agora não é reenviado como parte do histórico nativo das rodadas seguintes. IDs, nomes e argumentos das chamadas permanecem integrais, então OpenAI-compatible e Gemini continuam recebendo o pareamento exigido pela API. O objeto local da resposta mantém a prévia apenas para o caso já validado em que somente efeitos automáticos confirmados permitem reutilizá-la como fechamento. A auditoria mede somente quantos caracteres deixaram de ser reenviados; não converte isso em uma estimativa inventada de tokens.
+
+O fechamento sem novas ferramentas recebe um estado operacional mínimo. Referências de membros/recursos, presença de voz, rascunhos e availability servem para decidir e executar chamadas, mas não podem alterar nada depois que o host proíbe novas tools. A rodada final conserva somente preferências necessárias de formato/idioma. Isso reduz especialmente o segundo prompt de pedidos com muitos alvos resolvidos.
+
+A preferência da conversa deixa de ser relida do Mongo a cada rodada do mesmo turno. Ela já foi capturada antes do loop e o canal é serializado; quando `set_conversation_preferences` confirma uma mudança, o estado local é atualizado imediatamente. A economia principal aqui é de deadline/I/O, diminuindo a chance de um fechamento útil cair em timeout e gerar fallback desperdiçado.
+
+O último turno pessoal também passa a respeitar o orçamento normal quando a mensagem atual é longa e lexicalmente independente do assunto anterior. Seguimentos curtos ou com termos em comum continuam preservando até o teto maior para manter continuidade. Uma troca clara de assunto ainda conserva até o orçamento normal de 2.800 caracteres, em vez de anexar automaticamente até 6.000 caracteres só porque a resposta anterior era grande.

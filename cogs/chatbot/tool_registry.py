@@ -100,37 +100,39 @@ class ToolRegistry:
     def summary(self, context=None) -> str:
         return tool_summary(self.snapshot(context))
 
-    def capability_index(self, *, exclude_names=()) -> str:
+    def capability_index(self, *, exclude_names=(), detail_names=None) -> str:
         """Índice compacto das funções ainda não descritas por schemas nativos.
 
-        ``exclude_names`` não avalia availability e portanto não transforma o
-        catálogo em autorização. A rodada já recebe os contratos completos das
-        funções carregadas; repetir seus resumos aqui só desperdiça entrada.
+        ``carregar_ferramentas`` já carrega no próprio schema um enum com todos
+        os nomes reais. Em runtime, ``detail_names`` limita descrições extras a
+        candidatos semanticamente relevantes que não couberam nos schemas; isso
+        evita repetir o catálogo inteiro em toda rodada. ``None`` mantém o modo
+        detalhado legado para diagnósticos/testes e adapters antigos.
         """
         excluded = set(exclude_names or ())
+        details = None if detail_names is None else set(detail_names or ())
         lines = [
-            "Índice de outras ferramentas reais do bot; contratos nativos presentes já estão carregados.",
-            ("Para uma função deste índice, use carregar_ferramentas antes de chamá-la."
-             if "carregar_ferramentas" in self._specs else "Use apenas contratos nativos presentes nesta rodada."),
-            "Não peça códigos internos; só confirme efeitos após resultado real; staff aprova ações privilegiadas.",
+            "Outras ferramentas reais podem ser carregadas por carregar_ferramentas; o enum names contém o catálogo.",
+            "Carregar contrato não executa ação nem concede permissão; só confirme efeitos após resultado real.",
         ]
-        # Sem avaliar availability: nomes/descritivos são catálogo publicado, não
-        # promessa de disponibilidade. Descrições carregadas ficam nos schemas.
         count = 0
         for spec in self._specs.values():
-            if spec.name in excluded:
+            if spec.name in excluded or (details is not None and spec.name not in details):
                 continue
             description = re.split(r"(?<=[.!?])\s+", " ".join(spec.description.split()), maxsplit=1)[0]
-            description = description if len(description) <= 76 else description[:73].rstrip() + "..."
+            description = description if len(description) <= 68 else description[:65].rstrip() + "..."
             suffix = f" [{spec.permission}]"
             actions = spec.capabilities or spec.parameters.get("properties", {}).get("action", {}).get("enum", ())
             if actions:
                 suffix += " ações=" + ",".join(actions)
             lines.append(f"{spec.name}: {description}{suffix}")
             count += 1
-        if not count:
+        if details is not None and not count:
+            return "\n".join(lines)
+        if details is None and not count:
             return "Contratos nativos presentes cobrem as ferramentas carregadas desta rodada."
         return "\n".join(lines)
+
 
 
 def tool_summary(specs) -> str:
