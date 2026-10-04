@@ -19,10 +19,12 @@ import discord
 
 from . import constants as C
 from . import action_policy as policy
-from .action_protocol import MAX_PROPOSALS, parse_proposal, proposal_tool
+from .action_protocol import ALLOWED_ACTIONS, MAX_PROPOSALS, action_options_schema, parse_proposal, proposal_tool
+from .action_drafts import DraftConflict, DraftStale, InvalidDraft
 from .memory import MemoryEpoch
 from .tool_memory import FactStore
 from .tool_registry import InvalidToolArguments, ToolRegistry, ToolSpec, validate_tool_arguments
+from .voice_context import build_voice_snapshot, member_voice_snapshot
 
 log = logging.getLogger(__name__)
 _EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
@@ -85,6 +87,10 @@ class ToolRuntimeContext:
     response_sent: bool = False
     proposals_invalid: bool = False
     proposals_error: str = ""
+    voice_state: dict = field(default_factory=dict)
+    action_draft: dict | None = None
+    draft_store: object = None
+    action_draft_error: str = ""
 
     @property
     def guild_id(self):
@@ -157,6 +163,9 @@ def refresh_action_spec(registry):
     refs = list(runtime.targets)
     for member in runtime.targets.values():
         refs.extend((str(member.id), f"<@{member.id}>", f"<@!{member.id}>"))
+    for ref, resource in runtime.resources.items():
+        if isinstance(resource, discord.User):
+            refs.extend((ref, str(resource.id), f"<@{resource.id}>"))
     declaration = proposal_tool(actions, tuple(refs))
     registry.unregister_owner("runtime_actions")
 
@@ -188,7 +197,7 @@ def refresh_action_spec(registry):
                         "executed": False}, status="proposed")
 
     registry.register(ToolSpec(declaration["name"], declaration["description"], declaration["parameters"],
-                               permission="áudio/fala automáticos; staff para ações privilegiadas", handler=propose, available=bool(actions),
+                               permission="áudio/fala e própria conexão de voz automáticos; staff para ações privilegiadas", handler=propose, available=bool(actions),
                                why=("" if actions else "O serviço de ações não está disponível." if not _actions_ready(runtime.cog) else "Não há ações habilitadas."),
                                availability=lambda _context: (bool(actions) and _actions_ready(runtime.cog),
                                    "" if actions and _actions_ready(runtime.cog) else "O serviço de ações não está disponível." if not _actions_ready(runtime.cog) else "Não há ações habilitadas.")), owner="runtime_actions")
@@ -212,6 +221,111 @@ async def rebuild_action_context(registry):
     refresh_action_spec(registry)
 
 
+async def refresh_tool_context(registry):
+    """Atualiza presença/catálogo sem executar propostas ou afirmar sucesso."""
+    runtime = registry.runtime
+    guild, _channel, requester, _config = await runtime.guard()
+    runtime.targets["autor"] = requester
+    runtime.voice_state = build_voice_snapshot(runtime.cog.bot, guild, requester)
+    await _load_action_draft(registry)
+    await rebuild_action_context(registry)
+    return runtime.voice_state
+
+
+def _draft_identity(draft):
+    return {"expected_draft_id": draft["draft_id"], "expected_revision": draft["revision"]}
+
+
+def _check_seen_draft(runtime, current):
+    observed = runtime.action_draft
+    if ((observed is None) != (current is None)
+            or observed is not None and _draft_identity(observed) != _draft_identity(current)):
+        raise policy.ActionDenied("O pedido mudou ou expirou durante a conversa. Consulte o pedido atual antes de completar ou cancelar.")
+
+
+async def _restore_action_draft(registry, draft):
+    runtime = registry.runtime
+    guild, channel, requester, _cfg = await runtime.guard()
+    restored = dict(draft)
+    target_id = draft.get("target_id")
+    if target_id is not None:
+        if draft["action"] == "unban_member":
+            target = await _draft_account(runtime, target_id)
+            restored["target_ref"] = runtime.reference(runtime.resources, target, "u")
+        else:
+            target = await policy._fresh_member(guild, target_id)
+            restored["target_ref"] = runtime.reference(runtime.targets, target, "m")
+        restored["target_name"] = policy._label(target)
+    options = dict(draft.get("options") or {})
+    if "role_ref" in options:
+        role = guild.get_role(int(options["role_ref"]))
+        if not isinstance(role, discord.Role) or role.guild.id != guild.id:
+            raise policy.ActionDenied("O cargo desse pedido não está mais disponível.")
+        options["role_ref"] = runtime.reference(runtime.resources, role, "r")
+    if "channel_ref" in options:
+        resource = guild.get_channel_or_thread(int(options["channel_ref"]))
+        if not isinstance(resource, discord.TextChannel) or resource.guild.id != guild.id:
+            raise policy.ActionDenied("O canal desse pedido não está mais disponível.")
+        await policy._requester_can_view(resource, requester)
+        options["channel_ref"] = runtime.reference(runtime.resources, resource, "c")
+    if "message_refs" in options:
+        refs = []
+        for identifier in options["message_refs"]:
+            item = await channel.fetch_message(int(identifier))
+            if (not isinstance(item, discord.Message) or item.guild.id != guild.id
+                    or item.channel.id != channel.id):
+                raise policy.ActionDenied("Uma mensagem desse pedido não está mais disponível.")
+            refs.append(runtime.reference(runtime.resources, item, "msg"))
+        options["message_refs"] = refs
+    restored["options"] = options
+    await runtime.guard()
+    runtime.action_draft = restored
+    runtime.action_draft_error = ""
+    return restored
+
+
+async def _draft_account(runtime, user_id):
+    # Uma conta banida normalmente não é Member. Consultar sua identidade
+    # pública pelo ID específico não revela lista nem situação de banimento.
+    lookup = getattr(runtime.cog.bot, "fetch_user", None)
+    if not callable(lookup):
+        raise policy.ActionDenied("Não consegui confirmar a identidade dessa conta agora.")
+    try:
+        user = await lookup(int(user_id))
+    except (discord.HTTPException, asyncio.TimeoutError):
+        raise policy.ActionDenied("Não consegui confirmar a identidade dessa conta agora.") from None
+    if not isinstance(user, discord.User) or user.id != int(user_id):
+        raise policy.ActionDenied("Não consegui confirmar a identidade dessa conta.")
+    return user
+
+
+async def _load_action_draft(registry):
+    runtime = registry.runtime
+    if runtime.draft_store is None:
+        runtime.action_draft = None
+        return None
+    try:
+        draft = await runtime.draft_store.get_current(runtime.guild_id, runtime.channel_id, runtime.user_id, runtime.epoch)
+    except (DraftStale, DraftConflict, InvalidDraft) as exc:
+        raise policy.ActionDenied(str(exc)) from None
+    if draft is None:
+        runtime.action_draft = None
+        return None
+    try:
+        return await _restore_action_draft(registry, draft)
+    except (policy.ActionDenied, discord.NotFound, ValueError, TypeError, KeyError, AttributeError):
+        # Não deixar uma referência de outra rodada apontar para um alvo novo.
+        # CAS impede a limpeza de apagar um pedido que mudou concorrentemente.
+        try:
+            await runtime.draft_store.cancel(runtime.guild_id, runtime.channel_id, runtime.user_id,
+                                             runtime.epoch, **_draft_identity(draft))
+        except ValueError:
+            pass  # outra revisão/reset não autoriza apagar o pedido mais novo
+        runtime.action_draft = None
+        runtime.action_draft_error = "O pedido anterior perdeu um alvo ou contexto válido. Confirme o pedido e o alvo novamente."
+        return None
+
+
 async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
                               reply_target=None, action_context=None):
     if action_context is not None and not _actions_ready(cog):
@@ -230,18 +344,93 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
         runtime.reference(runtime.resources, reply_target, "msg")
     if action_context is None:
         await rebuild_action_context(registry)
+    runtime.voice_state = build_voice_snapshot(cog.bot, message.guild, message.author)
+    runtime.draft_store = getattr(cog, "_action_drafts", None)
+    if runtime.draft_store is not None:
+        await _load_action_draft(registry)
+        await rebuild_action_context(registry)
 
     def register(name, description, schema, handler, *, permission="read", available=True, why=""):
         registry.register(ToolSpec(name, description, schema, permission=permission,
                                    handler=handler, available=available, why=why))
 
+    async def get_draft(_arguments):
+        await runtime.guard()
+        draft = await _load_action_draft(registry)
+        await rebuild_action_context(registry)
+        return _result({"found": draft is not None, "draft": draft,
+                        "reason": runtime.action_draft_error})
+
+    async def save_draft(arguments):
+        guild, channel, requester, cfg = await runtime.guard()
+        current = await runtime.draft_store.get_current(runtime.guild_id, runtime.channel_id, runtime.user_id, runtime.epoch)
+        _check_seen_draft(runtime, current)
+        action = arguments.get("action") or (current or {}).get("action")
+        if action not in ALLOWED_ACTIONS or not policy._enabled(cfg, action):
+            raise policy.ActionDenied("Essa ação não está disponível para guardar um pedido.")
+        fields = {key: arguments[key] for key in ("action", "text", "reason") if key in arguments}
+        if "target_ref" in arguments:
+            ref = arguments["target_ref"]
+            if action == "unban_member":
+                target = runtime.targets.get(ref) or runtime.resources.get(ref)
+                trusted = isinstance(target, (discord.Member, discord.User))
+                target_id = (getattr(target, "id", None) if trusted
+                             else policy._reference_id(ref))
+                if target_id is None or (not trusted and not policy._explicit_id(runtime.message, target_id)):
+                    raise policy.ActionDenied("Preciso de um ID ou menção explícito da conta para guardar esse pedido.")
+                target = await _draft_account(runtime, target_id)
+            else:
+                target = await policy._resolve_member(runtime.message, ref, runtime.targets)
+            fields["target_id"] = int(target.id)
+        if "options" in arguments:
+            options = dict(arguments["options"])
+            for key, kind in (("role_ref", "role"), ("channel_ref", "channel")):
+                if key in options:
+                    resource = policy._resolve_resource(runtime.message, options[key], runtime.resources, kind)
+                    if kind == "channel":
+                        await policy._requester_can_view(resource, requester)
+                    options[key] = str(resource.id)
+            if "message_refs" in options:
+                ids = []
+                for ref in options["message_refs"]:
+                    resource = policy._resolve_resource(runtime.message, ref, runtime.resources, "message")
+                    if resource.channel.id != channel.id:
+                        raise policy.ActionDenied("O pedido pode usar mensagens somente deste canal.")
+                    ids.append(str(resource.id))
+                options["message_refs"] = ids
+            fields["options"] = options
+        await runtime.guard()
+        try:
+            await runtime.draft_store.save(runtime.guild_id, runtime.channel_id, runtime.user_id,
+                runtime.epoch, **fields, **(_draft_identity(current) if current is not None else {}))
+        except (DraftStale, DraftConflict, InvalidDraft) as exc:
+            raise policy.ActionDenied(str(exc)) from None
+        draft = await _load_action_draft(registry)
+        if draft is None:
+            raise policy.ActionDenied(runtime.action_draft_error or "O contexto mudou antes de guardar o pedido. Confirme o alvo novamente.")
+        await rebuild_action_context(registry)
+        return _result({"draft": draft, "executed": False, "requires_completion": bool(draft.get("missing_fields"))}, status="draft_saved")
+
+    async def cancel_draft(_arguments):
+        await runtime.guard()
+        current = await runtime.draft_store.get_current(runtime.guild_id, runtime.channel_id, runtime.user_id, runtime.epoch)
+        _check_seen_draft(runtime, current)
+        cancelled = bool(current is not None and await runtime.draft_store.cancel(runtime.guild_id,
+            runtime.channel_id, runtime.user_id, runtime.epoch, **_draft_identity(current)))
+        runtime.action_draft = None
+        return _result({"cancelled": cancelled, "executed_requests_cancelled": False}, status="executed")
+
+    draft_available = runtime.draft_store is not None
+    register("get_action_draft", "Consulte o pedido incompleto atual deste autor/canal. Referências são restauradas a partir de IDs reais; uma resposta curta do autor pode completar o campo perguntado. Um rascunho não executa nem autoriza uma ação.", _EMPTY, get_draft, available=draft_available, why="Continuidade de pedidos indisponível.")
+    register("save_action_draft", "Guarde o pedido incompleto ANTES de perguntar motivo, duração, alvo ou outro campo que falta. Atualize-o quando o autor responder, inclusive com uma resposta curta. Use alvos já resolvidos; omitir campos preserva-os na mesma ação. Trocar action inicia outro pedido. Só use propor_acao depois de completar os campos; guardar não concede aprovação nem executa nada. Texto de áudio fica privado.", _schema({"action": {"type": "string", "enum": list(ALLOWED_ACTIONS)}, "target_ref": _string(32, minimum=1), "text": _string(800), "reason": _string(500), "options": action_options_schema()}), save_draft, permission="automatic_effect", available=draft_available, why="Continuidade de pedidos indisponível.")
+    register("cancel_action_draft", "Esqueça somente o pedido incompleto atual deste autor/canal quando ele desistir ou mudar de assunto. Não cancela ações já publicadas ou executadas.", _EMPTY, cancel_draft, permission="automatic_effect", available=draft_available, why="Continuidade de pedidos indisponível.")
+
     async def operational_state(_arguments):
+        await refresh_tool_context(registry)
         guild, channel, member, _config = await runtime.guard()
         bot_member = await policy._fresh_member(guild, int(cog.bot.user.id))
-        voice_channel = policy._bot_voice_channel(guild)
-        visible_voice = voice_channel is not None and policy._can_view_voice(voice_channel, member)
         tts = cog.bot.get_cog("TTSVoice")
-        connected = bool(voice_channel is not None)
+        runtime.voice_state = build_voice_snapshot(cog.bot, guild, member)
         recent = []
         if getattr(cog, "_actions", None) is not None:
             recent = [{key: item[key] for key in ("action", "state", "public_result") if key in item}
@@ -251,9 +440,10 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
                          "id": str(cog.bot.user.id),
                          "avatar_url": str(getattr(getattr(bot_member, "display_avatar", None), "url", ""))[:500]},
             "guild_id": str(guild.id), "channel_id": str(channel.id),
-            "voice": {"connected": connected, "listening": False,
-                      "channel": str(voice_channel.name)[:80] if visible_voice else None,
+            "voice": {"connected": runtime.voice_state["bot"]["connected"], "listening": False,
+                      "channel": runtime.voice_state["bot"]["channel_name"],
                       "can_synthesize": callable(getattr(tts, "synthesize_chatbot_attachment", None))},
+            "voice_state": runtime.voice_state,
             "tools": [{"name": spec.name, "available": spec.available, "why": spec.why[:180]}
                       for spec in registry.snapshot()],
             "recent_action_results": recent,
@@ -263,11 +453,10 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
 
     def member_data(guild, member, requester):
         ref = runtime.reference(runtime.targets, member, "m")
-        call = policy._voice_channel(member)
-        visible_call = call is not None and policy._can_view_voice(call, requester)
+        voice = member_voice_snapshot(cog.bot, guild, member, viewer=requester)
         return {"ref": ref, "id": str(member.id), "name": policy._label(member),
                 "mention": f"<@{member.id}>", "bot": bool(member.bot),
-                "voice_channel": str(call.name)[:80] if visible_call else None}
+                "voice_channel": voice["channel_name"], "voice": voice}
 
     async def resolve_member(arguments):
         guild, _channel, requester, _config = await runtime.guard()

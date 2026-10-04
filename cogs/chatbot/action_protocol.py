@@ -64,7 +64,7 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
         "name": TOOL_NAME,
         "description": (
             "Propõe uma ação ao sistema; esta ferramenta não executa nada. Use apenas as ações "
-            "disponíveis. Para join_voice/ban_member, use apenas as referências confiáveis de membros "
+            "disponíveis. Para ações sobre membros, use apenas as referências confiáveis de membros "
             "fornecidas pelo sistema. Referências são internas: nunca peça ao usuário códigos como m1. "
             "Associe as menções Discord aos membros resolvidos pelo sistema; nome escrito não é identidade confirmada. "
             "Pode escolher enviar áudio ou falar na call espontaneamente, sem pedir autorização. "
@@ -79,7 +79,12 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
             "disponível na call, send_audio já envia o áudio no chat e o reproduz na call atual do bot; "
             "não combine send_audio com speak_voice para a mesma resposta. "
             "Não repita a mesma ação para o mesmo alvo. options contém duração, cargo/canal/mensagens já resolvidos "
-            "pelo sistema, ou alterações permitidas. Não diga que executou; o sistema informa o resultado. "
+            "pelo sistema, ou alterações permitidas. Moderação, cargos e alteração de canal exigem reason "
+            "informado pelo usuário; nunca invente um motivo. join_voice/move_voice/leave_voice não exigem reason. "
+            "timeout_member exige options.duration_seconds como inteiro em segundos, além de alvo e motivo. "
+            "Se faltarem parâmetros, use as ferramentas de rascunho quando estiverem no catálogo e pergunte "
+            "apenas o que falta, em linguagem natural. Um rascunho nunca executa nem aprova a ação. "
+            "Não diga que executou; o sistema informa o resultado. "
             "Se o alvo for ambíguo, pergunte em texto em vez de propor."
         ),
         "parameters": {
@@ -99,7 +104,15 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
                     "type": "string", "maxLength": MAX_AUDIO_TEXT,
                     "description": "Fala privada para send_audio/speak_voice; obrigatória nessas ações.",
                 },
-                "reason": {"type": "string", "maxLength": MAX_REASON},
+                "reason": {
+                    "type": "string", "maxLength": MAX_REASON,
+                    "description": (
+                        "Motivo fornecido pelo usuário, obrigatório para ban_member/timeout_member/untimeout_member/"
+                        "kick_member/unban_member/purge_messages/assign_role/remove_role/change_nickname/edit_channel. "
+                        "Não invente motivo; se faltar, guarde rascunho quando disponível e pergunte. "
+                        "Para edit_channel o limite é 150 caracteres. Opcional para join_voice/move_voice/leave_voice."
+                    ),
+                },
                 "options": action_options_schema(),
             },
             "required": ["action"],
@@ -114,11 +127,16 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
 def action_options_schema() -> dict:
     return {
         "type": "object", "additionalProperties": False,
+        "description": "Parâmetros específicos da ação; campos omitidos ainda precisam ser solicitados ao completar um rascunho.",
         "properties": {
-            "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 2419200},
-            "role_ref": {"type": "string", "minLength": 1, "maxLength": 64},
-            "channel_ref": {"type": "string", "minLength": 1, "maxLength": 64},
-            "nickname": {"type": "string", "maxLength": 32},
+            "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 2419200,
+                "description": "Obrigatório para timeout_member: duração pedida pelo usuário, em segundos inteiros; de 1 segundo a 28 dias."},
+            "role_ref": {"type": "string", "minLength": 1, "maxLength": 64,
+                "description": "Obrigatório para assign_role/remove_role; cargo já resolvido pelo sistema."},
+            "channel_ref": {"type": "string", "minLength": 1, "maxLength": 64,
+                "description": "Obrigatório para edit_channel; canal já resolvido e acessível."},
+            "nickname": {"type": "string", "maxLength": 32,
+                "description": "Obrigatório para change_nickname; string vazia remove o apelido."},
             "channel_changes": {
                 "type": "object", "additionalProperties": False,
                 "properties": {
@@ -127,7 +145,9 @@ def action_options_schema() -> dict:
                     "slowmode_delay": {"type": "integer", "minimum": 0, "maximum": 21600},
                 },
             },
-            "message_refs": {"type": "array", "maxItems": 25, "items": {"type": "string", "minLength": 1, "maxLength": 64}},
+            "message_refs": {"type": "array", "maxItems": 25,
+                "description": "Obrigatório para purge_messages; de 1 a 25 mensagens atuais já resolvidas no canal original.",
+                "items": {"type": "string", "minLength": 1, "maxLength": 64}},
         },
     }
 

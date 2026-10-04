@@ -251,12 +251,12 @@ async def test_native_ban_proposal_becomes_bound_button_and_only_staff_executes(
             request["requester_id"], request["message_id"]) == (10, 30, 50, 1, 60)
     assert request["payload"]["target_id"] == 3
     assert request["ask_permission"] and request["state"] == "pending"
-    assert "view" not in world.message.reply.await_args.kwargs
+    world.message.reply.assert_not_awaited()
     view = world.channel.send.await_args.kwargs["view"]
     assert view.is_persistent()
     assert [button.label for button in view.children] == ["Pode banir", "Não"]
     assert request["request_id"] in view.children[0].custom_id
-    assert "spam repetido" in _public_output(world)
+    assert request["payload"]["reason"] == "spam repetido"
     world.members[3].ban.assert_not_awaited()
     assert not world.cog._supervisor.jobs
     world.cog._maybe_generate_tts.assert_not_awaited()
@@ -319,7 +319,7 @@ async def test_two_native_bans_need_separate_cards_and_staff_approval_in_order(w
 
 
 @pytest.mark.asyncio
-async def test_join_then_audio_waits_for_staff_and_mirrors_exact_attachment_without_second_permission(world):
+async def test_join_then_audio_runs_without_staff_and_mirrors_exact_attachment(world):
     world.guild.voice_client = None
     world.members[999].voice = None
     payload = b"audio unico gerado para chat e call"
@@ -340,21 +340,17 @@ async def test_join_then_audio_waits_for_staff_and_mirrors_exact_attachment_with
     assert await world.cog._generate_and_send(world.message, "entre na call e mande um áudio")
     await world.cog._supervisor.drain()
     first, second = world.collection.docs
-    assert [first["state"], second["state"]] == ["pending", "blocked"]
-    world.tts.synthesize_chatbot_attachment.assert_not_awaited()
-    world.tts.chatbot_join_voice.assert_not_awaited()
-    world.message.reply.assert_not_awaited()
-    staff = _interaction(world, 2)
-    await world.cog._actions.handle_interaction(staff, first["request_id"], approve=True)
-    await world.cog._supervisor.drain()
     assert [first["state"], second["state"]] == ["succeeded", "succeeded"]
-    assert world.channel.send.await_count == 2  # um pedido e um arquivo
+    assert world.channel.send.await_count == 1  # somente o arquivo, sem cartão
+    world.message.reply.assert_not_awaited()
+    world.tts.chatbot_join_voice.assert_awaited_once()
     world.tts.synthesize_chatbot_attachment.assert_awaited_once()
     world.tts.chatbot_mirror_audio.assert_awaited_once()
     assert world.tts.chatbot_mirror_audio.await_args.kwargs["audio"] is payload
     assert second["approved_by"] == world.message.author.id
+    assert first["approved_by"] == world.message.author.id
+    assert not first["ask_permission"] and first["message_id"] == 0
     assert not second["ask_permission"] and second["message_id"] == 0
-    staff.followup.send.assert_not_awaited()
 
 
 @pytest.mark.parametrize("action", ["send_audio", "speak_voice"])
@@ -479,7 +475,8 @@ async def test_failed_permission_card_does_not_execute_privileged_action(world):
     world.tts.synthesize_chatbot_attachment.assert_not_awaited()
     world.members[3].ban.assert_not_awaited()
     world.cog._memory.append_turn.assert_not_awaited()
-    world.cog._remove_processing_reaction.assert_awaited_once_with(world.message, "⏳")
+    world.cog._add_processing_reaction.assert_not_awaited()
+    world.cog._remove_processing_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio

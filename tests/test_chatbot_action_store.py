@@ -5,6 +5,7 @@ import asyncio
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from pymongo import ReturnDocument
@@ -455,8 +456,8 @@ async def test_non_success_cancels_entire_tail_and_purges_all_private_speech(sta
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["send_audio", "speak_voice"])
-async def test_automatic_audio_claim_is_once_bound_to_requester_and_requires_no_card(state, action):
+@pytest.mark.parametrize("action", ["send_audio", "speak_voice", "join_voice", "move_voice", "leave_voice"])
+async def test_automatic_audio_or_navigation_claim_is_once_bound_to_requester_and_requires_no_card(state, action):
     store, _, _ = state
     doc = await store.create(_data(action=action, ask_permission=False))
     rid = doc["request_id"]
@@ -480,7 +481,8 @@ async def test_automatic_audio_claim_is_once_bound_to_requester_and_requires_no_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action,asks", [("ban_member", False), ("join_voice", False),
+@pytest.mark.parametrize("action,asks", [("ban_member", False), ("kick_member", False), ("join_voice", True),
+                                        ("move_voice", True), ("leave_voice", True),
                                         ("send_audio", True), ("speak_voice", True)])
 async def test_automatic_claim_never_arms_privileged_or_permission_requested_actions(state, action, asks):
     store, _, _ = state
@@ -799,6 +801,53 @@ async def test_owner_cancellation_and_staff_approval_have_only_one_winner(state)
         store.claim(rid, **_binding(actor_id=111)),
     )
     assert int(cancelled) + int(claimed is not None) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_navigation_cleanup_cancels_only_unexecuted_approvals_and_purges_descendants(state):
+    store, _, _ = state
+    old_join = await _pending(store, action="join_voice")
+    old_move = await store.create(_data(action="move_voice"))
+    assert await store.claim_publication(old_move["request_id"])
+    old_leave = await store.create(_data(action="leave_voice"))
+    old_executing = await _pending(store, action="join_voice")
+    await store.claim(old_executing, **_binding(actor_id=111))
+    old_uncertain = await _pending(store, action="move_voice")
+    unknown = await store.claim(old_uncertain, **_binding(actor_id=111))
+    assert await store.finish(old_uncertain, unknown["execution_token"], state="uncertain", public_result="Verifique a call.")
+    moderation = await _pending(store, action="ban_member")
+    fresh = await store.create(_data(action="join_voice", ask_permission=False))
+    assert await store.arm_automatic(fresh["request_id"])
+    chain = await store.create_plan([_data(action="join_voice"), _data(action="speak_voice", ask_permission=False)])
+    cancelled = await store.cancel_legacy_navigation_approvals()
+    assert {r["request_id"] for r in cancelled} == {
+        old_join, old_move["request_id"], old_leave["request_id"], *(r["request_id"] for r in chain),
+    }
+    assert all(r["state"] == "cancelled" and "text" not in r["payload"] for r in cancelled)
+    assert (await store.get(old_executing))["state"] == "executing"
+    assert (await store.get(old_uncertain))["state"] == "uncertain"
+    assert (await store.get(moderation))["state"] == "pending"
+    assert [r["request_id"] for r in await store.recover_ready()] == [fresh["request_id"]]
+    assert await store.cancel_legacy_navigation_approvals() == []
+
+
+@pytest.mark.asyncio
+async def test_plan_accepts_host_generated_uuid_and_never_uses_per_step_untrusted_plan_id(state):
+    store, _, _ = state
+    plan_id = str(uuid4())
+    docs = await store.create_plan([_data(plan_id="untrusted"), _data(plan_id="untrusted")], plan_id=plan_id)
+    assert all(doc["plan_id"] == plan_id for doc in docs)
+    assert [doc["state"] for doc in docs] == ["created", "blocked"]
+    assert [doc["request_id"] for doc in await store.list_for_plan(plan_id)] == [doc["request_id"] for doc in docs]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["", "not-a-uuid", 42, {"plan_id": "invalid"}])
+async def test_invalid_host_plan_uuid_is_rejected_before_any_insert(state, invalid):
+    store, coll, _ = state
+    with pytest.raises(ValueError, match="identificador"):
+        await store.create_plan([_data()], plan_id=invalid)
+    assert coll.docs == [] and await store.recover_ready() == []
 
 
 @pytest.mark.asyncio

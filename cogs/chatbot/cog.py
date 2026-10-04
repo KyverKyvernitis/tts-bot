@@ -36,6 +36,8 @@ from .audio import (
 )
 from .audio_format import AudioReplySelector
 from .preferences import ConversationPreferences, PreferenceStale, PreferenceStore
+from .typing import ProcessingIndicator
+from .voice_context import build_voice_snapshot
 from .imagegen import build_image_failure_message, generated_image_extension, parse_image_intent
 from .image_service import ImageService
 from .memory import MemoryStore, MemoryEntry, MemoryEpoch, visibility_scope_for
@@ -78,6 +80,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._actions: Optional[ActionService] = None
         self._preferences: Optional[PreferenceStore] = None
         self._reply_store = None
+        self._action_drafts = None
+        self._processing_indicator = ProcessingIndicator()
         self._admission = AdmissionController()
         self._supervisor = TaskSupervisor()
         self._user_cooldowns: dict[tuple[int, int], float] = {}
@@ -110,7 +114,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._memory = MemoryStore(coll)
         self._preferences = PreferenceStore(coll, memory=self._memory)
         from .reply_store import ReplyStore
+        from .action_drafts import ActionDraftStore
         self._reply_store = ReplyStore(coll)
+        self._action_drafts = ActionDraftStore(coll, memory=self._memory)
         self._master = MasterPromptStore(coll)
         self._message_index = ChatbotMessageIndex(coll)
         groq_key = os.environ.get("GROQ_API_KEY", "").strip()
@@ -136,6 +142,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if getattr(self, "_actions", None) is not None:
             self._actions.shutdown()
         await self._supervisor.shutdown()
+        indicator = getattr(self, "_processing_indicator", None)
+        if indicator is not None:
+            await indicator.close()
         self._cleanup_task = None
         if self._session is not None:
             await self._session.close()
@@ -144,6 +153,14 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._router = None
         self._image_service = None
         self._actions = None
+        self._action_drafts = None
+
+    def processing(self, channel):
+        """Indicador compartilhado pelas etapas realmente em processamento."""
+        indicator = getattr(self, "_processing_indicator", None)
+        if indicator is None:
+            indicator = self._processing_indicator = ProcessingIndicator()
+        return indicator.process(channel)
 
     def _is_user_on_cooldown(self, guild_id: int, user_id: int) -> bool:
         key = (int(guild_id), int(user_id))
@@ -437,11 +454,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         image_prompt: str | None = None, processing_reaction: Optional[str] = None,
     ) -> bool:
         if self._session is None or self._image_service is None or message.guild is None:
-            await self._remove_processing_reaction(message, processing_reaction)
             return False
         prompt = (image_prompt or "").strip() or parse_image_intent(prompt_text).prompt
         if not prompt:
-            await self._remove_processing_reaction(message, processing_reaction)
             return False
         channel, guild = message.channel, message.guild
         effective_nsfw = channel_is_nsfw(channel) and C.nsfw_enabled_for_guild(guild.id)
@@ -449,8 +464,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         visibility = visibility_scope_for(channel.id, is_nsfw=effective_nsfw, is_private=private)
         # Capturar ANTES da chamada: reset durante a geração invalida este turno.
         epoch = await self._capture_turn_epoch(guild.id, message.author.id)
-        reaction = processing_reaction or await self._add_processing_reaction(message)
-        try:
+        async with self.processing(channel):
             result = await self._image_service.generate(
                 prompt=prompt, channel_is_nsfw=effective_nsfw, slot_acquired=True,
             )
@@ -478,8 +492,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     user_message=prompt_text, assistant_message=f"[imagem gerada: {prompt[:500]}]",
                 )
             return True
-        finally:
-            await self._remove_processing_reaction(message, reaction)
 
     def _detect_user_intent(self, content: str) -> UserIntent:
         text = (content or "").strip()
@@ -718,27 +730,35 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         reply_target, action_context, temperature: float, router_options: dict,
     ):
         """Rodadas limitadas do modelo; somente o catálogo pode executar ferramentas."""
+        started = time.monotonic()
+        from .action_policy import ActionDenied
+        state = {"delivered": False, "audio_sent": False, "uncertain": False, "action_failed": False,
+                 "preferences": preferences}
         registry = None
         if getattr(self, "_preferences", None) is not None and epoch is not None:
             from .tool_runtime import build_tool_registry
-            registry = await build_tool_registry(
-                self, message, config, epoch=epoch, visibility_scope=visibility,
-                reply_target=reply_target, action_context=action_context,
-            )
-        state = {"delivered": False, "audio_sent": False, "uncertain": False, "action_failed": False,
-                 "preferences": preferences}
-        current_voice = getattr(getattr(message.guild, "voice_client", None), "channel", None)
-        visible_voice = current_voice is not None and bool(
-            getattr(current_voice.permissions_for(message.author), "view_channel", False)
-        )
+            try:
+                registry = await asyncio.wait_for(build_tool_registry(
+                    self, message, config, epoch=epoch, visibility_scope=visibility,
+                    reply_target=reply_target, action_context=action_context,
+                ), timeout=C.TOOL_LOOP_BUDGET_SECONDS)
+            except asyncio.TimeoutError:
+                state["deadline"] = True
+                return ChatReply(""), None, state
+            except ActionDenied as exc:
+                state["action_failed"] = True
+                state["reason"] = str(exc)
+                return ChatReply(""), None, state
+        voice_state = build_voice_snapshot(self.bot, message.guild, message.author)
         me = getattr(message.guild, "me", None) or getattr(self.bot, "user", None)
         actual_state = {
             "guild_id": int(message.guild.id), "channel_id": int(message.channel.id),
             "user_id": int(message.author.id),
             "bot_id": int(getattr(getattr(self.bot, "user", None), "id", 0) or 0),
             "bot_name": str(getattr(me, "display_name", "bot"))[:80],
-            "voice_connected": current_voice is not None,
-            "voice_channel_id": int(current_voice.id) if visible_voice else None,
+            "voice_connected": voice_state["bot"]["connected"],
+            "voice_channel_id": voice_state["bot"]["channel_id"],
+            "voice_state": voice_state,
             "preferences": preferences.to_result(),
         }
         actual = "Estado confirmado deste turno: " + json.dumps(actual_state, ensure_ascii=False)
@@ -752,8 +772,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             reply = await self._router.chat(system=actual + "\n\n" + system, messages=messages,
                                             temperature=temperature, **router_options)
             return reply, None, state
-        from .tool_runtime import execute_native_tool
-        started = time.monotonic()
+        from .tool_runtime import execute_native_tool, refresh_tool_context
         calls_used = 0
         results_by_id: dict[str, tuple[str, str, dict]] = {}
         effect_results: dict[tuple[str, str], dict] = {}
@@ -761,8 +780,28 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         for _round in range(C.MAX_TOOL_ROUNDS):
             remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
             if remaining <= 0:
+                state["deadline"] = True
                 break
-            # Resolvers podem ter ampliado o catálogo da rodada anterior.
+            # Presença e capacidades vêm do Gateway e da política atuais em
+            # cada rodada; uma entrada na call nunca é executada para consultar estado.
+            try:
+                voice_state = await asyncio.wait_for(refresh_tool_context(registry), timeout=remaining)
+            except asyncio.TimeoutError:
+                state["deadline"] = True
+                break
+            except ActionDenied as exc:
+                state["action_failed"] = True
+                state["reason"] = str(exc)
+                break
+            runtime_context = getattr(registry, "runtime", None)
+            actual_state["voice_state"] = voice_state
+            actual_state["voice_connected"] = voice_state["bot"]["connected"]
+            actual_state["voice_channel_id"] = voice_state["bot"]["channel_id"]
+            actual_state["action_draft"] = getattr(runtime_context, "action_draft", None)
+            remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
+            if remaining <= 0:
+                state["deadline"] = True
+                break
             try:
                 current_preferences = await asyncio.wait_for(self.get_conversation_preferences(
                     message.guild.id, message.channel.id, message.author.id, epoch,
@@ -770,7 +809,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             except asyncio.TimeoutError:
                 state["deadline"] = True
                 break
-            effective_mode = getattr(getattr(registry, "runtime", None), "response_format", None) or current_preferences.mode
+            effective_mode = getattr(runtime_context, "response_format", None) or current_preferences.mode
             state["preferences"] = current_preferences
             actual_state["preferences"] = {**current_preferences.to_result(), "effective_mode": effective_mode}
             current = "Estado confirmado deste turno: " + json.dumps(actual_state, ensure_ascii=False)
@@ -778,7 +817,12 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 current += f"\nEntregue a resposta de conversa em áudio, completa em até {MAX_TTS_CHARS} caracteres, sem prévia em texto."
             if current_preferences.language:
                 current += "\nIdioma solicitado para esta conversa: " + current_preferences.language
-            context = getattr(getattr(registry, "runtime", None), "action_context", action_context)
+            draft_tool = registry.get("save_action_draft")
+            if draft_tool is not None and draft_tool.available:
+                current += ("\nSe faltar uma informação para uma ação, guarde o rascunho com save_action_draft "
+                            "antes de perguntar. Continue o rascunho confirmado usando as ferramentas e os novos "
+                            "argumentos; guardar ou consultar um rascunho não executa a ação.")
+            context = getattr(runtime_context, "action_context", action_context)
             if context is not None:
                 current += "\n" + context.description
             remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
@@ -836,9 +880,14 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 state["delivered"] = state["delivered"] or status in {"image_sent", "audio_sent", "reply_sent"}
                 state["audio_sent"] = state["audio_sent"] or status in {"audio_sent", "reply_sent"}
                 state["uncertain"] = state["uncertain"] or status == "uncertain"
+                if status == "uncertain" and isinstance(result.get("reason"), str):
+                    state["reason"] = result["reason"]
                 state["deadline"] = state.get("deadline", False) or status == "deadline"
                 has_proposal = has_proposal or (call.name == "propor_acao" and bool(result.get("ok")))
                 state["action_failed"] = state["action_failed"] or (call.name == "propor_acao" and not result.get("ok"))
+                if call.name == "propor_acao" and not result.get("ok"):
+                    state["reason"] = (getattr(runtime_context, "proposals_error", "")
+                                       or result.get("reason") or "Não consegui preparar essa ação.")
                 serialized = json.dumps(result, ensure_ascii=False, allow_nan=False)
                 if len(serialized) > 12000:
                     serialized = json.dumps({"ok": bool(result.get("ok")), "status": status,
@@ -1359,36 +1408,37 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                         guild_id=guild.id, channel_id=message.channel.id, user_id=message.author.id,
                     ):
                         return
-                    content = trigger.content.strip()
-                    images, audios = extract_attachments(message)
-                    if not content and self._message_has_image_attachment(message):
-                        content = "Analise a imagem anexada."
-                    if audios and (not content or is_voice_message(message)) and not C.SAFE_MODE:
-                        async with self._admission.resource("stt"):
-                            transcription = await self._maybe_transcribe(message)
-                        if transcription:
-                            content = f"{content}\n[áudio transcrito]: {transcription}".strip()
-                    if not content and message.reference is not None:
-                        target = await self._resolve_reply_target(message)
-                        if target is not None and self._message_has_image_attachment(target):
-                            content = "Analise a imagem da mensagem respondida."
-                    if not content:
-                        return
-                    self._apply_user_cooldown(guild.id, message.author.id)
-                    try:
-                        sent = await asyncio.wait_for(
-                            self._generate_and_send(message, content, behavior_hint=trigger.behavior_hint),
-                            timeout=C.CHAT_TURN_TIMEOUT_SECONDS,
-                        )
-                        if sent and spontaneous:
-                            self._apply_spontaneous_cooldowns(
-                                guild_id=guild.id, channel_id=message.channel.id, user_id=message.author.id,
+                    async with self.processing(message.channel):
+                        content = trigger.content.strip()
+                        images, audios = extract_attachments(message)
+                        if not content and self._message_has_image_attachment(message):
+                            content = "Analise a imagem anexada."
+                        if audios and (not content or is_voice_message(message)) and not C.SAFE_MODE:
+                            async with self._admission.resource("stt"):
+                                transcription = await self._maybe_transcribe(message)
+                            if transcription:
+                                content = f"{content}\n[áudio transcrito]: {transcription}".strip()
+                        if not content and message.reference is not None:
+                            target = await self._resolve_reply_target(message)
+                            if target is not None and self._message_has_image_attachment(target):
+                                content = "Analise a imagem da mensagem respondida."
+                        if not content:
+                            return
+                        self._apply_user_cooldown(guild.id, message.author.id)
+                        try:
+                            sent = await asyncio.wait_for(
+                                self._generate_and_send(message, content, behavior_hint=trigger.behavior_hint),
+                                timeout=C.CHAT_TURN_TIMEOUT_SECONDS,
                             )
-                    except asyncio.TimeoutError as exc:
-                        await self._send_chat_failure(
-                            message, exc, had_images=self._message_has_image_attachment(message),
-                            spontaneous=spontaneous,
-                        )
+                            if sent and spontaneous:
+                                self._apply_spontaneous_cooldowns(
+                                    guild_id=guild.id, channel_id=message.channel.id, user_id=message.author.id,
+                                )
+                        except asyncio.TimeoutError as exc:
+                            await self._send_chat_failure(
+                                message, exc, had_images=self._message_has_image_attachment(message),
+                                spontaneous=spontaneous,
+                            )
         except Exception:
             log.exception("chatbot: falha ao processar turno")
 
@@ -1396,8 +1446,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         guild, channel, author = message.guild, message.channel, message.author
         if guild is None or self._memory is None or self._router is None:
             return False
-        reaction = await self._add_processing_reaction(message)
-        try:
+        async with self.processing(channel):
             effective_nsfw = channel_is_nsfw(channel) and C.nsfw_enabled_for_guild(guild.id)
             private = isinstance(channel, discord.Thread) and channel.is_private()
             visibility = visibility_scope_for(channel.id, is_nsfw=effective_nsfw, is_private=private)
@@ -1485,11 +1534,16 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 return False
             reply_provider, reply_model = getattr(reply, "provider", ""), getattr(reply, "model", "")
             effective_mode = preferences.mode
+            runtime_context = None
             if registry is not None:
                 from .tool_runtime import drain_action_proposals
                 proposals = drain_action_proposals(registry)
                 runtime_context = getattr(registry, "runtime", None)
                 action_context = getattr(runtime_context, "action_context", action_context)
+                if getattr(runtime_context, "proposals_invalid", False):
+                    tool_state["action_failed"] = True
+                    tool_state["reason"] = (getattr(runtime_context, "proposals_error", "")
+                                            or tool_state.get("reason") or "Não consegui preparar essa ação.")
                 if proposals and not (tool_state.get("uncertain") or tool_state.get("action_failed")):
                     reply = replace(reply, proposals=proposals) if isinstance(reply, ChatReply) else ChatReply(str(reply or ""), proposals)
                 preferences = tool_state.get("preferences", preferences)
@@ -1498,7 +1552,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     item.action in {"send_audio", "speak_voice"} for item in proposals
                 ):
                     effective_mode = "audio"
-            if tool_state.get("audio_sent") and not (isinstance(reply, ChatReply) and reply.proposals):
+            if (tool_state.get("audio_sent") and not (isinstance(reply, ChatReply) and reply.proposals)
+                    and not any(tool_state.get(key) for key in ("uncertain", "action_failed", "deadline", "limit_reached"))):
                 # Uma ferramenta já entregou o arquivo correspondente ao
                 # turno. A fala e seu vínculo foram registrados pelo handler.
                 return True
@@ -1507,9 +1562,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                                  or tool_state.get("deadline") or tool_state.get("limit_reached"))
             if action_failed:
                 if tool_state.get("uncertain"):
-                    reply = "Não consegui confirmar essa ação. Confira o resultado antes de tentar novamente."
+                    reply = (tool_state.get("reason")
+                             or "Não consegui confirmar essa ação. Confira o resultado antes de tentar novamente.")
                 elif tool_state.get("action_failed"):
-                    reply = "Não consegui preparar a sequência solicitada. Nenhuma etapa foi autorizada."
+                    reply = tool_state.get("reason") or "Não consegui preparar essa ação."
                 else:
                     reply = "Não consegui terminar esse pedido dentro do limite deste turno."
             if isinstance(reply, ChatReply):
@@ -1523,14 +1579,18 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                         text = audio_proposals[0].text
                     reply = replace(reply, text=text, proposals=proposals)
                 if reply.proposals and action_context is not None:
+                    plan_options = {}
+                    action_draft = getattr(runtime_context, "action_draft", None)
+                    if isinstance(action_draft, dict) and action_draft:
+                        plan_options["action_draft"] = action_draft
                     action_plan = await action_service.plan(
                         message, reply, action_context, config, epoch=epoch, visibility_scope=visibility,
-                        original_user_text=content,
+                        original_user_text=content, **plan_options,
                     )
                     if action_plan.requests:
                         reply = action_service.content(action_plan)
                     else:
-                        reply = action_plan.public_error or "Não consegui preparar essa ação agora. Tente novamente."
+                        reply = action_plan.public_error or "Não consegui preparar essa ação."
                         action_plan = None
                         action_failed = True
                 else:
@@ -1603,8 +1663,6 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     assistant_message=reply[:2000],
                 )
             return True
-        finally:
-            await self._remove_processing_reaction(message, reaction)
 
     async def _persist_turn(
         self, *, guild_id: int, user_id: int, channel_id: int, visibility_scope: str,

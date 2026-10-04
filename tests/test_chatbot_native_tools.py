@@ -146,6 +146,25 @@ async def test_valid_audio_proposal_uses_current_catalog_and_keeps_speech_privat
     assert action_spec.parameters["properties"]["options"]["additionalProperties"] is False
 
 
+@pytest.mark.parametrize("provider", ["groq", "gemini"])
+@pytest.mark.asyncio
+async def test_action_requirements_and_partial_draft_guidance_keep_native_schema_compatible(provider):
+    declaration = proposal_tool(("timeout_member", "join_voice", "move_voice", "leave_voice"), ("autor", "m1"))
+    action_spec = ToolSpec(declaration["name"], declaration["description"], declaration["parameters"])
+    _reply, payload = await call(provider, (_groq if provider == "groq" else _gemini)("Por quanto tempo?"), specs=(action_spec,))
+    exported = payload["tools"][0]["function"] if provider == "groq" else payload["tools"][0]["functionDeclarations"][0]
+    parameters = exported["parameters"]
+    duration = parameters["properties"]["options"]["properties"]["duration_seconds"]
+    assert duration["type"] == "integer" and duration["minimum"] == 1 and duration["maximum"] == 2419200
+    assert "duration_seconds" not in parameters["properties"]
+    assert "obrigatório" in parameters["properties"]["reason"]["description"]
+    assert "Opcional para join_voice/move_voice/leave_voice" in parameters["properties"]["reason"]["description"]
+    assert "nunca invente um motivo" in exported["description"]
+    assert "Um rascunho nunca executa nem aprova" in exported["description"]
+    assert not {"if", "then", "else", "oneOf", "allOf", "$ref"} & set(parameters)
+    json.dumps(payload, allow_nan=False)
+
+
 @pytest.mark.parametrize("options", [
     {"duration_seconds": True}, {"duration_seconds": 2419201},
     {"channel_changes": {"delete": True}}, {"channel_changes": {"slowmode_delay": 21601}},

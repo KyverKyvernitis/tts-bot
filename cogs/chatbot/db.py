@@ -155,6 +155,12 @@ async def ensure_indexes(coll) -> None:
     ):
         specs.append((keys, {"name": name, "partialFilterExpression": {"type": kind}}))
     specs.extend([
+        ([("type", 1), ("guild_id", 1), ("channel_id", 1), ("user_id", 1)],
+         {"name": "chatbot_action_draft_scope_v1", "unique": True,
+          "partialFilterExpression": {"type": "chatbot_action_draft"}}),
+        ([("expires_on", 1)],
+         {"name": "chatbot_action_draft_expiry_v1", "expireAfterSeconds": 0,
+          "partialFilterExpression": {"type": "chatbot_action_draft"}}),
         ([("type", 1), ("message_id", 1)],
          {"name": "chatbot_reply_unique", "unique": True,
           "partialFilterExpression": {"type": DOC_TYPE_REPLY}}),

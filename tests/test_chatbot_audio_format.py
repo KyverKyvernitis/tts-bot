@@ -193,6 +193,7 @@ def turn(monkeypatch):
     cog._audio_reply_selector = AudioReplySelector(draw=draw, clock=lambda: 100)
     channel = Mock(spec=discord.TextChannel)
     channel.id, channel.nsfw = 20, False
+    channel.typing = AsyncMock()
     message = SimpleNamespace(
         id=30, guild=SimpleNamespace(id=10), channel=channel,
         author=SimpleNamespace(id=40, name="ana", display_name="Ana", voice=None),
@@ -364,3 +365,108 @@ async def test_configure_audio_button_is_staff_guarded_and_no_env_needed():
     submitted = save.await_args.args[1]
     assert (submitted.audio_reply_chance_percent, submitted.audio_reply_cooldown_seconds) == (35, 90)
     assert authorized.await_count == 2
+
+
+def activate_processing_turn(turn):
+    from cogs.chatbot.cog import TriggerInfo
+    from cogs.chatbot.runtime import AdmissionController
+    turn.cog._admission = AdmissionController()
+    turn.cog._user_cooldowns = {}
+    turn.cog._turn_locks = {}
+    turn.cog._turn_lock_touched = {}
+    turn.cog._resolve_trigger = AsyncMock(return_value=TriggerInfo("", "mention"))
+
+
+@pytest.mark.asyncio
+async def test_typing_covers_stt_provider_synthesis_delivery_and_mirror_after_admission(turn, monkeypatch):
+    activate_processing_turn(turn)
+    monkeypatch.setattr("cogs.chatbot.cog.extract_attachments", lambda _message: ([], [object()]))
+    events = []
+
+    def active(stage, references):
+        indicator = turn.cog._processing_indicator
+        assert indicator._channels[20].references == references
+        events.append(stage)
+
+    async def transcribe(_message):
+        active("stt", 1)
+        return "oi"
+
+    async def provider(**_kwargs):
+        active("provider", 2)
+        return "E aí!"
+
+    async def synthesize(**_kwargs):
+        active("synthesis", 2)
+        return b"the exact mp3 bytes"
+
+    async def send(*_args, **_kwargs):
+        active("delivery", 2)
+        return SimpleNamespace(id=50)
+
+    async def mirror(**_kwargs):
+        active("mirror", 2)
+        return {"ok": True, "status": "enqueued"}
+
+    turn.cog._maybe_transcribe = AsyncMock(side_effect=transcribe)
+    turn.cog._router.chat.side_effect = provider
+    turn.tts.synthesize_chatbot_attachment.side_effect = synthesize
+    turn.message.reply.side_effect = send
+    turn.tts.chatbot_mirror_audio.side_effect = mirror
+    await turn.cog._process_chat(turn.message)
+    assert events == ["stt", "provider", "synthesis", "delivery", "mirror"]
+    assert turn.message.channel.typing.await_count >= 1
+    assert not turn.cog._processing_indicator._channels
+    assert not turn.cog._admission._inflight_users
+    turn.cog._add_processing_reaction.assert_not_awaited()
+    turn.cog._remove_processing_reaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_typing_does_not_start_before_configuration_gate(turn):
+    activate_processing_turn(turn)
+    turn.cog._can_respond.return_value = False
+    await turn.cog._process_chat(turn.message)
+    turn.message.channel.typing.assert_not_awaited()
+    turn.cog._router.chat.assert_not_awaited()
+    assert getattr(turn.cog, "_processing_indicator", None) is None
+    assert not turn.cog._admission._inflight_users
+
+
+@pytest.mark.asyncio
+async def test_typing_stops_after_binding_a_staff_request_without_waiting_for_approval(turn):
+    plan = SimpleNamespace(requests=[{"action": "ban_member", "state": "pending"}])
+
+    async def bind(_plan, sent):
+        assert sent is None
+        assert turn.cog._processing_indicator._channels[20].references == 1
+
+    service = turn.cog._actions = SimpleNamespace(
+        ready=True, describe=AsyncMock(return_value=SimpleNamespace(
+            description="Pode solicitar à staff.", actions=("ban_member",), targets={"m1": object()},
+        )), plan=AsyncMock(return_value=plan), content=lambda _plan: "",
+        bind_and_start=AsyncMock(side_effect=bind),
+    )
+    turn.cog._router.chat.return_value = ChatReply("", (ActionProposal("ban_member", "m1", reason="spam"),))
+    assert await turn.cog._generate_and_send(turn.message, "bana o membro")
+    service.bind_and_start.assert_awaited_once_with(plan, None)
+    assert plan.requests[0]["state"] == "pending"
+    assert not turn.cog._processing_indicator._channels
+    turn.message.reply.assert_not_awaited()
+    turn.tts.synthesize_chatbot_attachment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cog_unload_closes_shared_typing_tasks():
+    import asyncio
+    cog = ChatbotCog(SimpleNamespace())
+    channel = SimpleNamespace(id=20, typing=AsyncMock())
+    indicator = cog._processing_indicator
+    async with cog.processing(channel):
+        await asyncio.sleep(0)
+        task = indicator._channels[20].task
+        await cog.cog_unload()
+        assert task.done()
+        assert indicator.closed and not indicator._channels
+    async with cog.processing(channel):
+        assert not indicator._channels

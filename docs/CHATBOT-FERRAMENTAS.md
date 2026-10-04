@@ -14,6 +14,14 @@ O catálogo é explícito: métodos internos dos cogs, terminal, credenciais, ba
 
 O tom permite linguagem informal e palavrões conforme a conversa, sem frases de atendente e sem obrigar o bot a xingar. Configurações personalizadas do prompt global continuam respeitadas. Bloqueios aplicados pelos provedores não são removidos pelo código do projeto.
 
+## Continuidade e indicador de digitação
+
+Quando faltam argumentos de uma ação, a IA pode guardar um rascunho pelas ferramentas e retomá-lo nas próximas mensagens. O rascunho conserva o ID real do alvo, em vez de reutilizar um código temporário de outro turno. Ele pertence ao mesmo servidor, canal e membro, expira em dez minutos e é removido pelos resets de memória. Guardar o rascunho não concede aprovação nem executa a ação. O sistema consome a versão do rascunho uma única vez antes de criar o plano, para que ele não reapareça depois da publicação, da execução ou de um resultado incerto.
+
+As falhas de preparo preservam o motivo público retornado pela ferramenta, em vez de substituir todos os casos por um aviso genérico. A duração de um timeout continua sendo um número inteiro de segundos, de 1 segundo a 28 dias, com motivo explícito.
+
+O processamento usa o indicador nativo de digitação do Discord, renovado durante contexto, ferramentas, transcrição e síntese. Ele substitui as reações de carregamento. A renovação termina ao entregar, falhar ou cancelar; não permanece ativa enquanto uma ação espera a staff. O indicador pode levar alguns segundos para desaparecer no cliente do Discord.
+
 ## Identificação e resultados
 
 Menções reais do Discord são associadas aos membros do servidor. As ferramentas resolvem nomes ambíguos, canais, cargos e mensagens acessíveis antes de propor efeitos; referências internas nunca devem ser pedidas ao usuário.
@@ -22,11 +30,13 @@ Cada consulta retorna um resultado estruturado ao modelo. Áudio enviado, fala e
 
 ## Aprovações
 
-Entrar, mover ou sair de uma sessão de call requer aprovação da staff. As mudanças ficam vinculadas à sessão e ao destino autorizados; não tomam o controle de música ou de outros recursos de voz.
+Entrar, mudar ou sair da própria sessão de call é automático, sem aprovação da staff e sem motivo obrigatório. A IA escolhe pelas ferramentas conforme a conversa, inclusive para membros comuns. O estado de voz atual do autor e do bot, o nome e a identificação do canal e a indicação de estarem juntos são apresentados a cada rodada. As ações verificam novamente o destino, o acesso e a sessão antes do efeito, preservando as permissões Conectar/Falar do Discord e a posse dos outros recursos de voz.
+
+Uma fala dependente só começa depois do sucesso confirmado da entrada ou mudança. Pedidos antigos de navegação ainda aguardando aprovação são cancelados e seus cartões removidos; a atualização não os transforma retroativamente em execuções automáticas.
 
 Banimento, expulsão, timeout, remoção de timeout, desbanimento, mudanças de apelido, cargos, canais e exclusão de mensagens requerem uma aprovação específica por etapa. O membro comum pode solicitar, mas não recebe as permissões da pessoa que aprova. O bot e a staff precisam das permissões do Discord e da hierarquia correspondentes no momento do efeito.
 
-As mensagens de aprovação usam a primeira pessoa e são temporárias. Aprovação, rejeição ou expiração retiram o cartão, sem a confirmação redundante “Aprovado. Vou executar a ação”. Falha, rejeição ou resultado incerto interrompem as etapas seguintes.
+As mensagens de aprovação usam a primeira pessoa, texto curto e somente dois botões de decisão, sem botão Detalhes. O cartão apresenta o alvo e os parâmetros efetivos relevantes, sem repetir a autoria ou os avisos de andamento. Aprovação, rejeição ou expiração retiram o cartão, sem a confirmação redundante “Aprovado. Vou executar a ação”. Falha, rejeição ou resultado incerto interrompem as etapas seguintes.
 
 ## Painel
 

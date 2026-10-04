@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -41,6 +42,19 @@ def cog():
     instance._can_respond = AsyncMock(return_value=True)
     instance._add_processing_reaction = AsyncMock(return_value="⏳")
     instance._remove_processing_reaction = AsyncMock()
+    instance._processing_active = 0
+    instance._processing_started = 0
+
+    @asynccontextmanager
+    async def processing(_channel):
+        instance._processing_active += 1
+        instance._processing_started += 1
+        try:
+            yield
+        finally:
+            instance._processing_active -= 1
+
+    instance.processing = processing
     instance._maybe_generate_tts = AsyncMock(return_value=None)
     return instance
 
@@ -277,7 +291,9 @@ async def test_ordinary_continuation_uses_real_personal_memory_without_other_use
     assert "OUTRO_USUARIO_FALOU" not in payload["system"]
     assert [query["scope"] for query in coll.find_one_queries] == ["user"]
     assert len(coll.find_queries) == 1
-    cog._remove_processing_reaction.assert_awaited_once_with(message, "⏳")
+    assert cog._processing_active == 0 and cog._processing_started > 0
+    cog._add_processing_reaction.assert_not_awaited()
+    cog._remove_processing_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -335,7 +351,9 @@ async def test_slow_master_does_not_discard_already_loaded_personal_dialogue(cog
     assert cog._memory.append_turn.await_args.kwargs["epoch"] == MemoryEpoch(2, 3, 4)
     assert cancelled.is_set()
     assert len(observed) == 1 and observed[0].done() and observed[0].cancelled()
-    cog._remove_processing_reaction.assert_awaited_once_with(message, "⏳")
+    assert cog._processing_active == 0 and cog._processing_started > 0
+    cog._add_processing_reaction.assert_not_awaited()
+    cog._remove_processing_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -355,7 +373,9 @@ async def test_slow_memory_preserves_completed_custom_master_and_captures_fresh_
     assert cog._memory.append_turn.await_args.kwargs["epoch"] == MemoryEpoch(8, 9, 10)
     assert cancelled.is_set()
     assert len(observed) == 1 and observed[0].done() and observed[0].cancelled()
-    cog._remove_processing_reaction.assert_awaited_once_with(message, "⏳")
+    assert cog._processing_active == 0 and cog._processing_started > 0
+    cog._add_processing_reaction.assert_not_awaited()
+    cog._remove_processing_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -381,7 +401,9 @@ async def test_failed_memory_and_slow_master_finish_without_leaking_context_task
     assert observed[0].done() and observed[0].cancelled()
     assert memory_tasks[0].done() and not memory_tasks[0].cancelled()
     assert isinstance(memory_tasks[0].exception(), RuntimeError)
-    cog._remove_processing_reaction.assert_awaited_once_with(message, "⏳")
+    assert cog._processing_active == 0 and cog._processing_started > 0
+    cog._add_processing_reaction.assert_not_awaited()
+    cog._remove_processing_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -420,7 +442,9 @@ async def test_benign_question_about_nsfw_term_reaches_model_through_listener(co
     assert cog._memory.append_turn.await_args.kwargs["assistant_message"] == answer
     assert cog._admission.snapshot().inflight_users == 0
     message.channel.history.assert_not_called()
-    cog._remove_processing_reaction.assert_awaited_once_with(message, "⏳")
+    assert cog._processing_active == 0 and cog._processing_started > 0
+    cog._add_processing_reaction.assert_not_awaited()
+    cog._remove_processing_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio

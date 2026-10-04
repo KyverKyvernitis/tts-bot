@@ -15,8 +15,28 @@ from cogs.chatbot.memory import MemoryEntry, MemoryEpoch
 from cogs.chatbot.preferences import ConversationPreferences
 from cogs.chatbot.tool_registry import ToolSpec
 from cogs.chatbot.tool_runtime import build_tool_registry, drain_action_proposals, execute_native_tool, refresh_action_spec
+from cogs.chatbot.tool_runtime import refresh_tool_context
+from cogs.chatbot.action_drafts import ActionDraftStore
 from tests.test_chatbot_action_flow import world, _member
 from tests.test_chatbot_tool_memory import Collection
+
+
+class DraftCollection(Collection):
+    async def find_one_and_replace(self, query, replacement, **kwargs):
+        from copy import deepcopy
+        from tests.test_chatbot_action_flow import _matches
+        for index, doc in enumerate(self.docs):
+            if _matches(doc, query):
+                self.docs[index] = deepcopy(replacement)
+                return deepcopy(replacement)
+        return None
+
+
+def install_drafts(w):
+    clock = [100.0]
+    collection = DraftCollection()
+    w.cog._action_drafts = ActionDraftStore(collection, memory=w.cog._memory, clock=lambda: clock[0])
+    return collection, clock
 
 
 async def registry_for(w):
@@ -312,3 +332,182 @@ async def test_move_then_speak_passes_pinned_source_and_destination_to_policy(wo
     assert (await call(registry, "propor_acao", action="speak_voice", text="fala exata"))["ok"]
     assert observed == [("move_voice", None, None), ("speak_voice", 20, 21)]
     assert len(drain_action_proposals(registry)) == 2
+
+
+@pytest.mark.asyncio
+async def test_action_draft_roundtrip_resolves_same_target_when_old_alias_belongs_to_another_member(world):
+    collection, _clock = install_drafts(world)
+    registry = await registry_for(world)
+    saved = await call(registry, "save_action_draft", action="timeout_member", target_ref="m1", reason="spam confirmado")
+    assert saved["status"] == "draft_saved" and saved["data"]["requires_completion"]
+    assert saved["data"]["draft"]["target_id"] == 3
+    assert saved["data"]["draft"]["missing_fields"] == ["options.duration_seconds"]
+    assert collection.docs[0]["target_id"] == 3 and "target_ref" not in collection.docs[0]
+    assert not world.collection.docs and not world.cog._supervisor.jobs
+    world.members[4] = _member(world.guild, 4, rank=2)
+    world.message.mentions = [world.members[4]]
+    resumed = await registry_for(world)
+    draft = resumed.runtime.action_draft
+    assert draft["target_id"] == 3 and draft["target_ref"] != "m1"
+    assert resumed.runtime.targets["m1"].id == 4
+    assert resumed.runtime.targets[draft["target_ref"]].id == 3
+    assert draft["target_name"] == "membro 3"
+    completed = await call(resumed, "save_action_draft", options={"duration_seconds": 27 * 60})
+    assert completed["ok"] and not completed["data"]["requires_completion"]
+    assert completed["data"]["draft"]["target_id"] == 3
+    assert completed["data"]["draft"]["reason"] == "spam confirmado"
+    assert collection.docs[0]["options"] == {"duration_seconds": 1620}
+    assert not world.collection.docs and not world.cog._supervisor.jobs
+
+
+@pytest.mark.asyncio
+async def test_draft_save_rejects_untrusted_member_or_resource_ids_without_creating_authority(world):
+    collection, _clock = install_drafts(world)
+    registry = await registry_for(world)
+    invalid_target = await call(registry, "save_action_draft", action="timeout_member", target_ref="77")
+    assert not invalid_target["ok"]
+    invalid_resource = await call(registry, "save_action_draft", action="assign_role", target_ref="m1",
+                                  options={"role_ref": "77"})
+    assert not invalid_resource["ok"] and not collection.docs
+
+
+@pytest.mark.asyncio
+async def test_draft_expiry_and_memory_reset_do_not_restore_old_targets(world):
+    _collection, clock = install_drafts(world)
+    await world.cog._action_drafts.save(10, 30, 1, world.epoch, action="timeout_member", target_id=3)
+    clock[0] += 601
+    assert (await registry_for(world)).runtime.action_draft is None
+    await world.cog._action_drafts.save(10, 30, 1, world.epoch, action="timeout_member", target_id=3)
+    world.epoch = MemoryEpoch(2, 3, 5)
+    world.cog._memory.capture_epoch.return_value = world.epoch
+    assert (await registry_for(world)).runtime.action_draft is None
+
+
+@pytest.mark.asyncio
+async def test_departed_draft_target_clears_draft_without_selecting_new_member_or_executing(world):
+    collection, _clock = install_drafts(world)
+    await world.cog._action_drafts.save(10, 30, 1, world.epoch, action="timeout_member", target_id=3)
+    world.members.pop(3)
+    world.message.mentions = []
+    registry = await registry_for(world)
+    assert registry.runtime.action_draft is None and registry.runtime.action_draft_error
+    assert not collection.docs and not world.collection.docs
+    assert not world.cog._supervisor.jobs
+
+
+@pytest.mark.asyncio
+async def test_draft_resource_aliases_persist_as_ids_and_are_restored_to_actual_objects(world):
+    from unittest.mock import MagicMock
+    import discord
+    collection, _clock = install_drafts(world)
+    role = MagicMock(spec=discord.Role)
+    role.id, role.guild, role.name, role.managed = 70, world.guild, "cargo real", False
+    world.guild.get_role = lambda identifier: role if identifier == 70 else None
+    registry = await registry_for(world)
+    registry.runtime.resources["r1"] = role
+    result = await call(registry, "save_action_draft", action="assign_role", target_ref="m1",
+                        reason="cargo solicitado", options={"role_ref": "r1"})
+    assert result["ok"] and collection.docs[0]["options"]["role_ref"] == "70"
+    resumed = await registry_for(world)
+    alias = resumed.runtime.action_draft["options"]["role_ref"]
+    assert resumed.runtime.resources[alias] is role and alias != "70"
+
+
+@pytest.mark.asyncio
+async def test_draft_cancel_only_clears_incomplete_context_not_existing_action_requests(world):
+    collection, _clock = install_drafts(world)
+    await world.cog._action_drafts.save(10, 30, 1, world.epoch, action="timeout_member", target_id=3)
+    registry = await registry_for(world)
+    world.cog._actions.cancel_pending = AsyncMock()
+    result = await call(registry, "cancel_action_draft")
+    assert result["data"] == {"cancelled": True, "executed_requests_cancelled": False}
+    assert registry.runtime.action_draft is None and not collection.docs
+    world.cog._actions.cancel_pending.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_refresh_tool_context_observes_gateway_move_and_rebuilds_capabilities_without_effects(world):
+    from unittest.mock import MagicMock
+    import discord
+    registry = await registry_for(world)
+    assert registry.runtime.voice_state["same_channel"]
+    other = MagicMock(spec=discord.VoiceChannel)
+    other.id, other.guild, other.name = 44, world.guild, "nova call"
+    other.permissions_for.return_value = SimpleNamespace(view_channel=True, connect=True, speak=True)
+    world.members[1].voice = SimpleNamespace(channel=other)
+    state = await refresh_tool_context(registry)
+    assert state["author"]["channel_id"] == "44" and not state["same_channel"]
+    assert "speak_voice" not in registry.runtime.action_context.actions
+    assert not world.collection.docs and not world.cog._supervisor.jobs
+    world.tts.chatbot_join_voice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_operational_and_member_tools_share_current_voice_snapshot_shape(world):
+    registry = await registry_for(world)
+    world.voice.name = "call atual"
+    state = (await call(registry, "get_operational_state"))["data"]["voice_state"]
+    member = (await call(registry, "resolve_member", query="autor"))["data"]["members"][0]
+    assert state["author"] == member["voice"]
+    assert state["author"]["channel_name"] == "call atual" and state["can_listen"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool,arguments", [("save_action_draft", {"options": {"duration_seconds": 1620}}),
+                                          ("cancel_action_draft", {})])
+async def test_changed_draft_cannot_rebind_short_answer_or_cancel_to_another_target(world, tool, arguments):
+    _collection, _clock = install_drafts(world)
+    await world.cog._action_drafts.save(10, 30, 1, world.epoch, action="timeout_member", target_id=3)
+    registry = await registry_for(world)
+    world.members[4] = _member(world.guild, 4, rank=2)
+    await world.cog._action_drafts.save(10, 30, 1, world.epoch, action="timeout_member", target_id=4)
+    result = await call(registry, tool, **arguments)
+    assert not result["ok"] and result["status"] == "failed"
+    actual = await world.cog._action_drafts.get_current(10, 30, 1, world.epoch)
+    assert actual["target_id"] == 4 and "duration_seconds" not in actual["options"]
+
+
+@pytest.mark.asyncio
+async def test_draft_can_preserve_bot_target_when_real_ban_policy_allows_it(world):
+    _collection, _clock = install_drafts(world)
+    world.members[3].bot = True
+    registry = await registry_for(world)
+    result = await call(registry, "save_action_draft", action="ban_member", target_ref="m1", reason="spam confirmado")
+    assert result["ok"]
+    resumed = await registry_for(world)
+    assert resumed.runtime.targets[resumed.runtime.action_draft["target_ref"]].bot
+
+
+@pytest.mark.asyncio
+async def test_unban_draft_restores_public_account_identity_without_membership_or_ban_queries(world):
+    from unittest.mock import MagicMock
+    import discord
+    collection, _clock = install_drafts(world)
+    account = MagicMock(spec=discord.User)
+    account.id, account.name, account.display_name = 77, "conta real", "conta real"
+    world.cog.bot.fetch_user = AsyncMock(return_value=account)
+    world.guild.fetch_ban = AsyncMock()
+    world.message.content = "Desbane a conta <@77>"
+    registry = await registry_for(world)
+    saved = await call(registry, "save_action_draft", action="unban_member", target_ref="<@77>")
+    assert saved["ok"] and collection.docs[0]["target_id"] == 77
+    world.message.content = "motivo explicado"
+    resumed = await registry_for(world)
+    draft = resumed.runtime.action_draft
+    assert draft["target_name"] == "conta real" and draft["target_id"] == 77
+    assert resumed.runtime.resources[draft["target_ref"]] is account
+    enums = resumed.get("propor_acao").parameters["properties"]["target_ref"]["enum"]
+    assert draft["target_ref"] in enums and "77" in enums
+    world.guild.fetch_ban.assert_not_awaited()
+    assert 77 not in [item.args[0] for item in world.guild.fetch_member.await_args_list]
+    assert not world.collection.docs and not world.cog._supervisor.jobs
+
+
+@pytest.mark.asyncio
+async def test_unban_draft_rejects_id_that_only_the_model_supplied(world):
+    collection, _clock = install_drafts(world)
+    world.cog.bot.fetch_user = AsyncMock()
+    registry = await registry_for(world)
+    result = await call(registry, "save_action_draft", action="unban_member", target_ref="77")
+    assert not result["ok"] and not collection.docs
+    world.cog.bot.fetch_user.assert_not_awaited()

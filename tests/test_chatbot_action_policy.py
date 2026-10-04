@@ -6,7 +6,8 @@ import discord
 import pytest
 
 from cogs.chatbot.action_execution import ActionExecutionUncertain, execute_action
-from cogs.chatbot.action_policy import ActionDenied, build_action_context, prepare_action, validate_action
+from cogs.chatbot.action_policy import (AUDIO_ACTIONS, AUTOMATIC_ACTIONS, NAVIGATION_ACTIONS, STAFF_ACTIONS,
+                                       ActionDenied, build_action_context, prepare_action, validate_action)
 from cogs.chatbot.action_protocol import ActionProposal
 
 
@@ -203,7 +204,7 @@ async def test_join_can_prepare_deferred_speech_but_execution_stays_blocked_unti
         targets={"autor": world.members[1]}, config=world.config,
         deferred_voice_channel_id=join["payload"]["voice_channel_id"],
     )
-    assert join["ask_permission"] is True and speech["ask_permission"] is False
+    assert join["ask_permission"] is False and speech["ask_permission"] is False
     assert speech["payload"]["voice_channel_id"] == 20 and speech["payload"]["target_id"] == 1
     with pytest.raises(ActionDenied, match="continuar na call"):
         await validate_action(world.bot, speech, 1)
@@ -334,26 +335,26 @@ async def test_speech_rejects_moved_requester_or_disconnected_bot(world):
 
 
 @pytest.mark.asyncio
-async def test_join_forces_staff_approval_and_channel_pin(world):
+async def test_join_is_automatic_for_common_member_and_pins_target_call(world):
     in_call(world, 3)
-    prepared = await prepare_action(world.bot, world.message, ActionProposal("join_voice", "m1"),
+    prepared = await prepare_action(world.bot, world.message, ActionProposal("join_voice", "m1", ask_permission=True),
                                     targets={"m1": world.members[3]}, config=world.config)
-    assert prepared["ask_permission"] and prepared["payload"]["voice_channel_id"] == 20
-    with pytest.raises(ActionDenied, match="Somente a staff"):
-        await validate_action(world.bot, prepared, 1)
-    await validate_action(world.bot, prepared, 4)
+    assert prepared["ask_permission"] is False and prepared["payload"]["voice_channel_id"] == 20
+    await validate_action(world.bot, prepared, 1)
+    with pytest.raises(ActionDenied, match="Somente o membro"):
+        await validate_action(world.bot, prepared, 4)
     world.members[3].voice = None
     with pytest.raises(ActionDenied, match="saiu ou mudou"):
-        await validate_action(world.bot, prepared, 4)
-    # Sair da call não impede a staff de encerrar o pedido.
-    await validate_action(world.bot, prepared, 4, reject=True)
+        await validate_action(world.bot, prepared, 1)
+    # O dono da solicitação ainda pode encerrá-la depois da saída do alvo.
+    await validate_action(world.bot, prepared, 1, reject=True)
 
 
 @pytest.mark.asyncio
-async def test_configured_staff_role_can_join_without_manage_guild(world):
+async def test_configured_staff_roles_do_not_restrict_automatic_join(world):
     in_call(world, 3)
     world.config.action_staff_role_ids = (77,)
-    world.members[1].roles = [SimpleNamespace(id=77)]
+    assert world.members[1].roles == []
     await validate_action(world.bot, doc("join_voice", target=3, voice=20), 1)
 
 
@@ -368,7 +369,7 @@ async def test_stage_and_missing_voice_permissions_are_denied(world):
     in_call(world, 3)
     world.voice.permissions_for.return_value.connect = False
     with pytest.raises(ActionDenied, match="permissão"):
-        await validate_action(world.bot, doc("join_voice", target=3, voice=20), 4)
+        await validate_action(world.bot, doc("join_voice", target=3, voice=20), 1)
 
 
 @pytest.mark.asyncio
@@ -471,14 +472,70 @@ async def test_speech_adapter_receives_private_text_and_uncertain_does_not_retry
 
 
 @pytest.mark.asyncio
-async def test_join_calls_canonical_adapter_after_fresh_staff_check(world):
+async def test_join_calls_canonical_adapter_without_staff_and_keeps_effect_guard(world):
     in_call(world, 3)
-    result = await execute_action(world.bot, doc("join_voice", target=3, voice=20), actor_id=4)
-    assert result.public_result == "Entrou na call autorizada."
+    result = await execute_action(world.bot, doc("join_voice", target=3, voice=20, ask=False), actor_id=1)
+    assert result.public_result == "Entrou na call escolhida."
     kwargs = world.tts.chatbot_join_voice.await_args.kwargs
     assert (kwargs["guild_id"], kwargs["user_id"], kwargs["channel_id"], kwargs["request_id"]) == (10, 3, 20, "abc123")
     assert callable(kwargs["before_effect"])
     world.tts.chatbot_join_voice.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_automatic_navigation_does_not_grant_moderation_authority(world):
+    assert NAVIGATION_ACTIONS == {"join_voice", "move_voice", "leave_voice"}
+    assert AUTOMATIC_ACTIONS == AUDIO_ACTIONS | NAVIGATION_ACTIONS
+    assert {"ban_member", "timeout_member", "kick_member", "assign_role", "edit_channel"} <= STAFF_ACTIONS
+    in_call(world, 3)
+    world.config.moderation_actions_enabled = False
+    await validate_action(world.bot, doc("join_voice", target=3, voice=20, ask=False), 1)
+    world.config.moderation_actions_enabled = True
+    with pytest.raises(ActionDenied, match="permissão"):
+        await execute_action(world.bot, doc("ban_member", target=3, ask=False), actor_id=1)
+    world.members[3].ban.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("occupied", ["connected", "music"])
+async def test_automatic_join_never_reuses_or_takes_an_occupied_session(world, occupied):
+    in_call(world, 3)
+    request = await prepare_action(world.bot, world.message, ActionProposal("join_voice", "m1"),
+                                   targets={"m1": world.members[3]}, config=world.config)
+    if occupied == "connected":
+        in_call(world, bot=True)
+    else:
+        world.tts._chatbot_voice_precheck = Mock(return_value=(world.guild, world.voice, "music owned"))
+    with pytest.raises(ActionDenied, match="sessão de voz"):
+        await execute_action(world.bot, request, actor_id=1)
+    world.tts.chatbot_join_voice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_automatic_join_rechecks_target_after_adapter_wait_before_connect(world):
+    in_call(world, 3)
+    effects = []
+    async def adapter(**kwargs):
+        world.members[3].voice = None
+        await kwargs["before_effect"]()
+        effects.append("connected")
+        return {"ok": True, "status": "executed"}
+    world.tts.chatbot_join_voice.side_effect = adapter
+    with pytest.raises(ActionDenied, match="saiu ou mudou"):
+        await execute_action(world.bot, doc("join_voice", target=3, voice=20, ask=False), actor_id=1)
+    assert effects == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["enabled", "actions_enabled", "voice_actions_enabled"])
+async def test_automatic_join_still_respects_current_server_switches(world, flag):
+    in_call(world, 3)
+    request = await prepare_action(world.bot, world.message, ActionProposal("join_voice", "m1"),
+                                   targets={"m1": world.members[3]}, config=world.config)
+    setattr(world.config, flag, False)
+    with pytest.raises(ActionDenied, match="desativad"):
+        await execute_action(world.bot, request, actor_id=1)
+    world.tts.chatbot_join_voice.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -543,7 +600,7 @@ async def test_all_actions_require_requester_to_keep_original_channel_access(wor
     with pytest.raises(ActionDenied, match="solicitante"):
         await validate_action(world.bot, doc("ban_member", target=3), 2)
     with pytest.raises(ActionDenied, match="solicitante"):
-        await validate_action(world.bot, doc("join_voice", target=3, voice=20), 4)
+        await validate_action(world.bot, doc("join_voice", target=3, voice=20), 1)
 
 
 @pytest.mark.asyncio
@@ -624,17 +681,19 @@ async def test_private_voice_target_not_advertised_or_pinned_without_requester_v
 
 
 @pytest.mark.asyncio
-async def test_join_approval_requires_staff_and_requester_to_see_target_call(world):
+async def test_automatic_join_requires_original_member_to_see_target_call(world):
     in_call(world, 3)
-    action_doc = doc("join_voice", target=3, voice=20)
+    action_doc = doc("join_voice", target=3, voice=20, ask=False)
     world.voice.permissions_for.side_effect = lambda m: SimpleNamespace(
         view_channel=m.id != 4, connect=True, speak=True)
-    with pytest.raises(ActionDenied, match="Você precisa poder ver"):
+    # A staff de outra pessoa não participa da execução automática.
+    await validate_action(world.bot, action_doc, 1)
+    with pytest.raises(ActionDenied, match="Somente o membro"):
         await validate_action(world.bot, action_doc, 4)
     world.voice.permissions_for.side_effect = lambda m: SimpleNamespace(
         view_channel=m.id != 1, connect=True, speak=True)
     with pytest.raises(ActionDenied, match="solicitante precisa poder ver"):
-        await validate_action(world.bot, action_doc, 4)
+        await validate_action(world.bot, action_doc, 1)
 
 
 @pytest.mark.asyncio
@@ -646,11 +705,11 @@ async def test_voice_visibility_rechecked_after_final_config_await(world):
         count += 1
         if count == 2:
             world.voice.permissions_for.side_effect = lambda m: SimpleNamespace(
-                view_channel=m.id != 4, connect=True, speak=True)
+                view_channel=m.id != 1, connect=True, speak=True)
         return world.config
     world.store.get_config.side_effect = config_getter
-    with pytest.raises(ActionDenied, match="Você precisa poder ver"):
-        await validate_action(world.bot, doc("join_voice", target=3, voice=20), 4)
+    with pytest.raises(ActionDenied, match="solicitante precisa poder ver"):
+        await validate_action(world.bot, doc("join_voice", target=3, voice=20), 1)
 
 
 @pytest.mark.asyncio
@@ -965,35 +1024,107 @@ def _expanded_voice(w):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["move_voice", "leave_voice"])
-async def test_voice_session_controls_require_staff_and_pin_own_session(expanded, action):
+async def test_voice_navigation_is_automatic_without_reason_and_pins_own_session(expanded, action):
     w = expanded
     _expanded_voice(w)
-    prepared = await _expanded_request(w, action)
+    w.config.action_staff_role_ids = (888,)
+    prepared = await prepare_action(w.bot, w.message, ActionProposal(action, "m1", ask_permission=True),
+                                    targets=w.targets, resources=w.resources, config=w.config)
     payload = prepared["payload"]
+    assert prepared["ask_permission"] is False and payload["reason"] == ""
     assert payload["voice_session_ref"] == "session-original"
     assert payload["voice_channel_id"] == (21 if action == "move_voice" else 20)
-    with pytest.raises(ActionDenied):
-        await validate_action(w.bot, prepared, 1)
-    await execute_action(w.bot, prepared, actor_id=4)
+    await validate_action(w.bot, prepared, 1)
+    with pytest.raises(ActionDenied, match="Somente o membro"):
+        await validate_action(w.bot, prepared, 4)
+    await execute_action(w.bot, prepared, actor_id=1)
     adapter = getattr(w.tts, "chatbot_" + action)
     adapter.assert_awaited_once()
     assert adapter.await_args.kwargs["session_ref"] == "session-original"
     assert callable(adapter.await_args.kwargs["before_effect"])
     w.tts.chatbot_voice_session_ref.return_value = "another-session"
     with pytest.raises(ActionDenied, match="sessão"):
-        await validate_action(w.bot, prepared, 4)
+        await validate_action(w.bot, prepared, 1)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("private_for", [1, 4])
-async def test_voice_move_staff_role_never_bypasses_visibility_of_source_or_destination(expanded, private_for):
+@pytest.mark.parametrize("action", ["move_voice", "leave_voice"])
+async def test_automatic_navigation_never_acts_on_a_busy_or_replaced_voice_session(expanded, action):
+    w = expanded
+    _expanded_voice(w)
+    prepared = await _expanded_request(w, action)
+    w.tts.chatbot_voice_session_ref.return_value = None
+    with pytest.raises(ActionDenied, match="sessão"):
+        await execute_action(w.bot, prepared, actor_id=1)
+    getattr(w.tts, "chatbot_" + action).assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_automatic_move_rechecks_member_destination_before_effect(expanded):
+    w = expanded
+    _expanded_voice(w)
+    request = await _expanded_request(w, "move_voice")
+    effects = []
+    async def adapter(**kwargs):
+        w.members[3].voice = SimpleNamespace(channel=w.voice)
+        await kwargs["before_effect"]()
+        effects.append("moved")
+        return {"ok": True, "status": "executed"}
+    w.tts.chatbot_move_voice.side_effect = adapter
+    with pytest.raises(ActionDenied, match="mudou de call"):
+        await execute_action(w.bot, request, actor_id=1)
+    assert effects == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["move_voice", "leave_voice"])
+async def test_uncertain_automatic_navigation_is_never_retried(expanded, action):
+    w = expanded
+    _expanded_voice(w)
+    request = await _expanded_request(w, action)
+    adapter = getattr(w.tts, "chatbot_" + action)
+    adapter.return_value = {"ok": False, "status": "uncertain"}
+    with pytest.raises(ActionExecutionUncertain):
+        await execute_action(w.bot, request, actor_id=1)
+    adapter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["join_voice", "move_voice", "leave_voice"])
+async def test_reset_during_final_config_read_revokes_automatic_navigation(expanded, action):
+    from cogs.chatbot.memory import MemoryEpoch
+    w = expanded
+    if action == "join_voice":
+        in_call(w, 3)
+    else:
+        _expanded_voice(w)
+    request = await prepare_action(w.bot, w.message, ActionProposal(action, "m1"),
+                                   targets=w.targets, resources=w.resources, config=w.config)
+    memory = SimpleNamespace(capture_epoch=AsyncMock(return_value=MemoryEpoch(1, 2, 3)))
+    w.bot.get_cog("Chatbot")._memory = memory
+    request["memory_epoch"] = {"global_generation": 1, "guild_generation": 2, "user_generation": 3}
+    reads = 0
+    async def config(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            memory.capture_epoch.return_value = MemoryEpoch(2, 2, 3)
+        return w.config
+    w.store.get_config.side_effect = config
+    with pytest.raises(ActionDenied, match="reiniciada"):
+        await execute_action(w.bot, request, actor_id=1)
+    getattr(w.tts, "chatbot_" + action).assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_automatic_voice_move_never_bypasses_visibility_of_source_or_destination(expanded):
     w = expanded
     destination = _expanded_voice(w)
     prepared = await _expanded_request(w, "move_voice")
     for channel in (w.voice, destination):
-        channel.permissions_for.side_effect = lambda m: SimpleNamespace(view_channel=m.id != private_for, connect=True, speak=True)
+        channel.permissions_for.side_effect = lambda m: SimpleNamespace(view_channel=m.id != 1, connect=True, speak=True)
         with pytest.raises(ActionDenied):
-            await validate_action(w.bot, prepared, 4)
+            await validate_action(w.bot, prepared, 1)
         channel.permissions_for.side_effect = None
     w.tts.chatbot_move_voice.assert_not_awaited()
 
@@ -1009,7 +1140,7 @@ async def test_voice_adapter_guard_revocation_prevents_effect_and_busy_session_n
         pytest.fail("revoked voice effect must not proceed")
     w.tts.chatbot_leave_voice.side_effect = adapter
     with pytest.raises(ActionDenied):
-        await execute_action(w.bot, prepared, actor_id=4)
+        await execute_action(w.bot, prepared, actor_id=1)
     w.config.voice_actions_enabled = True
     w.tts.chatbot_voice_session_ref.return_value = None
     context = await build_action_context(w.bot, w.message, w.config)

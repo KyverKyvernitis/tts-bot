@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import unittest
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -330,6 +331,17 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         self.cog._can_respond = AsyncMock(return_value=True)
         self.cog._add_processing_reaction = AsyncMock(return_value="⏳")
         self.cog._remove_processing_reaction = AsyncMock()
+        self.processing_events = []
+
+        @asynccontextmanager
+        async def processing(_channel):
+            self.processing_events.append("start")
+            try:
+                yield
+            finally:
+                self.processing_events.append("stop")
+
+        self.cog.processing = processing
         self.cog._maybe_generate_tts = AsyncMock(return_value=None)
         channel = Mock(spec=discord.TextChannel)
         channel.id = 20
@@ -365,7 +377,9 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
             include_collective=False,
         )
         self.message.channel.history.assert_not_called()
-        self.cog._remove_processing_reaction.assert_awaited_once_with(self.message, "⏳")
+        self.assertEqual(self.processing_events, ["start", "stop"])
+        self.cog._add_processing_reaction.assert_not_awaited()
+        self.cog._remove_processing_reaction.assert_not_awaited()
 
     async def test_audio_attachment_has_no_transcript_and_remembers_delivered_speech(self):
         audio = discord.File(io.BytesIO(b"fake audio"), filename="resposta.mp3")
@@ -434,7 +448,9 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         audio.close.assert_called_once_with()
         self.cog._message_index.remember.assert_not_awaited()
         self.cog._memory.append_turn.assert_not_awaited()
-        self.cog._remove_processing_reaction.assert_awaited_once_with(self.message, "⏳")
+        self.assertEqual(self.processing_events, ["start", "stop"])
+        self.cog._add_processing_reaction.assert_not_awaited()
+        self.cog._remove_processing_reaction.assert_not_awaited()
 
     async def test_provider_error_feedback_allows_retry_without_persisting_failed_turn(self):
         self.cog._router.chat.side_effect = ProviderError("offline")
@@ -444,7 +460,9 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
         self.message.reply.assert_awaited_once()
         self.cog._message_index.remember.assert_awaited_once_with(guild_id=10, channel_id=20, message_id=50)
         self.cog._memory.append_turn.assert_not_awaited()
-        self.cog._remove_processing_reaction.assert_awaited_once_with(self.message, "⏳")
+        self.assertEqual(self.processing_events, ["start", "stop"])
+        self.cog._add_processing_reaction.assert_not_awaited()
+        self.cog._remove_processing_reaction.assert_not_awaited()
 
     async def test_failed_discord_send_never_indexes_or_persists_unsent_response(self):
         self.message.reply.side_effect = discord.Forbidden(
@@ -456,7 +474,9 @@ class NativeBotSendingTests(unittest.IsolatedAsyncioTestCase):
 
         self.cog._message_index.remember.assert_not_awaited()
         self.cog._memory.append_turn.assert_not_awaited()
-        self.cog._remove_processing_reaction.assert_awaited_once_with(self.message, "⏳")
+        self.assertEqual(self.processing_events, ["start", "stop"])
+        self.cog._add_processing_reaction.assert_not_awaited()
+        self.cog._remove_processing_reaction.assert_not_awaited()
 
     async def test_failed_context_read_recaptures_current_reset_generation_for_append(self):
         self.cog._memory.load_context.side_effect = RuntimeError("database temporarily unavailable")

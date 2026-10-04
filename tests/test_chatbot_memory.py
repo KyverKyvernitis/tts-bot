@@ -82,21 +82,22 @@ class _Collection:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reset", ["user", "guild", "global"])
-async def test_reset_physically_removes_preferences_facts_and_reply_references(reset):
+async def test_reset_physically_removes_preferences_facts_replies_and_action_drafts(reset):
     coll = _Collection()
     store = MemoryStore(coll)
     kinds = [("chatbot_conversation_preferences", "user_id"),
              ("chatbot_conversation_fact", "user_id"),
-             ("chatbot_sent_reply", "requester_id")]
+             ("chatbot_sent_reply", "requester_id"),
+             ("chatbot_action_draft", "user_id")]
     for kind, field in kinds:
         for gid, uid in ((1, 1), (1, 2), (2, 1)):
             coll.docs.append({"type": kind, "guild_id": gid, field: uid, "content": "private"})
     if reset == "user":
-        assert await store.clear_user_history(1, 1) == 3
+        assert await store.clear_user_history(1, 1) == 4
     elif reset == "guild":
-        assert await store.clear_all_guild_memory(1) == 6
+        assert await store.clear_all_guild_memory(1) == 8
     else:
-        assert await store.clear_all_memory_everywhere() == 9
+        assert await store.clear_all_memory_everywhere() == 12
     for kind, field in kinds:
         remaining = [doc for doc in coll.docs if doc["type"] == kind]
         expected = 2 if reset == "user" else 1 if reset == "guild" else 0

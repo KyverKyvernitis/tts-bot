@@ -11,8 +11,10 @@ from . import constants as C
 from .action_protocol import ALLOWED_ACTIONS, ActionProposal, MAX_AUDIO_TEXT, MAX_REASON
 
 AUDIO_ACTIONS = frozenset({"send_audio", "speak_voice"})
-VOICE_ACTIONS = frozenset({"join_voice", "speak_voice", "move_voice", "leave_voice"})
-STAFF_ACTIONS = frozenset(ALLOWED_ACTIONS) - AUDIO_ACTIONS
+NAVIGATION_ACTIONS = frozenset({"join_voice", "move_voice", "leave_voice"})
+AUTOMATIC_ACTIONS = AUDIO_ACTIONS | NAVIGATION_ACTIONS
+VOICE_ACTIONS = NAVIGATION_ACTIONS | {"speak_voice"}
+STAFF_ACTIONS = frozenset(ALLOWED_ACTIONS) - AUTOMATIC_ACTIONS
 MEMBER_ACTIONS = frozenset({"ban_member", "kick_member", "timeout_member", "untimeout_member", "assign_role", "remove_role", "change_nickname"})
 _ACTION_PERMISSION = {"ban_member": "ban_members", "unban_member": "ban_members",
                       "kick_member": "kick_members", "timeout_member": "moderate_members",
@@ -116,14 +118,14 @@ def _voice_visibility_gate(guild, doc, actor, requester) -> None:
         return
     channel = guild.get_channel(int((doc.get("payload") or {}).get("voice_channel_id") or 0))
     if not _can_view_voice(channel, requester):
-        raise ActionDenied("O solicitante precisa poder ver a call autorizada.")
+        raise ActionDenied("O solicitante precisa poder ver a call escolhida.")
     if not _can_view_voice(channel, actor):
-        raise ActionDenied("Você precisa poder ver a call para aprovar essa entrada.")
+        raise ActionDenied("Você precisa poder ver a call escolhida.")
     source_id = int((doc.get("payload") or {}).get("source_voice_channel_id") or 0)
     if source_id:
         source = guild.get_channel(source_id)
         if not _can_view_voice(source, requester) or not _can_view_voice(source, actor):
-            raise ActionDenied("A staff e o solicitante precisam poder ver a call de origem.")
+            raise ActionDenied("O membro da conversa precisa poder ver a call de origem.")
 
 
 def _audio_channel(guild, channel_id: int, member):
@@ -262,7 +264,7 @@ async def build_action_context(bot, message, config, reply_target=None, *, trust
                     and _voice_available(tts, guild, target, _voice_channel(target))
                     for target in targets.values())):
         actions.append("join_voice")
-        lines.append("join_voice: pedir à staff para entrar na call de um dos alvos; nunca executar sem aprovação.")
+        lines.append("join_voice: entrar automaticamente na call de um dos alvos identificados, espontaneamente ou a pedido; não precisa de aprovação da staff.")
     if ("speak_voice" not in actions and "join_voice" in actions
             and _enabled(config, "speak_voice") and callable(getattr(tts, "chatbot_speak_voice", None))
             and requester_channel is not None and _voice_permissions(requester_channel, me)
@@ -271,7 +273,7 @@ async def build_action_context(bot, message, config, reply_target=None, *, trust
         actions.append("speak_voice")
         lines.append(
             "speak_voice: pode ser a etapa seguinte a join_voice para a call do autor. "
-            "Só fale após a staff aprovar a entrada e o sistema confirmar o sucesso; "
+            "Só fale após o sistema confirmar o sucesso da entrada automática; "
             "ainda não há conexão para falar diretamente."
         )
     if (requester_channel is not None and bot_channel is not None and requester_channel.id == bot_channel.id
@@ -284,12 +286,19 @@ async def build_action_context(bot, message, config, reply_target=None, *, trust
     lines.append(
         "Envie áudio ou fale diretamente quando disponível, sem pedir aprovação para o áudio. "
         "text fica privado: nunca mostre nem antecipe o conteúdo. Até quatro ações podem formar uma sequência; "
-        "entrada em call e cada banimento aguardam aprovações separadas da staff. "
+        "entrar, mudar e sair da própria call são automáticos quando disponíveis; "
+        "cada ação de moderação ou alteração do servidor aguarda aprovação separada da staff. "
         "No máximo uma proposta de áudio ou fala por sequência; não combine send_audio e speak_voice."
     )
     for ref, member in targets.items():
         channel = _voice_channel(member)
-        state = "está em call" if _can_view_voice(channel, requester) else "call indisponível nesta conversa" if channel else "fora de call"
+        raw_channel = getattr(getattr(member, "voice", None), "channel", None)
+        if isinstance(raw_channel, discord.StageChannel):
+            visible = bool(getattr(raw_channel.permissions_for(requester), "view_channel", False))
+            state = ("está em canal de palco; entrada e fala pelo chatbot não estão disponíveis"
+                     if visible else "call indisponível nesta conversa")
+        else:
+            state = "está em call" if _can_view_voice(channel, requester) else "call indisponível nesta conversa" if channel else "fora de call"
         lines.append(f"Alvo {ref}: {_label(member)} ({state}).")
     _advertise_extended(actions, lines, bot, guild, requester, config, message.channel)
     for ref, member in targets.items():
@@ -340,7 +349,7 @@ async def prepare_action(
                 # preparada anteriormente. O modelo não escolhe ID de canal.
                 if (not isinstance(deferred_voice_channel_id, int) or isinstance(deferred_voice_channel_id, bool)
                         or deferred_voice_channel_id <= 0 or channel.id != deferred_voice_channel_id):
-                    raise ActionDenied("A fala precisa continuar na mesma call autorizada para a entrada.")
+                    raise ActionDenied("A fala precisa continuar na mesma call preparada para a entrada ou mudança.")
                 awaiting_move = (bot_channel is not None and bot_channel.id != channel.id
                                  and isinstance(deferred_voice_source_channel_id, int)
                                  and not isinstance(deferred_voice_source_channel_id, bool)
@@ -355,12 +364,11 @@ async def prepare_action(
                 raise ActionDenied("Você e o bot precisam estar na mesma call para eu falar.")
             payload["voice_channel_id"] = int(channel.id)
     elif proposal.action == "join_voice":
-        ask_permission = True
         channel = _voice_channel(target)
         if channel is None or not callable(getattr(tts, "chatbot_join_voice", None)):
             raise ActionDenied("Esse membro precisa estar em uma call de voz disponível.")
         if not _can_view_voice(channel, message.author):
-            raise ActionDenied("O solicitante precisa poder ver a call para pedir a entrada.")
+            raise ActionDenied("O solicitante precisa poder ver a call para entrar.")
         if _bot_voice_channel(guild) is not None:
             raise ActionDenied("A sessão de voz do bot já está em uso.")
         if not _voice_available(tts, guild, target, channel):
@@ -399,11 +407,9 @@ def _can_approve_ban(guild, actor, config) -> bool:
 
 def _check_approver(guild, action, actor, requester_id, config, doc=None) -> None:
     if actor.bot:
-        raise ActionDenied("Este botão precisa ser usado por um membro do servidor.")
-    if action in {"send_audio", "speak_voice"} and actor.id != requester_id:
-        raise ActionDenied("Somente o membro envolvido pode responder a esse pedido de áudio.")
-    if action in {"join_voice", "move_voice", "leave_voice"} and not _is_staff(guild, actor, config):
-        raise ActionDenied("Somente a staff autorizada pode aprovar ou rejeitar a entrada na call.")
+        raise ActionDenied("Esta ação precisa estar vinculada a um membro do servidor.")
+    if action in AUTOMATIC_ACTIONS and actor.id != requester_id:
+        raise ActionDenied("Somente o membro envolvido pode executar essa ação automática.")
     if action in _ACTION_PERMISSION:
         permission = _ACTION_PERMISSION[action]
         # Cargos de staff restringem o uso, mas nunca concedem permissões Discord.
@@ -512,9 +518,11 @@ async def validate_action(bot, doc: dict, actor_id: int, *, reject: bool = False
         if action == "speak_voice":
             bot_channel = _bot_voice_channel(guild)
             if bot_channel is None or bot_channel.id != channel.id or not callable(getattr(tts, "chatbot_speak_voice", None)):
-                raise ActionDenied("O bot precisa continuar na call autorizada para falar.")
+                raise ActionDenied("O bot precisa continuar na call escolhida para falar.")
         elif not callable(getattr(tts, "chatbot_join_voice", None)):
             raise ActionDenied("A conexão de voz está indisponível agora.")
+        elif _bot_voice_channel(guild) is not None or not _voice_available(tts, guild, target, channel):
+            raise ActionDenied("A sessão de voz está em uso ou a entrada nessa call está indisponível.")
     elif action == "ban_member":
         if not _ban_target_allowed(guild, target, me) or target.id in {actor.id, requester_id}:
             raise ActionDenied("O bot não pode banir esse membro com a hierarquia atual.")
@@ -598,9 +606,9 @@ def _target_hierarchy(guild, target, bot_member, *, actor=None, requester_id=Non
         raise ActionDenied("Seu cargo precisa estar acima do membro afetado.")
 
 
-def _reason(proposal, *, limit=MAX_REASON) -> str:
+def _reason(proposal, *, limit=MAX_REASON, required=True) -> str:
     reason = str(proposal.reason or "").strip()
-    if not reason or len(reason) > limit or any(ord(c) < 32 and c not in "\n\t" for c in reason):
+    if (required and not reason) or len(reason) > limit or any(ord(c) < 32 and c not in "\n\t" for c in reason):
         raise ActionDenied("Essa ação precisa de um motivo claro e curto.")
     return reason
 
@@ -652,15 +660,15 @@ def _advertise_extended(actions, lines, bot, guild, requester, config, origin):
         ):
             if _enabled(config, action) and callable(getattr(tts, adapter, None)):
                 actions.append(action)
-                lines.append(f"{action}: pedir à staff para {description}; não interrompa música, escuta ou reprodução de outra pessoa.")
+                lines.append(f"{action}: {description}, automaticamente e por vontade própria ou a pedido, sem aprovação da staff; não interrompa música, escuta ou reprodução de outra pessoa.")
         author_call = _voice_channel(requester)
         if ("move_voice" in actions and "speak_voice" not in actions and _enabled(config, "speak_voice")
                 and callable(getattr(tts, "chatbot_speak_voice", None)) and author_call is not None
                 and author_call.id != source.id and _can_view_voice(author_call, requester)
                 and _voice_permissions(author_call, me)):
             actions.append("speak_voice")
-            lines.append("speak_voice pode seguir move_voice para a call do autor, somente após aprovação da mudança e sucesso confirmado; não fale antes.")
-    lines.append("Resolva membros, cargos, canais e mensagens pelas ferramentas disponíveis antes de propor alterações; referências internas não são perguntas ao usuário. Cada ação privilegiada precisa de aprovação separada; o bot nunca aprova seus próprios pedidos.")
+            lines.append("speak_voice pode seguir move_voice para a call do autor, somente após sucesso confirmado da mudança automática; não fale antes.")
+    lines.append("Resolva membros, cargos, canais e mensagens pelas ferramentas disponíveis antes de propor alterações; referências internas não são perguntas ao usuário. Navegação da própria sessão de voz é automática. Cada ação de moderação, cargos ou canais precisa de aprovação separada da staff; o bot nunca aprova esses pedidos.")
 
 
 def _resolve_resource(message, ref, resources, kind):
@@ -723,9 +731,12 @@ async def _prepare_extended(bot, message, proposal, *, targets, resources, confi
     guild, action, options = message.guild, proposal.action, proposal.options
     if not isinstance(options, dict):
         raise ActionDenied("Os parâmetros dessa ação não são válidos.")
-    payload = {"target_id": int(message.author.id), "voice_channel_id": 0, "text": "", "reason": _reason(proposal, limit=150 if action == "edit_channel" else MAX_REASON)}
+    payload = {"target_id": int(message.author.id), "voice_channel_id": 0, "text": "",
+               "reason": _reason(proposal, limit=150 if action == "edit_channel" else MAX_REASON,
+                                 required=action not in NAVIGATION_ACTIONS)}
     doc = {"guild_id": int(guild.id), "channel_id": int(message.channel.id), "origin_message_id": int(message.id),
-           "requester_id": int(message.author.id), "action": action, "payload": payload, "ask_permission": True}
+           "requester_id": int(message.author.id), "action": action, "payload": payload,
+           "ask_permission": action in STAFF_ACTIONS}
     me = guild.me
     if action in MEMBER_ACTIONS:
         target = await _resolve_member(message, proposal.target_ref or "autor", targets)
@@ -808,7 +819,9 @@ async def _prepare_extended(bot, message, proposal, *, targets, resources, confi
 async def _validate_extended(bot, guild, doc, actor, requester, me, config):
     action, payload = doc["action"], doc["payload"]
     reason = payload.get("reason")
-    if not isinstance(reason, str) or not reason.strip() or len(reason) > (150 if action == "edit_channel" else MAX_REASON):
+    if (not isinstance(reason, str) or (action not in NAVIGATION_ACTIONS and not reason.strip())
+            or len(reason) > (150 if action == "edit_channel" else MAX_REASON)
+            or any(ord(c) < 32 and c not in "\n\t" for c in reason)):
         raise ActionDenied("Esse pedido não tem um motivo válido.")
     _current_write_allowlist(guild, doc, config)
     _resource_visibility_gate(guild, doc, actor, requester)

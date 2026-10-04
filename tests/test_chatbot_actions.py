@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
+from uuid import UUID, uuid4
 
 import pytest
+import discord
 
 from cogs.chatbot import actions as actions_module
 from cogs.chatbot.action_execution import ActionExecutionUncertain, ExecutionResult
@@ -14,7 +17,7 @@ from cogs.chatbot.action_protocol import ActionProposal, ChatReply
 from cogs.chatbot.action_store import ActionStore
 from cogs.chatbot.actions import ActionService
 from cogs.chatbot.memory import MemoryEpoch
-from test_chatbot_action_policy import doc, in_call, world as policy_world
+from test_chatbot_action_policy import doc, expanded as policy_expanded, in_call, world as policy_world
 from test_chatbot_action_store import _Clock, _Collection
 
 
@@ -187,8 +190,8 @@ async def test_common_requester_can_approve_speech_in_current_call(environment):
     assert w.executor.await_args.kwargs["actor_id"] == 1
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action,staff_actor", [("join_voice", 4), ("ban_member", 2)])
-async def test_join_and_ban_require_current_staff_authority(environment, action, staff_actor):
+@pytest.mark.parametrize("action,staff_actor", [("ban_member", 2)])
+async def test_ban_still_requires_current_staff_authority(environment, action, staff_actor):
     w = environment
     in_call(w, 3)
     r = await _request(w, action, target=3)
@@ -283,13 +286,10 @@ async def test_rejected_optional_audio_never_enters_conversation_memory(environm
     w.card.delete.assert_awaited_once()
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["join_voice", "ban_member"])
-async def test_false_model_permission_never_automates_join_or_ban(environment, action):
+@pytest.mark.parametrize("action", ["ban_member"])
+async def test_false_model_permission_never_automates_ban(environment, action):
     w = environment
     in_call(w, 3)
-    if action == "join_voice":
-        w.guild.voice_client = None
-        w.members[999].voice = None
     p = await w.service.plan(w.message, ChatReply("", (ActionProposal(action, "m1", reason="spam", ask_permission=False),)),
                              await build_action_context(w.bot, w.message, w.config), w.config)
     await w.service.bind_and_start(p, None)
@@ -460,7 +460,7 @@ async def test_lost_database_claim_releases_local_slot_for_another_request(envir
     assert w.executor.await_count == 1
 
 @pytest.mark.asyncio
-async def test_join_then_speech_waits_for_staff_and_executes_as_requester(environment):
+async def test_join_then_speech_runs_automatically_only_after_confirmed_connection(environment):
     w = environment
     w.guild.voice_client = None
     w.members[999].voice = None
@@ -469,18 +469,18 @@ async def test_join_then_speech_waits_for_staff_and_executes_as_requester(enviro
     p = await w.service.plan(w.message, ChatReply("", (
         ActionProposal("join_voice", "autor"), ActionProposal("speak_voice", text="oi call"))), context, w.config)
     assert len(p.requests) == 2 and p.requests[1]["state"] == "blocked"
-    await w.service.bind_and_start(p, None)
-    await w.supervisor.drain()
-    w.executor.assert_not_awaited()
     async def execute(bot, request, *, actor_id):
         if request["action"] == "join_voice":
             in_call(w, 1, bot=True)
         return ExecutionResult("ok")
     w.executor.side_effect = execute
-    await w.service.handle_interaction(_interaction(w, actor=4), p.requests[0]["request_id"], approve=True)
+    await w.service.bind_and_start(p, None)
     await w.supervisor.drain()
-    assert [c.kwargs["actor_id"] for c in w.executor.await_args_list] == [4, 1]
+    assert [c.kwargs["actor_id"] for c in w.executor.await_args_list] == [1, 1]
     assert [r["state"] for r in await w.service.store.list_for_plan(p.requests[0]["plan_id"])] == ["succeeded", "succeeded"]
+    assert all(not r["ask_permission"] for r in p.requests)
+    w.chat.send.assert_not_awaited()
+    w.card.delete.assert_not_awaited()
     assert not w.service._active_users
 
 @pytest.mark.asyncio
@@ -661,3 +661,423 @@ async def test_db_failure_after_card_send_removes_or_disables_known_orphan(envir
         w.card.edit.assert_awaited_once_with(view=None)
     assert not w.service._views
     w.executor.assert_not_awaited()
+
+
+def _navigation_context(world, action):
+    if action == "join_voice":
+        world.guild.voice_client = None
+        world.members[999].voice = None
+        in_call(world, 1)
+    else:
+        from test_chatbot_action_policy import _expanded_voice
+        _expanded_voice(world)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["join_voice", "move_voice", "leave_voice"])
+async def test_common_member_navigation_runs_without_cards_despite_legacy_model_approval_flag(environment, action):
+    w = environment
+    _navigation_context(w, action)
+    p = await w.service.plan(w.message, ChatReply("certo", (
+        ActionProposal(action, "m1" if action == "move_voice" else "autor", ask_permission=True),)),
+        await build_action_context(w.bot, w.message, w.config), w.config)
+    assert len(p.requests) == 1 and not p.requests[0]["ask_permission"]
+    await w.service.bind_and_start(p)
+    await w.supervisor.drain()
+    final = await w.service.store.get(p.requests[0]["request_id"])
+    assert final["state"] == "succeeded" and final["message_id"] == 0
+    assert w.executor.await_args.kwargs["actor_id"] == w.message.author.id
+    w.chat.send.assert_not_awaited()
+    w.card.delete.assert_not_awaited()
+    w.bot.add_view.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_move_then_speech_waits_for_the_confirmed_new_call(environment):
+    from test_chatbot_action_policy import _expanded_voice
+    w = environment
+    destination = _expanded_voice(w)
+    w.members[1].voice = SimpleNamespace(channel=destination)
+    p = await w.service.plan(w.message, ChatReply("", (
+        ActionProposal("move_voice", "autor"), ActionProposal("speak_voice", text="fala depois da mudança"))),
+        await build_action_context(w.bot, w.message, w.config), w.config)
+    assert len(p.requests) == 2 and p.requests[1]["state"] == "blocked"
+
+    async def execute(bot, request, *, actor_id):
+        if request["action"] == "move_voice":
+            w.guild.voice_client = SimpleNamespace(channel=destination)
+            w.members[999].voice = SimpleNamespace(channel=destination)
+        return ExecutionResult("ok")
+
+    w.executor.side_effect = execute
+    await w.service.bind_and_start(p)
+    await w.supervisor.drain()
+    assert [call.args[1]["action"] for call in w.executor.await_args_list] == ["move_voice", "speak_voice"]
+    assert [call.kwargs["actor_id"] for call in w.executor.await_args_list] == [1, 1]
+    assert all(r["state"] == "succeeded" for r in await w.service.store.list_for_plan(p.requests[0]["plan_id"]))
+    w.chat.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["denied", "uncertain", "unknown"])
+async def test_navigation_failure_cancels_following_audio_and_reports_one_safe_message(environment, failure):
+    w = environment
+    _navigation_context(w, "join_voice")
+    p = await w.service.plan(w.message, ChatReply("", (
+        ActionProposal("join_voice", "autor"), ActionProposal("speak_voice", text="SEGREDO DA FALA"))),
+        await build_action_context(w.bot, w.message, w.config), w.config)
+    w.executor.side_effect = (ActionDenied("A call está ocupada.") if failure == "denied" else
+                             ActionExecutionUncertain("SEGREDO DO ADAPTER") if failure == "uncertain" else
+                             RuntimeError("SEGREDO DA EXCEÇÃO"))
+    await w.service.bind_and_start(p)
+    await w.supervisor.drain()
+    final = await w.service.store.list_for_plan(p.requests[0]["plan_id"])
+    assert [r["state"] for r in final] == ["failed" if failure == "denied" else "uncertain", "cancelled"]
+    assert "text" not in final[1]["payload"]
+    w.executor.assert_awaited_once()
+    assert w.chat.send.await_count == 1
+    text = w.chat.send.await_args.args[0]
+    assert text == ("A call está ocupada." if failure == "denied" else
+                    "Não consegui confirmar a entrada. Confira a call antes de tentar de novo.")
+    assert "SEGREDO" not in text
+    await w.service.cleanup()
+    await w.supervisor.drain()
+    assert w.executor.await_count == 1 and w.chat.send.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["join_voice", "move_voice", "leave_voice"])
+async def test_startup_cancels_pending_legacy_navigation_without_connecting(environment, action):
+    w = environment
+    old = await _request(w, action, ask=True)
+    restarted = ActionService(w.cog, w.coll)
+    restarted.store = ActionStore(w.coll, clock=w.clock)
+    await restarted.initialize()
+    await w.supervisor.drain()
+    assert (await restarted.store.get(old["request_id"]))["state"] == "cancelled"
+    w.executor.assert_not_awaited()
+    w.card.delete.assert_awaited_once()
+    w.bot.add_view.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovers_armed_navigation_once_and_keeps_executing_or_uncertain_unreplayed(environment):
+    w = environment
+    _navigation_context(w, "join_voice")
+    pending = await _request(w, "join_voice", ask=False, bound=False)
+    executing = await _request(w, "join_voice", ask=False, bound=False)
+    uncertain = await _request(w, "join_voice", ask=False, bound=False)
+    for request in (pending, executing, uncertain):
+        assert await w.service.store.arm_automatic(request["request_id"])
+    for request in (executing, uncertain):
+        claimed = await w.service.store.claim_automatic(request["request_id"], guild_id=10, channel_id=30, actor_id=1)
+        if request is uncertain:
+            assert await w.service.store.finish(request["request_id"], claimed["execution_token"],
+                                                state="uncertain", public_result="Verifique a call.")
+    restarted = ActionService(w.cog, w.coll)
+    restarted.store = ActionStore(w.coll, clock=w.clock)
+    await restarted.initialize()
+    await w.supervisor.drain()
+    w.executor.assert_awaited_once()
+    assert (await restarted.store.get(pending["request_id"]))["state"] == "succeeded"
+    assert (await restarted.store.get(executing["request_id"]))["state"] == "executing"
+    assert (await restarted.store.get(uncertain["request_id"]))["state"] == "uncertain"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["join_voice", "send_audio"])
+async def test_automatic_effect_uses_shared_processing_context_and_releases_it(environment, action):
+    w = environment
+    events = []
+
+    @asynccontextmanager
+    async def processing(channel):
+        events.append(("enter", channel.id))
+        try:
+            yield
+        finally:
+            events.append(("exit", channel.id))
+
+    w.cog.processing = processing
+    if action == "join_voice":
+        _navigation_context(w, action)
+    p = await w.service.plan(w.message, ChatReply("", (ActionProposal(action, "autor", text="oi" if action == "send_audio" else ""),)),
+        await build_action_context(w.bot, w.message, w.config), w.config)
+
+    async def execute(*args, **kwargs):
+        assert events == [("enter", 30)]
+        return ExecutionResult("ok")
+
+    w.executor.side_effect = execute
+    await w.service.bind_and_start(p)
+    await w.supervisor.drain()
+    assert events == [("enter", 30), ("exit", 30)]
+
+
+@pytest.mark.asyncio
+async def test_staff_card_waiting_never_starts_processing_indicator(environment):
+    w = environment
+    w.cog.processing = Mock(side_effect=AssertionError("Pending staff card must not start typing"))
+    p = await w.service.plan(w.message, ChatReply("vou pedir", (ActionProposal("ban_member", "m1", reason="spam"),)),
+        await build_action_context(w.bot, w.message, w.config), w.config)
+    await w.service.bind_and_start(p)
+    await w.supervisor.drain()
+    assert (await w.service.store.get(p.requests[0]["request_id"]))["state"] == "pending"
+    w.cog.processing.assert_not_called()
+
+
+async def _draft_environment(world, *, action="ban_member", target_id=3, options=None):
+    from cogs.chatbot.action_drafts import ActionDraftStore
+    from test_chatbot_action_drafts import Collection
+    epoch = MemoryEpoch(global_generation=1, guild_generation=2, user_generation=3)
+    memory = SimpleNamespace(capture_epoch=AsyncMock(return_value=epoch))
+    world.bot.get_cog("Chatbot")._memory = memory
+    world.draft_coll = Collection()
+    world.cog._action_drafts = ActionDraftStore(world.draft_coll, memory=memory, clock=lambda: 1000.0)
+    snapshot = await world.cog._action_drafts.save(10, 30, 1, epoch, action=action, target_id=target_id, options=options or {})
+    return epoch, snapshot
+
+
+@pytest.mark.asyncio
+async def test_matching_draft_is_consumed_before_any_plan_insert_and_audits_same_uuid(environment, monkeypatch):
+    w = environment
+    epoch, snapshot = await _draft_environment(w)
+    consume = w.cog._action_drafts.consume
+
+    async def consume_before_insert(*args, **kwargs):
+        assert w.coll.docs == []
+        assert await w.service.store.recover_ready() == []
+        return await consume(*args, **kwargs)
+
+    monkeypatch.setattr(w.cog._action_drafts, "consume", AsyncMock(side_effect=consume_before_insert))
+    p = await w.service.plan(w.message, ChatReply("Vou solicitar o banimento; texto redundante.", (
+        ActionProposal("ban_member", "m1", reason="motivo completado pelo usuário"),)),
+        await build_action_context(w.bot, w.message, w.config), w.config, epoch=epoch, action_draft=snapshot)
+    assert len(p.requests) == 1 and p.base_reply == ""
+    request = p.requests[0]
+    args = w.cog._action_drafts.consume.await_args
+    assert args.args == (10, 30, 1, epoch)
+    assert args.kwargs["expected_draft_id"] == snapshot["draft_id"]
+    assert args.kwargs["expected_revision"] == snapshot["revision"]
+    assert request["plan_id"] == args.kwargs["plan_id"] == str(UUID(args.kwargs["plan_id"]))
+    assert request["consumed_draft_id"] == snapshot["draft_id"]
+    assert request["consumed_draft_revision"] == snapshot["revision"]
+    assert await w.cog._action_drafts.get_current(10, 30, 1, epoch) is None
+    await w.service.bind_and_start(p)
+    await w.supervisor.drain()
+    assert w.chat.send.await_count == 1
+    assert w.chat.send.await_args.args[0].startswith("Posso banir")
+    w.executor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_same_draft_concurrently_produces_one_plan_one_card_and_one_approved_effect(environment):
+    w = environment
+    epoch, snapshot = await _draft_environment(w)
+    reply = ChatReply("", (ActionProposal("ban_member", "m1", reason="spam"),))
+    context = await build_action_context(w.bot, w.message, w.config)
+    plans = await asyncio.gather(*(w.service.plan(w.message, reply, context, w.config, epoch=epoch,
+                                                action_draft=dict(snapshot)) for _ in range(2)))
+    winners = [p for p in plans if p.requests]
+    assert len(winners) == 1 and len(w.coll.docs) == 1
+    assert next(p for p in plans if not p.requests).public_error
+    await w.service.bind_and_start(winners[0])
+    await w.supervisor.drain()
+    assert w.chat.send.await_count == 1
+    await w.service.handle_interaction(_interaction(w), winners[0].requests[0]["request_id"], approve=True)
+    await w.supervisor.drain()
+    w.executor.assert_awaited_once()
+    later = await w.service.plan(w.message, reply, context, w.config, epoch=epoch, action_draft=snapshot)
+    assert not later.requests and later.public_error
+    assert len(w.coll.docs) == 1
+
+
+@pytest.mark.asyncio
+async def test_changed_draft_revision_refuses_plan_without_destroying_the_new_draft(environment):
+    w = environment
+    epoch, snapshot = await _draft_environment(w)
+    updated = await w.cog._action_drafts.save(10, 30, 1, epoch, reason="novo motivo",
+        expected_draft_id=snapshot["draft_id"], expected_revision=snapshot["revision"])
+    p = await w.service.plan(w.message, ChatReply("", (ActionProposal("ban_member", "m1", reason="spam"),)),
+        await build_action_context(w.bot, w.message, w.config), w.config, epoch=epoch, action_draft=snapshot)
+    assert not p.requests and p.public_error and w.coll.docs == []
+    assert await w.cog._action_drafts.get_current(10, 30, 1, epoch) == updated
+    w.executor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("difference", ["target", "action"])
+async def test_unrelated_proposal_leaves_current_draft_untouched(environment, difference):
+    w = environment
+    epoch, snapshot = await _draft_environment(w, action="kick_member" if difference == "action" else "ban_member",
+                                               target_id=4 if difference == "target" else 3)
+    p = await w.service.plan(w.message, ChatReply("", (ActionProposal("ban_member", "m1", reason="spam"),)),
+        await build_action_context(w.bot, w.message, w.config), w.config, epoch=epoch, action_draft=snapshot)
+    assert len(p.requests) == 1 and "consumed_draft_id" not in p.requests[0]
+    assert await w.cog._action_drafts.get_current(10, 30, 1, epoch) == snapshot
+
+
+@pytest.mark.asyncio
+async def test_audio_draft_with_implicit_author_is_consumed_without_copying_private_draft_fields_to_audit(environment):
+    w = environment
+    epoch, snapshot = await _draft_environment(w, action="send_audio", target_id=None)
+    p = await w.service.plan(w.message, ChatReply("PRIVATE PREVIEW", (
+        ActionProposal("send_audio", text="fala privada concluída"),)),
+        await build_action_context(w.bot, w.message, w.config), w.config, epoch=epoch, action_draft=snapshot)
+    assert len(p.requests) == 1 and p.base_reply == ""
+    assert p.requests[0]["consumed_draft_id"] == snapshot["draft_id"]
+    assert p.requests[0]["consumed_draft_revision"] == 1
+    assert "action_draft" not in p.requests[0] and "missing_fields" not in p.requests[0]
+    assert await w.cog._action_drafts.get_current(10, 30, 1, epoch) is None
+
+
+@pytest.mark.asyncio
+async def test_consumption_unknown_outcome_creates_no_plan_and_never_restores_consumed_draft(environment, monkeypatch):
+    w = environment
+    epoch, snapshot = await _draft_environment(w)
+    consume = w.cog._action_drafts.consume
+
+    async def uncertain_consume(*args, **kwargs):
+        await consume(*args, **kwargs)
+        raise RuntimeError("PRIVATE BACKEND DETAIL")
+
+    monkeypatch.setattr(w.cog._action_drafts, "consume", AsyncMock(side_effect=uncertain_consume))
+    p = await w.service.plan(w.message, ChatReply("", (ActionProposal("ban_member", "m1", reason="spam"),)),
+        await build_action_context(w.bot, w.message, w.config), w.config, epoch=epoch, action_draft=snapshot)
+    assert not p.requests and p.public_error and w.coll.docs == []
+    assert "PRIVATE" not in p.public_error
+    assert await w.cog._action_drafts.get_current(10, 30, 1, epoch) is None
+    w.executor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_plan_persistence_failure_after_consumption_never_restores_or_reuses_draft(environment, monkeypatch):
+    w = environment
+    epoch, snapshot = await _draft_environment(w)
+    create = w.service.store.create_plan
+    failed_create = AsyncMock(side_effect=RuntimeError("PRIVATE write failed"))
+    monkeypatch.setattr(w.service.store, "create_plan", failed_create)
+    reply = ChatReply("", (ActionProposal("ban_member", "m1", reason="spam"),))
+    context = await build_action_context(w.bot, w.message, w.config)
+    failed = await w.service.plan(w.message, reply, context, w.config, epoch=epoch, action_draft=snapshot)
+    assert not failed.requests and failed.public_error and "PRIVATE" not in failed.public_error
+    failed_create.assert_awaited_once()
+    assert await w.cog._action_drafts.get_current(10, 30, 1, epoch) is None
+    monkeypatch.setattr(w.service.store, "create_plan", create)
+    repeat = await w.service.plan(w.message, reply, context, w.config, epoch=epoch, action_draft=snapshot)
+    assert not repeat.requests and repeat.public_error and w.coll.docs == []
+
+
+@pytest.mark.asyncio
+async def test_uncertain_plan_write_is_recovered_once_and_consumed_snapshot_cannot_recreate_it(environment, monkeypatch):
+    w = environment
+    epoch, snapshot = await _draft_environment(w)
+    create = w.service.store.create_plan
+
+    async def persisted_then_failed(*args, **kwargs):
+        await create(*args, **kwargs)
+        raise RuntimeError("PRIVATE write acknowledgement lost")
+
+    failed_create = AsyncMock(side_effect=persisted_then_failed)
+    monkeypatch.setattr(w.service.store, "create_plan", failed_create)
+    reply = ChatReply("", (ActionProposal("ban_member", "m1", reason="spam"),))
+    context = await build_action_context(w.bot, w.message, w.config)
+    failed = await w.service.plan(w.message, reply, context, w.config, epoch=epoch, action_draft=snapshot)
+    assert not failed.requests and failed.public_error and "PRIVATE" not in failed.public_error
+    assert len(w.coll.docs) == 1 and not w.supervisor.pending
+    repeated = await w.service.plan(w.message, reply, context, w.config, epoch=epoch, action_draft=snapshot)
+    assert not repeated.requests and repeated.public_error
+    failed_create.assert_awaited_once()
+    await w.service.initialize()
+    await w.supervisor.drain()
+    assert w.chat.send.await_count == 1
+    await w.service.handle_interaction(_interaction(w), w.coll.docs[0]["request_id"], approve=True)
+    await w.supervisor.drain()
+    w.executor.assert_awaited_once()
+    await w.service.initialize()
+    await w.supervisor.drain()
+    assert w.chat.send.await_count == 1
+    w.executor.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["assign_role", "edit_channel", "purge_messages"])
+@pytest.mark.parametrize("matching_resource", [False, True])
+async def test_draft_consumption_matches_host_resources_not_only_action_and_member(environment, action, matching_resource):
+    w = policy_expanded.__wrapped__(environment)
+    from datetime import datetime, timezone
+
+    second_role = MagicMock(spec=discord.Role)
+    second_role.id, second_role.guild, second_role.managed, second_role.position = 71, w.guild, False, 3
+    second_role.is_default.return_value = False
+    second_role.permissions = discord.Permissions.none()
+    second_role.__lt__.side_effect = lambda rank: 3 < rank
+    role_lookup, channel_lookup = w.guild.get_role, w.guild.get_channel
+    w.guild.get_role = lambda identifier: second_role if identifier == 71 else role_lookup(identifier)
+    second_channel = MagicMock(spec=discord.TextChannel)
+    second_channel.id, second_channel.guild = 31, w.guild
+    second_channel.name, second_channel.topic, second_channel.slowmode_delay = "outro", "antes", 0
+    second_channel.permissions_for.side_effect = w.chat.permissions_for.side_effect
+    w.guild.get_channel = lambda identifier: second_channel if identifier == 31 else channel_lookup(identifier)
+    w.config.action_allowed_role_ids = (70, 71)
+    w.config.action_allowed_channel_ids = (30, 31)
+    second_message = MagicMock(spec=discord.Message)
+    second_message.id, second_message.guild, second_message.channel = 101, w.guild, w.chat
+    second_message.created_at = datetime.now(timezone.utc)
+    w.resources.update(r2=second_role, c2=second_channel, msg2=second_message)
+    ref_key, canonical, first, second = {
+        "assign_role": ("role_ref", "70", "r1", "r2"),
+        "edit_channel": ("channel_ref", "30", "c1", "c2"),
+        "purge_messages": ("message_refs", ["100"], ["msg1"], ["msg2"]),
+    }[action]
+    epoch, snapshot = await _draft_environment(w, action=action, target_id=3 if action == "assign_role" else None,
+                                               options={ref_key: canonical})
+    restored = {**snapshot, "options": {ref_key: first}}
+    proposed_options = {ref_key: first if matching_resource else second}
+    if action == "edit_channel":
+        proposed_options["channel_changes"] = {"topic": "proposta completada"}
+    context = SimpleNamespace(actions=(action,), targets=w.targets, resources=w.resources)
+    plan = await w.service.plan(w.message, ChatReply("", (ActionProposal(action, "m1", reason="motivo", options=proposed_options),)),
+                                context, w.config, epoch=epoch, action_draft=restored)
+    assert len(plan.requests) == 1 and not plan.public_error
+    assert ("consumed_draft_id" in plan.requests[0]) is matching_resource
+    current = await w.cog._action_drafts.get_current(10, 30, 1, epoch)
+    assert current == (None if matching_resource else snapshot)
+    w.executor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_raw_resource_id_without_host_alias_cannot_consume_role_draft(environment):
+    w = policy_expanded.__wrapped__(environment)
+    epoch, snapshot = await _draft_environment(w, action="assign_role", options={"role_ref": "70"})
+    plan = await w.service.plan(w.message, ChatReply("", (ActionProposal("assign_role", "m1", reason="motivo", options={"role_ref": "r1"}),)),
+        SimpleNamespace(actions=("assign_role",), targets=w.targets, resources=w.resources), w.config,
+        epoch=epoch, action_draft=snapshot)
+    assert len(plan.requests) == 1 and "consumed_draft_id" not in plan.requests[0]
+    assert await w.cog._action_drafts.get_current(10, 30, 1, epoch) == snapshot
+
+
+@pytest.mark.asyncio
+async def test_invalid_batch_preparation_never_consumes_valid_matching_draft(environment, monkeypatch):
+    w = environment
+    epoch, snapshot = await _draft_environment(w)
+    consume = AsyncMock(wraps=w.cog._action_drafts.consume)
+    monkeypatch.setattr(w.cog._action_drafts, "consume", consume)
+    p = await w.service.plan(w.message, ChatReply("", (
+        ActionProposal("ban_member", "m1", reason="spam"), ActionProposal("send_audio", text=" "))),
+        await build_action_context(w.bot, w.message, w.config), w.config, epoch=epoch, action_draft=snapshot)
+    assert not p.requests and p.public_error and w.coll.docs == []
+    consume.assert_not_awaited()
+    assert await w.cog._action_drafts.get_current(10, 30, 1, epoch) == snapshot
+
+
+@pytest.mark.asyncio
+async def test_operational_plans_suppress_redundant_messages_but_plain_conversation_remains(environment):
+    w = environment
+    plain = await w.service.plan(w.message, ChatReply("conversa normal"),
+                                await build_action_context(w.bot, w.message, w.config), w.config)
+    assert plain.base_reply == "conversa normal"
+    _navigation_context(w, "join_voice")
+    operational = await w.service.plan(w.message, ChatReply("Já entrei!", (ActionProposal("join_voice", "autor"),)),
+                                      await build_action_context(w.bot, w.message, w.config), w.config)
+    assert len(operational.requests) == 1 and operational.base_reply == ""

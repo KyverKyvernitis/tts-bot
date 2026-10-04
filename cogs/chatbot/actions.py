@@ -4,11 +4,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import json
+from contextlib import nullcontext
+from uuid import UUID, uuid4
 from dataclasses import dataclass, replace
 import discord
 from . import constants as C
 from .action_execution import ActionExecutionUncertain, execute_action
-from .action_policy import (ActionDenied, STAFF_ACTIONS, _enabled, _can_view_voice, _fresh_member,
+from .action_policy import (ActionDenied, AUTOMATIC_ACTIONS, NAVIGATION_ACTIONS, STAFF_ACTIONS, _enabled, _can_view_voice, _fresh_member,
                             _requester_can_view, _resource_visibility_gate, _voice_visibility_gate,
                             build_action_context, prepare_action, validate_action)
 from .action_protocol import MAX_PROPOSALS
@@ -18,6 +20,8 @@ from .memory import MemoryEpoch
 
 log = logging.getLogger(__name__)
 _AUDIO = {"send_audio", "speak_voice"}
+_AUTOMATIC = AUTOMATIC_ACTIONS
+_NAVIGATION = NAVIGATION_ACTIONS
 _STAFF = STAFF_ACTIONS
 
 @dataclass
@@ -62,6 +66,7 @@ class ActionService:
 
     async def initialize(self):
         await self.store.cancel_legacy_audio_approvals()
+        await self.store.cancel_legacy_navigation_approvals()
         await self.cleanup(schedule=False)
         for request in await self.store.pending():
             if request["action"] in _STAFF:
@@ -86,16 +91,19 @@ class ActionService:
             return replace(context, actions=(), description="Neste turno não há ações executáveis disponíveis. Responda apenas em texto.")
         try:
             summaries = [f"{r['action']}: {r.get('state', '')}" for r in await self.store.recent_results(
-                message.guild.id, message.channel.id, message.author.id) if r.get("action") in _AUDIO | _STAFF]
+                message.guild.id, message.channel.id, message.author.id) if r.get("action") in _AUTOMATIC | _STAFF]
             if summaries:
                 context = replace(context, description=context.description + "\nResultados reais recentes: " + "; ".join(summaries))
         except Exception as exc:
             log.warning("chatbot: resultados de ações indisponíveis (%s)", type(exc).__name__)
         return context
 
-    async def plan(self, message, reply, context, config, *, epoch=None, visibility_scope="", original_user_text=None):
+    async def plan(self, message, reply, context, config, *, epoch=None, visibility_scope="", original_user_text=None,
+                   action_draft=None):
         proposals = reply.proposals[:MAX_PROPOSALS]
-        base = "" if any(p.action in _AUDIO for p in proposals) else self.cog._sanitize_model_reply(reply.text)[:1200]
+        # O cartão ou a execução já comunica a ação. Não antecipe sucesso nem
+        # envie uma segunda mensagem dizendo que vai pedir permissão.
+        base = "" if proposals else self.cog._sanitize_model_reply(reply.text)[:1200]
         steps, seen, join_channel, source_channel = [], set(), None, None
         for proposal in proposals:
             if proposal.action == "speak_voice" and any(step["action"] == "leave_voice" for step in steps):
@@ -129,7 +137,87 @@ class ActionService:
                 data["memory_epoch"] = {"global_generation": epoch.global_generation, "guild_generation": epoch.guild_generation, "user_generation": epoch.user_generation}
                 data["visibility_scope"] = visibility_scope
             steps.append(data)
-        return ActionPlan(base, await self.store.create_plan(steps) if steps else [])
+        if not steps:
+            return ActionPlan(base, [])
+        matching = [step for step in steps if self._matches_draft(step, action_draft, getattr(context, "resources", {}))]
+        if not matching:
+            return ActionPlan(base, await self.store.create_plan(steps))
+        from .action_drafts import DraftConflict, DraftStale, InvalidDraft
+
+        drafts = getattr(self.cog, "_action_drafts", None)
+        consume = getattr(drafts, "consume", None)
+        draft_id, revision = action_draft.get("draft_id"), action_draft.get("revision")
+        try:
+            if not isinstance(draft_id, str) or type(revision) is not int or revision <= 0:
+                raise ValueError
+            UUID(draft_id)
+        except (ValueError, TypeError, AttributeError):
+            return ActionPlan(base, [], "O rascunho mudou. Consulte o pedido atual antes de continuar.")
+        if not callable(consume) or not isinstance(epoch, MemoryEpoch):
+            return ActionPlan(base, [], "Não consegui confirmar esse pedido. Consulte o rascunho antes de continuar.")
+        plan_id = str(uuid4())
+        try:
+            consumed = await consume(message.guild.id, message.channel.id, message.author.id, epoch,
+                                     expected_draft_id=draft_id, expected_revision=revision, plan_id=plan_id)
+        except (DraftConflict, DraftStale, InvalidDraft) as exc:
+            return ActionPlan(base, [], str(exc))
+        except Exception as exc:
+            log.warning("chatbot: consumo de rascunho não confirmado (%s)", type(exc).__name__)
+            return ActionPlan(base, [], "Não consegui confirmar esse pedido. Consulte o rascunho antes de tentar novamente.")
+        if consumed is not True:
+            return ActionPlan(base, [], "O rascunho mudou ou já virou um pedido. Consulte o pedido atual antes de continuar.")
+        for step in matching:
+            step["consumed_draft_id"], step["consumed_draft_revision"] = draft_id, revision
+        # O consumo é irreversível. Mesmo se esta gravação falhar, não restaure
+        # o rascunho: um plano completo pode já ter sido persistido e recuperado.
+        try:
+            return ActionPlan(base, await self.store.create_plan(steps, plan_id=plan_id))
+        except Exception as exc:
+            log.warning("chatbot: criação do pedido consumido não confirmada (%s)", type(exc).__name__)
+            return ActionPlan(base, [], "Não consegui confirmar a criação do pedido. Confira o pedido atual antes de tentar de novo.")
+
+    @staticmethod
+    def _matches_draft(step, draft, resources=None):
+        if not isinstance(draft, dict) or draft.get("action") != step["action"]:
+            return False
+        expected_target = draft.get("target_id")
+        actual_target = step["payload"].get("target_id")
+        if type(expected_target) is int and expected_target > 0:
+            if type(actual_target) is not int or actual_target != expected_target:
+                return False
+        # Estes recursos não têm alvo de membro explícito; a política vincula
+        # o payload ao solicitante da conversa, sem inventar outro alvo.
+        elif not (expected_target is None and step["action"] in
+                  {"send_audio", "speak_voice", "leave_voice", "edit_channel", "purge_messages"}
+                  and actual_target == step["requester_id"]):
+            return False
+        options, payload = draft.get("options") or {}, step["payload"]
+        if not isinstance(options, dict):
+            return False
+        resources = resources if isinstance(resources, dict) else {}
+
+        def resource_id(ref):
+            # O runtime restaura aliases pelos objetos reais do servidor.
+            # IDs em strings do modelo não substituem esses objetos.
+            item = resources.get(ref) if isinstance(ref, str) else None
+            identifier = getattr(item, "id", None)
+            if type(identifier) is int and identifier > 0 and getattr(getattr(item, "guild", None), "id", None) == step["guild_id"]:
+                return identifier
+            return None
+
+        for ref_key, id_key in (("role_ref", "role_id"), ("channel_ref", "affected_channel_id")):
+            ref = options.get(ref_key)
+            if ref and (resource_id(ref) is None or resource_id(ref) != payload.get(id_key)):
+                return False
+        refs = options.get("message_refs")
+        if refs:
+            if not isinstance(refs, list):
+                return False
+            identifiers = [resource_id(ref) for ref in refs]
+            actual_ids = payload.get("message_ids")
+            if None in identifiers or not isinstance(actual_ids, list) or set(identifiers) != set(actual_ids):
+                return False
+        return True
 
     @staticmethod
     def content(plan):
@@ -165,7 +253,7 @@ class ActionService:
         request = await self.store.get(request_id)
         if request is None:
             return
-        if request["action"] in _AUDIO and not request.get("ask_permission"):
+        if request["action"] in _AUTOMATIC and not request.get("ask_permission"):
             if request["state"] == "created":
                 if not await self.store.arm_automatic(request_id):
                     return
@@ -229,7 +317,7 @@ class ActionService:
                         pass
 
     async def _start_automatic(self, request):
-        if request["action"] not in _AUDIO or request.get("ask_permission"):
+        if request["action"] not in _AUTOMATIC or request.get("ask_permission"):
             return
         reserved = await self._reserve(request)
         if not reserved:
@@ -305,9 +393,46 @@ class ActionService:
                     await self._notice(interaction, outcome[1])
                 except Exception as exc:
                     log.warning("chatbot: erro de ação não informado ao aprovador (%s)", type(exc).__name__)
+            elif request["action"] in _NAVIGATION and outcome[0] in {"failed", "uncertain"}:
+                await self._notify_navigation_failure(request, *outcome)
         finally:
             self._release(request)
         await self._schedule_ready()  # sucessor somente depois de liberar a reserva
+
+    async def _notify_navigation_failure(self, request, state, public_result):
+        """Uma falha de call tem aviso curto, nunca andamento ou sucesso extra."""
+        uncertain = {
+            "join_voice": "Não consegui confirmar a entrada. Confira a call antes de tentar de novo.",
+            "move_voice": "Não consegui confirmar a mudança. Confira a call antes de tentar de novo.",
+            "leave_voice": "Não consegui confirmar a saída. Confira a call antes de tentar de novo.",
+        }
+        try:
+            config = await self.cog._config.get_config(request["guild_id"], fresh=True)
+            channel = self.bot.get_channel(request["channel_id"])
+            if (C.SAFE_MODE or not config.enabled or channel is None
+                    or getattr(getattr(channel, "guild", None), "id", None) != request["guild_id"]
+                    or not config.allows_channel(channel.id, parent_id=getattr(channel, "parent_id", None))):
+                return
+            requester = await _fresh_member(channel.guild, request["requester_id"])
+            await _requester_can_view(channel, requester)
+            me = await _fresh_member(channel.guild, self.bot.user.id)
+            permissions = channel.permissions_for(me)
+            send_permission = "send_messages_in_threads" if isinstance(channel, discord.Thread) else "send_messages"
+            if not all(getattr(permissions, name, False) for name in ("view_channel", send_permission)):
+                return
+            text = uncertain[request["action"]] if state == "uncertain" else str(public_result or "Não consegui executar essa ação de call.")[:300]
+            reference = discord.MessageReference(message_id=request["origin_message_id"], channel_id=channel.id,
+                                                 guild_id=request["guild_id"], fail_if_not_exists=False)
+            sent = await channel.send(text, reference=reference, allowed_mentions=discord.AllowedMentions.none())
+            await self.cog._remember_sent_message(guild_id=request["guild_id"], channel_id=channel.id, message_id=sent.id)
+        except Exception as exc:
+            log.warning("chatbot: falha de call não informada (%s)", type(exc).__name__)
+
+    def _processing(self, request):
+        factory = getattr(self.cog, "processing", None)
+        if request["action"] in _AUTOMATIC and callable(factory):
+            return factory(self.bot.get_channel(request["channel_id"]))
+        return nullcontext()
 
     async def _record_spoken(self, request, *, audio=True):
         epoch, spoken = request.get("memory_epoch"), request.get("payload", {}).get("text")
@@ -361,13 +486,14 @@ class ActionService:
     async def _execute_reserved(self, request, actor_id):
         state, public_result = "failed", "Não consegui executar a ação."
         try:
-            await self._current_config(request)
-            await validate_action(self.bot, request, actor_id)
-            result = await asyncio.wait_for(execute_action(self.bot, request, actor_id=actor_id), timeout=C.ACTION_EXECUTION_TIMEOUT_SECONDS)
-            state, public_result = "succeeded", result.public_result
-            if result.message_id:
-                await self.cog._remember_sent_message(guild_id=request["guild_id"], channel_id=request["channel_id"], message_id=result.message_id)
-            await self._record_spoken(request)
+            async with self._processing(request):
+                await self._current_config(request)
+                await validate_action(self.bot, request, actor_id)
+                result = await asyncio.wait_for(execute_action(self.bot, request, actor_id=actor_id), timeout=C.ACTION_EXECUTION_TIMEOUT_SECONDS)
+                state, public_result = "succeeded", result.public_result
+                if result.message_id:
+                    await self.cog._remember_sent_message(guild_id=request["guild_id"], channel_id=request["channel_id"], message_id=result.message_id)
+                await self._record_spoken(request)
         except (ActionExecutionUncertain, asyncio.TimeoutError):
             state, public_result = "uncertain", "Não consegui confirmar o resultado. Não vou repetir automaticamente."
         except ActionDenied as exc:
@@ -388,7 +514,7 @@ class ActionService:
 
     async def _delete_card(self, request):
         if not request.get("message_id") or (request["action"] not in _STAFF and not (
-                request["action"] in _AUDIO and request.get("ask_permission"))):
+                request["action"] in _AUTOMATIC and request.get("ask_permission"))):
             return
         current = await self.store.get(request["request_id"])
         if current is not None and current.get("card_removed"):

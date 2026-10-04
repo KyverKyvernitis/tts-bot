@@ -111,10 +111,10 @@ async def execute_action(bot, doc: dict, *, actor_id: int) -> ExecutionResult:
         if not result.get("ok"):
             # Mensagens vêm do adaptador local, que nunca inclui a fala privada.
             raise ActionDenied(str(result.get("message") or "Não consegui executar essa ação de voz."))
-        spoken_result = ("Fala reproduzida na call autorizada." if result.get("first_frame_observed") is True
-                         else "Fala enfileirada para a call autorizada.")
-        return ExecutionResult({"join_voice": "Entrou na call autorizada.", "speak_voice": spoken_result,
-                                "move_voice": "Moveu a própria sessão para a call autorizada.", "leave_voice": "Saiu da call autorizada."}[action])
+        spoken_result = ("Fala reproduzida na call escolhida." if result.get("first_frame_observed") is True
+                         else "Fala enfileirada para a call escolhida.")
+        return ExecutionResult({"join_voice": "Entrou na call escolhida.", "speak_voice": spoken_result,
+                                "move_voice": "Moveu a própria sessão para a call escolhida.", "leave_voice": "Saiu da call."}[action])
     if action == "send_audio":
         tts = bot.get_cog("TTSVoice")
         adapter = getattr(tts, "synthesize_chatbot_attachment", None)

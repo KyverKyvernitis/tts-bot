@@ -9,7 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Callable
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pymongo import ReturnDocument
 
@@ -19,7 +19,9 @@ REQUEST_LIFETIME = timedelta(minutes=5)
 RESULT_RETENTION = timedelta(days=7)
 TERMINAL_STATES = ("succeeded", "failed", "uncertain", "rejected", "expired", "cancelled")
 MAX_PLAN_STEPS = 4
-AUTOMATIC_ACTIONS = ("send_audio", "speak_voice")
+AUDIO_ACTIONS = ("send_audio", "speak_voice")
+NAVIGATION_ACTIONS = ("join_voice", "move_voice", "leave_voice")
+AUTOMATIC_ACTIONS = AUDIO_ACTIONS + NAVIGATION_ACTIONS
 
 
 class ActionStore:
@@ -104,7 +106,7 @@ class ActionStore:
         await self._coll.insert_one(doc)
         return deepcopy(doc)
 
-    async def create_plan(self, data_list: list[dict]) -> list[dict]:
+    async def create_plan(self, data_list: list[dict], *, plan_id: str | None = None) -> list[dict]:
         """Persiste uma cadeia inteira antes de disponibilizar a primeira etapa.
 
         Uma interrupção durante a inserção deixa somente etapas bloqueadas. A
@@ -113,12 +115,20 @@ class ActionStore:
         """
         if not 1 <= len(data_list) <= MAX_PLAN_STEPS:
             raise ValueError(f"Um plano precisa de 1 a {MAX_PLAN_STEPS} etapas.")
+        if plan_id is None:
+            plan_id = str(uuid4())
+        else:
+            try:
+                if not isinstance(plan_id, str):
+                    raise ValueError
+                plan_id = str(UUID(plan_id))
+            except (ValueError, TypeError, AttributeError):
+                raise ValueError("O identificador interno do plano não é válido.") from None
         now = self._now()
         docs = [self._new_doc(data, now=now) for data in data_list]
         scope = ("guild_id", "channel_id", "origin_message_id", "requester_id")
         if any(any(doc[key] != docs[0][key] for key in scope) for doc in docs[1:]):
             raise ValueError("Todas as etapas precisam pertencer à mesma conversa e membro.")
-        plan_id = str(uuid4())
         for index, doc in enumerate(docs):
             predecessor_id = docs[index - 1]["request_id"] if index else None
             doc.update({
@@ -245,7 +255,7 @@ class ActionStore:
         return updated is not None
 
     async def arm_automatic(self, request_id: str) -> bool:
-        """Prepara áudio sem cartão; ações privilegiadas nunca passam aqui."""
+        """Prepara áudio ou navegação sem cartão; moderação nunca passa aqui."""
         updated = await self._coll.find_one_and_update(
             {**self._query(request_id), "state": "created", "ask_permission": False,
              "action": {"$in": list(AUTOMATIC_ACTIONS)},
@@ -523,8 +533,19 @@ class ActionStore:
 
     async def cancel_legacy_audio_approvals(self) -> list[dict]:
         """Pedidos antigos de áudio não viram reprodução automática após update."""
+        return await self._cancel_legacy_approvals(
+            AUDIO_ACTIONS, "Pedido antigo de áudio cancelado após a atualização."
+        )
+
+    async def cancel_legacy_navigation_approvals(self) -> list[dict]:
+        """Cartões antigos de call nunca viram conexão automática após update."""
+        return await self._cancel_legacy_approvals(
+            NAVIGATION_ACTIONS, "Pedido antigo de call cancelado após a atualização."
+        )
+
+    async def _cancel_legacy_approvals(self, actions, public_result: str) -> list[dict]:
         now = self._now()
-        query = {"type": DOC_TYPE_ACTION_REQUEST, "action": {"$in": list(AUTOMATIC_ACTIONS)},
+        query = {"type": DOC_TYPE_ACTION_REQUEST, "action": {"$in": list(actions)},
                  "ask_permission": True,
                  "state": {"$in": ["blocked", "created", "publishing", "pending"]}}
         changed = []
@@ -532,7 +553,7 @@ class ActionStore:
             updated = await self._coll.find_one_and_update(
                 {**query, "request_id": doc["request_id"]},
                 self._terminal_update(
-                    now, state="cancelled", public_result="Pedido antigo de áudio cancelado após a atualização."
+                    now, state="cancelled", public_result=public_result
                 ),
                 return_document=ReturnDocument.AFTER,
             )

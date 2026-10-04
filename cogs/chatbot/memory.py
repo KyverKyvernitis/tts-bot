@@ -383,7 +383,8 @@ class MemoryStore:
         removed = 0
         for kind, user_field in (("chatbot_conversation_preferences", "user_id"),
                                  ("chatbot_conversation_fact", "user_id"),
-                                 ("chatbot_sent_reply", "requester_id")):
+                                 ("chatbot_sent_reply", "requester_id"),
+                                 ("chatbot_action_draft", "user_id")):
             query = {"type": kind}
             if guild_id is not None:
                 query["guild_id"] = int(guild_id)

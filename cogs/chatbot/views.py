@@ -207,9 +207,9 @@ class ActionConfigModal(discord.ui.Modal, title="Ações do chatbot"):
         )
         self.add_item(_label("Ações da IA", self.actions_group, "Permite usar os recursos abaixo durante a conversa."))
         self.add_item(_label("Áudios", self.audio_group, "Pode mandar sem aprovação e reproduzir o mesmo áudio na call atual."))
-        self.add_item(_label("Calls", self.voice_group, "Entrar, sair ou mover exigem staff; falar na call atual é automático."))
+        self.add_item(_label("Calls", self.voice_group, "Entrar, sair, mudar de call e falar são automáticos, sem aprovação da staff."))
         self.add_item(_label("Moderação", self.moderation_group, "Banir, expulsar e silenciar exigem staff, suas permissões e hierarquia."))
-        self.add_item(_label("Cargos de staff", self.staff_roles, "Opcional. Gerenciar servidor permite aprovar entrada; banir exige sua permissão."))
+        self.add_item(_label("Cargos de staff", self.staff_roles, "Opcional. Ações administrativas exigem a permissão Discord correspondente."))
 
     async def on_submit(self, interaction: discord.Interaction):
         if int(getattr(interaction.user, "id", 0) or 0) != self._requester_id:

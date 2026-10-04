@@ -1,7 +1,7 @@
-"""Adapters estreitos para ações de voz já autorizadas pelo chatbot.
+"""Adapters estreitos para ações de voz preparadas pelo chatbot.
 
-A autorização da staff pertence ao chatbot. Este módulo conserva o destino
-aprovado e a posse da conexão; uma fala nunca conecta, move ou recupera voz.
+O chatbot decide a navegação automaticamente. Este módulo conserva o destino
+definido e a posse da conexão; uma fala nunca conecta, move ou recupera voz.
 """
 from __future__ import annotations
 
@@ -116,7 +116,7 @@ class ChatbotVoiceActionsMixin:
     ) -> dict[str, Any]:
         captured = self.chatbot_voice_session_ref(guild_id)
         if captured is None or (session_ref is not None and captured != session_ref):
-            return _result(False, "A sessão aprovada mudou ou está ocupada por outra fala ou recurso.")
+            return _result(False, "A sessão definida mudou ou está ocupada por outra fala ou recurso.")
         guild = self.bot.get_guild(int(guild_id))
         vc = self._get_voice_client_for_guild(guild)
         source_channel_id = int(self._voice_client_channel(vc).id)
@@ -126,12 +126,12 @@ class ChatbotVoiceActionsMixin:
                 raise ChatbotVoiceActionBlocked("A sessão de voz mudou; faça um novo pedido.")
             if action == "leave":
                 if source_channel_id != int(channel_id):
-                    raise ChatbotVoiceActionBlocked("O bot não está mais na call aprovada.")
+                    raise ChatbotVoiceActionBlocked("O bot não está mais na call escolhida.")
                 return None
             channel = guild.get_channel(int(channel_id))
             member = guild.get_member(int(user_id))
             if not isinstance(channel, discord.VoiceChannel) or getattr(getattr(getattr(member, "voice", None), "channel", None), "id", None) != int(channel_id):
-                raise ChatbotVoiceActionBlocked("O membro saiu ou mudou da call aprovada.")
+                raise ChatbotVoiceActionBlocked("O membro saiu ou mudou da call escolhida.")
             perms = channel.permissions_for(guild.me)
             if not all(getattr(perms, name, False) for name in ("view_channel", "connect", "speak")):
                 raise ChatbotVoiceActionBlocked("O bot perdeu as permissões da call de destino.")
@@ -157,7 +157,7 @@ class ChatbotVoiceActionsMixin:
                         remember = getattr(self, "_remember_expected_voice_channel", None)
                         if callable(remember):
                             remember(int(guild_id), int(channel_id))
-                        return _result(True, "Mudei para a call aprovada.")
+                        return _result(True, "Mudei para a call escolhida.")
                     for name in ("_mark_manual_voice_disconnect", "_cancel_runtime_voice_restore"):
                         handler = getattr(self, name, None)
                         if callable(handler):
@@ -172,7 +172,7 @@ class ChatbotVoiceActionsMixin:
                     clear = getattr(self, "_clear_remembered_voice_channel", None)
                     if callable(clear):
                         await clear(int(guild_id))
-                    return _result(True, "Saí da call aprovada.")
+                    return _result(True, "Saí da call escolhida.")
         except ChatbotVoiceActionBlocked as exc:
             return _result(False, str(exc))
         except ValueError:
@@ -184,7 +184,7 @@ class ChatbotVoiceActionsMixin:
         except discord.HTTPException as exc:
             return _result(False, "O Discord não confirmou a ação de voz.", uncertain=not 400 <= exc.status < 500)
         except Exception:
-            log.warning("[tts_voice] mudança autorizada não confirmada | guild=%s request=%s", guild_id, request_id)
+            log.warning("[tts_voice] mudança de call não confirmada | guild=%s request=%s", guild_id, request_id)
             return _result(False, "Não consegui confirmar o resultado da ação de voz.", uncertain=started)
 
     async def chatbot_move_voice(self, *, guild_id: int, user_id: int, channel_id: int, request_id: str,
@@ -354,11 +354,11 @@ class ChatbotVoiceActionsMixin:
             return None, None, "Não encontrei este servidor."
         channel = guild.get_channel(int(channel_id))
         if not isinstance(channel, discord.VoiceChannel):
-            return guild, None, "A call aprovada não existe ou não é um canal de voz comum."
+            return guild, None, "A call escolhida não existe ou não é um canal de voz comum."
         member = guild.get_member(int(user_id))
         member_channel = getattr(getattr(member, "voice", None), "channel", None)
         if member is None or getattr(member_channel, "id", None) != int(channel_id):
-            return guild, channel, "O membro saiu ou mudou da call aprovada. Faça uma nova solicitação."
+            return guild, channel, "O membro saiu ou mudou da call escolhida. Faça uma nova solicitação."
         me = getattr(guild, "me", None)
         if me is None:
             return guild, channel, "Não consegui verificar as permissões de voz do bot."
@@ -376,12 +376,12 @@ class ChatbotVoiceActionsMixin:
         if self._music_player_is_active(guild.id) or self._music_should_own_voice(guild) or self._voice_client_owned_by_music(vc):
             return guild, channel, "A música está usando a sessão de voz; tente quando ela estiver livre."
         if actual_channel is not None and getattr(actual_channel, "id", None) != int(channel_id):
-            return guild, channel, "O bot já está em outra call; não vou movê-lo com esta autorização."
+            return guild, channel, "O bot já está em outra call; não vou movê-lo com este pedido."
         if vc is not None and self._voice_client_is_connected(vc) and getattr(current_channel, "id", None) != int(channel_id):
-            return guild, channel, "O bot já está em outra call; não vou movê-lo com esta autorização."
+            return guild, channel, "O bot já está em outra call; não vou movê-lo com este pedido."
         if require_connected:
             if not self._voice_client_is_connected(vc) or getattr(current_channel, "id", None) != int(channel_id):
-                return guild, channel, "O bot não está mais conectado à call aprovada."
+                return guild, channel, "O bot não está mais conectado à call escolhida."
             if self._voice_client_is_playing_or_paused(vc):
                 return guild, channel, "Já há um áudio tocando nessa call; tente quando terminar."
             voice = getattr(me, "voice", None)
@@ -435,7 +435,7 @@ class ChatbotVoiceActionsMixin:
         try:
             vc = await self._ensure_connected(
                 guild, channel, report_failure=True,
-                failure_context=f"entrada do chatbot autorizada pela staff · solicitação {request_id}",
+                failure_context=f"entrada automática do chatbot · solicitação {request_id}",
                 chatbot_target_user_id=int(user_id),
                 chatbot_before_effect=before_effect,
             )
@@ -450,10 +450,10 @@ class ChatbotVoiceActionsMixin:
         except asyncio.TimeoutError:
             return _result(False, "A conexão demorou demais; confira se o bot entrou antes de tentar de novo.", uncertain=True)
         except Exception:
-            log.exception("[tts_voice] entrada autorizada do chatbot falhou | guild=%s request=%s", guild_id, request_id)
+            log.exception("[tts_voice] entrada automática do chatbot falhou | guild=%s request=%s", guild_id, request_id)
             return _result(False, "Não consegui confirmar a entrada na call; confira antes de tentar de novo.", uncertain=True)
         if vc is None or not self._voice_client_is_connected(vc) or getattr(self._voice_client_channel(vc), "id", None) != int(channel_id):
-            return _result(False, "Não consegui confirmar a entrada na call aprovada; confira antes de tentar de novo.", uncertain=True)
+            return _result(False, "Não consegui confirmar a entrada na call escolhida; confira antes de tentar de novo.", uncertain=True)
         return _result(True, f"Entrei na call {channel.name}.")
 
     async def chatbot_speak_voice(
@@ -523,7 +523,7 @@ class ChatbotVoiceActionsMixin:
                 return _result(False, "A sessão não confirmou a reprodução do áudio.", uncertain=True)
             if result.get("chatbot_interrupted"):
                 return _result(False, "A fala foi interrompida.")
-            return {**_result(True, "Falei o áudio na call aprovada."), "first_frame_observed": True}
+            return {**_result(True, "Falei o áudio na call escolhida."), "first_frame_observed": True}
         except ChatbotVoiceActionBlocked as exc:
             return _result(False, str(exc))
         except ValueError:

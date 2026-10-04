@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import base64
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -54,6 +55,19 @@ def turn():
     cog._can_respond = AsyncMock(return_value=True)
     cog._add_processing_reaction = AsyncMock(return_value="⏳")
     cog._remove_processing_reaction = AsyncMock()
+    cog._processing_active = 0
+    cog._processing_started = 0
+
+    @asynccontextmanager
+    async def processing(_channel):
+        cog._processing_active += 1
+        cog._processing_started += 1
+        try:
+            yield
+        finally:
+            cog._processing_active -= 1
+
+    cog.processing = processing
     cog._maybe_generate_tts = AsyncMock(return_value=None)
     channel = Mock(spec=discord.TextChannel)
     channel.id = 20
@@ -221,7 +235,9 @@ async def test_preparation_failure_is_actionable_and_never_reaches_provider_or_m
     assert_no_turn_saved(turn)
     assert expected in turn.message.reply.await_args.args[0]
     assert_safe_reply(turn.message)
-    turn.cog._remove_processing_reaction.assert_awaited_once_with(turn.message, "⏳")
+    assert turn.cog._processing_active == 0 and turn.cog._processing_started > 0
+    turn.cog._add_processing_reaction.assert_not_awaited()
+    turn.cog._remove_processing_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -253,7 +269,9 @@ async def test_spontaneous_failure_remains_silent_and_is_not_saved(turn):
     turn.message.reply.assert_not_awaited()
     turn.cog._router.chat.assert_not_awaited()
     assert_no_turn_saved(turn, feedback_sent=False)
-    turn.cog._remove_processing_reaction.assert_awaited_once()
+    assert turn.cog._processing_active == 0 and turn.cog._processing_started > 0
+    turn.cog._add_processing_reaction.assert_not_awaited()
+    turn.cog._remove_processing_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
