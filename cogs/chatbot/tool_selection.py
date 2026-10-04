@@ -64,6 +64,10 @@ class ToolSelection:
         self.registry = registry
         self._selected = set()
         self._used = {}
+        # Nomes carregados explicitamente pelo próprio modelo precisam sobreviver
+        # à próxima rodada. Já os candidatos especulativos do ranking inicial
+        # podem ser descartados depois do primeiro lote se não foram usados.
+        self._explicit = set()
         # Adapters de teste/legados sem descoberta mantêm seu contrato integral.
         self.enabled = registry.get(DISCOVERY_TOOL) is not None
         specs = tuple(registry.get_specs())
@@ -121,8 +125,23 @@ class ToolSelection:
                     unavailable[name] = spec.why[:180] or "Indisponível neste turno."
                 continue
             self._selected.add(name)
+            self._explicit.add(name)
             loaded.append(name)
         return {"loaded": loaded, "unavailable": unavailable}
+
+    def prune_speculative(self):
+        """Descarta schemas só sugeridos pelo ranking e nunca usados/carregados.
+
+        O catálogo continua acessível por ``carregar_ferramentas``. Contratos de
+        chamadas já emitidas e contratos explicitamente carregados permanecem
+        declarados para preservar o histórico nativo e a próxima decisão.
+        """
+        if not self.enabled:
+            return ()
+        keep = set(_CORE) | set(self._used) | set(self._explicit)
+        removed = tuple(sorted(name for name in self._selected if name not in keep))
+        self._selected.intersection_update(keep)
+        return removed
 
     def get_specs(self):
         selected = []
@@ -141,24 +160,18 @@ class ToolSelection:
     def availability_state(self):
         snapshot = self.registry.snapshot()
         selected = set(self.selected_names)
-        # O índice estável já anuncia o catálogo inteiro. Repetir todos os
-        # indisponíveis e todos os enums em cada rodada só infla o contexto.
-        # Aqui entram apenas contratos efetivamente carregados/consultados.
-        state = {"loaded": list(self.selected_names),
-                 "unavailable": {spec.name: spec.why[:180] or "Indisponível neste turno."
-                                 for spec in snapshot if not spec.available and spec.name in selected}}
-        for spec in snapshot:
-            if spec.name not in selected:
-                continue
-            if getattr(spec, "capabilities", ()):
-                state[spec.name + "_actions"] = (list(spec.parameters.get("properties", {})
-                                                    .get("action", {}).get("enum", ()))
-                                                  if spec.available else [])
-        return state
+        # Os contratos nativos já dizem ao modelo quais ferramentas estão
+        # carregadas e quais enums aceitam. No estado dinâmico só precisamos
+        # registrar uma indisponibilidade que mudou desde a seleção.
+        unavailable = {spec.name: spec.why[:180] or "Indisponível neste turno."
+                       for spec in snapshot if not spec.available and spec.name in selected}
+        return {"unavailable": unavailable} if unavailable else {}
 
     def metrics(self):
         full = tuple(self.registry.get_specs())
         selected = self.get_specs()
         return {"catalog_tools": len(full), "loaded_tools": len(selected),
                 "catalog_schema_chars": sum(declaration_chars(spec) for spec in full),
-                "loaded_schema_chars": sum(declaration_chars(spec) for spec in selected)}
+                "loaded_schema_chars": sum(declaration_chars(spec) for spec in selected),
+                "explicit_tools": len(self._explicit),
+                "used_tools": len(self._used)}

@@ -64,6 +64,31 @@ def test_initial_schema_budget_does_not_hide_discovery_or_full_capability_index(
     assert selection.load(["cultivar_orquideas"])["loaded"] == ["cultivar_orquideas"]
 
 
+
+
+def test_capability_index_omits_tools_already_described_by_native_schemas():
+    registry = catalog()
+    selection = ToolSelection(registry, "Qual espectroscopia serve para essa nebulosa?")
+    compact = registry.capability_index(exclude_names=selection.selected_names)
+    assert "medir_nebulosa" not in compact
+    assert "cultivar_orquideas" in compact
+    assert len(compact) < len(registry.capability_index())
+
+
+def test_followup_prunes_only_speculative_schemas_and_keeps_used_or_explicit_tools():
+    registry = catalog()
+    selection = ToolSelection(registry, "nebulosa orquídeas")
+    speculative = {name for name in selection.selected_names if name not in {DISCOVERY_TOOL, "select_response_format", "preparar_resposta"}}
+    assert speculative
+    used = sorted(speculative)[0]
+    selection.mark_used([used])
+    explicit = "catalogo_19"
+    selection.load([explicit])
+    removed = set(selection.prune_speculative())
+    assert used in selection.selected_names and explicit in selection.selected_names
+    assert removed == speculative - {used}
+    assert removed.isdisjoint(selection.selected_names)
+
 def test_recent_context_can_restore_tools_for_a_short_followup():
     registry = catalog()
     selection = ToolSelection(registry, "e amanhã?", recent_context="A irrigação dessas orquídeas")
@@ -92,7 +117,7 @@ def test_stable_index_does_not_evaluate_availability_or_change_with_operational_
     assert "ban_member" in before and "Backend ausente." not in before
     selection = ToolSelection(registry)
     state = selection.availability_state()
-    assert "efeito_delimitado" not in state["unavailable"]
+    assert "efeito_delimitado" not in state.get("unavailable", {})
     assert "efeito_delimitado_actions" not in state
 
 

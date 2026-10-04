@@ -119,6 +119,11 @@ def test_whole_turn_usage_includes_cache_and_reasoning_without_double_counting()
         "providers": {"groq": {"usage": {"total_tokens": 2000}},
                       "mistral": {"usage": {"total_tokens": 1150}}},
         "tools": {"seen": 3, "executed": 2, "reused_reads": 1},
+        "delivery": {"delivered": True, "model_rounds_per_response": 2,
+                     "generation_attempts_per_response": 3, "total_tokens_per_response": 3150,
+                     "neurons_per_response": 0.375},
+        "stages": {"initial": {"calls": 1, "usage": {"total_tokens": 2100}},
+                   "closing": {"calls": 1, "usage": {"total_tokens": 1050}}},
     })
     assert "Tokens do último turno medido:** entrada 3000, saída 150" in rendered
     assert "cache 2300 (incluído na entrada)" in rendered
@@ -127,6 +132,8 @@ def test_whole_turn_usage_includes_cache_and_reasoning_without_double_counting()
     assert "descartados 315 (10.0%)" in rendered
     assert "Uso por provedor:** Groq 2000, Mistral 1150 tokens" in rendered
     assert "Ferramentas no último turno:** 2 execuções; 1 leitura(s) repetida(s) reaproveitada(s)" in rendered
+    assert "Eficiência da resposta entregue:** 2 rodada(s) de modelo, 3 tentativa(s), 3150 tokens/resposta, 0.375 neurons/resposta" in rendered
+    assert "Rodadas:** inicial 1x/2100 tok, fechamento 1x/1050 tok" in rendered
     assert "contagem parcial" not in rendered and "última tentativa" not in rendered
     assert "PRIVATE" not in rendered
 

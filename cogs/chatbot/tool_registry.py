@@ -100,23 +100,36 @@ class ToolRegistry:
     def summary(self, context=None) -> str:
         return tool_summary(self.snapshot(context))
 
-    def capability_index(self) -> str:
-        """Índice estável: estado variável e contratos completos seguem à parte."""
+    def capability_index(self, *, exclude_names=()) -> str:
+        """Índice compacto das funções ainda não descritas por schemas nativos.
+
+        ``exclude_names`` não avalia availability e portanto não transforma o
+        catálogo em autorização. A rodada já recebe os contratos completos das
+        funções carregadas; repetir seus resumos aqui só desperdiça entrada.
+        """
+        excluded = set(exclude_names or ())
         lines = [
-            "Ferramentas reais do bot: use chamadas nativas quando úteis.",
-            ("Estado tools informa loaded e unavailable. Para outra função do catálogo, chame carregar_ferramentas antes de usá-la."
-             if "carregar_ferramentas" in self._specs else "Estado tools informa loaded e unavailable."),
-            "Nunca peça códigos internos ao usuário. Só confirme efeitos após resultado real; staff aprova ações privilegiadas.",
+            "Índice de outras ferramentas reais do bot; contratos nativos presentes já estão carregados.",
+            ("Para uma função deste índice, use carregar_ferramentas antes de chamá-la."
+             if "carregar_ferramentas" in self._specs else "Use apenas contratos nativos presentes nesta rodada."),
+            "Não peça códigos internos; só confirme efeitos após resultado real; staff aprova ações privilegiadas.",
         ]
-        # Sem avaliar availability: nomes/descritivos são o catálogo publicado,
-        # não uma promessa de disponibilidade. Isso mantém o prefixo estável.
+        # Sem avaliar availability: nomes/descritivos são catálogo publicado, não
+        # promessa de disponibilidade. Descrições carregadas ficam nos schemas.
+        count = 0
         for spec in self._specs.values():
+            if spec.name in excluded:
+                continue
             description = re.split(r"(?<=[.!?])\s+", " ".join(spec.description.split()), maxsplit=1)[0]
-            description = description if len(description) <= 90 else description[:87].rstrip() + "..."
-            lines.append(f"{spec.name}: {description} [{spec.permission}]")
+            description = description if len(description) <= 76 else description[:73].rstrip() + "..."
+            suffix = f" [{spec.permission}]"
             actions = spec.capabilities or spec.parameters.get("properties", {}).get("action", {}).get("enum", ())
             if actions:
-                lines.append("Ações: " + ", ".join(actions) + ".")
+                suffix += " ações=" + ",".join(actions)
+            lines.append(f"{spec.name}: {description}{suffix}")
+            count += 1
+        if not count:
+            return "Contratos nativos presentes cobrem as ferramentas carregadas desta rodada."
         return "\n".join(lines)
 
 

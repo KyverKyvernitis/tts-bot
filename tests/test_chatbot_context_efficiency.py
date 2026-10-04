@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from cogs.chatbot.context_efficiency import (
-    TurnUsage, compact_operational_state, deduplicate_reply_context, spontaneous_quota_factor,
+    TurnUsage, annotate_delivery, compact_operational_state, deduplicate_reply_context, spontaneous_quota_factor,
 )
 from cogs.chatbot.providers import ChatMessage
 
@@ -83,6 +83,11 @@ def test_turn_telemetry_separates_wasted_usage_neurons_and_context_without_conte
     usage.record_tool_call(executed=True, seen=False)
     usage.record_tool_call()
     usage.record_tool_call(reused_read=True, seen=False)
+    usage.record_tool_selection({"catalog_tools": 20, "loaded_tools": 5,
+                                 "catalog_schema_chars": 10000, "loaded_schema_chars": 2400})
+    usage.record_tool_selection({"catalog_tools": 20, "loaded_tools": 4,
+                                 "catalog_schema_chars": 10000, "loaded_schema_chars": 1800,
+                                 "used_tools": 1}, pruned=1)
     result = usage.result()
     assert result["resources"]["neurons"] == 1.25
     assert result["wasted_usage"]["total_tokens"] == 110
@@ -97,6 +102,11 @@ def test_turn_telemetry_separates_wasted_usage_neurons_and_context_without_conte
     assert result["providers"]["cloudflare"]["failed"] == 1
     assert result["models"]["mistral/small"]["successes"] == 1
     assert result["tools"] == {"seen": 2, "executed": 1, "reused_reads": 1}
+    assert result["tool_selection"]["initial_loaded_schema_chars"] == 2400
+    assert result["tool_selection"]["current_loaded_schema_chars"] == 1800
+    assert result["tool_selection"]["speculative_pruned"] == 1
+    assert result["tool_selection"]["initial_schema_reduction_ratio"] == .76
+    assert result["tool_selection"]["current_schema_reduction_ratio"] == .82
 
 
 @pytest.mark.parametrize("records,expected", [
@@ -120,3 +130,46 @@ def test_missing_or_vision_only_quota_state_does_not_suppress_chat():
     assert spontaneous_quota_factor({}) == 1
     assert spontaneous_quota_factor({"availability": [{"configured": True, "provider": "test",
                                                         "available": False, "modes": ["vision"]}]}) == 1
+
+
+def test_stage_breakdown_and_delivery_cost_use_only_reported_usage():
+    usage = TurnUsage()
+    usage.record_context({"system_chars": 900, "tool_schema_chars": 450}, stage="initial")
+    usage.record({
+        "outcome": "success", "request_count": 1, "generation_attempt_count": 1,
+        "usage_attempt_count": 1, "usage_complete": True,
+        "usage": {"input_tokens": 220, "output_tokens": 20, "total_tokens": 240},
+        "usage_field_attempts": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 1},
+        "attempts": [{"provider": "groq", "model": "small", "kind": "success",
+                      "usage": {"input_tokens": 220, "output_tokens": 20, "total_tokens": 240}}],
+    }, stage="initial")
+    usage.record_context({"system_chars": 500, "tool_schema_chars": 0, "tool_result_chars": 300},
+                         stage="closing")
+    usage.record({
+        "outcome": "success", "request_count": 1, "generation_attempt_count": 1,
+        "usage_attempt_count": 1, "usage_complete": True,
+        "usage": {"input_tokens": 140, "output_tokens": 15, "total_tokens": 155},
+        "usage_field_attempts": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 1},
+        "attempts": [{"provider": "groq", "model": "small", "kind": "success",
+                      "usage": {"input_tokens": 140, "output_tokens": 15, "total_tokens": 155}}],
+    }, stage="closing")
+    result = usage.result()
+    annotate_delivery(result, delivered=True, response_chars=42, source="model_closing")
+    assert result["stages"]["initial"]["usage"]["total_tokens"] == 240
+    assert result["stages"]["closing"]["usage"]["total_tokens"] == 155
+    assert result["stages"]["closing"]["context"]["peak"]["tool_schema_chars"] == 0
+    assert result["delivery"] == {
+        "delivered": True, "response_chars": 42, "audio": False, "source": "model_closing",
+        "input_tokens_per_response": 360, "output_tokens_per_response": 35,
+        "total_tokens_per_response": 395, "model_rounds_per_response": 2,
+        "generation_attempts_per_response": 2, "http_requests_per_response": 2,
+        "wasted_tokens_per_response": 0,
+    }
+
+
+def test_undelivered_turn_does_not_invent_per_response_numbers():
+    result = {"turn_calls": 2, "usage": {"total_tokens": 999}}
+    annotate_delivery(result, delivered=False, response_chars=10, source="delivery_suppressed")
+    assert result["delivery"] == {
+        "delivered": False, "response_chars": 10, "audio": False, "source": "delivery_suppressed"
+    }

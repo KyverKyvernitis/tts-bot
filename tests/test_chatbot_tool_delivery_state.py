@@ -207,7 +207,7 @@ async def test_four_successful_query_rounds_have_one_final_round_with_native_his
     assert delivery.events == ["query"] * 4
     assert delivery.cog._router.chat.await_count == 5
     last = delivery.cog._router.chat.await_args.kwargs
-    assert last["allow_tool_calls"] is False and last["tool_specs"]
+    assert last["allow_tool_calls"] is False and last["tool_specs"] == ()
     assert [message.tool_call_id for message in messages if message.role == "tool"] == ["0", "1", "2", "3"]
     assert [message.tool_calls[0].id for message in messages if message.role == "assistant"] == ["0", "1", "2", "3"]
 

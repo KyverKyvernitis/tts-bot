@@ -1,6 +1,6 @@
 # Tokens e reservas de IA econômicas
 
-O projeto mantém Groq como prioridade, Gemini como alternativa e prepara uma terceira reserva de texto: Qwen3-30B-A3B pela Cloudflare Workers AI. O modelo é fixo, `@cf/qwen/qwen3-30b-a3b-fp8`; esta integração não escolhe modelos pagos nem contrata planos. A reserva começa desativada, mesmo se já houver credenciais Cloudflare para imagens, e exige `CHATBOT_CLOUDFLARE_ENABLED=true`. A preferência já salva entre Groq e Gemini continua válida. Imagens seguem a cadeia de visão existente, pois esse Qwen aceita texto.
+O projeto mantém Groq/Gemini como provedores principais e duas reservas independentes de texto: Mistral Small 4 e Qwen3-30B-A3B pela Cloudflare Workers AI. A preferência salva continua escolhendo apenas qual dos dois provedores principais vem primeiro; quando habilitadas, as reservas entram como Mistral e depois Cloudflare. O Qwen permanece fixo em `@cf/qwen/qwen3-30b-a3b-fp8`; a integração não escolhe automaticamente outro modelo da Cloudflare. Mistral e Cloudflare são opt-in e não são usados em participação espontânea. Imagens seguem a cadeia de visão existente.
 
 ## Economia de tokens
 
@@ -63,7 +63,7 @@ Use `/chatbot configurar` para conferir o estado: o painel informa se falta o ID
 
 ```bash
 sudo journalctl -u tts-bot.service --since "30 minutes ago" --no-pager -o cat \
-  | grep -E 'chatbot: (configuration |provider=|skip |exhausted |result=success|usage |turn_usage |model_discovery|tool_repair|turno falhou)' \
+  | grep -E 'chatbot: (configuration |provider=|skip |exhausted |result=success|usage |turn_usage |delivery_usage |model_discovery|tool_repair|turno falhou)' \
   | tail -n 150
 ```
 
@@ -107,3 +107,25 @@ Os tetos normais de saída são adaptativos: mensagens mínimas reservam menos t
 A contabilidade da Cloudflare separa `measured_neurons` reportados pela API de `uncertain_reserved_neurons` de tentativas sem medição conclusiva. Uma requisição bem-sucedida com consumo reportado substitui a reserva estimada pelo valor real; falhas sem telemetria permanecem conservadoramente contabilizadas até a janela local expirar. O painel também expõe tokens descartados, uso por provedor e reutilização de leituras, para que otimizações futuras sejam baseadas em desperdício observado.
 
 Fontes adicionais: [Mistral Chat Completions](https://docs.mistral.ai/api/endpoint/chat), [Mistral reasoning](https://docs.mistral.ai/capabilities/reasoning/), [Mistral Small](https://docs.mistral.ai/getting-started/models/models_overview/).
+
+## Terceira rodada de eficiência
+
+O fechamento de um turno com ferramentas deixa de reenviar os schemas e o índice de capacidades quando novas chamadas já estão proibidas. O histórico nativo continua contendo cada `tool_call` e seu resultado confirmado, mas declarações que o modelo não pode mais usar são removidas da requisição final. O estado dinâmico do fechamento também omite a lista de ferramentas. Isso reduz principalmente tokens de entrada em turnos com consulta ou efeito sem alterar a autorização, que continua sendo responsabilidade do host.
+
+Fechamentos sem novas ferramentas usam o perfil econômico do router: GPT-OSS 20B vem antes do 120B e Gemini Flash Lite vem antes do Flash. A margem de saída para sintetizar resultados de ferramentas é preservada mesmo sem os schemas; a economia vem do modelo e do contexto, não de truncar à força a resposta final. Se o modelo menor falhar, o fallback normal continua disponível.
+
+Quando uma geração já produz texto junto de **apenas efeitos automáticos**, esse texto fica privado até todos os efeitos do lote confirmarem sucesso. Depois da confirmação, ele pode ser reutilizado como resposta final, eliminando a geração que antes servia apenas para reformular “concluído”. Isso nunca é aplicado a consultas de leitura, propostas privilegiadas, lotes parciais/incertos, falhas ou entregas que já ocorreram. `preparar_resposta` continua tendo prioridade quando o modelo o usa explicitamente.
+
+A telemetria agora separa as etapas `direct`, `initial`, `tool_followup` e `closing`, incluindo uso reportado e tamanho do contexto por etapa. Depois da entrega real no Discord, o turno recebe também custo por resposta entregue: rodadas de modelo, tentativas, tokens e neurons quando o provedor os reporta. Turnos suprimidos ou sem entrega não recebem números “por resposta”. O painel `/chatbot configurar` mostra um resumo dessa eficiência sem expor prompt, resultados privados ou credenciais.
+
+## Quarta rodada de eficiência
+
+Os contratos nativos carregados deixaram de ser descritos novamente no índice textual de capacidades. Em cada rodada o índice enumera apenas funções ainda não cobertas pelos schemas enviados naquela requisição; o schema de `carregar_ferramentas` continua permitindo descobrir contratos adicionais. Depois do primeiro lote, candidatos escolhidos apenas pelo ranking local e nunca usados são descartados das rodadas seguintes. Ferramentas efetivamente chamadas e contratos carregados explicitamente pelo modelo permanecem para preservar o histórico nativo.
+
+O estado dinâmico também não repete mais a lista de ferramentas carregadas nem os enums de ações já presentes nos schemas. Ele só acrescenta uma indisponibilidade quando o estado real de uma função carregada mudou. A autorização continua no host e o índice não avalia permissões nem availability.
+
+Resultados extensos de ferramentas passam por um limite de fallback menor (`MAX_TOOL_RESULT_CHARS=4500`, `MAX_TOOL_RESULT_BYTES=9000`). Ferramentas devem paginar antes desse ponto; quando o fallback precisa truncar, ele mantém status e comprovantes necessários para impedir replay, sem copiar payload privado como prévia.
+
+Recuperação local de lembretes pessoais e conhecimento publicado agora roda em paralelo, com um único prazo curto. Essas leituras não chamam modelo; o objetivo é preservar mais do deadline para a geração útil e reduzir turnos que precisariam cair em timeout/fallback.
+
+A auditoria registra o tamanho do catálogo completo, schemas realmente carregados na primeira rodada, tamanho depois da poda e quantos candidatos especulativos foram removidos. `/chatbot configurar` mostra essa redução sem armazenar nomes, argumentos ou conteúdo das ferramentas.

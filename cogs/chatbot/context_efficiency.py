@@ -40,16 +40,26 @@ class TurnUsage:
     context_sent: dict = field(default_factory=dict)
     context_peak: dict = field(default_factory=dict)
     context_calls: int = 0
+    stages: dict = field(default_factory=dict)
     repair_attempts: int = 0
     fallback_attempts: int = 0
     failed_generation_attempts: int = 0
     tool_calls_seen: int = 0
     tool_calls_executed: int = 0
     tool_reads_reused: int = 0
+    speculative_tools_pruned: int = 0
+    tool_selection_metrics: dict = field(default_factory=dict)
     complete: bool = True
     requests_known: bool = True
 
-    def record_context(self, metrics):
+    def _stage(self, name):
+        key = str(name or "generation")[:40]
+        return self.stages.setdefault(key, {
+            "calls": 0, "reported_calls": 0, "usage": {}, "resources": {},
+            "context_sent": {}, "context_peak": {}, "context_calls": 0,
+        })
+
+    def record_context(self, metrics, *, stage="generation"):
         if not isinstance(metrics, dict):
             return
         clean = {}
@@ -60,9 +70,14 @@ class TurnUsage:
         if not clean:
             return
         self.context_calls += 1
+        stage_bucket = self._stage(stage)
+        stage_bucket["calls"] += 1
+        stage_bucket["context_calls"] += 1
         for name, value in clean.items():
             self.context_sent[name] = self.context_sent.get(name, 0) + value
             self.context_peak[name] = max(self.context_peak.get(name, 0), value)
+            stage_bucket["context_sent"][name] = stage_bucket["context_sent"].get(name, 0) + value
+            stage_bucket["context_peak"][name] = max(stage_bucket["context_peak"].get(name, 0), value)
 
     def record_tool_call(self, *, executed: bool = False, reused_read: bool = False, seen: bool = True):
         """Telemetria local: não altera limites nem semântica das ferramentas."""
@@ -72,6 +87,28 @@ class TurnUsage:
             self.tool_calls_executed += 1
         if reused_read:
             self.tool_reads_reused += 1
+
+    def record_tool_selection(self, metrics=None, *, pruned: int = 0):
+        """Registra economia de schemas sem guardar nomes/argumentos de tools."""
+        if isinstance(metrics, dict):
+            for name in ("catalog_tools", "catalog_schema_chars"):
+                value = metrics.get(name)
+                if type(value) is int and 0 <= value <= 10**9:
+                    self.tool_selection_metrics.setdefault(name, value)
+            for source, initial, current in (
+                ("loaded_tools", "initial_loaded_tools", "current_loaded_tools"),
+                ("loaded_schema_chars", "initial_loaded_schema_chars", "current_loaded_schema_chars"),
+            ):
+                value = metrics.get(source)
+                if type(value) is int and 0 <= value <= 10**9:
+                    self.tool_selection_metrics.setdefault(initial, value)
+                    self.tool_selection_metrics[current] = value
+            for name in ("explicit_tools", "used_tools"):
+                value = metrics.get(name)
+                if type(value) is int and 0 <= value <= 10**9:
+                    self.tool_selection_metrics[name] = value
+        if type(pruned) is int and pruned > 0:
+            self.speculative_tools_pruned += pruned
 
     @staticmethod
     def _sum_usage(target, values):
@@ -91,8 +128,10 @@ class TurnUsage:
             if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= 10**12:
                 target[name] = target.get(name, 0.0) + float(value)
 
-    def record(self, report):
+    def record(self, report, *, stage="generation"):
         self.turn_calls += 1
+        stage_bucket = self._stage(stage)
+        stage_bucket["reported_calls"] += 1
         if not isinstance(report, dict) or report.get("outcome") not in {"success", "failed"}:
             self.complete = self.requests_known = False
             return
@@ -118,6 +157,8 @@ class TurnUsage:
                 value = values.get(name)
                 if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= 10**12:
                     self.resources[name] = self.resources.get(name, 0.0) + float(value)
+            self._sum_usage(stage_bucket["usage"], values)
+            self._sum_resources(stage_bucket["resources"], values)
         attempts_list = report.get("attempts")
         if isinstance(attempts_list, list):
             self.fallback_attempts += max(0, len(attempts_list) - 1)
@@ -187,6 +228,19 @@ class TurnUsage:
         if self.context_calls:
             result["context"] = {"calls": self.context_calls, "sent": dict(self.context_sent),
                                  "peak": dict(self.context_peak)}
+        if self.stages:
+            result["stages"] = {}
+            for name, bucket in self.stages.items():
+                item = {"calls": bucket["calls"], "reported_calls": bucket["reported_calls"]}
+                if bucket["usage"]:
+                    item["usage"] = dict(bucket["usage"])
+                if bucket["resources"]:
+                    item["resources"] = {key: round(value, 6) for key, value in bucket["resources"].items()}
+                if bucket["context_calls"]:
+                    item["context"] = {"calls": bucket["context_calls"],
+                                       "sent": dict(bucket["context_sent"]),
+                                       "peak": dict(bucket["context_peak"])}
+                result["stages"][name] = item
         input_tokens = self.usage.get("input_tokens")
         cached_tokens = self.usage.get("cached_tokens")
         if type(input_tokens) is int and input_tokens > 0 and type(cached_tokens) is int:
@@ -206,6 +260,19 @@ class TurnUsage:
         if self.tool_calls_seen:
             result["tools"] = {"seen": self.tool_calls_seen, "executed": self.tool_calls_executed,
                                "reused_reads": self.tool_reads_reused}
+        if self.tool_selection_metrics or self.speculative_tools_pruned:
+            selection = dict(self.tool_selection_metrics)
+            if self.speculative_tools_pruned:
+                selection["speculative_pruned"] = self.speculative_tools_pruned
+            catalog = selection.get("catalog_schema_chars")
+            initial = selection.get("initial_loaded_schema_chars")
+            current = selection.get("current_loaded_schema_chars")
+            if type(catalog) is int and catalog > 0:
+                if type(initial) is int:
+                    selection["initial_schema_reduction_ratio"] = round(max(0.0, 1.0 - initial / catalog), 4)
+                if type(current) is int:
+                    selection["current_schema_reduction_ratio"] = round(max(0.0, 1.0 - current / catalog), 4)
+            result["tool_selection"] = selection
         if self.requests_known or self.request_count:
             result["request_count"] = self.request_count
         if self.discovery_request_count:
@@ -223,6 +290,43 @@ class TurnUsage:
                 item["resources"] = {name: round(value, 6) for name, value in bucket["resources"].items()}
             result[key] = item
         return result
+
+
+def annotate_delivery(result, *, delivered: bool, response_chars: int = 0, source: str = "", audio: bool = False):
+    """Anexa eficiência por resposta entregue sem inventar contagens ausentes."""
+    if not isinstance(result, dict):
+        return result
+    delivery = {"delivered": bool(delivered), "response_chars": max(0, int(response_chars or 0)),
+                "audio": bool(audio)}
+    if source:
+        delivery["source"] = str(source)[:40]
+    if delivered:
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        for key in ("input_tokens", "output_tokens", "total_tokens", "cached_tokens", "reasoning_tokens"):
+            value = _count(usage.get(key))
+            if value is not None:
+                delivery[key + "_per_response"] = value
+        for source_key, target_key in (("turn_calls", "model_rounds_per_response"),
+                                       ("generation_attempt_count", "generation_attempts_per_response"),
+                                       ("request_count", "http_requests_per_response")):
+            value = _count(result.get(source_key))
+            if value is None or (source_key != "turn_calls" and value <= 0):
+                continue
+            if source_key == "request_count" and result.get("request_count_complete") is not True:
+                continue
+            delivery[target_key] = value
+        wasted = result.get("wasted_usage") if isinstance(result.get("wasted_usage"), dict) else {}
+        wasted_total = _count(wasted.get("total_tokens"))
+        if wasted_total is not None:
+            delivery["wasted_tokens_per_response"] = wasted_total
+        elif result.get("usage_complete") is True and result.get("failed_generation_attempts") == 0:
+            delivery["wasted_tokens_per_response"] = 0
+        resources = result.get("resources") if isinstance(result.get("resources"), dict) else {}
+        neurons = resources.get("neurons")
+        if isinstance(neurons, (int, float)) and not isinstance(neurons, bool) and math.isfinite(neurons) and neurons >= 0:
+            delivery["neurons_per_response"] = round(float(neurons), 6)
+    result["delivery"] = delivery
+    return result
 
 
 def deduplicate_reply_context(reply_context, history):
@@ -258,6 +362,9 @@ def compact_operational_state(state):
         for name in ("voice", "language"):
             if not preferences.get(name):
                 preferences.pop(name, None)
+    tools = result.get("tools")
+    if isinstance(tools, dict) and not any(tools.values()):
+        result.pop("tools", None)
     references = result.get("references")
     if isinstance(references, dict):
         for kind in ("members", "resources"):

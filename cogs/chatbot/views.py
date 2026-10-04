@@ -285,7 +285,7 @@ class ProviderConfigModal(discord.ui.Modal, title="Provedor de conversa"):
         self.provider_group.add_option(label="Groq primeiro (padrão)", value="groq", default=preferred != "gemini")
         self.provider_group.add_option(label="Gemini primeiro", value="gemini", default=preferred == "gemini")
         self.add_item(_label("Primeiro provedor da conversa", self.provider_group,
-                             "O outro serve de fallback; Qwen/Cloudflare é a última reserva de texto quando configurado."))
+                             "O outro serve de fallback; Mistral e depois Qwen/Cloudflare entram como reservas de texto quando configurados."))
 
     async def on_submit(self, interaction: discord.Interaction):
         if int(getattr(interaction.user, "id", 0) or 0) != self._requester_id:

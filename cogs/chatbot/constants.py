@@ -180,6 +180,11 @@ SHORT_RESPONSE_TOKENS = 384
 MAX_VISION_RESPONSE_TOKENS = 900
 MAX_TOOL_RESPONSE_TOKENS = 768
 MAX_ACTION_RESPONSE_TOKENS = 1400
+# Resultados nativos já são paginados pelas ferramentas. Este é o fallback por
+# resultado antes de reenviá-lo ao modelo; manter baixo evita que 2–3 leituras
+# independentes explodam o prompt da rodada seguinte.
+MAX_TOOL_RESULT_CHARS = 4500
+MAX_TOOL_RESULT_BYTES = 9000
 MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
 
 # -----------------------------------------------------------------------------

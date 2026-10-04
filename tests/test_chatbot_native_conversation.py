@@ -165,6 +165,11 @@ async def test_repeated_identical_read_is_reused_and_forces_final_round(native):
         "detail": "Resultado idêntico já está no histórico desta rodada; não repetir a consulta.",
     }
     assert native.cog._last_turn_usage["tools"] == {"seen": 2, "executed": 1, "reused_reads": 1}
+    closing = native.cog._router.chat.await_args.kwargs
+    assert closing["allow_tool_calls"] is False
+    assert closing["tool_specs"] == ()
+    assert "read_test" not in closing["system"]
+    assert native.cog._last_turn_usage["delivery"]["source"] == "model_closing"
 
 
 @pytest.mark.asyncio
@@ -374,3 +379,45 @@ async def test_plan_gets_trusted_draft_snapshot_and_failed_consumption_stops_eff
         native.message.reply.assert_not_awaited()
     native.tts.synthesize_chatbot_attachment.assert_not_awaited()
     native.tts.chatbot_mirror_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_automatic_effect_reuses_safe_preface_without_second_generation(native):
+    await native.cog._preferences.set_current(10, 20, 40, native.epoch, mode="text")
+    native.cog._router.chat.return_value = ChatReply(
+        "Pronto, pausei.", tool_calls=(call("effect-preface", "automatic_test"),)
+    )
+
+    assert await native.cog._generate_and_send(native.message, "pause")
+
+    native.cog._router.chat.assert_awaited_once()
+    assert native.effects == [{}]
+    assert native.message.reply.await_args.args == ("Pronto, pausei.",)
+    delivery = native.cog._last_turn_usage["delivery"]
+    assert delivery["delivered"] is True
+    assert delivery["source"] == "confirmed_effect_preface"
+    assert delivery["model_rounds_per_response"] == 1
+
+
+@pytest.mark.asyncio
+async def test_read_preface_is_never_reused_before_read_result(native):
+    await native.cog._preferences.set_current(10, 20, 40, native.epoch, mode="text")
+
+    async def read(_arguments):
+        return {"ok": True, "status": "found", "data": {"value": "confirmado"}}
+
+    native.extra_specs.append(ToolSpec(
+        "read_for_preface_test", "Consulta um valor real.",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        permission="read", handler=read,
+    ))
+    native.cog._router.chat.side_effect = [
+        ChatReply("Acho que é antigo.", tool_calls=(call("read-preface", "read_for_preface_test"),)),
+        ChatReply("O valor confirmado é novo."),
+    ]
+
+    assert await native.cog._generate_and_send(native.message, "qual é o valor?")
+
+    assert native.cog._router.chat.await_count == 2
+    assert native.message.reply.await_args.args == ("O valor confirmado é novo.",)
+    assert native.cog._last_turn_usage["delivery"]["source"] == "model_after_tools"

@@ -543,6 +543,11 @@ def _output_tokens(
         # Tool calls precisam de margem para argumentos estruturados. No
         # fechamento sem novas chamadas, o teto conversacional já basta.
         return max(tokens, C.MAX_TOOL_RESPONSE_TOKENS if allow_tool_calls else C.SHORT_RESPONSE_TOKENS)
+    if not allow_tool_calls and any(message.tool_calls or message.role == "tool" for message in messages):
+        # O fechamento pode receber uma consulta extensa mesmo quando a
+        # pergunta original era curta. Tiramos os schemas, não a margem para
+        # sintetizar os resultados já confirmados.
+        return max(tokens, C.SHORT_RESPONSE_TOKENS)
     return tokens
 
 
@@ -1574,20 +1579,43 @@ class ProviderRouter:
         has_native_history = any(message.tool_calls or message.role == "tool" for message in messages)
         latest_user = next((message.content for message in reversed(messages)
                             if message.role == "user" and isinstance(message.content, str)), "")
-        economy_route = (not has_images and not wants_tools and not has_native_history
-                         and len(latest_user.strip()) <= 700)
+        closing_economy = not has_images and not allow_tool_calls
+        economy_route = closing_economy or (
+            not has_images and not wants_tools and not has_native_history
+            and len(latest_user.strip()) <= 700
+        )
         if economy_route:
+            # Só reordene modelos que o operador configurou explicitamente.
+            # Candidatos descobertos continuam depois da cadeia configurada: isso
+            # evita que uma descoberta barata desloque um modelo saudável escolhido
+            # no ambiente. Para os defaults conhecidos, trocamos apenas as posições
+            # entre os próprios modelos conhecidos (small-first), preservando
+            # quaisquer modelos customizados e sua prioridade relativa.
             preferred = {
                 "groq": ("openai/gpt-oss-20b", "openai/gpt-oss-120b"),
                 "gemini": ("gemini-2.5-flash-lite", "gemini-2.5-flash"),
             }
+            configured_by_provider = {
+                "groq": tuple(C.GROQ_MODELS),
+                "gemini": tuple(C.GEMINI_MODELS),
+            }
             reordered = []
             for provider, client, models in attempts:
+                configured = [name for name in configured_by_provider.get(provider, ()) if name in models]
+                configured_set = set(configured)
+                extras = [name for name in models if name not in configured_set]
                 wanted = preferred.get(provider, ())
-                ordered = tuple(dict.fromkeys((*[name for name in wanted if name in models], *models)))
+                if wanted and configured:
+                    wanted_set = set(wanted)
+                    positions = [index for index, name in enumerate(configured) if name in wanted_set]
+                    ordered_known = [name for name in wanted if name in configured_set]
+                    for index, name in zip(positions, ordered_known):
+                        configured[index] = name
+                ordered = tuple(dict.fromkeys((*configured, *extras)))
                 reordered.append((provider, client, ordered))
             attempts = reordered
-        report["routing_profile"] = "economy" if economy_route else "full"
+        report["routing_profile"] = ("closing_economy" if closing_economy else
+                                     "economy" if economy_route else "full")
         repair_used = bool(repair_state and repair_state.get("used"))
         discovery_used = False
         native_schemas = {spec.name: spec.parameters for spec in tool_specs if spec.available}

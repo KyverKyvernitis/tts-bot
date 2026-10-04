@@ -62,7 +62,7 @@ _RESULT_METADATA_FIELDS = frozenset({
 })
 
 
-def compact_tool_result(result, *, max_chars=6000, max_bytes=12000):
+def compact_tool_result(result, *, max_chars=None, max_bytes=None):
     """Limita detalhes de consultas sem perder um recibo já confirmado.
 
     Não transforma efeitos em erro nem cria um preview de JSON privado.
@@ -70,6 +70,8 @@ def compact_tool_result(result, *, max_chars=6000, max_bytes=12000):
     permitir as próximas etapas; esses comprovantes têm prioridade no limite.
     As ferramentas de leitura já paginam os resultados antes deste fallback.
     """
+    max_chars = C.MAX_TOOL_RESULT_CHARS if max_chars is None else max(256, int(max_chars))
+    max_bytes = C.MAX_TOOL_RESULT_BYTES if max_bytes is None else max(512, int(max_bytes))
     encoded = json.dumps(result, ensure_ascii=False, allow_nan=False, default=_json_value)
     if len(encoded) <= max_chars and len(encoded.encode("utf-8")) <= max_bytes:
         return json.loads(encoded)
@@ -1030,7 +1032,7 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
         data = selection.load(arguments["names"])
         return _result(data, status="tools_loaded")
 
-    register("carregar_ferramentas", "Carregue os contratos de funções do índice que ainda não estão em tools.loaded. Na próxima rodada use chamadas nativas dessas funções. Isso só disponibiliza schemas: não executa ações nem libera permissões; funções indisponíveis continuam bloqueadas.",
+    register("carregar_ferramentas", "Carregue contratos do índice que ainda não aparecem nas declarações nativas desta rodada. Na próxima rodada use chamadas nativas dessas funções. Isso só disponibiliza schemas: não executa ações nem libera permissões; funções indisponíveis continuam bloqueadas.",
              _schema({"names": {"type": "array", "minItems": 1, "maxItems": 8,
                                "items": {"type": "string", "enum": [spec.name for spec in registry.snapshot()]}}}, ("names",)),
              load_tools)

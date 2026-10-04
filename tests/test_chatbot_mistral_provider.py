@@ -96,3 +96,37 @@ async def test_optional_work_never_uses_mistral_or_cloudflare_reserves():
         await router.chat(system="s", messages=[P.ChatMessage("user", "oi")],
                           allow_protected_reserves=False)
     assert session.requests == []
+
+
+def test_closing_without_schemas_keeps_room_for_native_result_synthesis():
+    from cogs.chatbot.action_protocol import NativeToolCall
+    call = NativeToolCall("read-1", "consultar", {"query": "x"})
+    messages = [
+        P.ChatMessage("user", "x?"),
+        P.ChatMessage("assistant", "", tool_calls=(call,)),
+        P.ChatMessage("tool", '{"ok":true,"data":{"value":"y"}}', tool_call_id=call.id, name=call.name),
+    ]
+    assert P._output_tokens(messages, has_tools=False, allow_tool_calls=False) == C.SHORT_RESPONSE_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_final_synthesis_prefers_small_groq_even_with_native_history(monkeypatch):
+    from cogs.chatbot.action_protocol import NativeToolCall
+    monkeypatch.setattr(C, "GROQ_MODELS", ("openai/gpt-oss-120b", "openai/gpt-oss-20b"))
+    session = _Session(_Response(_groq("resultado final", finish="stop")))
+    router = P.ProviderRouter(session, groq_key="offline-key")
+    call = NativeToolCall("read-1", "consultar", {})
+    messages = [
+        P.ChatMessage("user", "resuma"),
+        P.ChatMessage("assistant", "", tool_calls=(call,)),
+        P.ChatMessage("tool", '{"ok":true,"data":{"value":"confirmado"}}', tool_call_id=call.id, name=call.name),
+    ]
+    reply = await router.chat(system="s", messages=messages, allow_tool_calls=False)
+    assert reply == "resultado final"
+    report = router.get_request_report()
+    assert report["routing_profile"] == "closing_economy"
+    assert report["attempts"][0]["model"] == "openai/gpt-oss-20b"
+    payload = session.requests[0][1]["json"]
+    assert payload["model"] == "openai/gpt-oss-20b"
+    assert "tools" not in payload
+    assert payload["max_completion_tokens"] == C.SHORT_RESPONSE_TOKENS

@@ -297,6 +297,56 @@ class ChatbotCommandsMixin:
                         f"**Ferramentas no último turno:** {tools.get('executed', 0)} execuções; "
                         f"{tools['reused_reads']} leitura(s) repetida(s) reaproveitada(s)."
                     )
+                selection = turn.get("tool_selection")
+                if isinstance(selection, dict):
+                    catalog_chars = selection.get("catalog_schema_chars")
+                    initial_chars = selection.get("initial_loaded_schema_chars")
+                    current_chars = selection.get("current_loaded_schema_chars")
+                    if token_number(catalog_chars) and catalog_chars > 0 and token_number(initial_chars):
+                        saved = max(0, catalog_chars - initial_chars)
+                        ratio = selection.get("initial_schema_reduction_ratio")
+                        ratio_text = (f" ({float(ratio) * 100:.1f}% menor)"
+                                      if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) else "")
+                        details = [f"inicial {initial_chars}/{catalog_chars}, {saved} caracteres evitados{ratio_text}"]
+                        if token_number(current_chars) and current_chars != initial_chars:
+                            details.append(f"após lote {current_chars}")
+                        extra = selection.get("speculative_pruned")
+                        if token_number(extra) and extra:
+                            details.append(f"{extra} especulativa(s) removida(s)")
+                        lines.append("**Schemas de ferramentas:** " + "; ".join(details) + ".")
+                delivery = turn.get("delivery")
+                if isinstance(delivery, dict) and delivery.get("delivered") is True:
+                    efficiency = []
+                    rounds = delivery.get("model_rounds_per_response")
+                    if token_number(rounds):
+                        efficiency.append(f"{rounds} rodada(s) de modelo")
+                    attempts = delivery.get("generation_attempts_per_response")
+                    if token_number(attempts):
+                        efficiency.append(f"{attempts} tentativa(s)")
+                    total = delivery.get("total_tokens_per_response")
+                    if token_number(total):
+                        efficiency.append(f"{total} tokens/resposta")
+                    neurons = delivery.get("neurons_per_response")
+                    if isinstance(neurons, (int, float)) and not isinstance(neurons, bool) and math.isfinite(neurons):
+                        efficiency.append(f"{float(neurons):.3f} neurons/resposta")
+                    if efficiency:
+                        lines.append("**Eficiência da resposta entregue:** " + ", ".join(efficiency) + ".")
+                stages = turn.get("stages")
+                if isinstance(stages, dict):
+                    stage_labels = {"direct": "direta", "initial": "inicial",
+                                    "tool_followup": "pós-ferramenta", "closing": "fechamento"}
+                    stage_parts = []
+                    for name in ("direct", "initial", "tool_followup", "closing"):
+                        item = stages.get(name)
+                        stage_usage = item.get("usage") if isinstance(item, dict) else None
+                        if not isinstance(item, dict) or not token_number(item.get("calls")) or not item.get("calls"):
+                            continue
+                        part = f"{stage_labels[name]} {item['calls']}x"
+                        if isinstance(stage_usage, dict) and token_number(stage_usage.get("total_tokens")):
+                            part += f"/{stage_usage['total_tokens']} tok"
+                        stage_parts.append(part)
+                    if stage_parts:
+                        lines.append("**Rodadas:** " + ", ".join(stage_parts) + ".")
                 return "\n".join(lines)
 
         last = data.get("last_request")
