@@ -1087,6 +1087,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             has_proposal = False
             batch_read_success = bool(calls)
             batch_failed = False
+            answered_calls = 0
             for call in calls:
                 registry.selection.mark_used((call.name,))
                 spec = registry.get(call.name)
@@ -1174,8 +1175,19 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 serialized = json.dumps(compact_tool_result(result), ensure_ascii=False,
                                         allow_nan=False, separators=(",", ":"))
                 messages.append(ChatMessage("tool", serialized, tool_call_id=call.id, name=call.name))
+                answered_calls += 1
                 if state["uncertain"] or state["action_failed"] or state.get("deadline"):
                     break
+            # APIs nativas exigem uma resposta para cada chamada anunciada na
+            # mensagem assistant, inclusive as etapas que o host não iniciou.
+            # Um fechamento após deadline deve conservar o histórico completo
+            # sem executar nem afirmar execução das chamadas interrompidas.
+            for pending_call in calls[answered_calls:]:
+                messages.append(ChatMessage(
+                    "tool", json.dumps({"ok": False, "status": "not_executed",
+                                        "error": "Esta etapa não foi executada porque o lote foi interrompido."},
+                                       ensure_ascii=False, separators=(",", ":")),
+                    tool_call_id=pending_call.id, name=pending_call.name))
             if batch_failed and (state["delivered"] or state["effects_confirmed"]):
                 state["partial"] = True
             if (state.get("deadline") and successful_reads and not any(

@@ -51,6 +51,8 @@ _DIAGNOSTIC_CODES = frozenset({
     "tool_name", "invalid_json", "duplicate_key", "invalid_constant", "target_reference", "forbidden_field",
     "max_proposals", "invalid_arguments", "invalid_schema", "invalid_call_id", "duplicate_call_id",
     "batch_limit", "incomplete_calls", "unexpected_calls", "invalid_envelope", "malformed_response",
+    "api_tool_validation", "api_tool_schema", "api_tool_history", "api_context_limit",
+    "api_parameter", "api_invalid_argument",
 })
 _ATTEMPT_USAGE: ContextVar[dict | None] = ContextVar("chatbot_provider_usage", default=None)
 _ATTEMPT_REQUESTS: ContextVar[dict | None] = ContextVar("chatbot_provider_requests", default=None)
@@ -378,6 +380,11 @@ async def _http_error(response: aiohttp.ClientResponse, *, provider: str = "") -
     if not error and cloudflare_errors:
         error = cloudflare_errors[0]
     status = response.status
+    # Failed generations may contain arbitrary conversation text. They never
+    # participate in error classification or get copied into repair feedback.
+    if error:
+        excerpt = " ".join(value.lower() for key in ("message", "code", "status")
+                           if isinstance((value := error.get(key)), str))
     # A franquia de neurons é diária e compartilhada pela conta. Sem essa
     # evidência explícita, um 429 comum continua sendo uma espera temporária.
     daily_neurons = provider == "cloudflare" and any(
@@ -431,6 +438,12 @@ async def _http_error(response: aiohttp.ClientResponse, *, provider: str = "") -
         "api key expired", "authentication_error",
     ))):
         kind = "auth"
+    elif status in (400, 422) and error.get("code") == "tool_use_failed":
+        # Groq rejects a generated tool batch before returning choices. The
+        # existing one-repair budget applies; no rejected call is executed.
+        return ProviderError("provider gerou chamadas inválidas", status=status,
+                             kind="invalid_response", stage="output",
+                             diagnostic_code="api_tool_validation")
     elif status >= 500:
         kind = "network"
     elif any(marker in excerpt for marker in ("content_filter", "safety blocked", "prohibited_content")):
@@ -454,7 +467,36 @@ async def _http_error(response: aiohttp.ClientResponse, *, provider: str = "") -
         kind = "auth"
     else:
         kind = "request"
-    return ProviderError("provider rejeitou a requisição", status=status, kind=kind)
+    diagnostic = ""
+    if kind == "request" and status in (400, 422):
+        if any(marker in excerpt for marker in (
+            "tool_call_id", "tool call id", "tool responses", "tool response",
+            "function response", "functionresponse", "function_response", "function call turn",
+            "function call and function response", "missing tool result",
+            "thought signature", "thought_signature", "thoughtsignature",
+        )):
+            diagnostic = "api_tool_history"
+        elif any(marker in excerpt for marker in (
+            "context_length_exceeded", "maximum context", "context window",
+            "context length", "too many tokens", "input token limit", "input token count exceeds",
+        )):
+            diagnostic = "api_context_limit"
+        elif any(marker in excerpt for marker in (
+            "function_declarations", "functiondeclarations", "parameters.properties",
+            "properties: should be non-empty", "properties must be non-empty",
+            "invalid schema", "invalid json schema", "parameters schema",
+        )):
+            diagnostic = "api_tool_schema"
+        elif any(marker in excerpt for marker in (
+            "unsupported parameter", "unknown parameter", "unrecognized parameter",
+            "unknown name", "reasoning_effort", "include_reasoning", "thinkingbudget",
+            "thinking_budget", "max_completion_tokens", "maxoutputtokens",
+        )):
+            diagnostic = "api_parameter"
+        else:
+            diagnostic = "api_invalid_argument"
+    return ProviderError("provider rejeitou a requisição", status=status, kind=kind,
+                         diagnostic_code=diagnostic)
 
 
 def _output_tokens(messages: list[ChatMessage], *, actions: tuple[str, ...] = ()) -> int:
@@ -1019,7 +1061,14 @@ class _GeminiClient:
         }
         if declarations:
             for tool in declarations:
-                tool["parameters"] = _gemini_schema(tool["parameters"])
+                schema = tool["parameters"]
+                # FunctionDeclaration.parameters is optional. Omit it for a
+                # function with no arguments instead of sending an empty
+                # OpenAPI OBJECT; the original strict schema stays on host.
+                if schema.get("type") == "object" and not schema.get("properties") and not schema.get("required"):
+                    tool.pop("parameters")
+                else:
+                    tool["parameters"] = _gemini_schema(schema)
             payload["tools"] = [{"functionDeclarations": declarations}]
             payload["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO" if allow_tool_calls else "NONE"}}
         # Flash/Lite 2.5 aceitam desativar pensamento para conversa curta.
@@ -1654,6 +1703,10 @@ class ProviderRouter:
         # Remoção/404 de um último modelo não apaga os limites e contratos que
         # efetivamente impediram as alternativas saudáveis deste turno.
         def importance(error):
+            if error.kind == "request" and error.diagnostic_code.startswith("api_"):
+                # Waiting for the primary quota cannot fix a request rejected
+                # by available fallbacks. Preserve that actionable cause.
+                return 6
             if error.kind == "invalid_response" and error.diagnostic_code:
                 return 5
             return {"rate_limit": 4, "network": 3, "timeout": 3, "invalid_response": 3, "empty": 3,

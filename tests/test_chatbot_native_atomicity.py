@@ -118,7 +118,11 @@ async def test_effect_deadline_cancels_handler_and_stops_replay_and_model_follow
     assert time.monotonic() - started < .5
     assert cancelled.is_set() and state["uncertain"] and not state["delivered"]
     assert not reply.text and not drain_action_proposals(registry)
-    assert json.loads(messages[-1].content)["status"] == "uncertain"
+    results = {message.tool_call_id: json.loads(message.content)
+               for message in messages if message.role == "tool"}
+    assert results["first-image"]["status"] == "uncertain"
+    assert results["second-image"]["status"] == "not_executed"
+    assert results["second-image"]["ok"] is False
     world.cog._image_service.generate.assert_awaited_once()
     world.cog._router.chat.assert_awaited_once()
     world.message.reply.assert_not_awaited()
