@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -71,19 +72,32 @@ def _record_http_request(*, discovery: bool = False) -> None:
 
 
 def _safe_usage(usage) -> dict:
-    return {key: value for key, value in (usage.items() if isinstance(usage, dict) else [])
-            if key in {"input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "cached_tokens"}
-            and isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000_000}
+    result = {}
+    for key, value in (usage.items() if isinstance(usage, dict) else []):
+        if key in {"input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "cached_tokens"}:
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000_000:
+                result[key] = value
+        elif key == "neurons" and isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(number) and 0 <= number <= 1_000_000_000:
+                result[key] = number
+    return result
 
 
 def _record_usage(data, provider: str, model: str) -> dict:
-    compatible = provider in {"groq", "cloudflare"}
+    compatible = provider in {"groq", "cloudflare", "mistral"}
     source = data.get("usage" if compatible else "usageMetadata", {}) if isinstance(data, dict) else {}
     mapping = ({"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens", "total_tokens": "total_tokens"}
                if compatible else {"promptTokenCount": "input_tokens", "candidatesTokenCount": "output_tokens",
                                           "totalTokenCount": "total_tokens", "thoughtsTokenCount": "reasoning_tokens",
                                           "cachedContentTokenCount": "cached_tokens"})
-    usage = _safe_usage({target: source[key] for key, target in mapping.items() if isinstance(source, dict) and key in source})
+    raw_usage = {target: source[key] for key, target in mapping.items() if isinstance(source, dict) and key in source}
+    if provider == "cloudflare" and isinstance(source, dict) and "neurons" in source:
+        raw_usage["neurons"] = source["neurons"]
+    usage = _safe_usage(raw_usage)
     if not compatible and "output_tokens" in usage and "reasoning_tokens" in usage:
         # Gemini separa candidates de thoughts; OpenAI inclui reasoning na
         # completion. Normalizar a saída total, mantendo total remoto intacto.
@@ -103,9 +117,9 @@ def _record_usage(data, provider: str, model: str) -> dict:
     if holder is not None:
         holder.update(usage)
     if usage:
-        log.info("chatbot: usage provider=%s model=%s input_tokens=%s output_tokens=%s total_tokens=%s reasoning_tokens=%s cached_tokens=%s",
+        log.info("chatbot: usage provider=%s model=%s input_tokens=%s output_tokens=%s total_tokens=%s reasoning_tokens=%s cached_tokens=%s neurons=%s",
                  provider, model, usage.get("input_tokens"), usage.get("output_tokens"), usage.get("total_tokens"),
-                 usage.get("reasoning_tokens"), usage.get("cached_tokens"))
+                 usage.get("reasoning_tokens"), usage.get("cached_tokens"), usage.get("neurons"))
     return usage
 
 
@@ -499,17 +513,33 @@ async def _http_error(response: aiohttp.ClientResponse, *, provider: str = "") -
                          diagnostic_code=diagnostic)
 
 
-def _output_tokens(messages: list[ChatMessage], *, actions: tuple[str, ...] = ()) -> int:
-    tokens = (
-        getattr(C, "MAX_VISION_RESPONSE_TOKENS", C.MAX_RESPONSE_TOKENS)
-        if any(message.images or message.image_urls for message in messages)
-        else C.MAX_RESPONSE_TOKENS
-    )
-    # Leitura, descoberta e ajustes próprios usam argumentos curtos. Propostas
-    # mantêm espaço para quatro etapas e uma fala privada, sem truncar a cadeia.
+def _output_tokens(
+    messages: list[ChatMessage], *, actions: tuple[str, ...] = (),
+    has_tools: bool = False, allow_tool_calls: bool = True,
+) -> int:
+    has_images = any(message.images or message.image_urls for message in messages)
+    if has_images:
+        tokens = getattr(C, "MAX_VISION_RESPONSE_TOKENS", C.MAX_RESPONSE_TOKENS)
+    else:
+        # A maioria das conversas do Discord é curta. Reservar sempre o teto
+        # máximo aumenta saída potencial e, no Workers AI, neurons de reserva.
+        latest = next((message.content for message in reversed(messages)
+                       if message.role == "user" and isinstance(message.content, str)), "")
+        visible = len(latest.strip())
+        if visible <= 180:
+            tokens = getattr(C, "MIN_RESPONSE_TOKENS", 220)
+        elif visible <= 700:
+            tokens = getattr(C, "SHORT_RESPONSE_TOKENS", 320)
+        else:
+            tokens = C.MAX_RESPONSE_TOKENS
+    # Propostas de ação preservam o teto antigo porque podem conter várias
+    # etapas. Ferramentas de leitura precisam de espaço para JSON nativo; no
+    # fechamento sem novas tools, 500 tokens bastam sem reabrir o teto de 768.
     if TOOL_NAME in actions or enabled_actions(actions):
         return max(tokens, C.MAX_ACTION_RESPONSE_TOKENS)
-    return max(tokens, C.MAX_TOOL_RESPONSE_TOKENS) if actions else tokens
+    if has_tools:
+        return max(tokens, C.MAX_TOOL_RESPONSE_TOKENS if allow_tool_calls else C.MAX_RESPONSE_TOKENS)
+    return tokens
 
 
 def _action_reply(
@@ -679,7 +709,9 @@ class _GroqClient:
             "messages": [{"role": "system", "content": system}]
             + [message.to_openai_payload() for message in messages],
             "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-            self.MAX_TOKENS_KEY: _output_tokens(messages, actions=(actions or tuple(spec.name for spec in specs)) if allow_tool_calls else ()),
+            self.MAX_TOKENS_KEY: _output_tokens(
+                messages, actions=actions, has_tools=bool(specs), allow_tool_calls=allow_tool_calls,
+            ),
             "stream": False,
         }
         if declarations:
@@ -783,6 +815,31 @@ class _GroqClient:
         return reply
 
 
+class _MistralClient(_GroqClient):
+    """Chat Completions oficial da Mistral, texto + ferramentas nativas."""
+
+    BASE_URL = "https://api.mistral.ai/v1/chat/completions"
+    PROVIDER = "mistral"
+    LABEL = "Mistral"
+    MAX_TOKENS_KEY = "max_tokens"
+
+    def _validate_request(self, model, messages) -> None:
+        if model not in C.MISTRAL_MODELS:
+            raise ProviderError("modelo Mistral não permitido", kind="model", stage="routing")
+        if any(message.images or message.image_urls for message in messages):
+            raise ProviderError("reserva Mistral aceita apenas texto", kind="model", stage="routing")
+
+    def _prepare_payload(self, payload: dict) -> None:
+        # Mistral Small 4 permite desligar a exposição/uso de raciocínio
+        # desnecessário para conversa cotidiana e tool routing simples.
+        payload["reasoning_effort"] = "none"
+        # A chave não contém IDs nem conteúdo do usuário; deriva apenas do
+        # prefixo system exato para favorecer o prompt cache do provedor.
+        system = str(payload.get("messages", [{}])[0].get("content", ""))
+        digest = hashlib.sha256(system.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+        payload["prompt_cache_key"] = "chatbot-system-" + digest
+
+
 class _CloudflareClient(_GroqClient):
     """Workers AI direto, apenas Qwen de texto e sem rotas pagas adicionais."""
 
@@ -844,10 +901,14 @@ class _CloudflareClient(_GroqClient):
     def _settle_request(self, reservation, usage: dict) -> None:
         if not reservation or reservation[0] != self._budget_day:
             return
-        if not {"input_tokens", "output_tokens"} <= usage.keys():
+        reported = usage.get("neurons") if isinstance(usage, dict) else None
+        if isinstance(reported, (int, float)) and not isinstance(reported, bool) and math.isfinite(reported) and reported >= 0:
+            actual = float(reported)
+        elif {"input_tokens", "output_tokens"} <= usage.keys():
+            actual = (usage["input_tokens"] * self._INPUT_NEURONS_PER_TOKEN
+                      + usage["output_tokens"] * self._OUTPUT_NEURONS_PER_TOKEN)
+        else:
             return  # Sem medição, manter reserva; timeout pode ter consumido.
-        actual = (usage["input_tokens"] * self._INPUT_NEURONS_PER_TOKEN
-                  + usage["output_tokens"] * self._OUTPUT_NEURONS_PER_TOKEN)
         self._budget_spent = max(0.0, self._budget_spent - reservation[1] + actual)
 
     def _visible_content(self, content):
@@ -1056,7 +1117,9 @@ class _GeminiClient:
             "systemInstruction": {"parts": [{"text": system}]},
             "generationConfig": {
                 "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-                "maxOutputTokens": _output_tokens(messages, actions=(actions or tuple(spec.name for spec in specs)) if allow_tool_calls else ()),
+                "maxOutputTokens": _output_tokens(
+                    messages, actions=actions, has_tools=bool(specs), allow_tool_calls=allow_tool_calls,
+                ),
             },
         }
         if declarations:
@@ -1155,13 +1218,16 @@ class _GeminiClient:
 class ProviderRouter:
     def __init__(
         self, session: aiohttp.ClientSession, *, groq_key: Optional[str] = None,
-        gemini_key: Optional[str] = None,
+        gemini_key: Optional[str] = None, mistral_key: Optional[str] = None,
+        mistral_enabled: bool = False,
         cloudflare_account_id: Optional[str] = None, cloudflare_key: Optional[str] = None,
         cloudflare_enabled: bool = False,
     ) -> None:
         self._session = session
         self._groq = _GroqClient(session, groq_key) if groq_key else None
         self._gemini = _GeminiClient(session, gemini_key) if gemini_key else None
+        self._mistral = _MistralClient(session, mistral_key) if mistral_enabled is True and mistral_key else None
+        self._mistral_setup = {"enabled": mistral_enabled is True, "api_key_configured": bool(mistral_key)}
         # Credenciais podem pertencer ao gerador de imagens. Ativar o chat é
         # uma escolha separada e explícita, nunca efeito de encontrar a chave.
         valid_account = isinstance(cloudflare_account_id, str) and bool(re.fullmatch(r"[A-Fa-f0-9]{32}", cloudflare_account_id))
@@ -1175,8 +1241,10 @@ class ProviderRouter:
         self._unsupported_tool_models: set[tuple[str, str]] = set()
         self._last_request: dict = {}
         self._request_report: ContextVar[dict | None] = ContextVar("chatbot_router_task_report", default=None)
-        log.info("chatbot: configuration groq_configured=%s gemini_configured=%s cloudflare_configured=%s cloudflare_enabled=%s", bool(self._groq), bool(self._gemini), bool(self._cloudflare), cloudflare_enabled is True)
-        if not self._groq and not self._gemini and not self._cloudflare:
+        log.info("chatbot: configuration groq_configured=%s gemini_configured=%s mistral_configured=%s mistral_enabled=%s cloudflare_configured=%s cloudflare_enabled=%s",
+                 bool(self._groq), bool(self._gemini), bool(self._mistral), mistral_enabled is True,
+                 bool(self._cloudflare), cloudflare_enabled is True)
+        if not self._groq and not self._gemini and not self._mistral and not self._cloudflare:
             log.warning("ProviderRouter: nenhuma API key configurada")
 
     def get_request_report(self) -> dict:
@@ -1200,6 +1268,7 @@ class ProviderRouter:
 
     def _all_models(self, provider: str, models: tuple[str, ...]) -> tuple[str, ...]:
         configured = (C.CLOUDFLARE_MODELS if provider == "cloudflare" else
+                      C.MISTRAL_MODELS if provider == "mistral" else
                       (*C.GROQ_MODELS, *C.GROQ_VISION_MODELS) if provider == "groq" else
                       (*C.GEMINI_MODELS, *getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS)))
         discovered = (*self._catalog_models(), *self._catalog_models(has_images=True)) if provider == "gemini" else ()
@@ -1283,6 +1352,7 @@ class ProviderRouter:
         for provider, text, vision, configured in (
             ("groq", groq_text, tuple(C.GROQ_VISION_MODELS), self._groq is not None),
             ("gemini", gemini_text, tuple(dict.fromkeys((*getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS), *self._catalog_models(has_images=True)))), self._gemini is not None),
+            ("mistral", tuple(C.MISTRAL_MODELS), (), self._mistral is not None),
             ("cloudflare", tuple(C.CLOUDFLARE_MODELS), (), self._cloudflare is not None),
         ):
             for model in dict.fromkeys((*text, *vision)):
@@ -1308,13 +1378,16 @@ class ProviderRouter:
                        and not (self._last_request.get("tools_requested") and item["tools_support"] == "unsupported")
                        for item in availability)
         return {
-            "configured": {"groq": self._groq is not None, "gemini": self._gemini is not None, "cloudflare": self._cloudflare is not None},
+            "configured": {"groq": self._groq is not None, "gemini": self._gemini is not None,
+                           "mistral": self._mistral is not None, "cloudflare": self._cloudflare is not None},
             "circuits": circuits,
             "earliest_retry_seconds": 0.0 if eligible else min(waits) if waits else None,
             "last_request": deepcopy(self._last_request),
-            "models": {"groq": groq_text, "gemini": gemini_text, "cloudflare": tuple(C.CLOUDFLARE_MODELS)},
+            "models": {"groq": groq_text, "gemini": gemini_text, "mistral": tuple(C.MISTRAL_MODELS),
+                       "cloudflare": tuple(C.CLOUDFLARE_MODELS)},
             "availability": availability,
             "model_discovery": discovery_state,
+            "mistral_setup": dict(self._mistral_setup),
             "cloudflare_setup": {**self._cloudflare_setup,
                                   "billing_verified": False,
                                   "budget": cloudflare_budget() if callable(cloudflare_budget) else {}},
@@ -1395,13 +1468,18 @@ class ProviderRouter:
             cached = tuple(model for model in self._catalog_models(has_images=has_images)
                            if model not in configured and self._available("gemini", model))[:2]
             attempts.append(("gemini", self._gemini, (*configured, *cached)))
+        if self._mistral and not has_images:
+            attempts.append(("mistral", self._mistral, C.MISTRAL_MODELS))
         if self._cloudflare and not has_images:
             attempts.append(("cloudflare", self._cloudflare, C.CLOUDFLARE_MODELS))
         if not has_images:
             by_provider = {attempt[0]: attempt for attempt in attempts}
             priority = text_provider_order if text_provider_order is not None else ("groq", "gemini")
-            names = tuple(name for name in dict.fromkeys((*priority, *by_provider)) if name != "cloudflare")
-            attempts = [by_provider[name] for name in (*names, "cloudflare") if name in by_provider]
+            primary = tuple(name for name in dict.fromkeys(priority) if name in {"groq", "gemini"})
+            # Mistral usa uma cota independente antes da reserva diária de
+            # neurons da Cloudflare, protegendo Qwen para indisponibilidade real.
+            names = tuple(dict.fromkeys((*primary, "mistral", "cloudflare", *by_provider)))
+            attempts = [by_provider[name] for name in names if name in by_provider]
         report = request_report if isinstance(request_report, dict) else {}
         report.clear()
         report.update(outcome="pending", mode=mode, attempts=[], skips=[], attempt_count=0,
@@ -1461,6 +1539,22 @@ class ProviderRouter:
         wants_tools = bool(actions or tool_specs)
         report["tools_requested"] = wants_tools
         has_native_history = any(message.tool_calls or message.role == "tool" for message in messages)
+        latest_user = next((message.content for message in reversed(messages)
+                            if message.role == "user" and isinstance(message.content, str)), "")
+        economy_route = (not has_images and not wants_tools and not has_native_history
+                         and len(latest_user.strip()) <= 700)
+        if economy_route:
+            preferred = {
+                "groq": ("openai/gpt-oss-20b", "openai/gpt-oss-120b"),
+                "gemini": ("gemini-2.5-flash-lite", "gemini-2.5-flash"),
+            }
+            reordered = []
+            for provider, client, models in attempts:
+                wanted = preferred.get(provider, ())
+                ordered = tuple(dict.fromkeys((*[name for name in wanted if name in models], *models)))
+                reordered.append((provider, client, ordered))
+            attempts = reordered
+        report["routing_profile"] = "economy" if economy_route else "full"
         repair_used = bool(repair_state and repair_state.get("used"))
         discovery_used = False
         native_schemas = {spec.name: spec.parameters for spec in tool_specs if spec.available}

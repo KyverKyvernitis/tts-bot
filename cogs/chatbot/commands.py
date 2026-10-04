@@ -96,12 +96,15 @@ class ChatbotCommandsMixin:
             allowed_roles += f" e mais {len(config.action_allowed_role_ids) - 5}"
         if len(config.action_allowed_channel_ids) > 5:
             allowed_channels += f" e mais {len(config.action_allowed_channel_ids) - 5}"
-        # A preferência salva continua sendo entre os dois provedores existentes.
-        # Cloudflare é sempre a reserva de texto, sem trocar o caminho de imagens.
+        # A preferência salva continua escolhendo apenas quem vem primeiro entre
+        # Groq/Gemini. Reservas independentes aparecem depois quando habilitadas.
         provider_order = " → ".join(
             {"groq": "Groq", "gemini": "Gemini"}[provider]
             for provider in config.text_provider_order if provider in {"groq", "gemini"}
-        ) + " → Cloudflare (texto)"
+        )
+        if C.MISTRAL_ENABLED:
+            provider_order += " → Mistral (texto)"
+        provider_order += " → Cloudflare (texto)"
         return (
             f"**Chatbot:** {'ativado' if config.enabled else 'desativado'}\n"
             f"**Canais permitidos:** {channels}\n"
@@ -155,6 +158,7 @@ class ChatbotCommandsMixin:
 
         for provider, title, models in (("groq", "Groq", C.GROQ_MODELS),
                                          ("gemini", "Gemini", C.GEMINI_MODELS),
+                                         ("mistral", "Mistral · Small 4", C.MISTRAL_MODELS),
                                          ("cloudflare", "Cloudflare · Qwen", C.CLOUDFLARE_MODELS)):
             if configured.get(provider) is not True:
                 if provider == "cloudflare":
@@ -170,6 +174,12 @@ class ChatbotCommandsMixin:
                     if setup.get("api_token_configured") is not True:
                         missing.append("token da API")
                     lines.append(f"**{title}:** falta {' e '.join(missing) or 'configuração'}; reserva de texto.")
+                elif provider == "mistral":
+                    setup = data.get("mistral_setup", {})
+                    if isinstance(setup, dict) and setup.get("enabled") is False:
+                        lines.append(f"**{title}:** desativada; use CHATBOT_MISTRAL_ENABLED=true para ativar a reserva.")
+                    else:
+                        lines.append(f"**{title}:** falta MISTRAL_API_KEY; reserva de texto.")
                 else:
                     lines.append(f"**{title}:** chave não configurada.")
                 continue
@@ -246,6 +256,9 @@ class ChatbotCommandsMixin:
                 if turn.get("usage_complete") is not True:
                     parts.append("contagem parcial")
                 lines.append("**Tokens do último turno medido:** " + ", ".join(parts) + ".")
+                resources = turn.get("resources")
+                if isinstance(resources, dict) and isinstance(resources.get("neurons"), (int, float)):
+                    lines.append(f"**Cloudflare no último turno:** {resources['neurons']:.3f} neurons reportados.")
                 return "\n".join(lines)
 
         last = data.get("last_request")

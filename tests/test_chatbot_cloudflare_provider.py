@@ -187,6 +187,15 @@ async def test_measured_usage_reconciles_estimate_and_missing_usage_keeps_reserv
 
 
 @pytest.mark.asyncio
+async def test_reported_neurons_override_local_token_estimate_when_available():
+    data = _groq("oi", finish="stop")
+    data["usage"] = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "neurons": 0.75}
+    client = P._CloudflareClient(_Session(_Response(data)), KEY, ACCOUNT)
+    assert await chat(client) == "oi"
+    assert client._budget_spent == pytest.approx(0.75)
+
+
+@pytest.mark.asyncio
 async def test_concurrent_reservations_do_not_both_fit_the_last_budget(monkeypatch):
     started, release = asyncio.Event(), asyncio.Event()
     data = _groq("ok", finish="stop")

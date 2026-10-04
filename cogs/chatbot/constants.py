@@ -87,6 +87,15 @@ GEMINI_MODELS = _env_csv(
 # Permite comparar conversa entre provedores sem alterar o caminho de visão.
 TEXT_PROVIDER_ORDER = _env_csv("CHATBOT_TEXT_PROVIDER_ORDER", ("groq", "gemini"))
 
+# Quarta reserva independente de texto. Mantida opt-in para não consumir cota
+# de uma conta Mistral só porque uma chave já existe no ambiente. A preferência
+# persistida continua escolhendo apenas quem vem primeiro entre Groq/Gemini;
+# Mistral e Cloudflare funcionam como reservas protegidas.
+MISTRAL_ENABLED = (
+    os.environ.get("CHATBOT_MISTRAL_ENABLED", "").strip().lower() == "true"
+)
+MISTRAL_MODELS = _env_csv("CHATBOT_MISTRAL_MODELS", ("mistral-small-latest",))
+
 # Reserva de texto independente, sem catálogo nem troca para modelos pagos.
 # O operador deve manter a conta no plano Workers Free; o endpoint não muda
 # automaticamente o plano nem verifica a cobrança da conta.
@@ -162,9 +171,13 @@ MEDIA_CONNECT_TIMEOUT_SECONDS = 5.0
 MEDIA_READ_TIMEOUT_SECONDS = 25.0
 
 # Máximo de tokens na resposta do modelo.
+# Tetos, não reservas fixas. O cliente escolhe um limite menor para pedidos
+# curtos; manter os tetos evita regressão em respostas realmente longas.
 MAX_RESPONSE_TOKENS = 500
-MAX_VISION_RESPONSE_TOKENS = 1000
-MAX_TOOL_RESPONSE_TOKENS = 1000
+MIN_RESPONSE_TOKENS = 220
+SHORT_RESPONSE_TOKENS = 320
+MAX_VISION_RESPONSE_TOKENS = 900
+MAX_TOOL_RESPONSE_TOKENS = 768
 MAX_ACTION_RESPONSE_TOKENS = 2000
 MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -221,6 +234,9 @@ TURN_LOCK_IDLE_TTL_SECONDS = 10 * 60.0
 # mesmo se a memória tiver mensagens antigas muito grandes.
 MAX_MEMORY_ENTRY_CHARS = 700
 MAX_USER_HISTORY_CONTEXT_CHARS = 6000
+# Orçamento normal menor; o teto acima só é usado quando a consulta realmente
+# se beneficia de histórico antigo relevante.
+TARGET_USER_HISTORY_CONTEXT_CHARS = 2800
 MAX_GUILD_CONTEXT_CHARS = 4000
 MAX_REPLY_CONTEXT_CHARS = 1600
 MAX_MODEL_REPLY_CHARS = 4000

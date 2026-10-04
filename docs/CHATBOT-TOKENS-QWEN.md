@@ -70,3 +70,25 @@ sudo journalctl -u tts-bot.service --since "30 minutes ago" --no-pager -o cat \
 Os testes locais simulam os provedores, o banco e o Discord; não gastam a franquia. Naturalidade em português, interpretação de ferramentas e qualidade de RP precisam ser avaliadas no uso real. Nenhuma quantidade de respostas diárias é prometida: ela varia conforme o contexto, o raciocínio, o tamanho da saída e o número de chamadas por turno.
 
 Fontes: [franquia Workers AI](https://developers.cloudflare.com/workers-ai/platform/pricing/), [modelo Qwen](https://developers.cloudflare.com/workers-ai/models/qwen3-30b-a3b-fp8/), [token e REST API](https://developers.cloudflare.com/workers-ai/get-started/rest-api/), [cache Groq](https://console.groq.com/docs/prompt-caching).
+
+## Quarta reserva: Mistral Small 4
+
+A quarta reserva de texto é opt-in e usa a API oficial da Mistral em `https://api.mistral.ai/v1/chat/completions`, com `mistral-small-latest`. Ela entra depois dos dois provedores principais (Groq/Gemini) e antes da reserva diária de neurons da Cloudflare. Assim, a preferência já salva entre Groq e Gemini não muda e o orçamento da Cloudflare fica mais protegido.
+
+A reserva só é criada quando existem as duas configurações abaixo:
+
+```dotenv
+MISTRAL_API_KEY=<sua chave da Mistral>
+CHATBOT_MISTRAL_ENABLED=true
+```
+
+O cliente envia `reasoning_effort=none` para o Mistral Small 4 e um `prompt_cache_key` derivado por hash apenas do prefixo de sistema estável. Ferramentas continuam usando function calling nativo e o circuito de falhas/fallback é o mesmo dos demais provedores. A chave nunca é mostrada no painel nem entra no estado passado ao modelo.
+
+## Economia adicional desta rodada
+
+- Conversas curtas deixam de reservar sempre o teto máximo de saída; o limite cresce conforme o tamanho do pedido e mantém tetos maiores para visão, ferramentas e propostas de ação.
+- Conversa textual simples prefere GPT-OSS 20B antes do 120B e Gemini Flash Lite antes do Flash. Turnos com ferramentas, visão ou histórico nativo preservam a ordem forte.
+- O histórico pessoal mantém sempre o último turno e escolhe turnos antigos por relevância local, com um orçamento normal menor e sem nova chamada de IA.
+- O catálogo inicial de ferramentas caiu para no máximo 5 contratos e cerca de 4.800 caracteres; `carregar_ferramentas` continua disponível para buscar contratos adicionais.
+- Recuperação automática de memória/conhecimento e resultados extensos de ferramentas usam limites menores; recibos de efeitos confirmados continuam preservados para impedir replay.
+- A telemetria do turno agora separa uso bem-sucedido de tokens gastos em tentativas descartadas, mede cache/raciocínio, registra neurons reportados pela Cloudflare e mede apenas tamanhos de contexto, sem persistir o conteúdo do prompt.

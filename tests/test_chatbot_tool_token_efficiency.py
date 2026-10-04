@@ -42,7 +42,7 @@ def test_local_selection_uses_catalog_metadata_not_command_names_and_reduces_sch
     assert "cultivar_orquideas" not in selection.selected_names
     metrics = selection.metrics()
     assert metrics["catalog_tools"] == 25
-    assert metrics["loaded_tools"] <= 7
+    assert metrics["loaded_tools"] <= 5
     assert metrics["loaded_schema_chars"] < metrics["catalog_schema_chars"] / 4
     # O catálogo integral continua ensinando até a função não selecionada.
     assert "cultivar_orquideas" in registry.capability_index()

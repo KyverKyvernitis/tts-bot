@@ -112,7 +112,7 @@ class ToolRegistry:
         # não uma promessa de disponibilidade. Isso mantém o prefixo estável.
         for spec in self._specs.values():
             description = re.split(r"(?<=[.!?])\s+", " ".join(spec.description.split()), maxsplit=1)[0]
-            description = description if len(description) <= 130 else description[:127].rstrip() + "..."
+            description = description if len(description) <= 90 else description[:87].rstrip() + "..."
             lines.append(f"{spec.name}: {description} [{spec.permission}]")
             actions = spec.capabilities or spec.parameters.get("properties", {}).get("action", {}).get("enum", ())
             if actions:

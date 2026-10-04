@@ -63,6 +63,29 @@ def test_measured_cache_is_subset_and_missing_attempt_marks_turn_partial():
     assert usage.result()["request_count_complete"] is False
 
 
+def test_turn_telemetry_separates_wasted_usage_neurons_and_context_without_content():
+    usage = TurnUsage()
+    usage.record_context({"system_chars": 1000, "history_chars": 800, "tool_schema_chars": 400})
+    usage.record({"outcome": "success", "request_count": 2, "generation_attempt_count": 2,
+                  "usage_attempt_count": 2, "usage_complete": True,
+                  "usage": {"input_tokens": 300, "output_tokens": 40, "total_tokens": 340,
+                            "cached_tokens": 150, "neurons": 1.25},
+                  "usage_field_attempts": {"input_tokens": 2, "output_tokens": 2, "total_tokens": 2},
+                  "attempts": [
+                      {"kind": "rate_limit", "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110, "neurons": .4}},
+                      {"kind": "success", "usage": {"input_tokens": 200, "output_tokens": 30, "total_tokens": 230, "neurons": .85}},
+                  ]})
+    result = usage.result()
+    assert result["resources"]["neurons"] == 1.25
+    assert result["wasted_usage"]["total_tokens"] == 110
+    assert result["successful_usage"]["total_tokens"] == 230
+    assert result["wasted_resources"]["neurons"] == .4
+    assert result["successful_resources"]["neurons"] == .85
+    assert result["fallback_attempts"] == 1
+    assert result["cache_hit_ratio"] == .5
+    assert result["context"]["peak"]["history_chars"] == 800
+
+
 @pytest.mark.parametrize("blocked,eligible,expected", [(2, 0, 0), (1, 1, .25), (0, 2, 1)])
 def test_spontaneous_participation_tracks_known_quota_pressure(blocked, eligible, expected):
     records = [{"provider": f"provider-{index}", "configured": True, "modes": ["text"],

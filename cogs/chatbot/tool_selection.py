@@ -14,8 +14,8 @@ from dataclasses import replace
 
 
 DISCOVERY_TOOL = "carregar_ferramentas"
-INITIAL_TOOL_LIMIT = 7
-INITIAL_SCHEMA_CHARS = 8500
+INITIAL_TOOL_LIMIT = 5
+INITIAL_SCHEMA_CHARS = 4800
 _CORE = (DISCOVERY_TOOL, "select_response_format", "preparar_resposta")
 _STOP = frozenset("""a ao aos as ate com como da das de do dos e em entre era essa
 esse esta estas este eu foi ha isso isto la mais mas me meu meus minha minhas

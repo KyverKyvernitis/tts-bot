@@ -182,9 +182,31 @@ async def test_same_prefix_and_native_history_survive_economical_reasoning(chain
     assert payload["tool_choice"] == "none" and payload["max_completion_tokens"] == C.MAX_RESPONSE_TOKENS
 
 
+
+
+@pytest.mark.asyncio
+async def test_short_text_prefers_smaller_primary_models_but_tools_keep_strong_order(monkeypatch):
+    monkeypatch.setattr(C, "GROQ_MODELS", ("openai/gpt-oss-120b", "openai/gpt-oss-20b"))
+    simple_session = _Session(_Response(_groq("oi", finish="stop")))
+    simple = P.ProviderRouter(simple_session, groq_key="offline-key")
+    report = {}
+    assert await simple.chat(system="s", messages=[P.ChatMessage("user", "oi")], request_report=report) == "oi"
+    assert simple_session.requests[0][1]["json"]["model"] == "openai/gpt-oss-20b"
+    assert report["routing_profile"] == "economy"
+
+    spec = ToolSpec("consulta", "Consulta curta.", {"type": "object", "properties": {}, "additionalProperties": False})
+    tool_session = _Session(_Response(_groq("pronto", finish="stop")))
+    tools = P.ProviderRouter(tool_session, groq_key="offline-key")
+    tool_report = {}
+    reply = await tools.chat(system="s", messages=[P.ChatMessage("user", "consulte")],
+                             tool_specs=(spec,), request_report=tool_report)
+    assert reply.provider == "groq"
+    assert tool_session.requests[0][1]["json"]["model"] == "openai/gpt-oss-120b"
+    assert tool_report["routing_profile"] == "full"
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["groq", "gemini", "cloudflare"])
-@pytest.mark.parametrize("stage,expected", [("text", 500), ("read", 1000), ("actions", 2000), ("closing", 500)])
+@pytest.mark.parametrize("stage,expected", [("text", C.MIN_RESPONSE_TOKENS), ("read", C.MAX_TOOL_RESPONSE_TOKENS), ("actions", C.MAX_ACTION_RESPONSE_TOKENS), ("closing", C.MAX_RESPONSE_TOKENS)])
 async def test_output_budget_follows_generation_stage_without_removing_declarations(provider, stage, expected):
     spec = ToolSpec("consultar_ferramentas", "Descobre ferramentas.",
                     {"type": "object", "properties": {}, "additionalProperties": False})
@@ -206,7 +228,7 @@ async def test_output_budget_follows_generation_stage_without_removing_declarati
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["groq", "gemini"])
-@pytest.mark.parametrize("stage,expected", [("vision", 1000), ("read", 1000), ("actions", 2000), ("closing", 1000)])
+@pytest.mark.parametrize("stage,expected", [("vision", C.MAX_VISION_RESPONSE_TOKENS), ("read", C.MAX_VISION_RESPONSE_TOKENS), ("actions", C.MAX_ACTION_RESPONSE_TOKENS), ("closing", C.MAX_VISION_RESPONSE_TOKENS)])
 async def test_vision_and_final_response_budgets_remain_unchanged(provider, stage, expected):
     declaration = proposal_tool(("send_audio",), ("autor",))
     spec = ToolSpec(declaration["name"], declaration["description"], declaration["parameters"])

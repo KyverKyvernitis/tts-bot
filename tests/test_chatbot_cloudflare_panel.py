@@ -34,6 +34,27 @@ def test_qwen_is_displayed_after_both_saved_provider_orders(order):
     assert config.text_provider_order == order
 
 
+
+
+def test_mistral_reserve_appears_in_order_only_when_enabled(monkeypatch):
+    config = GuildChatbotConfig(guild_id=10, text_provider_order=("groq", "gemini"))
+    monkeypatch.setattr(C, "MISTRAL_ENABLED", False)
+    assert "Mistral" not in ChatbotCommandsMixin._format_config(config)
+    monkeypatch.setattr(C, "MISTRAL_ENABLED", True)
+    rendered = ChatbotCommandsMixin._format_config(config)
+    assert "Groq → Gemini → Mistral (texto) → Cloudflare (texto)" in rendered
+
+
+def test_mistral_status_never_prints_key_and_explains_opt_in():
+    rendered = _render({
+        "configured": {"mistral": False}, "circuits": {},
+        "mistral_setup": {"enabled": False, "api_key_configured": True, "api_key": "PRIVATE_KEY"},
+    })
+    assert "Mistral · Small 4:** desativada" in rendered
+    assert "CHATBOT_MISTRAL_ENABLED=true" in rendered
+    assert "PRIVATE_KEY" not in rendered
+
+
 @pytest.mark.parametrize("account,token,missing", [
     (False, False, "ID da conta e token da API"),
     (True, False, "token da API"),

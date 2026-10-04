@@ -62,7 +62,7 @@ _RESULT_METADATA_FIELDS = frozenset({
 })
 
 
-def compact_tool_result(result, *, max_chars=12000, max_bytes=24000):
+def compact_tool_result(result, *, max_chars=6000, max_bytes=12000):
     """Limita detalhes de consultas sem perder um recibo já confirmado.
 
     Não transforma efeitos em erro nem cria um preview de JSON privado.
@@ -139,7 +139,9 @@ def safe_provider_state(router):
         return fallback
     configured = diagnostics.get("configured")
     if isinstance(configured, dict):
-        names = ("groq", "gemini", "cloudflare") if "cloudflare" in configured else ("groq", "gemini")
+        names = tuple(name for name in ("groq", "gemini", "mistral", "cloudflare") if name in configured)
+        if not names:
+            names = ("groq", "gemini")
         fallback["configured"] = {name: configured.get(name) if type(configured.get(name)) is bool else None
                                   for name in names}
     availability = diagnostics.get("availability")
@@ -154,7 +156,7 @@ def safe_provider_state(router):
                     provider, model = key.split("/", 1)
                     availability.append({"provider": provider, "model": model, **circuit})
     for item in availability[:32]:
-        if not isinstance(item, dict) or item.get("provider") not in ("groq", "gemini", "cloudflare"):
+        if not isinstance(item, dict) or item.get("provider") not in ("groq", "gemini", "mistral", "cloudflare"):
             continue
         model = item.get("model")
         model_pattern = (r"@cf/[A-Za-z0-9][A-Za-z0-9_./:-]{0,115}"
@@ -1044,7 +1046,7 @@ async def auto_retrieve_facts(registry, query):
     await runtime.guard()
     rows = await facts.retrieve(runtime.guild_id, runtime.channel_id, runtime.user_id,
                                 runtime.visibility_scope, runtime.epoch, query=query,
-                                limit=4, max_chars=1000)
+                                limit=3, max_chars=700)
     await runtime.guard()
     return rows
 

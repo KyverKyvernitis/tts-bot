@@ -132,11 +132,13 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._knowledge = KnowledgeStore(coll)
         groq_key = os.environ.get("GROQ_API_KEY", "").strip()
         gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        mistral_key = os.environ.get("MISTRAL_API_KEY", "").strip()
         cloudflare_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
         cloudflare_key = (os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
                           or os.environ.get("CLOUDFLARE_API_KEY", "").strip())
         self._router = ProviderRouter(
             self._session, groq_key=groq_key or None, gemini_key=gemini_key or None,
+            mistral_key=mistral_key or None, mistral_enabled=C.MISTRAL_ENABLED,
             cloudflare_account_id=cloudflare_account_id or None, cloudflare_key=cloudflare_key or None,
             cloudflare_enabled=C.CLOUDFLARE_ENABLED,
         )
@@ -150,8 +152,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._cleanup_task = self._supervisor.create(
             self._cooldown_cleanup_loop(), name="chatbot-cleanup",
         )
-        if not groq_key and not gemini_key and not (C.CLOUDFLARE_ENABLED and cloudflare_account_id and cloudflare_key):
-            log.warning("chatbot: configure Groq, Gemini ou Cloudflare para conversação")
+        if (not groq_key and not gemini_key and not (C.MISTRAL_ENABLED and mistral_key)
+                and not (C.CLOUDFLARE_ENABLED and cloudflare_account_id and cloudflare_key)):
+            log.warning("chatbot: configure Groq, Gemini, Mistral ou Cloudflare para conversação")
         log.info("chatbot: bot único carregado (schema=%s)", C.CHATBOT_SCHEMA_VERSION)
 
     async def cog_unload(self):
@@ -823,6 +826,35 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         except Exception as exc:
             log.warning("chatbot: vínculo da resposta indisponível (%s)", type(exc).__name__)
 
+    @staticmethod
+    def _context_metrics(system, messages, tool_specs=()):
+        """Mede caracteres realmente enviados, sem estimar tokens ou guardar conteúdo."""
+        system_text = str(system or "")
+        values = {"system_chars": len(system_text), "message_chars": 0, "history_chars": 0,
+                  "current_user_chars": 0, "quoted_context_chars": 0, "retrieved_data_chars": 0,
+                  "tool_result_chars": 0, "tool_schema_chars": 0, "image_count": 0}
+        rows = list(messages or ())
+        current_index = next((index for index in range(len(rows) - 1, -1, -1)
+                              if getattr(rows[index], "role", None) == "user"), None)
+        for index, message in enumerate(rows):
+            content = getattr(message, "content", "")
+            size = len(content) if isinstance(content, str) else 0
+            values["message_chars"] += size
+            values["image_count"] += len(getattr(message, "images", ()) or ()) + len(getattr(message, "image_urls", ()) or ())
+            if getattr(message, "role", None) == "tool":
+                values["tool_result_chars"] += size
+            elif index == current_index:
+                values["current_user_chars"] += size
+            else:
+                values["history_chars"] += size
+            if isinstance(content, str) and content.startswith("[CONTEXTO CITADO"):
+                values["quoted_context_chars"] += size
+            if isinstance(content, str) and content.startswith("[DADOS RECUPERADOS"):
+                values["retrieved_data_chars"] += size
+        from .tool_selection import declaration_chars
+        values["tool_schema_chars"] = sum(declaration_chars(spec) for spec in (tool_specs or ()) if getattr(spec, "available", True))
+        return values
+
     async def _call_chat(self, **options):
         """Captura o relatório próprio da chamada, inclusive fallback e reparo."""
         report = {}
@@ -835,6 +867,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             pass
         if supported:
             options["request_report"] = report
+        usage = _TURN_USAGE.get()
+        if usage is not None:
+            usage.record_context(self._context_metrics(options.get("system", ""), options.get("messages", ()),
+                                                       options.get("tool_specs", ())))
         try:
             return await self._router.chat(**options)
         finally:
@@ -947,7 +983,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 await guard()
                 entries = await knowledge.retrieve(
                     message.guild.id, message.channel.id, visibility, epoch, query=query,
-                    limit=3, max_chars=1200,
+                    limit=2, max_chars=800,
                 )
                 await guard()
                 return entries
@@ -1553,27 +1589,58 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 user = None
         return turns
 
-    def _personal_history_messages(self, entries: list[MemoryEntry]) -> list[ChatMessage]:
-        selected: list[list[ChatMessage]] = []
-        total = 0
+    def _personal_history_messages(self, entries: list[MemoryEntry], *, query: str = "") -> list[ChatMessage]:
         turns = self._complete_history_turns(entries)
-        for index, (user, assistant) in enumerate(reversed(turns)):
-            # O último turno merece contexto completo; os antigos são compactos.
-            limit = C.MAX_STORED_MESSAGE_CHARS if index == 0 else C.MAX_MEMORY_ENTRY_CHARS
+        if not turns:
+            return []
+        # Chamadas diretas/legadas sem query preservam o comportamento máximo.
+        # Em uso normal, 2.8k é o alvo para histórico antigo, mas o último turno
+        # completo continua prioritário até o teto de segurança de 6k.
+        max_budget = C.MAX_USER_HISTORY_CONTEXT_CHARS
+        target_budget = min(max_budget, getattr(C, "TARGET_USER_HISTORY_CONTEXT_CHARS", 2800))
+        selected: dict[int, list[ChatMessage]] = {}
+        from .tool_selection import text_terms
+        query_terms = set(text_terms(query))
+
+        def prepared(index):
+            user, assistant = turns[index]
+            latest = index == len(turns) - 1
+            limit = C.MAX_STORED_MESSAGE_CHARS if latest else C.MAX_MEMORY_ENTRY_CHARS
             question = self._clean_prompt_text(user.content, limit)
             answer = self._clean_prompt_text(assistant.content, limit)
-            cost = len(question) + len(answer)
-            if total + cost > C.MAX_USER_HISTORY_CONTEXT_CHARS:
-                if selected:
-                    break
-                # Um turno excepcionalmente longo ainda conserva os dois lados.
-                half = max(1, C.MAX_USER_HISTORY_CONTEXT_CHARS // 2)
-                question = self._clean_prompt_text(question, half)
-                answer = self._clean_prompt_text(answer, C.MAX_USER_HISTORY_CONTEXT_CHARS - len(question))
-                cost = len(question) + len(answer)
-            selected.append([ChatMessage("user", question), ChatMessage("assistant", answer)])
+            return [ChatMessage("user", question), ChatMessage("assistant", answer)]
+
+        # O último turno mantém continuidade e pode usar conteúdo integral.
+        latest_index = len(turns) - 1
+        latest = prepared(latest_index)
+        latest_cost = sum(len(item.content) for item in latest)
+        budget = max_budget if not str(query).strip() else min(max_budget, max(target_budget, latest_cost))
+        if latest_cost > max_budget:
+            half = max(1, max_budget // 2)
+            latest[0].content = self._clean_prompt_text(latest[0].content, half)
+            latest[1].content = self._clean_prompt_text(latest[1].content, max_budget - len(latest[0].content))
+            latest_cost = sum(len(item.content) for item in latest)
+            budget = max_budget
+        selected[latest_index] = latest
+        total = latest_cost
+
+        candidates = []
+        for index in range(len(turns) - 2, -1, -1):
+            pair = prepared(index)
+            terms = set(text_terms(pair[0].content + " " + pair[1].content))
+            overlap = len(query_terms & terms)
+            # Relevância primeiro, recência como desempate. Sem sobreposição,
+            # ainda conserva até um turno imediatamente anterior se houver espaço.
+            score = overlap * 1000 + index
+            candidates.append((score, index, pair, sum(len(item.content) for item in pair), overlap))
+        for _score, index, pair, cost, overlap in sorted(candidates, reverse=True):
+            if overlap == 0 and index < len(turns) - 2:
+                continue
+            if total + cost > budget:
+                continue
+            selected[index] = pair
             total += cost
-        return [message for turn in reversed(selected) for message in turn]
+        return [message for index in sorted(selected) for message in selected[index]]
 
     @staticmethod
     def _wants_collective_context(content: str, *, behavior_hint: str = "") -> bool:
@@ -1655,7 +1722,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         collective = self._format_guild_context(guild_context)
 
         messages: list[ChatMessage] = []
-        messages.extend(self._personal_history_messages(user_history))
+        messages.extend(self._personal_history_messages(user_history, query=user_message))
 
         # Mensagem nova do usuário com contextos delimitados no mesmo nível de
         # autoridade. O modelo é instruído a tratá-los apenas como citações.
