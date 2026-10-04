@@ -513,9 +513,24 @@ async def _http_error(response: aiohttp.ClientResponse, *, provider: str = "") -
                          diagnostic_code=diagnostic)
 
 
+_CONTEXT_DATA_PREFIXES = (
+    "[DADOS;", "[CITAÇÕES;", "[FERRAMENTAS;", "[DADOS RECUPERADOS", "[CONTEXTO CITADO",
+)
+
+
+def _latest_request_text(messages: list[ChatMessage]) -> str:
+    """Última fala real do usuário, ignorando envelopes de dados do host."""
+    for message in reversed(messages):
+        content = message.content if isinstance(message.content, str) else ""
+        if message.role == "user" and not content.startswith(_CONTEXT_DATA_PREFIXES):
+            return content
+    return ""
+
+
 def _output_tokens(
     messages: list[ChatMessage], *, actions: tuple[str, ...] = (),
     has_tools: bool = False, allow_tool_calls: bool = True,
+    max_output_tokens: int | None = None,
 ) -> int:
     has_images = any(message.images or message.image_urls for message in messages)
     if has_images:
@@ -523,8 +538,7 @@ def _output_tokens(
     else:
         # A maioria das conversas do Discord é curta. Reservar sempre o teto
         # máximo aumenta saída potencial e, no Workers AI, neurons de reserva.
-        latest = next((message.content for message in reversed(messages)
-                       if message.role == "user" and isinstance(message.content, str)), "")
+        latest = _latest_request_text(messages)
         visible = len(latest.strip())
         if visible <= 80:
             tokens = getattr(C, "TINY_RESPONSE_TOKENS", 160)
@@ -538,17 +552,29 @@ def _output_tokens(
     # etapas. Ferramentas de leitura precisam de espaço para JSON nativo; no
     # fechamento sem novas tools, 500 tokens bastam sem reabrir o teto de 768.
     if TOOL_NAME in actions or enabled_actions(actions):
-        return max(tokens, C.MAX_ACTION_RESPONSE_TOKENS)
-    if has_tools:
-        # Tool calls precisam de margem para argumentos estruturados. No
-        # fechamento sem novas chamadas, o teto conversacional já basta.
-        return max(tokens, C.MAX_TOOL_RESPONSE_TOKENS if allow_tool_calls else C.SHORT_RESPONSE_TOKENS)
-    if not allow_tool_calls and any(message.tool_calls or message.role == "tool" for message in messages):
-        # O fechamento pode receber uma consulta extensa mesmo quando a
-        # pergunta original era curta. Tiramos os schemas, não a margem para
-        # sintetizar os resultados já confirmados.
-        return max(tokens, C.SHORT_RESPONSE_TOKENS)
-    return tokens
+        result = max(tokens, C.MAX_ACTION_RESPONSE_TOKENS)
+    elif has_tools:
+        # Tool calls precisam de margem para argumentos estruturados. 512 cobre
+        # os contratos usuais; ações privilegiadas continuam no teto próprio.
+        result = max(tokens, C.MAX_TOOL_RESPONSE_TOKENS if allow_tool_calls else C.SHORT_RESPONSE_TOKENS)
+    elif not allow_tool_calls and any(message.tool_calls or message.role == "tool" for message in messages):
+        # Compatibilidade com históricos nativos legados. Históricos compactados
+        # usam envelope [FERRAMENTAS;...] e ainda recebem o mesmo piso abaixo.
+        result = max(tokens, C.SHORT_RESPONSE_TOKENS)
+    elif not allow_tool_calls and any(
+            isinstance(message.content, str) and message.content.startswith("[FERRAMENTAS;")
+            for message in messages):
+        result = max(tokens, C.SHORT_RESPONSE_TOKENS)
+    else:
+        result = tokens
+    if type(max_output_tokens) is int and max_output_tokens > 0:
+        # Nunca aplique um cap externo abaixo da margem estrutural enquanto
+        # novas tools/ações podem ser emitidas. Em fechamento/texto direto, o
+        # cap reduz saída desperdiçada (principalmente respostas espontâneas).
+        structural = bool(actions) or (has_tools and allow_tool_calls)
+        if not structural:
+            result = min(result, max_output_tokens)
+    return result
 
 
 def _action_reply(
@@ -709,6 +735,7 @@ class _GroqClient:
         target_refs: tuple[str, ...] = (),
         tool_specs: tuple[ToolSpec, ...] = (),
         allow_tool_calls: bool = True,
+        max_output_tokens: int | None = None,
     ) -> str | ChatReply:
         self._validate_request(model, messages)
         actions = enabled_actions(actions)
@@ -720,6 +747,7 @@ class _GroqClient:
             "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
             self.MAX_TOKENS_KEY: _output_tokens(
                 messages, actions=actions, has_tools=bool(specs), allow_tool_calls=allow_tool_calls,
+                max_output_tokens=max_output_tokens,
             ),
             "stream": False,
         }
@@ -1104,6 +1132,7 @@ class _GeminiClient:
         target_refs: tuple[str, ...] = (),
         tool_specs: tuple[ToolSpec, ...] = (),
         allow_tool_calls: bool = True,
+        max_output_tokens: int | None = None,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         specs, declarations = _tool_declarations(actions, target_refs, tool_specs)
@@ -1152,6 +1181,7 @@ class _GeminiClient:
                 "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
                 "maxOutputTokens": _output_tokens(
                     messages, actions=actions, has_tools=bool(specs), allow_tool_calls=allow_tool_calls,
+                    max_output_tokens=max_output_tokens,
                 ),
             },
         }
@@ -1465,7 +1495,7 @@ class ProviderRouter:
         target_refs: tuple[str, ...] = (), tool_specs: tuple[ToolSpec, ...] = (),
         text_provider_order: tuple[str, ...] | None = None,
         budget_seconds: float | None = None, allow_tool_calls: bool = True,
-        allow_protected_reserves: bool = True,
+        allow_protected_reserves: bool = True, max_output_tokens: int | None = None,
         repair_state: dict | None = None,
         request_report: dict | None = None,
     ) -> str | ChatReply:
@@ -1480,6 +1510,7 @@ class ProviderRouter:
                                     text_provider_order=text_provider_order, budget_seconds=budget_seconds,
                                     allow_tool_calls=allow_tool_calls,
                                     allow_protected_reserves=allow_protected_reserves,
+                                    max_output_tokens=max_output_tokens,
                                     repair_state=repair_state, request_report=report)
         finally:
             _REQUEST_REPORT.reset(token)
@@ -1490,7 +1521,7 @@ class ProviderRouter:
         target_refs: tuple[str, ...] = (), tool_specs: tuple[ToolSpec, ...] = (),
         text_provider_order: tuple[str, ...] | None = None,
         budget_seconds: float | None = None, allow_tool_calls: bool = True,
-        allow_protected_reserves: bool = True,
+        allow_protected_reserves: bool = True, max_output_tokens: int | None = None,
         repair_state: dict | None = None, request_report: dict | None = None,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
@@ -1577,8 +1608,7 @@ class ProviderRouter:
         wants_tools = bool(actions or tool_specs)
         report["tools_requested"] = wants_tools
         has_native_history = any(message.tool_calls or message.role == "tool" for message in messages)
-        latest_user = next((message.content for message in reversed(messages)
-                            if message.role == "user" and isinstance(message.content, str)), "")
+        latest_user = _latest_request_text(messages)
         closing_economy = not has_images and not allow_tool_calls
         economy_route = closing_economy or (
             not has_images and not wants_tools and not has_native_history
@@ -1630,6 +1660,8 @@ class ProviderRouter:
             entry = {"provider": provider, "model": model, "budget_ms": max(0, int(timeout * 1000)), "text_only": text_only, "repair": repair}
             report["attempts"].append(entry)
             kwargs = dict(system=system, messages=messages, temperature=temperature, model=model, timeout_seconds=timeout)
+            if type(max_output_tokens) is int and max_output_tokens > 0:
+                kwargs["max_output_tokens"] = max_output_tokens
             if feedback:
                 kwargs["system"] += "\n\n" + feedback
             if text_only:

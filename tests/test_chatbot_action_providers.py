@@ -273,7 +273,8 @@ async def test_only_native_action_payload_receives_budget_for_four_proposals(pro
     images = [PreparedImage("image/png", b"prepared image bytes")] if vision else []
     _, payload = await _call(provider, factory("texto"), images=images, actions=("send_audio",) if native else ())
     tokens = payload["max_completion_tokens"] if provider == "groq" else payload["generationConfig"]["maxOutputTokens"]
-    assert tokens == (2000 if native else 1000 if vision else 500)
+    assert tokens == (C.MAX_ACTION_RESPONSE_TOKENS if native else
+                      C.MAX_VISION_RESPONSE_TOKENS if vision else C.TINY_RESPONSE_TOKENS)
 
 
 @pytest.mark.parametrize("provider", ["groq", "gemini"])

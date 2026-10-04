@@ -72,6 +72,12 @@ def call(identifier, name, **arguments):
     return NativeToolCall(identifier, name, arguments)
 
 
+def tool_evidence(messages):
+    item = next(message for message in messages
+                if message.role == "user" and message.content.startswith("[FERRAMENTAS;"))
+    return json.loads(item.content.split("\n", 2)[1])
+
+
 @pytest.mark.asyncio
 async def test_saved_audio_mode_applies_to_following_question_without_repeat(native):
     native.cog._router.chat.side_effect = [
@@ -159,11 +165,13 @@ async def test_repeated_identical_read_is_reused_and_forces_final_round(native):
     assert reads == [{"query": "x"}]
     assert native.cog._router.chat.await_count == 3
     messages = native.cog._router.chat.await_args.kwargs["messages"]
-    second = next(item for item in messages if item.role == "tool" and item.tool_call_id == "read-b")
-    assert json.loads(second.content) == {
+    evidence = tool_evidence(messages)
+    assert evidence[-1]["tool"] == "read_test"
+    assert evidence[-1]["result"] == {
         "ok": True, "status": "reused_read", "source_tool_call_id": "read-a",
         "detail": "Resultado idêntico já está no histórico desta rodada; não repetir a consulta.",
     }
+    assert not any(item.role == "tool" or item.tool_calls for item in messages)
     assert native.cog._last_turn_usage["tools"] == {"seen": 2, "executed": 1, "reused_reads": 1}
     closing = native.cog._router.chat.await_args.kwargs
     assert closing["allow_tool_calls"] is False

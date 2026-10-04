@@ -77,6 +77,12 @@ def call(identifier, name, **arguments):
     return NativeToolCall(identifier, name, arguments)
 
 
+def tool_evidence(messages):
+    item = next(message for message in messages
+                if message.role == "user" and message.content.startswith("[FERRAMENTAS;"))
+    return json.loads(item.content.split("\n", 2)[1])
+
+
 def reply_calls(*calls):
     return ChatReply("PRIVATE_INTERMEDIATE_PREVIEW", tool_calls=calls)
 
@@ -115,7 +121,8 @@ async def test_conversion_finishes_after_all_legitimate_calls_in_the_same_batch(
     assert state["delivered"] and state["response_complete"] and not state["partial"]
     assert state["effects_confirmed"] == [{"name": "control_music", "status": "music_control_applied", "public_result": "Música pausada."}]
     assert result.text == "" and not result.tool_calls
-    assert [message.tool_call_id for message in messages if message.role == "tool"] == ["convert", "music"]
+    assert [item["tool"] for item in tool_evidence(messages)] == ["convert_reply_audio", "control_music"]
+    assert not any(message.role == "tool" or message.tool_calls for message in messages)
     delivery.cog._router.chat.assert_awaited_once()
 
 
@@ -200,7 +207,7 @@ async def test_effect_deadline_cancels_work_without_replay_or_following_effect(d
 
 
 @pytest.mark.asyncio
-async def test_four_successful_query_rounds_have_one_final_round_with_native_history_preserved(delivery):
+async def test_four_successful_query_rounds_have_one_final_round_with_compact_evidence(delivery):
     delivery.cog._router.chat.side_effect = [reply_calls(call(str(i), "read_state")) for i in range(4)] + [ChatReply("O resultado é 42.")]
     result, _registry, state, messages = await loop(delivery)
     assert result.text == "O resultado é 42." and not state.get("limit_reached")
@@ -208,8 +215,9 @@ async def test_four_successful_query_rounds_have_one_final_round_with_native_his
     assert delivery.cog._router.chat.await_count == 5
     last = delivery.cog._router.chat.await_args.kwargs
     assert last["allow_tool_calls"] is False and last["tool_specs"] == ()
-    assert [message.tool_call_id for message in messages if message.role == "tool"] == ["0", "1", "2", "3"]
-    assert [message.tool_calls[0].id for message in messages if message.role == "assistant"] == ["0", "1", "2", "3"]
+    evidence = tool_evidence(messages)
+    assert [item["tool"] for item in evidence] == ["read_state"] * 4
+    assert not any(message.role == "tool" or message.tool_calls for message in messages)
 
 
 @pytest.mark.asyncio
@@ -276,7 +284,7 @@ async def test_normal_model_attempt_reserves_time_for_final_when_it_uses_its_who
     assert budgets == [47, 44, 8]
     assert result.text == "O dado confirmado é 42." and not state.get("deadline")
     assert delivery.events == ["query"]
-    assert [item.tool_call_id for item in messages if item.role == "tool"] == ["known-query"]
+    assert [item["tool"] for item in tool_evidence(messages)] == ["read_state"]
 
 
 @pytest.mark.asyncio
@@ -298,7 +306,7 @@ async def test_slow_read_cannot_consume_the_reserved_final_response_time(deliver
     assert delivery.cog._router.chat.await_count == 2
     final = delivery.cog._router.chat.await_args.kwargs
     assert final["allow_tool_calls"] is False and 0 < final["budget_seconds"] <= .018
-    assert json.loads(messages[-1].content)["status"] == "deadline"
+    assert tool_evidence(messages)[-1]["result"]["status"] == "deadline"
 
 
 @pytest.mark.asyncio

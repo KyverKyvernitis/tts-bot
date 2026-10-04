@@ -470,13 +470,13 @@ async def test_final_no_tools_round_keeps_declarations_and_native_history(provid
     if provider == "groq":
         assert payload["tool_choice"] == "none" and payload["tools"][0]["function"]["name"] == READ.name
         assert payload["messages"][-1]["tool_call_id"] == "native_id"
-        assert payload["max_completion_tokens"] == C.MAX_RESPONSE_TOKENS
+        assert payload["max_completion_tokens"] == C.SHORT_RESPONSE_TOKENS
     else:
         assert payload["toolConfig"]["functionCallingConfig"]["mode"] == "NONE"
         assert payload["tools"][0]["functionDeclarations"][0]["name"] == READ.name
         assert payload["contents"][0]["parts"] == [signature]
         assert payload["contents"][1]["parts"][0]["functionResponse"]["id"] == "native_id"
-        assert payload["generationConfig"]["maxOutputTokens"] == C.MAX_RESPONSE_TOKENS
+        assert payload["generationConfig"]["maxOutputTokens"] == C.SHORT_RESPONSE_TOKENS
 
 
 @pytest.mark.asyncio

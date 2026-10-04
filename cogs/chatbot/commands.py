@@ -300,8 +300,10 @@ class ChatbotCommandsMixin:
                 savings = turn.get("local_savings_chars")
                 if isinstance(savings, dict):
                     saved_parts = []
-                    labels = {"tool_preface_history": "prévias privadas", "closing_state": "estado de fechamento"}
-                    for key in ("tool_preface_history", "closing_state"):
+                    labels = {"tool_preface_history": "prévias privadas",
+                              "closing_state": "estado de fechamento",
+                              "tool_protocol_compaction": "protocolo de ferramentas"}
+                    for key in ("tool_preface_history", "closing_state", "tool_protocol_compaction"):
                         value = savings.get(key)
                         if token_number(value) and value:
                             saved_parts.append(f"{labels[key]} {value}")
