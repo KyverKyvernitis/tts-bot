@@ -6,6 +6,7 @@ import io
 import logging
 import math
 import os
+import re
 from typing import Optional
 
 import discord
@@ -134,25 +135,80 @@ class ChatbotCommandsMixin:
             return "**Disponibilidade:** diagnóstico ainda indisponível."
 
         lines = []
+        effective_models = data.get("models", {})
+        if not isinstance(effective_models, dict):
+            effective_models = {}
+
+        def wait_text(seconds):
+            seconds = max(1, min(86400, math.ceil(seconds)))
+            if seconds < 60:
+                return f"{seconds}s"
+            if seconds < 3600:
+                return f"{math.ceil(seconds / 60)}min"
+            hours, minutes = divmod(math.ceil(seconds / 60), 60)
+            return f"{hours}h{minutes:02d}min"
+
         for provider, title, models in (("groq", "Groq", C.GROQ_MODELS),
                                          ("gemini", "Gemini", C.GEMINI_MODELS)):
             if configured.get(provider) is not True:
                 lines.append(f"**{title}:** chave não configurada.")
                 continue
+            candidates = effective_models.get(provider)
+            if isinstance(candidates, (tuple, list)):
+                safe_models = tuple(dict.fromkeys(name for name in candidates
+                    if isinstance(name, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}", name)))[:32]
+                if safe_models:
+                    models = safe_models
             states = [circuits.get(f"{provider}/{model}") for model in models]
             waiting = [state for state in states if isinstance(state, dict) and state.get("available") is False]
             if len(waiting) != len(models) or not models:
                 lines.append(f"**{title}:** configurado; {'há modelos em espera' if waiting else 'sem bloqueio local'}.")
-                continue
-            retries = []
-            for state in waiting:
+            else:
+                retries = []
+                for state in waiting:
+                    if state.get("last_kind") in {"model", "auth"} or state.get("last_status") in {401, 403, 404}:
+                        continue
+                    delay = state.get("cooldown_seconds")
+                    if isinstance(delay, (float, int)) and not isinstance(delay, bool) and math.isfinite(delay):
+                        retries.append(delay)
+                delay_text = f"; próxima tentativa em cerca de {wait_text(min(retries))}" if retries else ""
+                if all(state.get("last_kind") == "auth" or state.get("last_status") == 401 for state in waiting):
+                    status = "credencial recusada"
+                elif all(state.get("last_kind") == "model" or state.get("last_status") == 404 for state in waiting):
+                    status = "modelos indisponíveis na API"
+                else:
+                    status = "temporariamente indisponível"
+                lines.append(f"**{title}:** {status}{delay_text}.")
+            reasons = {"rate_limit": "limite de uso", "model": "modelo indisponível", "auth": "credencial recusada",
+                       "invalid_response": "chamada de ferramenta ou resposta inválida", "timeout": "tempo esgotado",
+                       "network": "falha de conexão", "server": "falha do serviço"}
+            shown = 0
+            for model, state in zip(models, states):
+                if not isinstance(state, dict) or state.get("available") is not False:
+                    continue
+                if shown >= 2:
+                    break
+                reason = reasons.get(state.get("last_kind"), "aguardando nova tentativa")
                 delay = state.get("cooldown_seconds")
-                if isinstance(delay, (float, int)) and not isinstance(delay, bool) and math.isfinite(delay):
-                    retries.append(max(1, min(86400, math.ceil(delay))))
-            delay_text = f"; próxima tentativa em cerca de {min(retries)}s" if retries else ""
-            status = "credencial recusada" if all(state.get("last_kind") == "auth" or state.get("last_status") == 401
-                                                    for state in waiting) else "temporariamente indisponível"
-            lines.append(f"**{title}:** {status}{delay_text}.")
+                suffix = ""
+                if state.get("last_kind") not in {"model", "auth"} and isinstance(delay, (float, int)) and not isinstance(delay, bool) and math.isfinite(delay):
+                    suffix = f"; espera de cerca de {wait_text(delay)}"
+                # Apenas IDs de modelos declarados/localmente validados são exibidos.
+                if isinstance(model, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}", model):
+                    lines.append(f"{model}: {reason}{suffix}.")
+                    shown += 1
+
+        last = data.get("last_request")
+        attempts = last.get("attempts") if isinstance(last, dict) else None
+        if isinstance(attempts, list):
+            for attempt in reversed(attempts):
+                usage = attempt.get("usage") if isinstance(attempt, dict) else None
+                if not isinstance(usage, dict):
+                    continue
+                values = [usage.get(key) for key in ("input_tokens", "output_tokens")]
+                if all(isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000_000 for value in values):
+                    lines.append(f"**Tokens da última tentativa medida:** entrada {values[0]}, saída {values[1]}.")
+                    break
         return "\n".join(lines)
 
     async def _do_configurar(self, interaction: discord.Interaction):

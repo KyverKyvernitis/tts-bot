@@ -13,7 +13,12 @@ MAX_TOOL_ARGUMENT_BYTES = 8192
 
 
 class InvalidToolArguments(ValueError):
-    pass
+    """Erro público genérico com metadados derivados do schema, nunca do valor."""
+
+    def __init__(self, message="Argumentos inválidos.", *, code="invalid_arguments", path="$"):
+        super().__init__(message)
+        self.code = code
+        self.path = path
 
 
 @dataclass(frozen=True)
@@ -95,6 +100,7 @@ def tool_summary(specs) -> str:
         "Ferramentas reais deste turno. Escolha quando forem úteis à conversa e use chamadas nativas.",
         "Parâmetros e referências internas são resolvidos pelo sistema; nunca peça códigos internos ao usuário.",
         "Só confirme um efeito depois do resultado real. Pedidos à staff aguardam aprovação; não concedem permissão.",
+        "As declarações nativas trazem o contrato completo; este catálogo resume função, disponibilidade e requisitos.",
     ]
     for spec in specs:
         if not spec.available:
@@ -102,22 +108,41 @@ def tool_summary(specs) -> str:
             continue
         required = spec.parameters.get("required", [])
         arguments = ", ".join(required) if required else "nenhum obrigatório"
-        lines.append(f"{spec.name}: {spec.description[:1000]} Requisitos: {spec.permission}. Argumentos obrigatórios: {arguments}.")
+        # O contrato detalhado já segue na declaração nativa. Repeti-lo no
+        # system prompt consome tokens em todo turno e em cada rodada de tools.
+        description = re.split(r"(?<=[.!?])\s+", " ".join(spec.description.split()), maxsplit=1)[0]
+        if len(description) > 160:
+            description = description[:157].rstrip() + "..."
+        lines.append(f"{spec.name}: {description} Requisitos: {spec.permission}. Argumentos obrigatórios: {arguments}.")
+        actions = spec.parameters.get("properties", {}).get("action", {}).get("enum", ())
+        if actions:
+            lines.append("Ações disponíveis nesta ferramenta (valores de action, não nomes de ferramentas): " + ", ".join(actions) + ".")
     return "\n".join(lines)
 
 
 def validate_tool_arguments(arguments: Any, schema: dict) -> dict:
     if not isinstance(arguments, dict):
-        raise InvalidToolArguments("Argumentos inválidos.")
+        raise InvalidToolArguments(code="type")
     try:
-        if len(json.dumps(arguments, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TOOL_ARGUMENT_BYTES:
-            raise InvalidToolArguments("Argumentos inválidos.")
+        argument_size = len(json.dumps(arguments, ensure_ascii=False, allow_nan=False).encode("utf-8"))
     except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
-        raise InvalidToolArguments("Argumentos inválidos.") from exc
+        raise InvalidToolArguments(code="serialization") from exc
+    if argument_size > MAX_TOOL_ARGUMENT_BYTES:
+        raise InvalidToolArguments(code="argument_size")
 
-    def check(value, node, depth=0):
-        if depth > 12 or not isinstance(node, dict):
-            raise InvalidToolArguments("Argumentos inválidos.")
+    def child_path(path, key):
+        # key somente vem de properties/required do schema do host. Nunca
+        # inclua os nomes de campos extras escritos pelo modelo nos logs.
+        return path + "/" + str(key).replace("~", "~0").replace("/", "~1")
+
+    def fail(code, path):
+        raise InvalidToolArguments(code=code, path=path)
+
+    def check(value, node, depth=0, path="$"):
+        if depth > 12:
+            fail("max_depth", path)
+        if not isinstance(node, dict):
+            fail("invalid_schema", path)
         kind = node.get("type")
         valid = {
             "object": isinstance(value, dict), "array": isinstance(value, list),
@@ -127,38 +152,47 @@ def validate_tool_arguments(arguments: Any, schema: dict) -> dict:
             "null": value is None,
         }
         if kind and not (any(valid.get(item, False) for item in kind) if isinstance(kind, list) else valid.get(kind, False)):
-            raise InvalidToolArguments("Argumentos inválidos.")
+            fail("type", path)
         if "enum" in node and value not in node["enum"]:
-            raise InvalidToolArguments("Argumentos inválidos.")
+            fail("enum", path)
         if isinstance(value, dict):
             properties = node.get("properties", {})
-            if any(key not in value for key in node.get("required", [])):
-                raise InvalidToolArguments("Argumentos inválidos.")
+            for key in node.get("required", []):
+                if key not in value:
+                    fail("required", child_path(path, key))
             if node.get("additionalProperties") is False and set(value) - set(properties):
-                raise InvalidToolArguments("Argumentos inválidos.")
+                fail("additional_properties", path)
             for key, item in value.items():
                 if key in properties:
-                    check(item, properties[key], depth + 1)
+                    check(item, properties[key], depth + 1, child_path(path, key))
         elif isinstance(value, list):
-            if len(value) > node.get("maxItems", 100) or len(value) < node.get("minItems", 0):
-                raise InvalidToolArguments("Argumentos inválidos.")
+            if len(value) > node.get("maxItems", 100):
+                fail("max_items", path)
+            if len(value) < node.get("minItems", 0):
+                fail("min_items", path)
             for item in value:
-                check(item, node.get("items", {}), depth + 1)
+                check(item, node.get("items", {}), depth + 1, path + "/*")
         elif isinstance(value, str):
-            if "\x00" in value or len(value) > node.get("maxLength", MAX_TOOL_ARGUMENT_BYTES) or len(value) < node.get("minLength", 0):
-                raise InvalidToolArguments("Argumentos inválidos.")
+            if "\x00" in value:
+                fail("null_character", path)
+            if len(value) > node.get("maxLength", MAX_TOOL_ARGUMENT_BYTES):
+                fail("max_length", path)
+            if len(value) < node.get("minLength", 0):
+                fail("min_length", path)
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            if value < node.get("minimum", float("-inf")) or value > node.get("maximum", float("inf")):
-                raise InvalidToolArguments("Argumentos inválidos.")
+            if value < node.get("minimum", float("-inf")):
+                fail("minimum", path)
+            if value > node.get("maximum", float("inf")):
+                fail("maximum", path)
         for option in node.get("anyOf", []):
             try:
-                check(value, option, depth + 1)
+                check(value, option, depth + 1, path)
                 break
             except InvalidToolArguments:
                 pass
         else:
             if node.get("anyOf"):
-                raise InvalidToolArguments("Argumentos inválidos.")
+                fail("any_of", path)
 
     check(arguments, schema)
     return deepcopy(arguments)

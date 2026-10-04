@@ -190,7 +190,7 @@ async def test_each_model_round_sees_fresh_calls_and_saved_draft_without_executi
              "target_id": "41", "target_ref": "m1", "target_name": "alvo",
              "reason": "", "missing_fields": ["reason"], "options": {"duration_seconds": 600},
              "expires_at": "2026-10-04T12:00:00Z"}
-    native.extra_specs.append(ToolSpec("save_action_draft", "Guarde o rascunho incompleto.",
+    native.extra_specs.append(ToolSpec("save_action_draft", "Guarde o rascunho incompleto. Salve antes de perguntar o campo que falta; guardar não executa a ação.",
                                       {"type": "object", "properties": {}},
                                       handler=AsyncMock(), permission="automatic_effect"))
     systems = []
@@ -218,7 +218,8 @@ async def test_each_model_round_sees_fresh_calls_and_saved_draft_without_executi
     assert second["voice_state"]["bot"]["channel_id"] == "777"
     assert second["voice_state"]["can_listen"] is False
     assert first["action_draft"] is None and second["action_draft"] == draft
-    assert "antes de perguntar" in systems[1]
+    declared = native.cog._router.chat.await_args.kwargs["tool_specs"]
+    assert "antes de perguntar" in next(spec.description for spec in declared if spec.name == "save_action_draft")
     assert native.message.reply.await_args.args == ("Qual foi o motivo?",)
     assert len(native.refreshes) == 2
     native.tts.synthesize_chatbot_attachment.assert_not_awaited()

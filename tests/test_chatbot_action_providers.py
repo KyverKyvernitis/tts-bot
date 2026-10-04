@@ -127,7 +127,7 @@ async def test_native_schema_uses_only_concrete_host_target_refs_and_audio_omits
     })]), target_refs=("autor", "m1", "m1", "m2"))
     tool = payload["tools"][0]["function"] if provider == "groq" else payload["tools"][0]["functionDeclarations"][0]
     target_schema = tool["parameters"]["properties"]["target_ref"]
-    assert target_schema["enum"] == ["autor", "m1", "m2"]
+    assert target_schema["enum"] == ["", "autor", "m1", "m2"]
     assert "omita target_ref" in tool["description"]
     assert "Entrar/mudar" not in tool["description"]
     assert "Omita em send_audio/speak_voice" in target_schema["description"]
@@ -324,13 +324,14 @@ async def test_router_returns_only_successful_fallback_proposals(monkeypatch, ca
     monkeypatch.setattr(C, "TEXT_PROVIDER_ORDER", ("groq", "gemini"))
     session = _Session(
         _Response(_groq(calls=[("private invalid tool", {"private": "first proposed data"})])),
+        _Response(_groq(calls=[("private invalid tool", {"private": "repair proposed data"})])),
         _Response(_gemini(calls=[(TOOL_NAME, {"action": "send_audio", "text": "fala final"})])),
     )
     reply = await ProviderRouter(session, groq_key="private", gemini_key="private").chat(
         system="private system", messages=[ChatMessage("user", "oi")], actions=("send_audio",),
     )
     assert reply == ChatReply("", (ActionProposal("send_audio", text="fala final"),), "gemini", "gemini-model")
-    assert len(session.requests) == 2
+    assert len(session.requests) == 3
     assert "private" not in caplog.text
 
 
@@ -365,13 +366,14 @@ async def test_router_does_not_forward_private_failed_output_to_fallback_or_publ
             (TOOL_NAME, {"action": "send_audio", "text": secret, "ask_permission": True}),
             ("unknown", {"private": secret}),
         ])),
+        _Response(_groq(calls=[("unknown", {"private": secret})])),
         _Response(_gemini("resposta comum do fallback")),
     )
     reply = await ProviderRouter(session, groq_key="key", gemini_key="key").chat(
         system="s", messages=[ChatMessage("user", "oi")], actions=("send_audio",),
     )
     assert reply.text == "resposta comum do fallback" and not reply.proposals
-    assert secret not in json.dumps(session.requests[1][1]["json"])
+    assert all(secret not in json.dumps(request[1]["json"]) for request in session.requests[1:])
     assert secret not in caplog.text
 
 

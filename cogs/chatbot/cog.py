@@ -802,6 +802,21 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
     ):
         """Rodadas limitadas do modelo; somente o catálogo pode executar ferramentas."""
         started = time.monotonic()
+        # Uma rejeição de contrato pode ser reparada uma vez no turno inteiro,
+        # mesmo quando uma consulta exige novas rodadas do modelo.
+        repair_state = {"used": False}
+        repair_options = {}
+        try:
+            parameters = inspect.signature(self._router.chat).parameters
+            repair_parameter = parameters.get("repair_state")
+            if (repair_parameter is not None and repair_parameter.kind in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
+            }) or any(
+                item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+            ):
+                repair_options["repair_state"] = repair_state
+        except (TypeError, ValueError):
+            pass  # Adaptadores legados sem contrato explícito continuam compatíveis.
         from .action_policy import ActionDenied
         state = {"delivered": False, "audio_sent": False, "uncertain": False, "action_failed": False,
                  "preferences": preferences, "response_complete": False, "effects_confirmed": [],
@@ -822,8 +837,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 state["reason"] = str(exc)
                 return ChatReply(""), None, state
         voice_state = build_voice_snapshot(self.bot, message.guild, message.author)
+        from .tool_runtime import conversation_references, safe_provider_state
         me = getattr(message.guild, "me", None) or getattr(self.bot, "user", None)
         actual_state = {
+            "providers": safe_provider_state(self._router),
             "guild_id": int(message.guild.id), "channel_id": int(message.channel.id),
             "user_id": int(message.author.id),
             "bot_id": int(getattr(getattr(self.bot, "user", None), "id", 0) or 0),
@@ -841,8 +858,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if action_context is not None:
             actual += "\n" + action_context.description
         if registry is None:
+            options = {**router_options, **repair_options}
             reply = await self._router.chat(system=actual + "\n\n" + system, messages=messages,
-                                            temperature=temperature, **router_options)
+                                            temperature=temperature, **options)
             return reply, None, state
         from .tool_runtime import execute_native_tool, refresh_tool_context
         calls_used = 0
@@ -888,6 +906,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             actual_state["voice_channel_id"] = voice_state["bot"]["channel_id"]
             actual_state["action_draft"] = getattr(runtime_context, "action_draft", None)
             actual_state["action_draft_error"] = getattr(runtime_context, "action_draft_error", "")
+            actual_state["providers"] = safe_provider_state(self._router)
+            context = getattr(runtime_context, "action_context", action_context)
+            actual_state["references"] = conversation_references(self, message, context)
             remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
             if remaining <= 0:
                 state["deadline"] = True
@@ -905,16 +926,13 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             current = "Estado confirmado deste turno: " + json.dumps(actual_state, ensure_ascii=False)
             if effective_mode == "audio":
                 current += f"\nEntregue a resposta de conversa em áudio, completa em até {MAX_TTS_CHARS} caracteres, sem prévia em texto."
-            if current_preferences.language:
-                current += "\nIdioma solicitado para esta conversa: " + current_preferences.language
-            draft_tool = registry.get("save_action_draft")
-            if draft_tool is not None and draft_tool.available:
-                current += ("\nSe faltar uma informação para uma ação, guarde o rascunho com save_action_draft "
-                            "antes de perguntar. Continue o rascunho confirmado usando as ferramentas e os novos "
-                            "argumentos; guardar ou consultar um rascunho não executa a ação.")
-            context = getattr(runtime_context, "action_context", action_context)
-            if context is not None:
-                current += "\n" + context.description
+            # O catálogo/schema contém as regras uma única vez. O estado só
+            # acrescenta identidades, acesso e preferências reais deste turno.
+            current += ("\nRespeite o idioma de preferences.language quando definido. "
+                        "providers retrata circuitos locais, sem testar a conexão: available indica "
+                        "elegibilidade, não garantia de que a API responderá. Não invente cotas restantes. "
+                        "Use o estado confirmado já fornecido; consulte só dados ausentes ou que precisam de atualização. "
+                        "Agrupe consultas de leitura independentes na mesma rodada.")
             remaining = C.TOOL_LOOP_BUDGET_SECONDS - (time.monotonic() - started)
             if remaining <= 0:
                 state["deadline"] = True
@@ -936,6 +954,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     system=registry.summary() + "\n\n" + current + "\n\n" + system,
                     messages=messages, temperature=temperature, tool_specs=registry.get_specs(),
                     text_provider_order=config.text_provider_order, budget_seconds=request_budget, **final_options,
+                    **repair_options,
                 )
             except (ProviderError, asyncio.TimeoutError) as exc:
                 if (not final_round and can_finalize
@@ -1268,6 +1287,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
     def _chat_failure_text(exc: Exception, *, had_images: bool) -> str:
         kind = getattr(exc, "kind", "")
         stage = getattr(exc, "stage", "")
+        causes = getattr(exc, "causes", ())
+        alternative_limited = isinstance(causes, (tuple, list)) and any(
+            isinstance(cause, dict) and cause.get("kind") == "rate_limit" for cause in causes
+        )
         if isinstance(exc, ImagePreparationError) or stage == "attachment":
             if kind == "size":
                 return "Essa imagem passou do limite de leitura. Envia uma versão menor."
@@ -1278,27 +1301,46 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return "Não consegui baixar esse anexo. Reenvia a imagem, por favor."
         if kind == "blocked":
             return "O serviço de IA bloqueou esse pedido."
-        if kind == "rate_limit":
-            return "Bati no limite de pedidos por agora. Tenta de novo daqui a pouco."
-        if kind == "cooldown":
-            cause = getattr(exc, "cause_kind", "")
-            if cause == "auth":
+        if kind in {"rate_limit", "cooldown"}:
+            cause = getattr(exc, "cause_kind", "") if kind == "cooldown" else "rate_limit"
+            if cause in {"auth", "model", "unconfigured"}:
                 return "O chat de IA tá indisponível agora; a configuração precisa ser revisada."
+            # O router calcula este prazo somente entre opções que podem voltar
+            # a responder. Não usar a pausa de um modelo inexistente/sem acesso.
+            delay = getattr(exc, "earliest_retry_seconds", None)
+            if delay is None:
+                delay = getattr(exc, "retry_after", None)
             try:
-                delay = float(getattr(exc, "retry_after", 0) or 0)
+                delay = float(delay or 0)
                 delay = math.ceil(delay) if math.isfinite(delay) and delay > 0 else 0
             except (TypeError, ValueError, OverflowError):
                 delay = 0
-            wait = (f"Aguarde cerca de {math.ceil(delay / 60)} minuto(s)." if delay >= 60
+            wait = (f"Aguarde cerca de {math.ceil(delay / 86400)} dia(s)." if delay >= 86400
+                    else f"Aguarde cerca de {math.ceil(delay / 3600)} hora(s)." if delay >= 3600
+                    else f"Aguarde cerca de {math.ceil(delay / 60)} minuto(s)." if delay >= 60
                     else f"Aguarde cerca de {delay} segundo(s)." if delay else "Tenta de novo daqui a pouco.")
-            reason = ("Ainda estou no intervalo do limite de pedidos." if cause == "rate_limit"
+            reason = ("As opções de IA disponíveis atingiram um limite de uso." if cause == "rate_limit"
                       else "A conexão com a IA ainda está se recuperando." if cause in {"network", "timeout"}
                       else "O serviço de IA ainda está em uma pausa temporária.")
+            if cause == "rate_limit" and not delay:
+                wait = "Não recebi um prazo de liberação."
             return f"{reason} {wait}"
         if kind in ("timeout", "deadline") or isinstance(exc, asyncio.TimeoutError):
+            if alternative_limited:
+                return "A resposta demorou demais, e uma alternativa de IA também atingiu o limite de uso."
             return "A análise da imagem demorou demais. Tenta de novo." if had_images else "A resposta demorou demais. Tenta de novo."
         if kind in ("auth", "model", "unconfigured"):
             return "A leitura de imagens tá indisponível agora; a configuração precisa ser revisada." if had_images else "O chat de IA tá indisponível agora; a configuração precisa ser revisada."
+        if kind == "tools_unsupported":
+            if alternative_limited:
+                return "Não consegui usar as ferramentas deste pedido, e uma alternativa de IA também atingiu o limite de uso."
+            return "As opções de IA atuais não estão conseguindo usar as ferramentas deste pedido."
+        if kind == "invalid_response":
+            if alternative_limited:
+                return "Não consegui preparar uma resposta válida, e uma alternativa de IA também atingiu o limite de uso."
+            return "Não consegui preparar uma resposta válida agora."
+        if alternative_limited:
+            return "Não consegui responder agora, e uma alternativa de IA também atingiu o limite de uso."
         return "Não consegui analisar essa imagem agora. Tenta novamente daqui a pouco." if had_images else "Não consegui responder agora. Tenta novamente daqui a pouco."
 
     async def _send_chat_failure(self, message, exc: Exception, *, had_images: bool, spontaneous: bool = False) -> None:

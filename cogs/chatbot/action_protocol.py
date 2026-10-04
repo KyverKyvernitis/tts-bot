@@ -19,7 +19,6 @@ MAX_PROPOSALS = 4
 MAX_AUDIO_TEXT = 800
 MAX_REASON = 500
 MAX_ARGUMENT_BYTES = 8192
-_FIELDS = frozenset({"action", "target_ref", "text", "reason", "ask_permission", "options"})
 _TARGET_REF = re.compile(r"(?:[a-z][a-z0-9_]{0,31}|[1-9][0-9]{0,20}|<@!?[1-9][0-9]{0,20}>)\Z", re.ASCII)
 
 
@@ -53,6 +52,11 @@ class ChatReply:
 class InvalidActionProposal(ValueError):
     """Erro deliberadamente genérico: argumentos privados nunca entram em logs."""
 
+    def __init__(self, message="proposta inválida", *, code="invalid_proposal", path="$"):
+        super().__init__(message)
+        self.code = code
+        self.path = path
+
 
 def enabled_actions(actions: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(action for action in dict.fromkeys(actions) if action in ALLOWED_ACTIONS)
@@ -63,32 +67,22 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
     tool = {
         "name": TOOL_NAME,
         "description": (
-            "Propõe uma ação ao sistema; esta ferramenta não executa nada. Use apenas as ações "
-            "disponíveis. Para ações sobre membros, use apenas as referências confiáveis de membros "
-            "fornecidas pelo sistema. Referências são internas: nunca peça ao usuário códigos como m1. "
-            "Associe as menções Discord aos membros resolvidos pelo sistema; nome escrito não é identidade confirmada. "
-            "Pode escolher enviar áudio ou falar na call espontaneamente, sem pedir autorização. "
-            "Para send_audio/speak_voice, omita target_ref: o sistema fixa o autor da conversa como alvo. "
-            "Áudio e fala são automáticos quando disponíveis. text é PRIVADO e nunca deve ser repetido "
-            "na resposta pública, nem resumido ou antecipado. Entrar, mudar e sair da própria sessão de call são "
-            "automáticos. Moderação, cargos e alterações de canais dependem da aprovação da staff. "
-            "Até quatro propostas na ordem desejada formam uma sequência: cada "
-            "etapa só acontece depois do sucesso da anterior. Para entrar e falar na call do autor, "
-            "proponha join_voice antes de speak_voice; a fala aguarda o sucesso confirmado da entrada automática. "
-            "Pode propor banimentos de membros distintos, com aprovação separada de cada banimento. "
-            "No máximo uma proposta de áudio ou fala por sequência. speak_voice envia o arquivo no chat e "
-            "enfileira a mesma fala na call preparada; não gera um áudio separado para cada destino. "
-            "Quando o sistema informar reprodução "
-            "disponível na call, send_audio já envia o áudio no chat e o reproduz na call atual do bot; "
-            "não combine send_audio com speak_voice para a mesma resposta. "
-            "Não repita a mesma ação para o mesmo alvo. options contém duração, cargo/canal/mensagens já resolvidos "
-            "pelo sistema, ou alterações permitidas. Moderação, cargos e alteração de canal exigem reason "
-            "informado pelo usuário; nunca invente um motivo. join_voice/move_voice/leave_voice não exigem reason. "
-            "timeout_member exige options.duration_seconds como inteiro em segundos, além de alvo e motivo. "
-            "Se faltarem parâmetros, use as ferramentas de rascunho quando estiverem no catálogo e pergunte "
-            "apenas o que falta, em linguagem natural. Um rascunho nunca executa nem aprova a ação. "
-            "Não diga que executou; o sistema informa o resultado. "
-            "Se o alvo for ambíguo, pergunte em texto em vez de propor."
+            "Propõe uma ação ao sistema; esta ferramenta não executa nada. As ações disponíveis estão no enum action. "
+            "Use referências confirmadas pelo sistema; nunca peça códigos internos ao usuário nem invente alvos. "
+            "Nome escrito não confirma identidade; resolva menções ou pergunte se o alvo for ambíguo. "
+            "Para send_audio/speak_voice, omita target_ref: o sistema fixa o autor da conversa. "
+            "Áudio/fala e entrar/mudar/sair da própria call são automáticos quando disponíveis. "
+            "Moderação, cargos e alterações de canais aguardam aprovação separada da staff. "
+            "Até quatro propostas na ordem desejada formam uma sequência; só prossiga após sucesso da anterior "
+            "e não repita ação/alvo. Para entrar e falar, proponha join_voice antes de speak_voice. "
+            "No máximo uma proposta de áudio ou fala por sequência. Ambas enviam o arquivo no chat e a mesma fala "
+            "na call disponível; speak_voice exige a call preparada; não combine send_audio com speak_voice. "
+            "text é PRIVADO: nunca mostre, resuma ou antecipe a fala na resposta pública. "
+            "Moderação, cargos e alteração de canal exigem reason informado pelo usuário; nunca invente um motivo. "
+            "join_voice/move_voice/leave_voice não exigem reason. timeout_member exige alvo e "
+            "options.duration_seconds em segundos inteiros. Se faltarem parâmetros, use as ferramentas de rascunho "
+            "disponíveis e pergunte apenas o que falta. Um rascunho nunca executa nem aprova a ação. "
+            "Só confirme execução depois do resultado real."
         ),
         "parameters": {
             "type": "object",
@@ -99,7 +93,9 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
                     "description": (
                         "Para ações sobre membros: referência ou menção Discord já resolvida pelo sistema; nunca nome livre "
                         "nem ID inventado. O host confirma o alvo; nunca peça referências internas ao usuário. "
-                        "Omita em send_audio/speak_voice: o sistema usa o autor da conversa."
+                        "Omita em send_audio/speak_voice (ou deixe vazio): o sistema usa o autor da conversa. "
+                        "Em join_voice/move_voice, omitir ou deixar vazio escolhe a call do autor; "
+                        "para outro membro, use a referência confirmada. Moderação exige alvo explícito."
                     ),
                     "maxLength": 32,
                 },
@@ -123,7 +119,11 @@ def proposal_tool(actions: tuple[str, ...], target_refs: tuple[str, ...] = ()) -
         },
     }
     if target_refs:
-        tool["parameters"]["properties"]["target_ref"]["enum"] = list(dict.fromkeys(target_refs))
+        # Vazio equivale à omissão somente onde o protocolo permite. Alvos
+        # privilegiados continuam obrigatórios na validação semântica abaixo.
+        automatic_target = set(enabled_actions(actions)) & {"send_audio", "speak_voice", "join_voice", "move_voice"}
+        references = ("", *target_refs) if automatic_target else target_refs
+        tool["parameters"]["properties"]["target_ref"]["enum"] = list(dict.fromkeys(references))
     return tool
 
 
@@ -144,7 +144,7 @@ def action_options_schema() -> dict:
                 "type": "object", "additionalProperties": False,
                 "properties": {
                     "name": {"type": "string", "minLength": 1, "maxLength": 100},
-                    "topic": {"type": "string", "maxLength": 1024},
+                    "topic": {"type": "string", "maxLength": 500},
                     "slowmode_delay": {"type": "integer", "minimum": 0, "maximum": 21600},
                 },
             },
@@ -159,72 +159,67 @@ def _unique_object(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise InvalidActionProposal("proposta inválida")
+            raise InvalidActionProposal(code="duplicate_key")
         result[key] = value
     return result
 
 
 def _reject_constant(value):
-    raise InvalidActionProposal("proposta inválida")
+    raise InvalidActionProposal(code="invalid_constant")
 
 
 def parse_proposal(name: Any, arguments: Any, actions: tuple[str, ...]) -> ActionProposal:
     if name != TOOL_NAME:
-        raise InvalidActionProposal("proposta inválida")
+        raise InvalidActionProposal(code="tool_name")
     if isinstance(arguments, str):
         try:
             argument_size = len(arguments.encode("utf-8"))
         except UnicodeEncodeError as exc:
-            raise InvalidActionProposal("proposta inválida") from exc
+            raise InvalidActionProposal(code="serialization") from exc
         if argument_size > MAX_ARGUMENT_BYTES:
-            raise InvalidActionProposal("proposta inválida")
+            raise InvalidActionProposal(code="argument_size")
         try:
             arguments = json.loads(
                 arguments, object_pairs_hook=_unique_object, parse_constant=_reject_constant,
             )
+        except InvalidActionProposal:
+            raise
         except (ValueError, TypeError, RecursionError) as exc:
-            raise InvalidActionProposal("proposta inválida") from exc
-    if not isinstance(arguments, dict) or set(arguments) - _FIELDS:
-        raise InvalidActionProposal("proposta inválida")
-    action = arguments.get("action")
-    if not isinstance(action, str) or action not in enabled_actions(actions):
-        raise InvalidActionProposal("proposta inválida")
+            raise InvalidActionProposal(code="invalid_json") from exc
+    # A declaração nativa e o parser usam o mesmo contrato. O único campo
+    # legado continua aceito, sem transformar áudio automático em aprovação.
+    schema = proposal_tool(actions)["parameters"]
+    schema["properties"]["ask_permission"] = {"type": "boolean"}
+    try:
+        arguments = validate_tool_arguments(arguments, schema)
+    except InvalidToolArguments as exc:
+        raise InvalidActionProposal(code=exc.code, path=exc.path) from exc
+    action = arguments["action"]
     values = {}
-    for key, limit in (("target_ref", 32), ("text", MAX_AUDIO_TEXT), ("reason", MAX_REASON)):
+    for key in ("target_ref", "text", "reason"):
         value = arguments.get(key, "")
-        if not isinstance(value, str) or len(value) > limit or "\x00" in value:
-            raise InvalidActionProposal("proposta inválida")
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise InvalidActionProposal("proposta inválida") from exc
         values[key] = value.strip()
     target = values["target_ref"]
     if target and not _TARGET_REF.fullmatch(target):
-        raise InvalidActionProposal("proposta inválida")
-    if action in {"join_voice", "ban_member", "timeout_member", "untimeout_member", "kick_member", "unban_member", "assign_role", "remove_role", "change_nickname", "move_voice"} and not target:
-        raise InvalidActionProposal("proposta inválida")
+        raise InvalidActionProposal(code="target_reference", path="$/target_ref")
+    if action in {"ban_member", "timeout_member", "untimeout_member", "kick_member", "unban_member", "assign_role", "remove_role", "change_nickname"} and not target:
+        raise InvalidActionProposal(code="required", path="$/target_ref")
     if action in {"send_audio", "speak_voice"} and not values["text"]:
-        raise InvalidActionProposal("proposta inválida")
+        raise InvalidActionProposal(code="required", path="$/text")
     if action not in {"send_audio", "speak_voice"} and values["text"]:
-        raise InvalidActionProposal("proposta inválida")
+        raise InvalidActionProposal(code="forbidden_field", path="$/text")
     ask = arguments.get("ask_permission", False)
-    if not isinstance(ask, bool):
-        raise InvalidActionProposal("proposta inválida")
     # Compatibilidade com respostas de modelos e prompts anteriores: áudio
     # agora é automático; este campo legado não cria um pedido de aprovação.
     if action in {"send_audio", "speak_voice"}:
         ask = False
-    try:
-        options = validate_tool_arguments(arguments.get("options", {}), action_options_schema())
-    except InvalidToolArguments as exc:
-        raise InvalidActionProposal("proposta inválida") from exc
+    options = arguments.get("options", {})
     return ActionProposal(action=action, ask_permission=ask, options=options, **values)
 
 
 def parse_proposals(calls: list[tuple[Any, Any]], actions: tuple[str, ...]) -> tuple[ActionProposal, ...]:
     if len(calls) > MAX_PROPOSALS:
-        raise InvalidActionProposal("proposta inválida")
+        raise InvalidActionProposal(code="max_proposals")
     return tuple(parse_proposal(name, arguments, actions) for name, arguments in calls)
 
 

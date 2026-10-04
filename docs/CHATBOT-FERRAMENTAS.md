@@ -37,7 +37,23 @@ Falhas definidas antes de enviar o arquivo podem usar a resposta em texto quando
 
 Groq continua em primeiro por padrão e Gemini é a alternativa. As tentativas reservam parte do prazo para o próximo provedor. Um limite por modelo não bloqueia automaticamente os outros modelos; indisponibilidade comprovada da conta vale para todos. Os tempos de espera informados pela API são preservados, inclusive os dados estruturados do Gemini.
 
+Quando o Gemini informa que um modelo não está disponível, o roteador consulta o catálogo da API usando a chave já configurada e considera alternativas de conversa expostas naquele catálogo. A descoberta tem cache, limite de tamanho e prazo; não exige editar o ambiente. A presença no catálogo não garante quota disponível nem suporte a ferramentas: a requisição real continua verificando esses recursos. Um limite da conta não é contornado escolhendo outro nome de modelo.
+
+Chamadas nativas rejeitadas registram a categoria da falha, o caminho do campo no schema e o nome da ferramenta quando ele pertence ao catálogo. Valores de argumentos, fala privada, nomes de ferramentas desconhecidas e respostas brutas continuam fora dos logs. O roteador pode pedir uma correção limitada ao modelo, dentro do mesmo prazo e antes de executar qualquer parte do lote. Não converte automaticamente tipos nem inventa alvos ou parâmetros ausentes. Entrar ou mudar para a call do próprio autor aceita o alvo omitido, usando o membro confirmado pelo Discord.
+
+O índice de ferramentas no início do prompt é curto; descrições e schemas detalhados seguem nas declarações nativas, sem repetir instruções extensas a cada rodada. Os valores de `action`, como `join_voice`, são identificados como ações da ferramenta `propor_acao`. O contexto informa o estado local dos provedores e o atualiza entre rodadas; consultar esse estado não dispara uma nova chamada à API.
+
 O diagnóstico registra provedor, modelo, duração, resultado e motivo de uma tentativa ou de sua ausência. Não registra chaves, prompts, respostas privadas ou o corpo bruto de erros. O painel de configuração mostra se a chave está configurada e se há modelos aguardando nova tentativa. “Configurado” indica configuração local, sem prometer disponibilidade da API.
+
+As contagens de tokens reportadas pelos provedores aparecem nos logs e no diagnóstico. Uma contagem ausente permanece desconhecida. A exaustão preserva as causas das tentativas, em vez de mostrar apenas o último erro; um modelo ausente não encurta a espera de uma quota longa. O prazo de nova tentativa é uma previsão local, sem garantir recuperação do serviço. A atualização não aumenta as quotas contratadas.
+
+Para acompanhar os metadados na VPS:
+
+```bash
+sudo journalctl -u tts-bot.service --since "30 minutes ago" --no-pager -o cat \
+  | grep -E 'chatbot: (configuration |provider=|skip |exhausted |result=success|usage |model_discovery|tool_repair|turno falhou)' \
+  | tail -n 150
+```
 
 ## Aprovações
 

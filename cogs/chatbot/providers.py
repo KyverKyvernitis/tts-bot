@@ -15,6 +15,7 @@ import re
 import time
 from dataclasses import dataclass, field, replace
 from copy import deepcopy
+from contextvars import ContextVar
 from email.utils import parsedate_to_datetime
 from typing import Optional
 from urllib.parse import urlsplit
@@ -44,6 +45,56 @@ _DIAGNOSTIC_FINISH_REASONS = frozenset({
 _INCOMPLETE_TOOL_FINISH_REASONS = frozenset({
     "length", "MAX_TOKENS", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL",
 })
+_DIAGNOSTIC_CODES = frozenset({
+    "type", "enum", "required", "additional_properties", "max_length", "min_length", "null_character",
+    "minimum", "maximum", "max_items", "min_items", "any_of", "max_depth", "argument_size", "serialization",
+    "tool_name", "invalid_json", "duplicate_key", "invalid_constant", "target_reference", "forbidden_field",
+    "max_proposals", "invalid_arguments", "invalid_schema", "invalid_call_id", "duplicate_call_id",
+    "batch_limit", "incomplete_calls", "unexpected_calls", "invalid_envelope", "malformed_response",
+})
+_ATTEMPT_USAGE: ContextVar[dict | None] = ContextVar("chatbot_provider_usage", default=None)
+
+
+def _safe_usage(usage) -> dict:
+    return {key: value for key, value in (usage.items() if isinstance(usage, dict) else [])
+            if key in {"input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "cached_tokens"}
+            and isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000_000}
+
+
+def _record_usage(data, provider: str, model: str) -> dict:
+    source = data.get("usage" if provider == "groq" else "usageMetadata", {}) if isinstance(data, dict) else {}
+    mapping = ({"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens", "total_tokens": "total_tokens"}
+               if provider == "groq" else {"promptTokenCount": "input_tokens", "candidatesTokenCount": "output_tokens",
+                                          "totalTokenCount": "total_tokens", "thoughtsTokenCount": "reasoning_tokens",
+                                          "cachedContentTokenCount": "cached_tokens"})
+    usage = _safe_usage({target: source[key] for key, target in mapping.items() if isinstance(source, dict) and key in source})
+    holder = _ATTEMPT_USAGE.get()
+    if holder is not None:
+        holder.update(usage)
+    if usage:
+        log.info("chatbot: usage provider=%s model=%s input_tokens=%s output_tokens=%s total_tokens=%s reasoning_tokens=%s cached_tokens=%s",
+                 provider, model, usage.get("input_tokens"), usage.get("output_tokens"), usage.get("total_tokens"),
+                 usage.get("reasoning_tokens"), usage.get("cached_tokens"))
+    return usage
+
+
+def _safe_schema_path(path, schema) -> str:
+    if path == "$":
+        return "$"
+    if not isinstance(path, str) or not path.startswith("$/") or len(path) > 200:
+        return "$"
+    node = schema
+    for encoded in path[2:].split("/"):
+        token = encoded.replace("~1", "/").replace("~0", "~")
+        if not isinstance(node, dict):
+            return "$"
+        if token == "*" and isinstance(node.get("items"), dict):
+            node = node["items"]
+        elif token in node.get("properties", {}):
+            node = node["properties"][token]
+        else:
+            return "$"
+    return path
 
 
 def _diagnostic_finish_reason(reason: Optional[str]) -> str:
@@ -58,6 +109,9 @@ class ProviderError(Exception):
         retry_after: Optional[float] = None, kind: Optional[str] = None,
         stage: str = "api", finish_reason: Optional[str] = None,
         quota_scope: str = "model", cause_kind: Optional[str] = None,
+        diagnostic_code: str = "", diagnostic_path: str = "$", diagnostic_tool: str = "",
+        diagnostic_index: Optional[int] = None, usage: Optional[dict] = None,
+        causes: tuple[dict, ...] = (), earliest_retry_seconds: Optional[float] = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -71,6 +125,13 @@ class ProviderError(Exception):
         )
         self.quota_scope = "account" if quota_scope == "account" else "model"
         self.cause_kind = cause_kind or self.kind
+        self.diagnostic_code = diagnostic_code if diagnostic_code in _DIAGNOSTIC_CODES else ""
+        self.diagnostic_path = diagnostic_path
+        self.diagnostic_tool = diagnostic_tool
+        self.diagnostic_index = diagnostic_index if isinstance(diagnostic_index, int) and 0 <= diagnostic_index <= 8 else None
+        self.usage = _safe_usage(usage)
+        self.causes = causes
+        self.earliest_retry_seconds = earliest_retry_seconds
 
 
 class RateLimitError(ProviderError):
@@ -372,6 +433,7 @@ def _action_reply(
         raise ProviderError(
             "provider truncou as propostas", kind="invalid_response", stage="output",
             finish_reason=finish_reason,
+            diagnostic_code="incomplete_calls",
         )
     try:
         proposals = parse_proposals(calls, actions)
@@ -381,6 +443,9 @@ def _action_reply(
         raise ProviderError(
             "provider retornou proposta inválida", kind="invalid_response",
             stage="output", finish_reason=finish_reason,
+            diagnostic_code=getattr(exc, "code", "invalid_arguments"),
+            diagnostic_path=_safe_schema_path(getattr(exc, "path", "$"), proposal_tool(actions)["parameters"]),
+            diagnostic_tool=TOOL_NAME if any(name == TOOL_NAME for name, _arguments in calls) else "",
         ) from exc
     if not text and not proposals:
         raise ProviderError(
@@ -393,26 +458,33 @@ def _action_reply(
 def _native_reply(text, raw_calls, specs, actions, *, provider, model, finish_reason):
     """Um lote estritamente validado; nenhuma ferramenta é executada aqui."""
     if len(raw_calls) > getattr(C, "MAX_TOOL_CALLS", 8) or (raw_calls and finish_reason in _INCOMPLETE_TOOL_FINISH_REASONS):
-        raise ProviderError("provider retornou ferramentas incompletas", kind="invalid_response", stage="output", finish_reason=finish_reason)
+        raise ProviderError("provider retornou ferramentas incompletas", kind="invalid_response", stage="output", finish_reason=finish_reason,
+                            diagnostic_code="batch_limit" if len(raw_calls) > getattr(C, "MAX_TOOL_CALLS", 8) else "incomplete_calls")
     by_name = {spec.name: spec for spec in specs}
     calls, proposals, ids = [], [], set()
+    index, name, schema = 0, "", {}
     try:
-        for call_id, name, arguments, opaque in raw_calls:
-            spec = by_name.get(name)
+        for index, (call_id, name, arguments, opaque) in enumerate(raw_calls):
+            spec = by_name.get(name) if isinstance(name, str) else None
             if spec is None:
-                raise InvalidToolArguments("Ferramenta inválida.")
+                raise ProviderError("provider retornou ferramenta não declarada", kind="invalid_response", stage="output",
+                                    finish_reason=finish_reason, diagnostic_code="tool_name" if isinstance(name, str) else "invalid_envelope", diagnostic_index=index)
+            schema = spec.parameters
             if isinstance(arguments, str):
                 if len(arguments.encode("utf-8")) > 8192:
-                    raise InvalidToolArguments("Argumentos inválidos.")
+                    raise ProviderError("argumentos excedem o contrato", kind="invalid_response", stage="output", finish_reason=finish_reason,
+                                        diagnostic_code="argument_size", diagnostic_tool=name, diagnostic_index=index)
                 def unique(pairs):
                     result = {}
                     for key, value in pairs:
                         if key in result:
-                            raise InvalidToolArguments("Argumentos inválidos.")
+                            raise ProviderError("argumentos JSON inválidos", kind="invalid_response", stage="output", finish_reason=finish_reason,
+                                                diagnostic_code="duplicate_key", diagnostic_tool=name, diagnostic_index=index)
                         result[key] = value
                     return result
                 def constant(value):
-                    raise InvalidToolArguments("Argumentos inválidos.")
+                    raise ProviderError("argumentos JSON inválidos", kind="invalid_response", stage="output", finish_reason=finish_reason,
+                                        diagnostic_code="invalid_constant", diagnostic_tool=name, diagnostic_index=index)
                 arguments = json.loads(arguments, object_pairs_hook=unique, parse_constant=constant)
             if name == TOOL_NAME:
                 # Validação do envelope inteiro antes de separar campos. O
@@ -425,16 +497,23 @@ def _native_reply(text, raw_calls, specs, actions, *, provider, model, finish_re
                 proposals.append(proposal)
                 arguments.pop("ask_permission", None)
                 if len(proposals) > MAX_PROPOSALS:
-                    raise InvalidToolArguments("Propostas inválidas.")
+                    raise ProviderError("lote excede o contrato", kind="invalid_response", stage="output", finish_reason=finish_reason,
+                                        diagnostic_code="max_proposals", diagnostic_tool=name, diagnostic_index=index)
             else:
                 arguments = validate_tool_arguments(arguments, spec.parameters)
             call_id = f"call_{uuid4().hex}" if call_id is None else call_id
             if not isinstance(call_id, str) or not call_id or len(call_id) > 200 or call_id in ids:
-                raise InvalidToolArguments("Chamada inválida.")
+                raise ProviderError("identificação da chamada inválida", kind="invalid_response", stage="output", finish_reason=finish_reason,
+                                    diagnostic_code="duplicate_call_id" if isinstance(call_id, str) and call_id in ids else "invalid_call_id",
+                                    diagnostic_tool=name, diagnostic_index=index)
             ids.add(call_id)
             calls.append(NativeToolCall(call_id, name, arguments, deepcopy(opaque)))
     except (InvalidToolArguments, InvalidActionProposal, ValueError, TypeError, UnicodeError, RecursionError) as exc:
-        raise ProviderError("provider retornou ferramentas inválidas", kind="invalid_response", stage="output", finish_reason=finish_reason) from exc
+        code = "invalid_json" if isinstance(exc, json.JSONDecodeError) else getattr(exc, "code", "invalid_arguments")
+        tool = name if isinstance(name, str) and name in by_name else ""
+        raise ProviderError("provider retornou ferramentas inválidas", kind="invalid_response", stage="output", finish_reason=finish_reason,
+                            diagnostic_code=code, diagnostic_path=_safe_schema_path(getattr(exc, "path", "$"), schema),
+                            diagnostic_tool=tool, diagnostic_index=index) from exc
     if not text and not calls:
         raise ProviderError("provider retornou resposta vazia", kind="empty", stage="output", finish_reason=finish_reason)
     return ChatReply(private_reply_text(text, tuple(proposals)), tuple(proposals), provider, model, tuple(calls))
@@ -520,6 +599,7 @@ class _GroqClient:
             raise ProviderError("Groq timeout", kind="timeout") from exc
         except aiohttp.ClientError as exc:
             raise ProviderError("Groq erro de rede", kind="network") from exc
+        _record_usage(data, "groq", model)
         try:
             choice = data["choices"][0]
             finish_reason = choice.get("finish_reason")
@@ -548,7 +628,8 @@ class _GroqClient:
             raise ProviderError("Groq resposta malformada", kind="invalid_response", stage="output") from exc
         reply = content.strip() if isinstance(content, str) else ""
         if not allow_tool_calls and message.get("tool_calls"):
-            raise ProviderError("provider ignorou o fechamento sem ferramentas", kind="invalid_response", stage="output", finish_reason=finish_reason)
+            raise ProviderError("provider ignorou o fechamento sem ferramentas", kind="invalid_response", stage="output", finish_reason=finish_reason,
+                                diagnostic_code="unexpected_calls")
         if tool_specs:
             native_calls = []
             raw_calls = message.get("tool_calls") or []
@@ -591,6 +672,7 @@ class _GroqClient:
 
 class _GeminiClient:
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    CATALOG_URL = "https://generativelanguage.googleapis.com/v1beta/models"
     _ALLOWED_IMAGE_HOST_SUFFIXES = (
         ".discordapp.com", ".discordapp.net", ".discord.com",
     )
@@ -598,6 +680,120 @@ class _GeminiClient:
     def __init__(self, session: aiohttp.ClientSession, api_key: str):
         self._session = session
         self._api_key = api_key
+        self._catalog: tuple[tuple[str, bool], ...] = ()
+        self._catalog_expires = 0.0
+        self._catalog_task: asyncio.Task | None = None
+        self._catalog_status: dict = {}
+
+    def catalog_models(self, *, has_images: bool = False) -> tuple[str, ...]:
+        if time.monotonic() >= self._catalog_expires:
+            return ()
+        return tuple(name for name, vision in self._catalog if vision or not has_images)[:8]
+
+    def discovery_diagnostics(self) -> dict:
+        return {**self._catalog_status, "available_count": len(self.catalog_models()),
+                "cache_seconds": max(0.0, self._catalog_expires - time.monotonic())}
+
+    @staticmethod
+    def _catalog_entry(record) -> tuple[str, bool] | None:
+        if not isinstance(record, dict) or not isinstance(record.get("supportedGenerationMethods"), list) or "generateContent" not in record["supportedGenerationMethods"]:
+            return None
+        name = record.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"models/(gemini-[A-Za-z0-9._-]{1,100})", name, re.ASCII):
+            return None
+        model = name[7:]
+        if re.search(r"(?:^|-)(?:image|tts|audio|live|embedding|deep-research|computer-use|robotics)(?:-|$)", model, re.I):
+            return None
+        # listModels não declara suporte a ferramentas. Isso será verificado
+        # pela própria requisição nativa, nunca presumido a partir do nome.
+        modalities = record.get("inputModalities")
+        if isinstance(modalities, list):
+            vision = "IMAGE" in modalities
+            if "TEXT" not in modalities:
+                return None
+        else:
+            vision = bool(re.match(r"gemini-(?:1\.5|[2-9](?:[.-]|$))", model))
+        return model, vision
+
+    async def _fetch_catalog(self, timeout_seconds: float) -> tuple[tuple[str, bool], ...]:
+        entries = {}
+        seen, pages, truncated = 0, 0, False
+        started = time.monotonic()
+        deadline = time.monotonic() + min(3.0, timeout_seconds)
+        async def read_pages():
+            nonlocal seen, pages, truncated
+            getter = getattr(self._session, "get", None)
+            if not callable(getter):
+                raise ProviderError("descoberta não disponível", kind="discovery_unavailable", stage="discovery")
+            token, tokens = "", set()
+            for _page in range(2):
+                params = {"pageSize": 50}
+                if token:
+                    params["pageToken"] = token
+                async with getter(self.CATALOG_URL, params=params, headers={"x-goog-api-key": self._api_key},
+                                  timeout=aiohttp.ClientTimeout(total=_remaining(deadline))) as response:
+                    if response.status >= 400:
+                        raise await _http_error(response)
+                    data = await _read_json_limited(response)
+                rows = data.get("models") if isinstance(data, dict) else None
+                if not isinstance(rows, list):
+                    raise ProviderError("catálogo inválido", kind="invalid_response", stage="discovery")
+                seen += min(50, len(rows))
+                pages += 1
+                for row in rows[:50]:
+                    entry = self._catalog_entry(row)
+                    if entry is not None:
+                        entries[entry[0]] = entry
+                token = data.get("nextPageToken")
+                valid_token = isinstance(token, str) and 0 < len(token) <= 512 and token.isascii() and all(32 <= ord(char) < 127 for char in token)
+                truncated = len(rows) > 50 or bool(token)
+                if not valid_token or token in tokens:
+                    break
+                tokens.add(token)
+        try:
+            await asyncio.wait_for(read_pages(), timeout=max(.001, deadline - time.monotonic()))
+            delay, kind, status = 600.0, "success", 200
+            retry = None
+            scope = "model"
+        except Exception as exc:
+            kind = (exc.kind if isinstance(exc, ProviderError) else "timeout" if isinstance(exc, asyncio.TimeoutError)
+                    else "network" if isinstance(exc, aiohttp.ClientError) else "invalid_response")
+            retry = exc.retry_after if isinstance(exc, ProviderError) else None
+            delay = retry or (900.0 if kind == "auth" else 60.0)
+            status = int(getattr(exc, "status", 0) or 0)
+            scope = exc.quota_scope if isinstance(exc, ProviderError) else "model"
+            if kind == "auth":
+                entries.clear()
+        def rank(entry):
+            name = entry[0]
+            version = re.match(r"gemini-(\d+)(?:\.(\d+))?", name)
+            major, minor = (int(version[1]), int(version[2] or 0)) if version else (0, 0)
+            family = 1 if "flash-lite" in name else 0 if "flash" in name else 2 if "pro" in name else 3
+            return family, bool(re.search(r"(?:preview|exp)(?:-|$)", name)), -major, -minor, name
+        ordered = sorted(entries.values(), key=rank)
+        # Não expulsar modelos com imagem só porque a família Flash text-only
+        # veio primeiro. Cada capacidade conserva até oito candidatos seguros.
+        selected = {entry[0] for entry in ordered[:8]} | {entry[0] for entry in [item for item in ordered if item[1]][:8]}
+        self._catalog = tuple(entry for entry in ordered if entry[0] in selected)
+        self._catalog_expires = time.monotonic() + delay
+        self._catalog_status = {"kind": kind, "status": status, "retry_after": retry,
+                                "quota_scope": scope, "pages": pages, "rows_seen": seen, "truncated": truncated}
+        log.info("chatbot: model_discovery provider=gemini kind=%s status=%s pages=%d candidates=%d truncated=%s elapsed_ms=%d quota_scope=%s retry_after=%s",
+                 kind, status, pages, len(self._catalog), truncated, max(0, int((time.monotonic() - started) * 1000)), scope, retry)
+        return self._catalog
+
+    async def discover_models(self, *, timeout_seconds: float, has_images: bool = False) -> tuple[str, ...]:
+        if time.monotonic() < self._catalog_expires:
+            return self.catalog_models(has_images=has_images)
+        if timeout_seconds <= 0:
+            return ()
+        if self._catalog_task is None or self._catalog_task.done():
+            self._catalog_task = asyncio.create_task(self._fetch_catalog(min(3.0, timeout_seconds)))
+        try:
+            await asyncio.wait_for(asyncio.shield(self._catalog_task), timeout=min(3.0, timeout_seconds))
+        except asyncio.TimeoutError:
+            return ()
+        return self.catalog_models(has_images=has_images)
 
     async def _download_inline_image(self, url: str, deadline: float) -> dict:
         """Compatibilidade para chamadores antigos; falha do CDN nunca é credencial."""
@@ -696,6 +892,7 @@ class _GeminiClient:
             raise ProviderError("Gemini timeout", kind="timeout") from exc
         except aiohttp.ClientError as exc:
             raise ProviderError("Gemini erro de rede", kind="network") from exc
+        _record_usage(data, "gemini", model)
         if not isinstance(data, dict):
             raise ProviderError("Gemini resposta malformada", kind="invalid_response", stage="output")
         feedback = data.get("promptFeedback") or {}
@@ -719,7 +916,8 @@ class _GeminiClient:
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError("Gemini resposta malformada", kind="invalid_response", stage="output") from exc
         if not allow_tool_calls and any(isinstance(part, dict) and "functionCall" in part for part in parts):
-            raise ProviderError("provider ignorou o fechamento sem ferramentas", kind="invalid_response", stage="output", finish_reason=finish_reason)
+            raise ProviderError("provider ignorou o fechamento sem ferramentas", kind="invalid_response", stage="output", finish_reason=finish_reason,
+                                diagnostic_code="unexpected_calls")
         if tool_specs:
             native_calls = []
             for part in parts:
@@ -765,6 +963,7 @@ class ProviderRouter:
         self._groq = _GroqClient(session, groq_key) if groq_key else None
         self._gemini = _GeminiClient(session, gemini_key) if gemini_key else None
         self._states: dict[tuple[str, str], _ProviderState] = {}
+        self._account_states: dict[str, _ProviderState] = {}
         self._unsupported_tool_models: set[tuple[str, str]] = set()
         self._last_request: dict = {}
         log.info("chatbot: configuration groq_configured=%s gemini_configured=%s", bool(self._groq), bool(self._gemini))
@@ -772,20 +971,37 @@ class ProviderRouter:
             log.warning("ProviderRouter: nenhuma API key configurada")
 
     def _state(self, provider: str, model: str) -> _ProviderState:
-        return self._states.setdefault((provider, model), _ProviderState())
+        state = self._states.setdefault((provider, model), _ProviderState())
+        account = self._account_states.get(provider)
+        if account is not None and not account.is_available() and state.next_allowed_monotonic < account.next_allowed_monotonic:
+            state.failure_generation += 1
+            state.next_allowed_monotonic = account.next_allowed_monotonic
+            state.last_kind, state.last_stage = account.last_kind, account.last_stage
+            state.last_status, state.quota_scope = account.last_status, account.quota_scope
+            state.consecutive_failures = max(1, state.consecutive_failures)
+        return state
 
-    @staticmethod
-    def _all_models(provider: str, models: tuple[str, ...]) -> tuple[str, ...]:
+    def _catalog_models(self, *, has_images=False) -> tuple[str, ...]:
+        getter = getattr(self._gemini, "catalog_models", None)
+        return tuple(getter(has_images=has_images)) if callable(getter) else ()
+
+    def _all_models(self, provider: str, models: tuple[str, ...]) -> tuple[str, ...]:
         configured = ((*C.GROQ_MODELS, *C.GROQ_VISION_MODELS) if provider == "groq" else
                       (*C.GEMINI_MODELS, *getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS)))
-        return tuple(dict.fromkeys((*models, *configured)))
+        discovered = (*self._catalog_models(), *self._catalog_models(has_images=True)) if provider == "gemini" else ()
+        known = tuple(model for candidate, model in self._states if candidate == provider)
+        return tuple(dict.fromkeys((*models, *configured, *discovered, *known)))
 
     def _mark_provider_failure(
         self, provider: str, models: tuple[str, ...], cooldown_seconds: float, *, status: int,
         kind: str = "network", stage: str = "api", quota_scope: str = "account", explicit_retry: bool = False,
     ) -> None:
+        if kind == "auth" or (kind == "rate_limit" and quota_scope == "account"):
+            account = self._account_states.setdefault(provider, _ProviderState())
+            account.mark_failure(cooldown_seconds, status=status, kind=kind, stage=stage,
+                                 quota_scope=quota_scope, explicit_retry=explicit_retry)
         for candidate in models:
-            self._state(provider, candidate).mark_failure(
+            self._states.setdefault((provider, candidate), _ProviderState()).mark_failure(
                 cooldown_seconds, status=status, kind=kind, stage=stage,
                 quota_scope=quota_scope, explicit_retry=explicit_retry,
             )
@@ -823,7 +1039,7 @@ class ProviderRouter:
             return True, error
         elif error.kind == "model":
             state.mark_failure(300.0, **metadata)
-        elif error.kind in {"empty", "invalid_response"} and error.finish_reason not in {"length", "MAX_TOKENS"}:
+        elif error.kind in {"empty", "invalid_response"} and not error.diagnostic_code and error.finish_reason not in {"length", "MAX_TOKENS"}:
             state.mark_failure(20.0, **metadata)
         return error.kind == "deadline", error
 
@@ -844,15 +1060,51 @@ class ProviderRouter:
     def diagnostics(self) -> dict:
         """Metadados operacionais; nenhuma chave, mensagem ou corpo HTTP."""
         circuits = self.snapshot()
-        waits = [item["cooldown_seconds"] for item in circuits.values() if not item["available"]]
+        discovery = getattr(self._gemini, "discovery_diagnostics", None)
+        discovery_state = discovery() if callable(discovery) else {}
+        gemini_text = tuple(dict.fromkeys((*C.GEMINI_MODELS, *self._catalog_models())))
+        groq_text = tuple(C.GROQ_MODELS)
+        availability = []
+        for provider, text, vision, configured in (
+            ("groq", groq_text, tuple(C.GROQ_VISION_MODELS), self._groq is not None),
+            ("gemini", gemini_text, tuple(dict.fromkeys((*getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS), *self._catalog_models(has_images=True)))), self._gemini is not None),
+        ):
+            for model in dict.fromkeys((*text, *vision)):
+                state = self._states.get((provider, model))
+                account = self._account_states.get(provider)
+                candidates = [item for item in (state, account) if item is not None and not item.is_available()]
+                blocker = max(candidates, key=lambda item: item.next_allowed_monotonic) if candidates else None
+                availability.append({"provider": provider, "model": model, "configured": configured,
+                    "exposed": False if state is not None and state.last_status == 404 and state.last_kind == "model"
+                               else True if provider == "gemini" and model in (*self._catalog_models(), *self._catalog_models(has_images=True)) else None,
+                    "available": configured and blocker is None, "cooldown_seconds": max(0.0, blocker.next_allowed_monotonic - time.monotonic()) if blocker else 0.0,
+                    "cause_kind": blocker.last_kind if blocker else "", "status": blocker.last_status if blocker else 0,
+                    "quota_scope": blocker.quota_scope if blocker else "model",
+                    "modes": tuple(mode for mode, names in (("text", text), ("vision", vision)) if model in names),
+                    "tools_support": "unsupported" if (provider, model) in self._unsupported_tool_models else "unknown"})
+        mode = "vision" if self._last_request.get("mode") == "vision" else "text"
+        waits = [item["cooldown_seconds"] for item in availability
+                 if item["configured"] and mode in item["modes"] and not item["available"]
+                 and item["cause_kind"] not in {"auth", "model"} and item["cooldown_seconds"] > 0]
+        if discovery_state.get("kind") == "rate_limit" and discovery_state.get("cache_seconds", 0) > 0:
+            waits.append(discovery_state["cache_seconds"])
+        eligible = any(item["available"] and mode in item["modes"]
+                       and not (self._last_request.get("tools_requested") and item["tools_support"] == "unsupported")
+                       for item in availability)
         return {
             "configured": {"groq": self._groq is not None, "gemini": self._gemini is not None},
             "circuits": circuits,
-            "earliest_retry_seconds": min(waits) if waits else None,
+            "earliest_retry_seconds": 0.0 if eligible else min(waits) if waits else None,
             "last_request": deepcopy(self._last_request),
+            "models": {"groq": groq_text, "gemini": gemini_text},
+            "availability": availability,
+            "model_discovery": discovery_state,
         }
 
     def _available(self, provider: str, model: str) -> bool:
+        account = self._account_states.get(provider)
+        if account is not None and not account.is_available():
+            return False
         state = self._states.get((provider, model))
         return state is None or state.is_available()
 
@@ -862,7 +1114,8 @@ class ProviderRouter:
                    if (state := self._states.get((provider, model))) is not None and not state.is_available()]
         if not waiting:
             return None, None, None
-        earliest = min(waiting, key=lambda state: state.next_allowed_monotonic)
+        viable = [state for state in waiting if state.last_kind not in {"auth", "model"}]
+        earliest = min(viable or waiting, key=lambda state: state.next_allowed_monotonic)
         return max(0.0, earliest.next_allowed_monotonic - now), earliest.last_kind or None, earliest.last_status or None
 
     @staticmethod
@@ -887,6 +1140,7 @@ class ProviderRouter:
         target_refs: tuple[str, ...] = (), tool_specs: tuple[ToolSpec, ...] = (),
         text_provider_order: tuple[str, ...] | None = None,
         budget_seconds: float | None = None, allow_tool_calls: bool = True,
+        repair_state: dict | None = None,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         started = time.monotonic()
@@ -896,8 +1150,10 @@ class ProviderRouter:
         if self._groq:
             attempts.append(("groq", self._groq, C.GROQ_VISION_MODELS if has_images else C.GROQ_MODELS))
         if self._gemini:
-            attempts.append(("gemini", self._gemini,
-                             getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS) if has_images else C.GEMINI_MODELS))
+            configured = getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS) if has_images else C.GEMINI_MODELS
+            cached = tuple(model for model in self._catalog_models(has_images=has_images)
+                           if model not in configured and self._available("gemini", model))[:2]
+            attempts.append(("gemini", self._gemini, (*configured, *cached)))
         if not has_images:
             by_provider = {attempt[0]: attempt for attempt in attempts}
             priority = text_provider_order if text_provider_order is not None else ("groq", "gemini")
@@ -909,6 +1165,12 @@ class ProviderRouter:
             report.update(outcome=outcome, kind=kind, cause_kind=cause_kind or kind,
                           retry_after=retry_after, attempt_count=len(report["attempts"]),
                           elapsed_ms=max(0, int((time.monotonic() - started) * 1000)))
+            measured = [item["usage"] for item in report["attempts"] if item.get("usage")]
+            report["usage"] = {key: sum(item.get(key, 0) for item in measured) for key in {key for item in measured for key in item}}
+            report["usage_attempt_count"] = len(measured)
+            report["usage_scope"] = "reported_attempts"
+            report["usage_complete"] = bool(measured) and len(measured) == len(report["attempts"]) and all(
+                {"input_tokens", "output_tokens", "total_tokens"} <= set(item) for item in measured)
 
         def skip(provider: str, model: str, reason: str, *, retry_after=None):
             report["skips"].append({"provider": provider, "model": model, "reason": reason, "retry_after": retry_after})
@@ -945,17 +1207,27 @@ class ProviderRouter:
             raise AllProvidersExhausted("prazo dos providers esgotado", kind=exc.kind, stage=exc.stage) from exc
         messages = normalized
         last_error: Optional[ProviderError] = None
+        errors: list[ProviderError] = []
         text_fallbacks = []
         wants_tools = bool(actions or tool_specs)
+        report["tools_requested"] = wants_tools
         has_native_history = any(message.tool_calls or message.role == "tool" for message in messages)
+        repair_used = bool(repair_state and repair_state.get("used"))
+        discovery_used = False
+        native_schemas = {spec.name: spec.parameters for spec in tool_specs if spec.available}
+        if actions:
+            declaration = proposal_tool(actions, target_refs)
+            native_schemas.setdefault(TOOL_NAME, declaration["parameters"])
 
-        async def attempt(provider: str, client, model: str, timeout: float, *, text_only=False):
+        async def attempt(provider: str, client, model: str, timeout: float, *, text_only=False, repair=False, feedback=""):
             began = time.monotonic()
             state = self._state(provider, model)
             generation = state.failure_generation
-            entry = {"provider": provider, "model": model, "budget_ms": max(0, int(timeout * 1000)), "text_only": text_only}
+            entry = {"provider": provider, "model": model, "budget_ms": max(0, int(timeout * 1000)), "text_only": text_only, "repair": repair}
             report["attempts"].append(entry)
             kwargs = dict(system=system, messages=messages, temperature=temperature, model=model, timeout_seconds=timeout)
+            if feedback:
+                kwargs["system"] += "\n\n" + feedback
             if text_only:
                 kwargs["system"] += "\n\nNeste turno as ferramentas estão indisponíveis. Responda apenas em texto; não crie pedidos, não afirme executar ações e não peça códigos internos ao usuário."
             else:
@@ -968,20 +1240,34 @@ class ProviderRouter:
                     kwargs["tool_specs"] = tool_specs
                 if not allow_tool_calls:
                     kwargs["allow_tool_calls"] = False
+            usage = {}
+            usage_token = _ATTEMPT_USAGE.set(usage)
             try:
                 reply = await self._call(client, kwargs)
                 if not allow_tool_calls and isinstance(reply, ChatReply) and (reply.tool_calls or reply.proposals):
                     raise ProviderError("provider ignorou o fechamento sem ferramentas", kind="invalid_response", stage="output")
             except ProviderError as exc:
+                usage.update(exc.usage)
+                entry["usage"] = _safe_usage(usage)
+                diagnostic_tool = exc.diagnostic_tool if exc.diagnostic_tool in native_schemas else ""
+                diagnostic_path = _safe_schema_path(exc.diagnostic_path, native_schemas.get(diagnostic_tool, {}))
                 entry.update(kind=exc.kind, stage=exc.stage, status=int(exc.status or 0),
                              retry_after=exc.retry_after, quota_scope=exc.quota_scope,
+                             diagnostic_code=exc.diagnostic_code, diagnostic_path=diagnostic_path,
+                             diagnostic_tool=diagnostic_tool, diagnostic_index=exc.diagnostic_index,
                              elapsed_ms=max(0, int((time.monotonic() - began) * 1000)))
+                exc.diagnostic_tool, exc.diagnostic_path = diagnostic_tool, diagnostic_path
+                errors.append(exc)
                 log.warning(
-                    "chatbot: provider=%s model=%s mode=%s stage=%s kind=%s status=%s finish_reason=%s elapsed_ms=%d budget_ms=%d quota_scope=%s retry_after=%s",
+                    "chatbot: provider=%s model=%s mode=%s stage=%s kind=%s status=%s finish_reason=%s elapsed_ms=%d budget_ms=%d quota_scope=%s retry_after=%s diagnostic_code=%s diagnostic_path=%s diagnostic_tool=%s diagnostic_index=%s repair=%s",
                     provider, model, mode, exc.stage, exc.kind, int(exc.status or 0),
                     _diagnostic_finish_reason(exc.finish_reason), entry["elapsed_ms"], entry["budget_ms"], exc.quota_scope, exc.retry_after,
+                    exc.diagnostic_code or "none", diagnostic_path, diagnostic_tool or "none", exc.diagnostic_index, repair,
                 )
                 raise
+            finally:
+                _ATTEMPT_USAGE.reset(usage_token)
+            entry["usage"] = _safe_usage(usage)
             entry.update(kind="success", status=200, elapsed_ms=max(0, int((time.monotonic() - began) * 1000)))
             state.mark_success(expected_generation=generation)
             finish("success", outcome="success")
@@ -997,13 +1283,58 @@ class ProviderRouter:
                 raise AllProvidersExhausted("pedido não pôde ser processado", kind=error.kind, stage=error.stage,
                                             status=error.status, finish_reason=error.finish_reason) from error
 
+        async def discover(client, models, provider_deadline):
+            nonlocal discovery_used
+            account = self._account_states.get("gemini")
+            if discovery_used or (account is not None and not account.is_available()):
+                return
+            lookup = getattr(client, "discover_models", None)
+            remaining = provider_deadline - time.monotonic()
+            if not callable(lookup) or remaining <= 0:
+                return
+            discovery_used = True
+            timeout = min(3.0, remaining / 3)
+            try:
+                found = await asyncio.wait_for(lookup(timeout_seconds=timeout, has_images=has_images), timeout=timeout)
+            except (ProviderError, asyncio.TimeoutError):
+                found = ()
+            getter = getattr(client, "discovery_diagnostics", None)
+            status = getter() if callable(getter) else {}
+            report["model_discovery"] = status
+            if status.get("kind") in {"auth", "rate_limit"}:
+                error = ProviderError("a descoberta de modelos está indisponível", kind=status["kind"], stage="discovery",
+                                      status=status.get("status"), retry_after=status.get("retry_after"),
+                                      quota_scope="account" if status["kind"] == "auth" else status.get("quota_scope", "model"))
+                errors.append(error)
+                if error.kind == "auth" or error.quota_scope == "account":
+                    self._mark_provider_failure("gemini", self._all_models("gemini", tuple(models)),
+                                                900.0 if error.kind == "auth" else error.retry_after or 30.0,
+                                                status=error.status or 0, kind=error.kind, stage="discovery",
+                                                quota_scope=error.quota_scope, explicit_retry=error.retry_after is not None)
+            configured = set(getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS) if has_images else C.GEMINI_MODELS)
+            added = sum(model not in configured for model in models)
+            for candidate in found:
+                if added >= 2:
+                    break
+                if (isinstance(candidate, str) and re.fullmatch(r"gemini-[A-Za-z0-9._-]{1,100}", candidate, re.ASCII)
+                        and candidate not in models and self._available("gemini", candidate)):
+                    models.append(candidate)
+                    added += 1
+
         for index, (provider, client, models) in enumerate(attempts):
+            models = list(models)
+            attempts[index] = (provider, client, models)
             remaining = max(0.0, deadline - time.monotonic())
             later = [item for item in attempts[index + 1:] if any(self._available(item[0], model) for model in item[2])]
             # O prazo deste provider é fixo durante sua cadeia. Recalcular a
             # reserva a cada modelo permitiria consumir aos poucos todo o fallback.
             reserve = min(10.0, remaining * .5) if later else 0.0
             provider_deadline = deadline - reserve
+            if provider == "gemini" and any(
+                (state := self._states.get((provider, model))) is not None
+                and state.last_kind == "model" and state.last_status == 404 for model in models
+            ):
+                await discover(client, models, provider_deadline)
             for model_index, model in enumerate(models):
                 state = self._state(provider, model)
                 generation = state.failure_generation
@@ -1025,11 +1356,41 @@ class ProviderRouter:
                 except ProviderError as exc:
                     last_error = exc
                     terminal(exc)
+                    repairable = (wants_tools and allow_tool_calls and not repair_used and exc.kind == "invalid_response"
+                                  and exc.stage == "output" and exc.diagnostic_code
+                                  and exc.diagnostic_code not in {"incomplete_calls", "unexpected_calls", "malformed_response"}
+                                  and exc.finish_reason not in _INCOMPLETE_TOOL_FINISH_REASONS
+                                  and state.is_available() and state.failure_generation == generation
+                                  and provider_deadline - time.monotonic() > .05)
+                    if repairable:
+                        repair_used = True
+                        if repair_state is not None:
+                            repair_state["used"] = True
+                        report["repair_used"] = True
+                        feedback = (
+                            "O lote anterior deste pedido foi rejeitado. Nenhuma ferramenta desse lote foi executada. "
+                            "Corrija uma única vez o contrato das chamadas usando as declarações atuais. "
+                            "Não invente valores que faltam; pergunte quando o pedido não contiver a informação. "
+                            "Não repita um efeito confirmado no histórico. Não revele texto privado de áudio. "
+                            "Diagnóstico seguro: " + json.dumps({"code": exc.diagnostic_code, "path": exc.diagnostic_path,
+                                                                "tool": exc.diagnostic_tool, "index": exc.diagnostic_index}, ensure_ascii=False)
+                        )
+                        try:
+                            generation = state.failure_generation
+                            return await attempt(provider, client, model, self._attempt_timeout(provider_deadline, siblings=siblings),
+                                                 repair=True, feedback=feedback)
+                        except ProviderError as repaired:
+                            exc, last_error = repaired, repaired
+                            terminal(repaired)
                     if exc.kind == "tools_unsupported" and wants_tools:
                         self._unsupported_tool_models.add((provider, model))
                         text_fallbacks.append((provider, client, model))
                         continue
                     stop, last_error = self._record_failure(provider, model, models, exc, expected_generation=generation)
+                    if last_error is not exc:
+                        report["concurrent_failure_preserved"] = True
+                    if provider == "gemini" and exc.kind == "model" and exc.status == 404:
+                        await discover(client, models, provider_deadline)
                     if stop:
                         for candidate in models[model_index + 1:]:
                             skip(provider, candidate, "account_cooldown" if last_error.quota_scope == "account" or last_error.kind == "auth" else "provider_unavailable")
@@ -1059,8 +1420,43 @@ class ProviderRouter:
                 terminal(exc)
                 models = next(item[2] for item in attempts if item[0] == provider)
                 _, last_error = self._record_failure(provider, model, models, exc, expected_generation=generation)
+                if last_error is not exc:
+                    report["concurrent_failure_preserved"] = True
 
         retry_after, cooldown_kind, cooldown_status = self._retry_context(attempts)
+        if last_error is not None and last_error not in errors:
+            errors.append(last_error)
+        causes = tuple({
+            "kind": error.kind, "stage": error.stage, "status": error.status,
+            "retry_after": error.retry_after, "quota_scope": error.quota_scope,
+            "diagnostic_code": error.diagnostic_code, "diagnostic_path": error.diagnostic_path,
+            "diagnostic_tool": error.diagnostic_tool, "diagnostic_index": error.diagnostic_index,
+        } for error in errors)
+        report["causes"] = causes
+        viable_waits = [
+            max(0.0, state.next_allowed_monotonic - time.monotonic())
+            for provider, _, models in attempts for model in models
+            if (state := self._states.get((provider, model))) is not None and not state.is_available()
+            and state.last_kind not in {"auth", "model"}
+        ]
+        catalog_status = report.get("model_discovery", {})
+        if catalog_status.get("kind") == "rate_limit" and catalog_status.get("cache_seconds", 0) > 0:
+            viable_waits.append(catalog_status["cache_seconds"])
+        earliest_retry = min(viable_waits) if viable_waits else None
+        if any(self._available(provider, model) and not (wants_tools and (provider, model) in self._unsupported_tool_models)
+               for provider, _, models in attempts for model in models):
+            earliest_retry = 0.0
+        report["earliest_retry_seconds"] = earliest_retry
+        # Remoção/404 de um último modelo não apaga os limites e contratos que
+        # efetivamente impediram as alternativas saudáveis deste turno.
+        def importance(error):
+            if error.kind == "invalid_response" and error.diagnostic_code:
+                return 5
+            return {"rate_limit": 4, "network": 3, "timeout": 3, "invalid_response": 3, "empty": 3,
+                    "tools_unsupported": 2, "auth": 2, "request": 1, "model": 0}.get(error.kind, 1)
+        representative = max(reversed(errors), key=importance) if errors else None
+        if report.get("concurrent_failure_preserved") and last_error is not None:
+            representative = last_error
         attempted = len(report["attempts"])
         if time.monotonic() >= deadline:
             kind, stage = "deadline", "routing"
@@ -1071,18 +1467,25 @@ class ProviderRouter:
         elif attempted == 0:
             kind, stage = "cooldown", "routing"
         else:
-            kind = last_error.kind if last_error else "network"
-            stage = last_error.stage if last_error else "api"
-        cause_kind = cooldown_kind if kind == "cooldown" else last_error.kind if last_error else kind
-        if kind not in {"cooldown", "rate_limit"}:
-            retry_after = last_error.retry_after if last_error else None
+            kind = representative.kind if representative else "network"
+            stage = representative.stage if representative else "api"
+        cause_kind = cooldown_kind if kind == "cooldown" else representative.kind if representative else kind
+        if kind == "rate_limit":
+            retry_after = earliest_retry if earliest_retry is not None else representative.retry_after if representative else None
+        elif kind not in {"cooldown"}:
+            retry_after = representative.retry_after if representative else None
         finish(kind, cause_kind=cause_kind, retry_after=retry_after)
         log.info("chatbot: exhausted mode=%s kind=%s cause_kind=%s attempts=%d elapsed_ms=%d earliest_retry=%s",
                  mode, kind, cause_kind, attempted, report["elapsed_ms"], retry_after)
         raise AllProvidersExhausted(
             "todos os providers estão temporariamente indisponíveis" if kind == "cooldown" else "todos os providers falharam",
             kind=kind, cause_kind=cause_kind, stage=stage, retry_after=retry_after,
-            status=(cooldown_status if kind == "cooldown" else last_error.status if last_error else None),
-            quota_scope=last_error.quota_scope if last_error else "model",
-            finish_reason=last_error.finish_reason if last_error else None,
+            status=(cooldown_status if kind == "cooldown" else representative.status if representative else None),
+            quota_scope=representative.quota_scope if representative else "model",
+            finish_reason=representative.finish_reason if representative else None,
+            diagnostic_code=representative.diagnostic_code if representative else "",
+            diagnostic_path=representative.diagnostic_path if representative else "$",
+            diagnostic_tool=representative.diagnostic_tool if representative else "",
+            diagnostic_index=representative.diagnostic_index if representative else None,
+            usage=report.get("usage"), causes=causes, earliest_retry_seconds=earliest_retry,
         )

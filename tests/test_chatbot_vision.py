@@ -113,7 +113,7 @@ async def test_raw_image_above_fallback_limit_is_normalized_before_provider():
 async def test_image_is_downloaded_once_and_same_bytes_reach_all_vision_fallbacks():
     raw = _png(color=(10, 40, 90))
     session = _Session(
-        gets=[_Response(raw, mime="image/png")],
+        gets=[_Response(raw, mime="image/png"), _Response({"models": []})],
         posts=[
             _Response({"error": {"code": "model_not_found"}}, status=404),
             _Response({"error": {"message": "model unavailable"}}, status=404),
@@ -126,7 +126,8 @@ async def test_image_is_downloaded_once_and_same_bytes_reach_all_vision_fallback
     ):
         result = await router.chat(system="s", messages=[ChatMessage("user", "leia", image_urls=[_attachment(raw).url])])
     assert result == "li o print"
-    assert len(session.get_calls) == 1
+    assert sum("cdn.discordapp.com" in url for url, _kwargs in session.get_calls) == 1
+    assert sum(url.endswith("/v1beta/models") for url, _kwargs in session.get_calls) == 1
     groq = session.post_calls[0][1]["json"]["messages"][-1]["content"][1]["image_url"]["url"]
     gemini_first = session.post_calls[1][1]["json"]["contents"][-1]["parts"][1]["inlineData"]
     gemini_second = session.post_calls[2][1]["json"]["contents"][-1]["parts"][1]["inlineData"]

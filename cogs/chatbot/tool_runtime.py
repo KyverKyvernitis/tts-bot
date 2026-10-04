@@ -10,6 +10,7 @@ import asyncio
 import inspect
 import io
 import json
+import math
 import logging
 import re
 from dataclasses import dataclass, field, replace
@@ -50,6 +51,150 @@ def _json_value(value):
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     raise TypeError("Resultado contém um objeto não serializável.")
+
+
+_PROVIDER_KINDS = frozenset({"success", "cooldown", "rate_limit", "auth", "model", "network",
+                            "timeout", "deadline", "blocked", "invalid_response", "empty",
+                            "unconfigured", "tools_unsupported", "api", "server", "request"})
+
+
+def _safe_number(value, *, maximum=31536000):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return round(min(number, maximum), 2) if math.isfinite(number) and number >= 0 else None
+
+
+def safe_provider_state(router):
+    """Snapshot local permitido no prompt; nunca inclui corpo HTTP ou credenciais.
+
+    available significa elegível pelo circuito local, não uma verificação de
+    conectividade. Consultar o estado não consome uma chamada aos provedores.
+    """
+    fallback = {"configured": {"groq": None, "gemini": None}, "availability": [],
+                "earliest_retry_seconds": None, "availability_scope": "local_circuits"}
+    getter = getattr(router, "diagnostics", None)
+    if not callable(getter):
+        return fallback
+    try:
+        diagnostics = getter()
+    except Exception:
+        return fallback
+    if not isinstance(diagnostics, dict):
+        if inspect.iscoroutine(diagnostics):
+            diagnostics.close()
+        return fallback
+    configured = diagnostics.get("configured")
+    if isinstance(configured, dict):
+        fallback["configured"] = {name: configured.get(name) if type(configured.get(name)) is bool else None
+                                  for name in ("groq", "gemini")}
+    availability = diagnostics.get("availability")
+    # Compatibilidade com snapshots locais antigos; circuitos intocados são
+    # desconhecidos nesse formato e não podem ser anunciados como disponíveis.
+    if not isinstance(availability, (list, tuple)):
+        availability = []
+        circuits = diagnostics.get("circuits")
+        if isinstance(circuits, dict):
+            for key, circuit in circuits.items():
+                if isinstance(key, str) and "/" in key and isinstance(circuit, dict):
+                    provider, model = key.split("/", 1)
+                    availability.append({"provider": provider, "model": model, **circuit})
+    for item in availability[:32]:
+        if not isinstance(item, dict) or item.get("provider") not in ("groq", "gemini"):
+            continue
+        model = item.get("model")
+        if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:-]{0,119}", model):
+            continue
+        record = {"provider": item["provider"], "model": model,
+                  "available": item.get("available") if type(item.get("available")) is bool else None}
+        for key in ("configured", "exposed"):
+            if type(item.get(key)) is bool:
+                record[key] = item[key]
+        for key in ("cooldown_seconds",):
+            if (number := _safe_number(item.get(key))) is not None:
+                record[key] = number
+        cause = item.get("cause_kind", item.get("last_kind"))
+        if isinstance(cause, str) and cause in _PROVIDER_KINDS:
+            record["cause_kind"] = cause
+        status = item.get("status", item.get("last_status"))
+        if type(status) is int and 100 <= status <= 599:
+            record["status"] = status
+        if isinstance(item.get("quota_scope"), str) and item["quota_scope"] in {"model", "account", "provider", "global"}:
+            record["quota_scope"] = item["quota_scope"]
+        if isinstance(item.get("tools_support"), str) and item["tools_support"] in {"unknown", "unsupported", "supported"}:
+            record["tools_support"] = item["tools_support"]
+        if isinstance(item.get("modes"), (list, tuple)):
+            record["modes"] = list(dict.fromkeys(mode for mode in item["modes"] if isinstance(mode, str) and mode in {"text", "vision"}))
+        fallback["availability"].append(record)
+    fallback["earliest_retry_seconds"] = _safe_number(diagnostics.get("earliest_retry_seconds"))
+    last = diagnostics.get("last_request")
+    if isinstance(last, dict):
+        request = {}
+        if last.get("mode") in ("text", "vision"):
+            request["mode"] = last["mode"]
+        if isinstance(last.get("outcome"), str) and last["outcome"] in {"success", "failed"}:
+            request["outcome"] = last["outcome"]
+        for key in ("kind", "cause_kind", "representative_cause"):
+            if isinstance(last.get(key), str) and last[key] in _PROVIDER_KINDS:
+                request[key] = last[key]
+        usage = last.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            attempts = last.get("attempts")
+            if isinstance(attempts, (list, tuple)):
+                usage = next((attempt["usage"] for attempt in reversed(attempts)
+                              if isinstance(attempt, dict) and isinstance(attempt.get("usage"), dict)
+                              and attempt["usage"]), None)
+        if isinstance(usage, dict):
+            measured = {key: usage[key] for key in ("input_tokens", "output_tokens", "total_tokens",
+                                                   "reasoning_tokens", "cached_tokens")
+                        if type(usage.get(key)) is int and 0 <= usage[key] <= 1000000000}
+            if measured:
+                request["usage"] = measured
+                if last.get("usage_scope") == "reported_attempts":
+                    request["usage_scope"] = "reported_attempts"
+                if type(last.get("usage_complete")) is bool:
+                    request["usage_complete"] = last["usage_complete"]
+                count = last.get("usage_attempt_count")
+                if type(count) is int and 0 <= count <= 32:
+                    request["usage_attempt_count"] = count
+        if request:
+            fallback["last_request"] = request
+    return fallback
+
+
+def conversation_references(cog, message, context):
+    """Somente identidades já resolvidas e recursos visíveis, sem seu conteúdo."""
+    references = {"members": {}, "resources": {}}
+    for ref, member in list((getattr(context, "targets", None) or {}).items())[:30]:
+        if not isinstance(ref, str) or len(ref) > 32 or not policy._member_in_guild(member, message.guild):
+            continue
+        references["members"][ref] = {
+            "id": str(member.id), "name": policy._label(member), "bot": bool(member.bot),
+            "voice": member_voice_snapshot(cog.bot, message.guild, member, viewer=message.author),
+        }
+    for ref, resource in list((getattr(context, "resources", None) or {}).items())[:40]:
+        if not isinstance(ref, str) or len(ref) > 32:
+            continue
+        kind = None
+        if isinstance(resource, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel)):
+            if (getattr(getattr(resource, "guild", None), "id", None) == message.guild.id
+                    and bool(getattr(resource.permissions_for(message.author), "view_channel", False))):
+                kind = "channel"
+        elif isinstance(resource, discord.Role) and resource.guild.id == message.guild.id:
+            kind = "role"
+        elif isinstance(resource, discord.Message) and resource.channel.id == message.channel.id:
+            kind = "message"
+        elif isinstance(resource, discord.User):
+            kind = "user"
+        if kind is not None:
+            record = {"id": str(resource.id), "kind": kind}
+            if kind != "message":
+                record["name"] = policy._label(resource)
+            references["resources"][ref] = record
+    return references
 
 
 def _actions_ready(cog):
@@ -460,6 +605,7 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
             recent = [{key: item[key] for key in ("action", "state", "public_result") if key in item}
                       for item in await cog._actions.store.recent_results(runtime.guild_id, runtime.channel_id, runtime.user_id)]
         return _result({
+            "providers": safe_provider_state(getattr(cog, "_router", None)),
             "identity": {"name": str(getattr(bot_member, "display_name", cog.bot.user.name))[:80],
                          "id": str(cog.bot.user.id),
                          "avatar_url": str(getattr(getattr(bot_member, "display_avatar", None), "url", ""))[:500]},
@@ -473,7 +619,7 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
             "recent_action_results": recent,
         })
 
-    register("get_operational_state", "Consulte identidade real do bot, conexão de voz e ferramentas disponíveis. O bot não escuta a call.", _EMPTY, operational_state)
+    register("get_operational_state", "Consulte identidade real, voz, ferramentas e estado local dos provedores de IA: configuração, modelos elegíveis, pausas, causas e prazo conhecido. Não faz pedidos às APIs nem sabe a cota restante. O bot não escuta a call.", _EMPTY, operational_state)
 
     def member_data(guild, member, requester):
         ref = runtime.reference(runtime.targets, member, "m")
