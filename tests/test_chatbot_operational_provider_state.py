@@ -125,8 +125,10 @@ async def test_each_round_refreshes_provider_state_preserving_native_history_and
     assert first["providers"]["availability"][0]["available"] is False
     assert second["providers"]["availability"][0]["available"] is True
     assert second["providers"]["earliest_retry_seconds"] is None
-    assert first["references"]["members"]["autor"]["id"] == "1"
-    assert first["references"]["members"]["m1"]["id"] == "3"
+    assert "id" not in first["references"]["members"]["autor"]
+    assert "id" not in first["references"]["members"]["m1"]
+    assert registry.runtime.targets["autor"].id == 1
+    assert registry.runtime.targets["m1"].id == 3
     assert registry.runtime.action_context.description not in systems[-1]
     assert "PRIVATE_" not in "".join(systems)
     assert reply.text == "Esse provedor voltou a ficar elegível." and not state["delivered"]
@@ -137,7 +139,11 @@ async def test_each_round_refreshes_provider_state_preserving_native_history_and
 @pytest.mark.asyncio
 async def test_compact_prompt_preserves_unique_action_rules_in_native_declarations(world):
     activate_registry(world)
-    world.cog._router.chat.return_value = ChatReply("oi")
+    world.cog._router.chat.side_effect = [
+        ChatReply("", tool_calls=(NativeToolCall("load-proposal", "carregar_ferramentas",
+                                                {"names": ["propor_acao"]}),)),
+        ChatReply("oi"),
+    ]
     _reply, registry, _state = await run_loop(world)
     options = world.cog._router.chat.await_args.kwargs
     context = registry.runtime.action_context
@@ -174,7 +180,7 @@ def test_snapshot_of_real_router_does_not_make_http_calls():
     session = SimpleNamespace(post=Mock(side_effect=AssertionError("No external calls")))
     router = ProviderRouter(session, groq_key="test-key")
     state = safe_provider_state(router)
-    assert state["configured"] == {"groq": True, "gemini": False}
+    assert state["configured"] == {"groq": True, "gemini": False, "cloudflare": False}
     session.post.assert_not_called()
 
 
@@ -311,7 +317,7 @@ async def test_two_host_rounds_share_one_contract_repair_budget_for_entire_turn(
     router = ProviderRouter(session, groq_key="PRIVATE_API_KEY")
     router.chat = AsyncMock(wraps=router.chat)
     world.cog._router = router
-    messages = [ChatMessage("user", "PRIVATE_REQUEST")]
+    messages = [ChatMessage("user", "Consulte o estado operacional do bot. PRIVATE_REQUEST")]
     with pytest.raises(AllProvidersExhausted) as failure:
         await run_loop(world, messages)
     assert failure.value.kind == "invalid_response"

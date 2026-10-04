@@ -392,6 +392,14 @@ class MemoryStore:
                 query[user_field] = int(user_id)
             result = await self._coll.delete_many(query)
             removed += int(result.deleted_count)
+        # Publicações da staff pertencem ao servidor, nunca ao reset pessoal
+        # de quem as criou. O reset do servidor/global apaga esse conteúdo.
+        if user_id is None:
+            query = {"type": "chatbot_published_knowledge"}
+            if guild_id is not None:
+                query["guild_id"] = int(guild_id)
+            result = await self._coll.delete_many(query)
+            removed += int(result.deleted_count)
         return removed
 
     async def clear_guild_history(self, guild_id: int) -> int:

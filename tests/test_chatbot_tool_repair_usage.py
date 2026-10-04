@@ -325,7 +325,9 @@ async def test_groq_error_usage_and_gemini_usage_survive_fallback(world, chains)
     instance = make_router(_Session(_Response(invalid), _Response(invalid_repair), _Response(valid)), gemini=True)
     assert (await instance.chat(system="s", messages=[], tool_specs=(spec,))).text == "fallback"
     report = instance.diagnostics()["last_request"]
-    assert report["usage"] == {"input_tokens": 41, "output_tokens": 9, "total_tokens": 50,
+    # Gemini candidates exclude thoughts, whereas Groq completion includes it.
+    # Keep the remote total unchanged, even for this deliberately inconsistent fixture.
+    assert report["usage"] == {"input_tokens": 41, "output_tokens": 15, "total_tokens": 50,
                                "reasoning_tokens": 6, "cached_tokens": 7}
     assert report["usage_attempt_count"] == 3
 

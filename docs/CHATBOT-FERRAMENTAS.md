@@ -1,6 +1,6 @@
 # Ferramentas do chatbot
 
-Esta atualização substitui a interpretação de pedidos de áudio e imagem por chamadas nativas de ferramentas. O modelo recebe, no início do prompt geral, o catálogo disponível naquele turno, seus argumentos e o significado dos resultados. Depois vêm o estado real da conversa, a identidade do bot e as instruções de linguagem.
+Esta atualização substitui a interpretação de pedidos de áudio e imagem por chamadas nativas de ferramentas. O modelo recebe, no início do prompt geral, um índice de suas capacidades e as instruções estáveis de identidade e linguagem. Depois vem o estado real da conversa. Os schemas detalhados das ferramentas são carregados conforme a necessidade, preservando o catálogo e as validações do host.
 
 O catálogo é explícito: métodos internos dos cogs, terminal, credenciais, banco de dados, updater e administração global não são exportados automaticamente. Módulos desligados e recursos indisponíveis aparecem com o motivo correspondente. O bot sabe que sua conexão de voz não fornece escuta ao vivo.
 
@@ -35,7 +35,7 @@ Falhas definidas antes de enviar o arquivo podem usar a resposta em texto quando
 
 ## Fallback e diagnóstico
 
-Groq continua em primeiro por padrão e Gemini é a alternativa. As tentativas reservam parte do prazo para o próximo provedor. Um limite por modelo não bloqueia automaticamente os outros modelos; indisponibilidade comprovada da conta vale para todos. Os tempos de espera informados pela API são preservados, inclusive os dados estruturados do Gemini.
+Groq continua em primeiro por padrão, Gemini é a alternativa e Qwen3-30B-A3B pela Cloudflare é uma reserva adicional de texto quando configurada. A escolha salva entre Groq e Gemini é preservada; Cloudflare fica por último e não recebe imagens. As tentativas reservam parte do prazo para o próximo provedor. Um limite por modelo não bloqueia automaticamente os outros modelos; indisponibilidade comprovada da conta vale para todos. Os tempos de espera informados pela API são preservados, inclusive os dados estruturados do Gemini. Consulte [Tokens e Qwen](CHATBOT-TOKENS-QWEN.md) para configurar a reserva no plano gratuito e acompanhar o consumo.
 
 Quando o Gemini informa que um modelo não está disponível, o roteador consulta o catálogo da API usando a chave já configurada e considera alternativas de conversa expostas naquele catálogo. A descoberta tem cache, limite de tamanho e prazo; não exige editar o ambiente. A presença no catálogo não garante quota disponível nem suporte a ferramentas: a requisição real continua verificando esses recursos. Um limite da conta não é contornado escolhendo outro nome de modelo.
 
@@ -45,13 +45,13 @@ O índice de ferramentas no início do prompt é curto; descrições e schemas d
 
 O diagnóstico registra provedor, modelo, duração, resultado e motivo de uma tentativa ou de sua ausência. Não registra chaves, prompts, respostas privadas ou o corpo bruto de erros. O painel de configuração mostra se a chave está configurada e se há modelos aguardando nova tentativa. “Configurado” indica configuração local, sem prometer disponibilidade da API.
 
-As contagens de tokens reportadas pelos provedores aparecem nos logs e no diagnóstico. Uma contagem ausente permanece desconhecida. A exaustão preserva as causas das tentativas, em vez de mostrar apenas o último erro; um modelo ausente não encurta a espera de uma quota longa. O prazo de nova tentativa é uma previsão local, sem garantir recuperação do serviço. A atualização não aumenta as quotas contratadas.
+As contagens de tokens reportadas pelos provedores aparecem nos logs e no diagnóstico, incluindo as parcelas de cache e raciocínio quando informadas. O painel pode mostrar o agregado do turno completo, com tentativas e rodadas de ferramentas. Uma contagem ausente permanece desconhecida, e totais incompletos são identificados como parciais. A exaustão preserva as causas das tentativas, em vez de mostrar apenas o último erro; um modelo ausente não encurta a espera de uma quota longa. O prazo de nova tentativa é uma previsão local, sem garantir recuperação do serviço. A atualização não aumenta as quotas contratadas.
 
 Para acompanhar os metadados na VPS:
 
 ```bash
 sudo journalctl -u tts-bot.service --since "30 minutes ago" --no-pager -o cat \
-  | grep -E 'chatbot: (configuration |provider=|skip |exhausted |result=success|usage |model_discovery|tool_repair|turno falhou)' \
+  | grep -E 'chatbot: (configuration |provider=|skip |exhausted |result=success|usage |turn_usage |model_discovery|tool_repair|turno falhou)' \
   | tail -n 150
 ```
 
@@ -69,8 +69,8 @@ As mensagens de aprovação usam a primeira pessoa, texto curto e somente dois b
 
 Use `/chatbot configurar` para ajustar as opções no Discord:
 
-- **Provedor de conversa:** Groq é a prioridade padrão desta atualização; Gemini permanece como fallback. A escolha explícita no painel pode alterar a ordem posteriormente.
-- **Disponibilidade:** o texto do painel mostra a configuração e a espera local de Groq e Gemini, com previsão da próxima tentativa quando todos os modelos estão em espera.
+- **Provedor de conversa:** Groq é a prioridade padrão desta atualização; Gemini permanece como fallback. A escolha explícita no painel pode alterar a ordem entre esses dois. Qwen/Cloudflare é a última reserva de texto quando o operador configura a conta e o token.
+- **Disponibilidade:** o texto do painel mostra a configuração e a espera local de Groq, Gemini e Cloudflare, com previsão da próxima tentativa quando todos os modelos estão em espera. O consumo medido não inclui tentativas cujos provedores omitiram o uso.
 - **Autorizar cargos e canais:** autorize os recursos em que o chatbot poderá propor alterações. A lista começa vazia; permissões e aprovações continuam obrigatórias. Cargos gerenciados, de staff ou capazes de conceder poderes administrativos ficam protegidos.
 - **Configurar ações / Configurar áudios:** controles existentes de disponibilidade, staff e frequência de áudio.
 

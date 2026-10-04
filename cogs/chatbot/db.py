@@ -8,6 +8,7 @@ from .action_store import DOC_TYPE_ACTION_REQUEST
 from .preferences import DOC_TYPE_PREFERENCES
 from .reply_store import DOC_TYPE_REPLY
 from .tool_memory import FACT_TYPE
+from .knowledge import KNOWLEDGE_TYPE
 
 log = logging.getLogger(__name__)
 
@@ -152,9 +153,19 @@ async def ensure_indexes(coll) -> None:
          [("type", 1), ("guild_id", 1), ("channel_id", 1), ("user_id", 1),
           ("visibility_scope", 1), ("global_generation", 1), ("guild_generation", 1),
           ("user_generation", 1), ("updated_at", -1)]),
+        (KNOWLEDGE_TYPE, "chatbot_knowledge_scope_lookup",
+         [("type", 1), ("guild_id", 1), ("global_generation", 1), ("guild_generation", 1),
+          ("channel_id", 1), ("visibility_scope", 1), ("updated_at", -1)]),
     ):
         specs.append((keys, {"name": name, "partialFilterExpression": {"type": kind}}))
     specs.extend([
+        ([("type", 1), ("knowledge_ref", 1)],
+         {"name": "chatbot_knowledge_ref_unique", "unique": True,
+          "partialFilterExpression": {"type": KNOWLEDGE_TYPE}}),
+        ([("type", 1), ("guild_id", 1), ("global_generation", 1),
+          ("guild_generation", 1), ("entry_slot", 1)],
+         {"name": "chatbot_knowledge_slot_unique", "unique": True,
+          "partialFilterExpression": {"type": KNOWLEDGE_TYPE}}),
         ([("type", 1), ("guild_id", 1), ("channel_id", 1), ("user_id", 1)],
          {"name": "chatbot_action_draft_scope_v1", "unique": True,
           "partialFilterExpression": {"type": "chatbot_action_draft"}}),

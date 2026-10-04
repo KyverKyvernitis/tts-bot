@@ -33,7 +33,7 @@ async def test_groq_preserves_native_ids_and_serializes_tool_roundtrip():
     first, payload = await call("groq", data)
     assert first.tool_calls == (NativeToolCall("call_real_id", READ.name, {}),)
     assert first.proposals == ()
-    assert payload["max_completion_tokens"] == C.MAX_ACTION_RESPONSE_TOKENS
+    assert payload["max_completion_tokens"] == C.MAX_TOOL_RESPONSE_TOKENS
     second, payload = await call("groq", _groq("agora eu sei", finish="stop"), messages=[
         ChatMessage("user", "lembra como gosto?"),
         ChatMessage("assistant", first.text, tool_calls=first.tool_calls),
@@ -55,7 +55,7 @@ async def test_gemini_preserves_function_part_signature_and_matching_result():
     first, payload = await call("gemini", {"candidates": [{"content": {"parts": [part]}, "finishReason": "STOP"}]})
     assert first.tool_calls[0].id == "gemini_real_id"
     assert first.tool_calls[0].provider_data == {"part": part}
-    assert payload["generationConfig"]["maxOutputTokens"] == C.MAX_ACTION_RESPONSE_TOKENS
+    assert payload["generationConfig"]["maxOutputTokens"] == C.MAX_TOOL_RESPONSE_TOKENS
     _, payload = await call("gemini", _gemini("pronto"), messages=[
         ChatMessage("assistant", "", tool_calls=first.tool_calls),
         ChatMessage("tool", '{"ok":true,"mode":"text"}', tool_call_id=first.tool_calls[0].id, name=READ.name),

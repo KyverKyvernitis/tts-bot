@@ -96,7 +96,12 @@ class ChatbotCommandsMixin:
             allowed_roles += f" e mais {len(config.action_allowed_role_ids) - 5}"
         if len(config.action_allowed_channel_ids) > 5:
             allowed_channels += f" e mais {len(config.action_allowed_channel_ids) - 5}"
-        provider_order = " → ".join("Groq" if provider == "groq" else "Gemini" for provider in config.text_provider_order)
+        # A preferência salva continua sendo entre os dois provedores existentes.
+        # Cloudflare é sempre a reserva de texto, sem trocar o caminho de imagens.
+        provider_order = " → ".join(
+            {"groq": "Groq", "gemini": "Gemini"}[provider]
+            for provider in config.text_provider_order if provider in {"groq", "gemini"}
+        ) + " → Cloudflare (texto)"
         return (
             f"**Chatbot:** {'ativado' if config.enabled else 'desativado'}\n"
             f"**Canais permitidos:** {channels}\n"
@@ -149,14 +154,32 @@ class ChatbotCommandsMixin:
             return f"{hours}h{minutes:02d}min"
 
         for provider, title, models in (("groq", "Groq", C.GROQ_MODELS),
-                                         ("gemini", "Gemini", C.GEMINI_MODELS)):
+                                         ("gemini", "Gemini", C.GEMINI_MODELS),
+                                         ("cloudflare", "Cloudflare · Qwen", C.CLOUDFLARE_MODELS)):
             if configured.get(provider) is not True:
-                lines.append(f"**{title}:** chave não configurada.")
+                if provider == "cloudflare":
+                    setup = data.get("cloudflare_setup", {})
+                    if not isinstance(setup, dict):
+                        setup = {}
+                    if setup.get("enabled") is False:
+                        lines.append(f"**{title}:** desativada; configure uma conta Workers Free e CHATBOT_CLOUDFLARE_ENABLED=true.")
+                        continue
+                    missing = []
+                    if setup.get("account_id_configured") is not True:
+                        missing.append("ID da conta")
+                    if setup.get("api_token_configured") is not True:
+                        missing.append("token da API")
+                    lines.append(f"**{title}:** falta {' e '.join(missing) or 'configuração'}; reserva de texto.")
+                else:
+                    lines.append(f"**{title}:** chave não configurada.")
                 continue
             candidates = effective_models.get(provider)
             if isinstance(candidates, (tuple, list)):
                 safe_models = tuple(dict.fromkeys(name for name in candidates
-                    if isinstance(name, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}", name)))[:32]
+                    if isinstance(name, str) and (
+                        name in C.CLOUDFLARE_MODELS if provider == "cloudflare"
+                        else re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}", name)
+                    )))[:32]
                 if safe_models:
                     models = safe_models
             states = [circuits.get(f"{provider}/{model}") for model in models]
@@ -194,9 +217,36 @@ class ChatbotCommandsMixin:
                 if state.get("last_kind") not in {"model", "auth"} and isinstance(delay, (float, int)) and not isinstance(delay, bool) and math.isfinite(delay):
                     suffix = f"; espera de cerca de {wait_text(delay)}"
                 # Apenas IDs de modelos declarados/localmente validados são exibidos.
-                if isinstance(model, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}", model):
+                if isinstance(model, str) and (
+                    model in C.CLOUDFLARE_MODELS if provider == "cloudflare"
+                    else re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}", model)
+                ):
                     lines.append(f"{model}: {reason}{suffix}.")
                     shown += 1
+
+        # Somente números reportados: não mostramos prompt, respostas, IDs ou
+        # credenciais, e cache/raciocínio são parcelas já contidas nos totais.
+        turn = getattr(self, "_last_turn_usage", None)
+        usage = turn.get("usage") if isinstance(turn, dict) else None
+        if isinstance(usage, dict):
+            def token_number(value):
+                return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000_000
+
+            values = [usage.get(key) for key in ("input_tokens", "output_tokens")]
+            if all(token_number(value) for value in values):
+                parts = [f"entrada {values[0]}", f"saída {values[1]}"]
+                cached, thinking = usage.get("cached_tokens"), usage.get("reasoning_tokens")
+                if token_number(cached):
+                    parts.append(f"cache {cached} (incluído na entrada)")
+                if token_number(thinking):
+                    parts.append(f"raciocínio {thinking} (incluído na saída)")
+                requests = turn.get("request_count")
+                if token_number(requests):
+                    parts.append(f"{requests} tentativas")
+                if turn.get("usage_complete") is not True:
+                    parts.append("contagem parcial")
+                lines.append("**Tokens do último turno medido:** " + ", ".join(parts) + ".")
+                return "\n".join(lines)
 
         last = data.get("last_request")
         attempts = last.get("attempts") if isinstance(last, dict) else None
@@ -345,6 +395,68 @@ class ChatbotCommandsMixin:
         count = await self._memory.clear_all_guild_memory(interaction.guild.id)
         await _send(interaction, f"Memória do servidor apagada ({count} registros removidos).")
 
+    async def _do_conhecimento(
+        self, interaction: discord.Interaction, *, acao: str, titulo: str = "",
+        conteudo: str = "", referencia: str = "", tags: str = "", publica: bool = False,
+    ):
+        """Publicação explícita da staff; documentos nunca concedem autoridade."""
+        if not await self._config_staff_check(interaction):
+            return
+        store = getattr(self, "_knowledge", None)
+        guild, channel = interaction.guild, interaction.channel
+        if store is None:
+            await _send(interaction, "A base de conhecimento ainda não está pronta.")
+            return
+        if guild is None or channel is None or getattr(getattr(channel, "guild", None), "id", None) != guild.id:
+            await _send(interaction, "Use este comando em um canal deste servidor.")
+            return
+        if acao not in {"salvar", "listar", "remover"}:
+            await _send(interaction, "Escolha salvar, listar ou remover.")
+            return
+        # Não aceitamos um canal/servidor arbitrário nos parâmetros. O escopo
+        # vem da interação e o acesso é conferido novamente após ler a geração.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        from .memory import visibility_scope_for
+
+        epoch = await self._memory.capture_epoch(guild.id, interaction.user.id)
+        if not await self._config_staff_check(interaction):
+            return
+        effective_nsfw = channel_is_nsfw(channel) and C.nsfw_enabled_for_guild(guild.id)
+        visibility = visibility_scope_for(
+            channel.id, is_nsfw=effective_nsfw,
+            is_private=isinstance(channel, discord.Thread) and channel.is_private(),
+        )
+        try:
+            if acao == "salvar":
+                if not titulo.strip() or not conteudo.strip():
+                    raise ValueError("Informe título e conteúdo para salvar.")
+                result = await store.publish(
+                    guild.id, channel.id, visibility, epoch, title=titulo, content=conteudo,
+                    tags=tags, guild_public=publica, ref=referencia,
+                )
+                location = "em todo o servidor" if publica else "somente neste canal"
+                await _send(interaction, f"Conhecimento salvo {location}. Referência: `{result['ref']}`.")
+            elif acao == "remover":
+                if not referencia.strip():
+                    raise ValueError("Informe a referência exibida ao listar.")
+                removed = await store.forget(guild.id, channel.id, visibility, epoch, ref=referencia)
+                await _send(interaction, "Conhecimento removido." if removed else "Referência não encontrada neste escopo.")
+            else:
+                entries = await store.list(guild.id, channel.id, visibility, epoch, limit=15)
+                if not entries:
+                    await _send(interaction, "Nenhum conhecimento publicado acessível neste canal.")
+                    return
+                lines = []
+                for entry in entries:
+                    # O store valida referência/título. A lista não despeja o
+                    # conteúdo completo e nunca dispara menções do Discord.
+                    scope = "servidor" if entry.get("scope") == "guild" else "canal"
+                    title = discord.utils.escape_markdown(str(entry.get("title", ""))[:80])
+                    lines.append(f"`{entry['ref']}` · {title} ({scope})")
+                await _send(interaction, "**Conhecimento acessível neste canal**\n" + "\n".join(lines))
+        except ValueError as exc:
+            await _send(interaction, f"Não consegui salvar: {exc}")
+
     async def _master_check(self, interaction: discord.Interaction) -> Optional[object]:
         master = getattr(self, "_master", None)
         if master is None:
@@ -435,6 +547,28 @@ class ChatbotCommandsMixin:
     @_safe_slash
     async def chatbot_memoria(self, interaction: discord.Interaction):
         await self._do_memoria_reset_server(interaction)
+
+    @chatbot.command(name="conhecimento", description="Staff: publicar, listar ou remover informações do chatbot")
+    @app_commands.choices(acao=[
+        app_commands.Choice(name="Salvar ou atualizar", value="salvar"),
+        app_commands.Choice(name="Listar neste canal", value="listar"),
+        app_commands.Choice(name="Remover", value="remover"),
+    ])
+    @app_commands.describe(
+        titulo="Título de até 80 caracteres", conteudo="Informação de até 2.000 caracteres",
+        referencia="Referência exibida ao listar, para atualizar ou remover",
+        tags="Até 8 assuntos separados por vírgula",
+        publica="Ao salvar: disponibilizar em todo o servidor (padrão: somente este canal)",
+    )
+    @_safe_slash
+    async def chatbot_conhecimento(
+        self, interaction: discord.Interaction, acao: app_commands.Choice[str],
+        titulo: str = "", conteudo: str = "", referencia: str = "", tags: str = "", publica: bool = False,
+    ):
+        await self._do_conhecimento(
+            interaction, acao=acao.value, titulo=titulo, conteudo=conteudo,
+            referencia=referencia, tags=tags, publica=publica,
+        )
 
     @chatbot_admin.command(name="master", description="Ver, editar ou transferir as instruções globais do bot")
     @app_commands.choices(acao=[

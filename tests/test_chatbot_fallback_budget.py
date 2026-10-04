@@ -270,7 +270,7 @@ async def test_all_cooldown_preserves_cause_retry_and_safe_diagnostics(chains, m
     assert second.value.cause_kind == "rate_limit" and second.value.status == 429
     assert second.value.retry_after == 12
     diagnostics = instance.diagnostics()
-    assert diagnostics["configured"] == {"groq": True, "gemini": True}
+    assert diagnostics["configured"] == {"groq": True, "gemini": True, "cloudflare": False}
     assert diagnostics["earliest_retry_seconds"] == 12
     assert diagnostics["last_request"]["attempt_count"] == 0
     assert len(diagnostics["last_request"]["skips"]) == 4
@@ -513,5 +513,5 @@ async def test_gemini_schema_subset_preserves_host_bounds_and_privacy(chains):
 def test_diagnostics_config_missing_does_not_initialize_model_circuits():
     instance = P.ProviderRouter(object(), groq_key="test-placeholder")
     assert instance.snapshot() == {}
-    assert instance.diagnostics()["configured"] == {"groq": True, "gemini": False}
+    assert instance.diagnostics()["configured"] == {"groq": True, "gemini": False, "cloudflare": False}
     assert instance.diagnostics()["circuits"] == {}

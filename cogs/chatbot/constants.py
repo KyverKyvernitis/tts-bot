@@ -87,6 +87,15 @@ GEMINI_MODELS = _env_csv(
 # Permite comparar conversa entre provedores sem alterar o caminho de visão.
 TEXT_PROVIDER_ORDER = _env_csv("CHATBOT_TEXT_PROVIDER_ORDER", ("groq", "gemini"))
 
+# Reserva de texto independente, sem catálogo nem troca para modelos pagos.
+# O operador deve manter a conta no plano Workers Free; o endpoint não muda
+# automaticamente o plano nem verifica a cobrança da conta.
+CLOUDFLARE_ENABLED = (
+    os.environ.get("CHATBOT_CLOUDFLARE_ENABLED", "").strip().lower() == "true"
+)
+CLOUDFLARE_MODELS = ("@cf/qwen/qwen3-30b-a3b-fp8",)
+CLOUDFLARE_DAILY_NEURON_BUDGET = 10_000
+
 # A cadeia de visão é independente dos overrides de texto. Os IDs continuam
 # configuráveis; confirme disponibilidade e limites na conta do provedor.
 GEMINI_VISION_MODELS = _env_csv(
@@ -155,6 +164,7 @@ MEDIA_READ_TIMEOUT_SECONDS = 25.0
 # Máximo de tokens na resposta do modelo.
 MAX_RESPONSE_TOKENS = 500
 MAX_VISION_RESPONSE_TOKENS = 1000
+MAX_TOOL_RESPONSE_TOKENS = 1000
 MAX_ACTION_RESPONSE_TOKENS = 2000
 MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
 

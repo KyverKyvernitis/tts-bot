@@ -31,6 +31,7 @@ class ToolSpec:
     why: str = ""
     handler: Callable | None = field(default=None, repr=False, compare=False)
     availability: Callable | None = field(default=None, repr=False, compare=False)
+    capabilities: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not _NAME.fullmatch(self.name) or not isinstance(self.description, str):
@@ -38,6 +39,11 @@ class ToolSpec:
         if not isinstance(self.parameters, dict) or self.parameters.get("type") != "object":
             raise ValueError("Os argumentos da ferramenta precisam de schema object.")
         object.__setattr__(self, "parameters", deepcopy(self.parameters))
+        if (not isinstance(self.capabilities, (tuple, list))
+                or any(not isinstance(name, str) or not _NAME.fullmatch(name) for name in self.capabilities)):
+            raise ValueError("As capacidades precisam de nomes declarados válidos.")
+        capabilities = tuple(dict.fromkeys(self.capabilities))
+        object.__setattr__(self, "capabilities", capabilities)
 
     def native_declaration(self) -> dict:
         return {"name": self.name, "description": self.description, "parameters": deepcopy(self.parameters)}
@@ -93,6 +99,25 @@ class ToolRegistry:
 
     def summary(self, context=None) -> str:
         return tool_summary(self.snapshot(context))
+
+    def capability_index(self) -> str:
+        """Índice estável: estado variável e contratos completos seguem à parte."""
+        lines = [
+            "Ferramentas reais do bot: use chamadas nativas quando úteis.",
+            ("Estado tools informa loaded e unavailable. Para outra função do catálogo, chame carregar_ferramentas antes de usá-la."
+             if "carregar_ferramentas" in self._specs else "Estado tools informa loaded e unavailable."),
+            "Nunca peça códigos internos ao usuário. Só confirme efeitos após resultado real; staff aprova ações privilegiadas.",
+        ]
+        # Sem avaliar availability: nomes/descritivos são o catálogo publicado,
+        # não uma promessa de disponibilidade. Isso mantém o prefixo estável.
+        for spec in self._specs.values():
+            description = re.split(r"(?<=[.!?])\s+", " ".join(spec.description.split()), maxsplit=1)[0]
+            description = description if len(description) <= 130 else description[:127].rstrip() + "..."
+            lines.append(f"{spec.name}: {description} [{spec.permission}]")
+            actions = spec.capabilities or spec.parameters.get("properties", {}).get("action", {}).get("enum", ())
+            if actions:
+                lines.append("Ações: " + ", ".join(actions) + ".")
+        return "\n".join(lines)
 
 
 def tool_summary(specs) -> str:

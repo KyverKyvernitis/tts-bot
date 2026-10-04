@@ -321,11 +321,11 @@ class AdminCommandScopingTests(unittest.TestCase):
         names = sorted(c.name for c in admin.walk_commands())
         self.assertEqual(names, ["master", "reset_global"])
 
-    def test_chatbot_group_only_has_configuration_and_memory(self):
+    def test_chatbot_group_has_configuration_knowledge_and_memory(self):
         from cogs.chatbot.commands import ChatbotCommandsMixin
         chatbot = ChatbotCommandsMixin.__dict__["chatbot"]
         names = sorted(command.name for command in chatbot.walk_commands())
-        self.assertEqual(names, ["configurar", "memoria"])
+        self.assertEqual(names, ["configurar", "conhecimento", "memoria"])
 
 
 class GateBehaviorIntegrationTests(unittest.IsolatedAsyncioTestCase):

@@ -146,10 +146,11 @@ async def test_prompt_catalog_precedes_real_state_identity_and_style(native):
     assert await native.cog._generate_and_send(native.message, "quais recursos você tem?")
     options = native.cog._router.chat.await_args.kwargs
     system = options["system"]
-    assert system.startswith("Ferramentas reais deste turno.")
-    assert system.index("set_conversation_preferences") < system.index("Estado confirmado") < system.index("Você é o próprio bot")
-    assert '"bot_name": "Osaka do servidor"' in system
-    assert '"voice_connected": true' in system and '"voice_channel_id": null' in system
+    assert system.startswith("Ferramentas reais do bot:")
+    assert system.index("set_conversation_preferences") < system.index("Você é o próprio bot") < system.index("Estado confirmado")
+    assert confirmed_state(system)["bot_name"] == "Osaka do servidor"
+    assert confirmed_state(system)["voice_state"]["bot"]["connected"] is True
+    assert confirmed_state(system)["voice_state"]["bot"]["channel_id"] is None
     assert "777" not in system
     assert options["text_provider_order"] == ("groq", "gemini")
     assert "Geração de imagem adulta" not in system
@@ -217,7 +218,10 @@ async def test_each_model_round_sees_fresh_calls_and_saved_draft_without_executi
     assert second["voice_state"]["author"]["supported"] is False
     assert second["voice_state"]["bot"]["channel_id"] == "777"
     assert second["voice_state"]["can_listen"] is False
-    assert first["action_draft"] is None and second["action_draft"] == draft
+    assert "action_draft" not in first
+    assert second["action_draft"] == {key: value for key, value in draft.items()
+                                      if key not in {"target_id", "draft_id", "revision", "expires_at"}}
+    assert native.factories[0].runtime.action_draft == draft
     declared = native.cog._router.chat.await_args.kwargs["tool_specs"]
     assert "antes de perguntar" in next(spec.description for spec in declared if spec.name == "save_action_draft")
     assert native.message.reply.await_args.args == ("Qual foi o motivo?",)

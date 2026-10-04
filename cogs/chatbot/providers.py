@@ -53,6 +53,19 @@ _DIAGNOSTIC_CODES = frozenset({
     "batch_limit", "incomplete_calls", "unexpected_calls", "invalid_envelope", "malformed_response",
 })
 _ATTEMPT_USAGE: ContextVar[dict | None] = ContextVar("chatbot_provider_usage", default=None)
+_ATTEMPT_REQUESTS: ContextVar[dict | None] = ContextVar("chatbot_provider_requests", default=None)
+_REQUEST_REPORT: ContextVar[dict | None] = ContextVar("chatbot_provider_report", default=None)
+
+
+def _record_http_request(*, discovery: bool = False) -> None:
+    holder = _ATTEMPT_REQUESTS.get()
+    if holder is not None:
+        holder["count"] = holder.get("count", 0) + 1
+    report = _REQUEST_REPORT.get()
+    if report is not None:
+        report["request_count"] = report.get("request_count", 0) + 1
+        if discovery:
+            report["discovery_request_count"] = report.get("discovery_request_count", 0) + 1
 
 
 def _safe_usage(usage) -> dict:
@@ -62,12 +75,28 @@ def _safe_usage(usage) -> dict:
 
 
 def _record_usage(data, provider: str, model: str) -> dict:
-    source = data.get("usage" if provider == "groq" else "usageMetadata", {}) if isinstance(data, dict) else {}
+    compatible = provider in {"groq", "cloudflare"}
+    source = data.get("usage" if compatible else "usageMetadata", {}) if isinstance(data, dict) else {}
     mapping = ({"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens", "total_tokens": "total_tokens"}
-               if provider == "groq" else {"promptTokenCount": "input_tokens", "candidatesTokenCount": "output_tokens",
+               if compatible else {"promptTokenCount": "input_tokens", "candidatesTokenCount": "output_tokens",
                                           "totalTokenCount": "total_tokens", "thoughtsTokenCount": "reasoning_tokens",
                                           "cachedContentTokenCount": "cached_tokens"})
     usage = _safe_usage({target: source[key] for key, target in mapping.items() if isinstance(source, dict) and key in source})
+    if not compatible and "output_tokens" in usage and "reasoning_tokens" in usage:
+        # Gemini separa candidates de thoughts; OpenAI inclui reasoning na
+        # completion. Normalizar a saída total, mantendo total remoto intacto.
+        usage["output_tokens"] += usage["reasoning_tokens"]
+    if compatible and isinstance(source, dict):
+        for nested, key, target in (("prompt_tokens_details", "cached_tokens", "cached_tokens"),
+                                    ("completion_tokens_details", "reasoning_tokens", "reasoning_tokens")):
+            detail = source.get(nested)
+            if isinstance(detail, dict) and key in detail:
+                usage.update(_safe_usage({target: detail[key]}))
+    # Cache/raciocínio são partes dos totais informados, não novos tokens.
+    subdivisions = (("cached_tokens", "input_tokens"), ("reasoning_tokens", "output_tokens")) if compatible else (("cached_tokens", "input_tokens"),)
+    for detail, parent in subdivisions:
+        if detail in usage and parent in usage and usage[detail] > usage[parent]:
+            usage.pop(detail)
     holder = _ATTEMPT_USAGE.get()
     if holder is not None:
         holder.update(usage)
@@ -329,7 +358,7 @@ def _quota_scope(error: dict) -> str:
     return "account" if account else "model"
 
 
-async def _http_error(response: aiohttp.ClientResponse) -> ProviderError:
+async def _http_error(response: aiohttp.ClientResponse, *, provider: str = "") -> ProviderError:
     """Extrai apenas categorias e esperas; nunca preserva corpo/identificadores."""
     body = bytearray()
     async for chunk in response.content.iter_chunked(1024):
@@ -344,8 +373,21 @@ async def _http_error(response: aiohttp.ClientResponse) -> ProviderError:
         data = {}
     error = data.get("error", {}) if isinstance(data, dict) else {}
     error = error if isinstance(error, dict) else {}
+    cloudflare_errors = data.get("errors") if provider == "cloudflare" and isinstance(data, dict) else None
+    cloudflare_errors = [item for item in cloudflare_errors[:20] if isinstance(item, dict)] if isinstance(cloudflare_errors, list) else []
+    if not error and cloudflare_errors:
+        error = cloudflare_errors[0]
     status = response.status
-    if status == 429:
+    # A franquia de neurons é diária e compartilhada pela conta. Sem essa
+    # evidência explícita, um 429 comum continua sendo uma espera temporária.
+    daily_neurons = provider == "cloudflare" and any(
+        (item.get("quota_period") in ("day", "daily") and item.get("quota_unit") == "neurons") or
+        (isinstance(item.get("message"), str) and "daily" in item["message"].lower()
+         and "neuron" in item["message"].lower()
+         and any(word in item["message"].lower() for word in ("limit", "exceed", "reached")))
+        for item in [error, *cloudflare_errors]
+    )
+    if status == 429 or daily_neurons:
         waits = [_retry_after(response), _bounded_retry(error.get("retry_after"))]
         details = error.get("details")
         for detail in details[:20] if isinstance(details, list) else []:
@@ -357,6 +399,9 @@ async def _http_error(response: aiohttp.ClientResponse) -> ProviderError:
             if hint:
                 waits.append(_retry_duration(hint.group(1)))
         explicit_waits = [wait for wait in waits if wait is not None]
+        if daily_neurons and not explicit_waits:
+            waits.append(_bounded_retry(86400 - (time.time() % 86400)))
+            explicit_waits = [wait for wait in waits if wait is not None]
         if not explicit_waits:
             # Um bucket saudável pode ter reset longo. Somente o bucket
             # comprovadamente esgotado é uma pista útil, e nunca prevalece
@@ -370,8 +415,8 @@ async def _http_error(response: aiohttp.ClientResponse) -> ProviderError:
                 if math.isfinite(remaining) and remaining == 0:
                     waits.append(_retry_duration(response.headers.get(f"x-ratelimit-reset-{bucket}")))
         return RateLimitError(
-            "provider atingiu um limite temporário", retry_after=max((wait for wait in waits if wait is not None), default=None),
-            quota_scope=_quota_scope(error),
+            "provider atingiu um limite temporário", status=status, retry_after=max((wait for wait in waits if wait is not None), default=None),
+            quota_scope="account" if daily_neurons else _quota_scope(error),
         )
     auth_parts = [error.get("message"), error.get("code"), error.get("status")]
     details = error.get("details")
@@ -418,9 +463,11 @@ def _output_tokens(messages: list[ChatMessage], *, actions: tuple[str, ...] = ()
         if any(message.images or message.image_urls for message in messages)
         else C.MAX_RESPONSE_TOKENS
     )
-    # Quatro argumentos de ferramentas precisam de espaço além da resposta
-    # curta habitual. Sem ferramentas, preservamos o orçamento anterior.
-    return max(tokens, C.MAX_ACTION_RESPONSE_TOKENS) if actions else tokens
+    # Leitura, descoberta e ajustes próprios usam argumentos curtos. Propostas
+    # mantêm espaço para quatro etapas e uma fala privada, sem truncar a cadeia.
+    if TOOL_NAME in actions or enabled_actions(actions):
+        return max(tokens, C.MAX_ACTION_RESPONSE_TOKENS)
+    return max(tokens, C.MAX_TOOL_RESPONSE_TOKENS) if actions else tokens
 
 
 def _action_reply(
@@ -552,10 +599,28 @@ def _gemini_schema(schema: dict) -> dict:
 
 class _GroqClient:
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
+    PROVIDER = "groq"
+    LABEL = "Groq"
+    MAX_TOKENS_KEY = "max_completion_tokens"
 
     def __init__(self, session: aiohttp.ClientSession, api_key: str):
         self._session = session
         self._api_key = api_key
+
+    def _validate_request(self, model, messages) -> None:
+        pass
+
+    def _prepare_payload(self, payload: dict) -> None:
+        pass
+
+    def _reserve_request(self, payload: dict):
+        return None
+
+    def _settle_request(self, reservation, usage: dict) -> None:
+        pass
+
+    def _visible_content(self, content):
+        return content
 
     async def chat(
         self, *, system: str, messages: list[ChatMessage], temperature: float,
@@ -564,6 +629,7 @@ class _GroqClient:
         tool_specs: tuple[ToolSpec, ...] = (),
         allow_tool_calls: bool = True,
     ) -> str | ChatReply:
+        self._validate_request(model, messages)
         actions = enabled_actions(actions)
         specs, declarations = _tool_declarations(actions, target_refs, tool_specs)
         payload = {
@@ -571,35 +637,39 @@ class _GroqClient:
             "messages": [{"role": "system", "content": system}]
             + [message.to_openai_payload() for message in messages],
             "temperature": max(C.MIN_TEMPERATURE, min(C.MAX_TEMPERATURE, temperature)),
-            "max_completion_tokens": _output_tokens(messages, actions=(actions or tuple(spec.name for spec in specs)) if allow_tool_calls else ()),
+            self.MAX_TOKENS_KEY: _output_tokens(messages, actions=(actions or tuple(spec.name for spec in specs)) if allow_tool_calls else ()),
             "stream": False,
         }
         if declarations:
             payload["tools"] = [{"type": "function", "function": declaration} for declaration in declarations]
             payload["tool_choice"] = "auto" if allow_tool_calls else "none"
         # Evita gastar tokens de raciocínio oculto em conversa casual.
-        if model.startswith("openai/gpt-oss"):
+        if self.PROVIDER == "groq" and model in {"openai/gpt-oss-120b", "openai/gpt-oss-20b"}:
             payload.update({"reasoning_effort": "low", "include_reasoning": False})
-        elif model == "qwen/qwen3.8-27b":
+        elif self.PROVIDER == "groq" and model == "qwen/qwen3.8-27b":
             # Valores documentados pelo Groq para este modelo específico.
             payload.update({"reasoning_effort": "none", "include_reasoning": False})
+        self._prepare_payload(payload)
+        reservation = self._reserve_request(payload)
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
         timeout = aiohttp.ClientTimeout(total=max(0.001, timeout_seconds))
         try:
+            _record_http_request()
             async with self._session.post(
                 self.BASE_URL, json=payload, headers=headers, timeout=timeout,
             ) as resp:
                 if resp.status >= 400:
-                    raise await _http_error(resp)
+                    raise await _http_error(resp, provider=self.PROVIDER)
                 data = await _read_json_limited(resp)
         except asyncio.TimeoutError as exc:
-            raise ProviderError("Groq timeout", kind="timeout") from exc
+            raise ProviderError(f"{self.LABEL} timeout", kind="timeout") from exc
         except aiohttp.ClientError as exc:
-            raise ProviderError("Groq erro de rede", kind="network") from exc
-        _record_usage(data, "groq", model)
+            raise ProviderError(f"{self.LABEL} erro de rede", kind="network") from exc
+        usage = _record_usage(data, self.PROVIDER, model)
+        self._settle_request(reservation, usage)
         try:
             choice = data["choices"][0]
             finish_reason = choice.get("finish_reason")
@@ -625,7 +695,8 @@ class _GroqClient:
                 elif refusal:
                     raise ProviderError("resposta bloqueada pelo provider", kind="blocked", stage="output")
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
-            raise ProviderError("Groq resposta malformada", kind="invalid_response", stage="output") from exc
+            raise ProviderError(f"{self.LABEL} resposta malformada", kind="invalid_response", stage="output") from exc
+        content = self._visible_content(content)
         reply = content.strip() if isinstance(content, str) else ""
         if not allow_tool_calls and message.get("tool_calls"):
             raise ProviderError("provider ignorou o fechamento sem ferramentas", kind="invalid_response", stage="output", finish_reason=finish_reason,
@@ -643,7 +714,7 @@ class _GroqClient:
                     native_calls.append((call.get("id"), function.get("name"), function.get("arguments"), {}))
                 if len(native_calls) > getattr(C, "MAX_TOOL_CALLS", 8):
                     break
-            return _native_reply(reply, native_calls, specs, actions, provider="groq", model=model, finish_reason=finish_reason)
+            return _native_reply(reply, native_calls, specs, actions, provider=self.PROVIDER, model=model, finish_reason=finish_reason)
         if actions:
             calls = []
             raw_calls = message.get("tool_calls") or []
@@ -660,14 +731,90 @@ class _GroqClient:
                     if len(calls) > MAX_PROPOSALS:
                         break
             return _action_reply(
-                reply, calls, actions, provider="groq", model=model, finish_reason=finish_reason,
+                reply, calls, actions, provider=self.PROVIDER, model=model, finish_reason=finish_reason,
             )
         if not reply:
             raise ProviderError(
-                "Groq retornou resposta vazia", kind="empty", stage="output",
+                f"{self.LABEL} retornou resposta vazia", kind="empty", stage="output",
                 finish_reason=finish_reason,
             )
         return reply
+
+
+class _CloudflareClient(_GroqClient):
+    """Workers AI direto, apenas Qwen de texto e sem rotas pagas adicionais."""
+
+    PROVIDER = "cloudflare"
+    LABEL = "Cloudflare"
+    MAX_TOKENS_KEY = "max_tokens"
+    _INPUT_NEURONS_PER_TOKEN = 0.004625
+    _OUTPUT_NEURONS_PER_TOKEN = 0.030475
+
+    def __init__(self, session, api_key: str, account_id: str):
+        if not isinstance(account_id, str) or not re.fullmatch(r"[A-Fa-f0-9]{32}", account_id):
+            raise ValueError("Cloudflare Account ID inválido")
+        super().__init__(session, api_key)
+        self.BASE_URL = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions"
+        self._budget_day = int(time.time() // 86400)
+        self._budget_spent = 0.0
+
+    def _validate_request(self, model, messages) -> None:
+        if model not in C.CLOUDFLARE_MODELS:
+            raise ProviderError("modelo Cloudflare não permitido", kind="model", stage="routing")
+        if any(message.images or message.image_urls for message in messages):
+            raise ProviderError("Cloudflare Qwen aceita apenas texto", kind="model", stage="routing")
+
+    def _prepare_payload(self, payload: dict) -> None:
+        # /no_think é a instrução leve documentada pelo Qwen. O endpoint não
+        # documenta um hard switch: não enviar enable_thinking/extra_body.
+        payload["messages"][0]["content"] += "\n/no_think"
+
+    def _rotate_budget(self) -> None:
+        day = int(time.time() // 86400)
+        if day != self._budget_day:
+            self._budget_day, self._budget_spent = day, 0.0
+
+    def budget_diagnostics(self) -> dict:
+        self._rotate_budget()
+        return {"limit_neurons": C.CLOUDFLARE_DAILY_NEURON_BUDGET,
+                "reserved_or_used_neurons": round(self._budget_spent, 3),
+                "remaining_neurons": round(max(0.0, C.CLOUDFLARE_DAILY_NEURON_BUDGET - self._budget_spent), 3),
+                "scope": "process_daily", "estimated": True,
+                "reset_seconds": max(1.0, 86400 - (time.time() % 86400))}
+
+    def _reserve_request(self, payload: dict):
+        self._rotate_budget()
+        # Reserva conservadora por bytes UTF-8 + overhead do template. É uma
+        # proteção local por processo, não uma leitura da franquia da conta.
+        serialized = json.dumps({"messages": payload["messages"], "tools": payload.get("tools", [])},
+                                ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        input_upper = len(serialized) + 512 + 64 * (len(payload["messages"]) + len(payload.get("tools", [])))
+        reservation = (input_upper * self._INPUT_NEURONS_PER_TOKEN
+                       + payload["max_tokens"] * self._OUTPUT_NEURONS_PER_TOKEN)
+        if self._budget_spent + reservation > C.CLOUDFLARE_DAILY_NEURON_BUDGET:
+            raise RateLimitError("orçamento local diário Cloudflare esgotado", stage="routing", quota_scope="account",
+                                 retry_after=86400 - (time.time() % 86400))
+        # Sem awaits entre conferir e reservar: duas conversas não passam
+        # simultaneamente pela mesma franquia disponível deste processo.
+        self._budget_spent += reservation
+        return self._budget_day, reservation
+
+    def _settle_request(self, reservation, usage: dict) -> None:
+        if not reservation or reservation[0] != self._budget_day:
+            return
+        if not {"input_tokens", "output_tokens"} <= usage.keys():
+            return  # Sem medição, manter reserva; timeout pode ter consumido.
+        actual = (usage["input_tokens"] * self._INPUT_NEURONS_PER_TOKEN
+                  + usage["output_tokens"] * self._OUTPUT_NEURONS_PER_TOKEN)
+        self._budget_spent = max(0.0, self._budget_spent - reservation[1] + actual)
+
+    def _visible_content(self, content):
+        if not isinstance(content, str) or not content.lstrip().startswith("<think>"):
+            return content
+        content = content.lstrip()
+        end = content.find("</think>")
+        # Raciocínio incompleto nunca vira texto público nem histórico.
+        return content[end + len("</think>"):].lstrip() if end >= 0 else ""
 
 
 class _GeminiClient:
@@ -730,6 +877,7 @@ class _GeminiClient:
                 params = {"pageSize": 50}
                 if token:
                     params["pageToken"] = token
+                _record_http_request(discovery=True)
                 async with getter(self.CATALOG_URL, params=params, headers={"x-goog-api-key": self._api_key},
                                   timeout=aiohttp.ClientTimeout(total=_remaining(deadline))) as response:
                     if response.status >= 400:
@@ -881,6 +1029,7 @@ class _GeminiClient:
         headers = {"Content-Type": "application/json", "x-goog-api-key": self._api_key}
         timeout = aiohttp.ClientTimeout(total=_remaining(deadline))
         try:
+            _record_http_request()
             async with self._session.post(
                 self.BASE_URL.format(model=model), json=payload,
                 headers=headers, timeout=timeout,
@@ -958,17 +1107,32 @@ class ProviderRouter:
     def __init__(
         self, session: aiohttp.ClientSession, *, groq_key: Optional[str] = None,
         gemini_key: Optional[str] = None,
+        cloudflare_account_id: Optional[str] = None, cloudflare_key: Optional[str] = None,
+        cloudflare_enabled: bool = False,
     ) -> None:
         self._session = session
         self._groq = _GroqClient(session, groq_key) if groq_key else None
         self._gemini = _GeminiClient(session, gemini_key) if gemini_key else None
+        # Credenciais podem pertencer ao gerador de imagens. Ativar o chat é
+        # uma escolha separada e explícita, nunca efeito de encontrar a chave.
+        valid_account = isinstance(cloudflare_account_id, str) and bool(re.fullmatch(r"[A-Fa-f0-9]{32}", cloudflare_account_id))
+        self._cloudflare_setup = {"enabled": cloudflare_enabled is True,
+                                  "account_id_configured": valid_account,
+                                  "api_token_configured": bool(cloudflare_key)}
+        self._cloudflare = (_CloudflareClient(session, cloudflare_key, cloudflare_account_id)
+                           if cloudflare_enabled is True and valid_account and cloudflare_key else None)
         self._states: dict[tuple[str, str], _ProviderState] = {}
         self._account_states: dict[str, _ProviderState] = {}
         self._unsupported_tool_models: set[tuple[str, str]] = set()
         self._last_request: dict = {}
-        log.info("chatbot: configuration groq_configured=%s gemini_configured=%s", bool(self._groq), bool(self._gemini))
-        if not self._groq and not self._gemini:
+        self._request_report: ContextVar[dict | None] = ContextVar("chatbot_router_task_report", default=None)
+        log.info("chatbot: configuration groq_configured=%s gemini_configured=%s cloudflare_configured=%s cloudflare_enabled=%s", bool(self._groq), bool(self._gemini), bool(self._cloudflare), cloudflare_enabled is True)
+        if not self._groq and not self._gemini and not self._cloudflare:
             log.warning("ProviderRouter: nenhuma API key configurada")
+
+    def get_request_report(self) -> dict:
+        """Relatório desta tarefa; não confunde turnos concorrentes do router."""
+        return deepcopy(self._request_report.get() or {})
 
     def _state(self, provider: str, model: str) -> _ProviderState:
         state = self._states.setdefault((provider, model), _ProviderState())
@@ -986,7 +1150,8 @@ class ProviderRouter:
         return tuple(getter(has_images=has_images)) if callable(getter) else ()
 
     def _all_models(self, provider: str, models: tuple[str, ...]) -> tuple[str, ...]:
-        configured = ((*C.GROQ_MODELS, *C.GROQ_VISION_MODELS) if provider == "groq" else
+        configured = (C.CLOUDFLARE_MODELS if provider == "cloudflare" else
+                      (*C.GROQ_MODELS, *C.GROQ_VISION_MODELS) if provider == "groq" else
                       (*C.GEMINI_MODELS, *getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS)))
         discovered = (*self._catalog_models(), *self._catalog_models(has_images=True)) if provider == "gemini" else ()
         known = tuple(model for candidate, model in self._states if candidate == provider)
@@ -1062,12 +1227,14 @@ class ProviderRouter:
         circuits = self.snapshot()
         discovery = getattr(self._gemini, "discovery_diagnostics", None)
         discovery_state = discovery() if callable(discovery) else {}
+        cloudflare_budget = getattr(self._cloudflare, "budget_diagnostics", None)
         gemini_text = tuple(dict.fromkeys((*C.GEMINI_MODELS, *self._catalog_models())))
         groq_text = tuple(C.GROQ_MODELS)
         availability = []
         for provider, text, vision, configured in (
             ("groq", groq_text, tuple(C.GROQ_VISION_MODELS), self._groq is not None),
             ("gemini", gemini_text, tuple(dict.fromkeys((*getattr(C, "GEMINI_VISION_MODELS", C.GEMINI_MODELS), *self._catalog_models(has_images=True)))), self._gemini is not None),
+            ("cloudflare", tuple(C.CLOUDFLARE_MODELS), (), self._cloudflare is not None),
         ):
             for model in dict.fromkeys((*text, *vision)):
                 state = self._states.get((provider, model))
@@ -1092,13 +1259,16 @@ class ProviderRouter:
                        and not (self._last_request.get("tools_requested") and item["tools_support"] == "unsupported")
                        for item in availability)
         return {
-            "configured": {"groq": self._groq is not None, "gemini": self._gemini is not None},
+            "configured": {"groq": self._groq is not None, "gemini": self._gemini is not None, "cloudflare": self._cloudflare is not None},
             "circuits": circuits,
             "earliest_retry_seconds": 0.0 if eligible else min(waits) if waits else None,
             "last_request": deepcopy(self._last_request),
-            "models": {"groq": groq_text, "gemini": gemini_text},
+            "models": {"groq": groq_text, "gemini": gemini_text, "cloudflare": tuple(C.CLOUDFLARE_MODELS)},
             "availability": availability,
             "model_discovery": discovery_state,
+            "cloudflare_setup": {**self._cloudflare_setup,
+                                  "billing_verified": False,
+                                  "budget": cloudflare_budget() if callable(cloudflare_budget) else {}},
         }
 
     def _available(self, provider: str, model: str) -> bool:
@@ -1141,6 +1311,28 @@ class ProviderRouter:
         text_provider_order: tuple[str, ...] | None = None,
         budget_seconds: float | None = None, allow_tool_calls: bool = True,
         repair_state: dict | None = None,
+        request_report: dict | None = None,
+    ) -> str | ChatReply:
+        # O contador HTTP é herdado por wait_for e por descoberta single-flight,
+        # mas não pode permanecer ativo para outra operação após este await.
+        report = request_report if isinstance(request_report, dict) else {}
+        token = _REQUEST_REPORT.set(report)
+        self._request_report.set(report)
+        try:
+            return await self._chat(system=system, messages=messages, temperature=temperature, actions=actions,
+                                    target_refs=target_refs, tool_specs=tool_specs,
+                                    text_provider_order=text_provider_order, budget_seconds=budget_seconds,
+                                    allow_tool_calls=allow_tool_calls, repair_state=repair_state, request_report=report)
+        finally:
+            _REQUEST_REPORT.reset(token)
+
+    async def _chat(
+        self, *, system: str, messages: list[ChatMessage],
+        temperature: float = C.DEFAULT_TEMPERATURE, actions: tuple[str, ...] = (),
+        target_refs: tuple[str, ...] = (), tool_specs: tuple[ToolSpec, ...] = (),
+        text_provider_order: tuple[str, ...] | None = None,
+        budget_seconds: float | None = None, allow_tool_calls: bool = True,
+        repair_state: dict | None = None, request_report: dict | None = None,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         started = time.monotonic()
@@ -1154,19 +1346,27 @@ class ProviderRouter:
             cached = tuple(model for model in self._catalog_models(has_images=has_images)
                            if model not in configured and self._available("gemini", model))[:2]
             attempts.append(("gemini", self._gemini, (*configured, *cached)))
+        if self._cloudflare and not has_images:
+            attempts.append(("cloudflare", self._cloudflare, C.CLOUDFLARE_MODELS))
         if not has_images:
             by_provider = {attempt[0]: attempt for attempt in attempts}
             priority = text_provider_order if text_provider_order is not None else ("groq", "gemini")
-            attempts = [by_provider[name] for name in dict.fromkeys((*priority, *by_provider)) if name in by_provider]
-        self._last_request = {"outcome": "pending", "mode": mode, "attempts": [], "skips": [], "attempt_count": 0}
-        report = self._last_request
+            names = tuple(name for name in dict.fromkeys((*priority, *by_provider)) if name != "cloudflare")
+            attempts = [by_provider[name] for name in (*names, "cloudflare") if name in by_provider]
+        report = request_report if isinstance(request_report, dict) else {}
+        report.clear()
+        report.update(outcome="pending", mode=mode, attempts=[], skips=[], attempt_count=0,
+                      request_count=0, discovery_request_count=0)
+        self._last_request = report
 
         def finish(kind: str, *, cause_kind=None, retry_after=None, outcome="failed"):
             report.update(outcome=outcome, kind=kind, cause_kind=cause_kind or kind,
                           retry_after=retry_after, attempt_count=len(report["attempts"]),
+                          generation_attempt_count=len(report["attempts"]),
                           elapsed_ms=max(0, int((time.monotonic() - started) * 1000)))
             measured = [item["usage"] for item in report["attempts"] if item.get("usage")]
             report["usage"] = {key: sum(item.get(key, 0) for item in measured) for key in {key for item in measured for key in item}}
+            report["usage_field_attempts"] = {key: sum(key in item for item in measured) for key in report["usage"]}
             report["usage_attempt_count"] = len(measured)
             report["usage_scope"] = "reported_attempts"
             report["usage_complete"] = bool(measured) and len(measured) == len(report["attempts"]) and all(
@@ -1242,6 +1442,8 @@ class ProviderRouter:
                     kwargs["allow_tool_calls"] = False
             usage = {}
             usage_token = _ATTEMPT_USAGE.set(usage)
+            requests = {"count": 0}
+            requests_token = _ATTEMPT_REQUESTS.set(requests)
             try:
                 reply = await self._call(client, kwargs)
                 if not allow_tool_calls and isinstance(reply, ChatReply) and (reply.tool_calls or reply.proposals):
@@ -1267,6 +1469,8 @@ class ProviderRouter:
                 raise
             finally:
                 _ATTEMPT_USAGE.reset(usage_token)
+                _ATTEMPT_REQUESTS.reset(requests_token)
+                entry["request_count"] = requests["count"]
             entry["usage"] = _safe_usage(usage)
             entry.update(kind="success", status=200, elapsed_ms=max(0, int((time.monotonic() - began) * 1000)))
             state.mark_success(expected_generation=generation)
