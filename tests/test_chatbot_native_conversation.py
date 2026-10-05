@@ -73,9 +73,18 @@ def call(identifier, name, **arguments):
 
 
 def tool_evidence(messages):
-    item = next(message for message in messages
-                if message.role == "user" and message.content.startswith("[FERRAMENTAS;"))
-    return json.loads(item.content.split("\n", 2)[1])
+    """Normaliza envelopes imutáveis V7 e o formato legado para asserts claros."""
+    records = []
+    for item in messages:
+        if item.role != "user" or not item.content.startswith("[FERRAMENTAS;"):
+            continue
+        batch = json.loads(item.content.split("\n", 2)[1])
+        for record in batch:
+            if isinstance(record, list) and len(record) == 3:
+                records.append({"tool": record[0], "args": record[1], "result": record[2]})
+            elif isinstance(record, dict):
+                records.append(record)
+    return records
 
 
 @pytest.mark.asyncio
@@ -137,9 +146,10 @@ async def test_mutating_duplicate_call_ids_and_new_ids_do_not_repeat_effect(nati
     assert native.message.reply.await_args.args == ("Concluído.",)
     assert native.cog._router.chat.await_count == 4
     messages = native.cog._router.chat.await_args.kwargs["messages"]
-    results = [item for item in messages if item.role == "tool"]
-    assert [item.tool_call_id for item in results] == ["effect-a", "effect-a", "effect-b"]
-    assert all(json.loads(item.content)["ok"] for item in results)
+    evidence = tool_evidence(messages)
+    assert [item["tool"] for item in evidence] == ["automatic_test", "automatic_test", "automatic_test"]
+    assert all(item["result"]["ok"] for item in evidence)
+    assert not any(item.role == "tool" or item.tool_calls for item in messages)
 
 
 @pytest.mark.asyncio
@@ -167,10 +177,14 @@ async def test_repeated_identical_read_is_reused_and_forces_final_round(native):
     messages = native.cog._router.chat.await_args.kwargs["messages"]
     evidence = tool_evidence(messages)
     assert evidence[-1]["tool"] == "read_test"
-    assert evidence[-1]["result"] == {
-        "ok": True, "status": "reused_read", "source_tool_call_id": "read-a",
-        "detail": "Resultado idêntico já está no histórico desta rodada; não repetir a consulta.",
-    }
+    assert evidence[-1]["result"] == {"ok": True, "status": "reused_read", "same_result": True}
+    # Cada lote fica em seu próprio envelope para o prefixo anterior permanecer
+    # byte a byte estável e elegível a cache no provider.
+    envelopes = [item.content for item in messages
+                 if item.role == "user" and item.content.startswith("[FERRAMENTAS;")]
+    assert len(envelopes) == 2
+    assert "resultado grande" in envelopes[0]
+    assert "resultado grande" not in envelopes[1]
     assert not any(item.role == "tool" or item.tool_calls for item in messages)
     assert native.cog._last_turn_usage["tools"] == {"seen": 2, "executed": 1, "reused_reads": 1}
     closing = native.cog._router.chat.await_args.kwargs

@@ -806,7 +806,7 @@ async def build_tool_registry(cog, message, config, *, epoch, visibility_scope,
         runtime.response_format = arguments["mode"]
         return _result({"mode": runtime.response_format, "persistent": False}, status="selected")
 
-    register("select_response_format", "Escolha texto, áudio ou alternância somente para a resposta deste turno, como quando o autor pede áudio agora ou texto só desta vez. Não salva preferência permanente; use set_conversation_preferences quando o pedido vale para conversas futuras.", _schema({"mode": {"type": "string", "enum": ["auto", "text", "audio"]}}, ("mode",)), select_format, permission="automatic_effect")
+    register("select_response_format", "Escolha texto, áudio/voz/fala ou alternância somente para a resposta deste turno, como quando o autor pede áudio agora ou texto só desta vez. Não salva preferência permanente; use set_conversation_preferences quando o pedido vale para conversas futuras.", _schema({"mode": {"type": "string", "enum": ["auto", "text", "audio"]}}, ("mode",)), select_format, permission="automatic_effect")
 
     async def list_voices(arguments):
         await runtime.guard()

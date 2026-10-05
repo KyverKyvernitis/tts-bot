@@ -245,9 +245,15 @@ class ChatbotCommandsMixin:
                        and math.isfinite(value) and value >= 0 for value in (limit, measured, uncertain)) and limit > 0:
                     used = min(float(limit), float(measured) + float(uncertain))
                     suffix = f" + {float(uncertain):.3f} reservados/incertos" if uncertain else ""
+                    pressure = budget.get("conservation_level")
+                    text_cap = budget.get("text_output_cap")
+                    conserve = ""
+                    if pressure in {"elevated", "high", "critical"} and isinstance(text_cap, int):
+                        labels = {"elevated": "moderada", "high": "alta", "critical": "crítica"}
+                        conserve = f" Economia de saída {labels[pressure]}: até {text_cap} tokens em texto puro."
                     lines.append(
                         f"**Reserva local Cloudflare:** {float(measured):.3f}{suffix} / {float(limit):.0f} neurons "
-                        f"({used / float(limit) * 100:.1f}% contabilizado neste processo)."
+                        f"({used / float(limit) * 100:.1f}% contabilizado neste processo).{conserve}"
                     )
 
         # Somente números reportados: não mostramos prompt, respostas, IDs ou
@@ -302,8 +308,10 @@ class ChatbotCommandsMixin:
                     saved_parts = []
                     labels = {"tool_preface_history": "prévias privadas",
                               "closing_state": "estado de fechamento",
-                              "tool_protocol_compaction": "protocolo de ferramentas"}
-                    for key in ("tool_preface_history", "closing_state", "tool_protocol_compaction"):
+                              "tool_protocol_compaction": "protocolo de ferramentas",
+                              "trivial_tool_schemas": "schemas evitados em smalltalk"}
+                    for key in ("tool_preface_history", "closing_state", "tool_protocol_compaction",
+                                "trivial_tool_schemas"):
                         value = savings.get(key)
                         if token_number(value) and value:
                             saved_parts.append(f"{labels[key]} {value}")

@@ -51,7 +51,7 @@ def test_local_selection_uses_catalog_metadata_not_command_names_and_reduces_sch
 def test_ordinary_smalltalk_only_loads_control_tools_and_does_not_execute_handlers():
     registry = catalog()
     selection = ToolSelection(registry, "oi")
-    assert set(selection.selected_names) == {DISCOVERY_TOOL, "select_response_format", "preparar_resposta"}
+    assert set(selection.selected_names) == {DISCOVERY_TOOL}
     assert selection.load(["medir_nebulosa"])["loaded"] == ["medir_nebulosa"]
     assert "medir_nebulosa" in selection.selected_names
 
@@ -59,7 +59,7 @@ def test_ordinary_smalltalk_only_loads_control_tools_and_does_not_execute_handle
 def test_initial_schema_budget_does_not_hide_discovery_or_full_capability_index():
     registry = catalog()
     selection = ToolSelection(registry, "nebulosa orquídeas recursos", max_chars=1, max_initial=1)
-    assert set(selection.selected_names) == {DISCOVERY_TOOL, "select_response_format", "preparar_resposta"}
+    assert set(selection.selected_names) == {DISCOVERY_TOOL}
     assert "cultivar_orquideas" in registry.capability_index()
     assert selection.load(["cultivar_orquideas"])["loaded"] == ["cultivar_orquideas"]
 
@@ -78,7 +78,7 @@ def test_capability_index_omits_tools_already_described_by_native_schemas():
 def test_followup_prunes_only_speculative_schemas_and_keeps_used_or_explicit_tools():
     registry = catalog()
     selection = ToolSelection(registry, "nebulosa orquídeas")
-    speculative = {name for name in selection.selected_names if name not in {DISCOVERY_TOOL, "select_response_format", "preparar_resposta"}}
+    speculative = {name for name in selection.selected_names if name not in {DISCOVERY_TOOL}}
     assert speculative
     used = sorted(speculative)[0]
     selection.mark_used([used])

@@ -256,3 +256,60 @@ async def test_cloudflare_diagnostics_never_contain_credentials_or_billing_guara
     assert data["configured"]["cloudflare"] and data["models"]["cloudflare"] == (MODEL,)
     assert data["cloudflare_setup"]["billing_verified"] is False
     assert all(value not in json.dumps(data) for value in (ACCOUNT, KEY, "PRIVATE system"))
+
+@pytest.mark.asyncio
+async def test_neuron_pressure_caps_text_output_but_never_structural_tool_json(monkeypatch):
+    monkeypatch.setattr(C, "CLOUDFLARE_DAILY_NEURON_BUDGET", 10_000)
+    text_session = _Session(_Response(_groq("curto", finish="stop")))
+    text_client = P._CloudflareClient(text_session, KEY, ACCOUNT)
+    text_client._budget_actual = 7_600
+    await text_client.chat(
+        system="prefixo estável", messages=[P.ChatMessage("user", "x" * 1000)],
+        temperature=.8, model=MODEL, timeout_seconds=5,
+    )
+    payload = text_session.requests[0][1]["json"]
+    assert payload["max_tokens"] == 220
+    assert "franquia de reserva" in payload["messages"][0]["content"].lower()
+    assert payload["messages"][0]["content"].endswith("/no_think")
+    diagnostics = text_client.budget_diagnostics()
+    assert diagnostics["conservation_level"] == "high"
+    assert diagnostics["text_output_cap"] == 220
+
+    tool_session = _Session(_Response(native_data()))
+    tool_client = P._CloudflareClient(tool_session, KEY, ACCOUNT)
+    tool_client._budget_actual = 9_100
+    reply = await tool_client.chat(
+        system="prefixo estável", messages=[P.ChatMessage("user", "consulte x")],
+        temperature=.8, model=MODEL, timeout_seconds=5, tool_specs=(read_spec(),),
+    )
+    assert reply.tool_calls
+    # Pressão de quota nunca reduz a margem estrutural das chamadas nativas.
+    assert tool_session.requests[0][1]["json"]["max_tokens"] == C.MAX_TOOL_RESPONSE_TOKENS
+
+    closing_session = _Session(_Response(_groq("feito", finish="stop")))
+    closing_client = P._CloudflareClient(closing_session, KEY, ACCOUNT)
+    closing_client._budget_actual = 9_100
+    result = await closing_client.chat(
+        system="prefixo estável", messages=[P.ChatMessage("user", "x" * 1000)],
+        temperature=.8, model=MODEL, timeout_seconds=5, tool_specs=(read_spec(),),
+        allow_tool_calls=False,
+    )
+    assert result.text == "feito"
+    closing_payload = closing_session.requests[0][1]["json"]
+    assert closing_payload["tool_choice"] == "none"
+    assert closing_payload["max_tokens"] == 160
+
+
+def test_neuron_reservation_shrinks_plain_text_to_fit_remaining_budget(monkeypatch):
+    monkeypatch.setattr(C, "CLOUDFLARE_DAILY_NEURON_BUDGET", 30)
+    client = P._CloudflareClient(_Session(), KEY, ACCOUNT)
+    client._budget_actual = 18
+    payload = {
+        "messages": [{"role": "system", "content": "s/no_think"},
+                     {"role": "user", "content": "pedido de tamanho moderado"}],
+        "max_tokens": 500,
+    }
+    _day, reservation = client._reserve_request(payload)
+    assert 96 <= payload["max_tokens"] < 500
+    assert reservation <= 12
+    assert client._budget_uncertain == pytest.approx(reservation)

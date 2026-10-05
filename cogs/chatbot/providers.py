@@ -928,29 +928,82 @@ class _CloudflareClient(_GroqClient):
             number = 0.0
         self._budget_actual, self._budget_uncertain = number, 0.0
 
+    def _text_output_pressure_cap(self) -> tuple[str, int | None]:
+        """Cap conservador só para texto final quando a franquia diária aperta.
+
+        Tool calls mantêm sua margem estrutural: truncar JSON para economizar
+        neurons custa mais quando força repair/fallback. Em texto puro, uma
+        resposta um pouco mais concisa é preferível a consumir a reserva que
+        deveria sobreviver à indisponibilidade dos providers primários.
+        """
+        limit = float(C.CLOUDFLARE_DAILY_NEURON_BUDGET)
+        spent = self._budget_actual + self._budget_uncertain
+        ratio = spent / limit if limit > 0 else 1.0
+        if ratio >= .90:
+            return "critical", 160
+        if ratio >= .75:
+            return "high", 220
+        if ratio >= .50:
+            return "elevated", 320
+        return "normal", None
+
     def budget_diagnostics(self) -> dict:
         self._rotate_budget()
         spent = self._budget_actual + self._budget_uncertain
         limit = float(C.CLOUDFLARE_DAILY_NEURON_BUDGET)
+        pressure, text_cap = self._text_output_pressure_cap()
         return {"limit_neurons": C.CLOUDFLARE_DAILY_NEURON_BUDGET,
                 "measured_neurons": round(self._budget_actual, 3),
                 "uncertain_reserved_neurons": round(self._budget_uncertain, 3),
                 "reserved_or_used_neurons": round(spent, 3),
                 "remaining_neurons": round(max(0.0, limit - spent), 3),
                 "usage_ratio": round(min(1.0, spent / limit), 4) if limit > 0 else 1.0,
+                "conservation_level": pressure, "text_output_cap": text_cap,
                 "scope": "process_daily", "estimated": bool(self._budget_uncertain),
                 "reset_seconds": max(1.0, 86400 - (time.time() % 86400))}
 
     def _reserve_request(self, payload: dict):
         self._rotate_budget()
+        limit = float(C.CLOUDFLARE_DAILY_NEURON_BUDGET)
+        spent = self._budget_actual + self._budget_uncertain
+        tools = payload.get("tools") or []
+        structural_tools = bool(tools) and str(payload.get("tool_choice", "auto")).lower() != "none"
+        # Quando a reserva diária entra em pressão, reduzir apenas a resposta
+        # textual. Calls estruturadas preservam o teto necessário ao JSON.
+        _pressure, pressure_cap = self._text_output_pressure_cap()
+        original_max = int(payload.get("max_tokens") or 0)
+        if not structural_tools and pressure_cap is not None and original_max > pressure_cap:
+            payload["max_tokens"] = pressure_cap
+            directive = "\nA franquia de reserva está sob pressão: responda de forma curta, completa e sem repetição."
+            content = payload["messages"][0]["content"]
+            suffix = "\n/no_think"
+            # Preserve /no_think no fim do system para manter a orientação do
+            # Qwen no mesmo lugar, mesmo quando o orçamento entra em pressão.
+            if isinstance(content, str) and content.endswith(suffix):
+                payload["messages"][0]["content"] = content[:-len(suffix)] + directive + suffix
+            else:
+                payload["messages"][0]["content"] = str(content or "") + directive
+
         # Reserva conservadora por bytes UTF-8 + overhead do template. É uma
         # proteção local por processo, não uma leitura da franquia da conta.
-        serialized = json.dumps({"messages": payload["messages"], "tools": payload.get("tools", [])},
-                                ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
-        input_upper = len(serialized) + 512 + 64 * (len(payload["messages"]) + len(payload.get("tools", [])))
-        reservation = (input_upper * self._INPUT_NEURONS_PER_TOKEN
-                       + payload["max_tokens"] * self._OUTPUT_NEURONS_PER_TOKEN)
-        if self._budget_actual + self._budget_uncertain + reservation > C.CLOUDFLARE_DAILY_NEURON_BUDGET:
+        def estimate():
+            serialized = json.dumps({"messages": payload["messages"], "tools": tools},
+                                    ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+            input_upper = len(serialized) + 512 + 64 * (len(payload["messages"]) + len(tools))
+            input_neurons = input_upper * self._INPUT_NEURONS_PER_TOKEN
+            return input_neurons, input_neurons + payload["max_tokens"] * self._OUTPUT_NEURONS_PER_TOKEN
+
+        input_neurons, reservation = estimate()
+        available = max(0.0, limit - spent)
+        if reservation > available and not structural_tools:
+            # Último ajuste: se a entrada ainda cabe, use somente a saída que
+            # cabe no saldo conservador. Não desça abaixo de 96 tokens para não
+            # transformar uma resposta em truncamento quase certo.
+            affordable = int(max(0.0, available - input_neurons) / self._OUTPUT_NEURONS_PER_TOKEN)
+            if 96 <= affordable < payload["max_tokens"]:
+                payload["max_tokens"] = affordable
+                input_neurons, reservation = estimate()
+        if reservation > available:
             raise RateLimitError("orçamento local diário Cloudflare esgotado", stage="routing", quota_scope="account",
                                  retry_after=86400 - (time.time() % 86400))
         # Sem awaits entre conferir e reservar: duas conversas não passam

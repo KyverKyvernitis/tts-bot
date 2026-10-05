@@ -78,9 +78,18 @@ def call(identifier, name, **arguments):
 
 
 def tool_evidence(messages):
-    item = next(message for message in messages
-                if message.role == "user" and message.content.startswith("[FERRAMENTAS;"))
-    return json.loads(item.content.split("\n", 2)[1])
+    """Normaliza envelopes imutáveis V7 e o formato legado para asserts claros."""
+    records = []
+    for item in messages:
+        if item.role != "user" or not item.content.startswith("[FERRAMENTAS;"):
+            continue
+        batch = json.loads(item.content.split("\n", 2)[1])
+        for record in batch:
+            if isinstance(record, list) and len(record) == 3:
+                records.append({"tool": record[0], "args": record[1], "result": record[2]})
+            elif isinstance(record, dict):
+                records.append(record)
+    return records
 
 
 def reply_calls(*calls):

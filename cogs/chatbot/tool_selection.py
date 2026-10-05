@@ -16,7 +16,7 @@ from dataclasses import replace
 DISCOVERY_TOOL = "carregar_ferramentas"
 INITIAL_TOOL_LIMIT = 5
 INITIAL_SCHEMA_CHARS = 4800
-_CORE = (DISCOVERY_TOOL, "select_response_format", "preparar_resposta")
+_CORE = (DISCOVERY_TOOL,)
 _STOP = frozenset("""a ao aos as ate com como da das de do dos e em entre era essa
 esse esta estas este eu foi ha isso isto la mais mas me meu meus minha minhas
 na nas nao no nos o os ou para pela pelo por porque qual quando que quem se
@@ -72,6 +72,8 @@ class ToolSelection:
         # nomes já aparecem no enum de carregar_ferramentas; guardamos poucos
         # hints descritivos para não repetir o catálogo inteiro no system.
         self._index_hints = ()
+        self._query_terms = frozenset()
+        self._relevant = frozenset()
         # Adapters de teste/legados sem descoberta mantêm seu contrato integral.
         self.enabled = registry.get(DISCOVERY_TOOL) is not None
         specs = tuple(registry.get_specs())
@@ -81,6 +83,7 @@ class ToolSelection:
             self._selected.update(name for name in _CORE if any(spec.name == name for spec in specs))
             documents = {spec.name: text_terms(_metadata_text(spec)) for spec in specs}
             current, recent = text_terms(query), text_terms(str(recent_context)[-1600:])
+            self._query_terms = current
             counts = {term: sum(term in terms for terms in documents.values())
                       for term in current | recent}
 
@@ -93,6 +96,7 @@ class ToolSelection:
 
             size = sum(declaration_chars(spec) for spec in specs if spec.name in self._selected)
             scored = [(score(spec), spec) for spec in specs]
+            self._relevant = frozenset(spec.name for relevance, spec in scored if relevance > 0)
             ranked = sorted(scored, key=lambda item: (-item[0], item[1].name))
             omitted_relevant = []
             for relevance, spec in ranked:
@@ -113,6 +117,16 @@ class ToolSelection:
     @property
     def selected_names(self):
         return tuple(spec.name for spec in self.get_specs())
+
+    def trivial_text_only_candidate(self):
+        """True só para fala sem termos úteis e sem afinidade com o catálogo.
+
+        É um atalho conservador, não um classificador de intenção: mensagens com
+        qualquer termo lexical real continuam passando pelo fluxo de tools. O
+        contexto recente também participa de ``_relevant``, então confirmações
+        curtas de um fluxo operacional não perdem os contratos necessários.
+        """
+        return bool(self.enabled and not self._query_terms and not self._relevant)
 
     def index_hints(self):
         """Nomes relevantes omitidos dos schemas por limite de tamanho/quantidade."""

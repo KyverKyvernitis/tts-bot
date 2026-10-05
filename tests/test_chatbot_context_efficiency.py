@@ -173,3 +173,26 @@ def test_undelivered_turn_does_not_invent_per_response_numbers():
     assert result["delivery"] == {
         "delivered": False, "response_chars": 10, "audio": False, "source": "delivery_suppressed"
     }
+
+
+def test_operational_state_omits_voice_and_refs_when_loaded_tools_cannot_use_them():
+    state = {
+        "bot_name": "Osaka",
+        "voice_state": {"bot": {"connected": True}, "author": {"channel_id": "10"}},
+        "references": {"members": {"m1": {"name": "Pessoa"}}},
+        "action_draft": {"action": "timeout_member", "target_ref": "m1"},
+        "action_draft_error": "",
+        "preferences": {"mode": "auto", "voice": "", "language": "pt-BR"},
+    }
+    reduced = compact_operational_state(
+        state, selected_tools=("carregar_ferramentas", "select_response_format"),
+    )
+    assert "voice_state" not in reduced
+    assert "references" not in reduced
+    assert "action_draft" not in reduced
+    assert reduced["preferences"]["language"] == "pt-BR"
+
+    action = compact_operational_state(state, selected_tools=("propor_acao",))
+    assert action["voice_state"] == state["voice_state"]
+    assert action["references"]["members"]["m1"]["name"] == "Pessoa"
+    assert action["action_draft"]["action"] == "timeout_member"
