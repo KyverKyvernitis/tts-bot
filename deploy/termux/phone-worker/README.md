@@ -1,5 +1,51 @@
 # Phone Worker Termux
 
+## Ritmo e geração da Teto: renderer `speech-2`
+
+O renderer desconta a região consonantal do `LENGTH` solicitado ao Straycat.
+Antes, cada mora de 135 ms ainda recebia a duração da consoante, alongando a
+fala. O modo é detectado pelo nome do executável `straycat*`; wrappers podem
+configurar `PHONE_WORKER_TETO_LENGTH_MODE=post-consonant`. Outros resamplers
+continuam usando o contrato anterior, ou podem selecionar `total`.
+
+WAV mono PCM16 a 44100 Hz entra diretamente no cache. FFmpeg continua sendo
+usado para outros formatos. Até dois grupos de gravações são processados em
+paralelo; notas da mesma gravação ficam no mesmo grupo para preservar o cache
+WORLD `.sc`. A montagem mantém a ordem dos fonemas.
+
+As pausas entre palavras são menores, `ç` mantém o som de `s` e `l/lh` usam
+aproximações japonesas sem inserir a vogal extra anterior. A entonação de fim
+de frase é relativa ao pitch base, com subida em perguntas. A modulação
+preserva parte da variação de pitch da gravação original.
+
+Configurações opcionais, com os valores padrão:
+
+```env
+PHONE_WORKER_TETO_SPEECH_RATE=1.0
+PHONE_WORKER_TETO_MODULATION=15
+PHONE_WORKER_TETO_RENDER_THREADS=2
+PHONE_WORKER_TETO_LENGTH_MODE=auto
+```
+
+`SPEECH_RATE` escala a duração da fala e das pausas, entre 0.75 e 1.5.
+`TEMPO` continua sendo o BPM do pitchbend UTAU, e não controla a velocidade
+geral da fala. O fingerprint anunciado inclui a revisão e os parâmetros do
+renderer, para invalidar os caches de fragmentos, worker e bot quando o som
+muda. O fingerprint original da voicebank também permanece no status.
+
+Os testes direcionados passam com `python -m unittest discover -s tests -p
+'test_teto*.py' -v`. Em comparação com a voicebank oficial e Straycat 1.1.0
+no Linux x86_64, "Olá, eu sou a Teto." passou de 2.492 s para 1.595 s de áudio,
+sem aliases ausentes. Com análise WORLD já em cache e fragmentos vazios, a
+geração passou de aproximadamente 811 ms para 111 ms nesse host. Esses tempos
+não incluem Discord/rede e não representam medição do Poco X7 Pro. A
+naturalidade precisa de avaliação auditiva: a voicebank CV japonesa continua
+com limitações de pronúncia, articulação e entonação em português.
+
+Distribua a alteração pelo updater do projeto, nas pastas originais. O
+bootstrap publica e ativa a nova release pelo hash das fontes, preservando
+configuração e pareamento. Não edite a release imutável ativa manualmente.
+
 ## Painéis técnicos do bot
 
 Desde a extração de outubro de 2026, use `_base` para anexar a Base Git leve e

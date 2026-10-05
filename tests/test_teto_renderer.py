@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import io
+import array
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,15 +19,16 @@ if str(WORKER_DIR) not in sys.path:
 
 from teto_renderer import TetoRenderer
 from teto_renderer.errors import TetoResourceError
+from phone_worker_runtime import tts_policy
 
 
-def _write_wav(path: Path, *, frames: int = 2205) -> None:
+def _write_wav(path: Path, *, frames: int = 2205, rate: int = 22050, sample: int = 0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
-        audio.setframerate(22050)
-        audio.writeframes(b"\x00\x00" * frames)
+        audio.setframerate(rate)
+        audio.writeframes(array.array("h", [sample] * frames).tobytes())
 
 
 class TetoRendererTests(unittest.TestCase):
@@ -60,6 +64,11 @@ class TetoRendererTests(unittest.TestCase):
             "PHONE_WORKER_TETO_MAX_CHARACTERS": "180",
             "PHONE_WORKER_TETO_MAX_PHONEMES": "32",
             "PHONE_WORKER_TETO_MAX_AUDIO_SECONDS": "5",
+            "PHONE_WORKER_TETO_SPEECH_RATE": "1.0",
+            "PHONE_WORKER_TETO_MODULATION": "15",
+            "PHONE_WORKER_TETO_VELOCITY": "100",
+            "PHONE_WORKER_TETO_LENGTH_MODE": "auto",
+            "PHONE_WORKER_TETO_RENDER_THREADS": "2",
         }
 
     def test_status_and_render_with_external_assets(self):
@@ -89,6 +98,89 @@ class TetoRendererTests(unittest.TestCase):
                 self.assertTrue(renderer.status(force=True)["ready"])
                 with self.assertRaisesRegex(TetoResourceError, "build ativo"):
                     renderer.synthesize("teto")
+
+    def test_native_audio_does_not_need_a_conversion_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bank, resampler = self._assets(root)
+            _write_wav(bank / "te.wav", rate=44100, sample=1000)
+            _write_wav(bank / "to.wav", rate=44100, sample=-1000)
+            with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
+                with patch("teto_renderer.renderer.subprocess.run", wraps=subprocess.run) as run:
+                    result = TetoRenderer().synthesize("teto")
+                self.assertEqual(len(run.call_args_list), 2)
+                self.assertTrue(all(call.args[0][0] == str(resampler) for call in run.call_args_list))
+                with wave.open(io.BytesIO(result["audio"]), "rb") as audio:
+                    self.assertEqual((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()), (1, 2, 44100))
+                    samples = array.array("h", audio.readframes(audio.getnframes()))
+                self.assertGreater(max(samples), 0)
+                self.assertLess(min(samples), 0)
+
+    def test_parallel_completion_preserves_audio_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bank, resampler = self._assets(root)
+            _write_wav(bank / "te.wav", rate=44100, sample=1000)
+            _write_wav(bank / "to.wav", rate=44100, sample=-1000)
+            resampler.write_text(resampler.read_text().replace(
+                "import shutil, sys\n", "import shutil, sys, time\ntime.sleep(0.08 if sys.argv[1].endswith('te.wav') else 0)\n"
+            ))
+            outputs = []
+            for workers in (1, 2):
+                env = self._env(bank, resampler, root / f"cache-{workers}")
+                env["PHONE_WORKER_TETO_RENDER_THREADS"] = str(workers)
+                with patch.dict(os.environ, env):
+                    outputs.append(TetoRenderer().synthesize("tetoteto")["audio"])
+            self.assertEqual(outputs[0], outputs[1])
+
+    def test_profile_changes_invalidate_audio_caches(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bank, resampler = self._assets(root)
+            env = self._env(bank, resampler, root / "cache")
+            with patch.dict(os.environ, env):
+                renderer = TetoRenderer()
+                initial = renderer.status(force=True)
+                with patch.dict(os.environ, {"PHONE_WORKER_TETO_SPEECH_RATE": "1.25"}):
+                    faster = renderer.status(force=True)
+                with patch.dict(os.environ, {"PHONE_WORKER_TETO_MODULATION": "25"}):
+                    expressive = renderer.status(force=True)
+            self.assertEqual(initial["voicebank_fingerprint"], faster["voicebank_fingerprint"])
+            self.assertEqual(initial["voicebank_fingerprint"], expressive["voicebank_fingerprint"])
+            self.assertEqual(len({s["fingerprint"] for s in (initial, faster, expressive)}), 3)
+            keys = [tts_policy.standard_cache_key(
+                {"engine": "teto", "text": "teto"}, engine="teto",
+                sanitize_key=tts_policy.sanitize_cache_key,
+                normalize_rate=tts_policy.normalize_edge_rate,
+                normalize_pitch=tts_policy.normalize_edge_pitch,
+                normalize_language=tts_policy.normalize_gtts_language,
+                teto_fingerprint=s["fingerprint"], teto_base_pitch="C4",
+            ) for s in (initial, faster, expressive)]
+            self.assertEqual(len(set(keys)), 3)
+
+    def test_straycat_duration_includes_the_consonant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bank, original = self._assets(root)
+            resampler = root / "straycat-rs-test"
+            resampler.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys, wave, math, array\n"
+                "stretch = 2 ** (1 - float(sys.argv[4]) / 100)\n"
+                "ms = float(sys.argv[7]) + math.floor(float(sys.argv[8]) * stretch / 5) * 5\n"
+                "with wave.open(sys.argv[2], 'wb') as w:\n"
+                "    w.setparams((1, 2, 44100, 0, 'NONE', 'not compressed'))\n"
+                "    w.writeframes(array.array('h', [1000] * round(ms * 44.1)).tobytes())\n"
+            )
+            resampler.chmod(0o755)
+            (bank / "oto.ini").write_text("te.wav=て,0,62,0,0,0\nto.wav=と,0,59,0,0,0\n")
+            with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
+                result = TetoRenderer().synthesize("teto")
+                with wave.open(io.BytesIO(result["audio"]), "rb") as w:
+                    duration = w.getnframes() / w.getframerate()
+            # Two 135 ms moras, one 16 ms overlap and a 20 ms word pause.
+            # The consonants must fit inside those durations, not add 121 ms.
+            self.assertAlmostEqual(duration, 0.274, delta=0.002)
 
 
 if __name__ == "__main__":

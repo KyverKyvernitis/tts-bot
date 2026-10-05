@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -10,6 +10,8 @@ class Mora:
     candidates: tuple[str, ...]
     duration_ms: int = 135
     pause_after_ms: int = 0
+    word_end: bool = False
+    phrase_end: str = ""
 
 
 _ROMAJI_TO_KANA = {
@@ -39,7 +41,7 @@ _ROMAJI_TO_KANA = {
     "a": "あ", "i": "い", "u": "う", "e": "え", "o": "お", "n": "ん",
 }
 _ROMAJI_KEYS = sorted(_ROMAJI_TO_KANA, key=len, reverse=True)
-_PUNCT_PAUSES = {",": 150, ";": 190, ":": 170, ".": 310, "!": 300, "?": 330, "\n": 280}
+_PUNCT_PAUSES = {",": 110, ";": 150, ":": 130, ".": 220, "!": 200, "?": 240, "\n": 200}
 
 
 def _katakana_to_hiragana(text: str) -> str:
@@ -104,13 +106,18 @@ def _romaji_to_kana(text: str) -> list[str]:
 
 
 def _portuguese_word_to_romaji(word: str) -> str:
-    value = unicodedata.normalize("NFKD", word.lower()).replace("ç", "s")
+    # Preserve the cedilla's /s/ approximation before decomposition removes it.
+    # This remains a mapping to Japanese CV sounds, not a Portuguese G2P model.
+    value = unicodedata.normalize("NFKD", word.lower().replace("ç", "s"))
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
     replacements = (
-        (r"nh", "ny"), (r"lh", "ly"), (r"ch", "sh"), (r"rr", "r"), (r"ss", "s"),
+        (r"nh", "ny"), (r"lh", "ry"), (r"ch", "sh"), (r"rr", "r"), (r"ss", "s"),
         (r"qu(?=[ei])", "k"), (r"gu(?=[ei])", "g"), (r"ph", "f"),
         (r"c(?=[ei])", "s"), (r"g(?=[ei])", "j"), (r"c", "k"), (r"q", "k"),
         (r"x", "sh"), (r"w", "u"),
+        # Japanese CV banks usually provide ra/ri/... rather than la/li/....
+        # Final l is left to the existing fallback; PT-BR's /w/ is not modeled.
+        (r"l(?=[aeiouy])", "r"),
     )
     for pattern, replacement in replacements:
         value = re.sub(pattern, replacement, value)
@@ -137,7 +144,11 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
         if token in _PUNCT_PAUSES:
             if result:
                 previous = result[-1]
-                result[-1] = Mora(previous.candidates, previous.duration_ms, max(previous.pause_after_ms, _PUNCT_PAUSES[token]))
+                result[-1] = replace(
+                    previous,
+                    pause_after_ms=max(previous.pause_after_ms, _PUNCT_PAUSES[token]),
+                    phrase_end=token,
+                )
             continue
         moras = _word_to_mora(token)
         for mora in moras:
@@ -147,5 +158,9 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
                 return result
         if result:
             previous = result[-1]
-            result[-1] = Mora(previous.candidates, previous.duration_ms, max(previous.pause_after_ms, 45))
+            result[-1] = replace(
+                previous,
+                pause_after_ms=max(previous.pause_after_ms, 20),
+                word_end=True,
+            )
     return result

@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import os
 import time
+import threading
 from pathlib import Path
 
 
@@ -12,6 +13,7 @@ class FragmentCache:
         self.root = Path(root).expanduser()
         self.max_bytes = max(8, int(max_mb)) * 1024 * 1024
         self.root.mkdir(parents=True, exist_ok=True)
+        self._write_lock = threading.RLock()
 
     @staticmethod
     def key(payload: str) -> str:
@@ -34,16 +36,21 @@ class FragmentCache:
         return None
 
     def put(self, key: str, source: Path) -> Path:
-        target = self.path_for(key)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(".tmp")
-        data = source.read_bytes()
-        temporary.write_bytes(data)
-        temporary.replace(target)
-        self.prune()
-        return target
+        with self._write_lock:
+            target = self.path_for(key)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(".tmp")
+            data = source.read_bytes()
+            temporary.write_bytes(data)
+            temporary.replace(target)
+            self.prune()
+            return target
 
     def prune(self) -> None:
+        with self._write_lock:
+            self._prune()
+
+    def _prune(self) -> None:
         try:
             files = [path for path in self.root.rglob("*.wav") if path.is_file()]
             total = sum(path.stat().st_size for path in files)

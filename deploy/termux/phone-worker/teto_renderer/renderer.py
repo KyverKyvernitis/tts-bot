@@ -3,6 +3,8 @@ from __future__ import annotations
 import array
 import contextlib
 import hashlib
+import json
+import math
 import os
 import shlex
 import shutil
@@ -11,6 +13,7 @@ import tempfile
 import threading
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +26,7 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
+    RENDER_VERSION = "speech-2"
 
     def __init__(self, *, resource_guard: Callable[[], dict[str, Any]] | None = None):
         self._resource_guard = resource_guard
@@ -52,6 +56,47 @@ class TetoRenderer:
 
     def _voicebank_dir(self) -> str:
         return str(os.getenv("PHONE_WORKER_TETO_VOICEBANK_DIR") or "").strip()
+
+    def _speech_rate(self) -> float:
+        try:
+            value = float(os.getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"))
+            return max(0.75, min(1.5, value)) if math.isfinite(value) else 1.0
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _velocity(self) -> int:
+        return max(1, min(200, self._env_int("PHONE_WORKER_TETO_VELOCITY", 100)))
+
+    def _modulation(self) -> int:
+        return max(0, min(100, self._env_int("PHONE_WORKER_TETO_MODULATION", 15)))
+
+    def _length_mode(self) -> str:
+        mode = str(os.getenv("PHONE_WORKER_TETO_LENGTH_MODE", "auto")).strip().lower()
+        if mode in {"total", "post-consonant"}:
+            return mode
+        executable = Path(self._resampler_command()[0]).name.lower()
+        return "post-consonant" if executable.startswith("straycat") else "total"
+
+    def _render_fingerprint(self, index: VoicebankIndex) -> str:
+        # The existing worker and bot cache contracts read status.fingerprint.
+        # Include the render profile so an update cannot replay old speech.
+        command = self._resampler_command()
+        executable = Path(shutil.which(command[0]) or command[0])
+        stamp = executable.stat()
+        profile = {
+            "version": self.RENDER_VERSION,
+            "voicebank": index.fingerprint,
+            "resampler": command,
+            "resampler_stamp": [stamp.st_size, stamp.st_mtime_ns],
+            "pitch": os.getenv("PHONE_WORKER_TETO_BASE_PITCH", "C4"),
+            "rate": self._speech_rate(),
+            "velocity": self._velocity(),
+            "modulation": self._modulation(),
+            "flags": os.getenv("PHONE_WORKER_TETO_FLAGS", ""),
+            "tempo": max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
+            "length_mode": self._length_mode(),
+        }
+        return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
     def _resampler_command(self) -> list[str]:
         raw = str(os.getenv("PHONE_WORKER_TETO_RESAMPLER_COMMAND") or "").strip()
@@ -107,6 +152,10 @@ class TetoRenderer:
                     "available": True,
                     "ready": True,
                     "resampler": " ".join(command[:2]),
+                    "voicebank_fingerprint": index.fingerprint,
+                    "fingerprint": self._render_fingerprint(index),
+                    "renderer_version": self.RENDER_VERSION,
+                    "speech_rate": self._speech_rate(),
                     "last_error": "",
                 })
             except Exception as exc:
@@ -117,7 +166,7 @@ class TetoRenderer:
 
     def fingerprint(self) -> str:
         try:
-            return self._load_index().fingerprint
+            return self._render_fingerprint(self._load_index())
         except Exception:
             return "unavailable"
 
@@ -132,13 +181,34 @@ class TetoRenderer:
     def _format_number(value: float) -> str:
         return f"{float(value):.3f}".rstrip("0").rstrip(".") or "0"
 
+    def _resampler_length(self, entry: OtoEntry, note: RenderNote) -> float:
+        if self._length_mode() != "post-consonant":
+            return float(note.duration_ms)
+        # Straycat adds its consonantal region to LENGTH. WORLD uses 5 ms
+        # frames, so budget that region before requesting the vowel duration.
+        stretch = 2.0 ** (1.0 - self._velocity() / 100.0)
+        consonant = max(0.0, entry.consonant_ms) * stretch
+        consonant = math.floor(consonant / 5.0) * 5.0
+        duration = math.ceil(note.duration_ms / 5.0) * 5.0
+        return max(5.0, duration - consonant)
+
+    def _native_wav(self, path: Path) -> bool:
+        try:
+            with wave.open(str(path), "rb") as wav:
+                return (wav.getnchannels() == 1 and wav.getsampwidth() == 2
+                        and wav.getframerate() == self.SAMPLE_RATE
+                        and wav.getcomptype() == "NONE" and wav.getnframes() > 0)
+        except (OSError, EOFError, wave.Error):
+            return False
+
     def _resample_note(self, *, index: VoicebankIndex, entry: OtoEntry, note: RenderNote, workdir: Path, deadline: float) -> Path:
         payload = "|".join((
-            index.fingerprint,
+            self._render_fingerprint(index),
             entry.cache_identity(),
             note.pitch,
             str(note.duration_ms),
-            str(self._env_int("PHONE_WORKER_TETO_VELOCITY", 100)),
+            str(self._velocity()),
+            str(self._modulation()),
             str(os.getenv("PHONE_WORKER_TETO_FLAGS") or ""),
         ))
         key = self._cache.key(payload)
@@ -155,14 +225,14 @@ class TetoRenderer:
             str(entry.wav_path),
             str(raw_output),
             note.pitch,
-            str(max(1, min(200, self._env_int("PHONE_WORKER_TETO_VELOCITY", 100)))),
+            str(self._velocity()),
             str(os.getenv("PHONE_WORKER_TETO_FLAGS") or ""),
             self._format_number(entry.offset_ms),
-            str(note.duration_ms),
+            self._format_number(self._resampler_length(entry, note)),
             self._format_number(entry.consonant_ms),
             self._format_number(entry.cutoff_ms),
             "100",
-            "0",
+            str(self._modulation()),
             f"!{max(60, min(240, self._env_int('PHONE_WORKER_TETO_TEMPO', 140)))}",
             "AA",
         ]
@@ -177,7 +247,12 @@ class TetoRenderer:
             error = proc.stderr.decode("utf-8", errors="replace")[-500:]
             raise TetoSynthesisError(f"resampler falhou para {entry.alias!r}: {error or proc.returncode}")
 
+        if self._native_wav(raw_output):
+            return self._cache.put(key, raw_output)
+
         remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("tempo da normalização Teto esgotado")
         ffmpeg = subprocess.run(
             [
                 "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -234,7 +309,7 @@ class TetoRenderer:
         try:
             index = self._load_index()
             max_moras = max(8, self._env_int("PHONE_WORKER_TETO_MAX_PHONEMES", 240))
-            notes = build_notes(phonemize(clean_text, max_moras=max_moras), base_pitch=str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4"))
+            notes = build_notes(phonemize(clean_text, max_moras=max_moras), base_pitch=str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4"), speech_rate=self._speech_rate())
             if not notes:
                 raise TetoSynthesisError("texto não gerou fonemas compatíveis")
             deadline = started + max(2.0, float(timeout_seconds))
@@ -243,16 +318,39 @@ class TetoRenderer:
             rendered = 0
             with tempfile.TemporaryDirectory(prefix="phone-worker-teto-") as temp:
                 workdir = Path(temp)
-                for note in notes:
+                entries = [index.resolve(note.candidates) for note in notes]
+                groups: dict[Path, list[tuple[int, RenderNote, OtoEntry]]] = {}
+                for number, (note, entry) in enumerate(zip(notes, entries)):
+                    if entry is not None:
+                        groups.setdefault(entry.wav_path, []).append((number, note, entry))
+
+                def render_group(items):
+                    # One group per source WAV avoids racing Straycat's .sc
+                    # analysis cache when two notes use the same recording.
+                    return {number: self._resample_note(index=index, entry=entry, note=note, workdir=workdir, deadline=deadline)
+                            for number, note, entry in items}
+
+                fragments: dict[int, Path] = {}
+                workers = max(1, min(2, self._env_int("PHONE_WORKER_TETO_RENDER_THREADS", 2)))
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(render_group, items) for items in groups.values()]
+                    try:
+                        for future in as_completed(futures):
+                            fragments.update(future.result())
+                    except BaseException:
+                        for future in futures:
+                            future.cancel()
+                        raise
+
+                for number, (note, entry) in enumerate(zip(notes, entries)):
                     if time.monotonic() >= deadline:
                         raise TimeoutError("renderização Teto excedeu o timeout")
-                    entry = index.resolve(note.candidates)
                     if entry is None:
                         missing.append(note.candidates[0] if note.candidates else "?")
                         pause = int(self.SAMPLE_RATE * min(note.duration_ms, 160) / 1000)
                         combined.extend([0] * pause)
                         continue
-                    fragment_path = self._resample_note(index=index, entry=entry, note=note, workdir=workdir, deadline=deadline)
+                    fragment_path = fragments[number]
                     fragment = self._read_samples(fragment_path)
                     overlap_ms = max(8.0, min(45.0, entry.overlap_ms or 16.0))
                     self._append_crossfade(combined, fragment, int(self.SAMPLE_RATE * overlap_ms / 1000.0))
@@ -291,6 +389,9 @@ class TetoRenderer:
                 "audio_format": "wav",
                 "voicebank": index.name,
                 "voicebank_fingerprint": index.fingerprint,
+                "renderer_fingerprint": self._render_fingerprint(index),
+                "renderer_version": self.RENDER_VERSION,
+                "speech_rate": self._speech_rate(),
                 "aliases": index.alias_count,
                 "rendered_phonemes": rendered,
                 "missing_phonemes": missing[:12],
