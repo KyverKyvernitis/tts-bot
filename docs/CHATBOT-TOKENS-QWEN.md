@@ -1,6 +1,6 @@
 # Tokens e reservas de IA econômicas
 
-O projeto mantém Groq/Gemini como provedores principais e duas reservas independentes de texto: Mistral Small 4 e Qwen3-30B-A3B pela Cloudflare Workers AI. A preferência salva continua escolhendo apenas qual dos dois provedores principais vem primeiro; quando habilitadas, as reservas entram como Mistral e depois Cloudflare. O Qwen permanece fixo em `@cf/qwen/qwen3-30b-a3b-fp8`; a integração não escolhe automaticamente outro modelo da Cloudflare. Mistral e Cloudflare são opt-in e não são usados em participação espontânea. Imagens seguem a cadeia de visão existente.
+O projeto mantém Groq/Gemini como provedores principais e duas reservas independentes de texto: Mistral com Ministral 3B/8B/14B adaptativo e Qwen3-30B-A3B pela Cloudflare Workers AI. A preferência salva continua escolhendo apenas qual dos dois provedores principais vem primeiro; quando habilitadas, as reservas entram como Mistral e depois Cloudflare. O Qwen permanece fixo em `@cf/qwen/qwen3-30b-a3b-fp8`; a integração não escolhe automaticamente outro modelo da Cloudflare. Mistral e Cloudflare são opt-in e não são usados em participação espontânea. Imagens seguem a cadeia de visão existente.
 
 ## Economia de tokens
 
@@ -71,9 +71,9 @@ Os testes locais simulam os provedores, o banco e o Discord; não gastam a franq
 
 Fontes: [franquia Workers AI](https://developers.cloudflare.com/workers-ai/platform/pricing/), [modelo Qwen](https://developers.cloudflare.com/workers-ai/models/qwen3-30b-a3b-fp8/), [token e REST API](https://developers.cloudflare.com/workers-ai/get-started/rest-api/), [cache Groq](https://console.groq.com/docs/prompt-caching).
 
-## Quarta reserva: Mistral Small 4
+## Quarta reserva: Mistral com Ministral adaptativo
 
-A quarta reserva de texto é opt-in e usa a API oficial da Mistral em `https://api.mistral.ai/v1/chat/completions`, com `mistral-small-latest`. Ela entra depois dos dois provedores principais (Groq/Gemini) e antes da reserva diária de neurons da Cloudflare. Assim, a preferência já salva entre Groq e Gemini não muda e o orçamento da Cloudflare fica mais protegido.
+A quarta reserva de texto é opt-in e usa a API oficial da Mistral em `https://api.mistral.ai/v1/chat/completions`. A cadeia padrão é `ministral-3b-latest`, `ministral-8b-latest` e `ministral-14b-latest`: 3B lidera turnos simples e fechamentos, 8B lidera conversa normal e 14B lidera turnos com ferramentas. Ela entra depois dos dois provedores principais (Groq/Gemini) e antes da reserva diária de neurons da Cloudflare. Assim, a preferência já salva entre Groq e Gemini não muda e o orçamento da Cloudflare fica mais protegido.
 
 A reserva só é criada quando existem as duas configurações abaixo:
 
@@ -82,7 +82,7 @@ MISTRAL_API_KEY=<sua chave da Mistral>
 CHATBOT_MISTRAL_ENABLED=true
 ```
 
-O cliente envia `reasoning_effort=none` para o Mistral Small 4 e um `prompt_cache_key` derivado por hash apenas das instruções estáveis, sem misturar estado dinâmico da conversa. Ferramentas continuam usando function calling nativo e o circuito de falhas/fallback é o mesmo dos demais provedores. A chave nunca é mostrada no painel nem entra no estado passado ao modelo.
+Os Ministral 3B/8B/14B não recebem `reasoning_effort`, pois esses modelos reportam `reasoning=false` e rejeitam esse parâmetro. Se um `mistral-small-*` ou `mistral-medium-*` for explicitamente configurado, o cliente usa `reasoning_effort=none`. Todos mantêm um `prompt_cache_key` derivado por hash apenas das instruções estáveis, sem misturar estado dinâmico da conversa. Ferramentas continuam usando function calling nativo e o circuito de falhas/fallback é o mesmo dos demais provedores. A cadeia pode ser sobrescrita por `CHATBOT_MISTRAL_MODELS`; a chave nunca é mostrada no painel nem entra no estado passado ao modelo.
 
 ## Economia adicional desta rodada
 

@@ -158,7 +158,7 @@ class ChatbotCommandsMixin:
 
         for provider, title, models in (("groq", "Groq", C.GROQ_MODELS),
                                          ("gemini", "Gemini", C.GEMINI_MODELS),
-                                         ("mistral", "Mistral · Small 4", C.MISTRAL_MODELS),
+                                         ("mistral", "Mistral · Ministral adaptativo", C.MISTRAL_MODELS),
                                          ("cloudflare", "Cloudflare · Qwen", C.CLOUDFLARE_MODELS)):
             if configured.get(provider) is not True:
                 if provider == "cloudflare":

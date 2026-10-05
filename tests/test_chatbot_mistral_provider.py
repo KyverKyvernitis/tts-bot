@@ -10,23 +10,37 @@ from tests.test_chatbot_action_providers import _Response, _Session, _groq
 
 
 @pytest.mark.asyncio
-async def test_mistral_client_uses_official_chat_endpoint_and_disables_reasoning():
+async def test_ministral_client_omits_unsupported_reasoning_parameter():
     session = _Session(_Response(_groq("ok", finish="stop")))
     client = P._MistralClient(session, "offline-key")
+    model = next(name for name in C.MISTRAL_MODELS if name.startswith("ministral-"))
     result = await client.chat(
         system="prefixo estável", messages=[P.ChatMessage("user", "oi")],
-        temperature=.8, model=C.MISTRAL_MODELS[0], timeout_seconds=5,
+        temperature=.8, model=model, timeout_seconds=5,
     )
     assert result == "ok"
     url, options = session.requests[0]
     payload = options["json"]
     assert url == "https://api.mistral.ai/v1/chat/completions"
-    assert payload["model"] == C.MISTRAL_MODELS[0]
-    assert payload["reasoning_effort"] == "none"
+    assert payload["model"] == model
+    assert "reasoning_effort" not in payload
     assert payload["prompt_cache_key"].startswith("tts-bot-chatbot-")
     assert "prefixo estável" not in payload["prompt_cache_key"]
     assert payload["max_tokens"] == C.TINY_RESPONSE_TOKENS
     assert "include_reasoning" not in payload
+
+
+@pytest.mark.asyncio
+async def test_mistral_small_still_disables_reasoning_when_explicitly_configured(monkeypatch):
+    monkeypatch.setattr(C, "MISTRAL_MODELS", ("mistral-small-latest",))
+    session = _Session(_Response(_groq("ok", finish="stop")))
+    await P._MistralClient(session, "offline-key").chat(
+        system="s", messages=[P.ChatMessage("user", "oi")], temperature=.8,
+        model="mistral-small-latest", timeout_seconds=5,
+    )
+    payload = session.requests[0][1]["json"]
+    assert payload["reasoning_effort"] == "none"
+    assert payload["prompt_cache_key"].startswith("tts-bot-chatbot-")
 
 
 @pytest.mark.asyncio

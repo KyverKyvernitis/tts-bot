@@ -94,7 +94,10 @@ TEXT_PROVIDER_ORDER = _env_csv("CHATBOT_TEXT_PROVIDER_ORDER", ("groq", "gemini")
 MISTRAL_ENABLED = (
     os.environ.get("CHATBOT_MISTRAL_ENABLED", "").strip().lower() == "true"
 )
-MISTRAL_MODELS = _env_csv("CHATBOT_MISTRAL_MODELS", ("mistral-small-latest",))
+MISTRAL_MODELS = _env_csv(
+    "CHATBOT_MISTRAL_MODELS",
+    ("ministral-3b-latest", "ministral-8b-latest", "ministral-14b-latest"),
+)
 
 # Reserva de texto independente, sem catálogo nem troca para modelos pagos.
 # O operador deve manter a conta no plano Workers Free; o endpoint não muda

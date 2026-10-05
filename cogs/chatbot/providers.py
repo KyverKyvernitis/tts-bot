@@ -867,9 +867,13 @@ class _MistralClient(_GroqClient):
             raise ProviderError("reserva Mistral aceita apenas texto", kind="model", stage="routing")
 
     def _prepare_payload(self, payload: dict) -> None:
-        # Mistral Small 4 permite desligar a exposição/uso de raciocínio
-        # desnecessário para conversa cotidiana e tool routing simples.
-        payload["reasoning_effort"] = "none"
+        model = payload.get("model", "")
+        # Ministral 3B/8B/14B reportam reasoning=false e rejeitam o parâmetro
+        # com HTTP 400/code 3051. Envie reasoning_effort somente às famílias
+        # Mistral que o expõem. Modelos customizados desconhecidos ficam no
+        # caminho conservador: omitir é compatível com o endpoint.
+        if isinstance(model, str) and model.startswith(("mistral-small", "mistral-medium")):
+            payload["reasoning_effort"] = "none"
         # O cache key deve permanecer estável entre turnos. Hash do system
         # completo seria contraproducente porque estado/capacidades dinâmicos
         # mudam a cada rodada; o provedor ainda valida o prefixo compatível.
@@ -1331,6 +1335,31 @@ class _GeminiClient:
         return reply
 
 
+def _adaptive_mistral_models(models, *, profile: str, wants_tools: bool) -> tuple[str, ...]:
+    """Ordena apenas Ministral conhecidos; preserva modelos customizados.
+
+    3B economiza turnos simples/fechamentos, 8B é o padrão de conversa e
+    14B lidera quando há ferramentas. Um Mistral Small customizado continua
+    elegível, mas não é inserido automaticamente na cadeia gratuita.
+    """
+    models = tuple(dict.fromkeys(model for model in models if isinstance(model, str) and model))
+    if profile == "closing_economy":
+        preferred = ("ministral-3b-latest", "ministral-8b-latest", "ministral-14b-latest")
+    elif wants_tools:
+        preferred = ("ministral-14b-latest", "ministral-8b-latest", "ministral-3b-latest")
+    elif profile == "economy":
+        preferred = ("ministral-3b-latest", "ministral-8b-latest", "ministral-14b-latest")
+    else:
+        preferred = ("ministral-8b-latest", "ministral-14b-latest", "ministral-3b-latest")
+    known = set(preferred)
+    positions = [index for index, model in enumerate(models) if model in known]
+    ordered_known = [model for model in preferred if model in models]
+    reordered = list(models)
+    for index, model in zip(positions, ordered_known):
+        reordered[index] = model
+    return tuple(dict.fromkeys(reordered))
+
+
 class ProviderRouter:
     def __init__(
         self, session: aiohttp.ClientSession, *, groq_key: Optional[str] = None,
@@ -1667,6 +1696,8 @@ class ProviderRouter:
             not has_images and not wants_tools and not has_native_history
             and len(latest_user.strip()) <= 700
         )
+        routing_profile = ("closing_economy" if closing_economy else
+                           "economy" if economy_route else "full")
         if economy_route:
             # Só reordene modelos que o operador configurou explicitamente.
             # Candidatos descobertos continuam depois da cadeia configurada: isso
@@ -1684,6 +1715,10 @@ class ProviderRouter:
             }
             reordered = []
             for provider, client, models in attempts:
+                if provider == "mistral":
+                    reordered.append((provider, client, _adaptive_mistral_models(
+                        models, profile=routing_profile, wants_tools=wants_tools)))
+                    continue
                 configured = [name for name in configured_by_provider.get(provider, ()) if name in models]
                 configured_set = set(configured)
                 extras = [name for name in models if name not in configured_set]
@@ -1697,8 +1732,13 @@ class ProviderRouter:
                 ordered = tuple(dict.fromkeys((*configured, *extras)))
                 reordered.append((provider, client, ordered))
             attempts = reordered
-        report["routing_profile"] = ("closing_economy" if closing_economy else
-                                     "economy" if economy_route else "full")
+        else:
+            attempts = [
+                (provider, client, _adaptive_mistral_models(models, profile=routing_profile, wants_tools=wants_tools))
+                if provider == "mistral" else (provider, client, models)
+                for provider, client, models in attempts
+            ]
+        report["routing_profile"] = routing_profile
         repair_used = bool(repair_state and repair_state.get("used"))
         discovery_used = False
         native_schemas = {spec.name: spec.parameters for spec in tool_specs if spec.available}

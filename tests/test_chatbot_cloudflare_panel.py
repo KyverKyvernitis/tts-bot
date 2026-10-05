@@ -50,7 +50,7 @@ def test_mistral_status_never_prints_key_and_explains_opt_in():
         "configured": {"mistral": False}, "circuits": {},
         "mistral_setup": {"enabled": False, "api_key_configured": True, "api_key": "PRIVATE_KEY"},
     })
-    assert "Mistral · Small 4:** desativada" in rendered
+    assert "Mistral · Ministral adaptativo:** desativada" in rendered
     assert "CHATBOT_MISTRAL_ENABLED=true" in rendered
     assert "PRIVATE_KEY" not in rendered
 
