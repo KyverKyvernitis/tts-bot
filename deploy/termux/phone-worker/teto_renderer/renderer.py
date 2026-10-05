@@ -26,7 +26,7 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
-    RENDER_VERSION = "speech-3-natural"
+    RENDER_VERSION = "speech-4-natural"
 
     def __init__(self, *, resource_guard: Callable[[], dict[str, Any]] | None = None):
         self._resource_guard = resource_guard
@@ -291,14 +291,49 @@ class TetoRenderer:
         return output
 
     @staticmethod
-    def _oto_join_ms(entry: OtoEntry) -> float:
-        # OTO preutterance tells us how early the next consonant wants to enter.
-        # Use a conservative share of it instead of treating fragments as
-        # independent blocks. overlap remains the floor; the clamp avoids a
-        # malformed oto.ini swallowing a large part of the preceding mora.
+    def _oto_join_ms(entry: OtoEntry, previous: RenderNote | None = None, current: RenderNote | None = None) -> float:
+        # OTO preutterance tells us how early the *current* consonant wants to
+        # enter the previous unit. Keep joins stronger inside a word and lighter
+        # across lexical boundaries. Explicit punctuation owns its real pause
+        # and must never be eaten by a crossfade.
+        if previous is None:
+            return 0.0
+        if previous.phrase_end or previous.pause_after_ms >= 24:
+            return 0.0
         preutterance = max(0.0, float(entry.preutterance_ms))
         overlap = max(0.0, float(entry.overlap_ms))
-        return max(10.0, min(55.0, max(16.0, overlap, preutterance * 0.45)))
+        same_word = current is not None and previous.word_index == current.word_index
+        factor = 0.60 if same_word else 0.34
+        floor = 14.0 if same_word else 8.0
+        ceiling = 68.0 if same_word else 42.0
+        if current is not None and current.glide:
+            factor += 0.08
+        if current is not None and current.coda:
+            factor -= 0.08
+        return max(floor, min(ceiling, max(overlap, preutterance * max(0.20, factor))))
+
+    @staticmethod
+    def _fade_head(fragment: array.array, samples: int) -> array.array:
+        count = min(len(fragment), max(0, int(samples)))
+        if count <= 0:
+            return fragment
+        output = array.array("h", fragment)
+        for index in range(count):
+            ratio = (index + 1) / (count + 1)
+            ratio = ratio * ratio * (3.0 - 2.0 * ratio)
+            output[index] = int(output[index] * ratio)
+        return output
+
+    @staticmethod
+    def _fade_tail_inplace(target: array.array, samples: int) -> None:
+        count = min(len(target), max(0, int(samples)))
+        if count <= 0:
+            return
+        start = len(target) - count
+        for offset in range(count):
+            ratio = (offset + 1) / (count + 1)
+            ratio = ratio * ratio * (3.0 - 2.0 * ratio)
+            target[start + offset] = int(target[start + offset] * (1.0 - ratio))
 
     @staticmethod
     def _append_crossfade(target: array.array, fragment: array.array, overlap_samples: int) -> None:
@@ -370,21 +405,55 @@ class TetoRenderer:
                             future.cancel()
                         raise
 
+                previous_note: RenderNote | None = None
+                pending_pause_ms = 0
                 for number, (note, entry) in enumerate(zip(notes, entries)):
                     if time.monotonic() >= deadline:
                         raise TimeoutError("renderização Teto excedeu o timeout")
                     if entry is None:
+                        if combined and pending_pause_ms:
+                            if pending_pause_ms >= 24:
+                                self._fade_tail_inplace(combined, int(self.SAMPLE_RATE * 0.0035))
+                            combined.extend([0] * int(self.SAMPLE_RATE * pending_pause_ms / 1000.0))
                         missing.append(note.candidates[0] if note.candidates else "?")
                         pause = int(self.SAMPLE_RATE * min(note.duration_ms, 160) / 1000)
                         combined.extend([0] * pause)
+                        pending_pause_ms = note.pause_after_ms
+                        previous_note = note
                         continue
                     fragment_path = fragments[number]
                     fragment = self._apply_gain(self._read_samples(fragment_path), note.gain)
-                    overlap_ms = self._oto_join_ms(entry)
-                    self._append_crossfade(combined, fragment, int(self.SAMPLE_RATE * overlap_ms / 1000.0))
-                    if note.pause_after_ms:
-                        combined.extend([0] * int(self.SAMPLE_RATE * note.pause_after_ms / 1000.0))
+                    if previous_note is None or not combined:
+                        fragment = self._fade_head(fragment, int(self.SAMPLE_RATE * 0.0025))
+                        combined.extend(fragment)
+                    elif pending_pause_ms >= 24 or previous_note.phrase_end:
+                        # Punctuation is a real prosodic boundary. Finish the old
+                        # phrase cleanly, preserve the requested silence, then
+                        # start a fresh envelope instead of crossfading through it.
+                        self._fade_tail_inplace(combined, int(self.SAMPLE_RATE * 0.0035))
+                        if pending_pause_ms:
+                            combined.extend([0] * int(self.SAMPLE_RATE * pending_pause_ms / 1000.0))
+                        fragment = self._fade_head(fragment, int(self.SAMPLE_RATE * 0.0035))
+                        combined.extend(fragment)
+                    else:
+                        overlap_ms = self._oto_join_ms(entry, previous_note, note)
+                        # A tiny lexical gap is expressed as reduced overlap, not
+                        # inserted silence. This keeps connected speech fluid while
+                        # still separating adjacent words a little.
+                        overlap_ms = max(0.0, overlap_ms - min(12.0, float(pending_pause_ms)))
+                        self._append_crossfade(
+                            combined,
+                            fragment,
+                            int(self.SAMPLE_RATE * overlap_ms / 1000.0),
+                        )
+                    pending_pause_ms = note.pause_after_ms
+                    previous_note = note
                     rendered += 1
+
+                if combined and pending_pause_ms:
+                    if previous_note is not None and previous_note.phrase_end:
+                        self._fade_tail_inplace(combined, int(self.SAMPLE_RATE * 0.0035))
+                    combined.extend([0] * int(self.SAMPLE_RATE * pending_pause_ms / 1000.0))
 
                 if rendered <= 0:
                     raise TetoSynthesisError("nenhum alias da voicebank correspondeu ao texto")

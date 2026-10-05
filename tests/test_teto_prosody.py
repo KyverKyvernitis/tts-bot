@@ -42,6 +42,36 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertEqual(_aliases("carro"), ["か", "ほ"])
         self.assertEqual(_aliases("casa"), ["か", "ざ"])
 
+    def test_silent_h_ch_and_common_ti_di_palatalization(self):
+        self.assertEqual(_aliases("hora"), ["お", "ら"])
+        self.assertEqual(_aliases("chave"), ["しゃ", "べ"])
+        self.assertEqual(_aliases("tia"), ["ち", "あ"])
+        self.assertEqual(_aliases("dia"), ["じ", "あ"])
+
+    def test_nasal_diphthongs_and_final_fricatives_become_short_tails(self):
+        nao = phonemize("não")
+        mae = phonemize("mãe")
+        mais = phonemize("mais")
+        self.assertEqual([m.candidates[0] for m in nao], ["な", "う", "ん"])
+        self.assertTrue(nao[1].glide)
+        self.assertTrue(nao[-1].coda)
+        self.assertTrue(mae[1].glide)
+        self.assertTrue(mae[-1].coda)
+        self.assertTrue(mais[1].glide)
+        self.assertTrue(mais[-1].coda)
+        self.assertLess(mais[-1].duration_ms, mais[0].duration_ms)
+
+    def test_function_words_are_deaccented_in_connected_speech(self):
+        moras = phonemize("a casa de Teto")
+        a = moras[0]
+        de = next(m for m in moras if m.source_word.lower() == "de")
+        casa_stress = next(m for m in moras if m.source_word.lower() == "casa" and m.stressed)
+        self.assertTrue(a.deaccented)
+        self.assertFalse(a.stressed)
+        self.assertTrue(de.deaccented)
+        self.assertFalse(de.stressed)
+        self.assertTrue(casa_stress.stressed)
+
     def test_portuguese_stress_prefers_accents_then_common_default_rules(self):
         teto = phonemize("Teto")
         bonito = phonemize("bonito")
@@ -80,6 +110,18 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertGreater(notes[1].duration_ms, notes[0].duration_ms)
         self.assertGreater(notes[1].duration_ms, notes[2].duration_ms)
         self.assertGreater(notes[1].gain, notes[0].gain)
+
+    def test_function_word_glide_and_coda_are_reduced(self):
+        notes = build_notes(phonemize("a não mais"))
+        function = notes[0]
+        glide = next(note for note in notes if note.glide)
+        coda = next(note for note in notes if note.coda)
+        stressed = next(note for note in notes if note.stressed)
+        self.assertTrue(function.deaccented)
+        self.assertLess(function.gain, stressed.gain)
+        self.assertLess(glide.duration_ms, stressed.duration_ms)
+        self.assertLess(coda.duration_ms, stressed.duration_ms)
+        self.assertLessEqual(coda.gain, glide.gain)
 
     def test_utau_pitchbend_encoder_matches_known_signed_12bit_values(self):
         self.assertEqual(encode_pitchbend([0]), "AA")

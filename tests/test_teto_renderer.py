@@ -186,13 +186,51 @@ class TetoRendererTests(unittest.TestCase):
 
     def test_oto_preutterance_contributes_to_join_without_unbounded_overlap(self):
         from teto_renderer.voicebank import OtoEntry
+        from teto_renderer.phonemizer import phonemize
+        from teto_renderer.prosody import build_notes
 
         base = OtoEntry("a", Path("a.wav"), 0, 40, 0, 0, 20)
         early = OtoEntry("a", Path("a.wav"), 0, 40, 0, 80, 20)
         extreme = OtoEntry("a", Path("a.wav"), 0, 40, 0, 1000, 20)
-        self.assertEqual(TetoRenderer._oto_join_ms(base), 20.0)
-        self.assertEqual(TetoRenderer._oto_join_ms(early), 36.0)
-        self.assertEqual(TetoRenderer._oto_join_ms(extreme), 55.0)
+        same_word = build_notes(phonemize("teto"))
+        across_words = build_notes(phonemize("teto teto"))
+        across_phrase = build_notes(phonemize("teto. teto"))
+
+        self.assertEqual(TetoRenderer._oto_join_ms(base, same_word[0], same_word[1]), 20.0)
+        self.assertEqual(TetoRenderer._oto_join_ms(early, same_word[0], same_word[1]), 48.0)
+        self.assertEqual(TetoRenderer._oto_join_ms(extreme, same_word[0], same_word[1]), 68.0)
+        lexical = TetoRenderer._oto_join_ms(early, across_words[1], across_words[2])
+        self.assertLess(lexical, 48.0)
+        self.assertGreater(lexical, 20.0)
+        self.assertEqual(TetoRenderer._oto_join_ms(early, across_phrase[1], across_phrase[2]), 0.0)
+
+    def test_renderer_announces_natural_v4_profile(self):
+        self.assertEqual(TetoRenderer.RENDER_VERSION, "speech-4-natural")
+
+    def test_punctuation_pause_survives_contextual_coarticulation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bank, resampler = self._assets(root)
+            _write_wav(bank / "te.wav", rate=44100, sample=1100)
+            _write_wav(bank / "to.wav", rate=44100, sample=900)
+            with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
+                result = TetoRenderer().synthesize("teto. teto")
+            with wave.open(io.BytesIO(result["audio"]), "rb") as audio:
+                samples = array.array("h", audio.readframes(audio.getnframes()))
+
+            # Find an interior silence run (surrounded by audio), excluding the
+            # normal trailing punctuation pause. A full stop asks for 180 ms;
+            # contextual OTO overlap must not consume it.
+            runs = []
+            start = None
+            for index, sample in enumerate(samples):
+                if sample == 0 and start is None:
+                    start = index
+                elif sample != 0 and start is not None:
+                    if start > 0:
+                        runs.append(index - start)
+                    start = None
+            self.assertTrue(any(run >= int(0.17 * 44100) for run in runs))
 
 
 if __name__ == "__main__":
