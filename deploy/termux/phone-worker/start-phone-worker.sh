@@ -282,6 +282,27 @@ except Exception: pass
 PYVER
 }
 
+runtime_source_changed_for_pid() {
+  local pid="$1" release="$(active_release_dir)"
+  # Updates can keep the same version number while changing their source hash.
+  # Check the confirmed process against the promoted immutable release.
+  "$PYTHON_BIN" - "$RUNTIME_STATUS_JSON" "$pid" "$release/phone-worker-release.json" <<'PYSOURCE' 2>/dev/null
+import json,re,sys
+try:
+    running=json.load(open(sys.argv[1],encoding='utf-8'))
+    target=json.load(open(sys.argv[3],encoding='utf-8'))
+    current=str(running.get('source_hash') or '').lower()
+    desired=str(target.get('source_hash') or '').lower()
+    valid=(int(running.get('pid') or -1)==int(sys.argv[2])
+           and running.get('runtime_kind')=='termux'
+           and re.fullmatch(r'[0-9a-f]{64}',current)
+           and re.fullmatch(r'[0-9a-f]{64}',desired))
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if valid and current!=desired else 1)
+PYSOURCE
+}
+
 file_version() {
   local release="$(active_release_dir)"
   "$PYTHON_BIN" - "$release/phone_worker.py" <<'PYVER' 2>/dev/null || true
@@ -775,6 +796,10 @@ if [[ -n "$existing_pid" && "$count" -le 1 ]] && worker_healthy_for_pid "$existi
     log "capacidade apk-builder alterada; reiniciando processo Termux confirmado"
     write_status "restart_for_apk_builder_capability pid=$existing_pid $(now_iso)"
     kill_worker_processes
+  elif runtime_source_changed_for_pid "$existing_pid"; then
+    log "fonte do worker mudou; reiniciando processo Termux confirmado"
+    write_status "restart_for_source_hash pid=$existing_pid $(now_iso)"
+    kill_worker_processes
   elif [[ -n "$running_ver" && -n "$file_ver" ]] && version_lt "$running_ver" "$file_ver"; then
     log "worker Termux confirmado está desatualizado; runtime=$running_ver arquivo=$file_ver"
     write_status "restart_for_update pid=$existing_pid runtime=$running_ver file=$file_ver $(now_iso)"
@@ -838,4 +863,3 @@ fi
 log "processo Termux vivo, mas identidade/control-plane não foram confirmados dentro da janela; pid=$child_pid"
 write_status "failed verification_timeout pid=$child_pid $(now_iso)"
 exit 1
-

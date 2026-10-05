@@ -285,7 +285,7 @@ def _runtime_status_path() -> Path:
 
 
 def _pid_path() -> Path:
-    return Path(os.getenv("PHONE_WORKER_PID_FILE") or (_state_root() / "phone-worker.pid")).expanduser()
+    return Path(os.getenv("PHONE_WORKER_PID_FILE") or (_install_root() / "phone-worker.pid")).expanduser()
 
 
 def _write_state(state: str, **extra: Any) -> None:
@@ -714,7 +714,7 @@ def _start_runtime() -> subprocess.Popen[Any]:
         env["PHONE_WORKER_RELEASE_DIR"] = str(active)
     env.setdefault("PHONE_WORKER_RUNTIME_ROOT", str(_runtime_root()))
     env.setdefault("PHONE_WORKER_STATE_DIR", str(_state_root()))
-    return subprocess.Popen([shutil.which("bash") or "bash", str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+    return subprocess.Popen([shutil.which("bash") or "bash", str(script), "--force-restart"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, start_new_session=True)
 
 
 def _verify_runtime(source_hash: str, version: str, timeout: int) -> dict[str, Any]:

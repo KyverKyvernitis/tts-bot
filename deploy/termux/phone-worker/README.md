@@ -1,5 +1,20 @@
 # Phone Worker Termux
 
+## Reinício após atualização de fontes
+
+O supervisor compara o hash do processo confirmado com o manifesto da release
+promovida. Uma alteração de fontes passa a reiniciar o worker mesmo quando o
+número de versão não muda. O bootstrap usa o mesmo arquivo de PID padrão do
+supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
+manter um daemon com módulos antigos depois de atualizar `current`.
+
+Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
+o renderer atualizado anuncia `renderer_version=speech-2`. Se o serviço ainda
+mostra o estado antigo, o reinício manual canônico é
+`bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
+Não desative o guard de recursos: builds e atualizações em andamento continuam
+bloqueando a síntese pesada até sua conclusão.
+
 ## Ritmo e geração da Teto: renderer `speech-2`
 
 O renderer desconta a região consonantal do `LENGTH` solicitado ao Straycat.
