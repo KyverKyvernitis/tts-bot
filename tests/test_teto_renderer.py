@@ -110,6 +110,7 @@ class TetoRendererTests(unittest.TestCase):
                     result = TetoRenderer().synthesize("teto")
                 self.assertEqual(len(run.call_args_list), 2)
                 self.assertTrue(all(call.args[0][0] == str(resampler) for call in run.call_args_list))
+                self.assertTrue(all(call.args[0][-1] != "AA" for call in run.call_args_list))
                 with wave.open(io.BytesIO(result["audio"]), "rb") as audio:
                     self.assertEqual((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()), (1, 2, 44100))
                     samples = array.array("h", audio.readframes(audio.getnframes()))
@@ -178,9 +179,20 @@ class TetoRendererTests(unittest.TestCase):
                 result = TetoRenderer().synthesize("teto")
                 with wave.open(io.BytesIO(result["audio"]), "rb") as w:
                     duration = w.getnframes() / w.getframerate()
-            # Two 135 ms moras, one 16 ms overlap and a 20 ms word pause.
-            # The consonants must fit inside those durations, not add 121 ms.
-            self.assertAlmostEqual(duration, 0.274, delta=0.002)
+            # Prosody v2 makes the stressed mora longer and the unstressed
+            # one shorter, with only a 6 ms lexical gap. The consonants must
+            # still fit inside the requested durations instead of adding 121 ms.
+            self.assertAlmostEqual(duration, 0.270, delta=0.003)
+
+    def test_oto_preutterance_contributes_to_join_without_unbounded_overlap(self):
+        from teto_renderer.voicebank import OtoEntry
+
+        base = OtoEntry("a", Path("a.wav"), 0, 40, 0, 0, 20)
+        early = OtoEntry("a", Path("a.wav"), 0, 40, 0, 80, 20)
+        extreme = OtoEntry("a", Path("a.wav"), 0, 40, 0, 1000, 20)
+        self.assertEqual(TetoRenderer._oto_join_ms(base), 20.0)
+        self.assertEqual(TetoRenderer._oto_join_ms(early), 36.0)
+        self.assertEqual(TetoRenderer._oto_join_ms(extreme), 55.0)
 
 
 if __name__ == "__main__":

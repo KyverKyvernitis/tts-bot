@@ -26,7 +26,7 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
-    RENDER_VERSION = "speech-2"
+    RENDER_VERSION = "speech-3-natural"
 
     def __init__(self, *, resource_guard: Callable[[], dict[str, Any]] | None = None):
         self._resource_guard = resource_guard
@@ -206,6 +206,7 @@ class TetoRenderer:
             self._render_fingerprint(index),
             entry.cache_identity(),
             note.pitch,
+            note.pitchbend,
             str(note.duration_ms),
             str(self._velocity()),
             str(self._modulation()),
@@ -234,7 +235,7 @@ class TetoRenderer:
             "100",
             str(self._modulation()),
             f"!{max(60, min(240, self._env_int('PHONE_WORKER_TETO_TEMPO', 140)))}",
-            "AA",
+            note.pitchbend,
         ]
         proc = subprocess.run(
             command,
@@ -280,6 +281,26 @@ class TetoRenderer:
             return samples
 
     @staticmethod
+    def _apply_gain(fragment: array.array, gain: float) -> array.array:
+        if not fragment or abs(float(gain) - 1.0) < 0.002:
+            return fragment
+        scale = max(0.80, min(1.20, float(gain)))
+        output = array.array("h", fragment)
+        for index, sample in enumerate(output):
+            output[index] = max(-32768, min(32767, int(sample * scale)))
+        return output
+
+    @staticmethod
+    def _oto_join_ms(entry: OtoEntry) -> float:
+        # OTO preutterance tells us how early the next consonant wants to enter.
+        # Use a conservative share of it instead of treating fragments as
+        # independent blocks. overlap remains the floor; the clamp avoids a
+        # malformed oto.ini swallowing a large part of the preceding mora.
+        preutterance = max(0.0, float(entry.preutterance_ms))
+        overlap = max(0.0, float(entry.overlap_ms))
+        return max(10.0, min(55.0, max(16.0, overlap, preutterance * 0.45)))
+
+    @staticmethod
     def _append_crossfade(target: array.array, fragment: array.array, overlap_samples: int) -> None:
         if not target or not fragment or overlap_samples <= 0:
             target.extend(fragment)
@@ -288,6 +309,8 @@ class TetoRenderer:
         start = len(target) - overlap
         for index in range(overlap):
             ratio = (index + 1) / (overlap + 1)
+            # Smoothstep removes the linear crossfade's audible change of slope.
+            ratio = ratio * ratio * (3.0 - 2.0 * ratio)
             mixed = int(target[start + index] * (1.0 - ratio) + fragment[index] * ratio)
             target[start + index] = max(-32768, min(32767, mixed))
         target.extend(fragment[overlap:])
@@ -309,7 +332,12 @@ class TetoRenderer:
         try:
             index = self._load_index()
             max_moras = max(8, self._env_int("PHONE_WORKER_TETO_MAX_PHONEMES", 240))
-            notes = build_notes(phonemize(clean_text, max_moras=max_moras), base_pitch=str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4"), speech_rate=self._speech_rate())
+            notes = build_notes(
+                phonemize(clean_text, max_moras=max_moras),
+                base_pitch=str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4"),
+                speech_rate=self._speech_rate(),
+                tempo=max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
+            )
             if not notes:
                 raise TetoSynthesisError("texto não gerou fonemas compatíveis")
             deadline = started + max(2.0, float(timeout_seconds))
@@ -351,8 +379,8 @@ class TetoRenderer:
                         combined.extend([0] * pause)
                         continue
                     fragment_path = fragments[number]
-                    fragment = self._read_samples(fragment_path)
-                    overlap_ms = max(8.0, min(45.0, entry.overlap_ms or 16.0))
+                    fragment = self._apply_gain(self._read_samples(fragment_path), note.gain)
+                    overlap_ms = self._oto_join_ms(entry)
                     self._append_crossfade(combined, fragment, int(self.SAMPLE_RATE * overlap_ms / 1000.0))
                     if note.pause_after_ms:
                         combined.extend([0] * int(self.SAMPLE_RATE * note.pause_after_ms / 1000.0))

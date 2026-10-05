@@ -12,6 +12,10 @@ class Mora:
     pause_after_ms: int = 0
     word_end: bool = False
     phrase_end: str = ""
+    word_index: int = 0
+    mora_index: int = 0
+    word_moras: int = 1
+    stressed: bool = False
 
 
 _ROMAJI_TO_KANA = {
@@ -41,7 +45,14 @@ _ROMAJI_TO_KANA = {
     "a": "あ", "i": "い", "u": "う", "e": "え", "o": "お", "n": "ん",
 }
 _ROMAJI_KEYS = sorted(_ROMAJI_TO_KANA, key=len, reverse=True)
-_PUNCT_PAUSES = {",": 110, ";": 150, ":": 130, ".": 220, "!": 200, "?": 240, "\n": 200}
+
+# These pauses are deliberately shorter than the old speech-2 defaults. Word
+# boundaries are primarily expressed by coarticulation now; punctuation keeps
+# a clear hierarchy without adding a tiny stop after every token.
+_PUNCT_PAUSES = {",": 85, ";": 135, ":": 115, ".": 180, "!": 155, "?": 180, "\n": 190}
+_WORD_GAP_MS = 6
+_PT_VOWELS = set("aeiouáéíóúâêôãõàü")
+_PT_STRESS_MARKS = set("áéíóúâêôãõ")
 
 
 def _katakana_to_hiragana(text: str) -> str:
@@ -108,30 +119,90 @@ def _romaji_to_kana(text: str) -> list[str]:
 def _portuguese_word_to_romaji(word: str) -> str:
     # Preserve the cedilla's /s/ approximation before decomposition removes it.
     # This remains a mapping to Japanese CV sounds, not a Portuguese G2P model.
-    value = unicodedata.normalize("NFKD", word.lower().replace("ç", "s"))
+    value = unicodedata.normalize("NFKD", word.lower().replace("ç", "ss"))
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
     replacements = (
-        (r"nh", "ny"), (r"lh", "ry"), (r"ch", "sh"), (r"rr", "r"), (r"ss", "s"),
+        (r"nh", "ny"), (r"lh", "ry"), (r"ch", "sh"), (r"rr", "h"),
+        (r"^r(?=[aeiou])", "h"),
         (r"qu(?=[ei])", "k"), (r"gu(?=[ei])", "g"), (r"ph", "f"),
         (r"c(?=[ei])", "s"), (r"g(?=[ei])", "j"), (r"c", "k"), (r"q", "k"),
+        (r"(?<=[aeiou])s(?=[aeiou])", "z"), (r"ss", "s"), (r"z$", "s"),
         (r"x", "sh"), (r"w", "u"),
+        # PT-BR final m/n nasalizes the preceding vowel; Japanese ん is less
+        # intrusive than appending mu/nu. Final l is commonly vocalized /w/.
+        (r"[mn]$", "n"), (r"l$", "u"),
+        # A final rhotic has no good CV-only equivalent. Dropping it is less
+        # disruptive to speech than appending an artificial 'ru' syllable.
+        (r"r$", ""),
         # Japanese CV banks usually provide ra/ri/... rather than la/li/....
-        # Final l is left to the existing fallback; PT-BR's /w/ is not modeled.
         (r"l(?=[aeiouy])", "r"),
     )
     for pattern, replacement in replacements:
         value = re.sub(pattern, replacement, value)
-    value = re.sub(r"[^a-z]", "", value)
-    return value
+    return re.sub(r"[^a-z]", "", value)
 
 
 def _word_to_mora(word: str) -> list[str]:
     if re.search(r"[ぁ-ゖァ-ヺ]", word):
         return _split_hiragana_mora(word)
     ascii_word = unicodedata.normalize("NFKC", word)
-    if re.fullmatch(r"[A-Za-z]+", ascii_word):
-        return _romaji_to_kana(_portuguese_word_to_romaji(ascii_word))
     return _romaji_to_kana(_portuguese_word_to_romaji(ascii_word))
+
+
+def _vowel_groups(word: str) -> list[tuple[int, int]]:
+    value = unicodedata.normalize("NFC", str(word or "").lower())
+    groups: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, char in enumerate(value):
+        if char in _PT_VOWELS:
+            if start is None:
+                start = index
+        elif start is not None:
+            groups.append((start, index))
+            start = None
+    if start is not None:
+        groups.append((start, len(value)))
+    return groups
+
+
+def _portuguese_stress_mora(word: str, mora_count: int) -> int | None:
+    """Return an intentionally conservative PT-BR stress approximation.
+
+    This is not a syllabifier. It preserves explicit orthographic stress first,
+    then applies the common Portuguese final/penultimate rule and maps that
+    vowel nucleus onto the Japanese mora sequence. The deterministic result is
+    sufficient for speech timing without adding a heavy linguistic dependency.
+    """
+    if mora_count <= 0 or re.search(r"[ぁ-ゖァ-ヺ]", word):
+        return None
+    value = unicodedata.normalize("NFC", str(word or "").lower())
+    groups = _vowel_groups(value)
+    if not groups:
+        return None
+
+    stressed_group: int | None = None
+    for group_index, (start, end) in enumerate(groups):
+        if any(char in _PT_STRESS_MARKS for char in value[start:end]):
+            stressed_group = group_index
+            break
+
+    if stressed_group is None:
+        plain = unicodedata.normalize("NFKD", value)
+        plain = "".join(ch for ch in plain if not unicodedata.combining(ch))
+        penultimate_endings = ("a", "e", "o", "as", "es", "os", "am", "em", "ens")
+        stressed_group = max(0, len(groups) - 2) if plain.endswith(penultimate_endings) and len(groups) > 1 else len(groups) - 1
+
+    if len(groups) == 1 or mora_count == 1:
+        return 0
+    mapped = round(stressed_group * (mora_count - 1) / (len(groups) - 1))
+    mapped = max(0, min(mora_count - 1, mapped))
+    # Orthographic final consonants can create an approximation mora in a CV
+    # bank. Keep lexical stress on the preceding vowel-bearing mora.
+    plain = unicodedata.normalize("NFKD", value)
+    plain = "".join(ch for ch in plain if not unicodedata.combining(ch))
+    if mapped == mora_count - 1 and mora_count > 1 and plain and plain[-1] in "mnslzx":
+        mapped -= 1
+    return mapped
 
 
 def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
@@ -140,6 +211,7 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
         return []
     tokens = re.findall(r"[ぁ-ゖァ-ヺーA-Za-zÀ-ÿÇç]+|[,.!?:;\n]", normalized)
     result: list[Mora] = []
+    word_index = 0
     for token in tokens:
         if token in _PUNCT_PAUSES:
             if result:
@@ -150,17 +222,27 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
                     phrase_end=token,
                 )
             continue
+
         moras = _word_to_mora(token)
-        for mora in moras:
+        stress_index = _portuguese_stress_mora(token, len(moras))
+        for mora_index, mora in enumerate(moras):
             duration = 150 if mora in {"ん"} else 135
-            result.append(Mora(_kana_candidates(mora), duration_ms=duration))
+            result.append(Mora(
+                _kana_candidates(mora),
+                duration_ms=duration,
+                word_index=word_index,
+                mora_index=mora_index,
+                word_moras=max(1, len(moras)),
+                stressed=stress_index == mora_index,
+            ))
             if len(result) >= max(1, int(max_moras)):
                 return result
-        if result:
+        if moras:
             previous = result[-1]
             result[-1] = replace(
                 previous,
-                pause_after_ms=max(previous.pause_after_ms, 20),
+                pause_after_ms=max(previous.pause_after_ms, _WORD_GAP_MS),
                 word_end=True,
             )
+            word_index += 1
     return result

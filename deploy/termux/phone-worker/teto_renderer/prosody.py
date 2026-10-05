@@ -13,10 +13,15 @@ class RenderNote:
     pitch: str
     duration_ms: int
     pause_after_ms: int
+    pitchbend: str = "AA"
+    gain: float = 1.0
+    stressed: bool = False
+    contour: str = "neutral"
 
 
 _PITCH_CLASSES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 _PITCH_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+_UTAU_BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 
 def _relative_pitch(base_pitch: str, semitones: int) -> str:
@@ -40,28 +45,195 @@ def _speech_rate(value: float) -> float:
     return max(0.5, min(2.0, rate))
 
 
+def _tempo(value: int | float) -> int:
+    try:
+        tempo = int(value)
+    except (TypeError, ValueError):
+        return 140
+    return max(60, min(240, tempo))
+
+
+def _encode_pitch_value(cents: int) -> str:
+    value = max(-2048, min(2047, int(round(cents))))
+    if value < 0:
+        value += 4096
+    return _UTAU_BASE64[(value >> 6) & 0x3F] + _UTAU_BASE64[value & 0x3F]
+
+
+def encode_pitchbend(values: list[int]) -> str:
+    """Encode signed-cent UTAU pitch points as 12-bit Base64 + RLE."""
+    if not values:
+        return "AA"
+    output: list[str] = []
+    index = 0
+    while index < len(values):
+        code = _encode_pitch_value(values[index])
+        run = 1
+        while index + run < len(values) and values[index + run] == values[index]:
+            run += 1
+        if run >= 3:
+            output.append(f"{code}#{run}#")
+        else:
+            output.append(code * run)
+        index += run
+    return "".join(output) or "AA"
+
+
+def _smoothstep(value: float) -> float:
+    value = max(0.0, min(1.0, value))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def _pitch_curve(start: int, peak: int, end: int, *, duration_ms: int, tempo: int) -> str:
+    # UTAU pitch points are spaced at 1/96 of a quarter note. Generate enough
+    # points for the note so Straycat receives a continuous contour instead of
+    # the old constant AA pitchbend.
+    points = round(max(1, duration_ms) * tempo * 96 / 60000)
+    points = max(8, min(64, points))
+    bend: list[int] = []
+    peak_at = max(2, min(points - 2, round(points * 0.48)))
+    for index in range(points):
+        if index <= peak_at:
+            ratio = _smoothstep(index / max(1, peak_at))
+            cents = start + (peak - start) * ratio
+        else:
+            ratio = _smoothstep((index - peak_at) / max(1, points - 1 - peak_at))
+            cents = peak + (end - peak) * ratio
+        # Two-cent quantization avoids needless fragment variants while staying
+        # well below an audible semitone step.
+        bend.append(int(round(cents / 2.0) * 2))
+    return encode_pitchbend(bend)
+
+
+def _phrase_spans(moras: list[Mora]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for index, mora in enumerate(moras):
+        if mora.phrase_end:
+            spans.append((start, index))
+            start = index + 1
+    if start < len(moras):
+        spans.append((start, len(moras) - 1))
+    return spans
+
+
+def _centers(moras: list[Mora]) -> list[int]:
+    values = [0 for _ in moras]
+    for start, end in _phrase_spans(moras):
+        count = end - start + 1
+        ending = moras[end].phrase_end
+        if ending == "?":
+            phrase_start, phrase_end = 4, 16
+        elif ending in {",", ";", ":"}:
+            phrase_start, phrase_end = 6, -4
+        elif ending == "!":
+            phrase_start, phrase_end = 10, -8
+        else:
+            phrase_start, phrase_end = 7, -14
+
+        for local_index, index in enumerate(range(start, end + 1)):
+            ratio = local_index / max(1, count - 1)
+            center = phrase_start + (phrase_end - phrase_start) * ratio
+            mora = moras[index]
+            if mora.stressed:
+                center += 28
+            elif mora.word_moras > 1:
+                center -= 3
+            if index + 1 <= end and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
+                center += 7
+            if mora.word_end and not mora.phrase_end:
+                center -= 3
+            values[index] = int(round(center))
+
+        if ending == "?":
+            if end - 1 >= start:
+                values[end - 1] = max(values[end - 1], 18)
+            values[end] = max(values[end], 50)
+        elif ending in {".", "\n"}:
+            if end - 1 >= start:
+                values[end - 1] = min(values[end - 1], -10)
+            values[end] = min(values[end], -34)
+        elif ending == "!":
+            if end - 1 >= start:
+                values[end - 1] = max(values[end - 1], 18)
+            values[end] = min(values[end], -12)
+        elif not ending:
+            values[end] = min(values[end], -22)
+
+    return [max(-70, min(70, value)) for value in values]
+
+
+def _duration_for(moras: list[Mora], index: int) -> int:
+    mora = moras[index]
+    duration = float(mora.duration_ms)
+    if mora.stressed:
+        duration *= 1.13
+    elif mora.word_moras > 1:
+        duration *= 0.90
+    if index + 1 < len(moras) and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
+        duration *= 0.96
+    if mora.phrase_end in {".", "!", "?", "\n"}:
+        duration *= 1.08
+    elif mora.phrase_end in {",", ";", ":"}:
+        duration *= 1.02
+    elif mora.word_end:
+        duration *= 1.015
+    return max(78, min(240, round(duration)))
+
+
+def _contour_name(mora: Mora) -> str:
+    if mora.phrase_end == "?":
+        return "question-rise"
+    if mora.phrase_end in {".", "\n"}:
+        return "statement-fall"
+    if mora.phrase_end == "!":
+        return "exclamation-fall"
+    if mora.phrase_end in {",", ";", ":"}:
+        return "continuation"
+    if mora.stressed:
+        return "stress"
+    return "neutral"
+
+
 def build_notes(
-    moras: list[Mora], *, base_pitch: str = "C4", speech_rate: float = 1.0
+    moras: list[Mora], *, base_pitch: str = "C4", speech_rate: float = 1.0, tempo: int = 140
 ) -> list[RenderNote]:
     if not moras:
         return []
     rate = _speech_rate(speech_rate)
+    tempo_value = _tempo(tempo)
+    centers = _centers(moras)
     notes: list[RenderNote] = []
+
     for index, mora in enumerate(moras):
-        # Only signal a phrase ending; do not guess Portuguese word stress.
-        # Three relative pitches keep fragment-cache variants limited.
-        semitones = 0
+        duration = max(70, min(500, round(_duration_for(moras, index) / rate)))
+        pause = max(0, min(1000, round(mora.pause_after_ms / rate)))
+        center = centers[index]
+        previous = centers[index - 1] if index > 0 and not moras[index - 1].phrase_end else center
+        following = centers[index + 1] if index + 1 < len(moras) and not mora.phrase_end else center
+        start = round((previous + center) / 2)
+        end = round((center + following) / 2)
+        peak = center + (10 if mora.stressed else 3)
         if mora.phrase_end == "?":
-            semitones = 1
-        elif mora.phrase_end in {".", "!", "\n"}:
-            semitones = -1
-        elif index == len(moras) - 1 and not mora.phrase_end:
-            semitones = -1
-        pitch = _relative_pitch(base_pitch, semitones)
+            peak = max(peak, 54)
+        elif mora.phrase_end in {".", "\n"}:
+            peak = min(peak, center + 1)
+        pitchbend = _pitch_curve(start, peak, end, duration_ms=duration, tempo=tempo_value)
+
+        gain = 1.055 if mora.stressed else (0.985 if mora.word_moras > 1 else 1.0)
+        if mora.phrase_end in {".", "?", "!", "\n"}:
+            gain *= 0.985
+
         notes.append(RenderNote(
             candidates=mora.candidates,
-            pitch=pitch,
-            duration_ms=max(70, min(500, round(mora.duration_ms / rate))),
-            pause_after_ms=max(0, min(1000, round(mora.pause_after_ms / rate))),
+            # Keep the coarse note stable and let the UTAU pitchbend carry the
+            # speech contour. This prevents audible semitone stair-steps.
+            pitch=_relative_pitch(base_pitch, 0),
+            duration_ms=duration,
+            pause_after_ms=pause,
+            pitchbend=pitchbend,
+            gain=max(0.90, min(1.10, gain)),
+            stressed=mora.stressed,
+            contour=_contour_name(mora),
         ))
     return notes

@@ -9,13 +9,13 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-2`. Se o serviço ainda
+o renderer atualizado anuncia `renderer_version=speech-3-natural`. Se o serviço ainda
 mostra o estado antigo, o reinício manual canônico é
 `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
 bloqueando a síntese pesada até sua conclusão.
 
-## Ritmo e geração da Teto: renderer `speech-2`
+## Naturalidade da Teto: renderer `speech-3-natural`
 
 O renderer desconta a região consonantal do `LENGTH` solicitado ao Straycat.
 Antes, cada mora de 135 ms ainda recebia a duração da consoante, alongando a
@@ -28,10 +28,24 @@ usado para outros formatos. Até dois grupos de gravações são processados em
 paralelo; notas da mesma gravação ficam no mesmo grupo para preservar o cache
 WORLD `.sc`. A montagem mantém a ordem dos fonemas.
 
-As pausas entre palavras são menores, `ç` mantém o som de `s` e `l/lh` usam
-aproximações japonesas sem inserir a vogal extra anterior. A entonação de fim
-de frase é relativa ao pitch base, com subida em perguntas. A modulação
-preserva parte da variação de pitch da gravação original.
+O `speech-3-natural` mantém o hot path de latência da revisão anterior e muda
+a fala em cinco pontos: tonicidade aproximada de PT-BR, duração diferente para
+sílabas tônicas e átonas, pitchbend UTAU contínuo em vez do `AA` plano, pausas
+lexicais curtas e junção orientada também pelo `preutterance` do `oto.ini`. O
+pitch grosso fica estável; curvas em centésimos de semitom carregam a
+entonação de afirmações, perguntas, exclamações e continuidades.
+
+O fonemizador continua sendo uma aproximação de português para banco japonês
+CV, mas evita algumas vogais artificiais comuns: `m/n` finais usam `ん`, `l`
+final é vocalizado, `r` final deixa de criar uma sílaba `ru`, `rr/r` forte usa
+uma aproximação aspirada e `s` intervocálico pode sonorizar. Isso melhora a
+inteligibilidade sem introduzir uma biblioteca linguística pesada.
+
+Na montagem, `overlap` continua sendo respeitado e uma fração conservadora de
+`preutterance` antecipa a entrada da próxima unidade, limitada a 55 ms. O
+crossfade agora usa smoothstep e a sílaba tônica recebe dinâmica leve. A
+modulação do Straycat continua preservando parte da variação da gravação
+original.
 
 Configurações opcionais, com os valores padrão:
 

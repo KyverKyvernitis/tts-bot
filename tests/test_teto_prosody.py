@@ -9,11 +9,15 @@ if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 
 from teto_renderer.phonemizer import phonemize
-from teto_renderer.prosody import build_notes
+from teto_renderer.prosody import build_notes, encode_pitchbend
 
 
 def _aliases(text: str) -> list[str]:
     return [mora.candidates[0] for mora in phonemize(text)]
+
+
+def _stress_indexes(text: str) -> list[int]:
+    return [index for index, mora in enumerate(phonemize(text)) if mora.stressed]
 
 
 class TetoProsodyTests(unittest.TestCase):
@@ -27,14 +31,61 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertEqual(_aliases("fala"), ["ふぁ", "ら"])
         self.assertEqual(_aliases("filha"), ["ふぃ", "りゃ"])
 
-    def test_phrase_endings_follow_the_configured_base_pitch(self):
+    def test_common_ptbr_final_consonants_avoid_extra_cv_syllables(self):
+        self.assertEqual(_aliases("bom"), ["ぼ", "ん"])
+        self.assertEqual(_aliases("sim"), ["し", "ん"])
+        self.assertEqual(_aliases("quer"), ["け"])
+        self.assertEqual(_aliases("Brasil")[-2:], ["じ", "う"])
+
+    def test_ptbr_r_and_intervocalic_s_use_closer_cv_approximations(self):
+        self.assertEqual(_aliases("rato"), ["は", "と"])
+        self.assertEqual(_aliases("carro"), ["か", "ほ"])
+        self.assertEqual(_aliases("casa"), ["か", "ざ"])
+
+    def test_portuguese_stress_prefers_accents_then_common_default_rules(self):
+        teto = phonemize("Teto")
+        bonito = phonemize("bonito")
+        voce = phonemize("você")
+        musica = phonemize("música")
+        computador = phonemize("computador")
+        self.assertEqual([m.stressed for m in teto], [True, False])
+        self.assertEqual([m.stressed for m in bonito], [False, True, False])
+        self.assertEqual([m.stressed for m in voce], [False, True])
+        self.assertEqual([m.stressed for m in musica], [True, False, False])
+        self.assertTrue(computador[-1].stressed)
+
+    def test_word_gaps_are_short_and_punctuation_keeps_hierarchy(self):
+        plain = phonemize("Olá eu")
+        comma = phonemize("Olá, eu")
+        question = phonemize("Olá?")
+        first_word_end = next(m for m in plain if m.word_end)
+        comma_end = next(m for m in comma if m.phrase_end == ",")
+        question_end = next(m for m in question if m.phrase_end == "?")
+        self.assertLessEqual(first_word_end.pause_after_ms, 8)
+        self.assertGreater(comma_end.pause_after_ms, first_word_end.pause_after_ms)
+        self.assertGreater(question_end.pause_after_ms, comma_end.pause_after_ms)
+
+    def test_phrase_contours_keep_coarse_pitch_stable_and_use_pitchbend(self):
         statement = build_notes(phonemize("Olá, eu sou a Teto."), base_pitch="D4")
         question = build_notes(phonemize("Olá, eu sou a Teto?"), base_pitch="D4")
-        self.assertEqual(statement[0].pitch, "D4")
-        self.assertEqual(statement[-1].pitch, "C#4")
-        self.assertEqual(question[-1].pitch, "D#4")
-        self.assertEqual(statement[4].pitch, "D4")
-        self.assertEqual(len({note.pitch for note in statement + question}), 3)
+        self.assertEqual({note.pitch for note in statement + question}, {"D4"})
+        self.assertEqual(statement[-1].contour, "statement-fall")
+        self.assertEqual(question[-1].contour, "question-rise")
+        self.assertNotEqual(statement[-1].pitchbend, question[-1].pitchbend)
+        self.assertTrue(any(note.pitchbend != "AA" for note in statement))
+        self.assertTrue(any(note.stressed for note in statement))
+
+    def test_stressed_mora_is_longer_and_slightly_louder_than_neighbor(self):
+        notes = build_notes(phonemize("bonito"))
+        self.assertGreater(notes[1].duration_ms, notes[0].duration_ms)
+        self.assertGreater(notes[1].duration_ms, notes[2].duration_ms)
+        self.assertGreater(notes[1].gain, notes[0].gain)
+
+    def test_utau_pitchbend_encoder_matches_known_signed_12bit_values(self):
+        self.assertEqual(encode_pitchbend([0]), "AA")
+        self.assertEqual(encode_pitchbend([1]), "AB")
+        self.assertEqual(encode_pitchbend([-1]), "//")
+        self.assertEqual(encode_pitchbend([1, 1, 1, 1]), "AB#4#")
 
     def test_rate_shortens_speech_and_pauses_without_changing_pronunciation(self):
         moras = phonemize("Olá, eu sou a Teto.")
