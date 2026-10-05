@@ -152,13 +152,16 @@ _HEAVY_RESOURCE_LOCK = threading.Lock()
 _TETO_RENDERER_LOCK = threading.RLock()
 _TETO_RENDERER: Any = None
 _TETO_RENDERER_ERROR = ""
+_TETO_BATTERY_CACHE_LOCK = threading.RLock()
+_TETO_BATTERY_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
+_TETO_BATTERY_MONITOR_STARTED = False
 _PHONE_WORKER_MUSIC_BRIDGE_MODULES: dict[str, Any] = {}
 _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.19"
+PHONE_WORKER_VERSION = "1.11.20"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -826,6 +829,61 @@ def _battery_snapshot() -> dict[str, Any]:
         return _empty_battery_snapshot("battery_permission_denied", exc)
     except Exception as exc:
         return _empty_battery_snapshot("battery_error", exc)
+
+
+def _refresh_teto_battery_cache() -> dict[str, Any]:
+    """Refresh the expensive Termux battery probe outside the Teto hot path."""
+    snapshot = _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot())
+    with _TETO_BATTERY_CACHE_LOCK:
+        _TETO_BATTERY_CACHE["at"] = time.monotonic()
+        _TETO_BATTERY_CACHE["data"] = dict(snapshot) if isinstance(snapshot, dict) else {}
+        return dict(_TETO_BATTERY_CACHE["data"])
+
+
+def _teto_cached_battery_snapshot() -> tuple[dict[str, Any], float | None]:
+    """Return battery telemetry without ever spawning termux-battery-status.
+
+    The process-wide monitor keeps the authoritative Termux API snapshot warm.
+    Before the first refresh (or in isolated validation/tests), sysfs is the
+    bounded, local fallback. A stale monitor value is preferable to blocking a
+    synthesis request on an Android IPC subprocess; its age is exposed so the
+    caller can observe monitor health.
+    """
+    now = time.monotonic()
+    with _TETO_BATTERY_CACHE_LOCK:
+        cached = _TETO_BATTERY_CACHE.get("data")
+        cached_at = float(_TETO_BATTERY_CACHE.get("at") or 0.0)
+        if isinstance(cached, dict) and cached:
+            age_ms = max(0.0, (now - cached_at) * 1000.0) if cached_at else None
+            return dict(cached), age_ms
+    snapshot = _safe_telemetry("battery-sysfs", _sysfs_battery_snapshot, _empty_battery_snapshot())
+    return (dict(snapshot) if isinstance(snapshot, dict) else {}), None
+
+
+def _start_teto_battery_monitor() -> bool:
+    """Start one daemon refresher so Teto admission never blocks on Termux API."""
+    global _TETO_BATTERY_MONITOR_STARTED
+    if not _env_bool("PHONE_WORKER_TETO_ENABLED", False):
+        return False
+    with _TETO_BATTERY_CACHE_LOCK:
+        if _TETO_BATTERY_MONITOR_STARTED:
+            return True
+        _TETO_BATTERY_MONITOR_STARTED = True
+
+    def run() -> None:
+        interval = max(5.0, min(60.0, _env_float("PHONE_WORKER_TETO_RESOURCE_REFRESH_SECONDS", 15.0)))
+        while True:
+            try:
+                _refresh_teto_battery_cache()
+            except Exception as exc:
+                print(
+                    f"[phone-worker] monitor de bateria Teto falhou: {type(exc).__name__}: {_short_text(exc, limit=100)}",
+                    flush=True,
+                )
+            time.sleep(interval)
+
+    threading.Thread(target=run, name="teto-battery-monitor", daemon=True).start()
+    return True
 
 
 def _safe_telemetry(name: str, callback, default: Any) -> Any:
@@ -2034,6 +2092,17 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
             handler.send_header("X-Core-Worker-Android-Synth-Ms", _header_ascii(timing.get("android_synth"), limit=40))
         if timing.get("android_roundtrip") not in (None, ""):
             handler.send_header("X-Core-Worker-Android-Roundtrip-Ms", _header_ascii(timing.get("android_roundtrip"), limit=40))
+        for key, header in (
+            ("preflight", "X-Core-Worker-Preflight-Ms"),
+            ("dependency_snapshot", "X-Core-Worker-Dependency-Snapshot-Ms"),
+            ("engine_order", "X-Core-Worker-Engine-Order-Ms"),
+            ("cache_key", "X-Core-Worker-Cache-Key-Ms"),
+            ("cache_lookup", "X-Core-Worker-Cache-Lookup-Ms"),
+            ("teto_render", "X-Core-Worker-Teto-Render-Ms"),
+            ("cache_store", "X-Core-Worker-Cache-Store-Ms"),
+        ):
+            if timing.get(key) not in (None, ""):
+                handler.send_header(header, _header_ascii(timing.get(key), limit=40))
     handler.end_headers()
     handler.wfile.write(data)
 
@@ -2205,7 +2274,7 @@ def _available_memory_mb() -> int | None:
 def _teto_resource_snapshot() -> dict[str, Any]:
     memory_mb = _available_memory_mb()
     min_memory_mb = max(128, _env_int("PHONE_WORKER_TETO_MIN_FREE_MEMORY_MB", 1200))
-    battery = _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot())
+    battery, battery_age_ms = _teto_cached_battery_snapshot()
     level = battery.get("level") if isinstance(battery, dict) else None
     temperature = battery.get("temperature_c") if isinstance(battery, dict) else None
     status = str((battery or {}).get("status") or "").strip().lower() if isinstance(battery, dict) else ""
@@ -2242,6 +2311,8 @@ def _teto_resource_snapshot() -> dict[str, Any]:
         "minimum_memory_mb": min_memory_mb,
         "battery_level": level,
         "battery_temperature_c": temperature,
+        "battery_source": str((battery or {}).get("source") or "") if isinstance(battery, dict) else "",
+        "battery_snapshot_age_ms": round(battery_age_ms, 2) if battery_age_ms is not None else None,
         "charging": charging,
         "active_heavy_job": active_type,
     }
@@ -2356,6 +2427,28 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
     deps["ok"] = not missing
     deps["missing"] = missing
     return deps
+
+
+def _teto_dependency_snapshot_fast() -> dict[str, Any]:
+    """Resolve only Teto readiness for an explicit Teto request.
+
+    This avoids probing Android TTS and importing unrelated network providers
+    before the requested engine has even been attempted. Full dependency
+    discovery is deferred until a real fallback is necessary.
+    """
+    profile = _current_core_worker_profile()
+    teto_status = _teto_status()
+    teto_resources = teto_status.get("resources") if isinstance(teto_status.get("resources"), dict) else {}
+    return {
+        "profile": profile,
+        "turbo": profile == "turbo",
+        "teto": teto_status,
+        "teto_tts": bool(teto_status.get("ready") and teto_resources.get("ok", True)),
+        "teto_enabled": bool(teto_status.get("enabled")),
+        "teto_fingerprint": str(teto_status.get("fingerprint") or "")[:64],
+        "ok": bool(teto_status.get("ready") and teto_resources.get("ok", True)),
+        "missing": [],
+    }
 
 
 
@@ -4678,8 +4771,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def _tts_agent_cache_mode_allows_store(self, body: dict[str, Any]) -> bool:
         return _phone_worker_tts_policy_module().cache_mode_allows_store(body)
 
-    def _tts_agent_standard_cache_hit(self, *, key: str, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, raw_response: bool = False) -> dict[str, Any] | None:
+    def _tts_agent_standard_cache_hit(self, *, key: str, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, stage_ms: dict[str, float] | None = None, available_engines: list[str] | None = None, raw_response: bool = False) -> dict[str, Any] | None:
+        stage_ms = stage_ms if isinstance(stage_ms, dict) else {}
+        lookup_started = time.monotonic()
         path, audio_format = self._find_tts_cache_file(key)
+        stage_ms["cache_lookup"] = round((time.monotonic() - lookup_started) * 1000.0, 2)
         if path is None:
             return None
         read_started = time.monotonic()
@@ -4695,11 +4791,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
         total_ms = (time.monotonic() - started) * 1000.0
         digest = hashlib.sha256(data).hexdigest()
         logs.append(f"standard-cache hit engine={engine} file={path.name} read={read_ms:.1f}ms")
-        timing_ms = {
-            "cache_read": round(read_ms, 2),
-            "worker_total": round(total_ms, 2),
-            "worker_synth": 0.0,
-        }
+        timing_ms = dict(stage_ms)
+        timing_ms.update({"cache_read": round(read_ms, 2), "worker_total": round(total_ms, 2), "worker_synth": 0.0})
         result = {
             "ok": True,
             "engine": engine,
@@ -4715,7 +4808,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
             "roles": roles[:16],
             "capabilities": capabilities[:24],
-            "available_engines": _tts_agent_available_engines(),
+            "available_engines": list(available_engines) if available_engines is not None else _tts_agent_available_engines(),
             "worker_synth_ms": 0.0,
             "worker_total_ms": round(total_ms, 2),
             "total_ms": round(total_ms, 2),
@@ -4738,7 +4831,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logs.append(f"standard-cache store falhou: {type(exc).__name__}: {_short_text(exc, limit=90)}")
 
-    def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int, raw_response: bool = False) -> dict[str, Any]:
+    def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int, available_engines: list[str] | None = None, raw_response: bool = False) -> dict[str, Any]:
         normalized = str(engine or "gtts").strip().lower().replace("-", "_") or "gtts"
         engine = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto"}.get(normalized, normalized)
         text = str(body.get("text") or "").strip()
@@ -4746,10 +4839,15 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise ValueError("texto vazio")
         stage_ms: dict[str, float] = {}
         cache_key = ""
-        if self._tts_agent_standard_cache_enabled(roles, capabilities):
+        cache_enabled = self._tts_agent_standard_cache_enabled(roles, capabilities)
+        cache_read_allowed = cache_enabled and self._tts_agent_cache_mode_allows_read(body)
+        cache_store_allowed = cache_enabled and self._tts_agent_cache_mode_allows_store(body)
+        if cache_read_allowed or cache_store_allowed:
+            key_started = time.monotonic()
             with contextlib.suppress(Exception):
                 cache_key = self._tts_agent_standard_cache_key(body, engine=engine)
-            if cache_key and self._tts_agent_cache_mode_allows_read(body):
+            stage_ms["cache_key"] = round((time.monotonic() - key_started) * 1000.0, 2)
+            if cache_key and cache_read_allowed:
                 hit = self._tts_agent_standard_cache_hit(
                     key=cache_key,
                     engine=engine,
@@ -4758,6 +4856,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     logs=logs,
                     started=started,
                     max_audio_bytes=max_audio_bytes,
+                    stage_ms=stage_ms,
+                    available_engines=available_engines,
                     raw_response=raw_response,
                 )
                 if hit is not None:
@@ -4766,6 +4866,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         data = b""
         response: dict[str, Any] = {}
         teto_meta: dict[str, Any] = {}
+        synth_started = None if engine == "teto" else time.monotonic()
         if engine == "teto":
             data, audio_format, teto_meta = _phone_worker_tts_providers_module().synthesize_teto(
                 text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
@@ -4798,13 +4899,19 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise RuntimeError("engine não gerou áudio")
         if len(data) > max_audio_bytes:
             raise RuntimeError(f"áudio grande demais: {len(data)} bytes")
-        if cache_key and self._tts_agent_cache_mode_allows_store(body):
+        if engine == "teto" and stage_ms.get("teto_render") is not None:
+            synth_ms = float(stage_ms.get("teto_render") or 0.0)
+        else:
+            if synth_started is None:
+                raise RuntimeError("cronômetro da engine TTS não inicializado")
+            synth_ms = (time.monotonic() - synth_started) * 1000.0
+        stage_ms["worker_synth"] = round(synth_ms, 2)
+        if cache_key and cache_store_allowed:
             store_started = time.monotonic()
             self._store_tts_agent_standard_cache(key=cache_key, data=data, audio_format=audio_format, logs=logs)
             stage_ms["cache_store"] = round((time.monotonic() - store_started) * 1000.0, 2)
-        synth_ms = (time.monotonic() - started) * 1000.0
-        stage_ms["worker_synth"] = round(synth_ms, 2)
-        stage_ms["worker_total"] = round(synth_ms, 2)
+        total_ms = (time.monotonic() - started) * 1000.0
+        stage_ms["worker_total"] = round(total_ms, 2)
         digest = hashlib.sha256(data).hexdigest()
         result = {
             "ok": True,
@@ -4826,10 +4933,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
             "roles": roles[:16],
             "capabilities": capabilities[:24],
-            "available_engines": _tts_agent_available_engines(),
+            "available_engines": list(available_engines) if available_engines is not None else _tts_agent_available_engines(),
             "worker_synth_ms": round(synth_ms, 2),
-            "worker_total_ms": round(synth_ms, 2),
-            "total_ms": round(synth_ms, 2),
+            "worker_total_ms": round(total_ms, 2),
+            "total_ms": round(total_ms, 2),
             "size": len(data),
             "sha256": digest,
             "logs": logs[:10],
@@ -4837,6 +4944,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _task_tts_agent_synthesize(self, body: dict[str, Any], *, raw_response: bool = False) -> dict[str, Any]:
+        request_started = time.monotonic()
         roles, capabilities = self._ensure_tts_piper_turbo_allowed()
         if not _env_bool("PHONE_WORKER_TTS_AGENT_ENABLED", True):
             raise RuntimeError("PHONE_WORKER_TTS_AGENT_ENABLED=false")
@@ -4853,11 +4961,27 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"texto grande demais para Teto ({len(text)} > {teto_max_chars})")
         timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or os.getenv("PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS") or self.job_timeout))))
         max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
-        deps = _turbo_dependency_snapshot()
+        fast_teto_preflight = requested_engine == "teto"
+        dependency_started = time.monotonic()
+        deps = _teto_dependency_snapshot_fast() if fast_teto_preflight else _turbo_dependency_snapshot()
+        dependency_ms = (time.monotonic() - dependency_started) * 1000.0
         available = _tts_agent_available_engines(deps)
+        order_started = time.monotonic()
         order = self._tts_agent_engine_order(body, available)
+        engine_order_ms = (time.monotonic() - order_started) * 1000.0
+        fallback_dependencies_resolved = not fast_teto_preflight
+        if not order and fast_teto_preflight:
+            fallback_started = time.monotonic()
+            deps = _turbo_dependency_snapshot()
+            dependency_ms += (time.monotonic() - fallback_started) * 1000.0
+            available = _tts_agent_available_engines(deps)
+            order_started = time.monotonic()
+            order = self._tts_agent_engine_order(body, available)
+            engine_order_ms += (time.monotonic() - order_started) * 1000.0
+            fallback_dependencies_resolved = True
         if not order:
             raise RuntimeError("nenhuma engine TTS pronta no worker")
+        preflight_ms = (time.monotonic() - request_started) * 1000.0
         base_logs = [
             f"perfil={_current_core_worker_profile()} versão={PHONE_WORKER_VERSION}",
             f"tts-agent chars={len(text)} order={','.join(order)} timeout={timeout}s",
@@ -4866,6 +4990,20 @@ class WorkerHandler(BaseHTTPRequestHandler):
         _tts_agent_record_start()
         started = time.monotonic()
         selected = ""
+
+        def finalize_timing(result: dict[str, Any]) -> dict[str, Any]:
+            total_ms = (time.monotonic() - request_started) * 1000.0
+            timing = result.get("timing_ms") if isinstance(result.get("timing_ms"), dict) else {}
+            timing = dict(timing)
+            timing["preflight"] = round(preflight_ms, 2)
+            timing["dependency_snapshot"] = round(dependency_ms, 2)
+            timing["engine_order"] = round(engine_order_ms, 2)
+            timing["worker_total"] = round(total_ms, 2)
+            result["timing_ms"] = timing
+            result["worker_total_ms"] = round(total_ms, 2)
+            result["total_ms"] = round(total_ms, 2)
+            return result
+
         try:
             for engine in order:
                 remaining = timeout - (time.monotonic() - started)
@@ -4885,7 +5023,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         result["available_engines"] = available
                         result["logs"] = (base_logs + list(result.get("logs") or []))[:10]
                         elapsed_ms = (time.monotonic() - started) * 1000.0
-                        result["total_ms"] = round(float(result.get("worker_total_ms") or elapsed_ms), 2)
+                        finalize_timing(result)
                         _tts_agent_record_done(ok=True, engine="piper", elapsed_ms=elapsed_ms)
                         return result
                     engine_body = dict(body)
@@ -4905,13 +5043,28 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         started=started,
                         max_audio_bytes=max_audio_bytes,
                         timeout=remaining,
+                        available_engines=available,
                         raw_response=raw_response,
                     )
+                    finalize_timing(result)
                     elapsed_ms = (time.monotonic() - started) * 1000.0
                     _tts_agent_record_done(ok=True, engine=engine, elapsed_ms=elapsed_ms)
                     return result
                 except Exception as exc:
                     errors.append(f"{engine}: {type(exc).__name__}: {_short_text(exc, limit=140)}")
+                    if fast_teto_preflight and engine == "teto" and not fallback_dependencies_resolved:
+                        fallback_started = time.monotonic()
+                        fallback_deps = _turbo_dependency_snapshot()
+                        dependency_ms += (time.monotonic() - fallback_started) * 1000.0
+                        fallback_available = _tts_agent_available_engines(fallback_deps)
+                        order_started = time.monotonic()
+                        fallback_order = self._tts_agent_engine_order(body, fallback_available)
+                        engine_order_ms += (time.monotonic() - order_started) * 1000.0
+                        for candidate in fallback_order:
+                            if candidate not in order:
+                                order.append(candidate)
+                        available = fallback_available
+                        fallback_dependencies_resolved = True
                     continue
             raise RuntimeError("; ".join(errors) or "todas as engines falharam")
         except Exception as exc:
@@ -10255,6 +10408,10 @@ def main() -> int:
         _phone_worker_tts_providers_module()
     with contextlib.suppress(Exception):
         _phone_worker_pcm_io_module()
+    # termux-battery-status can take close to a second on Android. Keep that
+    # IPC probe warm in a daemon so Teto admission only reads memory/cache.
+    with contextlib.suppress(Exception):
+        _start_teto_battery_monitor()
     if args.heartbeat_once:
         ok = _send_core_worker_heartbeat_once(host=args.host, port=args.port, timeout=8.0)
         return 0 if ok else 1

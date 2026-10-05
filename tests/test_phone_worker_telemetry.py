@@ -324,3 +324,40 @@ def test_assist_readiness_respects_zero_level_and_actual_charging(battery_env, m
     assert ("bateria baixa para tarefa pesada" in result["reasons"]) is (not heavy_ok)
     assert result["battery"] is snapshot and result["ok"]
     assert "hash_batch" in result["recommended_tasks"]
+
+
+def test_teto_hot_resource_guard_never_runs_termux_probe_inline(battery_env, monkeypatch):
+    worker, battery = battery_env
+    battery(capacity=77, status="Discharging", temp=355)
+    monkeypatch.setattr(worker, "_available_memory_mb", lambda: 2048)
+    monkeypatch.setattr(worker, "_core_job_runtime_snapshot", lambda: {})
+    monkeypatch.setattr(worker, "_battery_snapshot",
+                        lambda: pytest.fail("Teto hot path must not execute termux-battery-status"))
+    result = worker._teto_resource_snapshot()
+    assert result["ok"]
+    assert result["battery_level"] == 77
+    assert result["battery_temperature_c"] == 35.5
+    assert result["battery_source"] == "sysfs"
+    assert result["battery_snapshot_age_ms"] is None
+
+
+def test_teto_resource_guard_prefers_background_battery_cache(battery_env, monkeypatch):
+    worker, _ = battery_env
+    monkeypatch.setattr(worker, "_available_memory_mb", lambda: 2048)
+    monkeypatch.setattr(worker, "_core_job_runtime_snapshot", lambda: {})
+    monkeypatch.setattr(worker, "_battery_snapshot", lambda: {
+        "available": True, "source": "termux-api", "level": 83,
+        "temperature_c": 34.2, "charging": False,
+    })
+    refreshed = worker._refresh_teto_battery_cache()
+    assert refreshed["level"] == 83
+    monkeypatch.setattr(worker, "_battery_snapshot",
+                        lambda: pytest.fail("hot read must use monitor cache"))
+    monkeypatch.setattr(worker, "_sysfs_battery_snapshot",
+                        lambda: pytest.fail("warm monitor cache must avoid sysfs too"))
+    result = worker._teto_resource_snapshot()
+    assert result["ok"]
+    assert result["battery_source"] == "termux-api"
+    assert result["battery_level"] == 83
+    assert result["battery_temperature_c"] == 34.2
+    assert result["battery_snapshot_age_ms"] is not None

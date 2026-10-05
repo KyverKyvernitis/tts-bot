@@ -44,7 +44,8 @@ def tts(monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "_TTS_CACHE_MAINTENANCE_EXECUTOR", executor)
     calls = []
     deps = {"edge_tts": True, "gtts": True, "android_native_tts": True, "teto_tts": True,
-            "teto": {"fingerprint": "fixture-bank"}}
+            "teto": {"fingerprint": "fixture-bank", "ready": True, "enabled": True,
+                     "resources": {"ok": True}}}
     monkeypatch.setattr(worker, "_turbo_dependency_snapshot", lambda: dict(deps))
     teto_status = worker._teto_status
     get_teto_renderer = worker._get_teto_renderer
@@ -247,3 +248,50 @@ def test_rejected_maintenance_submission_allows_later_retry(tts, monkeypatch):
     assert worker._submit_tts_cache_maintenance(called.append, "retry")
     tts.executor.drain()
     assert called == ["retry"]
+
+
+def test_explicit_teto_success_uses_fast_preflight_without_full_dependency_scan(tts, monkeypatch):
+    calls = []
+    monkeypatch.setattr(tts.worker, "_turbo_dependency_snapshot",
+                        lambda: calls.append("full") or dict(tts.deps))
+    result = tts.handler._task_tts_agent_synthesize(
+        {"engine": "teto", "text": "Rota rápida.", "cache_mode": "bypass"}, raw_response=True)
+    assert result["selected_engine"] == "teto"
+    assert calls == []
+    assert result["available_engines"] == ["teto"]
+    assert result["timing_ms"]["dependency_snapshot"] == 0
+    assert result["timing_ms"]["preflight"] == 0
+    assert result["timing_ms"]["worker_total"] == result["worker_total_ms"]
+
+
+def test_explicit_teto_failure_resolves_full_dependencies_only_for_fallback(tts, monkeypatch):
+    calls = []
+    original = tts.handler._synthesize_standard_tts_bytes
+
+    def full_deps():
+        calls.append("full")
+        return dict(tts.deps)
+
+    def attempt(payload, **kwargs):
+        if kwargs["engine"] == "teto":
+            raise RuntimeError("controlled Teto failure")
+        return original(payload, **kwargs)
+
+    monkeypatch.setattr(tts.worker, "_turbo_dependency_snapshot", full_deps)
+    monkeypatch.setattr(tts.handler, "_synthesize_standard_tts_bytes", attempt)
+    result = tts.handler._task_tts_agent_synthesize(
+        {"engine": "teto", "fallback_engine": "gtts", "text": "Fallback.", "cache_mode": "bypass"},
+        raw_response=True,
+    )
+    assert calls == ["full"]
+    assert result["selected_engine"] == "gtts"
+    assert result["available_engines"] == ["teto", "android_native", "edge", "gtts"]
+
+
+def test_bypass_skips_standard_cache_key_entirely(tts, monkeypatch):
+    monkeypatch.setattr(tts.handler, "_tts_agent_standard_cache_key",
+                        lambda *a, **kw: pytest.fail("bypass must not compute a cache key"))
+    result = tts.handler._task_tts_agent_synthesize(
+        {"engine": "teto", "text": "Sem cache.", "cache_mode": "bypass"}, raw_response=True)
+    assert result["selected_engine"] == "teto" and not result["cache_hit"]
+    assert "cache_key" not in result["timing_ms"]
