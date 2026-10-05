@@ -17,12 +17,6 @@ class RenderNote:
     gain: float = 1.0
     stressed: bool = False
     contour: str = "neutral"
-    word_end: bool = False
-    phrase_end: str = ""
-    word_index: int = 0
-    deaccented: bool = False
-    coda: bool = False
-    glide: bool = False
 
 
 _PITCH_CLASSES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -129,72 +123,62 @@ def _centers(moras: list[Mora]) -> list[int]:
         count = end - start + 1
         ending = moras[end].phrase_end
         if ending == "?":
-            phrase_start, phrase_end = 8, 34
+            phrase_start, phrase_end = 4, 16
         elif ending in {",", ";", ":"}:
-            phrase_start, phrase_end = 16, 4
+            phrase_start, phrase_end = 6, -4
         elif ending == "!":
-            phrase_start, phrase_end = 24, -18
+            phrase_start, phrase_end = 10, -8
         else:
-            phrase_start, phrase_end = 18, -38
+            phrase_start, phrase_end = 7, -14
 
         for local_index, index in enumerate(range(start, end + 1)):
             ratio = local_index / max(1, count - 1)
             center = phrase_start + (phrase_end - phrase_start) * ratio
             mora = moras[index]
             if mora.stressed:
-                center += 48
-            elif mora.deaccented:
-                center -= 18
-            elif mora.glide or mora.coda:
-                center -= 10
+                center += 28
             elif mora.word_moras > 1:
-                center -= 5
+                center -= 3
             if index + 1 <= end and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
-                center += 10
-            if index > start and moras[index - 1].stressed and moras[index - 1].word_index == mora.word_index:
-                center -= 12
+                center += 7
             if mora.word_end and not mora.phrase_end:
-                center -= 5
+                center -= 3
             values[index] = int(round(center))
 
         if ending == "?":
             if end - 1 >= start:
-                values[end - 1] = max(values[end - 1], 48)
-            values[end] = max(values[end], 112)
+                values[end - 1] = max(values[end - 1], 18)
+            values[end] = max(values[end], 50)
         elif ending in {".", "\n"}:
             if end - 1 >= start:
-                values[end - 1] = min(values[end - 1], -28)
-            values[end] = min(values[end], -78)
+                values[end - 1] = min(values[end - 1], -10)
+            values[end] = min(values[end], -34)
         elif ending == "!":
             if end - 1 >= start:
-                values[end - 1] = max(values[end - 1], 54)
-            values[end] = min(values[end], -36)
+                values[end - 1] = max(values[end - 1], 18)
+            values[end] = min(values[end], -12)
         elif not ending:
-            values[end] = min(values[end], -48)
+            values[end] = min(values[end], -22)
 
-    return [max(-140, min(140, value)) for value in values]
+    return [max(-70, min(70, value)) for value in values]
 
 
 def _duration_for(moras: list[Mora], index: int) -> int:
     mora = moras[index]
     duration = float(mora.duration_ms)
     if mora.stressed:
-        duration *= 1.16
-    elif mora.deaccented:
-        duration *= 0.82
+        duration *= 1.13
     elif mora.word_moras > 1:
-        duration *= 0.87
-    if mora.glide:
-        duration *= 0.84
-    if mora.coda:
-        duration *= 0.88
+        duration *= 0.90
     if index + 1 < len(moras) and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
         duration *= 0.96
     if mora.phrase_end in {".", "!", "?", "\n"}:
         duration *= 1.08
     elif mora.phrase_end in {",", ";", ":"}:
         duration *= 1.02
-    return max(58 if (mora.coda or mora.glide) else 74, min(240, round(duration)))
+    elif mora.word_end:
+        duration *= 1.015
+    return max(78, min(240, round(duration)))
 
 
 def _contour_name(mora: Mora) -> str:
@@ -208,12 +192,6 @@ def _contour_name(mora: Mora) -> str:
         return "continuation"
     if mora.stressed:
         return "stress"
-    if mora.deaccented:
-        return "deaccented"
-    if mora.coda:
-        return "coda"
-    if mora.glide:
-        return "glide"
     return "neutral"
 
 
@@ -235,23 +213,14 @@ def build_notes(
         following = centers[index + 1] if index + 1 < len(moras) and not mora.phrase_end else center
         start = round((previous + center) / 2)
         end = round((center + following) / 2)
-        peak = center + (18 if mora.stressed else (0 if mora.deaccented else 4))
+        peak = center + (10 if mora.stressed else 3)
         if mora.phrase_end == "?":
-            peak = max(peak, 118)
+            peak = max(peak, 54)
         elif mora.phrase_end in {".", "\n"}:
             peak = min(peak, center + 1)
         pitchbend = _pitch_curve(start, peak, end, duration_ms=duration, tempo=tempo_value)
 
-        if mora.stressed:
-            gain = 1.06
-        elif mora.deaccented:
-            gain = 0.94
-        elif mora.coda:
-            gain = 0.90
-        elif mora.glide:
-            gain = 0.94
-        else:
-            gain = 0.985 if mora.word_moras > 1 else 1.0
+        gain = 1.055 if mora.stressed else (0.985 if mora.word_moras > 1 else 1.0)
         if mora.phrase_end in {".", "?", "!", "\n"}:
             gain *= 0.985
 
@@ -266,11 +235,5 @@ def build_notes(
             gain=max(0.90, min(1.10, gain)),
             stressed=mora.stressed,
             contour=_contour_name(mora),
-            word_end=mora.word_end,
-            phrase_end=mora.phrase_end,
-            word_index=mora.word_index,
-            deaccented=mora.deaccented,
-            coda=mora.coda,
-            glide=mora.glide,
         ))
     return notes

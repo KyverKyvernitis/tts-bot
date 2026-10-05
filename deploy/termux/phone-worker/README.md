@@ -9,46 +9,43 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-4-natural`. Se o serviço ainda
+o renderer atualizado anuncia `renderer_version=speech-3-natural`. Se o serviço ainda
 mostra o estado antigo, o reinício manual canônico é
 `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
 bloqueando a síntese pesada até sua conclusão.
 
-## Naturalidade da Teto: renderer `speech-4-natural`
+## Naturalidade da Teto: renderer `speech-3-natural`
 
-A revisão `speech-4-natural` mantém o hot path de latência da revisão anterior e
-refina principalmente fala conectada em PT-BR. A prosódia diferencia palavras de
-conteúdo de artigos/preposições/clíticos comuns, reduzindo o destaque artificial
-de palavras como `a`, `o`, `de`, `em` e `para`. Sílabas tônicas recebem mais duração
-e excursão tonal; elementos átonos, glides e codas ficam mais curtos e discretos.
+O renderer desconta a região consonantal do `LENGTH` solicitado ao Straycat.
+Antes, cada mora de 135 ms ainda recebia a duração da consoante, alongando a
+fala. O modo é detectado pelo nome do executável `straycat*`; wrappers podem
+configurar `PHONE_WORKER_TETO_LENGTH_MODE=post-consonant`. Outros resamplers
+continuam usando o contrato anterior, ou podem selecionar `total`.
 
-O contorno de pitch continua sendo carregado pelo pitchbend UTAU, mantendo a nota
-grossa estável para evitar degraus musicais. A faixa dinâmica do contorno foi
-ampliada de forma moderada: afirmações declinam ao final, perguntas sobem de forma
-mais clara e exclamações ganham pico seguido de queda. Palavras funcionais ficam
-mais próximas da linha prosódica em vez de receber um acento próprio a cada mora.
+WAV mono PCM16 a 44100 Hz entra diretamente no cache. FFmpeg continua sendo
+usado para outros formatos. Até dois grupos de gravações são processados em
+paralelo; notas da mesma gravação ficam no mesmo grupo para preservar o cache
+WORLD `.sc`. A montagem mantém a ordem dos fonemas.
 
-O fonemizador PT-BR -> CV japonês também recebeu aproximações contextuais leves:
-`h` ortográfico é silencioso fora dos dígrafos, `ch` preserva a aproximação /sh/,
-`ti/di` podem usar as séries japonesas `chi/ji`, ditongos nasais comuns (`ão`, `ãe`,
-`õe`) ganham cauda nasal com `ん`, e `s/z/x` finais viram codas curtas em vez de
-sílabas CV de duração cheia. `l` final vocalizado também é tratado como glide curto.
-Isso continua sendo uma aproximação para uma voicebank japonesa CV, não um G2P
-português completo.
+O `speech-3-natural` mantém o hot path de latência da revisão anterior e muda
+a fala em cinco pontos: tonicidade aproximada de PT-BR, duração diferente para
+sílabas tônicas e átonas, pitchbend UTAU contínuo em vez do `AA` plano, pausas
+lexicais curtas e junção orientada também pelo `preutterance` do `oto.ini`. O
+pitch grosso fica estável; curvas em centésimos de semitom carregam a
+entonação de afirmações, perguntas, exclamações e continuidades.
 
-A montagem agora usa o `oto.ini` de forma contextual. Dentro da mesma palavra,
-`preutterance` pode antecipar mais a unidade seguinte; entre palavras o overlap é
-mais conservador; pontuação nunca é consumida pelo crossfade. Pausas lexicais
-minúsculas reduzem o overlap em vez de inserir silêncio duro. Fronteiras de frase
-recebem fades curtos antes/depois da pausa, reduzindo cliques e a sensação de WAVs
-independentes concatenados.
+O fonemizador continua sendo uma aproximação de português para banco japonês
+CV, mas evita algumas vogais artificiais comuns: `m/n` finais usam `ん`, `l`
+final é vocalizado, `r` final deixa de criar uma sílaba `ru`, `rr/r` forte usa
+uma aproximação aspirada e `s` intervocálico pode sonorizar. Isso melhora a
+inteligibilidade sem introduzir uma biblioteca linguística pesada.
 
-O renderer continua descontando a região consonantal do `LENGTH` solicitado ao
-Straycat. WAV mono PCM16 a 44100 Hz entra diretamente no cache; FFmpeg permanece
-como fallback para outros formatos. Até dois grupos de gravações são processados
-em paralelo, mantendo notas da mesma gravação no mesmo grupo para evitar corrida
-no cache WORLD `.sc`.
+Na montagem, `overlap` continua sendo respeitado e uma fração conservadora de
+`preutterance` antecipa a entrada da próxima unidade, limitada a 55 ms. O
+crossfade agora usa smoothstep e a sílaba tônica recebe dinâmica leve. A
+modulação do Straycat continua preservando parte da variação da gravação
+original.
 
 Configurações opcionais, com os valores padrão:
 
@@ -59,15 +56,24 @@ PHONE_WORKER_TETO_RENDER_THREADS=2
 PHONE_WORKER_TETO_LENGTH_MODE=auto
 ```
 
-`SPEECH_RATE` escala duração e pausas entre 0.75 e 1.5. `TEMPO` continua sendo o
-BPM usado na grade do pitchbend UTAU e não controla a velocidade geral da fala. O
-fingerprint inclui a revisão do renderer e os parâmetros de áudio, invalidando
-caches antigos quando a sonoridade muda.
+`SPEECH_RATE` escala a duração da fala e das pausas, entre 0.75 e 1.5.
+`TEMPO` continua sendo o BPM do pitchbend UTAU, e não controla a velocidade
+geral da fala. O fingerprint anunciado inclui a revisão e os parâmetros do
+renderer, para invalidar os caches de fragmentos, worker e bot quando o som
+muda. O fingerprint original da voicebank também permanece no status.
 
-A naturalidade precisa ser julgada por escuta no aparelho: a voicebank CV japonesa
-continua tendo limitações reais de fonética portuguesa. Distribua a alteração pelo
-updater do projeto, nas pastas originais. O bootstrap publica e ativa a nova release
-pelo hash das fontes; não edite manualmente a release imutável ativa.
+Os testes direcionados passam com `python -m unittest discover -s tests -p
+'test_teto*.py' -v`. Em comparação com a voicebank oficial e Straycat 1.1.0
+no Linux x86_64, "Olá, eu sou a Teto." passou de 2.492 s para 1.595 s de áudio,
+sem aliases ausentes. Com análise WORLD já em cache e fragmentos vazios, a
+geração passou de aproximadamente 811 ms para 111 ms nesse host. Esses tempos
+não incluem Discord/rede e não representam medição do Poco X7 Pro. A
+naturalidade precisa de avaliação auditiva: a voicebank CV japonesa continua
+com limitações de pronúncia, articulação e entonação em português.
+
+Distribua a alteração pelo updater do projeto, nas pastas originais. O
+bootstrap publica e ativa a nova release pelo hash das fontes, preservando
+configuração e pareamento. Não edite a release imutável ativa manualmente.
 
 ## Painéis técnicos do bot
 

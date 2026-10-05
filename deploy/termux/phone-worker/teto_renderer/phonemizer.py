@@ -16,10 +16,6 @@ class Mora:
     mora_index: int = 0
     word_moras: int = 1
     stressed: bool = False
-    source_word: str = ""
-    deaccented: bool = False
-    coda: bool = False
-    glide: bool = False
 
 
 _ROMAJI_TO_KANA = {
@@ -57,12 +53,6 @@ _PUNCT_PAUSES = {",": 85, ";": 135, ":": 115, ".": 180, "!": 155, "?": 180, "\n"
 _WORD_GAP_MS = 6
 _PT_VOWELS = set("aeiouáéíóúâêôãõàü")
 _PT_STRESS_MARKS = set("áéíóúâêôãõ")
-_PT_FUNCTION_WORDS = {
-    "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e",
-    "em", "lhe", "lhes", "me", "na", "nas", "no", "nos", "o", "os", "para",
-    "por", "que", "se", "sem", "te", "um", "uma", "umas", "uns",
-}
-_PT_DIPHTHONGS = ("ai", "ei", "oi", "ui", "au", "eu", "ou", "ão", "ãe", "õe")
 
 
 def _katakana_to_hiragana(text: str) -> str:
@@ -127,32 +117,17 @@ def _romaji_to_kana(text: str) -> list[str]:
 
 
 def _portuguese_word_to_romaji(word: str) -> str:
-    # This remains a deliberately small PT-BR -> Japanese-CV approximation, not
-    # a full G2P model. Preserve nasal spelling before NFKD removes the tilde,
-    # and convert common digraphs before dropping the otherwise silent <h>.
-    value = unicodedata.normalize("NFC", word.lower())
-    value = (value
-             .replace("ão", "aun").replace("ãe", "ain").replace("õe", "oin")
-             .replace("ã", "an").replace("õ", "on")
-             .replace("ç", "ss"))
-    value = unicodedata.normalize("NFKD", value)
+    # Preserve the cedilla's /s/ approximation before decomposition removes it.
+    # This remains a mapping to Japanese CV sounds, not a Portuguese G2P model.
+    value = unicodedata.normalize("NFKD", word.lower().replace("ç", "ss"))
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
-    value = value.replace("nh", "ny").replace("lh", "ry").replace("ch", "sy")
-    # Portuguese orthographic h is silent. Strong-r approximations are inserted
-    # only after this pass so they keep their intended Japanese h-series sound.
-    value = value.replace("h", "")
     replacements = (
-        (r"rr", "h"),
+        (r"nh", "ny"), (r"lh", "ry"), (r"ch", "sh"), (r"rr", "h"),
         (r"^r(?=[aeiou])", "h"),
         (r"qu(?=[ei])", "k"), (r"gu(?=[ei])", "g"), (r"ph", "f"),
         (r"c(?=[ei])", "s"), (r"g(?=[ei])", "j"), (r"c", "k"), (r"q", "k"),
         (r"(?<=[aeiou])s(?=[aeiou])", "z"), (r"ss", "s"), (r"z$", "s"),
-        # Final x is treated like a short fricative coda; elsewhere /sh/ is a
-        # safer CV approximation than inserting two independent consonants.
-        (r"x$", "s"), (r"x", "sy"), (r"w", "u"),
-        # Very common Brazilian palatalization before /i/. This is still a CV
-        # approximation: chi/ji are closer than a literal Japanese ti/di.
-        (r"ti", "chi"), (r"di", "ji"),
+        (r"x", "sh"), (r"w", "u"),
         # PT-BR final m/n nasalizes the preceding vowel; Japanese ん is less
         # intrusive than appending mu/nu. Final l is commonly vocalized /w/.
         (r"[mn]$", "n"), (r"l$", "u"),
@@ -165,48 +140,6 @@ def _portuguese_word_to_romaji(word: str) -> str:
     for pattern, replacement in replacements:
         value = re.sub(pattern, replacement, value)
     return re.sub(r"[^a-z]", "", value)
-
-
-def _plain_word(word: str) -> str:
-    value = unicodedata.normalize("NFKD", str(word or "").lower())
-    return "".join(ch for ch in value if not unicodedata.combining(ch) and ch.isalpha())
-
-
-def _is_deaccented_word(word: str) -> bool:
-    value = unicodedata.normalize("NFC", str(word or "").lower())
-    if any(char in _PT_STRESS_MARKS for char in value):
-        return False
-    return _plain_word(value) in _PT_FUNCTION_WORDS
-
-
-def _mora_traits(word: str, moras: list[str]) -> tuple[set[int], set[int]]:
-    """Return (coda_indexes, glide_indexes) for cheap PT-BR timing hints."""
-    if not moras or re.search(r"[ぁ-ゖァ-ヺ]", word):
-        return set(), set()
-    value = unicodedata.normalize("NFC", str(word or "").lower())
-    plain = _plain_word(value)
-    codas: set[int] = set()
-    glides: set[int] = set()
-
-    last = moras[-1]
-    if (plain.endswith(("m", "n")) or any(mark in value for mark in ("ã", "õ"))) and last == "ん":
-        codas.add(len(moras) - 1)
-    elif plain.endswith(("s", "z", "x")) and last in {"す", "し", "ず", "じ"}:
-        codas.add(len(moras) - 1)
-
-    # A vocalized final L is a glide, not a full extra Japanese /u/ syllable.
-    if plain.endswith("l") and last == "う":
-        glides.add(len(moras) - 1)
-
-    # The overwhelmingly common one-nucleus diphthong case (pai, mãe, não,
-    # meu, foi...) maps cleanly onto the first two CV moras. Keep the second
-    # element short so it behaves like a glide rather than another syllable.
-    groups = _vowel_groups(value)
-    if len(groups) == 1 and any(diphthong in value for diphthong in _PT_DIPHTHONGS):
-        usable = [index for index in range(len(moras)) if index not in codas]
-        if len(usable) >= 2:
-            glides.add(usable[1])
-    return codas, glides
 
 
 def _word_to_mora(word: str) -> list[str]:
@@ -291,18 +224,9 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
             continue
 
         moras = _word_to_mora(token)
-        deaccented = _is_deaccented_word(token)
-        stress_index = None if deaccented else _portuguese_stress_mora(token, len(moras))
-        coda_indexes, glide_indexes = _mora_traits(token, moras)
+        stress_index = _portuguese_stress_mora(token, len(moras))
         for mora_index, mora in enumerate(moras):
-            coda = mora_index in coda_indexes
-            glide = mora_index in glide_indexes
-            if coda:
-                duration = 82 if mora != "ん" else 92
-            elif glide:
-                duration = 94
-            else:
-                duration = 135
+            duration = 150 if mora in {"ん"} else 135
             result.append(Mora(
                 _kana_candidates(mora),
                 duration_ms=duration,
@@ -310,10 +234,6 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
                 mora_index=mora_index,
                 word_moras=max(1, len(moras)),
                 stressed=stress_index == mora_index,
-                source_word=token,
-                deaccented=deaccented,
-                coda=coda,
-                glide=glide,
             ))
             if len(result) >= max(1, int(max_moras)):
                 return result
