@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 WORKER_DIR = Path(__file__).resolve().parents[1] / "deploy" / "termux" / "phone-worker"
 if str(WORKER_DIR) not in sys.path:
@@ -16,6 +17,16 @@ def _aliases(text: str) -> list[str]:
     return [mora.candidates[0] for mora in phonemize(text)]
 
 
+def _standard_aliases(text: str, available: set[str]) -> list[str]:
+    def resolve(candidates):
+        for candidate in candidates:
+            if candidate in available:
+                return SimpleNamespace(alias=candidate)
+        return None
+
+    return [mora.candidates[0] for mora in phonemize(text, resolve_alias=resolve)]
+
+
 def _stress_indexes(text: str) -> list[int]:
     return [index for index, mora in enumerate(phonemize(text)) if mora.stressed]
 
@@ -26,21 +37,32 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertEqual(_aliases("aça"), _aliases("assa"))
         self.assertNotEqual(_aliases("aça"), _aliases("aca"))
 
-    def test_prevocalic_l_does_not_insert_an_extra_u_vowel(self):
+    def test_prevocalic_l_and_palatal_l_do_not_add_full_extra_vowels(self):
         self.assertEqual(_aliases("Olá"), ["お", "ら"])
         self.assertEqual(_aliases("fala"), ["ふぁ", "ら"])
         self.assertEqual(_aliases("filha"), ["ふぃ", "りゃ"])
 
-    def test_common_ptbr_final_consonants_avoid_extra_cv_syllables(self):
-        self.assertEqual(_aliases("bom"), ["ぼ", "ん"])
-        self.assertEqual(_aliases("sim"), ["し", "ん"])
-        self.assertEqual(_aliases("quer"), ["け"])
-        self.assertEqual(_aliases("Brasil")[-2:], ["じ", "う"])
+    def test_nasal_vowels_and_final_consonants_are_short_auxiliary_units(self):
+        standard = {"ぼ", "し", "ん", "け", "る", "ぶ", "ら", "じ", "う"}
+        self.assertEqual(_standard_aliases("bom", standard), ["ぼ", "ん"])
+        self.assertEqual(_standard_aliases("sim", standard), ["し", "ん"])
+
+        quer = phonemize("quer")
+        self.assertEqual(quer[-1].role, "coda")
+        self.assertIn("る", quer[-1].candidates)
+        notes = build_notes(quer)
+        self.assertLess(notes[-1].duration_ms, notes[0].duration_ms)
+        self.assertLess(notes[-1].gain, notes[0].gain)
+
+        brasil = phonemize("Brasil")
+        self.assertEqual(brasil[0].role, "epenthetic")
+        self.assertEqual(brasil[-1].role, "glide")
 
     def test_ptbr_r_and_intervocalic_s_use_closer_cv_approximations(self):
-        self.assertEqual(_aliases("rato"), ["は", "と"])
-        self.assertEqual(_aliases("carro"), ["か", "ほ"])
-        self.assertEqual(_aliases("casa"), ["か", "ざ"])
+        standard = {"は", "と", "か", "ふ", "ざ"}
+        self.assertEqual(_standard_aliases("rato", standard), ["は", "と"])
+        self.assertEqual(_standard_aliases("carro", standard), ["か", "ふ"])
+        self.assertEqual(_standard_aliases("casa", standard), ["か", "ざ"])
 
     def test_portuguese_stress_prefers_accents_then_common_default_rules(self):
         teto = phonemize("Teto")
@@ -52,7 +74,28 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertEqual([m.stressed for m in bonito], [False, True, False])
         self.assertEqual([m.stressed for m in voce], [False, True])
         self.assertEqual([m.stressed for m in musica], [True, False, False])
-        self.assertTrue(computador[-1].stressed)
+        stressed = [m for m in computador if m.stressed]
+        self.assertEqual(len(stressed), 1)
+        self.assertEqual(stressed[0].source_phonemes, ("d", "o"))
+        self.assertEqual(computador[-1].role, "coda")
+
+    def test_clusters_use_quiet_short_epenthesis_instead_of_full_japanese_syllables(self):
+        brasil = build_notes(phonemize("Brasil"))
+        problema = build_notes(phonemize("problema"))
+        self.assertEqual(brasil[0].role, "epenthetic")
+        self.assertLess(brasil[0].duration_ms, 70)
+        self.assertLess(brasil[0].gain, 0.8)
+        self.assertEqual([note.role for note in problema].count("epenthetic"), 2)
+        self.assertTrue(all(note.duration_ms < 70 for note in problema if note.role == "epenthetic"))
+
+    def test_diphthongs_and_nasal_tails_are_not_full_second_vowels(self):
+        nao = phonemize("não")
+        mae = phonemize("mãe")
+        self.assertEqual([m.role for m in nao], ["nucleus", "nasal", "glide"])
+        self.assertEqual([m.role for m in mae], ["nucleus", "nasal", "glide"])
+        nao_notes = build_notes(nao)
+        self.assertLess(nao_notes[1].duration_ms, nao_notes[0].duration_ms)
+        self.assertLess(nao_notes[2].duration_ms, nao_notes[0].duration_ms)
 
     def test_word_gaps_are_short_and_punctuation_keeps_hierarchy(self):
         plain = phonemize("Olá eu")
@@ -65,12 +108,13 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertGreater(comma_end.pause_after_ms, first_word_end.pause_after_ms)
         self.assertGreater(question_end.pause_after_ms, comma_end.pause_after_ms)
 
-    def test_function_words_are_deaccented_without_changing_aliases(self):
+    def test_function_words_are_deaccented_and_get_spoken_ptbr_reduction(self):
         plain = phonemize("de para com")
         self.assertTrue(plain)
         self.assertTrue(all(m.deaccented for m in plain))
         self.assertFalse(any(m.stressed for m in plain))
-        self.assertEqual(_aliases("de"), ["で"])
+        # Neutral Brazilian Portuguese commonly realizes unstressed 'de' as /dZi/.
+        self.assertEqual(phonemize("de")[0].source_phonemes, ("dZ", "i"))
 
         phrase = build_notes(phonemize("eu sou a Teto"))
         deaccented = [note for note in phrase if note.deaccented]
@@ -129,9 +173,19 @@ class TetoProsodyTests(unittest.TestCase):
                 self.assertEqual(build_notes(moras, speech_rate=rate), normal)
         for rate in (0.001, 1000):
             notes = build_notes(moras, speech_rate=rate)
-            self.assertTrue(all(70 <= note.duration_ms <= 500 for note in notes))
+            self.assertTrue(all(70 <= note.duration_ms <= 500 for note in notes if note.role == "nucleus"))
+            self.assertTrue(all(32 <= note.duration_ms <= 500 for note in notes if note.role != "nucleus"))
             self.assertTrue(all(0 <= note.pause_after_ms <= 1000 for note in notes))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_phrase_contour_stays_on_last_lexical_nucleus_when_coda_follows():
+    moras = phonemize("melhor?")
+    notes = build_notes(moras, base_pitch="C4")
+    assert moras[-1].role == "coda"
+    assert notes[-1].contour == "coda"
+    nucleus_indexes = [i for i, mora in enumerate(moras) if mora.role == "nucleus"]
+    assert notes[nucleus_indexes[-1]].contour == "question-rise"

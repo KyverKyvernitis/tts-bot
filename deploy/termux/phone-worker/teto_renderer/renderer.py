@@ -26,7 +26,8 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
-    RENDER_VERSION = "speech-3b-natural-safe"
+    RENDER_VERSION = "speech-4-phonetic"
+    PHONEMIZER_VERSION = "ptbr-g2p-v1"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v2"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
 
@@ -180,6 +181,7 @@ class TetoRenderer:
                     "voicebank_fingerprint": index.fingerprint,
                     "fingerprint": self._render_fingerprint(index),
                     "renderer_version": self.RENDER_VERSION,
+                    "phonemizer_version": self.PHONEMIZER_VERSION,
                     "speech_rate": self._speech_rate(),
                     "last_error": "",
                 })
@@ -354,7 +356,7 @@ class TetoRenderer:
     def _apply_gain(fragment: array.array, gain: float) -> array.array:
         if not fragment or abs(float(gain) - 1.0) < 0.002:
             return fragment
-        scale = max(0.80, min(1.20, float(gain)))
+        scale = max(0.60, min(1.20, float(gain)))
         output = array.array("h", fragment)
         for index, sample in enumerate(output):
             output[index] = max(-32768, min(32767, int(sample * scale)))
@@ -402,8 +404,13 @@ class TetoRenderer:
         try:
             index = self._load_index()
             max_moras = max(8, self._env_int("PHONE_WORKER_TETO_MAX_PHONEMES", 240))
+            moras = phonemize(
+                clean_text,
+                max_moras=max_moras,
+                resolve_alias=index.resolve,
+            )
             notes = build_notes(
-                phonemize(clean_text, max_moras=max_moras),
+                moras,
                 base_pitch=str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4"),
                 speech_rate=self._speech_rate(),
                 tempo=max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
@@ -455,6 +462,12 @@ class TetoRenderer:
                     legacy_fragment_hits += int(legacy_fragment)
                     fragment = self._apply_gain(self._read_samples(fragment_path), note.gain)
                     overlap_ms = self._oto_join_ms(entry)
+                    if note.role == "epenthetic":
+                        # Hide the artificial vowel required by a Japanese CV
+                        # cluster approximation behind the neighbouring unit.
+                        overlap_ms = min(60.0, max(overlap_ms, note.duration_ms * 0.58))
+                    elif note.role in {"coda", "glide", "nasal"}:
+                        overlap_ms = min(58.0, max(overlap_ms, note.duration_ms * 0.42))
                     self._append_crossfade(combined, fragment, int(self.SAMPLE_RATE * overlap_ms / 1000.0))
                     # The phonemizer's tiny 6 ms word separator should not
                     # become a hard stop. Punctuation pauses remain explicit.
@@ -495,10 +508,14 @@ class TetoRenderer:
                 "voicebank_fingerprint": index.fingerprint,
                 "renderer_fingerprint": self._render_fingerprint(index),
                 "renderer_version": self.RENDER_VERSION,
+                "phonemizer_version": self.PHONEMIZER_VERSION,
                 "speech_rate": self._speech_rate(),
                 "aliases": index.alias_count,
                 "rendered_phonemes": rendered,
                 "missing_phonemes": missing[:12],
+                "phonetic_units": sum(len(note.source_phonemes) for note in notes),
+                "epenthetic_phonemes": sum(1 for note in notes if note.role == "epenthetic"),
+                "auxiliary_phonemes": sum(1 for note in notes if note.role != "nucleus"),
                 "pitchbend_fallbacks": pitchbend_fallbacks,
                 "legacy_fragment_hits": legacy_fragment_hits,
                 "worker_synth_ms": round(elapsed_ms, 2),

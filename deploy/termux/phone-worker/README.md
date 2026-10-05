@@ -9,42 +9,51 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-3b-natural-safe`. Se o serviço ainda
-mostra o estado antigo, o reinício manual canônico é
-`bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
+o renderer atualizado anuncia `renderer_version=speech-4-phonetic` e
+`phonemizer_version=ptbr-g2p-v1`. Se o serviço ainda mostra o estado antigo, o
+reinício manual canônico é `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
 bloqueando a síntese pesada até sua conclusão.
 
-## Naturalidade da Teto: renderer `speech-3b-natural-safe`
+## Inteligibilidade da Teto: renderer `speech-4-phonetic`
 
-A revisão 3B parte do renderer `speech-3-natural`, que já estava estável no aparelho,
-e reintroduz melhorias de qualidade em passos deliberadamente conservadores. Palavras
-funcionais comuns do PT-BR (`a`, `o`, `de`, `em`, `para`, etc.) deixam de receber
-acento prosódico próprio; sílabas lexicamente tônicas mantêm mais duração e ganho,
-e afirmações/perguntas/exclamações usam contornos um pouco mais claros sem saltos
-de nota.
+Esta revisão muda o front-end fonético antes de tentar novas curvas de prosódia.
+A referência arquitetural é o OpenUtau: a palavra é resolvida para sons da língua
+antes de esses sons serem adaptados aos aliases que a voicebank realmente oferece.
+O worker não incorpora OpenUtau nem o modelo ONNX do `PortugueseG2p`; a implementação
+continua leve, em Python padrão e sem dependências novas no Termux.
 
-O fonemizador não muda os aliases da revisão estável nesta rodada. Isso é intencional:
-a melhora vem de ritmo, acento e fraseado, evitando uma nova onda de aliases ausentes
-na voicebank CV japonesa. A separação lexical de 6 ms também deixa de virar silêncio
-duro no WAV final; pontuação continua preservando suas pausas maiores.
+O pipeline agora é:
 
-A proteção principal da 3B fica no renderer. Se o Straycat rejeitar uma curva UTAU
-expressiva, somente aquele fragmento é tentado outra vez com pitchbend neutro `AA`;
-a Teto não deve cair inteira para gTTS por causa de uma curva de qualidade. O resultado
-reporta `pitchbend_fallbacks` para tornar esse caso observável.
+`texto PT-BR -> G2P PT-BR -> sílabas/contexto -> aliases disponíveis -> Straycat -> montagem`
 
-A revisão também separa a identidade do cache da frase da identidade física dos
-fragmentos. O cache final muda com `speech-3b-natural-safe`, mas fragmentos compatíveis
-da revisão estável `speech-3-natural` podem ser reutilizados (`legacy_fragment_hits`).
-Isso evita transformar uma atualização de prosódia em uma renderização WORLD/Straycat
-totalmente fria. Fragmentos novos continuam sendo chaveados por pitch, pitchbend e
-duração, portanto sonoridades realmente diferentes não colidem.
+`ptbr_g2p.py` usa um inventário intermediário próximo ao empregado pelo OpenUtau
+(`a/e/E/i/o/O/u`, vogais nasais, `S/Z/J/L/R`, `tS/dZ`, glides etc.). Regras de
+ortografia tratam `nh`, `lh`, `ch`, `rr`, `ss`, `qu/gu`, `c/g` contextuais,
+`s` intervocálico, palatalização de `ti/di`, nasais, ditongos e hiatos com acento.
+A redução de vogal final átona também ocorre antes do mapeamento para japonês.
 
-Se a Teto ainda falhar e o TTS Agent precisar usar outra engine, o Phone Worker 1.11.21
-registra no stdout/journal a exceção exata antes do fallback e inclui `fallback_errors`
-no resultado interno. Assim uma regressão futura não fica escondida atrás de uma fala
-do gTTS.
+A adaptação para a voicebank CV deixou de assumir um único alias. Cada unidade
+carrega alternativas ordenadas e o `VoicebankIndex` escolhe a primeira presente
+no `oto.ini`. Isso permite aproveitar aliases mais ricos quando existem e manter
+fallbacks japoneses tradicionais na Teto padrão.
+
+Encontros consonantais e codas não viram mais sílabas japonesas com duração normal.
+Quando a voicebank precisa de uma vogal de apoio, ela recebe o papel `epenthetic`
+(~40-50 ms, ganho baixo e overlap maior). Codas, glides e caudas nasais também
+recebem durações/ganhos próprios. Exemplo: em `Brasil`, o /b/ de /br/ ainda precisa
+de uma unidade CV, mas a vogal artificial fica curta e parcialmente escondida pela
+transição para /ra/, em vez de soar como uma sílaba `bu` completa.
+
+A proteção da 3B permanece: uma curva de pitch rejeitada pelo Straycat tenta apenas
+aquele fragmento novamente com `AA`, sem derrubar a engine inteira para gTTS. O
+cache físico de fragmentos continua independente da versão de prosódia, portanto
+fragmentos realmente compatíveis podem ser reaproveitados.
+
+A resposta da Teto agora expõe `phonemizer_version`, `phonetic_units`,
+`auxiliary_phonemes` e `epenthetic_phonemes`. O Phone Worker 1.11.22 projeta esses
+metadados e, na resposta raw, publica também `X-Core-Worker-Teto-Renderer`,
+`X-Core-Worker-Teto-Phonemizer` e `X-Core-Worker-Teto-Epenthetic`.
 
 Configurações opcionais permanecem as mesmas:
 
@@ -55,9 +64,9 @@ PHONE_WORKER_TETO_RENDER_THREADS=2
 PHONE_WORKER_TETO_LENGTH_MODE=auto
 ```
 
-A voicebank continua sendo japonesa CV; o objetivo desta revisão é melhorar naturalidade
-sem trocar a engine nem adicionar dependências ao Termux. Distribua pelo updater do
-projeto nas pastas originais.
+A voicebank instalada continua sendo japonesa CV. Esta revisão melhora a
+inteligibilidade dentro dessa limitação; ela não torna o banco equivalente ao
+English/X-SAMPA usado em configurações do OpenUtau.
 
 ## Painéis técnicos do bot
 

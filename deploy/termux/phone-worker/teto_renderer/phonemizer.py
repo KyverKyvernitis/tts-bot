@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, replace
+from typing import Callable, Iterable
+
+from .ptbr_g2p import PhoneticWord, g2p_word
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,8 +20,13 @@ class Mora:
     word_moras: int = 1
     stressed: bool = False
     deaccented: bool = False
+    role: str = "nucleus"  # nucleus | epenthetic | coda | glide | nasal
+    source_phonemes: tuple[str, ...] = ()
 
 
+# This mapping is only the final PT-phone -> Japanese-CV approximation layer.
+# Portuguese orthography is resolved in ptbr_g2p.py first; keeping the layers
+# separate is the main architectural change in speech-4.
 _ROMAJI_TO_KANA = {
     "kya": "きゃ", "kyu": "きゅ", "kyo": "きょ", "gya": "ぎゃ", "gyu": "ぎゅ", "gyo": "ぎょ",
     "sha": "しゃ", "shu": "しゅ", "sho": "しょ", "sya": "しゃ", "syu": "しゅ", "syo": "しょ",
@@ -27,7 +35,7 @@ _ROMAJI_TO_KANA = {
     "nya": "にゃ", "nyu": "にゅ", "nyo": "にょ", "hya": "ひゃ", "hyu": "ひゅ", "hyo": "ひょ",
     "bya": "びゃ", "byu": "びゅ", "byo": "びょ", "pya": "ぴゃ", "pyu": "ぴゅ", "pyo": "ぴょ",
     "mya": "みゃ", "myu": "みゅ", "myo": "みょ", "rya": "りゃ", "ryu": "りゅ", "ryo": "りょ",
-    "fa": "ふぁ", "fi": "ふぃ", "fe": "ふぇ", "fo": "ふぉ", "va": "ば", "vi": "び", "vu": "ぶ", "ve": "べ", "vo": "ぼ",
+    "fa": "ふぁ", "fi": "ふぃ", "fe": "ふぇ", "fo": "ふぉ",
     "tsa": "つぁ", "tsi": "つぃ", "tse": "つぇ", "tso": "つぉ", "she": "しぇ", "che": "ちぇ", "je": "じぇ",
     "ka": "か", "ki": "き", "ku": "く", "ke": "け", "ko": "こ",
     "ga": "が", "gi": "ぎ", "gu": "ぐ", "ge": "げ", "go": "ご",
@@ -45,20 +53,36 @@ _ROMAJI_TO_KANA = {
     "wa": "わ", "wi": "うぃ", "we": "うぇ", "wo": "を",
     "a": "あ", "i": "い", "u": "う", "e": "え", "o": "お", "n": "ん",
 }
-_ROMAJI_KEYS = sorted(_ROMAJI_TO_KANA, key=len, reverse=True)
 
-# These pauses are deliberately shorter than the old speech-2 defaults. Word
-# boundaries are primarily expressed by coarticulation now; punctuation keeps
-# a clear hierarchy without adding a tiny stop after every token.
 _PUNCT_PAUSES = {",": 85, ";": 135, ":": 115, ".": 180, "!": 155, "?": 180, "\n": 190}
 _WORD_GAP_MS = 6
-_PT_VOWELS = set("aeiouáéíóúâêôãõàü")
 _PT_STRESS_MARKS = set("áéíóúâêôãõ")
 _PT_FUNCTION_WORDS = {
     "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e",
     "em", "lhe", "lhes", "me", "na", "nas", "no", "nos", "o", "os", "para",
     "por", "que", "se", "sem", "te", "um", "uma", "umas", "uns",
 }
+
+# Short auxiliary units are deliberately much shorter than lexical nuclei. They
+# hide the vowel that a Japanese CV bank must add to realize a Portuguese cluster
+# or final consonant (e.g. the first /b/ in "Brasil").
+_ROLE_DURATIONS = {
+    "epenthetic": 48,
+    "coda": 52,
+    "glide": 50,
+    "nasal": 66,
+}
+
+
+def _unique(values: Iterable[str]) -> tuple[str, ...]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean = unicodedata.normalize("NFKC", str(value or "")).strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    return tuple(result)
 
 
 def _katakana_to_hiragana(text: str) -> str:
@@ -70,15 +94,6 @@ def _katakana_to_hiragana(text: str) -> str:
         else:
             out.append(char)
     return "".join(out)
-
-
-def _kana_candidates(kana: str) -> tuple[str, ...]:
-    alternates: dict[str, tuple[str, ...]] = {
-        "じ": ("じ", "ぢ", "ji"), "ず": ("ず", "づ", "zu"), "し": ("し", "shi", "si"),
-        "ち": ("ち", "chi", "ti"), "つ": ("つ", "tsu", "tu"), "ふ": ("ふ", "fu", "hu"),
-        "を": ("を", "お", "wo"), "ん": ("ん", "n"),
-    }
-    return alternates.get(kana, (kana,))
 
 
 def _split_hiragana_mora(text: str) -> list[str]:
@@ -94,58 +109,13 @@ def _split_hiragana_mora(text: str) -> list[str]:
     return result
 
 
-def _romaji_to_kana(text: str) -> list[str]:
-    value = re.sub(r"[^a-z]", "", text.lower())
-    result: list[str] = []
-    index = 0
-    while index < len(value):
-        if index + 1 < len(value) and value[index] == value[index + 1] and value[index] not in "aeioun":
-            index += 1
-            continue
-        matched = False
-        for key in _ROMAJI_KEYS:
-            if value.startswith(key, index):
-                result.append(_ROMAJI_TO_KANA[key])
-                index += len(key)
-                matched = True
-                break
-        if not matched:
-            char = value[index]
-            fallback = {
-                "b": "ぶ", "c": "く", "d": "ど", "f": "ふ", "g": "ぐ", "h": "ふ",
-                "j": "じ", "k": "く", "l": "る", "m": "む", "p": "ぷ", "q": "く",
-                "r": "る", "s": "す", "t": "と", "v": "ぶ", "w": "う", "x": "し", "y": "い", "z": "ず",
-            }.get(char)
-            if fallback:
-                result.append(fallback)
-            index += 1
-    return result
-
-
-def _portuguese_word_to_romaji(word: str) -> str:
-    # Preserve the cedilla's /s/ approximation before decomposition removes it.
-    # This remains a mapping to Japanese CV sounds, not a Portuguese G2P model.
-    value = unicodedata.normalize("NFKD", word.lower().replace("ç", "ss"))
-    value = "".join(ch for ch in value if not unicodedata.combining(ch))
-    replacements = (
-        (r"nh", "ny"), (r"lh", "ry"), (r"ch", "sh"), (r"rr", "h"),
-        (r"^r(?=[aeiou])", "h"),
-        (r"qu(?=[ei])", "k"), (r"gu(?=[ei])", "g"), (r"ph", "f"),
-        (r"c(?=[ei])", "s"), (r"g(?=[ei])", "j"), (r"c", "k"), (r"q", "k"),
-        (r"(?<=[aeiou])s(?=[aeiou])", "z"), (r"ss", "s"), (r"z$", "s"),
-        (r"x", "sh"), (r"w", "u"),
-        # PT-BR final m/n nasalizes the preceding vowel; Japanese ん is less
-        # intrusive than appending mu/nu. Final l is commonly vocalized /w/.
-        (r"[mn]$", "n"), (r"l$", "u"),
-        # A final rhotic has no good CV-only equivalent. Dropping it is less
-        # disruptive to speech than appending an artificial 'ru' syllable.
-        (r"r$", ""),
-        # Japanese CV banks usually provide ra/ri/... rather than la/li/....
-        (r"l(?=[aeiouy])", "r"),
-    )
-    for pattern, replacement in replacements:
-        value = re.sub(pattern, replacement, value)
-    return re.sub(r"[^a-z]", "", value)
+def _kana_aliases(kana: str, *extra: str) -> tuple[str, ...]:
+    alternates: dict[str, tuple[str, ...]] = {
+        "じ": ("じ", "ぢ", "ji"), "ず": ("ず", "づ", "zu"), "し": ("し", "shi", "si"),
+        "ち": ("ち", "chi", "ti"), "つ": ("つ", "tsu", "tu"), "ふ": ("ふ", "fu", "hu"),
+        "を": ("を", "お", "wo"), "ん": ("ん", "n"),
+    }
+    return _unique((*alternates.get(kana, (kana,)), *extra))
 
 
 def _plain_word(word: str) -> str:
@@ -154,77 +124,217 @@ def _plain_word(word: str) -> str:
 
 
 def _is_deaccented_word(word: str) -> bool:
-    """Return True for short PT-BR function words that should not carry phrase stress."""
     value = unicodedata.normalize("NFC", str(word or "").lower())
     if any(char in _PT_STRESS_MARKS for char in value):
         return False
     return _plain_word(value) in _PT_FUNCTION_WORDS
 
 
-def _word_to_mora(word: str) -> list[str]:
-    if re.search(r"[ぁ-ゖァ-ヺ]", word):
-        return _split_hiragana_mora(word)
-    ascii_word = unicodedata.normalize("NFKC", word)
-    return _romaji_to_kana(_portuguese_word_to_romaji(ascii_word))
+def _base_vowel(phone: str) -> str:
+    return {
+        "a~": "a", "e~": "e", "i~": "i", "o~": "o", "u~": "u",
+        "E": "e", "O": "o",
+    }.get(phone, phone)
 
 
-def _vowel_groups(word: str) -> list[tuple[int, int]]:
-    value = unicodedata.normalize("NFC", str(word or "").lower())
-    groups: list[tuple[int, int]] = []
-    start: int | None = None
-    for index, char in enumerate(value):
-        if char in _PT_VOWELS:
-            if start is None:
-                start = index
-        elif start is not None:
-            groups.append((start, index))
-            start = None
-    if start is not None:
-        groups.append((start, len(value)))
-    return groups
+def _cv_aliases(consonant: str, vowel_phone: str) -> tuple[str, ...]:
+    vowel = _base_vowel(vowel_phone)
+    if vowel not in {"a", "e", "i", "o", "u"}:
+        vowel = "a"
+
+    if not consonant:
+        kana = _ROMAJI_TO_KANA[vowel]
+        return _kana_aliases(kana, vowel)
+
+    # Preserve the stop in PT /tu, du/. A plain Japanese CV bank normally lacks
+    # dedicated [tu]/[du], so prefer optional small-vowel aliases when present
+    # and fall back to to/do before accepting tsu-like substitutions.
+    if consonant == "t" and vowel == "u":
+        return _unique(("とぅ", "tu", "と", "to", "つ", "tsu"))
+    if consonant == "d" and vowel == "u":
+        return _unique(("どぅ", "du", "ど", "do"))
+    if consonant == "s" and vowel == "i":
+        return _unique(("すぃ", "si", "し", "shi"))
+    if consonant == "z" and vowel == "i":
+        return _unique(("ずぃ", "zi", "じ", "ji"))
+
+    # PT phone -> Japanese approximation. Special cases list a closer optional
+    # alias before the guaranteed plain-Japanese fallback so the actual oto.ini
+    # decides what the installed voicebank can support.
+    if consonant == "v":
+        voiced_v = {"a": "ゔぁ", "e": "ゔぇ", "i": "ゔぃ", "o": "ゔぉ", "u": "ゔ"}[vowel]
+        fallback = _ROMAJI_TO_KANA[f"b{vowel}"]
+        return _unique((voiced_v, voiced_v.replace("ゔ", "ヴ"), f"v{vowel}", fallback, f"b{vowel}"))
+    if consonant == "L":
+        close = {"a": "りゃ", "e": "りぇ", "i": "り", "o": "りょ", "u": "りゅ"}[vowel]
+        fallback = _ROMAJI_TO_KANA[f"r{vowel}"]
+        return _unique((close, f"ry{vowel}", fallback, f"r{vowel}"))
+    if consonant == "J":
+        close = {"a": "にゃ", "e": "にぇ", "i": "に", "o": "にょ", "u": "にゅ"}[vowel]
+        fallback = _ROMAJI_TO_KANA[f"n{vowel}"]
+        return _unique((close, f"ny{vowel}", fallback, f"n{vowel}"))
+
+    prefix = {
+        "b": "b", "d": "d", "dZ": "j", "f": "f", "g": "g", "j": "y",
+        "k": "k", "l": "r", "m": "m", "n": "n", "p": "p", "r": "r",
+        "R": "h", "s": "s", "S": "sh", "t": "t", "tS": "ch", "w": "w",
+        "z": "z", "Z": "j",
+    }.get(consonant, "")
+    key = f"{prefix}{vowel}"
+    kana = _ROMAJI_TO_KANA.get(key)
+    if kana is None:
+        # Not every glide/palatal sequence exists in a plain CV bank. Fall back
+        # to the vowel rather than manufacturing an unrelated full syllable.
+        return _kana_aliases(_ROMAJI_TO_KANA[vowel], vowel)
+
+    fallbacks: list[str] = [key]
+    if consonant == "S":
+        plain = _ROMAJI_TO_KANA.get(f"s{vowel}")
+        if plain:
+            fallbacks.extend((plain, f"s{vowel}"))
+    elif consonant in {"Z", "dZ"}:
+        plain = _ROMAJI_TO_KANA.get(f"z{vowel}") or _ROMAJI_TO_KANA.get(f"d{vowel}")
+        if plain:
+            fallbacks.append(plain)
+    elif consonant == "R":
+        plain = _ROMAJI_TO_KANA.get(f"r{vowel}")
+        if plain:
+            fallbacks.extend((plain, f"r{vowel}"))
+    return _unique((kana, *fallbacks))
 
 
-def _portuguese_stress_mora(word: str, mora_count: int) -> int | None:
-    """Return an intentionally conservative PT-BR stress approximation.
+def _auxiliary_aliases(phone: str, *, role: str) -> tuple[str, ...]:
+    if phone in {"m", "n"} or role == "nasal":
+        return _kana_aliases("ん", "n")
+    if phone == "j":
+        return _kana_aliases("い", "i")
+    if phone in {"w", "l"}:
+        return _kana_aliases("う", "u")
+    if phone in {"s", "S"}:
+        return _kana_aliases("す" if phone == "s" else "し", "su" if phone == "s" else "shi")
+    if phone in {"z", "Z"}:
+        return _kana_aliases("ず" if phone == "z" else "じ", "zu" if phone == "z" else "ji")
+    if phone in {"r", "R"}:
+        return _kana_aliases("る", "ru")
 
-    This is not a syllabifier. It preserves explicit orthographic stress first,
-    then applies the common Portuguese final/penultimate rule and maps that
-    vowel nucleus onto the Japanese mora sequence. The deterministic result is
-    sufficient for speech timing without adding a heavy linguistic dependency.
-    """
-    if mora_count <= 0 or re.search(r"[ぁ-ゖァ-ヺ]", word):
-        return None
-    value = unicodedata.normalize("NFC", str(word or "").lower())
-    groups = _vowel_groups(value)
-    if not groups:
-        return None
-
-    stressed_group: int | None = None
-    for group_index, (start, end) in enumerate(groups):
-        if any(char in _PT_STRESS_MARKS for char in value[start:end]):
-            stressed_group = group_index
-            break
-
-    if stressed_group is None:
-        plain = unicodedata.normalize("NFKD", value)
-        plain = "".join(ch for ch in plain if not unicodedata.combining(ch))
-        penultimate_endings = ("a", "e", "o", "as", "es", "os", "am", "em", "ens")
-        stressed_group = max(0, len(groups) - 2) if plain.endswith(penultimate_endings) and len(groups) > 1 else len(groups) - 1
-
-    if len(groups) == 1 or mora_count == 1:
-        return 0
-    mapped = round(stressed_group * (mora_count - 1) / (len(groups) - 1))
-    mapped = max(0, min(mora_count - 1, mapped))
-    # Orthographic final consonants can create an approximation mora in a CV
-    # bank. Keep lexical stress on the preceding vowel-bearing mora.
-    plain = unicodedata.normalize("NFKD", value)
-    plain = "".join(ch for ch in plain if not unicodedata.combining(ch))
-    if mapped == mora_count - 1 and mora_count > 1 and plain and plain[-1] in "mnslzx":
-        mapped -= 1
-    return mapped
+    epenthetic_vowel = {
+        "b": "u", "d": "o", "dZ": "i", "f": "u", "g": "u", "J": "u",
+        "k": "u", "L": "u", "p": "u", "t": "o", "tS": "i", "v": "u",
+    }.get(phone, "u")
+    return _cv_aliases(phone, epenthetic_vowel)
 
 
-def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
+def _prefer_available(
+    candidates: tuple[str, ...],
+    resolve_alias: Callable[[Iterable[str]], object | None] | None,
+) -> tuple[str, ...]:
+    if resolve_alias is None:
+        return candidates
+    try:
+        entry = resolve_alias(candidates)
+    except Exception:
+        return candidates
+    alias = str(getattr(entry, "alias", "") or "").strip() if entry is not None else ""
+    if not alias:
+        return candidates
+    return _unique((alias, *candidates))
+
+
+def _make_mora(
+    candidates: tuple[str, ...], *, duration_ms: int, role: str, source: tuple[str, ...],
+    stressed: bool = False, deaccented: bool = False,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+) -> Mora:
+    return Mora(
+        candidates=_prefer_available(candidates, resolve_alias),
+        duration_ms=duration_ms,
+        stressed=stressed,
+        deaccented=deaccented,
+        role=role,
+        source_phonemes=source,
+    )
+
+
+def _phonetic_word_to_moras(
+    word: PhoneticWord, *, deaccented: bool,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+) -> list[Mora]:
+    moras: list[Mora] = []
+    for syllable in word.syllables:
+        onset = list(syllable.onset)
+        # Japanese CV cannot express a PT consonant cluster directly. Realize
+        # all but the final onset consonant as tiny auxiliary units, then place
+        # the lexical vowel on the final onset consonant. This preserves the
+        # cluster's consonantal cues without a full Japanese epenthetic vowel.
+        for phone in onset[:-1]:
+            moras.append(_make_mora(
+                _auxiliary_aliases(phone, role="epenthetic"),
+                duration_ms=_ROLE_DURATIONS["epenthetic"],
+                role="epenthetic",
+                source=(phone,),
+                deaccented=True,
+                resolve_alias=resolve_alias,
+            ))
+
+        last_onset = onset[-1] if onset else ""
+        moras.append(_make_mora(
+            _cv_aliases(last_onset, syllable.vowel),
+            duration_ms=135,
+            role="nucleus",
+            source=tuple((*onset[-1:], syllable.vowel)),
+            stressed=bool(syllable.stressed and not deaccented),
+            deaccented=deaccented,
+            resolve_alias=resolve_alias,
+        ))
+
+        if syllable.vowel.endswith("~"):
+            moras.append(_make_mora(
+                _auxiliary_aliases("n", role="nasal"),
+                duration_ms=_ROLE_DURATIONS["nasal"],
+                role="nasal",
+                source=(syllable.vowel,),
+                deaccented=True,
+                resolve_alias=resolve_alias,
+            ))
+
+        for phone in syllable.coda:
+            role = "glide" if phone in {"j", "w"} else "coda"
+            moras.append(_make_mora(
+                _auxiliary_aliases(phone, role=role),
+                duration_ms=_ROLE_DURATIONS[role],
+                role=role,
+                source=(phone,),
+                deaccented=True,
+                resolve_alias=resolve_alias,
+            ))
+    return moras
+
+
+def _kana_word_to_moras(
+    word: str, *, deaccented: bool,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+) -> list[Mora]:
+    output: list[Mora] = []
+    raw = _split_hiragana_mora(word)
+    for index, mora in enumerate(raw):
+        output.append(_make_mora(
+            _kana_aliases(mora),
+            duration_ms=150 if mora == "ん" else 135,
+            role="nasal" if mora == "ん" else "nucleus",
+            source=(mora,),
+            stressed=(index == 0 and not deaccented),
+            deaccented=deaccented,
+            resolve_alias=resolve_alias,
+        ))
+    return output
+
+
+def phonemize(
+    text: str,
+    *,
+    max_moras: int = 240,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+) -> list[Mora]:
     normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
     if not normalized:
         return []
@@ -242,23 +352,25 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
                 )
             continue
 
-        moras = _word_to_mora(token)
         deaccented = _is_deaccented_word(token)
-        stress_index = None if deaccented else _portuguese_stress_mora(token, len(moras))
-        for mora_index, mora in enumerate(moras):
-            duration = 150 if mora in {"ん"} else 135
-            result.append(Mora(
-                _kana_candidates(mora),
-                duration_ms=duration,
+        if re.search(r"[ぁ-ゖァ-ヺ]", token):
+            word_moras = _kana_word_to_moras(token, deaccented=deaccented, resolve_alias=resolve_alias)
+        else:
+            word_moras = _phonetic_word_to_moras(
+                g2p_word(token, deaccented=deaccented), deaccented=deaccented, resolve_alias=resolve_alias
+            )
+
+        total = max(1, len(word_moras))
+        for mora_index, mora in enumerate(word_moras):
+            result.append(replace(
+                mora,
                 word_index=word_index,
                 mora_index=mora_index,
-                word_moras=max(1, len(moras)),
-                stressed=stress_index == mora_index,
-                deaccented=deaccented,
+                word_moras=total,
             ))
             if len(result) >= max(1, int(max_moras)):
                 return result
-        if moras:
+        if word_moras:
             previous = result[-1]
             result[-1] = replace(
                 previous,
@@ -267,3 +379,6 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
             )
             word_index += 1
     return result
+
+
+__all__ = ["Mora", "phonemize", "g2p_word"]

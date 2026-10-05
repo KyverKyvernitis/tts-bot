@@ -202,7 +202,8 @@ class TetoRendererTests(unittest.TestCase):
             resampler.chmod(0o755)
             with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
                 result = TetoRenderer().synthesize("teto")
-            self.assertEqual(result["renderer_version"], "speech-3b-natural-safe")
+            self.assertEqual(result["renderer_version"], "speech-4-phonetic")
+            self.assertEqual(result["phonemizer_version"], "ptbr-g2p-v1")
             self.assertEqual(result["pitchbend_fallbacks"], 2)
             self.assertTrue(bytes(result["audio"]).startswith(b"RIFF"))
 

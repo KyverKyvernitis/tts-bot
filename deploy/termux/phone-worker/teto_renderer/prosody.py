@@ -18,6 +18,8 @@ class RenderNote:
     stressed: bool = False
     contour: str = "neutral"
     deaccented: bool = False
+    role: str = "nucleus"
+    source_phonemes: tuple[str, ...] = ()
 
 
 _PITCH_CLASSES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -118,11 +120,27 @@ def _phrase_spans(moras: list[Mora]) -> list[tuple[int, int]]:
     return spans
 
 
+def _phrase_terminal_nuclei(moras: list[Mora]) -> dict[int, str]:
+    terminals: dict[int, str] = {}
+    for start, end in _phrase_spans(moras):
+        ending = moras[end].phrase_end
+        terminal = next(
+            (index for index in range(end, start - 1, -1) if moras[index].role == "nucleus"),
+            end,
+        )
+        terminals[terminal] = ending
+    return terminals
+
+
 def _centers(moras: list[Mora]) -> list[int]:
     values = [0 for _ in moras]
     for start, end in _phrase_spans(moras):
         count = end - start + 1
         ending = moras[end].phrase_end
+        terminal = next(
+            (index for index in range(end, start - 1, -1) if moras[index].role == "nucleus"),
+            end,
+        )
         if ending == "?":
             phrase_start, phrase_end = 6, 20
         elif ending in {",", ";", ":"}:
@@ -136,7 +154,11 @@ def _centers(moras: list[Mora]) -> list[int]:
             ratio = local_index / max(1, count - 1)
             center = phrase_start + (phrase_end - phrase_start) * ratio
             mora = moras[index]
-            if mora.stressed:
+            if mora.role != "nucleus":
+                # Auxiliary CV/coda units should carry articulation, not their
+                # own melodic accent. Keep them near the surrounding baseline.
+                center -= 8
+            elif mora.stressed:
                 center += 34
             elif mora.deaccented:
                 center -= 10
@@ -148,20 +170,30 @@ def _centers(moras: list[Mora]) -> list[int]:
                 center -= 3
             values[index] = int(round(center))
 
+        previous_nucleus = next(
+            (index for index in range(terminal - 1, start - 1, -1) if moras[index].role == "nucleus"),
+            None,
+        )
         if ending == "?":
-            if end - 1 >= start:
-                values[end - 1] = max(values[end - 1], 24)
-            values[end] = max(values[end], 64)
+            if previous_nucleus is not None:
+                values[previous_nucleus] = max(values[previous_nucleus], 24)
+            values[terminal] = max(values[terminal], 64)
         elif ending in {".", "\n"}:
-            if end - 1 >= start:
-                values[end - 1] = min(values[end - 1], -14)
-            values[end] = min(values[end], -42)
+            if previous_nucleus is not None:
+                values[previous_nucleus] = min(values[previous_nucleus], -14)
+            values[terminal] = min(values[terminal], -42)
         elif ending == "!":
-            if end - 1 >= start:
-                values[end - 1] = max(values[end - 1], 24)
-            values[end] = min(values[end], -18)
+            if previous_nucleus is not None:
+                values[previous_nucleus] = max(values[previous_nucleus], 24)
+            values[terminal] = min(values[terminal], -18)
         elif not ending:
-            values[end] = min(values[end], -28)
+            values[terminal] = min(values[terminal], -28)
+
+        # A trailing coda/glide/nasal carries articulation, not the sentence's
+        # melodic target. Let it follow the last lexical nucleus instead of
+        # stealing the question rise or statement fall.
+        for index in range(terminal + 1, end + 1):
+            values[index] = int(round(values[terminal] * 0.82))
 
     return [max(-84, min(84, value)) for value in values]
 
@@ -169,31 +201,43 @@ def _centers(moras: list[Mora]) -> list[int]:
 def _duration_for(moras: list[Mora], index: int) -> int:
     mora = moras[index]
     duration = float(mora.duration_ms)
-    if mora.stressed:
+    if mora.role == "epenthetic":
+        duration *= 0.90
+    elif mora.role == "coda":
+        duration *= 0.96
+    elif mora.role == "glide":
+        duration *= 0.94
+    elif mora.role == "nasal":
+        duration *= 0.98
+    elif mora.stressed:
         duration *= 1.14
     elif mora.deaccented:
         duration *= 0.88
     elif mora.word_moras > 1:
         duration *= 0.90
-    if index + 1 < len(moras) and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
+    if mora.role == "nucleus" and index + 1 < len(moras) and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
         duration *= 0.96
     if mora.phrase_end in {".", "!", "?", "\n"}:
         duration *= 1.08
     elif mora.phrase_end in {",", ";", ":"}:
         duration *= 1.02
-    elif mora.word_end:
+    elif mora.word_end and mora.role == "nucleus":
         duration *= 1.015
-    return max(78, min(240, round(duration)))
+    minimum = 34 if mora.role == "epenthetic" else 38 if mora.role in {"coda", "glide"} else 48 if mora.role == "nasal" else 78
+    maximum = 82 if mora.role == "epenthetic" else 96 if mora.role in {"coda", "glide", "nasal"} else 240
+    return max(minimum, min(maximum, round(duration)))
 
 
-def _contour_name(mora: Mora) -> str:
-    if mora.phrase_end == "?":
+def _contour_name(mora: Mora, *, terminal_ending: str = "") -> str:
+    if mora.role != "nucleus":
+        return mora.role
+    if terminal_ending == "?":
         return "question-rise"
-    if mora.phrase_end in {".", "\n"}:
+    if terminal_ending in {".", "\n"}:
         return "statement-fall"
-    if mora.phrase_end == "!":
+    if terminal_ending == "!":
         return "exclamation-fall"
-    if mora.phrase_end in {",", ";", ":"}:
+    if terminal_ending in {",", ";", ":"}:
         return "continuation"
     if mora.stressed:
         return "stress"
@@ -210,24 +254,36 @@ def build_notes(
     rate = _speech_rate(speech_rate)
     tempo_value = _tempo(tempo)
     centers = _centers(moras)
+    terminal_endings = _phrase_terminal_nuclei(moras)
     notes: list[RenderNote] = []
 
     for index, mora in enumerate(moras):
-        duration = max(70, min(500, round(_duration_for(moras, index) / rate)))
+        raw_duration = round(_duration_for(moras, index) / rate)
+        minimum = 32 if mora.role == "epenthetic" else 36 if mora.role in {"coda", "glide"} else 44 if mora.role == "nasal" else 70
+        duration = max(minimum, min(500, raw_duration))
         pause = max(0, min(1000, round(mora.pause_after_ms / rate)))
         center = centers[index]
         previous = centers[index - 1] if index > 0 and not moras[index - 1].phrase_end else center
         following = centers[index + 1] if index + 1 < len(moras) and not mora.phrase_end else center
         start = round((previous + center) / 2)
         end = round((center + following) / 2)
-        peak = center + (12 if mora.stressed else (1 if mora.deaccented else 3))
-        if mora.phrase_end == "?":
+        terminal_ending = terminal_endings.get(index, "")
+        peak = center + (0 if mora.role != "nucleus" else (12 if mora.stressed else (1 if mora.deaccented else 3)))
+        if terminal_ending == "?":
             peak = max(peak, 68)
-        elif mora.phrase_end in {".", "\n"}:
+        elif terminal_ending in {".", "\n"}:
             peak = min(peak, center + 1)
         pitchbend = _pitch_curve(start, peak, end, duration_ms=duration, tempo=tempo_value)
 
-        if mora.stressed:
+        if mora.role == "epenthetic":
+            gain = 0.72
+        elif mora.role == "coda":
+            gain = 0.78
+        elif mora.role == "glide":
+            gain = 0.82
+        elif mora.role == "nasal":
+            gain = 0.88
+        elif mora.stressed:
             gain = 1.055
         elif mora.deaccented:
             gain = 0.955
@@ -244,9 +300,11 @@ def build_notes(
             duration_ms=duration,
             pause_after_ms=pause,
             pitchbend=pitchbend,
-            gain=max(0.90, min(1.10, gain)),
+            gain=max(0.68, min(1.10, gain)),
             stressed=mora.stressed,
-            contour=_contour_name(mora),
+            contour=_contour_name(mora, terminal_ending=terminal_ending),
             deaccented=mora.deaccented,
+            role=mora.role,
+            source_phonemes=mora.source_phonemes,
         ))
     return notes

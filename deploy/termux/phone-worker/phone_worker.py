@@ -161,7 +161,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.21"
+PHONE_WORKER_VERSION = "1.11.22"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2071,6 +2071,12 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
     handler.send_header("X-Core-Worker-Sha256", _header_ascii(meta.get("sha256"), limit=80))
     handler.send_header("X-Core-Worker-Id", _header_ascii(meta.get("worker_id"), limit=100))
     handler.send_header("X-Core-Worker-Version", _header_ascii(meta.get("worker_version"), limit=40))
+    if meta.get("teto_renderer_version"):
+        handler.send_header("X-Core-Worker-Teto-Renderer", _header_ascii(meta.get("teto_renderer_version"), limit=60))
+    if meta.get("teto_phonemizer_version"):
+        handler.send_header("X-Core-Worker-Teto-Phonemizer", _header_ascii(meta.get("teto_phonemizer_version"), limit=60))
+    if meta.get("teto_epenthetic_phonemes") not in (None, ""):
+        handler.send_header("X-Core-Worker-Teto-Epenthetic", _header_ascii(meta.get("teto_epenthetic_phonemes"), limit=20))
     for key, header in (
         ("worker_total_ms", "X-Core-Worker-Worker-Total-Ms"),
         ("worker_synth_ms", "X-Core-Worker-Worker-Synth-Ms"),
@@ -4926,8 +4932,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "android_locale": response.get("locale") if engine == "android_native" and isinstance(response, dict) else "",
             "teto_voicebank": teto_meta.get("voicebank") if engine == "teto" else "",
             "teto_fingerprint": teto_meta.get("voicebank_fingerprint") if engine == "teto" else "",
+            "teto_renderer_version": teto_meta.get("renderer_version") if engine == "teto" else "",
+            "teto_phonemizer_version": teto_meta.get("phonemizer_version") if engine == "teto" else "",
             "teto_rendered_phonemes": teto_meta.get("rendered_phonemes") if engine == "teto" else None,
             "teto_missing_phonemes": teto_meta.get("missing_phonemes") if engine == "teto" else [],
+            "teto_phonetic_units": teto_meta.get("phonetic_units") if engine == "teto" else None,
+            "teto_auxiliary_phonemes": teto_meta.get("auxiliary_phonemes") if engine == "teto" else None,
+            "teto_epenthetic_phonemes": teto_meta.get("epenthetic_phonemes") if engine == "teto" else None,
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),

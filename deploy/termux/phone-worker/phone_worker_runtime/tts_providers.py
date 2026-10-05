@@ -24,7 +24,12 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
     stage_ms["teto_render"] = round((monotonic() - teto_started) * 1000.0, 2)
     logs.append(
         f"teto voicebank={rendered.get('voicebank') or 'Kasane Teto'} "
-        f"rendered={rendered.get('rendered_phonemes') or 0} missing={len(rendered.get('missing_phonemes') or [])}"
+        f"renderer={rendered.get('renderer_version') or '?'} "
+        f"phonemizer={rendered.get('phonemizer_version') or '?'} "
+        f"rendered={rendered.get('rendered_phonemes') or 0} "
+        f"aux={rendered.get('auxiliary_phonemes') or 0} "
+        f"epenthetic={rendered.get('epenthetic_phonemes') or 0} "
+        f"missing={len(rendered.get('missing_phonemes') or [])}"
     )
     return data, audio_format, teto_meta
 
