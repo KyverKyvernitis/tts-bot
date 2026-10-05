@@ -16,6 +16,7 @@ class Mora:
     mora_index: int = 0
     word_moras: int = 1
     stressed: bool = False
+    deaccented: bool = False
 
 
 _ROMAJI_TO_KANA = {
@@ -53,6 +54,11 @@ _PUNCT_PAUSES = {",": 85, ";": 135, ":": 115, ".": 180, "!": 155, "?": 180, "\n"
 _WORD_GAP_MS = 6
 _PT_VOWELS = set("aeiouáéíóúâêôãõàü")
 _PT_STRESS_MARKS = set("áéíóúâêôãõ")
+_PT_FUNCTION_WORDS = {
+    "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e",
+    "em", "lhe", "lhes", "me", "na", "nas", "no", "nos", "o", "os", "para",
+    "por", "que", "se", "sem", "te", "um", "uma", "umas", "uns",
+}
 
 
 def _katakana_to_hiragana(text: str) -> str:
@@ -142,6 +148,19 @@ def _portuguese_word_to_romaji(word: str) -> str:
     return re.sub(r"[^a-z]", "", value)
 
 
+def _plain_word(word: str) -> str:
+    value = unicodedata.normalize("NFKD", str(word or "").lower())
+    return "".join(ch for ch in value if not unicodedata.combining(ch) and ch.isalpha())
+
+
+def _is_deaccented_word(word: str) -> bool:
+    """Return True for short PT-BR function words that should not carry phrase stress."""
+    value = unicodedata.normalize("NFC", str(word or "").lower())
+    if any(char in _PT_STRESS_MARKS for char in value):
+        return False
+    return _plain_word(value) in _PT_FUNCTION_WORDS
+
+
 def _word_to_mora(word: str) -> list[str]:
     if re.search(r"[ぁ-ゖァ-ヺ]", word):
         return _split_hiragana_mora(word)
@@ -224,7 +243,8 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
             continue
 
         moras = _word_to_mora(token)
-        stress_index = _portuguese_stress_mora(token, len(moras))
+        deaccented = _is_deaccented_word(token)
+        stress_index = None if deaccented else _portuguese_stress_mora(token, len(moras))
         for mora_index, mora in enumerate(moras):
             duration = 150 if mora in {"ん"} else 135
             result.append(Mora(
@@ -234,6 +254,7 @@ def phonemize(text: str, *, max_moras: int = 240) -> list[Mora]:
                 mora_index=mora_index,
                 word_moras=max(1, len(moras)),
                 stressed=stress_index == mora_index,
+                deaccented=deaccented,
             ))
             if len(result) >= max(1, int(max_moras)):
                 return result

@@ -26,7 +26,9 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
-    RENDER_VERSION = "speech-3-natural"
+    RENDER_VERSION = "speech-3b-natural-safe"
+    FRAGMENT_CACHE_SCHEMA = "teto-fragment-v2"
+    LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
 
     def __init__(self, *, resource_guard: Callable[[], dict[str, Any]] | None = None):
         self._resource_guard = resource_guard
@@ -77,14 +79,14 @@ class TetoRenderer:
         executable = Path(self._resampler_command()[0]).name.lower()
         return "post-consonant" if executable.startswith("straycat") else "total"
 
-    def _render_fingerprint(self, index: VoicebankIndex) -> str:
-        # The existing worker and bot cache contracts read status.fingerprint.
-        # Include the render profile so an update cannot replay old speech.
+    def _render_fingerprint_for_version(self, index: VoicebankIndex, version: str) -> str:
+        # Whole-utterance caches must change when the prosody implementation
+        # changes, even when most low-level fragments remain reusable.
         command = self._resampler_command()
         executable = Path(shutil.which(command[0]) or command[0])
         stamp = executable.stat()
         profile = {
-            "version": self.RENDER_VERSION,
+            "version": str(version),
             "voicebank": index.fingerprint,
             "resampler": command,
             "resampler_stamp": [stamp.st_size, stamp.st_mtime_ns],
@@ -94,6 +96,29 @@ class TetoRenderer:
             "modulation": self._modulation(),
             "flags": os.getenv("PHONE_WORKER_TETO_FLAGS", ""),
             "tempo": max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
+            "length_mode": self._length_mode(),
+        }
+        return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
+
+    def _render_fingerprint(self, index: VoicebankIndex) -> str:
+        return self._render_fingerprint_for_version(index, self.RENDER_VERSION)
+
+    def _fragment_fingerprint(self, index: VoicebankIndex) -> str:
+        # Fragment identity is intentionally independent from the high-level
+        # prosody revision. duration/pitch/pitchbend are already part of each
+        # fragment key. This prevents a quality-only update from making every
+        # Straycat fragment cold at once.
+        command = self._resampler_command()
+        executable = Path(shutil.which(command[0]) or command[0])
+        stamp = executable.stat()
+        profile = {
+            "schema": self.FRAGMENT_CACHE_SCHEMA,
+            "voicebank": index.fingerprint,
+            "resampler": command,
+            "resampler_stamp": [stamp.st_size, stamp.st_mtime_ns],
+            "velocity": self._velocity(),
+            "modulation": self._modulation(),
+            "flags": os.getenv("PHONE_WORKER_TETO_FLAGS", ""),
             "length_mode": self._length_mode(),
         }
         return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
@@ -201,9 +226,11 @@ class TetoRenderer:
         except (OSError, EOFError, wave.Error):
             return False
 
-    def _resample_note(self, *, index: VoicebankIndex, entry: OtoEntry, note: RenderNote, workdir: Path, deadline: float) -> Path:
-        payload = "|".join((
-            self._render_fingerprint(index),
+    def _fragment_cache_payload(
+        self, *, fingerprint: str, entry: OtoEntry, note: RenderNote
+    ) -> str:
+        return "|".join((
+            fingerprint,
             entry.cache_identity(),
             note.pitch,
             note.pitchbend,
@@ -212,44 +239,85 @@ class TetoRenderer:
             str(self._modulation()),
             str(os.getenv("PHONE_WORKER_TETO_FLAGS") or ""),
         ))
+
+    def _resample_note(
+        self, *, index: VoicebankIndex, entry: OtoEntry, note: RenderNote, workdir: Path, deadline: float
+    ) -> tuple[Path, bool, bool]:
+        payload = self._fragment_cache_payload(
+            fingerprint=self._fragment_fingerprint(index), entry=entry, note=note
+        )
         key = self._cache.key(payload)
         cached = self._cache.get(key)
         if cached is not None:
-            return cached
+            return cached, False, False
+
+        # Compatibility lookup for the stable speech-3 fragment cache. 3B
+        # changes the whole-utterance fingerprint but must not force every
+        # source through a cold WORLD/Straycat render again.
+        legacy_payload = self._fragment_cache_payload(
+            fingerprint=self._render_fingerprint_for_version(index, self.LEGACY_FRAGMENT_RENDER_VERSION),
+            entry=entry,
+            note=note,
+        )
+        legacy_cached = self._cache.get(self._cache.key(legacy_payload))
+        if legacy_cached is not None:
+            return legacy_cached, False, True
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("tempo da renderização Teto esgotado")
         raw_output = workdir / f"{key}.raw.wav"
         normalized_output = workdir / f"{key}.wav"
-        command = self._resampler_command() + [
-            str(entry.wav_path),
-            str(raw_output),
-            note.pitch,
-            str(self._velocity()),
-            str(os.getenv("PHONE_WORKER_TETO_FLAGS") or ""),
-            self._format_number(entry.offset_ms),
-            self._format_number(self._resampler_length(entry, note)),
-            self._format_number(entry.consonant_ms),
-            self._format_number(entry.cutoff_ms),
-            "100",
-            str(self._modulation()),
-            f"!{max(60, min(240, self._env_int('PHONE_WORKER_TETO_TEMPO', 140)))}",
-            note.pitchbend,
-        ]
-        proc = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=max(0.5, remaining),
-            check=False,
-        )
+
+        def run_resampler(pitchbend: str) -> tuple[subprocess.CompletedProcess[bytes], list[str]]:
+            command = self._resampler_command() + [
+                str(entry.wav_path),
+                str(raw_output),
+                note.pitch,
+                str(self._velocity()),
+                str(os.getenv("PHONE_WORKER_TETO_FLAGS") or ""),
+                self._format_number(entry.offset_ms),
+                self._format_number(self._resampler_length(entry, note)),
+                self._format_number(entry.consonant_ms),
+                self._format_number(entry.cutoff_ms),
+                "100",
+                str(self._modulation()),
+                f"!{max(60, min(240, self._env_int('PHONE_WORKER_TETO_TEMPO', 140)))}",
+                pitchbend,
+            ]
+            proc = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=max(0.5, deadline - time.monotonic()),
+                check=False,
+            )
+            return proc, command
+
+        proc, _ = run_resampler(note.pitchbend)
+        pitchbend_fallback = False
+        primary_error = proc.stderr.decode("utf-8", errors="replace")[-500:]
+        primary_ok = proc.returncode == 0 and raw_output.is_file() and raw_output.stat().st_size > 44
+
+        if not primary_ok and note.pitchbend != "AA" and time.monotonic() < deadline:
+            # A quality curve is never allowed to knock the whole engine down to
+            # gTTS. Retry this single fragment with neutral UTAU pitchbend. The
+            # neutral retry is intentionally not persisted under the expressive
+            # cache key, so a future compatible renderer can try the curve again.
+            with contextlib.suppress(OSError):
+                raw_output.unlink()
+            proc, _ = run_resampler("AA")
+            pitchbend_fallback = True
+
         if proc.returncode != 0 or not raw_output.is_file() or raw_output.stat().st_size <= 44:
-            error = proc.stderr.decode("utf-8", errors="replace")[-500:]
-            raise TetoSynthesisError(f"resampler falhou para {entry.alias!r}: {error or proc.returncode}")
+            retry_error = proc.stderr.decode("utf-8", errors="replace")[-500:]
+            detail = retry_error or primary_error or str(proc.returncode)
+            raise TetoSynthesisError(f"resampler falhou para {entry.alias!r}: {detail}")
 
         if self._native_wav(raw_output):
-            return self._cache.put(key, raw_output)
+            if pitchbend_fallback:
+                return raw_output, True, False
+            return self._cache.put(key, raw_output), False, False
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -268,7 +336,9 @@ class TetoRenderer:
         if ffmpeg.returncode != 0 or not normalized_output.is_file() or normalized_output.stat().st_size <= 44:
             error = ffmpeg.stderr.decode("utf-8", errors="replace")[-500:]
             raise TetoSynthesisError(f"ffmpeg não normalizou fragmento: {error or ffmpeg.returncode}")
-        return self._cache.put(key, normalized_output)
+        if pitchbend_fallback:
+            return normalized_output, True, False
+        return self._cache.put(key, normalized_output), False, False
 
     def _read_samples(self, path: Path) -> array.array:
         with wave.open(str(path), "rb") as wav:
@@ -348,6 +418,8 @@ class TetoRenderer:
                 workdir = Path(temp)
                 entries = [index.resolve(note.candidates) for note in notes]
                 groups: dict[Path, list[tuple[int, RenderNote, OtoEntry]]] = {}
+                pitchbend_fallbacks = 0
+                legacy_fragment_hits = 0
                 for number, (note, entry) in enumerate(zip(notes, entries)):
                     if entry is not None:
                         groups.setdefault(entry.wav_path, []).append((number, note, entry))
@@ -358,7 +430,7 @@ class TetoRenderer:
                     return {number: self._resample_note(index=index, entry=entry, note=note, workdir=workdir, deadline=deadline)
                             for number, note, entry in items}
 
-                fragments: dict[int, Path] = {}
+                fragments: dict[int, tuple[Path, bool, bool]] = {}
                 workers = max(1, min(2, self._env_int("PHONE_WORKER_TETO_RENDER_THREADS", 2)))
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = [pool.submit(render_group, items) for items in groups.values()]
@@ -378,11 +450,15 @@ class TetoRenderer:
                         pause = int(self.SAMPLE_RATE * min(note.duration_ms, 160) / 1000)
                         combined.extend([0] * pause)
                         continue
-                    fragment_path = fragments[number]
+                    fragment_path, neutral_pitch, legacy_fragment = fragments[number]
+                    pitchbend_fallbacks += int(neutral_pitch)
+                    legacy_fragment_hits += int(legacy_fragment)
                     fragment = self._apply_gain(self._read_samples(fragment_path), note.gain)
                     overlap_ms = self._oto_join_ms(entry)
                     self._append_crossfade(combined, fragment, int(self.SAMPLE_RATE * overlap_ms / 1000.0))
-                    if note.pause_after_ms:
+                    # The phonemizer's tiny 6 ms word separator should not
+                    # become a hard stop. Punctuation pauses remain explicit.
+                    if note.pause_after_ms >= 24:
                         combined.extend([0] * int(self.SAMPLE_RATE * note.pause_after_ms / 1000.0))
                     rendered += 1
 
@@ -423,6 +499,8 @@ class TetoRenderer:
                 "aliases": index.alias_count,
                 "rendered_phonemes": rendered,
                 "missing_phonemes": missing[:12],
+                "pitchbend_fallbacks": pitchbend_fallbacks,
+                "legacy_fragment_hits": legacy_fragment_hits,
                 "worker_synth_ms": round(elapsed_ms, 2),
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }

@@ -65,6 +65,28 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertGreater(comma_end.pause_after_ms, first_word_end.pause_after_ms)
         self.assertGreater(question_end.pause_after_ms, comma_end.pause_after_ms)
 
+    def test_function_words_are_deaccented_without_changing_aliases(self):
+        plain = phonemize("de para com")
+        self.assertTrue(plain)
+        self.assertTrue(all(m.deaccented for m in plain))
+        self.assertFalse(any(m.stressed for m in plain))
+        self.assertEqual(_aliases("de"), ["で"])
+
+        phrase = build_notes(phonemize("eu sou a Teto"))
+        deaccented = [note for note in phrase if note.deaccented]
+        stressed = [note for note in phrase if note.stressed]
+        self.assertTrue(deaccented)
+        self.assertTrue(stressed)
+        self.assertLess(max(note.gain for note in deaccented), max(note.gain for note in stressed))
+
+    def test_question_and_statement_have_distinct_but_bounded_contours(self):
+        statement = build_notes(phonemize("Teto."))
+        question = build_notes(phonemize("Teto?"))
+        self.assertNotEqual(statement[-1].pitchbend, question[-1].pitchbend)
+        self.assertEqual(statement[-1].contour, "statement-fall")
+        self.assertEqual(question[-1].contour, "question-rise")
+        self.assertTrue(all(len(note.pitchbend) < 256 for note in statement + question))
+
     def test_phrase_contours_keep_coarse_pitch_stable_and_use_pitchbend(self):
         statement = build_notes(phonemize("Olá, eu sou a Teto."), base_pitch="D4")
         question = build_notes(phonemize("Olá, eu sou a Teto?"), base_pitch="D4")

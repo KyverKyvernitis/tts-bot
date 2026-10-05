@@ -161,7 +161,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.20"
+PHONE_WORKER_VERSION = "1.11.21"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -5046,12 +5046,22 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         available_engines=available,
                         raw_response=raw_response,
                     )
+                    if errors:
+                        result["fallback_errors"] = errors[:4]
+                        if engine != requested_engine:
+                            result["fallback_from_engine"] = requested_engine
+                        existing_logs = list(result.get("logs") or [])
+                        existing_logs.extend(f"fallback_before={item}" for item in errors[:2])
+                        result["logs"] = existing_logs[:10]
                     finalize_timing(result)
                     elapsed_ms = (time.monotonic() - started) * 1000.0
                     _tts_agent_record_done(ok=True, engine=engine, elapsed_ms=elapsed_ms)
                     return result
                 except Exception as exc:
-                    errors.append(f"{engine}: {type(exc).__name__}: {_short_text(exc, limit=140)}")
+                    failure = f"{engine}: {type(exc).__name__}: {_short_text(exc, limit=140)}"
+                    errors.append(failure)
+                    if engine == "teto":
+                        print(f"[phone-worker-tts] Teto falhou antes do fallback: {failure}", flush=True)
                     if fast_teto_preflight and engine == "teto" and not fallback_dependencies_resolved:
                         fallback_started = time.monotonic()
                         fallback_deps = _turbo_dependency_snapshot()

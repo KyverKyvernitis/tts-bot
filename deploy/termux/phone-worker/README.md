@@ -9,45 +9,44 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-3-natural`. Se o serviço ainda
+o renderer atualizado anuncia `renderer_version=speech-3b-natural-safe`. Se o serviço ainda
 mostra o estado antigo, o reinício manual canônico é
 `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
 bloqueando a síntese pesada até sua conclusão.
 
-## Naturalidade da Teto: renderer `speech-3-natural`
+## Naturalidade da Teto: renderer `speech-3b-natural-safe`
 
-O renderer desconta a região consonantal do `LENGTH` solicitado ao Straycat.
-Antes, cada mora de 135 ms ainda recebia a duração da consoante, alongando a
-fala. O modo é detectado pelo nome do executável `straycat*`; wrappers podem
-configurar `PHONE_WORKER_TETO_LENGTH_MODE=post-consonant`. Outros resamplers
-continuam usando o contrato anterior, ou podem selecionar `total`.
+A revisão 3B parte do renderer `speech-3-natural`, que já estava estável no aparelho,
+e reintroduz melhorias de qualidade em passos deliberadamente conservadores. Palavras
+funcionais comuns do PT-BR (`a`, `o`, `de`, `em`, `para`, etc.) deixam de receber
+acento prosódico próprio; sílabas lexicamente tônicas mantêm mais duração e ganho,
+e afirmações/perguntas/exclamações usam contornos um pouco mais claros sem saltos
+de nota.
 
-WAV mono PCM16 a 44100 Hz entra diretamente no cache. FFmpeg continua sendo
-usado para outros formatos. Até dois grupos de gravações são processados em
-paralelo; notas da mesma gravação ficam no mesmo grupo para preservar o cache
-WORLD `.sc`. A montagem mantém a ordem dos fonemas.
+O fonemizador não muda os aliases da revisão estável nesta rodada. Isso é intencional:
+a melhora vem de ritmo, acento e fraseado, evitando uma nova onda de aliases ausentes
+na voicebank CV japonesa. A separação lexical de 6 ms também deixa de virar silêncio
+duro no WAV final; pontuação continua preservando suas pausas maiores.
 
-O `speech-3-natural` mantém o hot path de latência da revisão anterior e muda
-a fala em cinco pontos: tonicidade aproximada de PT-BR, duração diferente para
-sílabas tônicas e átonas, pitchbend UTAU contínuo em vez do `AA` plano, pausas
-lexicais curtas e junção orientada também pelo `preutterance` do `oto.ini`. O
-pitch grosso fica estável; curvas em centésimos de semitom carregam a
-entonação de afirmações, perguntas, exclamações e continuidades.
+A proteção principal da 3B fica no renderer. Se o Straycat rejeitar uma curva UTAU
+expressiva, somente aquele fragmento é tentado outra vez com pitchbend neutro `AA`;
+a Teto não deve cair inteira para gTTS por causa de uma curva de qualidade. O resultado
+reporta `pitchbend_fallbacks` para tornar esse caso observável.
 
-O fonemizador continua sendo uma aproximação de português para banco japonês
-CV, mas evita algumas vogais artificiais comuns: `m/n` finais usam `ん`, `l`
-final é vocalizado, `r` final deixa de criar uma sílaba `ru`, `rr/r` forte usa
-uma aproximação aspirada e `s` intervocálico pode sonorizar. Isso melhora a
-inteligibilidade sem introduzir uma biblioteca linguística pesada.
+A revisão também separa a identidade do cache da frase da identidade física dos
+fragmentos. O cache final muda com `speech-3b-natural-safe`, mas fragmentos compatíveis
+da revisão estável `speech-3-natural` podem ser reutilizados (`legacy_fragment_hits`).
+Isso evita transformar uma atualização de prosódia em uma renderização WORLD/Straycat
+totalmente fria. Fragmentos novos continuam sendo chaveados por pitch, pitchbend e
+duração, portanto sonoridades realmente diferentes não colidem.
 
-Na montagem, `overlap` continua sendo respeitado e uma fração conservadora de
-`preutterance` antecipa a entrada da próxima unidade, limitada a 55 ms. O
-crossfade agora usa smoothstep e a sílaba tônica recebe dinâmica leve. A
-modulação do Straycat continua preservando parte da variação da gravação
-original.
+Se a Teto ainda falhar e o TTS Agent precisar usar outra engine, o Phone Worker 1.11.21
+registra no stdout/journal a exceção exata antes do fallback e inclui `fallback_errors`
+no resultado interno. Assim uma regressão futura não fica escondida atrás de uma fala
+do gTTS.
 
-Configurações opcionais, com os valores padrão:
+Configurações opcionais permanecem as mesmas:
 
 ```env
 PHONE_WORKER_TETO_SPEECH_RATE=1.0
@@ -56,24 +55,9 @@ PHONE_WORKER_TETO_RENDER_THREADS=2
 PHONE_WORKER_TETO_LENGTH_MODE=auto
 ```
 
-`SPEECH_RATE` escala a duração da fala e das pausas, entre 0.75 e 1.5.
-`TEMPO` continua sendo o BPM do pitchbend UTAU, e não controla a velocidade
-geral da fala. O fingerprint anunciado inclui a revisão e os parâmetros do
-renderer, para invalidar os caches de fragmentos, worker e bot quando o som
-muda. O fingerprint original da voicebank também permanece no status.
-
-Os testes direcionados passam com `python -m unittest discover -s tests -p
-'test_teto*.py' -v`. Em comparação com a voicebank oficial e Straycat 1.1.0
-no Linux x86_64, "Olá, eu sou a Teto." passou de 2.492 s para 1.595 s de áudio,
-sem aliases ausentes. Com análise WORLD já em cache e fragmentos vazios, a
-geração passou de aproximadamente 811 ms para 111 ms nesse host. Esses tempos
-não incluem Discord/rede e não representam medição do Poco X7 Pro. A
-naturalidade precisa de avaliação auditiva: a voicebank CV japonesa continua
-com limitações de pronúncia, articulação e entonação em português.
-
-Distribua a alteração pelo updater do projeto, nas pastas originais. O
-bootstrap publica e ativa a nova release pelo hash das fontes, preservando
-configuração e pareamento. Não edite a release imutável ativa manualmente.
+A voicebank continua sendo japonesa CV; o objetivo desta revisão é melhorar naturalidade
+sem trocar a engine nem adicionar dependências ao Termux. Distribua pelo updater do
+projeto nas pastas originais.
 
 ## Painéis técnicos do bot
 

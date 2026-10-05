@@ -179,10 +179,66 @@ class TetoRendererTests(unittest.TestCase):
                 result = TetoRenderer().synthesize("teto")
                 with wave.open(io.BytesIO(result["audio"]), "rb") as w:
                     duration = w.getnframes() / w.getframerate()
-            # Prosody v2 makes the stressed mora longer and the unstressed
-            # one shorter, with only a 6 ms lexical gap. The consonants must
-            # still fit inside the requested durations instead of adding 121 ms.
-            self.assertAlmostEqual(duration, 0.270, delta=0.003)
+            # Prosody 3B keeps the stressed mora longer and the unstressed
+            # one shorter, but the tiny lexical separator is no longer emitted
+            # as hard silence. Consonants must still stay inside the budget.
+            self.assertAlmostEqual(duration, 0.264, delta=0.003)
+
+    def test_quality_pitchbend_failure_retries_neutral_without_killing_teto(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bank, resampler = self._assets(root)
+            _write_wav(bank / "te.wav", rate=44100, sample=900)
+            _write_wav(bank / "to.wav", rate=44100, sample=-900)
+            resampler.write_text(
+                "#!/usr/bin/env python3\n"
+                "import shutil, sys\n"
+                "if sys.argv[-1] != 'AA':\n"
+                "    print('pitch curve rejected', file=sys.stderr)\n"
+                "    raise SystemExit(23)\n"
+                "shutil.copyfile(sys.argv[1], sys.argv[2])\n",
+                encoding="utf-8",
+            )
+            resampler.chmod(0o755)
+            with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
+                result = TetoRenderer().synthesize("teto")
+            self.assertEqual(result["renderer_version"], "speech-3b-natural-safe")
+            self.assertEqual(result["pitchbend_fallbacks"], 2)
+            self.assertTrue(bytes(result["audio"]).startswith(b"RIFF"))
+
+    def test_speech3_fragment_cache_is_reused_after_quality_revision(self):
+        from teto_renderer.phonemizer import phonemize
+        from teto_renderer.prosody import build_notes
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bank, resampler = self._assets(root)
+            _write_wav(bank / "te.wav", rate=44100, sample=700)
+            _write_wav(bank / "to.wav", rate=44100, sample=-700)
+            resampler.write_text(
+                "#!/usr/bin/env python3\nimport sys\nraise SystemExit(91)\n",
+                encoding="utf-8",
+            )
+            resampler.chmod(0o755)
+            with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
+                renderer = TetoRenderer()
+                index = renderer._load_index()
+                notes = build_notes(phonemize("teto"))
+                entries = [index.resolve(note.candidates) for note in notes]
+                for note, entry in zip(notes, entries):
+                    self.assertIsNotNone(entry)
+                    legacy = renderer._fragment_cache_payload(
+                        fingerprint=renderer._render_fingerprint_for_version(
+                            index, renderer.LEGACY_FRAGMENT_RENDER_VERSION
+                        ),
+                        entry=entry,
+                        note=note,
+                    )
+                    source = entry.wav_path
+                    renderer._cache.put(renderer._cache.key(legacy), source)
+                result = renderer.synthesize("teto")
+            self.assertEqual(result["legacy_fragment_hits"], 2)
+            self.assertEqual(result["pitchbend_fallbacks"], 0)
 
     def test_oto_preutterance_contributes_to_join_without_unbounded_overlap(self):
         from teto_renderer.voicebank import OtoEntry

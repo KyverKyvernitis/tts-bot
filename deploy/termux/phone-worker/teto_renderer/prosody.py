@@ -17,6 +17,7 @@ class RenderNote:
     gain: float = 1.0
     stressed: bool = False
     contour: str = "neutral"
+    deaccented: bool = False
 
 
 _PITCH_CLASSES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -123,20 +124,22 @@ def _centers(moras: list[Mora]) -> list[int]:
         count = end - start + 1
         ending = moras[end].phrase_end
         if ending == "?":
-            phrase_start, phrase_end = 4, 16
+            phrase_start, phrase_end = 6, 20
         elif ending in {",", ";", ":"}:
-            phrase_start, phrase_end = 6, -4
+            phrase_start, phrase_end = 8, -2
         elif ending == "!":
-            phrase_start, phrase_end = 10, -8
+            phrase_start, phrase_end = 12, -10
         else:
-            phrase_start, phrase_end = 7, -14
+            phrase_start, phrase_end = 9, -18
 
         for local_index, index in enumerate(range(start, end + 1)):
             ratio = local_index / max(1, count - 1)
             center = phrase_start + (phrase_end - phrase_start) * ratio
             mora = moras[index]
             if mora.stressed:
-                center += 28
+                center += 34
+            elif mora.deaccented:
+                center -= 10
             elif mora.word_moras > 1:
                 center -= 3
             if index + 1 <= end and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
@@ -147,27 +150,29 @@ def _centers(moras: list[Mora]) -> list[int]:
 
         if ending == "?":
             if end - 1 >= start:
-                values[end - 1] = max(values[end - 1], 18)
-            values[end] = max(values[end], 50)
+                values[end - 1] = max(values[end - 1], 24)
+            values[end] = max(values[end], 64)
         elif ending in {".", "\n"}:
             if end - 1 >= start:
-                values[end - 1] = min(values[end - 1], -10)
-            values[end] = min(values[end], -34)
+                values[end - 1] = min(values[end - 1], -14)
+            values[end] = min(values[end], -42)
         elif ending == "!":
             if end - 1 >= start:
-                values[end - 1] = max(values[end - 1], 18)
-            values[end] = min(values[end], -12)
+                values[end - 1] = max(values[end - 1], 24)
+            values[end] = min(values[end], -18)
         elif not ending:
-            values[end] = min(values[end], -22)
+            values[end] = min(values[end], -28)
 
-    return [max(-70, min(70, value)) for value in values]
+    return [max(-84, min(84, value)) for value in values]
 
 
 def _duration_for(moras: list[Mora], index: int) -> int:
     mora = moras[index]
     duration = float(mora.duration_ms)
     if mora.stressed:
-        duration *= 1.13
+        duration *= 1.14
+    elif mora.deaccented:
+        duration *= 0.88
     elif mora.word_moras > 1:
         duration *= 0.90
     if index + 1 < len(moras) and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
@@ -192,6 +197,8 @@ def _contour_name(mora: Mora) -> str:
         return "continuation"
     if mora.stressed:
         return "stress"
+    if mora.deaccented:
+        return "deaccented"
     return "neutral"
 
 
@@ -213,14 +220,19 @@ def build_notes(
         following = centers[index + 1] if index + 1 < len(moras) and not mora.phrase_end else center
         start = round((previous + center) / 2)
         end = round((center + following) / 2)
-        peak = center + (10 if mora.stressed else 3)
+        peak = center + (12 if mora.stressed else (1 if mora.deaccented else 3))
         if mora.phrase_end == "?":
-            peak = max(peak, 54)
+            peak = max(peak, 68)
         elif mora.phrase_end in {".", "\n"}:
             peak = min(peak, center + 1)
         pitchbend = _pitch_curve(start, peak, end, duration_ms=duration, tempo=tempo_value)
 
-        gain = 1.055 if mora.stressed else (0.985 if mora.word_moras > 1 else 1.0)
+        if mora.stressed:
+            gain = 1.055
+        elif mora.deaccented:
+            gain = 0.955
+        else:
+            gain = 0.985 if mora.word_moras > 1 else 1.0
         if mora.phrase_end in {".", "?", "!", "\n"}:
             gain *= 0.985
 
@@ -235,5 +247,6 @@ def build_notes(
             gain=max(0.90, min(1.10, gain)),
             stressed=mora.stressed,
             contour=_contour_name(mora),
+            deaccented=mora.deaccented,
         ))
     return notes
