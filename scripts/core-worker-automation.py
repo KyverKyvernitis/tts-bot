@@ -80,13 +80,13 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("start-phone-worker.sh", 0o755),
     ("watch-phone-worker.sh", 0o755),
     ("pair-phone-worker.sh", 0o755),
-    ("repair-phone-worker.sh", 0o755),
     ("bootstrap-phone-worker.sh", 0o755),
     ("teto_renderer/__init__.py", 0o644),
     ("teto_renderer/errors.py", 0o644),
     ("teto_renderer/cache.py", 0o644),
     ("teto_renderer/voicebank.py", 0o644),
     ("teto_renderer/phonemizer.py", 0o644),
+    ("teto_renderer/ptbr_g2p.py", 0o644),
     ("teto_renderer/prosody.py", 0o644),
     ("teto_renderer/renderer.py", 0o644),
     ("scripts/validate-teto-assets.py", 0o755),
@@ -95,6 +95,7 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
 # They are not required to boot an immutable runtime release. Keeping them
 # separate leaves the complete runtime within bootstrap 1.0.0's 64-member ZIP.
 PHONE_WORKER_INSTALLATION_FILES = (
+    ("repair-phone-worker.sh", 0o755),
     ("install.sh", 0o755),
     ("accept-core-worker-on-device.sh", 0o755),
     ("README.md", 0o644),

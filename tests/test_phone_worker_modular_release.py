@@ -53,7 +53,8 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/ponte_worker/servico.py",
              "cogs/musica/runtime_telefone/termux/__init__.py",
              "cogs/musica/runtime_telefone/termux/integracao-worker.sh",
-             "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh"}
+             "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh",
+             "teto_renderer/ptbr_g2p.py"}
 
 
 def load(name, path):
@@ -197,6 +198,29 @@ for module in (archive_manifest, archive_ogg, archive_staging, archive_pipeline,
         cwd=tmp_path, capture_output=True, text=True, timeout=10,
     )
     assert resolver_result.returncode == 0, resolver_result.stdout + resolver_result.stderr
+
+
+def test_teto_g2p_dependency_is_in_immutable_runtime_release(publisher, tmp_path):
+    bootstrap = original_bootstrap()
+    latest = publisher._publish_phone_worker_release(publisher._build_worker_update_payload())
+    outer = bootstrap._validate_manifest(latest, "https://vps.invalid")
+    archive = publisher.AGENT_RELEASE_ROOT / "releases" / (outer["source_hash"] + ".zip")
+    staging = tmp_path / "teto-runtime"
+    bootstrap._extract_and_validate(archive, staging, outer)
+
+    code = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+from teto_renderer import TetoRenderer
+from teto_renderer.ptbr_g2p import g2p_word
+assert TetoRenderer is not None
+assert g2p_word("Brasil").phonemes == ("b", "r", "a", "z", "i", "w")
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(staging)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("module_file", ["config.py", "telemetry.py", "control_plane.py", "voice_state.py", "tts_policy.py", "tts_cache.py", "tts_android.py", "tts_providers.py", "pcm_io.py"])

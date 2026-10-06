@@ -161,7 +161,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.22"
+PHONE_WORKER_VERSION = "1.11.23"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -9626,13 +9626,14 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "teto_renderer/cache.py": ("worker", "teto_renderer/cache.py", 0o644),
     "teto_renderer/voicebank.py": ("worker", "teto_renderer/voicebank.py", 0o644),
     "teto_renderer/phonemizer.py": ("worker", "teto_renderer/phonemizer.py", 0o644),
+    "teto_renderer/ptbr_g2p.py": ("worker", "teto_renderer/ptbr_g2p.py", 0o644),
     "teto_renderer/prosody.py": ("worker", "teto_renderer/prosody.py", 0o644),
     "teto_renderer/renderer.py": ("worker", "teto_renderer/renderer.py", 0o644),
     "scripts/validate-teto-assets.py": ("worker", "scripts/validate-teto-assets.py", 0o755),
 }
 # These installation-only files remain accepted for manual/legacy updates,
 # but are not part of the immutable runtime release or its source hash.
-_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"install.sh", "accept-core-worker-on-device.sh", "README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example"})
+_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"repair-phone-worker.sh", "install.sh", "accept-core-worker-on-device.sh", "README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example"})
 _PHONE_WORKER_SOURCE_HASH_CACHE: dict[str, Any] = {"signature": None, "value": ""}
 _PHONE_WORKER_SOURCE_HASH_LOCK = threading.Lock()
 

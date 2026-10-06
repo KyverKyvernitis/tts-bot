@@ -5,6 +5,8 @@ import unicodedata
 from dataclasses import dataclass
 
 
+# Runtime contract: this module is imported by phonemizer.py and therefore must
+# be present in every immutable Phone Worker release, not only in the VPS checkout.
 # Keep the intermediate inventory intentionally close to OpenUtau's Portuguese
 # G2P symbols. The worker does not embed OpenUtau/ONNX; this lightweight layer
 # exists so orthography is resolved to Portuguese sounds *before* we approximate
