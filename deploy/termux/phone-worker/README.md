@@ -9,64 +9,86 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-4-phonetic` e
-`phonemizer_version=ptbr-g2p-v1`. Se o serviço ainda mostra o estado antigo, o
-reinício manual canônico é `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
+o renderer atualizado anuncia `renderer_version=speech-4b-english-cvvc` e
+`phonemizer_version=ptbr-g2p-xsampa-cvvc-v1`. Se o serviço ainda mostra o
+estado antigo, o reinício manual canônico é
+`bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
 bloqueando a síntese pesada até sua conclusão.
 
-## Inteligibilidade da Teto: renderer `speech-4-phonetic`
+## Teto English CVVC para PT-BR: renderer `speech-4b-english-cvvc`
 
-Esta revisão muda o front-end fonético antes de tentar novas curvas de prosódia.
-A referência arquitetural é o OpenUtau: a palavra é resolvida para sons da língua
-antes de esses sons serem adaptados aos aliases que a voicebank realmente oferece.
-O worker não incorpora OpenUtau nem o modelo ONNX do `PortugueseG2p`; a implementação
-continua leve, em Python padrão e sem dependências novas no Termux.
+A revisão 4B troca o estágio final de articulação quando a voicebank oficial
+English 150401 está instalada. O G2P PT-BR continua separado da voicebank, mas
+os fonemas agora são planejados diretamente contra o inventário X-SAMPA/CVVC
+da Teto English. A bank japonesa permanece disponível como fallback de
+compatibilidade.
 
-O pipeline agora é:
+Seleção padrão (`PHONE_WORKER_TETO_VOICEBANK_MODE=auto`):
 
-`texto PT-BR -> G2P PT-BR -> sílabas/contexto -> aliases disponíveis -> Straycat -> montagem`
+1. tenta `$HOME/voicebanks/kasane-teto-english` como `english-cvvc`;
+2. valida o `oto.ini` e exige por padrão pelo menos 500 aliases;
+3. se a English estiver ausente/inválida, volta para
+   `PHONE_WORKER_TETO_VOICEBANK_DIR` sem derrubar a engine.
 
-`ptbr_g2p.py` usa um inventário intermediário próximo ao empregado pelo OpenUtau
-(`a/e/E/i/o/O/u`, vogais nasais, `S/Z/J/L/R`, `tS/dZ`, glides etc.). Regras de
-ortografia tratam `nh`, `lh`, `ch`, `rr`, `ss`, `qu/gu`, `c/g` contextuais,
-`s` intervocálico, palatalização de `ti/di`, nasais, ditongos e hiatos com acento.
-A redução de vogal final átona também ocorre antes do mapeamento para japonês.
+É possível fixar `english` ou `standard` com
+`PHONE_WORKER_TETO_VOICEBANK_MODE`. O caminho da English pode ser substituído
+por `PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR`. Nenhuma voicebank é distribuída
+no updater.
 
-A adaptação para a voicebank CV deixou de assumir um único alias. Cada unidade
-carrega alternativas ordenadas e o `VoicebankIndex` escolhe a primeira presente
-no `oto.ini`. Isso permite aproveitar aliases mais ricos quando existem e manter
-fallbacks japoneses tradicionais na Teto padrão.
+O pipeline principal fica:
 
-Encontros consonantais e codas não viram mais sílabas japonesas com duração normal.
-Quando a voicebank precisa de uma vogal de apoio, ela recebe o papel `epenthetic`
-(~40-50 ms, ganho baixo e overlap maior). Codas, glides e caudas nasais também
-recebem durações/ganhos próprios. Exemplo: em `Brasil`, o /b/ de /br/ ainda precisa
-de uma unidade CV, mas a vogal artificial fica curta e parcialmente escondida pela
-transição para /ra/, em vez de soar como uma sílaba `bu` completa.
+`texto PT-BR -> G2P -> X-SAMPA -> planner CVVC/CC -> oto.ini -> Straycat/WORLD -> WAV`
 
-A proteção da 3B permanece: uma curva de pitch rejeitada pelo Straycat tenta apenas
-aquele fragmento novamente com `AA`, sem derrubar a engine inteira para gTTS. O
-cache físico de fragmentos continua independente da versão de prosódia, portanto
-fragmentos realmente compatíveis podem ser reaproveitados.
+O planner tenta primeiro aliases completos de início/VCV/CCV. Se eles não
+existirem, usa transições VC e CC presentes no `oto.ini`. Encontros como `br`,
+`tr`, `pr`, `gr`, `pl` deixam de exigir uma vogal japonesa artificial quando a
+English possui o cluster. `S`, `Z`, `tS`, `dZ`, `v`, `j`, `w`, `N` e outros
+fonemas da bank são usados diretamente. Os três sons PT-BR sem unidade dedicada
+no banco recebem aproximações composicionais: `nh -> n+j`, `lh -> l+j` e o
+`r/rr` forte -> `h`; o `r` fraco usa os aliases contextuais de `r` e tenta `4`
+quando a combinação existir.
 
-A resposta da Teto agora expõe `phonemizer_version`, `phonetic_units`,
-`auxiliary_phonemes` e `epenthetic_phonemes`. O Phone Worker 1.11.22 projeta esses
-metadados e, na resposta raw, publica também `X-Core-Worker-Teto-Renderer`,
-`X-Core-Worker-Teto-Phonemizer` e `X-Core-Worker-Teto-Epenthetic`.
+Ditongos frequentes tentam aliases nativos como `aI`, `eI`, `OI`, `aU` e `oU`.
+Vogais nasais mantêm o núcleo oral e acrescentam uma cauda nasal curta com `N`
+quando o banco não oferece nasalização direta. Isso evita voltar ao padrão de
+sílabas japonesas completas.
 
-Configurações opcionais permanecem as mesmas:
+A resposta de síntese publica `voicebank_profile`, `cvvc_direct`,
+`cvvc_transitions`, `cluster_hits`, `approximated_phonemes` e
+`coverage_percent`. A resposta raw também inclui
+`X-Core-Worker-Teto-Voicebank-Profile`, `X-Core-Worker-Teto-Coverage` e
+`X-Core-Worker-Teto-Cluster-Hits`. Assim a inteligibilidade pode ser auditada
+por cobertura real do banco em vez de apenas por audição.
+
+Os caches WORLD `*_wav.sc` não precisam existir na instalação inicial. Straycat
+os cria sob demanda por WAV; o agrupamento por arquivo continua impedindo duas
+análises concorrentes do mesmo sample.
+
+Configuração recomendada:
 
 ```env
+CORE_WORKER_PROFILE=turbo
+PHONE_WORKER_TETO_ENABLED=true
+PHONE_WORKER_TETO_VOICEBANK_MODE=auto
+PHONE_WORKER_TETO_VOICEBANK_DIR=$HOME/voicebanks/kasane-teto
+PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR=$HOME/voicebanks/kasane-teto-english
+PHONE_WORKER_TETO_RESAMPLER_COMMAND=$HOME/bin/straycat-rs
 PHONE_WORKER_TETO_SPEECH_RATE=1.0
 PHONE_WORKER_TETO_MODULATION=15
 PHONE_WORKER_TETO_RENDER_THREADS=2
 PHONE_WORKER_TETO_LENGTH_MODE=auto
 ```
 
-A voicebank instalada continua sendo japonesa CV. Esta revisão melhora a
-inteligibilidade dentro dessa limitação; ela não torna o banco equivalente ao
-English/X-SAMPA usado em configurações do OpenUtau.
+Validação isolada da English CVVC (o `--mode` evita que o validador teste a bank errada quando as duas estão instaladas):
+
+```bash
+python ~/phone-worker/scripts/validate-teto-assets.py \
+  --mode english \
+  --voicebank "$HOME/voicebanks/kasane-teto-english" \
+  --resampler "$HOME/bin/straycat-rs" \
+  --render-test --text "Brasil trabalho problema"
+```
 
 ## Painéis técnicos do bot
 

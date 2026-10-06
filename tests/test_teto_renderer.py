@@ -89,6 +89,73 @@ class TetoRendererTests(unittest.TestCase):
                 self.assertTrue(bytes(result["audio"]).startswith(b"RIFF"))
                 self.assertLessEqual(len(result["audio"]), 8 * 1024 * 1024)
 
+    def test_voicebank_keeps_xsampa_case_distinctions(self):
+        from teto_renderer.voicebank import VoicebankIndex
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _write_wav(root / "upper.wav")
+            _write_wav(root / "lower.wav")
+            (root / "oto.ini").write_text(
+                "upper.wav=E,0,20,0,0,0\n"
+                "lower.wav=e,0,20,0,0,0\n",
+                encoding="utf-8",
+            )
+            index = VoicebankIndex.load(root, minimum_aliases=1)
+            self.assertEqual(index.resolve(("E",)).alias, "E")
+            self.assertEqual(index.resolve(("e",)).alias, "e")
+
+    def test_auto_prefers_english_cvvc_bank_and_reports_coverage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            standard, resampler = self._assets(root)
+            english = root / "english"
+            english.mkdir()
+            _write_wav(english / "start.wav", rate=44100, sample=800)
+            _write_wav(english / "vcv.wav", rate=44100, sample=-800)
+            (english / "oto.ini").write_text(
+                "start.wav=- te,0,20,0,15,8\n"
+                "vcv.wav=e tu,0,20,0,15,8\n",
+                encoding="utf-8",
+            )
+            (english / "nested").mkdir()
+            (english / "nested" / "character.txt").write_text("name=Kasane Teto English Test\n", encoding="utf-8")
+            env = self._env(standard, resampler, root / "cache")
+            env.update({
+                "PHONE_WORKER_TETO_VOICEBANK_MODE": "auto",
+                "PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR": str(english),
+                "PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES": "1",
+            })
+            with patch.dict(os.environ, env, clear=False):
+                renderer = TetoRenderer(resource_guard=lambda: {"ok": True})
+                status = renderer.status(force=True)
+                self.assertTrue(status["ready"])
+                self.assertEqual(status["voicebank_profile"], "english-cvvc")
+                self.assertEqual(status["voice"], "kasane-teto-english-cvvc")
+                self.assertEqual(status["name"], "Kasane Teto English Test")
+                result = renderer.synthesize("teto", timeout_seconds=10)
+            self.assertEqual(result["voicebank_profile"], "english-cvvc")
+            self.assertEqual(result["renderer_version"], "speech-4b-english-cvvc")
+            self.assertEqual(result["missing_phonemes"], [])
+            self.assertGreaterEqual(result["cvvc_direct"], 2)
+            self.assertGreater(result["coverage_percent"], 90.0)
+            self.assertEqual(result["epenthetic_phonemes"], 0)
+
+    def test_auto_falls_back_to_standard_bank_when_english_is_absent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            standard, resampler = self._assets(root)
+            env = self._env(standard, resampler, root / "cache")
+            env.update({
+                "PHONE_WORKER_TETO_VOICEBANK_MODE": "auto",
+                "PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR": str(root / "missing-english"),
+            })
+            with patch.dict(os.environ, env, clear=False):
+                status = TetoRenderer().status(force=True)
+            self.assertTrue(status["ready"])
+            self.assertEqual(status["voicebank_profile"], "standard")
+            self.assertEqual(status["voice"], "kasane-teto-standard")
+
     def test_resource_guard_blocks_without_starting_resampler(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -202,8 +269,8 @@ class TetoRendererTests(unittest.TestCase):
             resampler.chmod(0o755)
             with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
                 result = TetoRenderer().synthesize("teto")
-            self.assertEqual(result["renderer_version"], "speech-4-phonetic")
-            self.assertEqual(result["phonemizer_version"], "ptbr-g2p-v1")
+            self.assertEqual(result["renderer_version"], "speech-4b-english-cvvc")
+            self.assertEqual(result["phonemizer_version"], "ptbr-g2p-xsampa-cvvc-v1")
             self.assertEqual(result["pitchbend_fallbacks"], 2)
             self.assertTrue(bytes(result["audio"]).startswith(b"RIFF"))
 

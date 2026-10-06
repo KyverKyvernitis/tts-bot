@@ -22,6 +22,7 @@ class Mora:
     deaccented: bool = False
     role: str = "nucleus"  # nucleus | epenthetic | coda | glide | nasal
     source_phonemes: tuple[str, ...] = ()
+    coverage: str = "standard-cv"
 
 
 # This mapping is only the final PT-phone -> Japanese-CV approximation layer.
@@ -244,6 +245,7 @@ def _make_mora(
     candidates: tuple[str, ...], *, duration_ms: int, role: str, source: tuple[str, ...],
     stressed: bool = False, deaccented: bool = False,
     resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+    coverage: str = "standard-cv",
 ) -> Mora:
     return Mora(
         candidates=_prefer_available(candidates, resolve_alias),
@@ -252,6 +254,7 @@ def _make_mora(
         deaccented=deaccented,
         role=role,
         source_phonemes=source,
+        coverage=coverage,
     )
 
 
@@ -310,6 +313,271 @@ def _phonetic_word_to_moras(
     return moras
 
 
+
+# Teto English 150401 uses a Delta/X-SAMPA-style CVVC inventory.  Keep PT-BR
+# G2P independent from the bank: this layer only maps canonical PT phones onto
+# X-SAMPA units that are actually present in the loaded oto.ini.
+_XSAMPA_VOWELS = {
+    "a": "a", "a~": "a", "e": "e", "e~": "e", "E": "E",
+    "i": "i", "i~": "i", "o": "o", "o~": "o", "O": "O",
+    "u": "u", "u~": "u",
+}
+_XSAMPA_DIPHTHONGS = {
+    ("a", "j"): "aI", ("e", "j"): "eI", ("E", "j"): "eI",
+    ("o", "j"): "OI", ("O", "j"): "OI",
+    ("a", "w"): "aU", ("o", "w"): "oU", ("O", "w"): "oU",
+}
+_ENGLISH_ROLE_DURATIONS = {
+    "transition": 58,
+    "cluster": 54,
+    "coda": 58,
+    "glide": 54,
+    "nasal": 66,
+}
+
+
+def _xsampa_phone_sequence(phone: str) -> tuple[str, ...]:
+    # PT /nh/, /lh/ and strong /r/ do not exist as dedicated symbols in the
+    # official English bank.  Represent them with the closest *composable*
+    # inventory rather than inserting Japanese vowels.
+    if phone == "J":       # /ɲ/ -> n+j
+        return ("n", "j")
+    if phone == "L":       # /ʎ/ -> l+j
+        return ("l", "j")
+    if phone == "R":       # Brazilian strong r is closer to English /h/
+        return ("h",)
+    if phone == "r":
+        # The Teto bank has rich r-context aliases but no isolated r.  Keep r
+        # as the stable default; candidate generation also probes tap /4/.
+        return ("r",)
+    return (phone,)
+
+
+def _xsampa_onset(phones: Iterable[str]) -> tuple[str, ...]:
+    output: list[str] = []
+    for phone in phones:
+        output.extend(_xsampa_phone_sequence(phone))
+    return tuple(output)
+
+
+def _xsampa_vowel(phone: str) -> str:
+    return _XSAMPA_VOWELS.get(phone, phone.rstrip("~") or "@")
+
+
+def _english_resolve(
+    tiers: Iterable[tuple[str, Iterable[str]]],
+    resolve_alias: Callable[[Iterable[str]], object | None] | None,
+) -> tuple[tuple[str, ...], str]:
+    """Pick the first alias tier that the actual English oto.ini can render.
+
+    The full tier ordering is retained behind the chosen alias so renderer-side
+    resolution remains deterministic even if the index normalizes the spelling.
+    """
+    first: tuple[str, ...] = ()
+    first_kind = "approximation"
+    for kind, values in tiers:
+        candidates = _unique(values)
+        if not candidates:
+            continue
+        if not first:
+            first, first_kind = candidates, kind
+        if resolve_alias is None:
+            return candidates, kind
+        try:
+            entry = resolve_alias(candidates)
+        except Exception:
+            entry = None
+        if entry is not None:
+            alias = str(getattr(entry, "alias", "") or "").strip()
+            return _unique((alias, *candidates)), kind
+    return first, first_kind
+
+
+def _english_mora(
+    tiers: Iterable[tuple[str, Iterable[str]]], *, duration_ms: int, role: str,
+    source: tuple[str, ...], stressed: bool = False, deaccented: bool = False,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+) -> Mora:
+    candidates, coverage = _english_resolve(tiers, resolve_alias)
+    return Mora(
+        candidates=candidates,
+        duration_ms=duration_ms,
+        stressed=stressed,
+        deaccented=deaccented,
+        role=role,
+        source_phonemes=source,
+        coverage=coverage,
+    )
+
+
+def _english_nucleus_candidates(
+    *, onset: tuple[str, ...], vowel: str, previous_vowel: str, word_start: bool,
+) -> list[tuple[str, tuple[str, ...]]]:
+    cluster = "".join(onset)
+    last = onset[-1] if onset else ""
+    tiers: list[tuple[str, tuple[str, ...]]] = []
+    if word_start:
+        if cluster:
+            tiers.append(("cvvc-direct", (f"- {cluster}{vowel}",)))
+            if last == "r":
+                tiers.append(("cvvc-direct", (f"- {cluster[:-1]}4{vowel}",)))
+        else:
+            tiers.append(("cvvc-direct", (f"- {vowel}",)))
+    elif previous_vowel:
+        if cluster:
+            tiers.append(("cvvc-direct", (
+                f"{previous_vowel} {cluster}{vowel}",
+                f"{previous_vowel}{cluster} {vowel}",
+            )))
+        else:
+            tiers.append(("cvvc-direct", (f"{previous_vowel} {vowel}", f"{previous_vowel}{vowel}")))
+    if cluster:
+        base = [f"{cluster}{vowel}", f"{last}{vowel}", f"{last} {vowel}"]
+        if last == "r":
+            base.extend((f"4{vowel}", f"4 {vowel}"))
+        tiers.append(("cvvc-direct", tuple(base)))
+    else:
+        tiers.append(("cvvc-direct", (vowel,)))
+    return tiers
+
+
+def _english_cluster_units(
+    onset: tuple[str, ...], *, word_start: bool, previous_vowel: str,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None,
+) -> list[Mora]:
+    if not onset:
+        return []
+    units: list[Mora] = []
+    cluster = "".join(onset)
+    first = onset[0]
+    if word_start and len(onset) > 1:
+        units.append(_english_mora(
+            [
+                ("cluster-hit", (f"- {cluster}",)),
+                ("cvvc-transition", (f"- {first}", first)),
+            ],
+            duration_ms=_ENGLISH_ROLE_DURATIONS["cluster"], role="cluster",
+            source=tuple(onset), deaccented=True, resolve_alias=resolve_alias,
+        ))
+    elif word_start:
+        units.append(_english_mora(
+            [("cvvc-transition", (f"- {first}", first))],
+            duration_ms=_ENGLISH_ROLE_DURATIONS["transition"], role="transition",
+            source=(first,), deaccented=True, resolve_alias=resolve_alias,
+        ))
+    elif previous_vowel:
+        # A VC/VCC transition retains the previous vowel's exit into the onset.
+        prefix2 = "".join(onset[:2])
+        units.append(_english_mora(
+            [
+                ("cluster-hit", (f"{previous_vowel} {prefix2}",)) if len(onset) > 1 else ("cvvc-transition", ()),
+                ("cvvc-transition", (f"{previous_vowel} {first}", f"{previous_vowel}{first}")),
+            ],
+            duration_ms=_ENGLISH_ROLE_DURATIONS["transition"], role="transition",
+            source=(previous_vowel, first), deaccented=True, resolve_alias=resolve_alias,
+        ))
+
+    cluster_already_covered = False
+    if units and units[0].coverage == "cluster-hit":
+        compact = units[0].candidates[0].replace("-", "").replace(" ", "") if units[0].candidates else ""
+        cluster_already_covered = cluster in compact
+
+    if len(onset) > 1 and not cluster_already_covered:
+        # Each CC alias bridges the cluster without an epenthetic vowel.
+        for left, right in zip(onset, onset[1:]):
+            units.append(_english_mora(
+                [
+                    ("cluster-hit", (f"{left} {right}", f"{left}{right}")),
+                    ("approximation", (left, right)),
+                ],
+                duration_ms=_ENGLISH_ROLE_DURATIONS["cluster"], role="cluster",
+                source=(left, right), deaccented=True, resolve_alias=resolve_alias,
+            ))
+    return units
+
+
+def _english_coda_units(
+    *, vowel: str, coda: tuple[str, ...], nasal: bool,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None,
+) -> list[Mora]:
+    units: list[Mora] = []
+    previous = vowel
+    phones: list[str] = []
+    if nasal:
+        phones.append("N")
+    for phone in coda:
+        phones.extend(_xsampa_phone_sequence(phone))
+    for raw in phones:
+        phone = "4" if raw == "r" else raw
+        role = "nasal" if raw == "N" else "glide" if raw in {"j", "w"} else "coda"
+        units.append(_english_mora(
+            [
+                ("cvvc-transition", (f"{previous} {phone}", f"{previous}{phone}")),
+                ("approximation", (phone, raw)),
+            ],
+            duration_ms=_ENGLISH_ROLE_DURATIONS[role], role=role,
+            source=(raw,), deaccented=True, resolve_alias=resolve_alias,
+        ))
+        previous = phone
+    return units
+
+
+def _english_word_to_moras(
+    word: PhoneticWord, *, deaccented: bool,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+) -> list[Mora]:
+    moras: list[Mora] = []
+    previous_vowel = ""
+    for syllable_index, syllable in enumerate(word.syllables):
+        onset = _xsampa_onset(syllable.onset)
+        base_vowel = _xsampa_vowel(syllable.vowel)
+        coda_source = list(syllable.coda)
+        diphthong = None
+        if coda_source and coda_source[0] in {"j", "w"}:
+            diphthong = _XSAMPA_DIPHTHONGS.get((base_vowel, coda_source[0]))
+        vowel = diphthong or base_vowel
+        if diphthong:
+            coda_source = coda_source[1:]
+        word_start = syllable_index == 0
+
+        nucleus_tiers = _english_nucleus_candidates(
+            onset=onset, vowel=vowel, previous_vowel=previous_vowel, word_start=word_start,
+        )
+        nucleus_candidates, nucleus_coverage = _english_resolve(nucleus_tiers, resolve_alias)
+
+        # If a complete start/VCV/CCV alias exists it already contains the onset
+        # transition; otherwise explicitly schedule CVVC transition/CC units.
+        full_alias = nucleus_candidates[0] if nucleus_candidates else ""
+        cluster_encoded = bool(onset) and (
+            (word_start and full_alias.startswith("- ") and "".join(onset) in full_alias)
+            or (not word_start and previous_vowel and "".join(onset) in full_alias and " " in full_alias)
+            or (len(onset) > 1 and full_alias.startswith("".join(onset)))
+        )
+        if onset and not cluster_encoded:
+            moras.extend(_english_cluster_units(
+                onset, word_start=word_start, previous_vowel=previous_vowel,
+                resolve_alias=resolve_alias,
+            ))
+
+        moras.append(Mora(
+            candidates=nucleus_candidates,
+            duration_ms=138,
+            stressed=bool(syllable.stressed and not deaccented),
+            deaccented=deaccented,
+            role="nucleus",
+            source_phonemes=tuple(syllable.onset) + (syllable.vowel,) + (tuple(syllable.coda[:1]) if diphthong else ()),
+            coverage=nucleus_coverage,
+        ))
+
+        nasal = syllable.vowel.endswith("~")
+        moras.extend(_english_coda_units(
+            vowel=vowel, coda=tuple(coda_source), nasal=nasal, resolve_alias=resolve_alias,
+        ))
+        # The bank's next VCV transition should reference the lexical vowel, not
+        # a short coda consonant; this mirrors OpenUtau's prevV handling.
+        previous_vowel = vowel
+    return moras
+
 def _kana_word_to_moras(
     word: str, *, deaccented: bool,
     resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
@@ -334,6 +602,7 @@ def phonemize(
     *,
     max_moras: int = 240,
     resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+    voicebank_profile: str = "standard",
 ) -> list[Mora]:
     normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
     if not normalized:
@@ -356,9 +625,15 @@ def phonemize(
         if re.search(r"[ぁ-ゖァ-ヺ]", token):
             word_moras = _kana_word_to_moras(token, deaccented=deaccented, resolve_alias=resolve_alias)
         else:
-            word_moras = _phonetic_word_to_moras(
-                g2p_word(token, deaccented=deaccented), deaccented=deaccented, resolve_alias=resolve_alias
-            )
+            phonetic = g2p_word(token, deaccented=deaccented)
+            if str(voicebank_profile).lower().startswith("english"):
+                word_moras = _english_word_to_moras(
+                    phonetic, deaccented=deaccented, resolve_alias=resolve_alias
+                )
+            else:
+                word_moras = _phonetic_word_to_moras(
+                    phonetic, deaccented=deaccented, resolve_alias=resolve_alias
+                )
 
         total = max(1, len(word_moras))
         for mora_index, mora in enumerate(word_moras):

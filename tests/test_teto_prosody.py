@@ -27,6 +27,18 @@ def _standard_aliases(text: str, available: set[str]) -> list[str]:
     return [mora.candidates[0] for mora in phonemize(text, resolve_alias=resolve)]
 
 
+
+def _english_moras(text: str, available: set[str]):
+    def resolve(candidates):
+        for candidate in candidates:
+            if candidate in available:
+                return SimpleNamespace(alias=candidate)
+        return None
+
+    return phonemize(
+        text, resolve_alias=resolve, voicebank_profile="english-cvvc"
+    )
+
 def _stress_indexes(text: str) -> list[int]:
     return [index for index, mora in enumerate(phonemize(text)) if mora.stressed]
 
@@ -78,6 +90,36 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertEqual(len(stressed), 1)
         self.assertEqual(stressed[0].source_phonemes, ("d", "o"))
         self.assertEqual(computador[-1].role, "coda")
+
+    def test_english_cvvc_uses_real_cluster_and_vcv_aliases_without_epenthetic_vowels(self):
+        available = {"- br", "ra", "a zi", "i w"}
+        moras = _english_moras("Brasil", available)
+        aliases = [m.candidates[0] for m in moras]
+        self.assertEqual(aliases, ["- br", "ra", "a zi", "i w"])
+        self.assertNotIn("epenthetic", [m.role for m in moras])
+        self.assertEqual(moras[0].coverage, "cluster-hit")
+        self.assertEqual(moras[2].coverage, "cvvc-direct")
+
+    def test_english_cvvc_maps_pt_specific_sounds_to_composable_xsampa(self):
+        available = {"- fi", "i lj", "lju", "- ba", "a nj", "nje", "- ka", "a hu", "hu"}
+        filha = _english_moras("filha", available)
+        banho = _english_moras("banho", available)
+        carro = _english_moras("carro", available)
+        joined = " ".join(m.candidates[0] for m in filha + banho + carro)
+        self.assertNotRegex(joined, r"[ぁ-ゖァ-ヺ]")
+        self.assertIn("lj", joined)
+        self.assertIn("nj", joined)
+        self.assertIn("h", joined)
+        self.assertFalse(any(m.role == "epenthetic" for m in filha + banho + carro))
+
+    def test_english_cvvc_transition_roles_remain_short_and_quiet(self):
+        available = {"- br", "ra", "a zi", "i w"}
+        notes = build_notes(_english_moras("Brasil", available))
+        auxiliaries = [n for n in notes if n.role != "nucleus"]
+        self.assertTrue(auxiliaries)
+        self.assertTrue(all(n.duration_ms < 100 for n in auxiliaries))
+        self.assertTrue(all(n.gain < 1.0 for n in auxiliaries))
+        self.assertTrue(all(n.coverage in {"cluster-hit", "cvvc-transition", "approximation"} for n in auxiliaries))
 
     def test_clusters_use_quiet_short_epenthesis_instead_of_full_japanese_syllables(self):
         brasil = build_notes(phonemize("Brasil"))

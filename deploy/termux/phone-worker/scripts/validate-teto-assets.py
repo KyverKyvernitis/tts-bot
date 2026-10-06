@@ -18,13 +18,28 @@ from teto_renderer import TetoRenderer  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description="Valida voicebank e resampler da Kasane Teto no phone worker.")
     parser.add_argument("--voicebank", required=True, help="Pasta da voicebank UTAU instalada pelo operador.")
+    parser.add_argument(
+        "--mode",
+        choices=("standard", "english", "auto"),
+        default="standard",
+        help="Perfil da voicebank a validar. O padrão mantém compatibilidade e valida exatamente --voicebank.",
+    )
     parser.add_argument("--resampler", required=True, help="Comando do resampler, por exemplo: python ~/bin/straycat.py")
     parser.add_argument("--render-test", action="store_true", help="Também sintetiza uma frase curta de teste.")
     parser.add_argument("--text", default="teto", help="Texto usado no teste opcional.")
     args = parser.parse_args()
 
     os.environ["PHONE_WORKER_TETO_ENABLED"] = "true"
-    os.environ["PHONE_WORKER_TETO_VOICEBANK_DIR"] = str(Path(args.voicebank).expanduser())
+    voicebank = str(Path(args.voicebank).expanduser())
+    os.environ["PHONE_WORKER_TETO_VOICEBANK_MODE"] = args.mode
+    if args.mode == "english":
+        os.environ["PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR"] = voicebank
+    elif args.mode == "auto":
+        # In auto mode the supplied bank is treated as the English candidate,
+        # while the normal configured standard bank remains available as fallback.
+        os.environ["PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR"] = voicebank
+    else:
+        os.environ["PHONE_WORKER_TETO_VOICEBANK_DIR"] = voicebank
     os.environ["PHONE_WORKER_TETO_RESAMPLER_COMMAND"] = args.resampler
     renderer = TetoRenderer(resource_guard=lambda: {"ok": True, "reason": "validator"})
     result = {"status": renderer.status(force=True)}

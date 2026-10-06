@@ -26,8 +26,8 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
-    RENDER_VERSION = "speech-4-phonetic"
-    PHONEMIZER_VERSION = "ptbr-g2p-v1"
+    RENDER_VERSION = "speech-4b-english-cvvc"
+    PHONEMIZER_VERSION = "ptbr-g2p-xsampa-cvvc-v1"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v2"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
 
@@ -36,6 +36,7 @@ class TetoRenderer:
         self._lock = threading.Lock()
         self._index: VoicebankIndex | None = None
         self._index_path = ""
+        self._index_profile = "standard"
         self._last_status_at = 0.0
         self._last_status: dict[str, Any] = {}
         cache_root = os.getenv("PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "teto-fragments")
@@ -59,6 +60,29 @@ class TetoRenderer:
 
     def _voicebank_dir(self) -> str:
         return str(os.getenv("PHONE_WORKER_TETO_VOICEBANK_DIR") or "").strip()
+
+    def _english_voicebank_dir(self) -> str:
+        configured = str(os.getenv("PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR") or "").strip()
+        if configured:
+            return configured
+        return str(Path.home() / "voicebanks" / "kasane-teto-english")
+
+    def _voicebank_mode(self) -> str:
+        mode = str(os.getenv("PHONE_WORKER_TETO_VOICEBANK_MODE") or "auto").strip().lower()
+        return mode if mode in {"auto", "english", "standard"} else "auto"
+
+    def _voicebank_candidates(self) -> list[tuple[str, str, int]]:
+        mode = self._voicebank_mode()
+        standard = self._voicebank_dir()
+        english = self._english_voicebank_dir()
+        english_min = max(1, self._env_int("PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES", 500))
+        standard_min = max(1, self._env_int("PHONE_WORKER_TETO_MIN_ALIASES", 10))
+        candidates: list[tuple[str, str, int]] = []
+        if mode in {"auto", "english"} and english:
+            candidates.append((english, "english-cvvc", english_min))
+        if mode in {"auto", "standard"} and standard:
+            candidates.append((standard, "standard", standard_min))
+        return candidates
 
     def _speech_rate(self) -> float:
         try:
@@ -141,14 +165,32 @@ class TetoRenderer:
         return command
 
     def _load_index(self) -> VoicebankIndex:
-        configured = self._voicebank_dir()
-        if not configured:
-            raise TetoConfigurationError("PHONE_WORKER_TETO_VOICEBANK_DIR não configurado")
-        resolved = str(Path(configured).expanduser().resolve())
-        if self._index is None or self._index_path != resolved:
-            self._index = VoicebankIndex.load(resolved, minimum_aliases=self._env_int("PHONE_WORKER_TETO_MIN_ALIASES", 10))
+        candidates = self._voicebank_candidates()
+        if not candidates:
+            raise TetoConfigurationError("nenhuma voicebank Teto configurada")
+        errors: list[str] = []
+        for configured, profile, minimum_aliases in candidates:
+            resolved_path = Path(configured).expanduser()
+            if not resolved_path.is_dir():
+                errors.append(f"{profile}: ausente ({resolved_path})")
+                continue
+            resolved = str(resolved_path.resolve())
+            if self._index is not None and self._index_path == resolved:
+                self._index_profile = profile
+                return self._index
+            try:
+                index = VoicebankIndex.load(resolved, minimum_aliases=minimum_aliases)
+            except Exception as exc:
+                errors.append(f"{profile}: {type(exc).__name__}: {exc}")
+                if self._voicebank_mode() != "auto":
+                    raise
+                continue
+            self._index = index
             self._index_path = resolved
-        return self._index
+            self._index_profile = profile
+            return index
+        detail = "; ".join(errors) or "nenhuma voicebank encontrada"
+        raise TetoConfigurationError(detail[:420])
 
     def status(self, *, force: bool = False) -> dict[str, Any]:
         now = time.monotonic()
@@ -163,6 +205,7 @@ class TetoRenderer:
             "enabled": enabled,
             "engine": "teto",
             "voice": "kasane-teto-standard",
+            "voicebank_profile": "standard",
         }
         if not enabled:
             result["last_error"] = "PHONE_WORKER_TETO_ENABLED=false"
@@ -174,6 +217,8 @@ class TetoRenderer:
                 index = self._load_index()
                 result.update(index.snapshot())
                 result.update({
+                    "voice": "kasane-teto-english-cvvc" if self._index_profile == "english-cvvc" else "kasane-teto-standard",
+                    "voicebank_profile": self._index_profile,
                     "ok": True,
                     "available": True,
                     "ready": True,
@@ -408,6 +453,7 @@ class TetoRenderer:
                 clean_text,
                 max_moras=max_moras,
                 resolve_alias=index.resolve,
+                voicebank_profile=self._index_profile,
             )
             notes = build_notes(
                 moras,
@@ -462,6 +508,8 @@ class TetoRenderer:
                     legacy_fragment_hits += int(legacy_fragment)
                     fragment = self._apply_gain(self._read_samples(fragment_path), note.gain)
                     overlap_ms = self._oto_join_ms(entry)
+                    if self._index_profile == "english-cvvc" and note.role in {"transition", "cluster"}:
+                        overlap_ms = min(72.0, max(overlap_ms, note.duration_ms * 0.55))
                     if note.role == "epenthetic":
                         # Hide the artificial vowel required by a Japanese CV
                         # cluster approximation behind the neighbouring unit.
@@ -511,11 +559,17 @@ class TetoRenderer:
                 "phonemizer_version": self.PHONEMIZER_VERSION,
                 "speech_rate": self._speech_rate(),
                 "aliases": index.alias_count,
+                "voicebank_profile": self._index_profile,
                 "rendered_phonemes": rendered,
                 "missing_phonemes": missing[:12],
                 "phonetic_units": sum(len(note.source_phonemes) for note in notes),
                 "epenthetic_phonemes": sum(1 for note in notes if note.role == "epenthetic"),
                 "auxiliary_phonemes": sum(1 for note in notes if note.role != "nucleus"),
+                "cvvc_direct": sum(1 for note in notes if note.coverage == "cvvc-direct"),
+                "cvvc_transitions": sum(1 for note in notes if note.coverage == "cvvc-transition"),
+                "cluster_hits": sum(1 for note in notes if note.coverage == "cluster-hit"),
+                "approximated_phonemes": sum(1 for note in notes if note.coverage == "approximation"),
+                "coverage_percent": round(100.0 * sum(1 for note in notes if note.coverage in {"cvvc-direct", "cvvc-transition", "cluster-hit"}) / max(1, len(notes)), 1),
                 "pitchbend_fallbacks": pitchbend_fallbacks,
                 "legacy_fragment_hits": legacy_fragment_hits,
                 "worker_synth_ms": round(elapsed_ms, 2),

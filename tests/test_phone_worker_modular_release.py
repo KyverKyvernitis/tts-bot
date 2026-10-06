@@ -211,10 +211,21 @@ def test_teto_g2p_dependency_is_in_immutable_runtime_release(publisher, tmp_path
     code = r'''
 import sys
 sys.path.insert(0, sys.argv[1])
+from types import SimpleNamespace
 from teto_renderer import TetoRenderer
+from teto_renderer.phonemizer import phonemize
 from teto_renderer.ptbr_g2p import g2p_word
 assert TetoRenderer is not None
 assert g2p_word("Brasil").phonemes == ("b", "r", "a", "z", "i", "w")
+available = {"- br", "ra", "a zi", "i w"}
+def resolve(candidates):
+    for candidate in candidates:
+        if candidate in available:
+            return SimpleNamespace(alias=candidate)
+    return None
+moras = phonemize("Brasil", resolve_alias=resolve, voicebank_profile="english-cvvc")
+assert [m.candidates[0] for m in moras] == ["- br", "ra", "a zi", "i w"]
+assert not any(m.role == "epenthetic" for m in moras)
 '''
     result = subprocess.run(
         [sys.executable, "-c", code, str(staging)],

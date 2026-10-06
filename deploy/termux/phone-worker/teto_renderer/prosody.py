@@ -20,6 +20,7 @@ class RenderNote:
     deaccented: bool = False
     role: str = "nucleus"
     source_phonemes: tuple[str, ...] = ()
+    coverage: str = "standard-cv"
 
 
 _PITCH_CLASSES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -203,6 +204,10 @@ def _duration_for(moras: list[Mora], index: int) -> int:
     duration = float(mora.duration_ms)
     if mora.role == "epenthetic":
         duration *= 0.90
+    elif mora.role == "transition":
+        duration *= 0.92
+    elif mora.role == "cluster":
+        duration *= 0.90
     elif mora.role == "coda":
         duration *= 0.96
     elif mora.role == "glide":
@@ -223,8 +228,8 @@ def _duration_for(moras: list[Mora], index: int) -> int:
         duration *= 1.02
     elif mora.word_end and mora.role == "nucleus":
         duration *= 1.015
-    minimum = 34 if mora.role == "epenthetic" else 38 if mora.role in {"coda", "glide"} else 48 if mora.role == "nasal" else 78
-    maximum = 82 if mora.role == "epenthetic" else 96 if mora.role in {"coda", "glide", "nasal"} else 240
+    minimum = 34 if mora.role == "epenthetic" else 36 if mora.role in {"transition", "cluster"} else 38 if mora.role in {"coda", "glide"} else 48 if mora.role == "nasal" else 78
+    maximum = 82 if mora.role == "epenthetic" else 92 if mora.role in {"transition", "cluster"} else 96 if mora.role in {"coda", "glide", "nasal"} else 240
     return max(minimum, min(maximum, round(duration)))
 
 
@@ -259,7 +264,7 @@ def build_notes(
 
     for index, mora in enumerate(moras):
         raw_duration = round(_duration_for(moras, index) / rate)
-        minimum = 32 if mora.role == "epenthetic" else 36 if mora.role in {"coda", "glide"} else 44 if mora.role == "nasal" else 70
+        minimum = 32 if mora.role == "epenthetic" else 34 if mora.role in {"transition", "cluster"} else 36 if mora.role in {"coda", "glide"} else 44 if mora.role == "nasal" else 70
         duration = max(minimum, min(500, raw_duration))
         pause = max(0, min(1000, round(mora.pause_after_ms / rate)))
         center = centers[index]
@@ -277,6 +282,10 @@ def build_notes(
 
         if mora.role == "epenthetic":
             gain = 0.72
+        elif mora.role == "transition":
+            gain = 0.90
+        elif mora.role == "cluster":
+            gain = 0.88
         elif mora.role == "coda":
             gain = 0.78
         elif mora.role == "glide":
@@ -306,5 +315,6 @@ def build_notes(
             deaccented=mora.deaccented,
             role=mora.role,
             source_phonemes=mora.source_phonemes,
+            coverage=mora.coverage,
         ))
     return notes

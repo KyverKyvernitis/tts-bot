@@ -29,6 +29,9 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
         f"rendered={rendered.get('rendered_phonemes') or 0} "
         f"aux={rendered.get('auxiliary_phonemes') or 0} "
         f"epenthetic={rendered.get('epenthetic_phonemes') or 0} "
+        f"profile={rendered.get('voicebank_profile') or 'standard'} "
+        f"coverage={rendered.get('coverage_percent') if rendered.get('coverage_percent') is not None else '-'} "
+        f"clusters={rendered.get('cluster_hits') or 0} "
         f"missing={len(rendered.get('missing_phonemes') or [])}"
     )
     return data, audio_format, teto_meta

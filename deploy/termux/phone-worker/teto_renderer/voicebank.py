@@ -68,9 +68,13 @@ def _is_within(path: Path, root: Path) -> bool:
 
 
 class VoicebankIndex:
-    def __init__(self, root: Path, entries: dict[str, OtoEntry], fingerprint: str, name: str):
+    def __init__(
+        self, root: Path, entries: dict[str, OtoEntry], folded_entries: dict[str, OtoEntry],
+        fingerprint: str, name: str,
+    ):
         self.root = root
         self.entries = entries
+        self.folded_entries = folded_entries
         self.fingerprint = fingerprint
         self.name = name
 
@@ -85,6 +89,7 @@ class VoicebankIndex:
             raise TetoVoicebankError("voicebank sem oto.ini")
 
         entries: dict[str, OtoEntry] = {}
+        folded_candidates: dict[str, OtoEntry | None] = {}
         digest = hashlib.sha256()
         digest.update(str(base).encode("utf-8", errors="replace"))
 
@@ -124,8 +129,16 @@ class VoicebankIndex:
                     overlap_ms=max(0.0, _number(values[5])),
                 )
                 entries.setdefault(alias, entry)
-                normalized = _normalized_alias(alias).lower()
-                entries.setdefault(normalized, entry)
+                folded = _normalized_alias(alias).casefold()
+                previous = folded_candidates.get(folded, ...)
+                if previous is ...:
+                    folded_candidates[folded] = entry
+                elif previous is not None and previous.alias != alias:
+                    # X-SAMPA is case-sensitive (E/e, I/i, O/o, U/u). Never
+                    # let a convenience case-fold silently replace one phoneme
+                    # with another. Keep case-insensitive fallback only when the
+                    # folded spelling is unambiguous across the bank.
+                    folded_candidates[folded] = None
                 digest.update(entry.cache_identity().encode("utf-8", errors="replace"))
 
         unique_entries = {id(entry): entry for entry in entries.values()}
@@ -136,6 +149,8 @@ class VoicebankIndex:
 
         name = "Kasane Teto"
         character = base / "character.txt"
+        if not character.is_file():
+            character = next(iter(sorted(base.rglob("character.txt"))), character)
         if character.is_file():
             try:
                 for line in _decode_text(character).splitlines():
@@ -147,7 +162,8 @@ class VoicebankIndex:
             except OSError:
                 pass
 
-        return cls(base, entries, digest.hexdigest(), name)
+        folded_entries = {key: entry for key, entry in folded_candidates.items() if entry is not None}
+        return cls(base, entries, folded_entries, digest.hexdigest(), name)
 
     @property
     def alias_count(self) -> int:
@@ -158,7 +174,9 @@ class VoicebankIndex:
             key = _normalized_alias(candidate)
             if not key:
                 continue
-            entry = self.entries.get(key) or self.entries.get(key.lower())
+            entry = self.entries.get(key)
+            if entry is None:
+                entry = self.folded_entries.get(key.casefold())
             if entry is not None:
                 return entry
         return None

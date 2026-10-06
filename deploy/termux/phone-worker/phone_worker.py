@@ -161,7 +161,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.23"
+PHONE_WORKER_VERSION = "1.11.24"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2077,6 +2077,12 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
         handler.send_header("X-Core-Worker-Teto-Phonemizer", _header_ascii(meta.get("teto_phonemizer_version"), limit=60))
     if meta.get("teto_epenthetic_phonemes") not in (None, ""):
         handler.send_header("X-Core-Worker-Teto-Epenthetic", _header_ascii(meta.get("teto_epenthetic_phonemes"), limit=20))
+    if meta.get("teto_voicebank_profile"):
+        handler.send_header("X-Core-Worker-Teto-Voicebank-Profile", _header_ascii(meta.get("teto_voicebank_profile"), limit=40))
+    if meta.get("teto_coverage_percent") not in (None, ""):
+        handler.send_header("X-Core-Worker-Teto-Coverage", _header_ascii(meta.get("teto_coverage_percent"), limit=20))
+    if meta.get("teto_cluster_hits") not in (None, ""):
+        handler.send_header("X-Core-Worker-Teto-Cluster-Hits", _header_ascii(meta.get("teto_cluster_hits"), limit=20))
     for key, header in (
         ("worker_total_ms", "X-Core-Worker-Worker-Total-Ms"),
         ("worker_synth_ms", "X-Core-Worker-Worker-Synth-Ms"),
@@ -4939,6 +4945,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "teto_phonetic_units": teto_meta.get("phonetic_units") if engine == "teto" else None,
             "teto_auxiliary_phonemes": teto_meta.get("auxiliary_phonemes") if engine == "teto" else None,
             "teto_epenthetic_phonemes": teto_meta.get("epenthetic_phonemes") if engine == "teto" else None,
+            "teto_voicebank_profile": teto_meta.get("voicebank_profile") if engine == "teto" else "",
+            "teto_cvvc_direct": teto_meta.get("cvvc_direct") if engine == "teto" else None,
+            "teto_cvvc_transitions": teto_meta.get("cvvc_transitions") if engine == "teto" else None,
+            "teto_cluster_hits": teto_meta.get("cluster_hits") if engine == "teto" else None,
+            "teto_approximated_phonemes": teto_meta.get("approximated_phonemes") if engine == "teto" else None,
+            "teto_coverage_percent": teto_meta.get("coverage_percent") if engine == "teto" else None,
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
