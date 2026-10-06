@@ -130,11 +130,42 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertTrue(auxiliaries)
         self.assertTrue(all(n.duration_ms <= 56 for n in auxiliaries))
         self.assertTrue(all(n.gain < 0.9 for n in auxiliaries))
-        self.assertTrue(all(n.pitchbend == "AA" for n in auxiliaries))
+        self.assertTrue(all(n.pitchbend != "AA" for n in auxiliaries))
         self.assertTrue(all(n.coverage in {"cluster-hit", "cvvc-transition", "approximation"} for n in auxiliaries))
         nuclei = [n for n in notes if n.role == "nucleus"]
         self.assertTrue(nuclei)
         self.assertTrue(any(n.pitchbend != "AA" for n in nuclei))
+        # All CVVC fragments now sample one phrase envelope. Adjacent note
+        # boundaries must meet exactly instead of resetting to zero cents.
+        for left, right in zip(notes, notes[1:]):
+            self.assertEqual(left.pitch_end_cents, right.pitch_start_cents)
+
+    def test_english_speech_timing_varies_nuclei_instead_of_fixed_138ms(self):
+        available = {"- pro", "o ble", "e ma"}
+        moras = _english_moras("problema", available)
+        nuclei = [m for m in moras if m.role == "nucleus"]
+        self.assertEqual(len(nuclei), 3)
+        self.assertGreater(len({m.duration_ms for m in nuclei}), 1)
+        notes = [n for n in build_notes(moras) if n.role == "nucleus"]
+        self.assertGreater(notes[1].duration_ms, notes[0].duration_ms)
+        self.assertLess(sum(n.duration_ms for n in notes) / len(notes), 135)
+
+    def test_english_alias_planner_prefers_healthier_context_recording(self):
+        entries = {
+            "- ka": SimpleNamespace(alias="- ka", preutterance_ms=55, overlap_ms=18, consonant_ms=30),
+            "a za": SimpleNamespace(alias="a za", preutterance_ms=0, overlap_ms=0, consonant_ms=0),
+            "az a": SimpleNamespace(alias="az a", preutterance_ms=65, overlap_ms=20, consonant_ms=34),
+        }
+        def resolve(candidates):
+            for candidate in candidates:
+                if candidate in entries:
+                    return entries[candidate]
+            return None
+        moras = phonemize("casa", resolve_alias=resolve, voicebank_profile="english-cvvc")
+        nuclei = [m for m in moras if m.role == "nucleus"]
+        self.assertEqual(nuclei[0].candidates[0], "- ka")
+        self.assertEqual(nuclei[1].candidates[0], "az a")
+        self.assertLess(nuclei[1].planner_cost, 10.0)
 
     def test_clusters_use_quiet_short_epenthesis_instead_of_full_japanese_syllables(self):
         brasil = build_notes(phonemize("Brasil"))

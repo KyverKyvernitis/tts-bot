@@ -25,13 +25,16 @@ def test_teto_parameters_metadata_and_exact_audio_limit(tts, monkeypatch, raw):
     captured = []
     rendered = {"audio": bytearray(b"a" * 1024), "audio_format": " WAV ",
                 "voicebank": "Test Teto", "voicebank_fingerprint": "bank-sha",
-                "renderer_version": "speech-4d-texttoteto-pitch", "phonemizer_version": "ptbr-g2p-xsampa-cvvc-v1",
+                "renderer_version": "speech-4e-phrase-speech", "phonemizer_version": "ptbr-g2p-xsampa-cvvc-v1",
                 "rendered_phonemes": 3, "missing_phonemes": ["x"],
                 "phonetic_units": 4, "auxiliary_phonemes": 2, "epenthetic_phonemes": 1,
                 "voicebank_profile": "english-cvvc", "cvvc_direct": 2, "cvvc_transitions": 1,
                 "cluster_hits": 1, "approximated_phonemes": 0, "coverage_percent": 96.5,
-                "timeline_mode": "oto-continuous", "timeline_aux_overlays": 2,
+                "timeline_mode": "phrase-continuous", "timeline_aux_overlays": 2,
                 "timeline_audio_ms": 321.4, "pitch_offset_semitones": -1.0,
+                "alias_path_cost": 7.5, "mean_nucleus_ms": 112.0,
+                "nucleus_duration_stddev_ms": 9.2, "pitch_boundary_max_cents": 0,
+                "continuity_repairs": 2, "energy_boundary_max_db": 4.6,
                 "private": "not projected"}
 
     def synthesize(text, **kwargs):
@@ -46,7 +49,7 @@ def test_teto_parameters_metadata_and_exact_audio_limit(tts, monkeypatch, raw):
     assert audio(result) == b"a" * 1024 and result["audio_format"] == "wav"
     assert result["sha256"] == hashlib.sha256(audio(result)).hexdigest()
     assert result["teto_voicebank"] == "Test Teto" and result["teto_fingerprint"] == "bank-sha"
-    assert result["teto_renderer_version"] == "speech-4d-texttoteto-pitch"
+    assert result["teto_renderer_version"] == "speech-4e-phrase-speech"
     assert result["teto_phonemizer_version"] == "ptbr-g2p-xsampa-cvvc-v1"
     assert result["teto_rendered_phonemes"] == 3 and result["teto_missing_phonemes"] == ["x"]
     assert result["teto_phonetic_units"] == 4
@@ -55,15 +58,22 @@ def test_teto_parameters_metadata_and_exact_audio_limit(tts, monkeypatch, raw):
     assert result["teto_cvvc_direct"] == 2 and result["teto_cvvc_transitions"] == 1
     assert result["teto_cluster_hits"] == 1 and result["teto_approximated_phonemes"] == 0
     assert result["teto_coverage_percent"] == 96.5
-    assert result["teto_timeline_mode"] == "oto-continuous"
+    assert result["teto_timeline_mode"] == "phrase-continuous"
     assert result["teto_timeline_aux_overlays"] == 2
     assert result["teto_timeline_audio_ms"] == 321.4
     assert result["teto_pitch_offset_semitones"] == -1.0
+    assert result["teto_alias_path_cost"] == 7.5
+    assert result["teto_mean_nucleus_ms"] == 112.0
+    assert result["teto_nucleus_duration_stddev_ms"] == 9.2
+    assert result["teto_pitch_boundary_max_cents"] == 0
+    assert result["teto_continuity_repairs"] == 2
+    assert result["teto_energy_boundary_max_db"] == 4.6
     assert result["timing_ms"]["teto_render"] == 0
     assert result["logs"] == [
-        "teto voicebank=Test Teto renderer=speech-4d-texttoteto-pitch phonemizer=ptbr-g2p-xsampa-cvvc-v1 "
+        "teto voicebank=Test Teto renderer=speech-4e-phrase-speech phonemizer=ptbr-g2p-xsampa-cvvc-v1 "
         "rendered=3 aux=2 epenthetic=1 profile=english-cvvc coverage=96.5 clusters=1 "
-        "timeline=oto-continuous pitch=-1.0st overlays=2 missing=1"
+        "timeline=phrase-continuous pitch=-1.0st overlays=2 path_cost=7.5 pitch_jump=0 "
+        "energy_jump=4.6 repairs=2 missing=1"
     ]
     assert "private" not in result and "audio" not in rendered
     assert not tts.executor.jobs and not tts.root.exists()

@@ -23,6 +23,10 @@ class Mora:
     role: str = "nucleus"  # nucleus | epenthetic | coda | glide | nasal
     source_phonemes: tuple[str, ...] = ()
     coverage: str = "standard-cv"
+    profile: str = "standard"
+    planner_cost: float = 0.0
+    syllable_index: int = 0
+    word_syllables: int = 1
 
 
 # This mapping is only the final PT-phone -> Japanese-CV approximation layer.
@@ -364,33 +368,91 @@ def _xsampa_vowel(phone: str) -> str:
     return _XSAMPA_VOWELS.get(phone, phone.rstrip("~") or "@")
 
 
+def _english_alias_score(kind: str, alias: str, entry: object | None, rank: int) -> float:
+    """Cost a renderable English alias by context coverage and OTO health.
+
+    The 4B planner was greedy: the first spelling that existed won.  The English
+    bank has many aliases for the same phonetic boundary, so that rule often
+    selected a weak CV fallback even when a full-context VCV/cluster recording
+    was available later in the tier.  Keep coverage quality dominant, then use
+    the actual oto.ini timing as a small tie-breaker.
+    """
+    base = {
+        "cvvc-direct": 0.0,
+        "cluster-hit": 8.0,
+        "cvvc-transition": 14.0,
+        "approximation": 42.0,
+    }.get(str(kind), 48.0)
+    text = str(alias or "").strip()
+    score = base + max(0, int(rank)) * 1.5
+    if text.startswith("- "):
+        score -= 2.5
+    if " " in text:
+        score -= 2.0
+    if len(text.replace("-", "").replace(" ", "")) >= 3:
+        score -= 1.0
+    if entry is not None:
+        try:
+            pre = max(0.0, float(getattr(entry, "preutterance_ms", 0.0) or 0.0))
+            overlap = max(0.0, float(getattr(entry, "overlap_ms", 0.0) or 0.0))
+            consonant = max(0.0, float(getattr(entry, "consonant_ms", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            pre = overlap = consonant = 0.0
+        contextual = text.startswith("- ") or " " in text
+        if contextual and pre <= 0.0:
+            score += 5.0
+        if pre > 0.0 and overlap <= 0.0:
+            score += 2.0
+        if 4.0 <= overlap <= pre + 8.0:
+            score -= 1.5
+        if consonant > 0.0:
+            score -= 0.5
+        if pre > 220.0:
+            score += min(12.0, (pre - 220.0) / 25.0)
+    return round(max(0.0, score), 3)
+
+
 def _english_resolve(
     tiers: Iterable[tuple[str, Iterable[str]]],
     resolve_alias: Callable[[Iterable[str]], object | None] | None,
-) -> tuple[tuple[str, ...], str]:
-    """Pick the first alias tier that the actual English oto.ini can render.
-
-    The full tier ordering is retained behind the chosen alias so renderer-side
-    resolution remains deterministic even if the index normalizes the spelling.
-    """
+) -> tuple[tuple[str, ...], str, float]:
+    """Select the lowest-cost renderable alias instead of the first hit."""
     first: tuple[str, ...] = ()
     first_kind = "approximation"
+    if resolve_alias is None:
+        for kind, values in tiers:
+            candidates = _unique(values)
+            if candidates:
+                return candidates, kind, _english_alias_score(kind, candidates[0], None, 0)
+        return first, first_kind, 99.0
+
+    renderable: list[tuple[float, int, str, str, object]] = []
+    flattened: list[str] = []
+    order = 0
     for kind, values in tiers:
         candidates = _unique(values)
         if not candidates:
             continue
         if not first:
             first, first_kind = candidates, kind
-        if resolve_alias is None:
-            return candidates, kind
-        try:
-            entry = resolve_alias(candidates)
-        except Exception:
-            entry = None
-        if entry is not None:
-            alias = str(getattr(entry, "alias", "") or "").strip()
-            return _unique((alias, *candidates)), kind
-    return first, first_kind
+        for rank, candidate in enumerate(candidates):
+            flattened.append(candidate)
+            try:
+                entry = resolve_alias((candidate,))
+            except Exception:
+                entry = None
+            if entry is None:
+                order += 1
+                continue
+            alias = str(getattr(entry, "alias", "") or candidate).strip() or candidate
+            score = _english_alias_score(kind, alias, entry, rank)
+            renderable.append((score, order, kind, alias, entry))
+            order += 1
+
+    if not renderable:
+        return first, first_kind, 99.0
+    score, _, kind, alias, _ = min(renderable, key=lambda item: (item[0], item[1]))
+    return _unique((alias, *flattened)), kind, score
 
 
 def _english_mora(
@@ -398,7 +460,7 @@ def _english_mora(
     source: tuple[str, ...], stressed: bool = False, deaccented: bool = False,
     resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
 ) -> Mora:
-    candidates, coverage = _english_resolve(tiers, resolve_alias)
+    candidates, coverage, planner_cost = _english_resolve(tiers, resolve_alias)
     return Mora(
         candidates=candidates,
         duration_ms=duration_ms,
@@ -407,6 +469,8 @@ def _english_mora(
         role=role,
         source_phonemes=source,
         coverage=coverage,
+        profile="english-cvvc",
+        planner_cost=planner_cost,
     )
 
 
@@ -522,12 +586,35 @@ def _english_coda_units(
     return units
 
 
+def _english_nucleus_duration(
+    syllable, *, deaccented: bool, syllable_index: int, word_syllables: int, diphthong: bool
+) -> int:
+    """Speech timing seed for a lexical vowel, before rate/prosody scaling."""
+    duration = 108.0
+    if deaccented:
+        duration -= 16.0
+    elif bool(getattr(syllable, "stressed", False)):
+        duration += 14.0
+    onset = tuple(getattr(syllable, "onset", ()) or ())
+    coda = tuple(getattr(syllable, "coda", ()) or ())
+    if len(onset) >= 2:
+        duration += 4.0
+    if coda:
+        duration += 4.0
+    if diphthong:
+        duration += 5.0
+    if syllable_index == max(0, word_syllables - 1):
+        duration += 4.0
+    return max(82, min(142, round(duration)))
+
+
 def _english_word_to_moras(
     word: PhoneticWord, *, deaccented: bool,
     resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
 ) -> list[Mora]:
     moras: list[Mora] = []
     previous_vowel = ""
+    word_syllables = max(1, len(word.syllables))
     for syllable_index, syllable in enumerate(word.syllables):
         onset = _xsampa_onset(syllable.onset)
         base_vowel = _xsampa_vowel(syllable.vowel)
@@ -543,38 +630,57 @@ def _english_word_to_moras(
         nucleus_tiers = _english_nucleus_candidates(
             onset=onset, vowel=vowel, previous_vowel=previous_vowel, word_start=word_start,
         )
-        nucleus_candidates, nucleus_coverage = _english_resolve(nucleus_tiers, resolve_alias)
+        nucleus_candidates, nucleus_coverage, nucleus_cost = _english_resolve(nucleus_tiers, resolve_alias)
 
-        # If a complete start/VCV/CCV alias exists it already contains the onset
-        # transition; otherwise explicitly schedule CVVC transition/CC units.
+        # A full-context nucleus owns the onset already. Do not schedule another
+        # consonant attack around it; duplicated attacks are especially audible
+        # when the bank is used for speech instead of singing.
         full_alias = nucleus_candidates[0] if nucleus_candidates else ""
+        compact_alias = full_alias.replace("-", "").replace(" ", "")
+        onset_compact = "".join(onset)
         cluster_encoded = bool(onset) and (
-            (word_start and full_alias.startswith("- ") and "".join(onset) in full_alias)
-            or (not word_start and previous_vowel and "".join(onset) in full_alias and " " in full_alias)
-            or (len(onset) > 1 and full_alias.startswith("".join(onset)))
+            onset_compact in compact_alias
+            and (full_alias.startswith("- ") or " " in full_alias or compact_alias.startswith(onset_compact))
         )
+
+        syllable_moras: list[Mora] = []
         if onset and not cluster_encoded:
-            moras.extend(_english_cluster_units(
+            syllable_moras.extend(_english_cluster_units(
                 onset, word_start=word_start, previous_vowel=previous_vowel,
                 resolve_alias=resolve_alias,
             ))
 
-        moras.append(Mora(
+        syllable_moras.append(Mora(
             candidates=nucleus_candidates,
-            duration_ms=138,
+            duration_ms=_english_nucleus_duration(
+                syllable,
+                deaccented=deaccented,
+                syllable_index=syllable_index,
+                word_syllables=word_syllables,
+                diphthong=bool(diphthong),
+            ),
             stressed=bool(syllable.stressed and not deaccented),
             deaccented=deaccented,
             role="nucleus",
             source_phonemes=tuple(syllable.onset) + (syllable.vowel,) + (tuple(syllable.coda[:1]) if diphthong else ()),
             coverage=nucleus_coverage,
+            profile="english-cvvc",
+            planner_cost=nucleus_cost,
         ))
 
         nasal = syllable.vowel.endswith("~")
-        moras.extend(_english_coda_units(
+        syllable_moras.extend(_english_coda_units(
             vowel=vowel, coda=tuple(coda_source), nasal=nasal, resolve_alias=resolve_alias,
         ))
-        # The bank's next VCV transition should reference the lexical vowel, not
-        # a short coda consonant; this mirrors OpenUtau's prevV handling.
+        for mora in syllable_moras:
+            moras.append(replace(
+                mora,
+                profile="english-cvvc",
+                syllable_index=syllable_index,
+                word_syllables=word_syllables,
+            ))
+        # The bank's next VCV transition references the lexical vowel, not a
+        # short coda consonant; this mirrors OpenUtau's prevV behaviour.
         previous_vowel = vowel
     return moras
 

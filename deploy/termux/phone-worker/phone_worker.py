@@ -161,7 +161,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.26"
+PHONE_WORKER_VERSION = "1.11.27"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2089,6 +2089,14 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
         handler.send_header("X-Core-Worker-Teto-Aux-Overlays", _header_ascii(meta.get("teto_timeline_aux_overlays"), limit=20))
     if meta.get("teto_pitch_offset_semitones") not in (None, ""):
         handler.send_header("X-Core-Worker-Teto-Pitch-Semitones", _header_ascii(meta.get("teto_pitch_offset_semitones"), limit=20))
+    if meta.get("teto_alias_path_cost") not in (None, ""):
+        handler.send_header("X-Core-Worker-Teto-Path-Cost", _header_ascii(meta.get("teto_alias_path_cost"), limit=20))
+    if meta.get("teto_pitch_boundary_max_cents") not in (None, ""):
+        handler.send_header("X-Core-Worker-Teto-Pitch-Jump", _header_ascii(meta.get("teto_pitch_boundary_max_cents"), limit=20))
+    if meta.get("teto_energy_boundary_max_db") not in (None, ""):
+        handler.send_header("X-Core-Worker-Teto-Energy-Jump", _header_ascii(meta.get("teto_energy_boundary_max_db"), limit=20))
+    if meta.get("teto_continuity_repairs") not in (None, ""):
+        handler.send_header("X-Core-Worker-Teto-Continuity-Repairs", _header_ascii(meta.get("teto_continuity_repairs"), limit=20))
     for key, header in (
         ("worker_total_ms", "X-Core-Worker-Worker-Total-Ms"),
         ("worker_synth_ms", "X-Core-Worker-Worker-Synth-Ms"),
@@ -4965,6 +4973,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "teto_timeline_aux_overlays": teto_meta.get("timeline_aux_overlays") if engine == "teto" else None,
             "teto_timeline_audio_ms": teto_meta.get("timeline_audio_ms") if engine == "teto" else None,
             "teto_pitch_offset_semitones": teto_meta.get("pitch_offset_semitones") if engine == "teto" else None,
+            "teto_alias_path_cost": teto_meta.get("alias_path_cost") if engine == "teto" else None,
+            "teto_mean_nucleus_ms": teto_meta.get("mean_nucleus_ms") if engine == "teto" else None,
+            "teto_nucleus_duration_stddev_ms": teto_meta.get("nucleus_duration_stddev_ms") if engine == "teto" else None,
+            "teto_pitch_boundary_max_cents": teto_meta.get("pitch_boundary_max_cents") if engine == "teto" else None,
+            "teto_continuity_repairs": teto_meta.get("continuity_repairs") if engine == "teto" else None,
+            "teto_energy_boundary_max_db": teto_meta.get("energy_boundary_max_db") if engine == "teto" else None,
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),

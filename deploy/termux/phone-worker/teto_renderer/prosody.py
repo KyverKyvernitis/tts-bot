@@ -26,6 +26,12 @@ class RenderNote:
     word_moras: int = 1
     word_end: bool = False
     phrase_end: str = ""
+    profile: str = "standard"
+    planner_cost: float = 0.0
+    syllable_index: int = 0
+    word_syllables: int = 1
+    pitch_start_cents: int = 0
+    pitch_end_cents: int = 0
 
 
 _PITCH_CLASSES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -114,6 +120,18 @@ def _pitch_curve(start: int, peak: int, end: int, *, duration_ms: int, tempo: in
     return encode_pitchbend(bend)
 
 
+def _pitch_line(start: int, end: int, *, duration_ms: int, tempo: int) -> str:
+    """Encode one phrase-continuous segment without creating a new local peak."""
+    points = round(max(1, duration_ms) * tempo * 96 / 60000)
+    points = max(8, min(64, points))
+    bend: list[int] = []
+    for index in range(points):
+        ratio = _smoothstep(index / max(1, points - 1))
+        cents = start + (end - start) * ratio
+        bend.append(int(round(cents / 2.0) * 2))
+    return encode_pitchbend(bend)
+
+
 def _phrase_spans(moras: list[Mora]) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     start = 0
@@ -143,37 +161,46 @@ def _centers(moras: list[Mora]) -> list[int]:
     for start, end in _phrase_spans(moras):
         count = end - start + 1
         ending = moras[end].phrase_end
+        english_speech = any(moras[i].profile == "english-cvvc" for i in range(start, end + 1))
         terminal = next(
             (index for index in range(end, start - 1, -1) if moras[index].role == "nucleus"),
             end,
         )
-        if ending == "?":
-            phrase_start, phrase_end = 6, 20
-        elif ending in {",", ";", ":"}:
-            phrase_start, phrase_end = 8, -2
-        elif ending == "!":
-            phrase_start, phrase_end = 12, -10
+        if english_speech:
+            if ending == "?":
+                phrase_start, phrase_end = 4, 14
+            elif ending in {",", ";", ":"}:
+                phrase_start, phrase_end = 5, -1
+            elif ending == "!":
+                phrase_start, phrase_end = 7, -8
+            else:
+                phrase_start, phrase_end = 5, -12
         else:
-            phrase_start, phrase_end = 9, -18
+            if ending == "?":
+                phrase_start, phrase_end = 6, 20
+            elif ending in {",", ";", ":"}:
+                phrase_start, phrase_end = 8, -2
+            elif ending == "!":
+                phrase_start, phrase_end = 12, -10
+            else:
+                phrase_start, phrase_end = 9, -18
 
         for local_index, index in enumerate(range(start, end + 1)):
             ratio = local_index / max(1, count - 1)
             center = phrase_start + (phrase_end - phrase_start) * ratio
             mora = moras[index]
             if mora.role != "nucleus":
-                # Auxiliary CV/coda units should carry articulation, not their
-                # own melodic accent. Keep them near the surrounding baseline.
-                center -= 8
+                center -= 3 if english_speech else 8
             elif mora.stressed:
-                center += 34
+                center += 19 if english_speech else 34
             elif mora.deaccented:
-                center -= 10
+                center -= 6 if english_speech else 10
             elif mora.word_moras > 1:
-                center -= 3
+                center -= 2 if english_speech else 3
             if index + 1 <= end and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
-                center += 7
+                center += 5 if english_speech else 7
             if mora.word_end and not mora.phrase_end:
-                center -= 3
+                center -= 2 if english_speech else 3
             values[index] = int(round(center))
 
         previous_nucleus = next(
@@ -182,43 +209,52 @@ def _centers(moras: list[Mora]) -> list[int]:
         )
         if ending == "?":
             if previous_nucleus is not None:
-                values[previous_nucleus] = max(values[previous_nucleus], 24)
-            values[terminal] = max(values[terminal], 64)
+                values[previous_nucleus] = max(values[previous_nucleus], 14 if english_speech else 24)
+            values[terminal] = max(values[terminal], 38 if english_speech else 64)
         elif ending in {".", "\n"}:
             if previous_nucleus is not None:
-                values[previous_nucleus] = min(values[previous_nucleus], -14)
-            values[terminal] = min(values[terminal], -42)
+                values[previous_nucleus] = min(values[previous_nucleus], -8 if english_speech else -14)
+            values[terminal] = min(values[terminal], -24 if english_speech else -42)
         elif ending == "!":
             if previous_nucleus is not None:
-                values[previous_nucleus] = max(values[previous_nucleus], 24)
-            values[terminal] = min(values[terminal], -18)
+                values[previous_nucleus] = max(values[previous_nucleus], 15 if english_speech else 24)
+            values[terminal] = min(values[terminal], -12 if english_speech else -18)
         elif not ending:
-            values[terminal] = min(values[terminal], -28)
+            values[terminal] = min(values[terminal], -16 if english_speech else -28)
 
-        # A trailing coda/glide/nasal carries articulation, not the sentence's
-        # melodic target. Let it follow the last lexical nucleus instead of
-        # stealing the question rise or statement fall.
         for index in range(terminal + 1, end + 1):
             values[index] = int(round(values[terminal] * 0.82))
 
-    return [max(-84, min(84, value)) for value in values]
+    limit = 52 if any(mora.profile == "english-cvvc" for mora in moras) else 84
+    return [max(-limit, min(limit, value)) for value in values]
 
 
 def _duration_for(moras: list[Mora], index: int) -> int:
     mora = moras[index]
     duration = float(mora.duration_ms)
+    english_speech = mora.profile == "english-cvvc"
     if mora.role == "epenthetic":
         duration *= 0.90
     elif mora.role == "transition":
-        duration *= 0.92
+        duration *= 0.84 if english_speech else 0.92
     elif mora.role == "cluster":
-        duration *= 0.90
+        duration *= 0.82 if english_speech else 0.90
     elif mora.role == "coda":
-        duration *= 0.96
+        duration *= 0.84 if english_speech else 0.96
     elif mora.role == "glide":
-        duration *= 0.94
+        duration *= 0.82 if english_speech else 0.94
     elif mora.role == "nasal":
-        duration *= 0.98
+        duration *= 0.88 if english_speech else 0.98
+    elif english_speech:
+        # The phonemizer already seeds lexical timing from the PT-BR syllable.
+        # Only subtle phrase-level adjustment belongs here; applying the older
+        # UTAU stress multipliers again creates the mechanical ta-ta-ta cadence.
+        if mora.stressed:
+            duration *= 1.05
+        elif mora.deaccented:
+            duration *= 0.94
+        elif mora.word_syllables > 1:
+            duration *= 0.98
     elif mora.stressed:
         duration *= 1.14
     elif mora.deaccented:
@@ -226,15 +262,15 @@ def _duration_for(moras: list[Mora], index: int) -> int:
     elif mora.word_moras > 1:
         duration *= 0.90
     if mora.role == "nucleus" and index + 1 < len(moras) and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
-        duration *= 0.96
+        duration *= 0.97 if english_speech else 0.96
     if mora.phrase_end in {".", "!", "?", "\n"}:
-        duration *= 1.08
+        duration *= 1.06 if english_speech else 1.08
     elif mora.phrase_end in {",", ";", ":"}:
-        duration *= 1.02
+        duration *= 1.015 if english_speech else 1.02
     elif mora.word_end and mora.role == "nucleus":
-        duration *= 1.015
-    minimum = 34 if mora.role == "epenthetic" else 36 if mora.role in {"transition", "cluster"} else 38 if mora.role in {"coda", "glide"} else 48 if mora.role == "nasal" else 78
-    maximum = 82 if mora.role == "epenthetic" else 92 if mora.role in {"transition", "cluster"} else 96 if mora.role in {"coda", "glide", "nasal"} else 240
+        duration *= 1.01 if english_speech else 1.015
+    minimum = 30 if mora.role == "epenthetic" else 30 if mora.role in {"transition", "cluster"} else 32 if mora.role in {"coda", "glide"} else 42 if mora.role == "nasal" else 68
+    maximum = 76 if mora.role == "epenthetic" else 78 if mora.role in {"transition", "cluster"} else 84 if mora.role in {"coda", "glide", "nasal"} else 220
     return max(minimum, min(maximum, round(duration)))
 
 
@@ -289,26 +325,35 @@ def build_notes(
         start = round((previous + center) / 2)
         end = round((center + following) / 2)
         terminal_ending = terminal_endings.get(index, "")
-        peak = center + (0 if mora.role != "nucleus" else (12 if mora.stressed else (1 if mora.deaccented else 3)))
-        if terminal_ending == "?":
-            peak = max(peak, 68)
-        elif terminal_ending in {".", "\n"}:
+        if mora.profile == "english-cvvc":
+            peak = center + (0 if mora.role != "nucleus" else (7 if mora.stressed else (1 if mora.deaccented else 2)))
+            if terminal_ending == "?":
+                peak = max(peak, 42)
+        else:
+            peak = center + (0 if mora.role != "nucleus" else (12 if mora.stressed else (1 if mora.deaccented else 3)))
+            if terminal_ending == "?":
+                peak = max(peak, 68)
+        if terminal_ending in {".", "\n"}:
             peak = min(peak, center + 1)
         continuous_cvvc_aux = (
-            mora.role != "nucleus"
+            mora.profile == "english-cvvc"
+            and mora.role != "nucleus"
             and mora.coverage in {"cvvc-transition", "cluster-hit", "approximation"}
         )
         if continuous_cvvc_aux:
-            # Auxiliary CVVC pieces are articulation overlays, not independent
-            # notes. Giving each one a fresh speech contour resets the spectral
-            # trajectory at every boundary and is a major source of the robotic
-            # "travado" sound. Keep one coarse pitch and let lexical nuclei own
-            # phrase prosody.
-            pitchbend = encode_pitchbend([residual_cents] * 8) if residual_cents else "AA"
+            # Every fragment samples the same phrase envelope. 4D kept CVVC
+            # auxiliaries at neutral AA, which introduced a small pitch reset at
+            # every consonantal boundary even though the PCM timeline overlapped.
+            pitchbend = _pitch_line(
+                start + residual_cents,
+                end + residual_cents,
+                duration_ms=duration,
+                tempo=tempo_value,
+            )
             cap = {
-                "transition": 48, "cluster": 46, "coda": 50,
-                "glide": 50, "nasal": 56,
-            }.get(mora.role, 52)
+                "transition": 44, "cluster": 42, "coda": 46,
+                "glide": 44, "nasal": 52,
+            }.get(mora.role, 46)
             duration = min(duration, cap)
         else:
             pitchbend = _pitch_curve(
@@ -320,23 +365,27 @@ def build_notes(
             )
 
         if mora.role == "epenthetic":
-            gain = 0.72
+            gain = 0.76
         elif mora.role == "transition":
-            gain = 0.84 if continuous_cvvc_aux else 0.90
+            gain = 0.89 if continuous_cvvc_aux else 0.92
         elif mora.role == "cluster":
-            gain = 0.80 if continuous_cvvc_aux else 0.88
+            gain = 0.87 if continuous_cvvc_aux else 0.91
         elif mora.role == "coda":
-            gain = 0.74 if continuous_cvvc_aux else 0.78
+            gain = 0.86 if continuous_cvvc_aux else 0.84
         elif mora.role == "glide":
-            gain = 0.76 if continuous_cvvc_aux else 0.82
+            gain = 0.87 if continuous_cvvc_aux else 0.86
         elif mora.role == "nasal":
-            gain = 0.82 if continuous_cvvc_aux else 0.88
+            gain = 0.89 if continuous_cvvc_aux else 0.90
+        elif mora.profile == "english-cvvc" and mora.stressed:
+            gain = 1.035
+        elif mora.profile == "english-cvvc" and mora.deaccented:
+            gain = 0.97
         elif mora.stressed:
             gain = 1.055
         elif mora.deaccented:
             gain = 0.955
         else:
-            gain = 0.985 if mora.word_moras > 1 else 1.0
+            gain = 0.99 if mora.word_moras > 1 else 1.0
         if mora.phrase_end in {".", "?", "!", "\n"}:
             gain *= 0.985
 
@@ -360,5 +409,11 @@ def build_notes(
             word_moras=mora.word_moras,
             word_end=mora.word_end,
             phrase_end=mora.phrase_end,
+            profile=mora.profile,
+            planner_cost=mora.planner_cost,
+            syllable_index=mora.syllable_index,
+            word_syllables=mora.word_syllables,
+            pitch_start_cents=int(start + residual_cents),
+            pitch_end_cents=int(end + residual_cents),
         ))
     return notes

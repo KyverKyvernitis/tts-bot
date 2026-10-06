@@ -37,6 +37,10 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
         f"timeline={rendered.get('timeline_mode') or 'serial'} "
         f"pitch={rendered.get('pitch_offset_semitones') if rendered.get('pitch_offset_semitones') is not None else 0.0:+.1f}st "
         f"overlays={rendered.get('timeline_aux_overlays') or 0} "
+        f"path_cost={rendered.get('alias_path_cost') if rendered.get('alias_path_cost') is not None else '-'} "
+        f"pitch_jump={rendered.get('pitch_boundary_max_cents') if rendered.get('pitch_boundary_max_cents') is not None else '-'} "
+        f"energy_jump={rendered.get('energy_boundary_max_db') if rendered.get('energy_boundary_max_db') is not None else '-'} "
+        f"repairs={rendered.get('continuity_repairs') or 0} "
         f"missing={len(rendered.get('missing_phonemes') or [])}"
     )
     return data, audio_format, teto_meta

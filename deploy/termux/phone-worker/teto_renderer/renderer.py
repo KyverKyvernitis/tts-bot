@@ -26,7 +26,7 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
-    RENDER_VERSION = "speech-4d-texttoteto-pitch"
+    RENDER_VERSION = "speech-4e-phrase-speech"
     PHONEMIZER_VERSION = "ptbr-g2p-xsampa-cvvc-v1"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v3-continuous"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
@@ -438,6 +438,56 @@ class TetoRenderer:
         return output
 
     @staticmethod
+    def _rms(samples: array.array, start: int = 0, end: int | None = None) -> float:
+        if not samples:
+            return 0.0
+        lo = max(0, int(start))
+        hi = len(samples) if end is None else max(lo, min(len(samples), int(end)))
+        if hi <= lo:
+            return 0.0
+        total = 0.0
+        count = 0
+        for sample in samples[lo:hi]:
+            total += float(sample) * float(sample)
+            count += 1
+        return math.sqrt(total / max(1, count))
+
+    def _match_fragment_energy(
+        self, target: array.array, fragment: array.array, *, start_sample: int,
+        fade_samples: int, role: str,
+    ) -> tuple[array.array, float, bool]:
+        """Match local RMS conservatively before a CVVC boundary is mixed.
+
+        Resampler fragments come from different recordings and often have visibly
+        different loudness. A global final normalization cannot fix those local
+        steps; it only scales the whole phrase. This keeps each join within a small
+        gain window so consonants retain their character while the perceived voice
+        no longer pumps at every alias boundary.
+        """
+        if not target or not fragment or start_sample < 0 or start_sample >= len(target):
+            return fragment, 0.0, False
+        overlap = min(len(fragment), len(target) - start_sample)
+        if overlap <= 16:
+            return fragment, 0.0, False
+        window = min(overlap, max(96, min(round(self.SAMPLE_RATE * 0.010), max(1, fade_samples))))
+        target_rms = self._rms(target, start_sample, start_sample + window)
+        fragment_rms = self._rms(fragment, 0, window)
+        if target_rms < 48.0 or fragment_rms < 48.0:
+            return fragment, 0.0, False
+        delta_db = 20.0 * math.log10(max(1e-6, fragment_rms / target_rms))
+        if abs(delta_db) < 1.25:
+            return fragment, abs(delta_db), False
+        desired = target_rms / fragment_rms
+        if role == "nucleus":
+            scale = max(0.82, min(1.18, desired))
+        else:
+            scale = max(0.86, min(1.14, desired))
+        if abs(scale - 1.0) < 0.015:
+            return fragment, abs(delta_db), False
+        matched = self._apply_gain(fragment, scale)
+        return matched, abs(delta_db), True
+
+    @staticmethod
     def _oto_join_ms(entry: OtoEntry) -> float:
         # OTO preutterance tells us how early the next consonant wants to enter.
         # Use a conservative share of it instead of treating fragments as
@@ -583,12 +633,11 @@ class TetoRenderer:
         fade = max(0, min(overlap, int(fade_samples)))
         for offset in range(overlap):
             if fade > 0 and offset < fade:
-                ratio = (offset + 1) / (fade + 1)
-                ratio = ratio * ratio * (3.0 - 2.0 * ratio)
+                phase = (offset + 1) / (fade + 1) * (math.pi / 2.0)
+                # sin²/cos² is constant-sum but has zero slope at both ends, so
+                # a join does not announce itself as a new envelope attack.
+                ratio = math.sin(phase) ** 2
             else:
-                # After the OTO crossfade the new sample must dominate.  The
-                # old 4B compositor kept averaging independent syllables and
-                # made consonant attacks sound doubled/robotic.
                 ratio = 1.0
             position = start + offset
             mixed = int(target[position] * (1.0 - ratio) + fragment[offset] * ratio)
@@ -617,6 +666,8 @@ class TetoRenderer:
         legacy_fragment_hits = 0
         auxiliary_overlays = 0
         max_lead_ms = 0.0
+        continuity_repairs = 0
+        max_energy_boundary_db = 0.0
 
         for number, (note, entry, placement) in enumerate(zip(notes, entries, placements)):
             if time.monotonic() >= deadline:
@@ -634,6 +685,12 @@ class TetoRenderer:
             fragment = self._apply_gain(self._read_samples(fragment_path), note.gain)
             start_sample = round(self.SAMPLE_RATE * placement["start_ms"] / 1000.0)
             fade_samples = round(self.SAMPLE_RATE * placement["fade_ms"] / 1000.0)
+            fragment, boundary_db, repaired = self._match_fragment_energy(
+                combined, fragment, start_sample=start_sample,
+                fade_samples=fade_samples, role=note.role,
+            )
+            max_energy_boundary_db = max(max_energy_boundary_db, boundary_db)
+            continuity_repairs += int(repaired)
             self._place_timeline_fragment(
                 combined, fragment, start_sample=start_sample, fade_samples=fade_samples
             )
@@ -655,12 +712,14 @@ class TetoRenderer:
             float(note.pause_after_ms) for note in notes if note.pause_after_ms >= 24
         )
         timeline = {
-            "mode": "oto-continuous",
+            "mode": "phrase-continuous",
             "planned_ms": round(planned_end_ms, 2),
             "audio_ms": round(1000.0 * len(combined) / self.SAMPLE_RATE, 2),
             "serialized_ms": round(sequential_ms, 2),
             "aux_overlays": auxiliary_overlays,
             "max_preutterance_ms": round(max_lead_ms, 2),
+            "continuity_repairs": continuity_repairs,
+            "energy_boundary_max_db": round(max_energy_boundary_db, 2),
         }
         return combined, missing, rendered, pitchbend_fallbacks, legacy_fragment_hits, timeline
 
@@ -805,6 +864,20 @@ class TetoRenderer:
             if not raw or len(raw) > max_audio_bytes:
                 raise TetoSynthesisError(f"áudio Teto inválido ou grande demais ({len(raw)} bytes)")
             elapsed_ms = (time.monotonic() - started) * 1000.0
+            nuclei = [note.duration_ms for note in notes if note.role == "nucleus"]
+            mean_nucleus_ms = (sum(nuclei) / len(nuclei)) if nuclei else 0.0
+            nucleus_stddev_ms = (
+                math.sqrt(sum((value - mean_nucleus_ms) ** 2 for value in nuclei) / len(nuclei))
+                if nuclei else 0.0
+            )
+            pitch_boundary_max = 0
+            for left, right in zip(notes, notes[1:]):
+                if left.phrase_end:
+                    continue
+                pitch_boundary_max = max(
+                    pitch_boundary_max,
+                    abs(int(left.pitch_end_cents) - int(right.pitch_start_cents)),
+                )
             return {
                 "audio": raw,
                 "audio_format": "wav",
@@ -827,6 +900,10 @@ class TetoRenderer:
                 "cluster_hits": sum(1 for note in notes if note.coverage == "cluster-hit"),
                 "approximated_phonemes": sum(1 for note in notes if note.coverage == "approximation"),
                 "coverage_percent": round(100.0 * sum(1 for note in notes if note.coverage in {"cvvc-direct", "cvvc-transition", "cluster-hit"}) / max(1, len(notes)), 1),
+                "alias_path_cost": round(sum(float(note.planner_cost) for note in notes), 2),
+                "mean_nucleus_ms": round(mean_nucleus_ms, 2),
+                "nucleus_duration_stddev_ms": round(nucleus_stddev_ms, 2),
+                "pitch_boundary_max_cents": pitch_boundary_max,
                 "pitchbend_fallbacks": pitchbend_fallbacks,
                 "legacy_fragment_hits": legacy_fragment_hits,
                 "timeline_mode": str(timeline_meta.get("mode") or "serial"),
@@ -835,6 +912,8 @@ class TetoRenderer:
                 "timeline_serialized_ms": timeline_meta.get("serialized_ms"),
                 "timeline_aux_overlays": timeline_meta.get("aux_overlays", 0),
                 "timeline_max_preutterance_ms": timeline_meta.get("max_preutterance_ms"),
+                "continuity_repairs": timeline_meta.get("continuity_repairs", 0),
+                "energy_boundary_max_db": timeline_meta.get("energy_boundary_max_db", 0.0),
                 "worker_synth_ms": round(elapsed_ms, 2),
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }

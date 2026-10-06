@@ -9,17 +9,18 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-4d-texttoteto-pitch` e
+o renderer atualizado anuncia `renderer_version=speech-4e-phrase-speech` e
 `phonemizer_version=ptbr-g2p-xsampa-cvvc-v1`. Se o serviço ainda mostra o
 estado antigo, o reinício manual canônico é
 `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
 bloqueando a síntese pesada até sua conclusão.
 
-## Teto English CVVC para PT-BR: renderer `speech-4d-texttoteto-pitch`
+## Teto English CVVC para PT-BR: renderer `speech-4e-phrase-speech`
 
-A revisão 4C mantém o planner fonético da 4B e troca o compositor temporal do estágio final de articulação quando a voicebank oficial
-English 150401 está instalada. O G2P PT-BR continua separado da voicebank, mas
+A revisão 4E mantém a voicebank English 150401 e transforma o estágio final em
+um renderer de fala por frase. O objetivo é reduzir resets de pitch, cadência fixa
+e degraus de energia entre aliases, mantendo a síntese no Straycat/WORLD. O G2P PT-BR continua separado da voicebank, mas
 os fonemas agora são planejados diretamente contra o inventário X-SAMPA/CVVC
 da Teto English. A bank japonesa permanece disponível como fallback de
 compatibilidade.
@@ -72,17 +73,26 @@ os cria sob demanda por WAV; o agrupamento por arquivo continua impedindo duas
 análises concorrentes do mesmo sample.
 
 Os aliases English CVVC deixam de ser concatenados como blocos independentes.
-O compositor `oto-continuous` usa `preutterance` para iniciar cada VCV/cluster
+O compositor `phrase-continuous` usa `preutterance` para iniciar cada VCV/cluster
 antes do boundary lexical, usa `overlap` como janela de crossfade e faz
 transições/codas funcionarem como overlays. Somente núcleos vocálicos avançam
 a maior parte do relógio da fala. O renderer também inclui o preutterance no
 budget entregue ao Straycat, evitando que um VCV posicionado cedo termine cedo
 e corte o começo/fim da sílaba.
 
-Unidades auxiliares CVVC usam pitchbend neutro e duração curta; a prosódia de
-frase permanece nos núcleos. A telemetria de síntese publica `timeline_mode`,
-`timeline_planned_ms`, `timeline_audio_ms`, `timeline_serialized_ms`,
-`timeline_aux_overlays` e `timeline_max_preutterance_ms`.
+A 4E remove o pitchbend neutro dos auxiliares: cada fragmento recebe um trecho
+da mesma curva de pitch da frase e as fronteiras compartilham o mesmo valor em
+cents. O timing dos núcleos deixa de partir de 138 ms fixos e passa a considerar
+tonicidade, palavra funcional, onset/coda, ditongo e posição na palavra. O
+planner de aliases deixa de aceitar simplesmente o primeiro hit e pontua aliases
+renderizáveis por cobertura de contexto e saúde do OTO.
+
+Antes de misturar um fragmento novo, o compositor mede a energia local e aplica
+correção conservadora de RMS quando existe um salto grande entre gravações. A
+janela OTO usa fade sin²/cos² com inclinação nula nas bordas. A telemetria publica
+`alias_path_cost`, `mean_nucleus_ms`, `nucleus_duration_stddev_ms`,
+`pitch_boundary_max_cents`, `continuity_repairs`, `energy_boundary_max_db`, além
+dos campos `timeline_*` anteriores.
 
 
 Configuração recomendada:

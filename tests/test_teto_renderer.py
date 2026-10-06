@@ -135,12 +135,17 @@ class TetoRendererTests(unittest.TestCase):
                 self.assertEqual(status["name"], "Kasane Teto English Test")
                 result = renderer.synthesize("teto", timeout_seconds=10)
             self.assertEqual(result["voicebank_profile"], "english-cvvc")
-            self.assertEqual(result["renderer_version"], "speech-4d-texttoteto-pitch")
+            self.assertEqual(result["renderer_version"], "speech-4e-phrase-speech")
             self.assertEqual(result["missing_phonemes"], [])
             self.assertGreaterEqual(result["cvvc_direct"], 2)
             self.assertGreater(result["coverage_percent"], 90.0)
             self.assertEqual(result["epenthetic_phonemes"], 0)
-            self.assertEqual(result["timeline_mode"], "oto-continuous")
+            self.assertEqual(result["timeline_mode"], "phrase-continuous")
+            self.assertIn("alias_path_cost", result)
+            self.assertIn("mean_nucleus_ms", result)
+            self.assertEqual(result["pitch_boundary_max_cents"], 0)
+            self.assertIn("continuity_repairs", result)
+            self.assertIn("energy_boundary_max_db", result)
 
     def test_english_cvvc_timeline_uses_oto_preutterance_instead_of_serial_aux_notes(self):
         from teto_renderer.prosody import RenderNote
@@ -225,7 +230,7 @@ class TetoRendererTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 result = TetoRenderer().synthesize("Brasil", timeout_seconds=10)
 
-            self.assertEqual(result["timeline_mode"], "oto-continuous")
+            self.assertEqual(result["timeline_mode"], "phrase-continuous")
             self.assertGreaterEqual(result["timeline_aux_overlays"], 2)
             self.assertGreater(result["timeline_max_preutterance_ms"], 40)
             self.assertLess(result["timeline_audio_ms"], 520)
@@ -239,6 +244,18 @@ class TetoRendererTests(unittest.TestCase):
                 else:
                     current = 0
             self.assertLess(longest_zero, round(0.010 * 44100))
+
+    def test_phrase_compositor_repairs_large_local_energy_steps(self):
+        renderer = TetoRenderer()
+        target = array.array("h", [900] * 1200)
+        fragment = array.array("h", [2600] * 900)
+        matched, before_db, repaired = renderer._match_fragment_energy(
+            target, fragment, start_sample=400, fade_samples=300, role="nucleus"
+        )
+        self.assertTrue(repaired)
+        self.assertGreater(before_db, 6.0)
+        self.assertLess(max(abs(x) for x in matched), 2600)
+        self.assertGreater(max(abs(x) for x in matched), 1800)
 
     def test_auto_falls_back_to_standard_bank_when_english_is_absent(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -368,7 +385,7 @@ class TetoRendererTests(unittest.TestCase):
             resampler.chmod(0o755)
             with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
                 result = TetoRenderer().synthesize("teto")
-            self.assertEqual(result["renderer_version"], "speech-4d-texttoteto-pitch")
+            self.assertEqual(result["renderer_version"], "speech-4e-phrase-speech")
             self.assertEqual(result["phonemizer_version"], "ptbr-g2p-xsampa-cvvc-v1")
             self.assertEqual(result["pitchbend_fallbacks"], 2)
             self.assertTrue(bytes(result["audio"]).startswith(b"RIFF"))
