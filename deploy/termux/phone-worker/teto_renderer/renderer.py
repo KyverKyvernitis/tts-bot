@@ -26,9 +26,9 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
-    RENDER_VERSION = "speech-4b-english-cvvc"
+    RENDER_VERSION = "speech-4c-continuous-cvvc"
     PHONEMIZER_VERSION = "ptbr-g2p-xsampa-cvvc-v1"
-    FRAGMENT_CACHE_SCHEMA = "teto-fragment-v2"
+    FRAGMENT_CACHE_SCHEMA = "teto-fragment-v3-continuous"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
 
     def __init__(self, *, resource_guard: Callable[[], dict[str, Any]] | None = None):
@@ -253,15 +253,43 @@ class TetoRenderer:
     def _format_number(value: float) -> str:
         return f"{float(value):.3f}".rstrip("0").rstrip(".") or "0"
 
+    def _english_lead_ms(self, entry: OtoEntry, note: RenderNote) -> float:
+        """Amount of OTO preutterance that must live *before* the note anchor.
+
+        speech-4B rendered every alias as a self-contained block and only
+        crossfaded the finished WAVs.  A CVVC/VCV oto is authored differently:
+        preutterance belongs before the lexical note boundary.  Keeping this
+        lead inside the rendered fragment lets the compositor place the sample
+        on an UTAU-like timeline instead of serializing consonant attacks.
+        """
+        if self._index_profile != "english-cvvc":
+            return 0.0
+        preutterance = max(0.0, float(entry.preutterance_ms))
+        overlap = max(0.0, float(entry.overlap_ms))
+        if note.role == "nucleus":
+            cap = 180.0
+        elif note.role in {"transition", "cluster"}:
+            cap = 120.0
+        elif note.role in {"coda", "glide", "nasal"}:
+            cap = 90.0
+        else:
+            cap = 70.0
+        return min(cap, max(preutterance, overlap))
+
     def _resampler_length(self, entry: OtoEntry, note: RenderNote) -> float:
+        # For English CVVC the output needs to contain the preutterance region
+        # *and* the lexical duration after the anchor.  Without this budget a
+        # VCV fragment placed early on the timeline ends early as well, which
+        # sounds like a series of clipped/restarted syllables.
+        target_duration = float(note.duration_ms) + self._english_lead_ms(entry, note)
         if self._length_mode() != "post-consonant":
-            return float(note.duration_ms)
+            return target_duration
         # Straycat adds its consonantal region to LENGTH. WORLD uses 5 ms
         # frames, so budget that region before requesting the vowel duration.
         stretch = 2.0 ** (1.0 - self._velocity() / 100.0)
         consonant = max(0.0, entry.consonant_ms) * stretch
         consonant = math.floor(consonant / 5.0) * 5.0
-        duration = math.ceil(note.duration_ms / 5.0) * 5.0
+        duration = math.ceil(target_duration / 5.0) * 5.0
         return max(5.0, duration - consonant)
 
     def _native_wav(self, path: Path) -> bool:
@@ -282,6 +310,8 @@ class TetoRenderer:
             note.pitch,
             note.pitchbend,
             str(note.duration_ms),
+            note.role,
+            self._format_number(self._english_lead_ms(entry, note)),
             str(self._velocity()),
             str(self._modulation()),
             str(os.getenv("PHONE_WORKER_TETO_FLAGS") or ""),
@@ -432,6 +462,208 @@ class TetoRenderer:
             target[start + index] = max(-32768, min(32767, mixed))
         target.extend(fragment[overlap:])
 
+    @staticmethod
+    def _continuous_aux_advance_ms(note: RenderNote) -> float:
+        # CVVC transition aliases articulate a boundary; they are not separate
+        # spoken notes.  Give post-nucleus tails a tiny amount of real timeline
+        # space while onset transitions consume none of the lexical duration.
+        if note.role == "nasal":
+            return max(10.0, min(26.0, note.duration_ms * 0.34))
+        if note.role in {"coda", "glide"}:
+            return max(8.0, min(22.0, note.duration_ms * 0.30))
+        return 0.0
+
+    def _english_timeline_placements(
+        self, notes: list[RenderNote], entries: list[OtoEntry | None]
+    ) -> tuple[list[dict[str, float]], float]:
+        """Schedule English CVVC fragments around lexical note anchors.
+
+        Nuclei advance the speech clock.  Onset/cluster aliases lead into the
+        next nucleus and coda/glide/nasal aliases overlap the tail of the
+        previous nucleus.  This is deliberately different from speech-4B's
+        serial append model, where every auxiliary alias created a new attack.
+        """
+        anchors = [0.0 for _ in notes]
+        leads = [
+            self._english_lead_ms(entry, note) if entry is not None else 0.0
+            for note, entry in zip(notes, entries)
+        ]
+        cursor = 0.0
+        pending_onsets: list[int] = []
+
+        for index, note in enumerate(notes):
+            if note.role in {"transition", "cluster"}:
+                pending_onsets.append(index)
+                continue
+
+            if note.role == "nucleus":
+                if pending_onsets:
+                    # Order onset pieces by their *sample starts*, not only by
+                    # lexical anchors. A nucleus with a long preutterance can
+                    # begin earlier than a short '- br' alias; if we ignored
+                    # that, the nucleus would overwrite the cluster attack.
+                    nucleus_sample_start = cursor - leads[index]
+                    count = len(pending_onsets)
+                    for local, pending in enumerate(pending_onsets):
+                        before = min(42.0, (count - local) * 12.0)
+                        desired_start = nucleus_sample_start - before
+                        anchors[pending] = desired_start + leads[pending]
+                    pending_onsets.clear()
+
+                anchors[index] = cursor
+                cursor += float(note.duration_ms)
+            else:
+                # Post-nucleus articulation starts at the current lexical
+                # boundary.  Its own preutterance will move the sample earlier
+                # and therefore replace/merge with the vowel tail.
+                anchors[index] = cursor
+                cursor += self._continuous_aux_advance_ms(note)
+
+            if note.pause_after_ms >= 24:
+                cursor += float(note.pause_after_ms)
+
+        # Defensive handling for a malformed/planner-truncated sequence ending
+        # in an onset alias without a following nucleus.
+        if pending_onsets:
+            for local, pending in enumerate(pending_onsets):
+                anchors[pending] = cursor + local * 8.0
+            cursor += max(0.0, (len(pending_onsets) - 1) * 8.0)
+
+        placements: list[dict[str, float]] = []
+        minimum_start = 0.0
+        first = True
+        for index, (note, entry) in enumerate(zip(notes, entries)):
+            lead = leads[index]
+            start = anchors[index] - lead
+            overlap = 0.0
+            if entry is not None:
+                # OTO overlap is the real crossfade hint.  Add only a small
+                # share of the preutterance as a safety floor; after this fade
+                # the new VCV fragment owns the overlap instead of being mixed
+                # at half volume for its entire consonant region.
+                overlap = max(float(entry.overlap_ms), min(24.0, lead * 0.28))
+                overlap = max(4.0, min(48.0, overlap))
+            if first or start < minimum_start:
+                minimum_start = start
+                first = False
+            placements.append({
+                "anchor_ms": anchors[index],
+                "start_ms": start,
+                "lead_ms": lead,
+                "fade_ms": overlap,
+            })
+
+        shift = -minimum_start if minimum_start < 0.0 else 0.0
+        if shift:
+            for placement in placements:
+                placement["anchor_ms"] += shift
+                placement["start_ms"] += shift
+        return placements, cursor + shift
+
+    @staticmethod
+    def _place_timeline_fragment(
+        target: array.array, fragment: array.array, *, start_sample: int, fade_samples: int
+    ) -> None:
+        if not fragment:
+            return
+        start = int(start_sample)
+        source_offset = 0
+        if start < 0:
+            source_offset = min(len(fragment), -start)
+            start = 0
+        if source_offset >= len(fragment):
+            return
+        fragment = fragment[source_offset:]
+        original_length = len(target)
+        if start > original_length:
+            target.extend([0] * (start - original_length))
+            original_length = len(target)
+
+        overlap = max(0, min(len(fragment), original_length - start))
+        fade = max(0, min(overlap, int(fade_samples)))
+        for offset in range(overlap):
+            if fade > 0 and offset < fade:
+                ratio = (offset + 1) / (fade + 1)
+                ratio = ratio * ratio * (3.0 - 2.0 * ratio)
+            else:
+                # After the OTO crossfade the new sample must dominate.  The
+                # old 4B compositor kept averaging independent syllables and
+                # made consonant attacks sound doubled/robotic.
+                ratio = 1.0
+            position = start + offset
+            mixed = int(target[position] * (1.0 - ratio) + fragment[offset] * ratio)
+            target[position] = max(-32768, min(32767, mixed))
+
+        remainder = fragment[overlap:]
+        if remainder:
+            if start + overlap == len(target):
+                target.extend(remainder)
+            else:
+                needed = start + len(fragment) - len(target)
+                if needed > 0:
+                    target.extend([0] * needed)
+                for offset, sample in enumerate(remainder, start=overlap):
+                    target[start + offset] = sample
+
+    def _compose_english_cvvc(
+        self, *, notes: list[RenderNote], entries: list[OtoEntry | None],
+        fragments: dict[int, tuple[Path, bool, bool]], deadline: float
+    ) -> tuple[array.array, list[str], int, int, int, dict[str, float | int | str]]:
+        placements, planned_end_ms = self._english_timeline_placements(notes, entries)
+        combined = array.array("h")
+        missing: list[str] = []
+        rendered = 0
+        pitchbend_fallbacks = 0
+        legacy_fragment_hits = 0
+        auxiliary_overlays = 0
+        max_lead_ms = 0.0
+
+        for number, (note, entry, placement) in enumerate(zip(notes, entries, placements)):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("renderização Teto excedeu o timeout")
+            if entry is None:
+                missing.append(note.candidates[0] if note.candidates else "?")
+                # Do not serialize an explicit silence for a missing auxiliary
+                # CVVC unit.  The surrounding lexical samples usually cover
+                # that boundary more naturally than a hard gap would.
+                continue
+
+            fragment_path, neutral_pitch, legacy_fragment = fragments[number]
+            pitchbend_fallbacks += int(neutral_pitch)
+            legacy_fragment_hits += int(legacy_fragment)
+            fragment = self._apply_gain(self._read_samples(fragment_path), note.gain)
+            start_sample = round(self.SAMPLE_RATE * placement["start_ms"] / 1000.0)
+            fade_samples = round(self.SAMPLE_RATE * placement["fade_ms"] / 1000.0)
+            self._place_timeline_fragment(
+                combined, fragment, start_sample=start_sample, fade_samples=fade_samples
+            )
+            max_lead_ms = max(max_lead_ms, float(placement["lead_ms"]))
+            auxiliary_overlays += int(note.role != "nucleus")
+            rendered += 1
+
+        if combined:
+            # Phrase-level micro fades eliminate the only two raw PCM edges
+            # that remain exposed after timeline composition.
+            edge = min(len(combined) // 2, round(self.SAMPLE_RATE * 0.004))
+            for offset in range(edge):
+                ratio = (offset + 1) / max(1, edge)
+                combined[offset] = int(combined[offset] * ratio)
+                end = len(combined) - 1 - offset
+                combined[end] = int(combined[end] * ratio)
+
+        sequential_ms = sum(float(note.duration_ms) for note in notes) + sum(
+            float(note.pause_after_ms) for note in notes if note.pause_after_ms >= 24
+        )
+        timeline = {
+            "mode": "oto-continuous",
+            "planned_ms": round(planned_end_ms, 2),
+            "audio_ms": round(1000.0 * len(combined) / self.SAMPLE_RATE, 2),
+            "serialized_ms": round(sequential_ms, 2),
+            "aux_overlays": auxiliary_overlays,
+            "max_preutterance_ms": round(max_lead_ms, 2),
+        }
+        return combined, missing, rendered, pitchbend_fallbacks, legacy_fragment_hits, timeline
+
     def synthesize(self, text: str, *, timeout_seconds: float = 25.0, max_audio_bytes: int = 8 * 1024 * 1024) -> dict[str, Any]:
         if not self.status().get("ready"):
             raise TetoConfigurationError(str(self.status().get("last_error") or "Teto indisponível"))
@@ -495,33 +727,42 @@ class TetoRenderer:
                             future.cancel()
                         raise
 
-                for number, (note, entry) in enumerate(zip(notes, entries)):
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError("renderização Teto excedeu o timeout")
-                    if entry is None:
-                        missing.append(note.candidates[0] if note.candidates else "?")
-                        pause = int(self.SAMPLE_RATE * min(note.duration_ms, 160) / 1000)
-                        combined.extend([0] * pause)
-                        continue
-                    fragment_path, neutral_pitch, legacy_fragment = fragments[number]
-                    pitchbend_fallbacks += int(neutral_pitch)
-                    legacy_fragment_hits += int(legacy_fragment)
-                    fragment = self._apply_gain(self._read_samples(fragment_path), note.gain)
-                    overlap_ms = self._oto_join_ms(entry)
-                    if self._index_profile == "english-cvvc" and note.role in {"transition", "cluster"}:
-                        overlap_ms = min(72.0, max(overlap_ms, note.duration_ms * 0.55))
-                    if note.role == "epenthetic":
-                        # Hide the artificial vowel required by a Japanese CV
-                        # cluster approximation behind the neighbouring unit.
-                        overlap_ms = min(60.0, max(overlap_ms, note.duration_ms * 0.58))
-                    elif note.role in {"coda", "glide", "nasal"}:
-                        overlap_ms = min(58.0, max(overlap_ms, note.duration_ms * 0.42))
-                    self._append_crossfade(combined, fragment, int(self.SAMPLE_RATE * overlap_ms / 1000.0))
-                    # The phonemizer's tiny 6 ms word separator should not
-                    # become a hard stop. Punctuation pauses remain explicit.
-                    if note.pause_after_ms >= 24:
-                        combined.extend([0] * int(self.SAMPLE_RATE * note.pause_after_ms / 1000.0))
-                    rendered += 1
+                timeline_meta: dict[str, float | int | str] = {"mode": "serial"}
+                if self._index_profile == "english-cvvc":
+                    (
+                        combined, missing, rendered, pitchbend_fallbacks,
+                        legacy_fragment_hits, timeline_meta,
+                    ) = self._compose_english_cvvc(
+                        notes=notes, entries=entries, fragments=fragments, deadline=deadline
+                    )
+                else:
+                    for number, (note, entry) in enumerate(zip(notes, entries)):
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("renderização Teto excedeu o timeout")
+                        if entry is None:
+                            missing.append(note.candidates[0] if note.candidates else "?")
+                            pause = int(self.SAMPLE_RATE * min(note.duration_ms, 160) / 1000)
+                            combined.extend([0] * pause)
+                            continue
+                        fragment_path, neutral_pitch, legacy_fragment = fragments[number]
+                        pitchbend_fallbacks += int(neutral_pitch)
+                        legacy_fragment_hits += int(legacy_fragment)
+                        fragment = self._apply_gain(self._read_samples(fragment_path), note.gain)
+                        overlap_ms = self._oto_join_ms(entry)
+                        if note.role == "epenthetic":
+                            # Hide the artificial vowel required by a Japanese CV
+                            # cluster approximation behind the neighbouring unit.
+                            overlap_ms = min(60.0, max(overlap_ms, note.duration_ms * 0.58))
+                        elif note.role in {"coda", "glide", "nasal"}:
+                            overlap_ms = min(58.0, max(overlap_ms, note.duration_ms * 0.42))
+                        self._append_crossfade(
+                            combined, fragment, int(self.SAMPLE_RATE * overlap_ms / 1000.0)
+                        )
+                        # The phonemizer's tiny 6 ms word separator should not
+                        # become a hard stop. Punctuation pauses remain explicit.
+                        if note.pause_after_ms >= 24:
+                            combined.extend([0] * int(self.SAMPLE_RATE * note.pause_after_ms / 1000.0))
+                        rendered += 1
 
                 if rendered <= 0:
                     raise TetoSynthesisError("nenhum alias da voicebank correspondeu ao texto")
@@ -572,6 +813,12 @@ class TetoRenderer:
                 "coverage_percent": round(100.0 * sum(1 for note in notes if note.coverage in {"cvvc-direct", "cvvc-transition", "cluster-hit"}) / max(1, len(notes)), 1),
                 "pitchbend_fallbacks": pitchbend_fallbacks,
                 "legacy_fragment_hits": legacy_fragment_hits,
+                "timeline_mode": str(timeline_meta.get("mode") or "serial"),
+                "timeline_planned_ms": timeline_meta.get("planned_ms"),
+                "timeline_audio_ms": timeline_meta.get("audio_ms"),
+                "timeline_serialized_ms": timeline_meta.get("serialized_ms"),
+                "timeline_aux_overlays": timeline_meta.get("aux_overlays", 0),
+                "timeline_max_preutterance_ms": timeline_meta.get("max_preutterance_ms"),
                 "worker_synth_ms": round(elapsed_ms, 2),
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }

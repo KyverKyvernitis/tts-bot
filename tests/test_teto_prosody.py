@@ -117,9 +117,13 @@ class TetoProsodyTests(unittest.TestCase):
         notes = build_notes(_english_moras("Brasil", available))
         auxiliaries = [n for n in notes if n.role != "nucleus"]
         self.assertTrue(auxiliaries)
-        self.assertTrue(all(n.duration_ms < 100 for n in auxiliaries))
-        self.assertTrue(all(n.gain < 1.0 for n in auxiliaries))
+        self.assertTrue(all(n.duration_ms <= 56 for n in auxiliaries))
+        self.assertTrue(all(n.gain < 0.9 for n in auxiliaries))
+        self.assertTrue(all(n.pitchbend == "AA" for n in auxiliaries))
         self.assertTrue(all(n.coverage in {"cluster-hit", "cvvc-transition", "approximation"} for n in auxiliaries))
+        nuclei = [n for n in notes if n.role == "nucleus"]
+        self.assertTrue(nuclei)
+        self.assertTrue(any(n.pitchbend != "AA" for n in nuclei))
 
     def test_clusters_use_quiet_short_epenthesis_instead_of_full_japanese_syllables(self):
         brasil = build_notes(phonemize("Brasil"))

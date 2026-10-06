@@ -135,11 +135,110 @@ class TetoRendererTests(unittest.TestCase):
                 self.assertEqual(status["name"], "Kasane Teto English Test")
                 result = renderer.synthesize("teto", timeout_seconds=10)
             self.assertEqual(result["voicebank_profile"], "english-cvvc")
-            self.assertEqual(result["renderer_version"], "speech-4b-english-cvvc")
+            self.assertEqual(result["renderer_version"], "speech-4c-continuous-cvvc")
             self.assertEqual(result["missing_phonemes"], [])
             self.assertGreaterEqual(result["cvvc_direct"], 2)
             self.assertGreater(result["coverage_percent"], 90.0)
             self.assertEqual(result["epenthetic_phonemes"], 0)
+            self.assertEqual(result["timeline_mode"], "oto-continuous")
+
+    def test_english_cvvc_timeline_uses_oto_preutterance_instead_of_serial_aux_notes(self):
+        from teto_renderer.prosody import RenderNote
+        from teto_renderer.voicebank import OtoEntry
+
+        renderer = TetoRenderer()
+        renderer._index_profile = "english-cvvc"
+        notes = [
+            RenderNote(("- br",), "C4", 46, 0, role="cluster", coverage="cluster-hit"),
+            RenderNote(("ra",), "C4", 120, 0, role="nucleus", coverage="cvvc-direct"),
+            RenderNote(("i w",), "C4", 50, 0, role="glide", coverage="cvvc-transition", word_end=True),
+        ]
+        entries = [
+            OtoEntry("- br", Path("cluster.wav"), 0, 32, 0, 45, 18),
+            OtoEntry("ra", Path("ra.wav"), 0, 38, 0, 70, 18),
+            OtoEntry("i w", Path("iw.wav"), 0, 26, 0, 45, 18),
+        ]
+        placements, _ = renderer._english_timeline_placements(notes, entries)
+
+        # The consonant cluster starts first and converges on the lexical /ra/
+        # boundary instead of consuming a standalone 46 ms block.
+        self.assertLess(placements[0]["start_ms"], placements[1]["start_ms"])
+        self.assertLess(placements[0]["anchor_ms"], placements[1]["anchor_ms"])
+        # Both the lexical VCV and final glide include their OTO preutterance
+        # before the anchor, which is the core UTAU/CVVC timing invariant.
+        self.assertAlmostEqual(placements[1]["anchor_ms"] - placements[1]["start_ms"], 70.0)
+        self.assertAlmostEqual(placements[2]["anchor_ms"] - placements[2]["start_ms"], 45.0)
+        # The coda anchor follows one lexical nucleus duration, not cluster +
+        # nucleus + coda serialized durations.
+        self.assertAlmostEqual(placements[2]["anchor_ms"] - placements[1]["anchor_ms"], 120.0)
+
+    def test_english_cvvc_resampler_budget_includes_preutterance(self):
+        from teto_renderer.prosody import RenderNote
+        from teto_renderer.voicebank import OtoEntry
+
+        renderer = TetoRenderer()
+        note = RenderNote(("a zi",), "C4", 120, 0, role="nucleus", coverage="cvvc-direct")
+        entry = OtoEntry("a zi", Path("azi.wav"), 0, 40, 0, 75, 20)
+        with patch.dict(os.environ, {"PHONE_WORKER_TETO_LENGTH_MODE": "total"}, clear=False):
+            renderer._index_profile = "english-cvvc"
+            self.assertEqual(renderer._resampler_length(entry, note), 195.0)
+            renderer._index_profile = "standard"
+            self.assertEqual(renderer._resampler_length(entry, note), 120.0)
+
+    def test_english_cvvc_realistic_fragments_overlap_without_hard_internal_gaps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            standard, _ = self._assets(root)
+            english = root / "english"
+            english.mkdir()
+            for name, sample in (("cluster.wav", 500), ("ra.wav", 900), ("azi.wav", -700), ("iw.wav", 450)):
+                _write_wav(english / name, rate=44100, sample=sample)
+            (english / "oto.ini").write_text(
+                "cluster.wav=- br,0,32,0,45,18\n"
+                "ra.wav=ra,0,38,0,70,18\n"
+                "azi.wav=a zi,0,36,0,70,18\n"
+                "iw.wav=i w,0,26,0,45,18\n",
+                encoding="utf-8",
+            )
+            resampler = root / "duration_resampler.py"
+            resampler.write_text(
+                "#!/usr/bin/env python3\n"
+                "import array, sys, wave\n"
+                "name=sys.argv[1]\n"
+                "length=float(sys.argv[7]); consonant=float(sys.argv[8])\n"
+                "ms=max(5.0, length + consonant)\n"
+                "sample={'cluster.wav':500,'ra.wav':900,'azi.wav':-700,'iw.wav':450}.get(name.rsplit('/',1)[-1],300)\n"
+                "frames=max(1, round(ms*44.1))\n"
+                "with wave.open(sys.argv[2],'wb') as w:\n"
+                " w.setparams((1,2,44100,0,'NONE','not compressed'))\n"
+                " w.writeframes(array.array('h',[sample]*frames).tobytes())\n",
+                encoding="utf-8",
+            )
+            resampler.chmod(0o755)
+            env = self._env(standard, resampler, root / "cache")
+            env.update({
+                "PHONE_WORKER_TETO_VOICEBANK_MODE": "english",
+                "PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR": str(english),
+                "PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES": "1",
+                "PHONE_WORKER_TETO_LENGTH_MODE": "post-consonant",
+            })
+            with patch.dict(os.environ, env, clear=False):
+                result = TetoRenderer().synthesize("Brasil", timeout_seconds=10)
+
+            self.assertEqual(result["timeline_mode"], "oto-continuous")
+            self.assertGreaterEqual(result["timeline_aux_overlays"], 2)
+            self.assertGreater(result["timeline_max_preutterance_ms"], 40)
+            self.assertLess(result["timeline_audio_ms"], 520)
+            with wave.open(io.BytesIO(result["audio"]), "rb") as audio:
+                samples = array.array("h", audio.readframes(audio.getnframes()))
+            longest_zero = current = 0
+            for sample in samples:
+                if sample == 0:
+                    current += 1
+                    longest_zero = max(longest_zero, current)
+                else:
+                    current = 0
+            self.assertLess(longest_zero, round(0.010 * 44100))
 
     def test_auto_falls_back_to_standard_bank_when_english_is_absent(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -269,7 +368,7 @@ class TetoRendererTests(unittest.TestCase):
             resampler.chmod(0o755)
             with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
                 result = TetoRenderer().synthesize("teto")
-            self.assertEqual(result["renderer_version"], "speech-4b-english-cvvc")
+            self.assertEqual(result["renderer_version"], "speech-4c-continuous-cvvc")
             self.assertEqual(result["phonemizer_version"], "ptbr-g2p-xsampa-cvvc-v1")
             self.assertEqual(result["pitchbend_fallbacks"], 2)
             self.assertTrue(bytes(result["audio"]).startswith(b"RIFF"))

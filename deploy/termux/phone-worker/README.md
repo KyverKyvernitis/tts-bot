@@ -9,16 +9,16 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-4b-english-cvvc` e
+o renderer atualizado anuncia `renderer_version=speech-4c-continuous-cvvc` e
 `phonemizer_version=ptbr-g2p-xsampa-cvvc-v1`. Se o serviço ainda mostra o
 estado antigo, o reinício manual canônico é
 `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
 bloqueando a síntese pesada até sua conclusão.
 
-## Teto English CVVC para PT-BR: renderer `speech-4b-english-cvvc`
+## Teto English CVVC para PT-BR: renderer `speech-4c-continuous-cvvc`
 
-A revisão 4B troca o estágio final de articulação quando a voicebank oficial
+A revisão 4C mantém o planner fonético da 4B e troca o compositor temporal do estágio final de articulação quando a voicebank oficial
 English 150401 está instalada. O G2P PT-BR continua separado da voicebank, mas
 os fonemas agora são planejados diretamente contra o inventário X-SAMPA/CVVC
 da Teto English. A bank japonesa permanece disponível como fallback de
@@ -64,6 +64,20 @@ por cobertura real do banco em vez de apenas por audição.
 Os caches WORLD `*_wav.sc` não precisam existir na instalação inicial. Straycat
 os cria sob demanda por WAV; o agrupamento por arquivo continua impedindo duas
 análises concorrentes do mesmo sample.
+
+Os aliases English CVVC deixam de ser concatenados como blocos independentes.
+O compositor `oto-continuous` usa `preutterance` para iniciar cada VCV/cluster
+antes do boundary lexical, usa `overlap` como janela de crossfade e faz
+transições/codas funcionarem como overlays. Somente núcleos vocálicos avançam
+a maior parte do relógio da fala. O renderer também inclui o preutterance no
+budget entregue ao Straycat, evitando que um VCV posicionado cedo termine cedo
+e corte o começo/fim da sílaba.
+
+Unidades auxiliares CVVC usam pitchbend neutro e duração curta; a prosódia de
+frase permanece nos núcleos. A telemetria de síntese publica `timeline_mode`,
+`timeline_planned_ms`, `timeline_audio_ms`, `timeline_serialized_ms`,
+`timeline_aux_overlays` e `timeline_max_preutterance_ms`.
+
 
 Configuração recomendada:
 

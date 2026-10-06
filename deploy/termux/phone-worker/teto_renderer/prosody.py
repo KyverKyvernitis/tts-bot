@@ -21,6 +21,11 @@ class RenderNote:
     role: str = "nucleus"
     source_phonemes: tuple[str, ...] = ()
     coverage: str = "standard-cv"
+    word_index: int = 0
+    mora_index: int = 0
+    word_moras: int = 1
+    word_end: bool = False
+    phrase_end: str = ""
 
 
 _PITCH_CLASSES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -278,20 +283,37 @@ def build_notes(
             peak = max(peak, 68)
         elif terminal_ending in {".", "\n"}:
             peak = min(peak, center + 1)
-        pitchbend = _pitch_curve(start, peak, end, duration_ms=duration, tempo=tempo_value)
+        continuous_cvvc_aux = (
+            mora.role != "nucleus"
+            and mora.coverage in {"cvvc-transition", "cluster-hit", "approximation"}
+        )
+        if continuous_cvvc_aux:
+            # Auxiliary CVVC pieces are articulation overlays, not independent
+            # notes. Giving each one a fresh speech contour resets the spectral
+            # trajectory at every boundary and is a major source of the robotic
+            # "travado" sound. Keep one coarse pitch and let lexical nuclei own
+            # phrase prosody.
+            pitchbend = "AA"
+            cap = {
+                "transition": 48, "cluster": 46, "coda": 50,
+                "glide": 50, "nasal": 56,
+            }.get(mora.role, 52)
+            duration = min(duration, cap)
+        else:
+            pitchbend = _pitch_curve(start, peak, end, duration_ms=duration, tempo=tempo_value)
 
         if mora.role == "epenthetic":
             gain = 0.72
         elif mora.role == "transition":
-            gain = 0.90
+            gain = 0.84 if continuous_cvvc_aux else 0.90
         elif mora.role == "cluster":
-            gain = 0.88
+            gain = 0.80 if continuous_cvvc_aux else 0.88
         elif mora.role == "coda":
-            gain = 0.78
+            gain = 0.74 if continuous_cvvc_aux else 0.78
         elif mora.role == "glide":
-            gain = 0.82
+            gain = 0.76 if continuous_cvvc_aux else 0.82
         elif mora.role == "nasal":
-            gain = 0.88
+            gain = 0.82 if continuous_cvvc_aux else 0.88
         elif mora.stressed:
             gain = 1.055
         elif mora.deaccented:
@@ -316,5 +338,10 @@ def build_notes(
             role=mora.role,
             source_phonemes=mora.source_phonemes,
             coverage=mora.coverage,
+            word_index=mora.word_index,
+            mora_index=mora.mora_index,
+            word_moras=mora.word_moras,
+            word_end=mora.word_end,
+            phrase_end=mora.phrase_end,
         ))
     return notes
