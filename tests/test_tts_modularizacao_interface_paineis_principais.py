@@ -55,6 +55,7 @@ class TTSInterfacePaineisPrincipaisEstruturaTests(unittest.TestCase):
             "TTSPublicLauncherButton",
             "EdgeSettingsModal",
             "GTTSSettingsModal",
+            "TetoSettingsModal",
             "SpokenNameModal",
             "_send_settings_modal_with_fallback",
         ):
@@ -194,6 +195,7 @@ def _carregar_lancador():
     discord = _discord_stub()
     config = types.ModuleType("config")
     config.EDGE_TTS_VOICE = "pt-BR-FranciscaNeural"
+    config.TTS_TETO_DEFAULT_PITCH_SEMITONES = -1.0
 
     embed = types.ModuleType("cogs.tts.utils.embed")
     embed.human_language_name = lambda value: {"en": "Inglês", "pt-br": "Português"}.get(str(value), str(value))
@@ -206,6 +208,7 @@ def _carregar_lancador():
     online = types.ModuleType("cogs.tts.interface.modais_vozes_online")
     online.ModalConfiguracaoEdge = _ModalCapture
     online.ModalConfiguracaoGTTS = _ModalCapture
+    online.ModalConfiguracaoTeto = _ModalCapture
     operacoes = types.ModuleType("cogs.tts.interface.operacoes_painel")
     operacoes.DESCRICAO_LANCADOR_TTS = "Descrição"
     operacoes.enviar_modal_configuracao_com_fallback = AsyncMock()
@@ -245,6 +248,7 @@ def _carregar_painel():
     online = types.ModuleType("cogs.tts.interface.modais_vozes_online")
     online.ModalConfiguracaoEdge = _ModalCapture
     online.ModalConfiguracaoGTTS = _ModalCapture
+    online.ModalConfiguracaoTeto = _ModalCapture
     operacoes = types.ModuleType("cogs.tts.interface.operacoes_painel")
     operacoes.enviar_modal_configuracao_com_fallback = AsyncMock()
     seletores = types.ModuleType("cogs.tts.interface.seletores_basicos")
@@ -282,7 +286,7 @@ class TTSInterfaceLancadorComportamentoTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         _ModalCapture.ultimo = None
 
-    def _cog(self, *, defaults=None, user=None):
+    def _cog(self, *, defaults=None, user=None, worker_online=False):
         db = types.SimpleNamespace(
             get_guild_tts_defaults=lambda guild_id: defaults or {},
             get_user_tts=lambda guild_id, user_id: user or {},
@@ -291,6 +295,7 @@ class TTSInterfaceLancadorComportamentoTests(unittest.IsolatedAsyncioTestCase):
             _get_db=lambda: db,
             _normalize_rate_value=lambda value: value,
             _normalize_pitch_value=lambda value: value,
+            _tts_phone_worker_online_for_ui=lambda: worker_online,
             _member_panel_name=lambda member: f"nome-{member.id}",
             _get_saved_spoken_name=lambda guild_id, user_id: "apelido",
             _make_embed=lambda *a, **k: (a, k),
@@ -309,6 +314,39 @@ class TTSInterfaceLancadorComportamentoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view._resumo_edge(), "Voz: `humana:outra` · Velocidade: `+10%` · Tom: `+5Hz`")
         self.assertEqual(view._resumo_gtts(), "Idioma: `Inglês`")
         self.assertEqual([b.label for b in view.children], ["Configurar Edge", "Configurar gTTS"])
+
+    def test_texttoteto_so_aparece_com_worker_online_e_fica_por_ultimo(self):
+        modulo = _carregar_lancador()
+        offline = modulo.VisaoLancadorPublicoTTS(self._cog(worker_online=False), 10, 20)
+        self.assertEqual([b.label for b in offline.children], ["Configurar Edge", "Configurar gTTS"])
+
+        online = modulo.VisaoLancadorPublicoTTS(
+            self._cog(
+                defaults={"announce_author": True, "teto_prefix": "'"},
+                user={"teto_pitch_semitones": "-1.5"},
+                worker_online=True,
+            ),
+            10,
+            20,
+        )
+        self.assertEqual(online.children[-1].label, "Configurar TextToTeto")
+        self.assertIn("**TTS (TextToTeto)**", online._texto_motor(motor="teto"))
+        self.assertIn("`-1.5 semitom`", online._texto_motor(motor="teto"))
+
+    async def test_acao_teto_revalida_worker_e_abre_modal_pessoal(self):
+        modulo = _carregar_lancador()
+        view = modulo.VisaoLancadorPublicoTTS(self._cog(worker_online=True), 10, 20)
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=20),
+            user=types.SimpleNamespace(id=30),
+            message="painel",
+            response=types.SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+        )
+        await view._abrir_acao(interaction, "teto")
+        modal = interaction.response.send_modal.await_args.args[0]
+        self.assertEqual(modal.kwargs["target_user_id"], 30)
+        self.assertEqual(modal.kwargs["target_user_name"], "nome-30")
+        self.assertFalse(modal.kwargs["server"])
 
     async def test_acao_edge_preserva_contexto_e_fallback_textual(self):
         modulo = _carregar_lancador()

@@ -161,7 +161,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.25"
+PHONE_WORKER_VERSION = "1.11.26"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2087,6 +2087,8 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
         handler.send_header("X-Core-Worker-Teto-Timeline", _header_ascii(meta.get("teto_timeline_mode"), limit=40))
     if meta.get("teto_timeline_aux_overlays") not in (None, ""):
         handler.send_header("X-Core-Worker-Teto-Aux-Overlays", _header_ascii(meta.get("teto_timeline_aux_overlays"), limit=20))
+    if meta.get("teto_pitch_offset_semitones") not in (None, ""):
+        handler.send_header("X-Core-Worker-Teto-Pitch-Semitones", _header_ascii(meta.get("teto_pitch_offset_semitones"), limit=20))
     for key, header in (
         ("worker_total_ms", "X-Core-Worker-Worker-Total-Ms"),
         ("worker_synth_ms", "X-Core-Worker-Worker-Synth-Ms"),
@@ -4884,10 +4886,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
         teto_meta: dict[str, Any] = {}
         synth_started = None if engine == "teto" else time.monotonic()
         if engine == "teto":
+            teto_pitch = _phone_worker_tts_policy_module().normalize_teto_pitch_semitones(
+                body.get("teto_pitch_semitones"), default=0.0
+            )
             data, audio_format, teto_meta = _phone_worker_tts_providers_module().synthesize_teto(
                 text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
                 heavy_lock=_HEAVY_RESOURCE_LOCK, get_renderer=_get_teto_renderer,
-                monotonic=time.monotonic, normalize_format=self._normalize_tts_cache_format)
+                monotonic=time.monotonic, normalize_format=self._normalize_tts_cache_format,
+                pitch_offset_semitones=teto_pitch)
         elif engine == "android_native":
             data, audio_format, response = _phone_worker_tts_android_module().synthesize(
                 body, text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
@@ -4958,6 +4964,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "teto_timeline_mode": teto_meta.get("timeline_mode") if engine == "teto" else "",
             "teto_timeline_aux_overlays": teto_meta.get("timeline_aux_overlays") if engine == "teto" else None,
             "teto_timeline_audio_ms": teto_meta.get("timeline_audio_ms") if engine == "teto" else None,
+            "teto_pitch_offset_semitones": teto_meta.get("pitch_offset_semitones") if engine == "teto" else None,
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),

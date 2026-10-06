@@ -257,12 +257,23 @@ def _contour_name(mora: Mora, *, terminal_ending: str = "") -> str:
 
 
 def build_notes(
-    moras: list[Mora], *, base_pitch: str = "C4", speech_rate: float = 1.0, tempo: int = 140
+    moras: list[Mora], *, base_pitch: str = "C4", speech_rate: float = 1.0, tempo: int = 140,
+    pitch_offset_semitones: float = 0.0,
 ) -> list[RenderNote]:
     if not moras:
         return []
     rate = _speech_rate(speech_rate)
     tempo_value = _tempo(tempo)
+    try:
+        pitch_offset = float(pitch_offset_semitones)
+    except (TypeError, ValueError):
+        pitch_offset = 0.0
+    if not math.isfinite(pitch_offset):
+        pitch_offset = 0.0
+    pitch_offset = max(-4.0, min(4.0, round(pitch_offset * 2.0) / 2.0))
+    coarse_offset = math.trunc(pitch_offset)
+    residual_cents = int(round((pitch_offset - coarse_offset) * 100.0))
+    coarse_pitch = _relative_pitch(base_pitch, coarse_offset)
     centers = _centers(moras)
     terminal_endings = _phrase_terminal_nuclei(moras)
     notes: list[RenderNote] = []
@@ -293,14 +304,20 @@ def build_notes(
             # trajectory at every boundary and is a major source of the robotic
             # "travado" sound. Keep one coarse pitch and let lexical nuclei own
             # phrase prosody.
-            pitchbend = "AA"
+            pitchbend = encode_pitchbend([residual_cents] * 8) if residual_cents else "AA"
             cap = {
                 "transition": 48, "cluster": 46, "coda": 50,
                 "glide": 50, "nasal": 56,
             }.get(mora.role, 52)
             duration = min(duration, cap)
         else:
-            pitchbend = _pitch_curve(start, peak, end, duration_ms=duration, tempo=tempo_value)
+            pitchbend = _pitch_curve(
+                start + residual_cents,
+                peak + residual_cents,
+                end + residual_cents,
+                duration_ms=duration,
+                tempo=tempo_value,
+            )
 
         if mora.role == "epenthetic":
             gain = 0.72
@@ -327,7 +344,7 @@ def build_notes(
             candidates=mora.candidates,
             # Keep the coarse note stable and let the UTAU pitchbend carry the
             # speech contour. This prevents audible semitone stair-steps.
-            pitch=_relative_pitch(base_pitch, 0),
+            pitch=coarse_pitch,
             duration_ms=duration,
             pause_after_ms=pause,
             pitchbend=pitchbend,

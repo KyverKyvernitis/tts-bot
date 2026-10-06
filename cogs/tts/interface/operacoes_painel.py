@@ -5,10 +5,7 @@ import traceback
 import discord
 
 
-DESCRICAO_LANCADOR_TTS = (
-    "Tem dois modos de texto para voz, cada um com um prefixo diferente. "
-    "Escolha qual quer configurar"
-)
+DESCRICAO_LANCADOR_TTS = "Escolha qual modo de texto para voz quer configurar."
 
 
 async def salvar_atualizacoes_modal_tts(

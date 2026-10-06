@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import logging
+import math
 import urllib.request
 import uuid
 from collections import OrderedDict, deque
@@ -189,6 +190,9 @@ TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, int(getattr(config, "TTS_WORKER_AGENT
 TTS_TETO_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_TETO_MAX_TEXT_LENGTH", 180) or 180))
 TTS_TETO_WORKER_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "TTS_TETO_WORKER_TIMEOUT_SECONDS", 25.0) or 25.0))
 TTS_TETO_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TETO_MAX_AUDIO_MB", 8) or 8))
+TTS_TETO_DEFAULT_PITCH_SEMITONES = max(
+    -4.0, min(4.0, float(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)))
+)
 TTS_WORKER_AGENT_PREFERRED_ENGINE = str(getattr(config, "TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
 TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD = max(1, int(getattr(config, "TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD", 3) or 3))
 TTS_WORKER_AGENT_RAW_AUDIO_ENABLED = bool(getattr(config, "TTS_WORKER_AGENT_RAW_AUDIO_ENABLED", True))
@@ -485,6 +489,7 @@ class QueueItem:
     language: str
     rate: str
     pitch: str
+    teto_pitch_semitones: str = field(default_factory=lambda: str(TTS_TETO_DEFAULT_PITCH_SEMITONES), repr=False, compare=False)
     enqueued_at_monotonic: float = field(default_factory=time.monotonic, repr=False, compare=False)
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
     _cache_key_value: Optional[str] = field(default=None, repr=False, compare=False)
@@ -787,6 +792,25 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if not number.isdigit():
             return "+0Hz"
         return f"{sign}{number}Hz"
+
+
+    def _normalize_teto_pitch_semitones(self, raw: object) -> str:
+        default = float(TTS_TETO_DEFAULT_PITCH_SEMITONES)
+        text = str(raw if raw not in (None, "") else default).strip().lower()
+        text = text.replace(",", ".").replace("−", "-").replace("–", "-").replace("—", "-")
+        for suffix in ("semitones", "semitone", "semitons", "semitom", "st"):
+            if text.endswith(suffix):
+                text = text[:-len(suffix)].strip()
+                break
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            value = default
+        if not math.isfinite(value):
+            value = default
+        value = max(-4.0, min(4.0, value))
+        value = round(value * 2.0) / 2.0
+        return f"{value:+.1f}" if value >= 0 else f"{value:.1f}"
 
 
     def _estimate_playback_timeout(self, item: QueueItem | None = None) -> float:
@@ -1621,6 +1645,48 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if not last_ok or now - last_ok > TTS_WORKER_AGENT_STALE_SECONDS:
             return False
         return True
+
+    def _tts_phone_worker_online_for_ui(self) -> bool:
+        """Disponibilidade do aparelho para UI, sem exigir que a Teto esteja pronta.
+
+        O registry é a fonte principal porque distingue "worker online" de
+        "renderer indisponível" (bateria, assets, recurso pesado etc.). O estado
+        do health TTS entra apenas como fallback quando o registry não puder ser
+        lido. Nenhuma chamada de rede é feita ao abrir o painel.
+        """
+        try:
+            from utility.commands.workers_registry import get_core_workers_registry
+
+            snapshot = get_core_workers_registry().snapshot(lock_timeout_seconds=0.01)
+            workers = snapshot.get("workers") if isinstance(snapshot, dict) else None
+            if isinstance(workers, list):
+                for worker in workers:
+                    if not isinstance(worker, dict) or not bool(worker.get("online")):
+                        continue
+                    runtime_kind = str(worker.get("runtime_kind") or "").strip().lower()
+                    source = str(worker.get("source") or "").strip().lower()
+                    if runtime_kind == "apk" or source.startswith("core-worker-apk"):
+                        continue
+                    roles = {str(value or "").strip().lower() for value in (worker.get("roles") or [])}
+                    capabilities = {
+                        str(value or "").strip().lower() for value in (worker.get("capabilities") or [])
+                    }
+                    if "phone-worker" in (roles | capabilities):
+                        return True
+                return False
+        except Exception:
+            pass
+
+        if not self._tts_agent_base_configured():
+            return False
+        state = self._tts_agent_route_state()
+        last_check = float(state.get("last_check_monotonic") or 0.0)
+        if not last_check or time.monotonic() - last_check > TTS_WORKER_AGENT_STALE_SECONDS:
+            return False
+        reason = str(state.get("reason") or "").strip().lower()
+        return reason not in {
+            "health_error", "worker_base_unavailable", "disabled_or_unconfigured", "not_checked"
+        }
 
     def _record_tts_agent_route_sample(self, worker: bool) -> None:
         metrics = self._get_metrics_store()
@@ -2957,6 +3023,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
             item.language = str(item.language or GTTS_DEFAULT_LANGUAGE).strip().lower().replace("_", "-")
             if item.language == "pt-br":
                 item.language = "pt"
+        elif item.engine == "teto":
+            item.teto_pitch_semitones = self._normalize_teto_pitch_semitones(
+                getattr(item, "teto_pitch_semitones", TTS_TETO_DEFAULT_PITCH_SEMITONES)
+            )
         item._tts_settings_frozen = True
 
     def _cache_key(self, item: QueueItem) -> str:
@@ -2975,7 +3045,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
             payload = f"piper|worker|{model}|{text}"
         elif engine == "teto":
             fingerprint = self._tts_agent_route_state().get('teto_fingerprint') or 'unavailable'
-            payload = f"teto|worker|{fingerprint}|{item.voice}|{item.language}|{item.rate}|{item.pitch}|{text}"
+            teto_pitch = self._normalize_teto_pitch_semitones(
+                getattr(item, "teto_pitch_semitones", TTS_TETO_DEFAULT_PITCH_SEMITONES)
+            )
+            payload = f"teto|worker|{fingerprint}|{item.voice}|{item.language}|{item.rate}|{item.pitch}|{teto_pitch}|{text}"
         elif engine == "android_native":
             language = (item.language or "pt-BR").strip().lower().replace('_', '-')
             voice = str(item.voice or "auto").strip() or "auto"
@@ -5149,6 +5222,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
             "tld": str(getattr(item, "tld", "com")),
             "rate": str(item.rate or "+0%"),
             "pitch": str(item.pitch or "+0Hz"),
+            "teto_pitch_semitones": self._normalize_teto_pitch_semitones(
+                getattr(item, "teto_pitch_semitones", TTS_TETO_DEFAULT_PITCH_SEMITONES)
+            ) if is_teto else "",
             # Uma requisição explícita da Teto não pode ser desviada pela engine
             # global preferida do worker; o fallback continua separado abaixo.
             "preferred_engine": "teto" if is_teto else TTS_WORKER_AGENT_PREFERRED_ENGINE,

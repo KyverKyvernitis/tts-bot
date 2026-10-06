@@ -272,6 +272,7 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
                 "language": "pt-br",
                 "rate": "+5%",
                 "pitch": "+2Hz",
+                "teto_pitch_semitones": "-1.5",
             },
         ))
         message = make_message("'olá teto")
@@ -294,6 +295,7 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue_item.text, "olá teto")
         self.assertEqual(queue_item.engine, "teto")
         self.assertEqual(queue_item.voice, "kasane-teto-standard")
+        self.assertEqual(queue_item.teto_pitch_semitones, "-1.5")
         self.assertEqual(queue_item.piper_fallback_engine, "edge")
         self.assertEqual(queue_item.piper_fallback_voice, "pt-BR-FranciscaNeural")
 

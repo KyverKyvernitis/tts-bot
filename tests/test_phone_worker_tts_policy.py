@@ -95,6 +95,22 @@ def test_cache_key_callbacks_and_teto_inputs_are_resolved_only_when_needed(tts, 
     assert before != after and calls == ["status", "status"]
 
 
+def test_teto_pitch_offset_is_normalized_and_separates_cache_identity(tts, monkeypatch):
+    monkeypatch.setenv("PHONE_WORKER_TETO_BASE_PITCH", "C4")
+    monkeypatch.setattr(tts.worker, "_teto_status", lambda: {"fingerprint": "bank"})
+    base = tts.handler._tts_agent_standard_cache_key({"text": "Teto."}, engine="teto")
+    lower = tts.handler._tts_agent_standard_cache_key(
+        {"text": "Teto.", "teto_pitch_semitones": "-1,0"}, engine="teto"
+    )
+    lower_same = tts.handler._tts_agent_standard_cache_key(
+        {"text": "Teto.", "teto_pitch_semitones": "-1.0 semitom"}, engine="teto"
+    )
+    self_module = tts.worker._phone_worker_tts_policy_module()
+    assert self_module.normalize_teto_pitch_semitones("-1,5") == -1.5
+    assert self_module.normalize_teto_pitch_semitones("9") == 4.0
+    assert base != lower == lower_same
+
+
 def test_policy_loads_once_concurrently_and_warm_calls_do_not_load_or_lock(tts, monkeypatch):
     worker = tts.worker
     assert worker._PHONE_WORKER_TTS_POLICY_MODULE is None

@@ -79,6 +79,7 @@ from .interface.modais_simples import (
 from .interface.modais_vozes_online import (
     ModalConfiguracaoEdge as EdgeSettingsModal,
     ModalConfiguracaoGTTS as GTTSSettingsModal,
+    ModalConfiguracaoTeto as TetoSettingsModal,
 )
 from .interface.modais_atts import (
     CACHE_CATALOGO_VOZES_ATTS as _ATTS_VOICE_CATALOG_CACHE,
@@ -356,6 +357,7 @@ class TTSPublicLauncherView(VisaoLancadorPublicoTTS):
             classe_botao=TTSPublicLauncherButton,
             classe_modal_edge=EdgeSettingsModal,
             classe_modal_gtts=GTTSSettingsModal,
+            classe_modal_teto=TetoSettingsModal,
             classe_modal_apelido=SpokenNameModal,
             enviar_modal_fallback=_send_settings_modal_with_fallback,
             descricao_lancador=TTS_LAUNCHER_DESCRIPTION,

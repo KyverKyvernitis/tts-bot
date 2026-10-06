@@ -146,10 +146,12 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         self.assertIn('rotulo="Configurar"', launcher)
         self.assertIn('self._configuracao_servidor("edge_prefix", ",")', launcher)
         self.assertIn('self._configuracao_servidor("gtts_prefix", ".")', launcher)
+        self.assertIn('self._configuracao_servidor("teto_prefix", "\'")', launcher)
+        self.assertIn("**TTS (TextToTeto)**", launcher)
         self.assertNotIn("Como funciona", launcher)
 
         self.assertIn(
-            '"Tem dois modos de texto para voz, cada um com um prefixo diferente. "',
+            '"Escolha qual modo de texto para voz quer configurar. "',
             self.ui_text + self.operacoes_text,
         )
         self.assertNotIn("Escolha o motor pelo prefixo da mensagem", self.ui_text + self.cog_text)

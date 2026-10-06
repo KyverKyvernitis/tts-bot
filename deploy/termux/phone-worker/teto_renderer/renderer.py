@@ -26,7 +26,7 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
-    RENDER_VERSION = "speech-4c-continuous-cvvc"
+    RENDER_VERSION = "speech-4d-texttoteto-pitch"
     PHONEMIZER_VERSION = "ptbr-g2p-xsampa-cvvc-v1"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v3-continuous"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
@@ -664,7 +664,14 @@ class TetoRenderer:
         }
         return combined, missing, rendered, pitchbend_fallbacks, legacy_fragment_hits, timeline
 
-    def synthesize(self, text: str, *, timeout_seconds: float = 25.0, max_audio_bytes: int = 8 * 1024 * 1024) -> dict[str, Any]:
+    def synthesize(
+        self,
+        text: str,
+        *,
+        timeout_seconds: float = 25.0,
+        max_audio_bytes: int = 8 * 1024 * 1024,
+        pitch_offset_semitones: float = 0.0,
+    ) -> dict[str, Any]:
         if not self.status().get("ready"):
             raise TetoConfigurationError(str(self.status().get("last_error") or "Teto indisponível"))
         clean_text = " ".join(str(text or "").strip().split())
@@ -687,11 +694,19 @@ class TetoRenderer:
                 resolve_alias=index.resolve,
                 voicebank_profile=self._index_profile,
             )
+            try:
+                pitch_offset = float(pitch_offset_semitones)
+            except (TypeError, ValueError):
+                pitch_offset = 0.0
+            if not math.isfinite(pitch_offset):
+                pitch_offset = 0.0
+            pitch_offset = max(-4.0, min(4.0, round(pitch_offset * 2.0) / 2.0))
             notes = build_notes(
                 moras,
                 base_pitch=str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4"),
                 speech_rate=self._speech_rate(),
                 tempo=max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
+                pitch_offset_semitones=pitch_offset,
             )
             if not notes:
                 raise TetoSynthesisError("texto não gerou fonemas compatíveis")
@@ -799,6 +814,7 @@ class TetoRenderer:
                 "renderer_version": self.RENDER_VERSION,
                 "phonemizer_version": self.PHONEMIZER_VERSION,
                 "speech_rate": self._speech_rate(),
+                "pitch_offset_semitones": pitch_offset,
                 "aliases": index.alias_count,
                 "voicebank_profile": self._index_profile,
                 "rendered_phonemes": rendered,

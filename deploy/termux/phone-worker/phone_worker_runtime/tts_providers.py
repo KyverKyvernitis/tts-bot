@@ -6,7 +6,8 @@ Admission, cache, output envelopes and the shared transport keep their owners.
 
 
 def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
-                    heavy_lock, get_renderer, monotonic, normalize_format):
+                    heavy_lock, get_renderer, monotonic, normalize_format,
+                    pitch_offset_semitones=0.0):
     if not heavy_lock.acquire(blocking=False):
         raise RuntimeError("recurso pesado ocupado por build ou manutenção")
     teto_started = monotonic()
@@ -15,6 +16,7 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
             text,
             timeout_seconds=float(timeout),
             max_audio_bytes=max_audio_bytes,
+            pitch_offset_semitones=float(pitch_offset_semitones),
         )
     finally:
         heavy_lock.release()
@@ -33,6 +35,7 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
         f"coverage={rendered.get('coverage_percent') if rendered.get('coverage_percent') is not None else '-'} "
         f"clusters={rendered.get('cluster_hits') or 0} "
         f"timeline={rendered.get('timeline_mode') or 'serial'} "
+        f"pitch={rendered.get('pitch_offset_semitones') if rendered.get('pitch_offset_semitones') is not None else 0.0:+.1f}st "
         f"overlays={rendered.get('timeline_aux_overlays') or 0} "
         f"missing={len(rendered.get('missing_phonemes') or [])}"
     )

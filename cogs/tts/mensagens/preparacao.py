@@ -82,6 +82,9 @@ async def preparar_payload_tts_mensagem(
         resolved["voice"] = "kasane-teto-standard"
         resolved["rate"] = "1.0"
         resolved["pitch"] = "C4"
+        resolved["teto_pitch_semitones"] = resolved.get("teto_pitch_semitones") or str(
+            getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)
+        )
 
     # Texto final: tira o prefixo de fala, limpa marcadores e prepende o
     # nome falado do autor quando o servidor tem essa opção ligada.
@@ -116,6 +119,10 @@ async def preparar_payload_tts_mensagem(
         language=str(resolved.get("language") or ""),
         rate=str(resolved.get("rate") or "+0%"),
         pitch=str(resolved.get("pitch") or "+0Hz"),
+        teto_pitch_semitones=str(
+            resolved.get("teto_pitch_semitones")
+            or getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)
+        ),
         piper_fallback_engine=fallback_engine,
         piper_fallback_voice=fallback_voice,
         piper_fallback_language=fallback_language,

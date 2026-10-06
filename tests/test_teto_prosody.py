@@ -112,6 +112,17 @@ class TetoProsodyTests(unittest.TestCase):
         self.assertIn("h", joined)
         self.assertFalse(any(m.role == "epenthetic" for m in filha + banho + carro))
 
+    def test_pitch_offset_lowers_coarse_note_and_keeps_half_semitone_in_pitchbend(self):
+        moras = phonemize("teto")
+        neutral = build_notes(moras, pitch_offset_semitones=0.0)
+        lower = build_notes(moras, pitch_offset_semitones=-1.0)
+        half = build_notes(moras, pitch_offset_semitones=-0.5)
+        self.assertTrue(neutral and lower and half)
+        self.assertEqual(neutral[0].pitch, "C4")
+        self.assertEqual(lower[0].pitch, "B3")
+        self.assertEqual(half[0].pitch, "C4")
+        self.assertNotEqual(half[0].pitchbend, neutral[0].pitchbend)
+
     def test_english_cvvc_transition_roles_remain_short_and_quiet(self):
         available = {"- br", "ra", "a zi", "i w"}
         notes = build_notes(_english_moras("Brasil", available))

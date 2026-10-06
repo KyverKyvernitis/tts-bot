@@ -9,14 +9,14 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-4c-continuous-cvvc` e
+o renderer atualizado anuncia `renderer_version=speech-4d-texttoteto-pitch` e
 `phonemizer_version=ptbr-g2p-xsampa-cvvc-v1`. Se o serviço ainda mostra o
 estado antigo, o reinício manual canônico é
 `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
 bloqueando a síntese pesada até sua conclusão.
 
-## Teto English CVVC para PT-BR: renderer `speech-4c-continuous-cvvc`
+## Teto English CVVC para PT-BR: renderer `speech-4d-texttoteto-pitch`
 
 A revisão 4C mantém o planner fonético da 4B e troca o compositor temporal do estágio final de articulação quando a voicebank oficial
 English 150401 está instalada. O G2P PT-BR continua separado da voicebank, mas
@@ -39,6 +39,12 @@ no updater.
 O pipeline principal fica:
 
 `texto PT-BR -> G2P -> X-SAMPA -> planner CVVC/CC -> oto.ini -> Straycat/WORLD -> WAV`
+
+O deslocamento de tom pode ser enviado por requisição em
+`teto_pitch_semitones`, limitado a `-4.0..+4.0` e quantizado em passos de `0.5`.
+O bot usa `-1.0` como padrão de TextToTeto; chamadas antigas que não enviam o
+campo preservam offset `0.0`. O valor participa da identidade de cache para não
+reutilizar áudio sintetizado em outro tom.
 
 O planner tenta primeiro aliases completos de início/VCV/CCV. Se eles não
 existirem, usa transições VC e CC presentes no `oto.ini`. Encontros como `br`,

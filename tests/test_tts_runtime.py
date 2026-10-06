@@ -213,6 +213,49 @@ class RuntimePrimitiveTests(unittest.IsolatedAsyncioTestCase):
         second.tld = 'com.br'
         self.assertNotEqual(probe._cache_key(first), probe._cache_key(second))
 
+    def test_teto_pitch_offset_is_sent_and_separates_vps_cache(self):
+        probe = Probe()
+        lower, neutral = item(), item()
+        for entry in (lower, neutral):
+            entry.engine = 'teto'
+            entry.voice = 'kasane-teto-standard'
+            entry.language = 'pt-BR'
+            entry.rate = '1.0'
+            entry.pitch = 'C4'
+        lower.teto_pitch_semitones = '-1.0'
+        neutral.teto_pitch_semitones = '0.0'
+
+        self.assertNotEqual(probe._cache_key(lower), probe._cache_key(neutral))
+        payload = probe._tts_agent_payload_for_item(lower)
+        self.assertEqual(payload['engine'], 'teto')
+        self.assertEqual(payload['teto_pitch_semitones'], '-1.0')
+        self.assertEqual(payload['preferred_engine'], 'teto')
+
+    def test_texttoteto_visibility_follows_online_termux_phone_worker(self):
+        probe = Probe()
+        online = SimpleNamespace(snapshot=lambda **kwargs: {
+            'workers': [{
+                'online': True,
+                'runtime_kind': 'termux',
+                'source': 'termux-phone-worker',
+                'roles': ['phone-worker'],
+                'capabilities': [],
+            }]
+        })
+        apk_only = SimpleNamespace(snapshot=lambda **kwargs: {
+            'workers': [{
+                'online': True,
+                'runtime_kind': 'apk',
+                'source': 'core-worker-apk',
+                'roles': ['phone-worker'],
+                'capabilities': [],
+            }]
+        })
+        with patch('utility.commands.workers_registry.get_core_workers_registry', return_value=online):
+            self.assertTrue(probe._tts_phone_worker_online_for_ui())
+        with patch('utility.commands.workers_registry.get_core_workers_registry', return_value=apk_only):
+            self.assertFalse(probe._tts_phone_worker_online_for_ui())
+
     def test_cancelled_gtts_does_not_start_a_second_http_attempt(self):
         stop = threading.Event()
         calls = []

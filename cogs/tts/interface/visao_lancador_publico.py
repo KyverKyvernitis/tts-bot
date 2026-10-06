@@ -14,7 +14,7 @@ import config
 from ..utils.embed import human_language_name, human_voice_name
 from .controles_paineis import BotaoLancadorPublicoTTS
 from .modais_simples import ModalApelidoFalado
-from .modais_vozes_online import ModalConfiguracaoEdge, ModalConfiguracaoGTTS
+from .modais_vozes_online import ModalConfiguracaoEdge, ModalConfiguracaoGTTS, ModalConfiguracaoTeto
 from .operacoes_painel import DESCRICAO_LANCADOR_TTS, enviar_modal_configuracao_com_fallback
 from .visoes_layout import VisaoLayoutBaseTTS
 
@@ -33,6 +33,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         classe_botao: Type[discord.ui.Button] = BotaoLancadorPublicoTTS,
         classe_modal_edge: Type[discord.ui.Modal] = ModalConfiguracaoEdge,
         classe_modal_gtts: Type[discord.ui.Modal] = ModalConfiguracaoGTTS,
+        classe_modal_teto: Type[discord.ui.Modal] = ModalConfiguracaoTeto,
         classe_modal_apelido: Type[discord.ui.Modal] = ModalApelidoFalado,
         enviar_modal_fallback: EnviadorModalFallback = enviar_modal_configuracao_com_fallback,
         descricao_lancador: str = DESCRICAO_LANCADOR_TTS,
@@ -42,6 +43,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         self._classe_botao = classe_botao
         self._classe_modal_edge = classe_modal_edge
         self._classe_modal_gtts = classe_modal_gtts
+        self._classe_modal_teto = classe_modal_teto
         self._classe_modal_apelido = classe_modal_apelido
         self._enviar_modal_fallback = enviar_modal_fallback
         self._descricao_lancador = str(descricao_lancador)
@@ -79,6 +81,31 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
 
     def _apelido_falado_ativo(self) -> bool:
         return bool((self._guild_defaults or {}).get("announce_author", False))
+
+    def _teto_disponivel(self) -> bool:
+        checker = getattr(self.cog, "_tts_phone_worker_online_for_ui", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return False
+        checker = getattr(self.cog, "_tts_agent_route_available", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return False
+        return False
+
+    def _tom_teto_atual(self) -> str:
+        fallback = str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0))
+        raw = self._limpar_configuracao((self._user_settings or {}).get("teto_pitch_semitones")) or fallback
+        try:
+            value = max(-4.0, min(4.0, float(str(raw).replace(",", "."))))
+        except (TypeError, ValueError):
+            value = -1.0
+        value = round(value * 2.0) / 2.0
+        return f"{value:+.1f}" if value >= 0 else f"{value:.1f}"
 
     @staticmethod
     def _separador():
@@ -148,6 +175,13 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                 f"Voz mais personalizável (é mais lenta) · Prefixo {self._codigo(prefixo)}",
             ]
             resumo = self._resumo_edge()
+        elif motor == "teto":
+            prefixo = self._configuracao_servidor("teto_prefix", "'")
+            linhas = [
+                "**TTS (TextToTeto)**",
+                f"Voz sintetizada da Kasane Teto · Prefixo {self._codigo(prefixo)}",
+            ]
+            resumo = f"Tom: {self._codigo(self._tom_teto_atual() + ' semitom')}"
         else:
             prefixo = self._configuracao_servidor("gtts_prefix", ".")
             linhas = [
@@ -172,6 +206,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
             pass
 
         apelido_ativo = self._apelido_falado_ativo()
+        teto_disponivel = self._teto_disponivel()
         if self.painel_componentes_v2():
             botao_edge = self._criar_botao(acao="edge", rotulo="Configurar")
             botao_gtts = self._criar_botao(acao="gtts", rotulo="Configurar")
@@ -190,6 +225,13 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     discord.ui.TextDisplay("**Apelido falado**\nEscolha o nome anunciado antes das suas mensagens"),
                     accessory=botao_apelido,
                 ))
+            if teto_disponivel:
+                botao_teto = self._criar_botao(acao="teto", rotulo="Configurar")
+                container.add_item(self._separador())
+                container.add_item(discord.ui.Section(
+                    discord.ui.TextDisplay(self._texto_motor(motor="teto")),
+                    accessory=botao_teto,
+                ))
             self.add_item(container)
             return
 
@@ -197,6 +239,8 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         self.add_item(self._criar_botao(acao="gtts", rotulo="Configurar gTTS"))
         if apelido_ativo:
             self.add_item(self._criar_botao(acao="spoken_name", rotulo="Alterar apelido"))
+        if teto_disponivel:
+            self.add_item(self._criar_botao(acao="teto", rotulo="Configurar TextToTeto"))
 
     async def _abrir_acao(self, interaction: discord.Interaction, acao: str) -> None:
         if interaction.guild is None:
@@ -246,6 +290,30 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     force_text_fallback=True,
                 ),
                 context="public-gtts",
+            )
+            return
+
+        if acao == "teto":
+            if not self._teto_disponivel():
+                await interaction.response.send_message(
+                    "TextToTeto está disponível somente enquanto o dispositivo de síntese está online.",
+                    ephemeral=True,
+                )
+                try:
+                    self._reconstruir_itens()
+                    if mensagem_painel is not None and hasattr(mensagem_painel, "edit"):
+                        await mensagem_painel.edit(view=self)
+                except Exception:
+                    pass
+                return
+            await interaction.response.send_modal(
+                self._classe_modal_teto(
+                    self.cog,
+                    mensagem_painel,
+                    server=False,
+                    target_user_id=interaction.user.id,
+                    target_user_name=nome_alvo,
+                )
             )
             return
 
@@ -318,10 +386,11 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         await interaction.response.send_message(
             embed=self.cog._make_embed(
                 "Ajuda do TTS",
-                "Edge e gTTS são modos de voz. O prefixo é só o símbolo digitado antes da frase.\n\n"
+                "Edge, gTTS e TextToTeto são modos de voz. O prefixo é só o símbolo digitado antes da frase.\n\n"
                 "Exemplos:\n"
                 "• `,bom dia` usa Edge.\n"
-                "• `.bom dia` usa gTTS.",
+                "• `.bom dia` usa gTTS.\n"
+                "• `'bom dia` usa TextToTeto quando o dispositivo está online.",
                 ok=True,
             ),
             ephemeral=True,

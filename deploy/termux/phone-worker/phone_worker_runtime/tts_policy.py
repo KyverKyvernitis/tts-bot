@@ -13,6 +13,24 @@ def normalize_engine(raw: Any, *, default: str = "gtts") -> str:
     return aliases.get(value, value)
 
 
+
+
+def normalize_teto_pitch_semitones(raw: Any, *, default: float = 0.0) -> float:
+    text = str(raw if raw not in (None, "") else default).strip().lower()
+    text = text.replace(",", ".").replace("−", "-").replace("–", "-").replace("—", "-")
+    for suffix in ("semitones", "semitone", "semitons", "semitom", "st"):
+        if text.endswith(suffix):
+            text = text[:-len(suffix)].strip()
+            break
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        value = float(default)
+    if value != value or value in (float("inf"), float("-inf")):
+        value = float(default)
+    value = max(-4.0, min(4.0, value))
+    return round(value * 2.0) / 2.0
+
 def available_engines(deps: dict[str, Any]) -> list[str]:
     engines: list[str] = []
     if deps.get("teto_tts"):
@@ -128,7 +146,11 @@ def standard_cache_key(body: dict[str, Any], *, engine: str, sanitize_key, norma
         voice = str(body.get("voice") or "kasane-teto-standard").strip() or "kasane-teto-standard"
         language = str(body.get("language") or "pt-BR").strip() or "pt-BR"
         base_pitch = str(teto_base_pitch or "C4")
-        payload = f"teto|{fingerprint}|{voice}|{language}|{base_pitch}|{text}"
+        pitch_part = ""
+        if "teto_pitch_semitones" in body:
+            pitch_offset = normalize_teto_pitch_semitones(body.get("teto_pitch_semitones"), default=0.0)
+            pitch_part = f"|pitch={pitch_offset:+.1f}"
+        payload = f"teto|{fingerprint}|{voice}|{language}|{base_pitch}{pitch_part}|{text}"
     elif normalized_engine == "android_native":
         language = str(body.get("language") or body.get("fallback_language") or "pt-BR").strip().replace("_", "-") or "pt-BR"
         voice = str(body.get("voice") or "auto").strip() or "auto"

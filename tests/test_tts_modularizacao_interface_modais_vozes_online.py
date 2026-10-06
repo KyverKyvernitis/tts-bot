@@ -14,10 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_PATH = ROOT / "cogs" / "tts" / "ui.py"
 MODULO_PATH = ROOT / "cogs" / "tts" / "interface" / "modais_vozes_online.py"
 
-CLASSES_CANONICAS = {"ModalConfiguracaoEdge", "ModalConfiguracaoGTTS"}
+CLASSES_CANONICAS = {"ModalConfiguracaoEdge", "ModalConfiguracaoGTTS", "ModalConfiguracaoTeto"}
 ALIASES_LEGADOS = {
     "EdgeSettingsModal": "ModalConfiguracaoEdge",
     "GTTSSettingsModal": "ModalConfiguracaoGTTS",
+    "TetoSettingsModal": "ModalConfiguracaoTeto",
 }
 
 
@@ -82,6 +83,7 @@ def _carregar_modulo():
 
     config = types.ModuleType("config")
     config.EDGE_TTS_VOICE = "pt-BR-FranciscaNeural"
+    config.TTS_TETO_DEFAULT_PITCH_SEMITONES = -1.0
 
     embed = types.ModuleType("cogs.tts.utils.embed")
     embed.human_language_name = lambda value: f"idioma:{value}"
@@ -236,6 +238,44 @@ class TTSInterfaceModaisVozesOnlineComportamentoTests(unittest.IsolatedAsyncioTe
         self.assertEqual(kwargs["success_description"], "Idioma · idioma:ja")
         self.assertEqual(kwargs["target_user_id"], 9)
         self.assertEqual(kwargs["target_user_name"], "Pessoa")
+
+    async def test_teto_tom_salva_separado_do_pitch_edge(self):
+        modulo, salvar = _carregar_modulo()
+        cog = types.SimpleNamespace(
+            valores={"teto_pitch_semitones": "-1.0", "pitch": "+25Hz"},
+            _make_embed=lambda *args, **kwargs: (args, kwargs),
+        )
+        panel = types.SimpleNamespace(guild=types.SimpleNamespace(id=12))
+        modal = modulo.ModalConfiguracaoTeto(
+            cog, panel, server=False, target_user_id=9, target_user_name="Pessoa"
+        )
+        self.assertEqual(modal.current_pitch, "-1.0")
+        modal.teto_pitch_semitones.value = "-1.5"
+        interaction = types.SimpleNamespace(response=types.SimpleNamespace(send_message=AsyncMock()))
+
+        await modal.on_submit(interaction)
+        salvar.assert_awaited_once()
+        kwargs = salvar.await_args.kwargs
+        self.assertEqual(kwargs["updates"], {"teto_pitch_semitones": "-1.5"})
+        self.assertNotIn("pitch", kwargs["updates"])
+        self.assertEqual(kwargs["target_user_id"], 9)
+
+    def test_teto_normalizador_aceita_zero_numerico(self):
+        modulo, _ = _carregar_modulo()
+        self.assertEqual(modulo.normalizar_tom_teto_semitons(0), "+0.0")
+
+    async def test_teto_rejeita_fora_da_faixa_e_passos_nao_suportados(self):
+        modulo, salvar = _carregar_modulo()
+        cog = types.SimpleNamespace(valores={}, _make_embed=lambda *args, **kwargs: (args, kwargs))
+        for invalido in ("-4.5", "1.2", "abc"):
+            with self.subTest(invalido=invalido):
+                salvar.reset_mock()
+                modal = modulo.ModalConfiguracaoTeto(cog, None, server=False)
+                modal.teto_pitch_semitones.value = invalido
+                response = types.SimpleNamespace(send_message=AsyncMock())
+                await modal.on_submit(types.SimpleNamespace(response=response))
+                response.send_message.assert_awaited_once()
+                salvar.assert_not_awaited()
 
     async def test_gtts_invalido_responde_sem_salvar(self):
         modulo, salvar = _carregar_modulo()

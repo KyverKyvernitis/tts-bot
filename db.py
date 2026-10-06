@@ -1004,6 +1004,7 @@ class SettingsDB:
             "android_language": str(tts.get("android_language", "") or ""),
             "android_rate": str(tts.get("android_rate", "") or ""),
             "android_pitch": str(tts.get("android_pitch", "") or ""),
+            "teto_pitch_semitones": str(tts.get("teto_pitch_semitones", "") or ""),
             "speaker_name": str(tts.get("speaker_name", "") or ""),
         }
 
@@ -1021,6 +1022,7 @@ class SettingsDB:
         android_language: Optional[str] = None,
         android_rate: Optional[str] = None,
         android_pitch: Optional[str] = None,
+        teto_pitch_semitones: Optional[str] = None,
         speaker_name: Optional[str] = None,
     ):
         key = (guild_id, user_id)
@@ -1045,6 +1047,8 @@ class SettingsDB:
             tts["android_rate"] = android_rate
         if android_pitch is not None:
             tts["android_pitch"] = android_pitch
+        if teto_pitch_semitones is not None:
+            tts["teto_pitch_semitones"] = str(teto_pitch_semitones)
         if speaker_name is not None:
             cleaned_speaker_name = str(speaker_name or "").strip()
             if cleaned_speaker_name:
@@ -1133,6 +1137,10 @@ class SettingsDB:
             "android_language": pick("android_language", "pt-BR"),
             "android_rate": pick("android_rate", "1.0"),
             "android_pitch": pick("android_pitch", "1.0"),
+            "teto_pitch_semitones": pick(
+                "teto_pitch_semitones",
+                str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)),
+            ),
             "speaker_name": str(user.get("speaker_name", "") or ""),
             "bot_prefix": str(guild.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(guild.get("tts_prefix", ",") or ","),
