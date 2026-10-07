@@ -15,6 +15,13 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import config
 
 
+def _tts_effect_level(value: object) -> int:
+    try:
+        return max(0, min(3, int(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
 class SettingsDB:
     def __init__(self, uri: str, db_name: str, coll_name: str):
         self.client = AsyncIOMotorClient(uri)
@@ -1056,18 +1063,12 @@ class SettingsDB:
         if teto_pitch_semitones is not None:
             tts["teto_pitch_semitones"] = str(teto_pitch_semitones)
 
-        def _effect_level(value: object) -> int:
-            try:
-                return max(0, min(3, int(value or 0)))
-            except (TypeError, ValueError):
-                return 0
-
         if advanced_nightcore_level is not None:
-            tts["advanced_nightcore_level"] = _effect_level(advanced_nightcore_level)
+            tts["advanced_nightcore_level"] = _tts_effect_level(advanced_nightcore_level)
         if advanced_slowed_level is not None:
-            tts["advanced_slowed_level"] = _effect_level(advanced_slowed_level)
+            tts["advanced_slowed_level"] = _tts_effect_level(advanced_slowed_level)
         if advanced_reverb_level is not None:
-            tts["advanced_reverb_level"] = _effect_level(advanced_reverb_level)
+            tts["advanced_reverb_level"] = _tts_effect_level(advanced_reverb_level)
         if speaker_name is not None:
             cleaned_speaker_name = str(speaker_name or "").strip()
             if cleaned_speaker_name:

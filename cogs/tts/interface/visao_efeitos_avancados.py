@@ -1,16 +1,24 @@
-"""Painel Components V2 dos efeitos DSP avançados do TTS Edge/gTTS."""
+"""Components V2 para os efeitos DSP pessoais do TTS Edge/gTTS."""
 from __future__ import annotations
 
 import contextlib
-import time
 
 import discord
 
-from .visoes_base import (
-    DURACAO_DESPACHO_PAINEL_TTS,
-    DURACAO_EXPIRACAO_PAINEL_TTS,
-)
+from .visoes_layout import VisaoLayoutBaseTTS
 
+
+_ELIGIBLE_ENGINES = frozenset(("edge", "gtts"))
+_LEVEL_LABELS = ("Desligado", "Nível 1 · Leve", "Nível 2 · Médio", "Nível 3 · Forte")
+_SUMMARY = {
+    "nightcore": ("Desligado", "Nível 1 · Leve · +10%", "Nível 2 · Médio · +20%", "Nível 3 · Forte · +30%"),
+    "slowed": ("Desligado", "Nível 1 · Leve · −8%", "Nível 2 · Médio · −16%", "Nível 3 · Forte · −24%"),
+    "reverb": ("Desligado", "Nível 1 · Leve", "Nível 2 · Médio", "Nível 3 · Forte"),
+}
+_RADIO_DESCRIPTIONS = {
+    "nightcore": (None, "Velocidade e tom +10%.", "Velocidade e tom +20%.", "Velocidade e tom +30%."),
+    "slowed": (None, "Velocidade e tom −8%.", "Velocidade e tom −16%.", "Velocidade e tom −24%."),
+}
 
 
 def _level(value: object) -> int:
@@ -20,38 +28,10 @@ def _level(value: object) -> int:
         return 0
 
 
-def _engine_name(value: object) -> str:
-    engine = str(value or "gtts").strip().lower().replace("-", "_")
-    aliases = {
-        "edge_tts": "edge",
-        "microsoft": "edge",
-        "microsoft_edge": "edge",
-        "google": "gtts",
-        "google_tts": "gtts",
-    }
-    return aliases.get(engine, engine)
-
-
-def _effect_detail(effect: str, level: int) -> str:
-    if level <= 0:
-        return "Desligado"
-    if effect == "nightcore":
-        return (
-            "Nível 1 · Leve · +10%",
-            "Nível 2 · Médio · +20%",
-            "Nível 3 · Forte · +30%",
-        )[level - 1]
-    if effect == "slowed":
-        return (
-            "Nível 1 · Leve · −8%",
-            "Nível 2 · Médio · −16%",
-            "Nível 3 · Forte · −24%",
-        )[level - 1]
-    return (
-        "Nível 1 · Leve",
-        "Nível 2 · Médio",
-        "Nível 3 · Forte",
-    )[level - 1]
+async def _silent_defer(interaction: discord.Interaction) -> None:
+    with contextlib.suppress(Exception):
+        if not interaction.response.is_done():
+            await interaction.response.defer()
 
 
 def _resolve_exclusive_levels(
@@ -60,67 +40,35 @@ def _resolve_exclusive_levels(
     nightcore: int,
     slowed: int,
 ) -> tuple[int, int]:
-    """Mantém Nightcore/Slowed exclusivos sem rejeitar o modal."""
+    """Resolve conflito sem mensagem: o efeito alterado prevalece; empate = Slowed."""
     nightcore = _level(nightcore)
     slowed = _level(slowed)
     if not (nightcore and slowed):
         return nightcore, slowed
 
-    nightcore_turned_on = _level(original_nightcore) == 0 and nightcore > 0
-    slowed_turned_on = _level(original_slowed) == 0 and slowed > 0
-    if nightcore_turned_on and not slowed_turned_on:
+    nightcore_changed = nightcore != original_nightcore
+    slowed_changed = slowed != original_slowed
+    if nightcore_changed and not slowed_changed:
         return nightcore, 0
-    if slowed_turned_on and not nightcore_turned_on:
-        return 0, slowed
-    if nightcore != _level(original_nightcore) and slowed == _level(original_slowed):
-        return nightcore, 0
-    if slowed != _level(original_slowed) and nightcore == _level(original_nightcore):
-        return 0, slowed
-
-    # Se ambos forem ligados na mesma edição, o Discord não informa a ordem
-    # dos cliques dos RadioGroups; Slowed prevalece de forma determinística.
     return 0, slowed
 
 
 def _radio_group(effect: str, current: int) -> discord.ui.RadioGroup:
     group = discord.ui.RadioGroup(custom_id=f"tts_advanced_{effect}", required=True)
-    group.add_option(
-        label="Desligado",
-        value="0",
-        default=current == 0,
-    )
-
-    if effect == "nightcore":
-        descriptions = (
-            "Velocidade e tom +10%.",
-            "Velocidade e tom +20%.",
-            "Velocidade e tom +30%.",
-        )
-    elif effect == "slowed":
-        descriptions = (
-            "Velocidade e tom −8%.",
-            "Velocidade e tom −16%.",
-            "Velocidade e tom −24%.",
-        )
-    else:
-        descriptions = (None, None, None)
-
-    for level, description in enumerate(descriptions, start=1):
-        strength = ("Leve", "Médio", "Forte")[level - 1]
-        option_kwargs = {
-            "label": f"Nível {level} · {strength}",
+    descriptions = _RADIO_DESCRIPTIONS.get(effect)
+    for level, label in enumerate(_LEVEL_LABELS):
+        kwargs = {
+            "label": label,
             "value": str(level),
             "default": current == level,
         }
-        if description:
-            option_kwargs["description"] = description
-        group.add_option(**option_kwargs)
+        if descriptions and descriptions[level]:
+            kwargs["description"] = descriptions[level]
+        group.add_option(**kwargs)
     return group
 
 
 class ModalEfeitosAvancadosTTS(discord.ui.Modal, title="Editar efeitos do TTS"):
-    """Edita todos os efeitos em um único formulário nativo."""
-
     def __init__(self, panel: "VisaoEfeitosAvancadosTTS"):
         super().__init__(timeout=300.0)
         self.panel = panel
@@ -132,72 +80,40 @@ class ModalEfeitosAvancadosTTS(discord.ui.Modal, title="Editar efeitos do TTS"):
         self.slowed = _radio_group("slowed", slowed)
         self.reverb = _radio_group("reverb", reverb)
 
-        self.add_item(
-            discord.ui.Label(
-                text="Nightcore",
-                description="Aumenta velocidade e tom. Não pode ser combinado com Slowed.",
-                component=self.nightcore,
-            )
-        )
-        self.add_item(
-            discord.ui.Label(
-                text="Slowed",
-                description="Reduz velocidade e tom. Não pode ser combinado com Nightcore.",
-                component=self.slowed,
-            )
-        )
-        self.add_item(
-            discord.ui.Label(
-                text="Reverb",
-                description="Adiciona ambiência e pode ser combinado com qualquer um dos dois.",
-                component=self.reverb,
-            )
-        )
+        for text, description, component in (
+            ("Nightcore", "Aumenta velocidade e tom. Não pode ser combinado com Slowed.", self.nightcore),
+            ("Slowed", "Reduz velocidade e tom. Não pode ser combinado com Nightcore.", self.slowed),
+            ("Reverb", "Adiciona ambiência e pode ser combinado com qualquer um dos dois.", self.reverb),
+        ):
+            self.add_item(discord.ui.Label(text=text, description=description, component=component))
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.panel.owner_id:
-            with contextlib.suppress(Exception):
-                await interaction.response.defer()
-            return
-
-        await self.panel._reload()
-        if not self.panel._engine_is_eligible():
-            with contextlib.suppress(Exception):
-                await interaction.response.edit_message(view=self.panel)
-            return
-
-        try:
-            night = _level(self.nightcore.value)
-            slowed = _level(self.slowed.value)
-            reverb = _level(self.reverb.value)
-        except (TypeError, ValueError):
-            with contextlib.suppress(Exception):
-                await interaction.response.edit_message(view=self.panel)
+        panel = self.panel
+        if panel._is_expired() or interaction.user.id != panel.owner_id:
+            await _silent_defer(interaction)
             return
 
         night, slowed = _resolve_exclusive_levels(
             self.original_nightcore,
             self.original_slowed,
-            night,
-            slowed,
+            _level(self.nightcore.value),
+            _level(self.slowed.value),
         )
+        reverb = _level(self.reverb.value)
 
-        await self.panel.cog._set_user_tts_and_refresh(
-            self.panel.guild_id,
-            self.panel.owner_id,
+        await panel.cog._set_user_tts_and_refresh(
+            panel.guild_id,
+            panel.owner_id,
             advanced_nightcore_level=night,
             advanced_slowed_level=slowed,
             advanced_reverb_level=reverb,
         )
-        await self.panel._reload()
-        if interaction.response.is_done():
-            await self.panel._refresh_panel_message()
-        else:
-            await interaction.response.edit_message(view=self.panel)
+        panel._apply_levels(night, slowed, reverb)
+        await interaction.response.edit_message(view=panel)
 
 
-class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
-    """Configura DSP por usuário sem tocar no estado/mixer da música."""
+class VisaoEfeitosAvancadosTTS(VisaoLayoutBaseTTS):
+    """Configura DSP por usuário sem compartilhar estado com os efeitos da música."""
 
     def __init__(
         self,
@@ -207,24 +123,16 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
         *,
         resolved: dict | None = None,
     ):
-        duracao_solicitada = max(1.0, float(DURACAO_EXPIRACAO_PAINEL_TTS))
-        duracao_despacho = max(duracao_solicitada, DURACAO_DESPACHO_PAINEL_TTS)
-        super().__init__(timeout=duracao_despacho)
-        self.cog = cog
-        self.owner_id = int(owner_id)
-        self.guild_id = int(guild_id)
-        self.message: discord.Message | None = None
-        self.panel_kind = "advanced"
-        self.expires_at_monotonic = time.monotonic() + duracao_solicitada
+        super().__init__(cog, owner_id, guild_id)
         self.resolved = dict(resolved or {})
         self._rebuild_items()
 
     @property
     def engine(self) -> str:
-        return _engine_name(self.resolved.get("engine"))
+        return str(self.resolved.get("engine") or "gtts").strip().lower().replace("-", "_")
 
     def _engine_is_eligible(self) -> bool:
-        return self.engine in {"edge", "gtts"}
+        return self.engine in _ELIGIBLE_ENGINES
 
     def _levels(self) -> tuple[int, int, int]:
         return (
@@ -233,23 +141,18 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
             _level(self.resolved.get("advanced_reverb_level")),
         )
 
-    def _is_expired(self) -> bool:
-        return time.monotonic() >= self.expires_at_monotonic
-
     def _summary_text(self) -> str:
         night, slowed, reverb = self._levels()
         return (
             "# TTS avançado\n\n"
-            f"⚡ **Nightcore**\n-# {_effect_detail('nightcore', night)}\n\n"
-            f"🐌 **Slowed**\n-# {_effect_detail('slowed', slowed)}\n\n"
-            f"🌊 **Reverb**\n-# {_effect_detail('reverb', reverb)}"
+            f"⚡ **Nightcore**\n-# {_SUMMARY['nightcore'][night]}\n\n"
+            f"🐌 **Slowed**\n-# {_SUMMARY['slowed'][slowed]}\n\n"
+            f"🌊 **Reverb**\n-# {_SUMMARY['reverb'][reverb]}"
         )
 
     def _rebuild_items(self) -> None:
         self.clear_items()
-        night, slowed, reverb = self._levels()
-        has_effect = any((night, slowed, reverb))
-
+        levels = self._levels()
         edit = discord.ui.Button(
             label="Editar efeitos",
             emoji="🎛️",
@@ -260,12 +163,11 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
             label="Desativar tudo",
             emoji="🔄",
             style=discord.ButtonStyle.secondary,
-            disabled=not has_effect,
+            disabled=not any(levels),
             custom_id=f"tts:advanced:reset:{self.guild_id}:{self.owner_id}",
         )
         edit.callback = self._open_modal
         reset.callback = self._disable_all
-
         self.add_item(
             discord.ui.Container(
                 discord.ui.TextDisplay(self._summary_text()),
@@ -274,59 +176,43 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
             )
         )
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if self._is_expired():
-            with contextlib.suppress(Exception):
-                await interaction.response.defer()
-            return False
+    def _apply_levels(self, nightcore: int, slowed: int, reverb: int) -> None:
+        self.resolved.update(
+            advanced_nightcore_level=nightcore,
+            advanced_slowed_level=slowed,
+            advanced_reverb_level=reverb,
+        )
+        self._rebuild_items()
 
-        if interaction.user.id != self.owner_id:
-            with contextlib.suppress(Exception):
-                await interaction.response.defer()
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self._is_expired() or interaction.user.id != self.owner_id:
+            await _silent_defer(interaction)
             return False
         return True
-
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
         print(
             f"[tts_panel_error] user={getattr(interaction.user, 'id', None)} "
             f"guild={getattr(interaction.guild, 'id', None)} "
             f"item={getattr(item, 'custom_id', None) or getattr(item, 'label', None) or type(item).__name__} "
-            f"error={repr(error)}"
+            f"error={error!r}"
         )
-        with contextlib.suppress(Exception):
-            if not interaction.response.is_done():
-                await interaction.response.defer()
+        await _silent_defer(interaction)
 
-
-    async def on_timeout(self) -> None:
-        pass
-
-    async def _reload(self) -> None:
+    async def _load_resolved(self) -> None:
         db = self.cog._get_db()
         if db is None:
             raise RuntimeError("settings db unavailable")
         self.resolved = dict(await self.cog._maybe_await(db.resolve_tts(self.guild_id, self.owner_id)) or {})
-        self._rebuild_items()
-
-    async def _ensure_current_engine_is_eligible(self, interaction: discord.Interaction) -> bool:
-        await self._reload()
-        if self._engine_is_eligible():
-            return True
-        with contextlib.suppress(Exception):
-            if not interaction.response.is_done():
-                await interaction.response.defer()
-        return False
-
 
     async def _open_modal(self, interaction: discord.Interaction) -> None:
-        if not await self._ensure_current_engine_is_eligible(interaction):
+        await self._load_resolved()
+        if not self._engine_is_eligible():
+            await _silent_defer(interaction)
             return
         await interaction.response.send_modal(ModalEfeitosAvancadosTTS(self))
 
     async def _disable_all(self, interaction: discord.Interaction) -> None:
-        if not await self._ensure_current_engine_is_eligible(interaction):
-            return
         await self.cog._set_user_tts_and_refresh(
             self.guild_id,
             self.owner_id,
@@ -334,24 +220,8 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
             advanced_slowed_level=0,
             advanced_reverb_level=0,
         )
-        await self._reload()
+        self._apply_levels(0, 0, 0)
         await interaction.response.edit_message(view=self)
 
-    async def _refresh_panel_message(self) -> None:
-        if self.message is None:
-            return
-        with contextlib.suppress(Exception):
-            await self.message.edit(view=self)
-
     async def send_for_message(self, message: discord.Message) -> discord.Message:
-        sent = await message.channel.send(view=self)
-        self.message = sent
-        return sent
-
-    async def send(self, interaction: discord.Interaction) -> None:
-        if interaction.response.is_done():
-            sent = await interaction.followup.send(view=self, wait=True)
-        else:
-            await interaction.response.send_message(view=self)
-            sent = await interaction.original_response()
-        self.message = sent
+        return await message.channel.send(view=self)

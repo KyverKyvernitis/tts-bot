@@ -31,7 +31,12 @@ from gtts.tts import gTTSError
 
 
 import config
-from cogs.musica.runtime_telefone.agente.efeitos import filtros_tts, normalizar_efeitos_tts
+from cogs.musica.runtime_telefone.agente.efeitos import (
+    TTS_EFFECT_ENGINES,
+    filtros_tts,
+    normalizar_efeitos_tts,
+    payload_efeitos_tts,
+)
 from cogs.musica.integracoes.tts import (
     agendar_idle_musica,
     deve_adiar_auto_leave_tts,
@@ -146,7 +151,7 @@ TTS_OPUS_PLAYBACK_ENABLED = bool(getattr(config, "TTS_OPUS_PLAYBACK_ENABLED", Tr
 TTS_OPUS_PLAYBACK_COPY_CODEC = bool(getattr(config, "TTS_OPUS_PLAYBACK_COPY_CODEC", True))
 WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB = max(1, int(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB", 8) or 8))
 TTS_FFMPEG_BEFORE_OPTIONS = getattr(config, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin")
-TTS_FFMPEG_OPTIONS = getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error")
+TTS_FFMPEG_OPTIONS = str(getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error").strip()
 TTS_TEMP_DIR = os.path.abspath(str(getattr(config, "TTS_TEMP_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")).strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio"))
 TTS_TEMP_MAX_MB = max(64, int(getattr(config, "TTS_TEMP_MAX_MB", 256)))
 TTS_TEMP_MAX_FILES = max(32, int(getattr(config, "TTS_TEMP_MAX_FILES", 256)))
@@ -3031,15 +3036,20 @@ class TTSAudioMixin(SharedSynthesisMixin):
             item.teto_pitch_semitones = self._normalize_teto_pitch_semitones(
                 getattr(item, "teto_pitch_semitones", TTS_TETO_DEFAULT_PITCH_SEMITONES)
             )
-        (
-            item.advanced_nightcore_level,
-            item.advanced_slowed_level,
-            item.advanced_reverb_level,
-        ) = normalizar_efeitos_tts(
-            getattr(item, "advanced_nightcore_level", 0),
-            getattr(item, "advanced_slowed_level", 0),
-            getattr(item, "advanced_reverb_level", 0),
-        )
+        if item.engine in TTS_EFFECT_ENGINES:
+            (
+                item.advanced_nightcore_level,
+                item.advanced_slowed_level,
+                item.advanced_reverb_level,
+            ) = normalizar_efeitos_tts(
+                item.advanced_nightcore_level,
+                item.advanced_slowed_level,
+                item.advanced_reverb_level,
+            )
+        else:
+            item.advanced_nightcore_level = 0
+            item.advanced_slowed_level = 0
+            item.advanced_reverb_level = 0
         item._tts_settings_frozen = True
 
     def _cache_key(self, item: QueueItem) -> str:
@@ -4087,9 +4097,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
             "language": str(item.language or "pt-br"),
             "rate": str(item.rate or "+0%"),
             "pitch": str(item.pitch or "+0Hz"),
-            "advanced_nightcore_level": int(getattr(item, "advanced_nightcore_level", 0) or 0),
-            "advanced_slowed_level": int(getattr(item, "advanced_slowed_level", 0) or 0),
-            "advanced_reverb_level": int(getattr(item, "advanced_reverb_level", 0) or 0),
+            **payload_efeitos_tts(
+                item.advanced_nightcore_level,
+                item.advanced_slowed_level,
+                item.advanced_reverb_level,
+            ),
             "cache_key": self._cache_key(item),
             "cache_mode": "prefer",
             "timeout_seconds": max(3.0, min(WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS, self._estimate_playback_timeout(item))),
@@ -4370,7 +4382,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
 
     def _tts_ffmpeg_options_for_item(self, item: QueueItem | None) -> tuple[str, str]:
         effect_filter = self._tts_effect_filter(item)
-        options = str(TTS_FFMPEG_OPTIONS or "-vn -loglevel error").strip()
+        options = TTS_FFMPEG_OPTIONS
         if effect_filter:
             options = f"{options} -af {effect_filter}".strip()
         return options, effect_filter

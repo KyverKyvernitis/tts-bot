@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
+from ..runtime_telefone.agente.efeitos import payload_efeitos_tts
+
 
 _VOICE_LOG_THROTTLE: dict[tuple[int, str], float] = {}
 
@@ -275,9 +277,11 @@ async def rotear_item_tts_para_musica(
             language=getattr(item, "language", "pt-br"),
             rate=getattr(item, "rate", "+0%"),
             pitch=getattr(item, "pitch", "+0Hz"),
-            advanced_nightcore_level=int(getattr(item, "advanced_nightcore_level", 0) or 0),
-            advanced_slowed_level=int(getattr(item, "advanced_slowed_level", 0) or 0),
-            advanced_reverb_level=int(getattr(item, "advanced_reverb_level", 0) or 0),
+            **payload_efeitos_tts(
+                getattr(item, "advanced_nightcore_level", 0),
+                getattr(item, "advanced_slowed_level", 0),
+                getattr(item, "advanced_reverb_level", 0),
+            ),
             timeout=owner._estimate_playback_timeout(item),
         )
         # Resposta HTTP bem-sucedida não significa que o overlay tocou. Antes

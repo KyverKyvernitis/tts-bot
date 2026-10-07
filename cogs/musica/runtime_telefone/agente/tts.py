@@ -25,6 +25,9 @@ from .efeitos import filtros_tts
 from .mixer_pcm import AgentMixedAudioSource
 from .utilitarios import safe_id, short_text
 
+_TTS_FFMPEG_BASE_OPTIONS = "-vn -sn -dn -loglevel warning"
+
+
 class _TimedTTSSource(discord.AudioSource):
     def __init__(self, source, *, started, reader=None, buffered=False):
         self.source, self.started, self.reader = source, started, reader
@@ -177,20 +180,18 @@ class TTSMixin:
             return raw if raw.startswith(("+", "-")) else "+" + raw
         return "+0Hz"
 
-    def _tts_effect_filter_from_body(self, body: dict[str, Any]) -> str:
-        return filtros_tts(
-            engine=body.get("engine"),
+    def _tts_ffmpeg_options_from_body(
+        self, body: dict[str, Any], *, engine: object | None = None
+    ) -> tuple[str, str]:
+        effect_filter = filtros_tts(
+            engine=body.get("engine") if engine is None else engine,
             nightcore_level=body.get("advanced_nightcore_level", 0),
             slowed_level=body.get("advanced_slowed_level", 0),
             reverb_level=body.get("advanced_reverb_level", 0),
         )
-
-    def _tts_ffmpeg_options_from_body(self, body: dict[str, Any]) -> tuple[str, str]:
-        effect_filter = self._tts_effect_filter_from_body(body)
-        options = "-vn -sn -dn -loglevel warning"
         if effect_filter:
-            options = f"{options} -af {effect_filter}"
-        return options, effect_filter
+            return f"{_TTS_FFMPEG_BASE_OPTIONS} -af {effect_filter}", effect_filter
+        return _TTS_FFMPEG_BASE_OPTIONS, ""
 
     def _tts_cache_enabled(self) -> bool:
         return truthy(os.getenv("MUSIC_AGENT_TTS_CACHE_ENABLED"), truthy(os.getenv("PHONE_WORKER_TTS_AGENT_CACHE_ENABLED"), True))
@@ -452,15 +453,7 @@ class TTSMixin:
         engine = str(body.get('engine') or 'gtts').lower().replace('-', '_')
         if engine in {'google', 'google_tts', 'googlecloud', 'google_cloud', 'gcloud'}:
             engine = 'gtts'
-        effect_filter = filtros_tts(
-            engine=engine,
-            nightcore_level=body.get("advanced_nightcore_level", 0),
-            slowed_level=body.get("advanced_slowed_level", 0),
-            reverb_level=body.get("advanced_reverb_level", 0),
-        )
-        ffmpeg_options = "-vn -sn -dn -loglevel warning"
-        if effect_filter:
-            ffmpeg_options = f"{ffmpeg_options} -af {effect_filter}"
+        ffmpeg_options, _ = self._tts_ffmpeg_options_from_body(body, engine=engine)
         key = self._tts_cache_key_for_body(body, engine=engine, text=text) if self._tts_cache_enabled() else ''
         cache_hit = key and self._tts_cache_mode_allows_read(body) and await asyncio.to_thread(
             self._try_read_tts_cache_to_target, key=key, target=target, body=body)
@@ -574,7 +567,7 @@ class TTSMixin:
                 else:
                     tts_source, engine = await self._prepare_tts_source(body, path, started=started)
                 if tts_source is None:
-                    ffmpeg_options, _effect_filter = self._tts_ffmpeg_options_from_body(body)
+                    ffmpeg_options, _ = self._tts_ffmpeg_options_from_body(body)
                     tts_source = await self._buffer_tts_source(
                         discord.FFmpegPCMAudio(tts_input, executable=self.ffmpeg_executable,
                             before_options="-nostdin", options=ffmpeg_options),

@@ -80,7 +80,7 @@ def filtros(
     return ",".join(parts)
 
 
-TTS_EFFECT_ENGINES = {"edge", "gtts"}
+TTS_EFFECT_ENGINES = frozenset(("edge", "gtts"))
 TTS_NIGHTCORE_MULTIPLIERS = (1.0, 1.10, 1.20, 1.30)
 TTS_SLOWED_MULTIPLIERS = (1.0, 0.92, 0.84, 0.76)
 TTS_REVERB_DECAYS = (
@@ -90,31 +90,63 @@ TTS_REVERB_DECAYS = (
 )
 
 
-def nivel_efeito_tts(value: object) -> int:
-    """Normaliza o nível de DSP do TTS para 0..3."""
-    try:
-        level = int(value or 0)
-    except (TypeError, ValueError):
-        level = 0
-    return max(0, min(MAX_EFFECT_LEVEL, level))
-
-
 def normalizar_efeitos_tts(
     nightcore_level: object = 0,
     slowed_level: object = 0,
     reverb_level: object = 0,
 ) -> tuple[int, int, int]:
-    """Normaliza níveis e impede Nightcore + Slowed simultâneos.
+    """Normaliza 0..3 e mantém Nightcore/Slowed mutuamente exclusivos."""
+    night = nivel_efeito(nightcore_level)
+    slow = nivel_efeito(slowed_level)
+    reverb = nivel_efeito(reverb_level)
+    return night, 0 if night else slow, reverb
 
-    A UI já garante exclusividade. Esta defesa mantém payloads antigos ou
-    malformados determinísticos sem tocar no estado dos efeitos da música.
-    """
-    night = nivel_efeito_tts(nightcore_level)
-    slow = nivel_efeito_tts(slowed_level)
-    reverb = nivel_efeito_tts(reverb_level)
-    if night and slow:
-        slow = 0
-    return night, slow, reverb
+
+def payload_efeitos_tts(
+    nightcore_level: object = 0,
+    slowed_level: object = 0,
+    reverb_level: object = 0,
+) -> dict[str, int]:
+    """Serializa somente efeitos ativos; ausência no payload equivale a nível 0."""
+    if not (nightcore_level or slowed_level or reverb_level):
+        return {}
+    night, slow, reverb = normalizar_efeitos_tts(nightcore_level, slowed_level, reverb_level)
+    payload: dict[str, int] = {}
+    if night:
+        payload["advanced_nightcore_level"] = night
+    elif slow:
+        payload["advanced_slowed_level"] = slow
+    if reverb:
+        payload["advanced_reverb_level"] = reverb
+    return payload
+
+
+def _tts_rate_filter(multiplier: float) -> str:
+    if multiplier == 1.0:
+        return ""
+    return f"aresample=48000,asetrate={round(SAMPLE_RATE * multiplier)},aresample=48000"
+
+
+_TTS_NIGHTCORE_FILTERS = tuple(_tts_rate_filter(value) for value in TTS_NIGHTCORE_MULTIPLIERS)
+_TTS_SLOWED_FILTERS = tuple(_tts_rate_filter(value) for value in TTS_SLOWED_MULTIPLIERS)
+_TTS_REVERB_FILTERS = ("",) + tuple(
+    f"aecho=0.82:0.58:55|120|250:{'|'.join(f'{value:.2f}' for value in decays)}"
+    for decays in TTS_REVERB_DECAYS
+)
+_TTS_FILTERS = {
+    (night, slow, reverb): ",".join(
+        part
+        for part in (
+            _TTS_NIGHTCORE_FILTERS[night] or _TTS_SLOWED_FILTERS[slow],
+            _TTS_REVERB_FILTERS[reverb],
+        )
+        if part
+    )
+    for night in range(MAX_EFFECT_LEVEL + 1)
+    for slow in range(MAX_EFFECT_LEVEL + 1)
+    if not (night and slow)
+    for reverb in range(MAX_EFFECT_LEVEL + 1)
+}
 
 
 def filtros_tts(
@@ -124,44 +156,10 @@ def filtros_tts(
     slowed_level: object = 0,
     reverb_level: object = 0,
 ) -> str:
-    """Monta o DSP pós-síntese do TTS sem afetar música/ducking.
-
-    Só Edge e gTTS são elegíveis. A cauda do reverb é deliberadamente curta
-    (até 250 ms) para que o overlay não mantenha a música duckada por tempo
-    excessivo depois que a fala termina.
-    """
-    normalized_engine = str(engine or "").strip().lower().replace("-", "_")
-    if normalized_engine not in TTS_EFFECT_ENGINES:
+    """Retorna o filtergraph pós-síntese pré-calculado para Edge/gTTS."""
+    if not (nightcore_level or slowed_level or reverb_level):
         return ""
-    night, slow, reverb = normalizar_efeitos_tts(
-        nightcore_level, slowed_level, reverb_level
-    )
-    if not (night or slow or reverb):
+    if str(engine or "").strip().lower().replace("-", "_") not in TTS_EFFECT_ENGINES:
         return ""
-
-    parts: list[str] = []
-    if night:
-        multiplier = TTS_NIGHTCORE_MULTIPLIERS[night]
-        parts.extend((
-            "aresample=48000",
-            f"asetrate={round(SAMPLE_RATE * multiplier)}",
-            "aresample=48000",
-        ))
-    elif slow:
-        multiplier = TTS_SLOWED_MULTIPLIERS[slow]
-        parts.extend((
-            "aresample=48000",
-            f"asetrate={round(SAMPLE_RATE * multiplier)}",
-            "aresample=48000",
-        ))
-
-    if reverb:
-        decays = "|".join(f"{value:.2f}" for value in TTS_REVERB_DECAYS[reverb - 1])
-        parts.append(f"aecho=0.82:0.58:55|120|250:{decays}")
-
-    # Não use o alimiter moderno da música aqui. O TTS também pode tocar na
-    # VPS (Ubuntu 22.04/FFmpeg mais antigo), e opções como ``latency`` fazem
-    # alguns builds encerrarem o decoder antes do primeiro PCM. O aecho já
-    # trabalha com ganho de saída conservador e o mixer mantém a proteção da
-    # soma quando há música. Assim o mesmo filtergraph funciona nos dois hosts.
-    return ",".join(parts)
+    levels = normalizar_efeitos_tts(nightcore_level, slowed_level, reverb_level)
+    return _TTS_FILTERS[levels]
