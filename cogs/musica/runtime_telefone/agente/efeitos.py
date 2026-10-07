@@ -159,7 +159,9 @@ def filtros_tts(
         decays = "|".join(f"{value:.2f}" for value in TTS_REVERB_DECAYS[reverb - 1])
         parts.append(f"aecho=0.82:0.58:55|120|250:{decays}")
 
-    # Protege apenas o ramo TTS. O limiter/mix gain global continua sendo
-    # responsabilidade do mixer, e o bassboost continua exclusivo da música.
-    parts.append("alimiter=limit=0.96:attack=5:release=80:level=0:latency=1")
+    # Não use o alimiter moderno da música aqui. O TTS também pode tocar na
+    # VPS (Ubuntu 22.04/FFmpeg mais antigo), e opções como ``latency`` fazem
+    # alguns builds encerrarem o decoder antes do primeiro PCM. O aecho já
+    # trabalha com ganho de saída conservador e o mixer mantém a proteção da
+    # soma quando há música. Assim o mesmo filtergraph funciona nos dois hosts.
     return ",".join(parts)

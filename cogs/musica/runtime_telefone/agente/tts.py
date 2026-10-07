@@ -38,9 +38,20 @@ class _TimedTTSSource(discord.AudioSource):
             threading.Thread(target=self._fill, name='tts-pcm-reader', daemon=True).start()
 
     def _fill(self):
+        saw_pcm = False
         try:
             while not self.closed:
                 frame = self.source.read()
+                if not frame:
+                    # FFmpegPCMAudio não propaga stderr pelo read(). Antes, um
+                    # decoder que morria por filtergraph inválido colocava EOF
+                    # na fila, marcava ``ready`` e o pedido parecia ter tocado
+                    # em silêncio. Exija ao menos um frame PCM real.
+                    if not saw_pcm:
+                        self.error = RuntimeError("decoder TTS encerrou sem produzir PCM")
+                        self.ready.set()
+                    break
+                saw_pcm = True
                 while not self.closed:
                     try:
                         self.frames.put(frame, timeout=.1)
@@ -48,8 +59,6 @@ class _TimedTTSSource(discord.AudioSource):
                         break
                     except queue.Full:
                         continue
-                if not frame:
-                    break
         except Exception as error:
             self.error = error
             self.ready.set()
