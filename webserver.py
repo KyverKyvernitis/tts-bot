@@ -20,10 +20,12 @@ from pathlib import Path
 
 from utility.apk_identity import ApkIdentityError, assert_expected_apk_identity, inspect_apk_identity
 from utility.storage_maintenance import prune_core_worker_releases
+from utility.openai_compat import register_openai_compat_routes
 from cogs.musica.integracoes.webserver import registrar_rotas_musica
 
 app = Flask(__name__)
 registrar_rotas_musica(app)
+register_openai_compat_routes(app)
 
 _health_provider = None
 _update_action_provider = None
