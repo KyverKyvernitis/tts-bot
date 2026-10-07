@@ -290,6 +290,9 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
     ) -> dict[str, object]:
         """Executa uma completion externa dentro do loop dono do ProviderRouter."""
         from cogs.chatbot.providers import AllProvidersExhausted, ChatMessage
+        from cogs.chatbot.action_protocol import NativeToolCall
+        from cogs.chatbot.tool_registry import ToolSpec
+        from utility.openai_compat_tools import external_response_calls, ToolPayloadError
 
         chatbot = self.get_cog("Chatbot")
         router = getattr(chatbot, "_router", None) if chatbot is not None else None
@@ -302,10 +305,23 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                 "message": "Chatbot is not ready.",
             }
 
-        messages = [
-            ChatMessage(role=str(item.get("role") or "user"), content=str(item.get("content") or ""))
-            for item in list(spec.get("messages") or []) if isinstance(item, dict)
-        ]
+        messages = []
+        for item in list(spec.get("messages") or []):
+            if not isinstance(item, dict):
+                continue
+            native_calls = tuple(
+                NativeToolCall(id=call["id"], name=call["name"], arguments=call["arguments"])
+                for call in item.get("tool_calls", ())
+            )
+            messages.append(ChatMessage(
+                role=str(item.get("role") or "user"), content=str(item.get("content") or ""),
+                tool_calls=native_calls, tool_call_id=str(item.get("tool_call_id") or ""),
+                name=str(item.get("name") or ""),
+            ))
+        # Apenas contratos declarados pelo cliente externo; sem handler, sem
+        # ações privilegiadas do Discord e sem acesso ao tool registry do bot.
+        tool_specs = tuple(ToolSpec(tool["name"], tool["description"], tool["parameters"],
+                                    permission="external/client") for tool in spec.get("tools", ()))
         report: dict[str, object] = {}
         try:
             kwargs = dict(
@@ -313,7 +329,8 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                 messages=messages,
                 temperature=float(spec.get("temperature") if spec.get("temperature") is not None else 0.8),
                 budget_seconds=float(spec.get("timeout_seconds") or 45.0),
-                allow_tool_calls=False,
+                allow_tool_calls=bool(spec.get("allow_tool_calls")),
+                tool_specs=tool_specs if spec.get("allow_tool_calls") else (),
                 max_output_tokens=spec.get("max_output_tokens") if isinstance(spec.get("max_output_tokens"), int) else None,
                 request_report=report,
             )
@@ -355,9 +372,18 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                 provider = str(success.get("provider") or "")
                 provider_model = str(success.get("model") or "")
         usage = report.get("usage") if isinstance(report.get("usage"), dict) else {}
+        try:
+            response_calls = external_response_calls(
+                getattr(reply, "tool_calls", ()) if not isinstance(reply, str) else (),
+                {tool.name for tool in tool_specs} if spec.get("allow_tool_calls") else set(),
+            )
+        except ToolPayloadError:
+            return {"ok": False, "status": 502, "code": "invalid_backend_tools",
+                    "type": "server_error", "message": "Provider returned invalid tool calls."}
         return {
             "ok": True,
             "text": str(text or ""),
+            "tool_calls": response_calls,
             "provider": provider,
             "provider_model": provider_model,
             "usage": dict(usage),

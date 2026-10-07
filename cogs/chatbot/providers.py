@@ -783,13 +783,14 @@ class _StreamVisibleText:
         return shown
 
 
-async def _openai_stream_result(response, on_text_delta, *, cloudflare=False) -> dict:
+async def _openai_stream_result(response, on_text_delta, *, cloudflare=False, allow_tools=False) -> dict:
     pieces: list[str] = []
     total_chars = 0
     usage = {}
     finish_reason = None
     refusal = None
     done = False
+    tool_parts: dict[int, dict[str, str]] = {}
     visibility = _StreamVisibleText() if cloudflare else None
     async for item in _iter_sse_payloads(response):
         if item == "[DONE]":
@@ -810,9 +811,44 @@ async def _openai_stream_result(response, on_text_delta, *, cloudflare=False) ->
         delta = choice.get("delta") or {}
         if not isinstance(delta, dict):
             raise ProviderError("SSE delta inválido", kind="invalid_response", stage="output")
-        if delta.get("tool_calls"):
-            raise ProviderError("provider enviou ferramentas não solicitadas", kind="invalid_response", stage="output",
-                                diagnostic_code="unexpected_calls")
+        raw_tool_calls = delta.get("tool_calls") or []
+        if raw_tool_calls:
+            if not allow_tools:
+                raise ProviderError("provider enviou ferramentas não solicitadas", kind="invalid_response", stage="output",
+                                    diagnostic_code="unexpected_calls")
+            if not isinstance(raw_tool_calls, list):
+                raise ProviderError("SSE tool_calls inválido", kind="invalid_response", stage="output")
+            for tool_chunk in raw_tool_calls:
+                if not isinstance(tool_chunk, dict):
+                    raise ProviderError("SSE tool_calls inválido", kind="invalid_response", stage="output")
+                index = tool_chunk.get("index")
+                if type(index) is not int or not 0 <= index < getattr(C, "MAX_TOOL_CALLS", 8):
+                    raise ProviderError("SSE tool_calls excede limites", kind="invalid_response", stage="output")
+                part = tool_parts.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                call_id = tool_chunk.get("id")
+                if call_id is not None:
+                    if not isinstance(call_id, str) or (part["id"] and part["id"] != call_id):
+                        raise ProviderError("SSE id inválido", kind="invalid_response", stage="output")
+                    part["id"] = call_id
+                function = tool_chunk.get("function") or {}
+                if not isinstance(function, dict) or tool_chunk.get("type", "function") != "function":
+                    raise ProviderError("SSE function inválida", kind="invalid_response", stage="output")
+                name = function.get("name")
+                arguments = function.get("arguments")
+                if name is not None:
+                    if not isinstance(name, str):
+                        raise ProviderError("SSE name inválido", kind="invalid_response", stage="output")
+                    # Os provedores podem enviar nome fragmentado ou completo.
+                    if not part["name"]:
+                        part["name"] = name
+                    elif name != part["name"]:
+                        part["name"] += name
+                if arguments is not None:
+                    if not isinstance(arguments, str):
+                        raise ProviderError("SSE arguments inválidos", kind="invalid_response", stage="output")
+                    part["arguments"] += arguments
+                if len(part["arguments"].encode("utf-8")) > 8192 or len(part["name"]) > 64:
+                    raise ProviderError("SSE arguments excedem limites", kind="invalid_response", stage="output")
         if delta.get("refusal"):
             refusal = delta["refusal"]
         content = delta.get("content")
@@ -832,17 +868,24 @@ async def _openai_stream_result(response, on_text_delta, *, cloudflare=False) ->
         raise ProviderError("stream SSE terminou antes da conclusão", kind="invalid_response", stage="output")
     if finish_reason == "content_filter":
         raise ProviderError("resposta bloqueada pelo provider", kind="blocked", stage="output")
+    native_calls = [
+        {"id": part["id"] or None, "type": "function", "function": {
+            "name": part["name"], "arguments": part["arguments"],
+        }} for _index, part in sorted(tool_parts.items())
+    ]
     return {"choices": [{"finish_reason": finish_reason,
-                         "message": {"content": "".join(pieces), "refusal": refusal}}],
+                         "message": {"content": "".join(pieces), "refusal": refusal,
+                                     "tool_calls": native_calls}}],
             "usage": usage}
 
 
-async def _gemini_stream_result(response, on_text_delta) -> dict:
+async def _gemini_stream_result(response, on_text_delta, *, allow_tools=False) -> dict:
     pieces: list[str] = []
     chars = 0
     reason = None
     usage = {}
     feedback = {}
+    tool_parts: list[dict] = []
     async for item in _iter_sse_payloads(response):
         if item == "[DONE]":
             break
@@ -869,8 +912,15 @@ async def _gemini_stream_result(response, on_text_delta) -> dict:
             if not isinstance(part, dict):
                 continue
             if "functionCall" in part:
-                raise ProviderError("provider enviou ferramentas não solicitadas", kind="invalid_response", stage="output",
-                                    diagnostic_code="unexpected_calls")
+                if not allow_tools:
+                    raise ProviderError("provider enviou ferramentas não solicitadas", kind="invalid_response", stage="output",
+                                        diagnostic_code="unexpected_calls")
+                if not isinstance(part["functionCall"], dict):
+                    raise ProviderError("Gemini functionCall inválida", kind="invalid_response", stage="output")
+                tool_parts.append(part)
+                if len(tool_parts) > getattr(C, "MAX_TOOL_CALLS", 8):
+                    raise ProviderError("Gemini retornou ferramentas demais", kind="invalid_response", stage="output")
+                continue
             fragment = part.get("text") if not part.get("thought") else None
             if not isinstance(fragment, str) or not fragment:
                 continue
@@ -881,8 +931,9 @@ async def _gemini_stream_result(response, on_text_delta) -> dict:
             await on_text_delta(fragment)
     if reason is None:
         raise ProviderError("Gemini SSE terminou antes da conclusão", kind="invalid_response", stage="output")
-    return {"candidates": [{"finishReason": reason, "content": {"parts": [{"text": "".join(pieces)}]}}],
-            "usageMetadata": usage, "promptFeedback": feedback}
+    return {"candidates": [{"finishReason": reason, "content": {
+        "parts": ([{"text": "".join(pieces)}] if pieces else []) + tool_parts,
+    }}], "usageMetadata": usage, "promptFeedback": feedback}
 
 
 class _GroqClient:
@@ -961,7 +1012,8 @@ class _GroqClient:
                     raise await _http_error(resp, provider=self.PROVIDER)
                 if on_text_delta is not None:
                     data = await _openai_stream_result(
-                        resp, on_text_delta, cloudflare=self.PROVIDER == "cloudflare")
+                        resp, on_text_delta, cloudflare=self.PROVIDER == "cloudflare",
+                        allow_tools=bool(tool_specs and allow_tool_calls))
                 else:
                     data = await _read_json_limited(resp)
         except asyncio.TimeoutError as exc:
@@ -1463,7 +1515,8 @@ class _GeminiClient:
                 if resp.status >= 400:
                     raise await _http_error(resp)
                 if on_text_delta is not None:
-                    data = await _gemini_stream_result(resp, on_text_delta)
+                    data = await _gemini_stream_result(resp, on_text_delta,
+                                                       allow_tools=bool(tool_specs and allow_tool_calls))
                 else:
                     data = await _read_json_limited(resp)
         except asyncio.TimeoutError as exc:

@@ -193,16 +193,16 @@ def test_chat_requires_auth_and_tailscale(monkeypatch):
     assert public.status_code == 403
 
 
-def test_chat_rejects_tools_and_unknown_model(monkeypatch):
+def test_chat_rejects_invalid_tools_and_unknown_model(monkeypatch):
     monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
     set_openai_chat_provider(lambda spec: {"ok": True, "text": "x", "usage": {}})
     base = {"model": "osaka-auto", "messages": [{"role": "user", "content": "x"}]}
 
-    tools = _post(_client(), {**base, "tools": [{"type": "function", "function": {"name": "x"}}]})
+    tools = _post(_client(), {**base, "tools": [{"type": "function", "function": {"name": "INVALID NAME"}}]})
     unknown = _post(_client(), {**base, "model": "other-model"})
 
     assert tools.status_code == 400
-    assert tools.get_json()["error"]["code"] == "unsupported_tools"
+    assert tools.get_json()["error"]["code"] == "invalid_tools"
     assert unknown.status_code == 404
     assert unknown.get_json()["error"]["code"] == "model_not_found"
 
@@ -378,7 +378,7 @@ def test_r4_audit_logs_request_shape_and_rejection_without_sensitive_data(monkey
         response = _post(_client(), payload, token="very-private-token-never-log")
 
     assert response.status_code == 400
-    assert response.get_json()["error"]["code"] == "unsupported_tools"
+    assert response.get_json()["error"]["code"] == "invalid_tools"
     request_id = response.headers.get("X-Osaka-Request-ID")
     assert isinstance(request_id, str) and len(request_id) == 12
     entries = _audit_events(caplog)
@@ -391,7 +391,7 @@ def test_r4_audit_logs_request_shape_and_rejection_without_sensitive_data(monkey
     assert entries[1]["content_arrays"] == 1
     assert entries[1]["unknown_key_count"] == 1
     assert entries[2]["status"] == 400
-    assert entries[2]["error_code"] == "unsupported_tools"
+    assert entries[2]["error_code"] == "invalid_tools"
     for sensitive in ("very-private-token-never-log", "secret-prompt-never-log",
                       "private-function-name", "secret-param-never-log", "a-secret-custom-param"):
         assert sensitive not in caplog.text
@@ -507,3 +507,114 @@ def test_r4_audit_models_exposes_request_id_without_credentials(monkeypatch, cap
     assert entries[1]["status"] == 200
     assert response.headers.get("X-Osaka-Request-ID") == entries[0]["request_id"]
     assert "secret-should-stay-private" not in caplog.text
+
+
+_R6_CALCULATOR = {"type": "function", "function": {
+    "name": "calculator", "description": "Evaluate arithmetic", "parameters": {
+        "type": "object", "properties": {"expression": {"type": "string"}},
+        "required": ["expression"], "additionalProperties": False,
+    },
+}}
+
+
+def _r6_call(call_id="call_123", name="calculator", arguments='{"expression":"2+3"}'):
+    return {"id": call_id, "type": "function",
+            "function": {"name": name, "arguments": arguments}}
+
+
+def test_r6_tool_call_nonstream_returns_only_client_execution_instruction(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    seen = {}
+    calls = [_r6_call()]
+
+    def provider(spec):
+        seen.update(spec)
+        return {"ok": True, "text": "", "tool_calls": calls, "usage": {}}
+
+    set_openai_chat_provider(provider)
+    response = _post(_client(), {
+        "model": "osaka-auto", "messages": [{"role": "user", "content": "Quanto é 2+3?"}],
+        "tools": [_R6_CALCULATOR], "tool_choice": "auto", "stream": False,
+    })
+    assert response.status_code == 200
+    choice = response.get_json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"] == calls
+    assert seen["allow_tool_calls"] is True
+    assert seen["tools"] == [_R6_CALCULATOR["function"]]
+
+
+def test_r6_tool_results_history_roundtrip(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    seen = {}
+    set_openai_chat_provider(lambda spec: (seen.update(spec) or {"ok": True, "text": "5", "usage": {}}))
+    response = _post(_client(), {
+        "model": "osaka-auto", "tools": [_R6_CALCULATOR],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Quanto é 2+3?"}]},
+            {"role": "assistant", "content": "", "tool_calls": [_r6_call()]},
+            {"role": "tool", "tool_call_id": "call_123", "content": [{"type": "text", "text": "5"}]},
+        ],
+    })
+    assert response.status_code == 200
+    assert seen["messages"][1]["tool_calls"][0] == {
+        "id": "call_123", "name": "calculator", "arguments": {"expression": "2+3"},
+    }
+    assert seen["messages"][2] == {"role": "tool", "content": "5", "tool_call_id": "call_123", "name": "calculator"}
+    assert response.get_json()["choices"][0]["finish_reason"] == "stop"
+
+
+def test_r6_invalid_tool_result_reference_rejected_before_backend(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    called = []
+    set_openai_chat_provider(lambda spec: (called.append(spec) or {"ok": True, "text": "ok"}))
+    response = _post(_client(), {"model": "osaka-auto", "tools": [_R6_CALCULATOR],
+        "messages": [{"role": "user", "content": "oi"},
+                     {"role": "tool", "tool_call_id": "call_fake", "content": "5"}]})
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "invalid_tool_history"
+    assert not called
+
+
+def test_r6_tool_choice_none_forbids_new_calls(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    seen = {}
+    set_openai_chat_provider(lambda spec: (seen.update(spec) or {"ok": True, "text": "ok"}))
+    response = _post(_client(), {"model": "osaka-fast", "tools": [_R6_CALCULATOR],
+        "tool_choice": "none", "messages": [{"role": "user", "content": "hello"}]})
+    assert response.status_code == 200
+    assert seen["allow_tool_calls"] is False
+    assert seen["tools"]
+    bad = _post(_client(), {"model": "osaka-fast", "tools": [_R6_CALCULATOR],
+        "tool_choice": "required", "messages": [{"role": "user", "content": "hello"}]})
+    assert bad.status_code == 400
+    assert bad.get_json()["error"]["code"] == "unsupported_tool_choice"
+
+
+def test_r6_streaming_native_tool_calls_offgrid_shape(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    calls = [_r6_call()]
+    def provider(spec):
+        source = OpenAIChatStream(4)
+        source.events.put_nowait(("done", {"ok": True, "provider": "groq", "tool_calls": calls,
+                                           "usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12}}))
+        return source
+    set_openai_chat_provider(provider)
+    response = _post(_client(), {"model": "osaka-smart", "stream": True,
+        "messages": [{"role": "user", "content": "2+3"}], "tools": [_R6_CALCULATOR]})
+    assert response.status_code == 200
+    events = _sse_payloads(response)
+    assert events[0]["choices"][0]["delta"] == {"role": "assistant"}
+    assert events[1]["choices"][0]["delta"]["tool_calls"] == [{"index": 0, **calls[0]}]
+    assert events[2]["choices"][0]["finish_reason"] == "tool_calls"
+    assert events[3] == "[DONE]"
+    response.close()
+
+
+def test_r6_backend_cannot_inject_unrequested_function(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    set_openai_chat_provider(lambda _spec: {"ok": True, "text": "", "tool_calls": [_r6_call(name="admin_ban")], "usage": {}})
+    response = _post(_client(), {"model": "osaka-auto", "tools": [_R6_CALCULATOR],
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert response.status_code == 502
+    assert response.get_json()["error"]["code"] == "invalid_backend_tools"

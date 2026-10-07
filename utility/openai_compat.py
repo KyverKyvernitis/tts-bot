@@ -15,6 +15,10 @@ from typing import Any, Callable
 
 from flask import Response, g, jsonify, request
 
+from utility.openai_compat_tools import (
+    ToolPayloadError, normalize_messages, normalize_tools,
+)
+
 
 _MODEL_OWNER = "osaka"
 _MODEL_CREATED = int(time.time())
@@ -55,6 +59,8 @@ _AUDIT_ERROR_CODES = frozenset({
     "chat_backend_timeout", "chatbot_unavailable", "discord_loop_unavailable",
     "rate_limit_exceeded", "upstream_timeout", "providers_unconfigured",
     "content_filter", "upstream_error", "other_error",
+    "invalid_tools", "unsupported_tool_choice", "invalid_tool_history",
+    "invalid_tool_arguments", "invalid_backend_tools",
 })
 
 
@@ -394,14 +400,11 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
     if isinstance(n, bool) or not isinstance(n, int) or n != 1:
         return None, _error("Only n=1 is supported.", 400, error_type="invalid_request_error", code="unsupported_n")
 
-    tools = payload.get("tools")
-    if tools not in (None, [], ()):
-        return None, _error(
-            "Tool calling is not enabled yet for this endpoint.",
-            400,
-            error_type="invalid_request_error",
-            code="unsupported_tools",
-        )
+    try:
+        tools, allow_tool_calls = normalize_tools(payload.get("tools"), payload.get("tool_choice"))
+    except ToolPayloadError as exc:
+        return None, _error("Invalid or unsupported tool declarations.", 400,
+                            error_type="invalid_request_error", code=exc.code)
 
     raw_messages = payload.get("messages")
     if not isinstance(raw_messages, list) or not raw_messages:
@@ -411,7 +414,7 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
         return None, _error("Too many messages.", 400, error_type="invalid_request_error", code="too_many_messages")
 
     system_parts: list[str] = []
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     total_chars = 0
     has_user = False
     max_chars = _env_int("BOT_OPENAI_MAX_TEXT_CHARS", 120_000, minimum=4_096, maximum=800_000)
@@ -419,7 +422,7 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
         if not isinstance(raw, dict):
             return None, _error(f"messages[{index}] must be an object.", 400, error_type="invalid_request_error", code="invalid_message")
         role = str(raw.get("role") or "").strip().lower()
-        if role not in {"system", "developer", "user", "assistant"}:
+        if role not in {"system", "developer", "user", "assistant", "tool"}:
             return None, _error(
                 f"Unsupported message role at messages[{index}].",
                 400,
@@ -439,7 +442,20 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
             continue
         if role == "user":
             has_user = True
-        messages.append({"role": role, "content": text})
+        message = {"role": role, "content": text}
+        if role == "assistant" and "tool_calls" in raw:
+            message["tool_calls"] = raw["tool_calls"]
+        if role == "tool":
+            message["tool_call_id"] = raw.get("tool_call_id")
+            if "name" in raw:
+                message["name"] = raw["name"]
+        messages.append(message)
+
+    try:
+        messages = normalize_messages(messages)
+    except ToolPayloadError as exc:
+        return None, _error("Invalid tool call history.", 400,
+                            error_type="invalid_request_error", code=exc.code)
 
     if not has_user:
         return None, _error("At least one user message is required.", 400, error_type="invalid_request_error", code="user_message_required")
@@ -469,6 +485,8 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
         "include_usage": bool(options.get("include_usage")),
         "system": "\n\n".join(system_parts),
         "messages": messages,
+        "tools": tools,
+        "allow_tool_calls": allow_tool_calls,
         "temperature": temperature,
         "max_output_tokens": max_output_tokens,
         "timeout_seconds": _env_float("BOT_OPENAI_REQUEST_TIMEOUT", 45.0, minimum=5.0, maximum=120.0),
@@ -578,6 +596,10 @@ def _chat_completions():
     text = result.get("text")
     if not isinstance(text, str):
         return _error("The chat backend returned an invalid response.", 502, error_type="server_error", code="invalid_backend_response")
+    calls = result.get("tool_calls") or []
+    if not isinstance(calls, list) or (calls and not spec["allow_tool_calls"]):
+        return _error("The chat backend returned invalid tool calls.", 502,
+                      error_type="server_error", code="invalid_backend_tools")
 
     usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
     prompt_tokens = max(0, int(usage.get("input_tokens") or 0))
@@ -591,8 +613,8 @@ def _chat_completions():
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": text if not calls else (text or None), **({"tool_calls": calls} if calls else {})},
+                "finish_reason": "tool_calls" if calls else "stop",
             }
         ],
         "usage": {
@@ -628,7 +650,8 @@ def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemapho
     closed = threading.Event()
     cleanup_lock = threading.Lock()
     stats = {"delta_count": 0, "character_count": 0, "first_delta_ms": None,
-             "sse_done_generated": False, "backend_code": None, "provider": None}
+             "sse_done_generated": False, "backend_code": None, "provider": None,
+             "tool_call_count": 0}
 
     def cleanup(outcome: str = "client_disconnected") -> None:
         with cleanup_lock:
@@ -642,6 +665,7 @@ def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemapho
             _audit_log(
                 "stream_end", request_id=request_id, outcome=outcome,
                 delta_count=stats["delta_count"], character_count=stats["character_count"],
+                tool_call_count=stats["tool_call_count"],
                 first_delta_ms=stats["first_delta_ms"],
                 sse_done_generated=stats["sse_done_generated"],
                 backend_code=stats["backend_code"], provider=stats["provider"],
@@ -693,7 +717,23 @@ def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemapho
                         provider = str(value.get("provider") or "").lower()
                         stats["provider"] = provider if provider in {"groq", "gemini", "mistral", "cloudflare"} else "other"
                         finish = value.get("finish_reason")
-                        yield chunk({}, finish_reason="length" if finish == "length" else "stop")
+                        calls = value.get("tool_calls") or []
+                        if calls and spec.get("allow_tool_calls"):
+                            stats["tool_call_count"] = len(calls)
+                            # O OGAM espera id, name e arguments no mesmo delta.
+                            # Emissão completa e limitada evita estado parcial no cliente.
+                            for index, call in enumerate(calls):
+                                yield chunk({"tool_calls": [{"index": index, **call}]})
+                        elif calls:
+                            stats["backend_code"] = "invalid_backend_tools"
+                            outcome = "backend_error"
+                            yield _sse_data({"error": {"message": "Invalid tool calls.",
+                                                         "type": "server_error", "code": "invalid_backend_tools"}})
+                            stats["sse_done_generated"] = True
+                            yield _sse_data("[DONE]")
+                            break
+                        yield chunk({}, finish_reason="tool_calls" if calls else
+                                    "length" if finish == "length" else "stop")
                         if spec.get("include_usage"):
                             usage = value.get("usage") if isinstance(value.get("usage"), dict) else {}
                             counters = ("input_tokens", "output_tokens", "total_tokens")

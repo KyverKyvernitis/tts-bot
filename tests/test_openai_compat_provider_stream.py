@@ -188,3 +188,75 @@ async def test_truncated_upstream_sse_does_not_succeed():
         await _openai_stream_result(_FakeRequest([
             {"choices": [{"delta": {"content": "incompleto"}, "finish_reason": None}]},
         ]), emit)
+
+
+@pytest.mark.asyncio
+async def test_r6_groq_stream_tool_fragments_are_reassembled_and_validated():
+    from cogs.chatbot.tool_registry import ToolSpec
+    from cogs.chatbot.action_protocol import ChatReply
+    sess = _FakeSession([
+        {"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_a", "type": "function",
+                                                "function": {"name": "calculator", "arguments": '{"expression":"2'}}]},
+                      "finish_reason": None}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '+3"}'}}]},
+                      "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        "[DONE]",
+    ])
+    results = []
+
+    async def text_delta(value):
+        results.append(value)
+
+    tool = ToolSpec("calculator", "Calculator", {"type": "object", "properties": {
+        "expression": {"type": "string"}}, "required": ["expression"]})
+    reply = await _GroqClient(sess, "secret").chat(
+        system="Compute", messages=[ChatMessage(role="user", content="2+3")],
+        model=C.GROQ_MODELS[0], temperature=0.5, timeout_seconds=10,
+        tool_specs=(tool,), allow_tool_calls=True, on_text_delta=text_delta,
+    )
+    assert isinstance(reply, ChatReply)
+    assert reply.tool_calls[0].id == "call_a"
+    assert reply.tool_calls[0].name == "calculator"
+    assert reply.tool_calls[0].arguments == {"expression": "2+3"}
+    assert results == []
+    assert sess.requests[0][1]["json"]["tools"][0]["function"]["name"] == "calculator"
+
+
+@pytest.mark.asyncio
+async def test_r6_gemini_stream_function_call_is_returned_to_external_client():
+    from cogs.chatbot.action_protocol import ChatReply
+    from cogs.chatbot.tool_registry import ToolSpec
+    sess = _FakeSession([
+        {"candidates": [{"content": {"parts": [{"functionCall": {"name": "device_info", "args": {}}}]},
+                         "finishReason": "STOP"}]},
+    ])
+    seen = []
+    tool = ToolSpec("device_info", "Device info", {"type": "object", "properties": {}})
+    async def emit(value):
+        seen.append(value)
+    reply = await _GeminiClient(sess, "secret").chat(
+        system="", messages=[ChatMessage(role="user", content="Qual celular?")],
+        model=C.GEMINI_MODELS[0], temperature=0.5, timeout_seconds=10,
+        tool_specs=(tool,), allow_tool_calls=True, on_text_delta=emit,
+    )
+    assert isinstance(reply, ChatReply)
+    assert reply.tool_calls[0].name == "device_info"
+    assert reply.tool_calls[0].arguments == {}
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_r6_providers_still_reject_unsolicited_tool_calls():
+    from cogs.chatbot.providers import _openai_stream_result
+    sess = _FakeRequest([
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_b", "type": "function",
+                                                "function": {"name": "unauthorized", "arguments": "{}"}}]},
+                      "finish_reason": "tool_calls"}]},
+        "[DONE]",
+    ])
+    async def emit(value):
+        raise AssertionError("No text expected")
+    with pytest.raises(ProviderError, match="não solicitadas"):
+        await _openai_stream_result(sess, emit)
