@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import atexit
 from collections import deque
 import hashlib
@@ -136,6 +137,7 @@ from discord.ext import commands
 import config
 from db import SettingsDB
 from webserver import run_webserver, set_health_provider, set_update_action_provider
+from utility.openai_compat import set_openai_chat_provider
 from cogs.musica.integracoes.bot import IntegracaoMusicaBot
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
 from utility.application_bio import ApplicationBioService
@@ -251,6 +253,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
             "last_update": None,
         }
         self._health_task: asyncio.Task | None = None
+        self._main_loop: asyncio.AbstractEventLoop | None = None
         self._event_loop_watchdog_task: asyncio.Task | None = None
         self._event_loop_last_lag_ms: float = 0.0
         self._event_loop_max_lag_ms: float = 0.0
@@ -280,6 +283,111 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
 
         set_health_provider(self.get_health_snapshot)
         set_update_action_provider(self.handle_internal_update_action)
+        set_openai_chat_provider(self.handle_openai_compat_chat)
+
+    async def _openai_compat_chat_on_loop(self, spec: dict[str, object]) -> dict[str, object]:
+        """Executa uma completion externa dentro do loop dono do ProviderRouter."""
+        from cogs.chatbot.providers import AllProvidersExhausted, ChatMessage
+
+        chatbot = self.get_cog("Chatbot")
+        router = getattr(chatbot, "_router", None) if chatbot is not None else None
+        if router is None:
+            return {
+                "ok": False,
+                "status": 503,
+                "code": "chatbot_unavailable",
+                "type": "server_error",
+                "message": "Chatbot is not ready.",
+            }
+
+        messages = [
+            ChatMessage(role=str(item.get("role") or "user"), content=str(item.get("content") or ""))
+            for item in list(spec.get("messages") or []) if isinstance(item, dict)
+        ]
+        report: dict[str, object] = {}
+        try:
+            reply = await router.chat(
+                system=str(spec.get("system") or ""),
+                messages=messages,
+                temperature=float(spec.get("temperature") if spec.get("temperature") is not None else 0.8),
+                budget_seconds=float(spec.get("timeout_seconds") or 45.0),
+                allow_tool_calls=False,
+                max_output_tokens=spec.get("max_output_tokens") if isinstance(spec.get("max_output_tokens"), int) else None,
+                request_report=report,
+            )
+        except AllProvidersExhausted as exc:
+            kind = str(getattr(exc, "kind", "") or "")
+            retry_after = getattr(exc, "retry_after", None)
+            if kind in {"rate_limit", "cooldown"}:
+                status, code, message = 429, "rate_limit_exceeded", "All chat providers are temporarily rate limited."
+            elif kind in {"deadline", "timeout"}:
+                status, code, message = 504, "upstream_timeout", "Chat providers timed out."
+            elif kind == "unconfigured":
+                status, code, message = 503, "providers_unconfigured", "No chat provider is configured."
+            elif kind == "blocked":
+                status, code, message = 400, "content_filter", "The request could not be processed by the provider."
+            else:
+                status, code, message = 502, "upstream_error", "All chat providers failed."
+            return {
+                "ok": False,
+                "status": status,
+                "code": code,
+                "type": "rate_limit_error" if status == 429 else "server_error",
+                "message": message,
+                "retry_after": retry_after,
+            }
+
+        text = reply if isinstance(reply, str) else getattr(reply, "text", "")
+        provider = "" if isinstance(reply, str) else str(getattr(reply, "provider", "") or "")
+        provider_model = "" if isinstance(reply, str) else str(getattr(reply, "model", "") or "")
+        attempts = report.get("attempts") if isinstance(report.get("attempts"), list) else []
+        if not provider:
+            success = next((item for item in reversed(attempts) if isinstance(item, dict) and item.get("kind") == "success"), None)
+            if isinstance(success, dict):
+                provider = str(success.get("provider") or "")
+                provider_model = str(success.get("model") or "")
+        usage = report.get("usage") if isinstance(report.get("usage"), dict) else {}
+        return {
+            "ok": True,
+            "text": str(text or ""),
+            "provider": provider,
+            "provider_model": provider_model,
+            "usage": dict(usage),
+        }
+
+    def handle_openai_compat_chat(self, spec: dict[str, object]) -> dict[str, object]:
+        """Ponte Waitress -> event loop do Discord, sem criar um segundo loop."""
+        loop = self._main_loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return {
+                "ok": False,
+                "status": 503,
+                "code": "discord_loop_unavailable",
+                "type": "server_error",
+                "message": "Chat backend is starting.",
+            }
+        timeout = float(spec.get("timeout_seconds") or 45.0)
+        future = asyncio.run_coroutine_threadsafe(self._openai_compat_chat_on_loop(spec), loop)
+        try:
+            return future.result(timeout=max(1.0, timeout + 2.0))
+        except FutureTimeoutError:
+            future.cancel()
+            return {
+                "ok": False,
+                "status": 504,
+                "code": "chat_backend_timeout",
+                "type": "server_error",
+                "message": "Chat backend timed out.",
+            }
+        except Exception:
+            future.cancel()
+            return {
+                "ok": False,
+                "status": 502,
+                "code": "chat_backend_error",
+                "type": "server_error",
+                "message": "Chat backend failed unexpectedly.",
+            }
 
     def _read_critical_extensions(self) -> set[str]:
         """Lê a lista de cogs realmente críticas.
@@ -752,6 +860,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
 
 
     async def setup_hook(self):
+        self._main_loop = asyncio.get_running_loop()
         print("SETUP_HOOK INICIOU")
         try:
             print(f"[DIAGNOSTICS] {self.integracao_musica.limpar_temporarios_diagnostico()}")
