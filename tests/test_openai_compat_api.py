@@ -278,3 +278,155 @@ def test_streaming_invalid_boolean_rejected(monkeypatch):
                                 "messages": [{"role": "user", "content": "x"}]})
     assert invalid.status_code == 400
     assert invalid.get_json()["error"]["code"] == "invalid_stream"
+
+
+def _audit_events(caplog):
+    import json
+    prefix = "[osaka/openai-audit] "
+    return [json.loads(message[len(prefix):]) for record in caplog.records
+            if (message := record.getMessage()).startswith(prefix)]
+
+
+def test_r4_audit_logs_request_shape_and_rejection_without_sensitive_data(monkeypatch, caplog):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "very-private-token-never-log")
+    monkeypatch.setenv("BOT_OPENAI_AUDIT_ENABLED", "true")
+    payload = {
+        "model": "osaka-auto", "stream": True, "top_p": 1,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "secret-prompt-never-log"}]}],
+        "tools": [{"type": "function", "function": {"name": "private-function-name"}}],
+        "tool_choice": "auto", "response_format": {"type": "json_object"},
+        "a-secret-custom-param": "secret-param-never-log",
+    }
+    with caplog.at_level("INFO", logger="utility.openai_compat"):
+        response = _post(_client(), payload, token="very-private-token-never-log")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "unsupported_tools"
+    request_id = response.headers.get("X-Osaka-Request-ID")
+    assert isinstance(request_id, str) and len(request_id) == 12
+    entries = _audit_events(caplog)
+    assert [e["event"] for e in entries] == ["request", "request_shape", "http_response"]
+    assert all(e["request_id"] == request_id for e in entries)
+    assert entries[1]["tools_present"] is True
+    assert entries[1]["tool_choice_present"] is True
+    assert entries[1]["response_format_present"] is True
+    assert entries[1]["stream"] is True
+    assert entries[1]["content_arrays"] == 1
+    assert entries[1]["unknown_key_count"] == 1
+    assert entries[2]["status"] == 400
+    assert entries[2]["error_code"] == "unsupported_tools"
+    for sensitive in ("very-private-token-never-log", "secret-prompt-never-log",
+                      "private-function-name", "secret-param-never-log", "a-secret-custom-param"):
+        assert sensitive not in caplog.text
+
+
+def test_r4_audit_captures_auth_rejections_without_parsing_body(monkeypatch, caplog):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "valid-secret")
+    monkeypatch.setenv("BOT_OPENAI_AUDIT_ENABLED", "true")
+    with caplog.at_level("INFO", logger="utility.openai_compat"):
+        result = _post(_client(), {"messages": [{"role": "user", "content": "secret"}]}, token=None)
+    assert result.status_code == 401
+    events = _audit_events(caplog)
+    assert [e["event"] for e in events] == ["request", "http_response"]
+    assert events[0]["auth_supplied"] is False
+    assert events[1]["error_code"] == "invalid_api_key"
+
+
+def test_r4_audit_stream_lifecycle_with_sse_success(monkeypatch, caplog):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    monkeypatch.setenv("BOT_OPENAI_AUDIT_ENABLED", "true")
+
+    def provider(_spec):
+        stream = OpenAIChatStream(5)
+        stream.events.put_nowait(("delta", "Olá"))
+        stream.events.put_nowait(("delta", "!"))
+        stream.events.put_nowait(("done", {"ok": True, "provider": "groq"}))
+        return stream
+
+    set_openai_chat_provider(provider)
+    with caplog.at_level("INFO", logger="utility.openai_compat"):
+        response = _post(_client(), {"model": "osaka-auto", "stream": True,
+                                    "messages": [{"role": "user", "content": "Olá"}]})
+        assert response.status_code == 200
+        assert _sse_payloads(response)[-1] == "[DONE]"
+        response.close()
+
+    entries = _audit_events(caplog)
+    assert [e["event"] for e in entries] == ["request", "request_shape", "http_response", "stream_end"]
+    assert entries[2]["status"] == 200 and entries[2]["sse_headers"] is True
+    assert entries[3]["outcome"] == "complete"
+    assert entries[3]["sse_done_generated"] is True
+    assert entries[3]["delta_count"] == 2
+    assert entries[3]["character_count"] == 4
+    assert isinstance(entries[3]["first_delta_ms"], int)
+    assert entries[3]["provider"] == "groq"
+    assert entries[3]["request_id"] == response.headers["X-Osaka-Request-ID"]
+
+
+def test_r4_audit_stream_disconnect_is_not_logged_as_success(monkeypatch, caplog):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    monkeypatch.setenv("BOT_OPENAI_AUDIT_ENABLED", "true")
+    source = OpenAIChatStream(10)
+    set_openai_chat_provider(lambda _spec: source)
+    with caplog.at_level("INFO", logger="utility.openai_compat"):
+        response = _post(_client(), {"model": "osaka-auto", "stream": True,
+                                    "messages": [{"role": "user", "content": "hello"}]})
+        next(iter(response.response))
+        response.close()
+    events = _audit_events(caplog)
+    endings = [event for event in events if event["event"] == "stream_end"]
+    assert len(endings) == 1
+    assert endings[0]["outcome"] == "client_disconnected"
+    assert endings[0]["sse_done_generated"] is False
+    assert source.closed
+
+
+def test_r4_audit_can_be_disabled(monkeypatch, caplog):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    monkeypatch.setenv("BOT_OPENAI_AUDIT_ENABLED", "false")
+    with caplog.at_level("INFO", logger="utility.openai_compat"):
+        response = _get(_client(), token="correct-secret")
+    assert response.status_code == 200
+    assert "X-Osaka-Request-ID" not in response.headers
+    assert not _audit_events(caplog)
+
+
+def test_r4_audit_stream_backend_error_has_terminal_code_even_on_http_200(monkeypatch, caplog):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    monkeypatch.setenv("BOT_OPENAI_AUDIT_ENABLED", "true")
+
+    def provider(_spec):
+        stream = OpenAIChatStream(5)
+        stream.events.put_nowait(("done", {"ok": False, "code": "upstream_timeout",
+                                          "message": "Backend error text is not part of audit."}))
+        return stream
+
+    set_openai_chat_provider(provider)
+    with caplog.at_level("INFO", logger="utility.openai_compat"):
+        response = _post(_client(), {"model": "osaka-auto", "stream": True,
+                                    "messages": [{"role": "user", "content": "Olá"}]})
+        events = _sse_payloads(response)
+        response.close()
+    assert response.status_code == 200
+    assert events[1]["error"]["code"] == "upstream_timeout"
+    audit = _audit_events(caplog)
+    assert audit[-2]["event"] == "http_response" and audit[-2]["status"] == 200
+    assert audit[-1]["event"] == "stream_end"
+    assert audit[-1]["outcome"] == "backend_error"
+    assert audit[-1]["backend_code"] == "upstream_timeout"
+    assert audit[-1]["sse_done_generated"] is True
+    assert "Backend error text is not part of audit." not in caplog.text
+
+
+def test_r4_audit_models_exposes_request_id_without_credentials(monkeypatch, caplog):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "secret-should-stay-private")
+    monkeypatch.setenv("BOT_OPENAI_AUDIT_ENABLED", "true")
+    with caplog.at_level("INFO", logger="utility.openai_compat"):
+        response = _get(_client(), token="secret-should-stay-private")
+    assert response.status_code == 200
+    entries = _audit_events(caplog)
+    assert [e["event"] for e in entries] == ["request", "http_response"]
+    assert entries[0]["route"] == "models"
+    assert entries[1]["status"] == 200
+    assert response.headers.get("X-Osaka-Request-ID") == entries[0]["request_id"]
+    assert "secret-should-stay-private" not in caplog.text

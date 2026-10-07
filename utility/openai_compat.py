@@ -4,6 +4,7 @@ import hmac
 import ipaddress
 import math
 import json
+import logging
 import asyncio
 import queue
 import os
@@ -12,7 +13,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from flask import Response, jsonify, request
+from flask import Response, g, jsonify, request
 
 
 _MODEL_ID = "osaka-auto"
@@ -25,6 +26,146 @@ _chat_provider_lock = threading.RLock()
 _chat_slots_lock = threading.RLock()
 _chat_slots: threading.BoundedSemaphore | None = None
 _chat_slots_size = 0
+
+# Diagnóstico estruturado para identificar incompatibilidades com clientes
+# OpenAI sem registrar mensagens, cabeçalhos, credenciais ou IPs completos.
+_audit_logger = logging.getLogger("utility.openai_compat")
+_AUDIT_ROUTES = {"/v1/models": "models", "/v1/chat/completions": "chat"}
+_AUDIT_KNOWN_KEYS = frozenset({
+    "model", "messages", "stream", "stream_options", "tools", "tool_choice",
+    "temperature", "top_p", "top_k", "max_tokens", "max_completion_tokens",
+    "n", "stop", "seed", "response_format", "reasoning_effort",
+    "parallel_tool_calls", "modalities", "user", "frequency_penalty",
+    "presence_penalty", "logit_bias", "logprobs", "top_logprobs",
+    "service_tier", "prediction", "metadata", "store", "safety_identifier",
+})
+_AUDIT_ERROR_CODES = frozenset({
+    "tailscale_required", "openai_compat_not_configured", "invalid_api_key",
+    "invalid_json", "model_not_found", "invalid_stream", "invalid_stream_options",
+    "unsupported_n", "unsupported_tools", "invalid_messages", "too_many_messages",
+    "invalid_message", "unsupported_role", "unsupported_content", "context_too_large",
+    "user_message_required", "invalid_temperature", "invalid_max_tokens",
+    "request_too_large", "chat_provider_unavailable", "server_busy",
+    "chat_backend_error", "stream_backend_unavailable", "invalid_backend_response",
+    "chat_backend_timeout", "chatbot_unavailable", "discord_loop_unavailable",
+    "rate_limit_exceeded", "upstream_timeout", "providers_unconfigured",
+    "content_filter", "upstream_error", "other_error",
+})
+
+
+def _audit_enabled() -> bool:
+    return str(os.getenv("BOT_OPENAI_AUDIT_ENABLED", "true")).strip().lower() not in {
+        "0", "false", "off", "no",
+    }
+
+
+def _audit_code(code: Any) -> str:
+    value = str(code or "")
+    return value if value in _AUDIT_ERROR_CODES else "other_error"
+
+
+def _audit_log(event: str, **fields: Any) -> None:
+    if not _audit_enabled():
+        return
+    try:
+        _audit_logger.info(
+            "[osaka/openai-audit] %s",
+            json.dumps({"event": event, **fields}, ensure_ascii=True, separators=(",", ":")),
+        )
+    except Exception:
+        # Diagnóstico jamais deve interromper um pedido de IA.
+        pass
+
+
+def _audit_request_start() -> None:
+    route = _AUDIT_ROUTES.get(request.path)
+    if route is None or not _audit_enabled():
+        return
+    g.osaka_audit_id = secrets.token_hex(6)
+    g.osaka_audit_started_at = time.monotonic()
+    length = request.content_length
+    _audit_log(
+        "request", request_id=g.osaka_audit_id, route=route, method=request.method,
+        is_json=bool(request.is_json),
+        body_bytes=length if isinstance(length, int) and length >= 0 else None,
+        auth_supplied=bool(request.headers.get("Authorization")),
+    )
+
+
+def _audit_request_finish(response: Response) -> Response:
+    request_id = getattr(g, "osaka_audit_id", None)
+    if request_id is None:
+        return response
+    response.headers["X-Osaka-Request-ID"] = request_id
+    error_code = None
+    if response.is_json and response.status_code >= 400:
+        try:
+            body = response.get_json(silent=True)
+            if isinstance(body, dict) and isinstance(body.get("error"), dict):
+                error_code = _audit_code(body["error"].get("code"))
+        except Exception:
+            error_code = "other_error"
+    _audit_log(
+        "http_response", request_id=request_id,
+        route=_AUDIT_ROUTES.get(request.path), status=response.status_code,
+        error_code=error_code,
+        elapsed_ms=round((time.monotonic() - g.osaka_audit_started_at) * 1000),
+        sse_headers=response.mimetype == "text/event-stream",
+    )
+    return response
+
+
+def _audit_request_shape(payload: Any, body_bytes: int) -> None:
+    """Somente presença/tipo/contagem; NUNCA valores textuais de mensagens."""
+    request_id = getattr(g, "osaka_audit_id", None)
+    if request_id is None:
+        return
+    if not isinstance(payload, dict):
+        _audit_log("request_shape", request_id=request_id, json_object=False, body_bytes=body_bytes)
+        return
+    messages = payload.get("messages")
+    roles = {"system": 0, "developer": 0, "user": 0, "assistant": 0, "tool": 0, "other": 0}
+    arrays = 0
+    media = 0
+    non_text = 0
+    if isinstance(messages, list):
+        for message in messages[:256]:
+            if not isinstance(message, dict):
+                roles["other"] += 1
+                continue
+            role = message.get("role")
+            roles[role if isinstance(role, str) and role in roles else "other"] += 1
+            content = message.get("content")
+            if isinstance(content, list):
+                arrays += 1
+                for block in content[:16]:
+                    if not isinstance(block, dict):
+                        non_text += 1
+                    elif block.get("type") not in ("text", "input_text"):
+                        non_text += 1
+                        if block.get("type") in ("image_url", "input_image", "input_audio", "audio", "image"):
+                            media += 1
+            elif not isinstance(content, (str, type(None))):
+                non_text += 1
+    tools = payload.get("tools")
+    stream = payload.get("stream", False)
+    _audit_log(
+        "request_shape", request_id=request_id, json_object=True, body_bytes=body_bytes,
+        model_known=payload.get("model") == _MODEL_ID,
+        stream=stream if isinstance(stream, bool) else "invalid",
+        message_count=len(messages) if isinstance(messages, list) else None,
+        roles=roles, content_arrays=arrays, non_text_blocks=non_text,
+        media_blocks=media,
+        tools_present=tools not in (None, [], ()),
+        tool_count=len(tools) if isinstance(tools, list) else None,
+        tool_choice_present=payload.get("tool_choice") is not None,
+        response_format_present=payload.get("response_format") is not None,
+        stream_options_present=payload.get("stream_options") is not None,
+        reasoning_effort_present=payload.get("reasoning_effort") is not None,
+        modalities_present=payload.get("modalities") is not None,
+        top_p_present=payload.get("top_p") is not None,
+        unknown_key_count=sum(key not in _AUDIT_KNOWN_KEYS for key in payload),
+    )
 
 
 class OpenAIChatStream:
@@ -357,6 +498,7 @@ def _chat_completions():
     if len(raw_body) > max_body:
         return _error("Request body is too large.", 413, error_type="invalid_request_error", code="request_too_large")
     payload = request.get_json(silent=True)
+    _audit_request_shape(payload, len(raw_body))
     spec, payload_error = _normalize_chat_payload(payload)
     if payload_error is not None:
         return payload_error
@@ -462,6 +604,9 @@ def _sse_data(value: Any) -> str:
 def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemaphore, spec: dict):
     chat_id = "chatcmpl-" + secrets.token_hex(12)
     created = int(time.time())
+    request_id = getattr(g, "osaka_audit_id", None)
+    audit_start = getattr(g, "osaka_audit_started_at", time.monotonic())
+    stream_created_at = time.monotonic()
 
     def chunk(delta: dict, *, finish_reason: str | None = None, usage: dict | None = None):
         data = {"id": chat_id, "object": "chat.completion.chunk", "created": created,
@@ -472,44 +617,71 @@ def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemapho
 
     closed = threading.Event()
     cleanup_lock = threading.Lock()
+    stats = {"delta_count": 0, "character_count": 0, "first_delta_ms": None,
+             "sse_done_generated": False, "backend_code": None, "provider": None}
 
-    def cleanup() -> None:
+    def cleanup(outcome: str = "client_disconnected") -> None:
         with cleanup_lock:
             if closed.is_set():
                 return
             closed.set()
-        source.close()
-        slot.release()
+        try:
+            source.close()
+        finally:
+            slot.release()
+            _audit_log(
+                "stream_end", request_id=request_id, outcome=outcome,
+                delta_count=stats["delta_count"], character_count=stats["character_count"],
+                first_delta_ms=stats["first_delta_ms"],
+                sse_done_generated=stats["sse_done_generated"],
+                backend_code=stats["backend_code"], provider=stats["provider"],
+                elapsed_ms=round((time.monotonic() - audit_start) * 1000),
+                stream_elapsed_ms=round((time.monotonic() - stream_created_at) * 1000),
+            )
 
     def generate():
+        outcome = "client_disconnected"
         try:
             yield chunk({"role": "assistant"})
             while True:
                 remaining = source.deadline - time.monotonic()
                 if remaining <= 0:
+                    outcome = "timeout"
+                    stats["backend_code"] = "chat_backend_timeout"
                     yield _sse_data({"error": {"message": "Chat backend timed out.",
                                                   "type": "server_error", "code": "chat_backend_timeout"}})
+                    stats["sse_done_generated"] = True
                     yield _sse_data("[DONE]")
                     break
                 try:
                     kind, value = source.events.get(timeout=min(5.0, remaining))
                 except queue.Empty:
                     if source.closed:
+                        outcome = "upstream_cancelled"
                         break
                     yield ": keep-alive\n\n"
                     continue
                 if kind == "delta":
+                    stats["delta_count"] += 1
+                    stats["character_count"] += len(value) if isinstance(value, str) else 0
+                    if stats["first_delta_ms"] is None:
+                        stats["first_delta_ms"] = round((time.monotonic() - audit_start) * 1000)
                     yield chunk({"content": value})
                     continue
                 if kind == "done":
                     if not isinstance(value, dict) or not value.get("ok"):
+                        outcome = "backend_error"
                         error = value if isinstance(value, dict) else {}
+                        stats["backend_code"] = _audit_code(error.get("code"))
                         yield _sse_data({"error": {
                             "message": str(error.get("message") or "Chat backend is unavailable."),
                             "type": str(error.get("type") or "server_error"),
                             "code": str(error.get("code") or "chat_backend_error"),
                         }})
                     else:
+                        outcome = "complete"
+                        provider = str(value.get("provider") or "").lower()
+                        stats["provider"] = provider if provider in {"groq", "gemini", "mistral", "cloudflare"} else "other"
                         finish = value.get("finish_reason")
                         yield chunk({}, finish_reason="length" if finish == "length" else "stop")
                         if spec.get("include_usage"):
@@ -523,10 +695,17 @@ def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemapho
                                                 "total_tokens": usage["total_tokens"]}
                             yield _sse_data({"id": chat_id, "object": "chat.completion.chunk", "created": created,
                                              "model": _MODEL_ID, "choices": [], "usage": openai_usage})
+                    stats["sse_done_generated"] = True
                     yield _sse_data("[DONE]")
                     break
+        except GeneratorExit:
+            outcome = "client_disconnected"
+            raise
+        except Exception:
+            outcome = "stream_internal_error"
+            raise
         finally:
-            cleanup()
+            cleanup(outcome)
 
     response = Response(generate(), content_type="text/event-stream; charset=utf-8")
     response.headers["Cache-Control"] = "no-cache, no-store"
@@ -537,6 +716,12 @@ def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemapho
 
 def register_openai_compat_routes(app: Any) -> None:
     """Registra a superfície OpenAI compatível no servidor já existente."""
+    # O after_request registra o status inclusive nas recusas de autenticação
+    # e validação. Streaming possui, adicionalmente, um evento terminal próprio.
+    if _audit_request_start not in app.before_request_funcs.get(None, []):
+        app.before_request(_audit_request_start)
+    if _audit_request_finish not in app.after_request_funcs.get(None, []):
+        app.after_request(_audit_request_finish)
     if "openai_compat_models" not in getattr(app, "view_functions", {}):
         app.add_url_rule(
             "/v1/models",
