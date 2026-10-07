@@ -30,6 +30,10 @@ def _get(client, *, remote: str = "100.64.10.20", token: str | None = None):
     return client.get("/v1/models", headers=_headers(token), environ_base={"REMOTE_ADDR": remote})
 
 
+def _props(client, *, remote: str = "100.64.10.20", token: str | None = None):
+    return client.get("/props", headers=_headers(token), environ_base={"REMOTE_ADDR": remote})
+
+
 def _post(client, payload, *, remote: str = "100.64.10.20", token: str | None = "correct-secret"):
     return client.post(
         "/v1/chat/completions",
@@ -48,18 +52,73 @@ def test_models_returns_503_when_server_key_is_not_configured(monkeypatch):
     assert response.headers["Cache-Control"] == "no-store"
 
 
-def test_models_rejects_missing_and_wrong_bearer(monkeypatch):
+def test_r61_capability_discovery_without_bearer_for_tailscale(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    client = _client()
+    models = _get(client)
+    props = _props(client)
+
+    assert models.status_code == 200
+    assert props.status_code == 200
+    assert models.headers["Cache-Control"] == "no-store"
+    assert props.headers["Cache-Control"] == "no-store"
+    body = models.get_json()
+    assert [item["id"] for item in body["data"]] == [
+        "osaka-auto", "osaka-fast", "osaka-smart",
+    ]
+    assert all(item["capabilities"] == ["tools"] for item in body["data"])
+    assert all(item["kind"] == "chat" for item in body["data"])
+    props_body = props.get_json()
+    assert props_body["chat_template_caps"]["supports_tools"] is True
+    assert props_body["modalities"]["vision"] is False
+    assert props_body["default_generation_settings"]["n_ctx"] == 4096
+
+
+def test_r61_discovery_blocks_public_address_even_without_bearer(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    client = _client()
+    for response in (_get(client, remote="203.0.113.25"),
+                     _props(client, remote="203.0.113.25")):
+        assert response.status_code == 403
+        assert response.get_json()["error"]["code"] == "tailscale_required"
+
+
+def test_r61_discovery_does_not_trust_forwarded_ip(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    response = _client().get(
+        "/props", headers={"X-Forwarded-For": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "203.0.113.25"},
+    )
+    assert response.status_code == 403
+
+
+def test_r61_discovery_rejects_explicit_invalid_authorization(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    client = _client()
+    for response in (_get(client, token="invalid"), _props(client, token="invalid")):
+        assert response.status_code == 401
+        assert response.get_json()["error"]["code"] == "invalid_api_key"
+    assert _get(client, token="correct-secret").status_code == 200
+    assert _props(client, token="correct-secret").status_code == 200
+
+
+def test_r61_discovery_remains_disabled_without_server_key(monkeypatch):
+    monkeypatch.delenv("BOT_OPENAI_API_KEY", raising=False)
+    assert _get(_client()).status_code == 503
+    assert _props(_client()).status_code == 503
+
+
+def test_models_allows_missing_bearer_but_rejects_wrong_bearer(monkeypatch):
     monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
     client = _client()
 
     missing = _get(client)
     wrong = _get(client, token="wrong-secret")
 
-    assert missing.status_code == 401
+    assert missing.status_code == 200  # Read-only discovery is safe without Bearer on tailnet.
     assert wrong.status_code == 401
-    assert missing.get_json()["error"]["code"] == "invalid_api_key"
     assert wrong.get_json()["error"]["code"] == "invalid_api_key"
-    assert missing.headers["WWW-Authenticate"] == "Bearer"
+    assert wrong.headers["WWW-Authenticate"] == "Bearer"
 
 
 def test_models_rejects_non_tailscale_remote_even_with_valid_key(monkeypatch):
@@ -231,6 +290,7 @@ def test_route_registration_is_idempotent():
 
     rules = [str(rule) for rule in app.url_map.iter_rules()]
     assert rules.count("/v1/models") == 1
+    assert rules.count("/props") == 1
     assert rules.count("/v1/chat/completions") == 1
 
 

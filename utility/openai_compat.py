@@ -39,7 +39,7 @@ _chat_slots_size = 0
 # Diagnóstico estruturado para identificar incompatibilidades com clientes
 # OpenAI sem registrar mensagens, cabeçalhos, credenciais ou IPs completos.
 _audit_logger = logging.getLogger("utility.openai_compat")
-_AUDIT_ROUTES = {"/v1/models": "models", "/v1/chat/completions": "chat"}
+_AUDIT_ROUTES = {"/v1/models": "models", "/props": "props", "/v1/chat/completions": "chat"}
 _AUDIT_KNOWN_KEYS = frozenset({
     "model", "messages", "stream", "stream_options", "tools", "tool_choice",
     "temperature", "top_p", "top_k", "max_tokens", "max_completion_tokens",
@@ -336,6 +336,40 @@ def _authenticate():
     return None
 
 
+def _authorize_capability_discovery():
+    """Permite apenas metadados não sensíveis na rede privada.
+
+    OGAM 0.0.111 omite Authorization em sondagens de capacidades em
+    segundo plano. Não relaxamos a autenticação de POST /v1/chat/completions.
+    Se uma credencial for enviada explicitamente, ela precisa ser válida.
+    """
+    if not _remote_is_private_ai_client():
+        return _error(
+            "OpenAI compatibility API is available only from localhost or Tailscale.",
+            403, error_type="permission_error", code="tailscale_required",
+        )
+    expected = _configured_api_key()
+    if not expected:
+        return _error(
+            "OpenAI compatibility API is not configured.",
+            503, error_type="server_error", code="openai_compat_not_configured",
+        )
+    if request.headers.get("Authorization"):
+        supplied = _bearer_token()
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            return _error(
+                "Invalid API key.",
+                401, error_type="authentication_error", code="invalid_api_key",
+            )
+    return None
+
+
+def _capability_response(data: dict[str, Any]):
+    response = jsonify(data)
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200
+
+
 def set_openai_chat_provider(provider: Callable[[dict[str, Any]], dict[str, Any]] | None) -> None:
     """Instala a ponte síncrona usada pelas threads do Waitress.
 
@@ -494,11 +528,11 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
 
 
 def _list_models():
-    auth_error = _authenticate()
+    auth_error = _authorize_capability_discovery()
     if auth_error is not None:
         return auth_error
 
-    response = jsonify({
+    return _capability_response({
         "object": "list",
         "data": [
             {
@@ -506,12 +540,37 @@ def _list_models():
                 "object": "model",
                 "created": _MODEL_CREATED,
                 "owned_by": _MODEL_OWNER,
+                "kind": "chat",
+                # OGAM 0.0.111 lê especificamente um array de capabilities
+                # no catálogo. Não inventar visão/thinking para modelos virtuais.
+                "capabilities": ["tools"],
             }
             for model_id in _MODEL_IDS
         ],
     })
-    response.headers["Cache-Control"] = "no-store"
-    return response, 200
+
+
+def _model_props():
+    """Projeção mínima do /props do llama.cpp para sondas do OGAM.
+
+    Osaka não executa um modelo GGUF nem tem um template llama.cpp, mas
+    todas as rotas virtuais R6 aceitam tool calls via ProviderRouter.
+    Não anunciar geração local, visão ou reasoning não implementados.
+    """
+    auth_error = _authorize_capability_discovery()
+    if auth_error is not None:
+        return auth_error
+    return _capability_response({
+        "modalities": {"vision": False, "video": False, "audio": False},
+        "chat_template_caps": {
+            "supports_tools": True,
+            "supports_preserve_reasoning": False,
+        },
+        "default_generation_settings": {
+            "n_ctx": 4096,
+            "params": {"reasoning_format": "none"},
+        },
+    })
 
 
 def _chat_completions():
@@ -777,6 +836,13 @@ def register_openai_compat_routes(app: Any) -> None:
             "/v1/models",
             endpoint="openai_compat_models",
             view_func=_list_models,
+            methods=["GET"],
+        )
+    if "openai_compat_props" not in getattr(app, "view_functions", {}):
+        app.add_url_rule(
+            "/props",
+            endpoint="openai_compat_props",
+            view_func=_model_props,
             methods=["GET"],
         )
     if "openai_compat_chat_completions" not in getattr(app, "view_functions", {}):
