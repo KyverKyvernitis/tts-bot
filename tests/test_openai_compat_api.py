@@ -5,7 +5,7 @@ import pytest
 flask = pytest.importorskip("flask")
 Flask = flask.Flask
 
-from utility.openai_compat import register_openai_compat_routes, set_openai_chat_provider
+from utility.openai_compat import OpenAIChatStream, register_openai_compat_routes, set_openai_chat_provider
 
 
 @pytest.fixture(autouse=True)
@@ -139,17 +139,14 @@ def test_chat_requires_auth_and_tailscale(monkeypatch):
     assert public.status_code == 403
 
 
-def test_chat_rejects_streaming_tools_and_unknown_model(monkeypatch):
+def test_chat_rejects_tools_and_unknown_model(monkeypatch):
     monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
     set_openai_chat_provider(lambda spec: {"ok": True, "text": "x", "usage": {}})
     base = {"model": "osaka-auto", "messages": [{"role": "user", "content": "x"}]}
 
-    streaming = _post(_client(), {**base, "stream": True})
     tools = _post(_client(), {**base, "tools": [{"type": "function", "function": {"name": "x"}}]})
     unknown = _post(_client(), {**base, "model": "other-model"})
 
-    assert streaming.status_code == 400
-    assert streaming.get_json()["error"]["code"] == "unsupported_stream"
     assert tools.status_code == 400
     assert tools.get_json()["error"]["code"] == "unsupported_tools"
     assert unknown.status_code == 404
@@ -181,3 +178,103 @@ def test_route_registration_is_idempotent():
     rules = [str(rule) for rule in app.url_map.iter_rules()]
     assert rules.count("/v1/models") == 1
     assert rules.count("/v1/chat/completions") == 1
+
+
+def _sse_payloads(response):
+    import json
+    data = response.get_data(as_text=True)
+    return [json.loads(line[6:]) if line[6:] != "[DONE]" else "[DONE]"
+            for line in data.splitlines() if line.startswith("data: ")]
+
+
+def test_streaming_sse_incremental_openai_schema(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    seen = {}
+
+    def provider(spec):
+        seen.update(spec)
+        stream = OpenAIChatStream(5)
+        stream.events.put_nowait(("delta", "Olá"))
+        stream.events.put_nowait(("delta", " mundo"))
+        stream.events.put_nowait(("done", {
+            "ok": True, "usage": {"input_tokens": 7, "output_tokens": 2, "total_tokens": 9}
+        }))
+        return stream
+
+    set_openai_chat_provider(provider)
+    response = _post(_client(), {
+        "model": "osaka-auto", "stream": True,
+        "stream_options": {"include_usage": True},
+        "messages": [{"role": "user", "content": "Olá"}],
+    })
+    assert response.status_code == 200
+    assert response.mimetype == "text/event-stream"
+    assert response.headers["X-Accel-Buffering"] == "no"
+    events = _sse_payloads(response)
+    assert events[0]["object"] == "chat.completion.chunk"
+    assert events[0]["choices"][0]["delta"] == {"role": "assistant"}
+    assert [e["choices"][0]["delta"]["content"] for e in events[1:3]] == ["Olá", " mundo"]
+    assert events[3]["choices"][0]["finish_reason"] == "stop"
+    assert events[4]["choices"] == []
+    assert events[4]["usage"] == {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}
+    assert events[5] == "[DONE]"
+    assert seen["stream"] is True
+    response.close()
+
+
+def test_streaming_backend_error_is_not_a_successful_finish(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+
+    def provider(spec):
+        stream = OpenAIChatStream(5)
+        stream.events.put_nowait(("done", {"ok": False, "code": "upstream_timeout",
+                                          "message": "Provider deadline reached."}))
+        return stream
+
+    set_openai_chat_provider(provider)
+    response = _post(_client(), {"model": "osaka-auto", "stream": True,
+                                 "messages": [{"role": "user", "content": "Olá"}]})
+    assert response.status_code == 200  # headers SSE já foram enviados
+    events = _sse_payloads(response)
+    assert events[1]["error"]["code"] == "upstream_timeout"
+    assert events[2] == "[DONE]"
+    assert not any(isinstance(e, dict) and e.get("choices", [{}])[0].get("finish_reason") == "stop"
+                   for e in events if isinstance(e, dict) and e.get("choices"))
+    response.close()
+
+
+def test_streaming_http_disconnect_cancels_source_and_releases_slot(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    monkeypatch.setenv("BOT_OPENAI_MAX_CONCURRENT", "1")
+    sources = []
+
+    def provider(spec):
+        stream = OpenAIChatStream(10)
+        sources.append(stream)
+        return stream
+
+    set_openai_chat_provider(provider)
+    client = _client()
+    payload = {"model": "osaka-auto", "stream": True,
+               "messages": [{"role": "user", "content": "Olá"}]}
+    response = _post(client, payload)
+    assert response.status_code == 200
+    first = next(iter(response.response))
+    assert b'"role":"assistant"' in first
+    competing = _post(client, payload)
+    assert competing.status_code == 429
+    assert competing.get_json()["error"]["code"] == "server_busy"
+    response.close()
+    assert sources[0].closed
+    followup = _post(client, payload)
+    assert followup.status_code == 200
+    followup.close()
+
+
+def test_streaming_invalid_boolean_rejected(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    set_openai_chat_provider(lambda spec: {"ok": True, "text": "x", "usage": {}})
+    invalid = _post(_client(), {"model": "osaka-auto", "stream": "yes",
+                                "messages": [{"role": "user", "content": "x"}]})
+    assert invalid.status_code == 400
+    assert invalid.get_json()["error"]["code"] == "invalid_stream"

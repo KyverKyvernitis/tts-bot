@@ -3,13 +3,16 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import math
+import json
+import asyncio
+import queue
 import os
 import secrets
 import threading
 import time
 from typing import Any, Callable
 
-from flask import jsonify, request
+from flask import Response, jsonify, request
 
 
 _MODEL_ID = "osaka-auto"
@@ -22,6 +25,62 @@ _chat_provider_lock = threading.RLock()
 _chat_slots_lock = threading.RLock()
 _chat_slots: threading.BoundedSemaphore | None = None
 _chat_slots_size = 0
+
+
+class OpenAIChatStream:
+    """Ponte limitada entre o event loop do Discord e as threads Waitress.
+
+    Nunca bloqueia o loop Discord com queue.put(); o consumidor HTTP mantém a
+    memória em <=64 eventos. close() cancela a requisição upstream quando o
+    cliente fecha o stream ou o timeout é atingido.
+    """
+
+    def __init__(self, timeout: float):
+        self.events: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=64)
+        self.deadline = time.monotonic() + max(1.0, timeout) + 4.0
+        self._closed = threading.Event()
+        self._future: Any = None
+        self._lock = threading.Lock()
+        self.fragments_sent = 0
+
+    @property
+    def closed(self) -> bool:
+        return self._closed.is_set()
+
+    def start(self, future: Any) -> None:
+        with self._lock:
+            self._future = future
+            if self.closed:
+                future.cancel()
+
+    async def _put(self, kind: str, value: Any) -> None:
+        while not self.closed:
+            try:
+                self.events.put_nowait((kind, value))
+                return
+            except queue.Full:
+                if time.monotonic() >= self.deadline:
+                    self.close()
+                    raise asyncio.CancelledError()
+                await asyncio.sleep(0.025)
+        raise asyncio.CancelledError()
+
+    async def send(self, delta: str) -> None:
+        if delta:
+            await self._put("delta", delta)
+            self.fragments_sent += 1
+
+    async def finish(self, result: dict[str, Any]) -> None:
+        if not self.closed:
+            await self._put("done", result)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed.set()
+            future = self._future
+        if future is not None and not future.done():
+            future.cancel()
+
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -175,13 +234,12 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
     if model != _MODEL_ID:
         return None, _error("Unknown model.", 404, error_type="invalid_request_error", code="model_not_found")
 
-    if payload.get("stream") is True:
-        return None, _error(
-            "Streaming is not enabled yet for this endpoint.",
-            400,
-            error_type="invalid_request_error",
-            code="unsupported_stream",
-        )
+    stream = payload.get("stream", False)
+    if not isinstance(stream, bool):
+        return None, _error("stream must be a boolean.", 400, error_type="invalid_request_error", code="invalid_stream")
+    options = payload.get("stream_options") or {}
+    if not isinstance(options, dict) or not isinstance(options.get("include_usage", False), bool):
+        return None, _error("Invalid stream_options.", 400, error_type="invalid_request_error", code="invalid_stream_options")
 
     n = payload.get("n", 1)
     if isinstance(n, bool) or not isinstance(n, int) or n != 1:
@@ -257,6 +315,8 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
 
     return {
         "model": _MODEL_ID,
+        "stream": stream,
+        "include_usage": bool(options.get("include_usage")),
         "system": "\n\n".join(system_parts),
         "messages": messages,
         "temperature": temperature,
@@ -320,6 +380,19 @@ def _chat_completions():
             code="server_busy",
             retry_after=1.0,
         )
+    if spec["stream"]:
+        try:
+            stream_source = provider(spec)
+        except Exception:
+            slot.release()
+            return _error("The chat backend failed unexpectedly.", 502,
+                          error_type="server_error", code="chat_backend_error")
+        if not isinstance(stream_source, OpenAIChatStream):
+            slot.release()
+            return _error("Streaming backend is unavailable.", 503,
+                          error_type="server_error", code="stream_backend_unavailable")
+        return _streaming_response(stream_source, slot, spec)
+
     try:
         try:
             result = provider(spec)
@@ -378,6 +451,88 @@ def _chat_completions():
     })
     response.headers["Cache-Control"] = "no-store"
     return response, 200
+
+
+def _sse_data(value: Any) -> str:
+    if value == "[DONE]":
+        return "data: [DONE]\n\n"
+    return "data: " + json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+
+
+def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemaphore, spec: dict):
+    chat_id = "chatcmpl-" + secrets.token_hex(12)
+    created = int(time.time())
+
+    def chunk(delta: dict, *, finish_reason: str | None = None, usage: dict | None = None):
+        data = {"id": chat_id, "object": "chat.completion.chunk", "created": created,
+                "model": _MODEL_ID, "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+        if usage is not None:
+            data["usage"] = usage
+        return _sse_data(data)
+
+    closed = threading.Event()
+    cleanup_lock = threading.Lock()
+
+    def cleanup() -> None:
+        with cleanup_lock:
+            if closed.is_set():
+                return
+            closed.set()
+        source.close()
+        slot.release()
+
+    def generate():
+        try:
+            yield chunk({"role": "assistant"})
+            while True:
+                remaining = source.deadline - time.monotonic()
+                if remaining <= 0:
+                    yield _sse_data({"error": {"message": "Chat backend timed out.",
+                                                  "type": "server_error", "code": "chat_backend_timeout"}})
+                    yield _sse_data("[DONE]")
+                    break
+                try:
+                    kind, value = source.events.get(timeout=min(5.0, remaining))
+                except queue.Empty:
+                    if source.closed:
+                        break
+                    yield ": keep-alive\n\n"
+                    continue
+                if kind == "delta":
+                    yield chunk({"content": value})
+                    continue
+                if kind == "done":
+                    if not isinstance(value, dict) or not value.get("ok"):
+                        error = value if isinstance(value, dict) else {}
+                        yield _sse_data({"error": {
+                            "message": str(error.get("message") or "Chat backend is unavailable."),
+                            "type": str(error.get("type") or "server_error"),
+                            "code": str(error.get("code") or "chat_backend_error"),
+                        }})
+                    else:
+                        finish = value.get("finish_reason")
+                        yield chunk({}, finish_reason="length" if finish == "length" else "stop")
+                        if spec.get("include_usage"):
+                            usage = value.get("usage") if isinstance(value.get("usage"), dict) else {}
+                            counters = ("input_tokens", "output_tokens", "total_tokens")
+                            measured = all(type(usage.get(field)) is int and usage[field] >= 0 for field in counters)
+                            openai_usage = None
+                            if measured:
+                                openai_usage = {"prompt_tokens": usage["input_tokens"],
+                                                "completion_tokens": usage["output_tokens"],
+                                                "total_tokens": usage["total_tokens"]}
+                            yield _sse_data({"id": chat_id, "object": "chat.completion.chunk", "created": created,
+                                             "model": _MODEL_ID, "choices": [], "usage": openai_usage})
+                    yield _sse_data("[DONE]")
+                    break
+        finally:
+            cleanup()
+
+    response = Response(generate(), content_type="text/event-stream; charset=utf-8")
+    response.headers["Cache-Control"] = "no-cache, no-store"
+    response.headers["X-Accel-Buffering"] = "no"
+    response.call_on_close(cleanup)
+    return response
 
 
 def register_openai_compat_routes(app: Any) -> None:

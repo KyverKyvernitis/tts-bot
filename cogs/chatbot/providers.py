@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from copy import deepcopy
 from contextvars import ContextVar
 from email.utils import parsedate_to_datetime
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -704,6 +704,187 @@ def _gemini_schema(schema: dict) -> dict:
     return result
 
 
+# Leitura incrementada de SSE no event loop dono da sessão aiohttp. Um evento
+# arbitrariamente grande ou stream truncado não pode acumular RAM indefinida.
+_MAX_UPSTREAM_SSE_EVENT = 131_072
+_MAX_UPSTREAM_TEXT = 250_000
+
+
+async def _iter_sse_payloads(response: aiohttp.ClientResponse):
+    pending: list[bytes] = []
+    size = 0
+
+    async def decode():
+        raw = b"\n".join(pending)
+        if raw == b"[DONE]":
+            return "[DONE]"
+        try:
+            item = json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ProviderError("evento SSE inválido", kind="invalid_response", stage="output") from exc
+        if not isinstance(item, dict):
+            raise ProviderError("evento SSE inesperado", kind="invalid_response", stage="output")
+        if "error" in item:
+            error = item.get("error") or {}
+            status = error.get("status") if isinstance(error, dict) else None
+            raise ProviderError("provider retornou erro no SSE", status=status if type(status) is int else None,
+                                kind="rate_limit" if status == 429 else "network")
+        return item
+
+    async for line in response.content:
+        if len(line) > _MAX_UPSTREAM_SSE_EVENT:
+            raise ProviderError("evento SSE excede limite", kind="invalid_response", stage="output")
+        line = line.rstrip(b"\r\n")
+        if not line:
+            if pending:
+                item = await decode()
+                pending, size = [], 0
+                yield item
+            continue
+        if not line.startswith(b"data:"):
+            continue
+        value = line[5:].lstrip(b" ")
+        size += len(value)
+        if size > _MAX_UPSTREAM_SSE_EVENT:
+            raise ProviderError("evento SSE excede limite", kind="invalid_response", stage="output")
+        pending.append(value)
+    if pending:
+        yield await decode()
+
+
+class _StreamVisibleText:
+    """Evita expor blocos <think> do Qwen em streaming Cloudflare."""
+
+    def __init__(self):
+        self._mode = "start"
+        self._pending = ""
+
+    def push(self, chunk: str) -> str:
+        if self._mode == "visible":
+            return chunk
+        self._pending += chunk
+        if self._mode == "start":
+            stripped = self._pending.lstrip()
+            if "<think>".startswith(stripped) and len(stripped) < len("<think>"):
+                return ""
+            if not stripped.startswith("<think>"):
+                self._mode = "visible"
+                shown, self._pending = self._pending, ""
+                return shown
+            self._mode = "thinking"
+            self._pending = stripped[len("<think>"):]
+        end = self._pending.find("</think>")
+        if end < 0:
+            self._pending = self._pending[-len("</think>") + 1:]
+            return ""
+        shown = self._pending[end + len("</think>"):].lstrip()
+        self._pending = ""
+        self._mode = "visible"
+        return shown
+
+
+async def _openai_stream_result(response, on_text_delta, *, cloudflare=False) -> dict:
+    pieces: list[str] = []
+    total_chars = 0
+    usage = {}
+    finish_reason = None
+    refusal = None
+    done = False
+    visibility = _StreamVisibleText() if cloudflare else None
+    async for item in _iter_sse_payloads(response):
+        if item == "[DONE]":
+            done = True
+            break
+        if isinstance(item.get("usage"), dict):
+            usage = item["usage"]
+        choices = item.get("choices") or []
+        if not isinstance(choices, list):
+            raise ProviderError("SSE choices inválido", kind="invalid_response", stage="output")
+        if not choices:
+            continue
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise ProviderError("SSE choice inválido", kind="invalid_response", stage="output")
+        if choice.get("finish_reason") is not None:
+            finish_reason = choice["finish_reason"]
+        delta = choice.get("delta") or {}
+        if not isinstance(delta, dict):
+            raise ProviderError("SSE delta inválido", kind="invalid_response", stage="output")
+        if delta.get("tool_calls"):
+            raise ProviderError("provider enviou ferramentas não solicitadas", kind="invalid_response", stage="output",
+                                diagnostic_code="unexpected_calls")
+        if delta.get("refusal"):
+            refusal = delta["refusal"]
+        content = delta.get("content")
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") for part in content
+                              if isinstance(part, dict) and isinstance(part.get("text"), str))
+        if not isinstance(content, str) or not content:
+            continue
+        total_chars += len(content)
+        if total_chars > _MAX_UPSTREAM_TEXT:
+            raise ProviderError("resposta SSE grande demais", kind="invalid_response", stage="output")
+        pieces.append(content)
+        visible = visibility.push(content) if visibility else content
+        if visible:
+            await on_text_delta(visible)
+    if not done and finish_reason is None:
+        raise ProviderError("stream SSE terminou antes da conclusão", kind="invalid_response", stage="output")
+    if finish_reason == "content_filter":
+        raise ProviderError("resposta bloqueada pelo provider", kind="blocked", stage="output")
+    return {"choices": [{"finish_reason": finish_reason,
+                         "message": {"content": "".join(pieces), "refusal": refusal}}],
+            "usage": usage}
+
+
+async def _gemini_stream_result(response, on_text_delta) -> dict:
+    pieces: list[str] = []
+    chars = 0
+    reason = None
+    usage = {}
+    feedback = {}
+    async for item in _iter_sse_payloads(response):
+        if item == "[DONE]":
+            break
+        if isinstance(item.get("usageMetadata"), dict):
+            usage = item["usageMetadata"]
+        if isinstance(item.get("promptFeedback"), dict):
+            feedback = item["promptFeedback"]
+        if feedback.get("blockReason"):
+            raise ProviderError("pedido bloqueado pelo provider", kind="blocked", stage="output")
+        candidates = item.get("candidates") or []
+        if not isinstance(candidates, list):
+            raise ProviderError("Gemini SSE inválido", kind="invalid_response", stage="output")
+        if not candidates:
+            continue
+        candidate = candidates[0]
+        if not isinstance(candidate, dict):
+            raise ProviderError("Gemini SSE inválido", kind="invalid_response", stage="output")
+        if candidate.get("finishReason"):
+            reason = candidate["finishReason"]
+        if reason in {"SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY"}:
+            raise ProviderError("resposta bloqueada pelo provider", kind="blocked", stage="output")
+        parts = (candidate.get("content") or {}).get("parts") or []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if "functionCall" in part:
+                raise ProviderError("provider enviou ferramentas não solicitadas", kind="invalid_response", stage="output",
+                                    diagnostic_code="unexpected_calls")
+            fragment = part.get("text") if not part.get("thought") else None
+            if not isinstance(fragment, str) or not fragment:
+                continue
+            chars += len(fragment)
+            if chars > _MAX_UPSTREAM_TEXT:
+                raise ProviderError("resposta SSE grande demais", kind="invalid_response", stage="output")
+            pieces.append(fragment)
+            await on_text_delta(fragment)
+    if reason is None:
+        raise ProviderError("Gemini SSE terminou antes da conclusão", kind="invalid_response", stage="output")
+    return {"candidates": [{"finishReason": reason, "content": {"parts": [{"text": "".join(pieces)}]}}],
+            "usageMetadata": usage, "promptFeedback": feedback}
+
+
 class _GroqClient:
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
     PROVIDER = "groq"
@@ -736,6 +917,7 @@ class _GroqClient:
         tool_specs: tuple[ToolSpec, ...] = (),
         allow_tool_calls: bool = True,
         max_output_tokens: int | None = None,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str | ChatReply:
         self._validate_request(model, messages)
         actions = enabled_actions(actions)
@@ -749,7 +931,7 @@ class _GroqClient:
                 messages, actions=actions, has_tools=bool(specs), allow_tool_calls=allow_tool_calls,
                 max_output_tokens=max_output_tokens,
             ),
-            "stream": False,
+            "stream": on_text_delta is not None,
         }
         if declarations:
             payload["tools"] = [{"type": "function", "function": declaration} for declaration in declarations]
@@ -761,6 +943,9 @@ class _GroqClient:
             # Valores documentados pelo Groq para este modelo específico.
             payload.update({"reasoning_effort": "none", "include_reasoning": False})
         self._prepare_payload(payload)
+        # Usage no último chunk só onde o parâmetro é compatível.
+        if on_text_delta is not None and self.PROVIDER == "groq":
+            payload["stream_options"] = {"include_usage": True}
         reservation = self._reserve_request(payload)
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -774,7 +959,11 @@ class _GroqClient:
             ) as resp:
                 if resp.status >= 400:
                     raise await _http_error(resp, provider=self.PROVIDER)
-                data = await _read_json_limited(resp)
+                if on_text_delta is not None:
+                    data = await _openai_stream_result(
+                        resp, on_text_delta, cloudflare=self.PROVIDER == "cloudflare")
+                else:
+                    data = await _read_json_limited(resp)
         except asyncio.TimeoutError as exc:
             raise ProviderError(f"{self.LABEL} timeout", kind="timeout") from exc
         except aiohttp.ClientError as exc:
@@ -849,6 +1038,10 @@ class _GroqClient:
                 f"{self.LABEL} retornou resposta vazia", kind="empty", stage="output",
                 finish_reason=finish_reason,
             )
+        if on_text_delta is not None:
+            report = _REQUEST_REPORT.get()
+            if isinstance(report, dict):
+                report["_stream_finish_reason"] = "length" if finish_reason == "length" else "stop"
         return reply
 
 
@@ -1190,6 +1383,7 @@ class _GeminiClient:
         tool_specs: tuple[ToolSpec, ...] = (),
         allow_tool_calls: bool = True,
         max_output_tokens: int | None = None,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         specs, declarations = _tool_declarations(actions, target_refs, tool_specs)
@@ -1262,13 +1456,16 @@ class _GeminiClient:
         timeout = aiohttp.ClientTimeout(total=_remaining(deadline))
         try:
             _record_http_request()
-            async with self._session.post(
-                self.BASE_URL.format(model=model), json=payload,
-                headers=headers, timeout=timeout,
-            ) as resp:
+            endpoint = self.BASE_URL.format(model=model)
+            if on_text_delta is not None:
+                endpoint = endpoint.replace(":generateContent", ":streamGenerateContent") + "?alt=sse"
+            async with self._session.post(endpoint, json=payload, headers=headers, timeout=timeout) as resp:
                 if resp.status >= 400:
                     raise await _http_error(resp)
-                data = await _read_json_limited(resp)
+                if on_text_delta is not None:
+                    data = await _gemini_stream_result(resp, on_text_delta)
+                else:
+                    data = await _read_json_limited(resp)
         except asyncio.TimeoutError as exc:
             raise ProviderError("Gemini timeout", kind="timeout") from exc
         except aiohttp.ClientError as exc:
@@ -1332,6 +1529,10 @@ class _GeminiClient:
                 "Gemini retornou resposta vazia", kind="empty", stage="output",
                 finish_reason=finish_reason,
             )
+        if on_text_delta is not None:
+            report = _REQUEST_REPORT.get()
+            if isinstance(report, dict):
+                report["_stream_finish_reason"] = "length" if finish_reason == "MAX_TOKENS" else "stop"
         return reply
 
 
@@ -1580,6 +1781,7 @@ class ProviderRouter:
         allow_protected_reserves: bool = True, max_output_tokens: int | None = None,
         repair_state: dict | None = None,
         request_report: dict | None = None,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str | ChatReply:
         # O contador HTTP é herdado por wait_for e por descoberta single-flight,
         # mas não pode permanecer ativo para outra operação após este await.
@@ -1593,7 +1795,8 @@ class ProviderRouter:
                                     allow_tool_calls=allow_tool_calls,
                                     allow_protected_reserves=allow_protected_reserves,
                                     max_output_tokens=max_output_tokens,
-                                    repair_state=repair_state, request_report=report)
+                                    repair_state=repair_state, request_report=report,
+                                    on_text_delta=on_text_delta)
         finally:
             _REQUEST_REPORT.reset(token)
 
@@ -1605,6 +1808,7 @@ class ProviderRouter:
         budget_seconds: float | None = None, allow_tool_calls: bool = True,
         allow_protected_reserves: bool = True, max_output_tokens: int | None = None,
         repair_state: dict | None = None, request_report: dict | None = None,
+        on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         started = time.monotonic()
@@ -1746,6 +1950,14 @@ class ProviderRouter:
             declaration = proposal_tool(actions, target_refs)
             native_schemas.setdefault(TOOL_NAME, declaration["parameters"])
 
+        stream_started = False
+
+        async def forward_delta(delta: str) -> None:
+            nonlocal stream_started
+            if on_text_delta is not None and delta:
+                await on_text_delta(delta)
+                stream_started = True
+
         async def attempt(provider: str, client, model: str, timeout: float, *, text_only=False, repair=False, feedback=""):
             began = time.monotonic()
             state = self._state(provider, model)
@@ -1753,6 +1965,8 @@ class ProviderRouter:
             entry = {"provider": provider, "model": model, "budget_ms": max(0, int(timeout * 1000)), "text_only": text_only, "repair": repair}
             report["attempts"].append(entry)
             kwargs = dict(system=system, messages=messages, temperature=temperature, model=model, timeout_seconds=timeout)
+            if on_text_delta is not None:
+                kwargs["on_text_delta"] = forward_delta
             if type(max_output_tokens) is int and max_output_tokens > 0:
                 kwargs["max_output_tokens"] = max_output_tokens
             if feedback:
@@ -1888,6 +2102,15 @@ class ProviderRouter:
                     return await attempt(provider, client, model, timeout)
                 except ProviderError as exc:
                     last_error = exc
+                    if stream_started:
+                        # A resposta já começou; alternar de provider misturaria
+                        # duas respostas num único stream do cliente.
+                        self._record_failure(provider, model, models, exc, expected_generation=generation)
+                        finish(exc.kind, retry_after=exc.retry_after)
+                        raise AllProvidersExhausted(
+                            "stream do provider foi interrompido após começar", kind=exc.kind,
+                            stage=exc.stage, retry_after=exc.retry_after, status=exc.status,
+                        ) from exc
                     terminal(exc)
                     repairable = (wants_tools and allow_tool_calls and not repair_used and exc.kind == "invalid_response"
                                   and exc.stage == "output" and exc.diagnostic_code
@@ -1914,6 +2137,12 @@ class ProviderRouter:
                                                  repair=True, feedback=feedback)
                         except ProviderError as repaired:
                             exc, last_error = repaired, repaired
+                            if stream_started:
+                                finish(repaired.kind, retry_after=repaired.retry_after)
+                                raise AllProvidersExhausted(
+                                    "stream interrompido", kind=repaired.kind, stage=repaired.stage,
+                                    status=repaired.status, retry_after=repaired.retry_after,
+                                ) from repaired
                             terminal(repaired)
                     if exc.kind == "tools_unsupported" and wants_tools:
                         self._unsupported_tool_models.add((provider, model))
@@ -1950,6 +2179,12 @@ class ProviderRouter:
                 return await attempt(provider, client, model, timeout, text_only=True)
             except ProviderError as exc:
                 last_error = exc
+                if stream_started:
+                    finish(exc.kind, retry_after=exc.retry_after)
+                    raise AllProvidersExhausted(
+                        "stream interrompido", kind=exc.kind, stage=exc.stage,
+                        status=exc.status, retry_after=exc.retry_after,
+                    ) from exc
                 terminal(exc)
                 models = next(item[2] for item in attempts if item[0] == provider)
                 _, last_error = self._record_failure(provider, model, models, exc, expected_generation=generation)

@@ -137,7 +137,7 @@ from discord.ext import commands
 import config
 from db import SettingsDB
 from webserver import run_webserver, set_health_provider, set_update_action_provider
-from utility.openai_compat import set_openai_chat_provider
+from utility.openai_compat import OpenAIChatStream, set_openai_chat_provider
 from cogs.musica.integracoes.bot import IntegracaoMusicaBot
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
 from utility.application_bio import ApplicationBioService
@@ -285,7 +285,9 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
         set_update_action_provider(self.handle_internal_update_action)
         set_openai_chat_provider(self.handle_openai_compat_chat)
 
-    async def _openai_compat_chat_on_loop(self, spec: dict[str, object]) -> dict[str, object]:
+    async def _openai_compat_chat_on_loop(
+        self, spec: dict[str, object], *, on_text_delta=None,
+    ) -> dict[str, object]:
         """Executa uma completion externa dentro do loop dono do ProviderRouter."""
         from cogs.chatbot.providers import AllProvidersExhausted, ChatMessage
 
@@ -306,7 +308,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
         ]
         report: dict[str, object] = {}
         try:
-            reply = await router.chat(
+            kwargs = dict(
                 system=str(spec.get("system") or ""),
                 messages=messages,
                 temperature=float(spec.get("temperature") if spec.get("temperature") is not None else 0.8),
@@ -315,6 +317,9 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                 max_output_tokens=spec.get("max_output_tokens") if isinstance(spec.get("max_output_tokens"), int) else None,
                 request_report=report,
             )
+            if on_text_delta is not None:
+                kwargs["on_text_delta"] = on_text_delta
+            reply = await router.chat(**kwargs)
         except AllProvidersExhausted as exc:
             kind = str(getattr(exc, "kind", "") or "")
             retry_after = getattr(exc, "retry_after", None)
@@ -353,6 +358,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
             "provider": provider,
             "provider_model": provider_model,
             "usage": dict(usage),
+            "finish_reason": report.get("_stream_finish_reason", "stop"),
         }
 
     def handle_openai_compat_chat(self, spec: dict[str, object]) -> dict[str, object]:
@@ -367,6 +373,26 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                 "message": "Chat backend is starting.",
             }
         timeout = float(spec.get("timeout_seconds") or 45.0)
+        if spec.get("stream"):
+            source = OpenAIChatStream(timeout)
+
+            async def run_stream():
+                try:
+                    result = await self._openai_compat_chat_on_loop(spec, on_text_delta=source.send)
+                    # Uma recusa de segurança pode chegar apenas no campo
+                    # refusal do provider, sem delta.content durante o SSE.
+                    if result.get("ok") and source.fragments_sent == 0 and result.get("text"):
+                        await source.send(str(result["text"]))
+                    await source.finish(result)
+                except asyncio.CancelledError:
+                    raise  # cancelamento do HTTP também cancela o aiohttp upstream
+                except Exception:
+                    if not source.closed:
+                        await source.finish({"ok": False, "status": 502, "code": "chat_backend_error",
+                                             "message": "Chat backend failed unexpectedly."})
+
+            source.start(asyncio.run_coroutine_threadsafe(run_stream(), loop))
+            return source
         future = asyncio.run_coroutine_threadsafe(self._openai_compat_chat_on_loop(spec), loop)
         try:
             return future.result(timeout=max(1.0, timeout + 2.0))
