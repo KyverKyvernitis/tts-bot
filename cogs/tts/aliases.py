@@ -15,6 +15,11 @@ _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
         "display": ("help",),
         "accepts_argument": True,
     },
+    "advanced": {
+        "aliases": ("advanced",),
+        "display": ("advanced",),
+        "accepts_argument": False,
+    },
     "clear": {
         "aliases": ("clear",),
         "display": ("clear",),

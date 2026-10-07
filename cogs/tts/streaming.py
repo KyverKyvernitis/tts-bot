@@ -344,7 +344,7 @@ class SharedSynthesisMixin:
                 handle._early_counted = True
                 handle._early_started = time.monotonic()
                 await self._activate_edge_stream(handle)
-                handle._early_source, handle._early_kind = self._make_discord_tts_source(path)
+                handle._early_source, handle._early_kind = self._make_discord_tts_source_for_item(path, item)
                 handle._early_read = asyncio.create_task(asyncio.to_thread(handle._early_source.read))
             await asyncio.wait_for(job.buffer.wait_for_bytes(minimum), timeout=timeout)
             handle.first_audio_ms = (time.monotonic() - consumer_started) * 1000

@@ -4154,6 +4154,9 @@ class AudioRouter:
         language: str = "pt-br",
         rate: str = "+0%",
         pitch: str = "+0Hz",
+        advanced_nightcore_level: int = 0,
+        advanced_slowed_level: int = 0,
+        advanced_reverb_level: int = 0,
         timeout: float | None = None,
         cache_key: str = "",
         audio_b64: str = "",
@@ -4194,6 +4197,9 @@ class AudioRouter:
             language=str(language or "pt-br"),
             rate=str(rate or "+0%"),
             pitch=str(pitch or "+0Hz"),
+            advanced_nightcore_level=max(0, min(3, int(advanced_nightcore_level or 0))),
+            advanced_slowed_level=max(0, min(3, int(advanced_slowed_level or 0))),
+            advanced_reverb_level=max(0, min(3, int(advanced_reverb_level or 0))),
             auto_leave_enabled=bool(auto_leave_enabled),
             timeout_seconds=max(3.0, float(timeout or MUSIC_AGENT_TTS_TIMEOUT_SECONDS)),
         )
@@ -4879,6 +4885,9 @@ class AudioRouter:
                     language=str(getattr(item, "language", "pt-br") or "pt-br"),
                     rate=str(getattr(item, "rate", "+0%") or "+0%"),
                     pitch=str(getattr(item, "pitch", "+0Hz") or "+0Hz"),
+                    advanced_nightcore_level=int(getattr(item, "advanced_nightcore_level", 0) or 0),
+                    advanced_slowed_level=int(getattr(item, "advanced_slowed_level", 0) or 0),
+                    advanced_reverb_level=int(getattr(item, "advanced_reverb_level", 0) or 0),
                     timeout_seconds=max(3.0, float(timeout or MUSIC_AGENT_TTS_TIMEOUT_SECONDS)),
                 )
                 elapsed_ms = max(0.0, (time.monotonic() - started_agent) * 1000.0)

@@ -21,6 +21,7 @@ import discord
 
 from .configuracao import env_float, env_int, truthy
 from .estado import GuildMusicState
+from .efeitos import filtros_tts
 from .mixer_pcm import AgentMixedAudioSource
 from .utilitarios import safe_id, short_text
 
@@ -166,6 +167,21 @@ class TTSMixin:
         if re.match(r"^[+-]?\d+Hz$", raw, re.I):
             return raw if raw.startswith(("+", "-")) else "+" + raw
         return "+0Hz"
+
+    def _tts_effect_filter_from_body(self, body: dict[str, Any]) -> str:
+        return filtros_tts(
+            engine=body.get("engine"),
+            nightcore_level=body.get("advanced_nightcore_level", 0),
+            slowed_level=body.get("advanced_slowed_level", 0),
+            reverb_level=body.get("advanced_reverb_level", 0),
+        )
+
+    def _tts_ffmpeg_options_from_body(self, body: dict[str, Any]) -> tuple[str, str]:
+        effect_filter = self._tts_effect_filter_from_body(body)
+        options = "-vn -sn -dn -loglevel warning"
+        if effect_filter:
+            options = f"{options} -af {effect_filter}"
+        return options, effect_filter
 
     def _tts_cache_enabled(self) -> bool:
         return truthy(os.getenv("MUSIC_AGENT_TTS_CACHE_ENABLED"), truthy(os.getenv("PHONE_WORKER_TTS_AGENT_CACHE_ENABLED"), True))
@@ -427,19 +443,28 @@ class TTSMixin:
         engine = str(body.get('engine') or 'gtts').lower().replace('-', '_')
         if engine in {'google', 'google_tts', 'googlecloud', 'google_cloud', 'gcloud'}:
             engine = 'gtts'
+        effect_filter = filtros_tts(
+            engine=engine,
+            nightcore_level=body.get("advanced_nightcore_level", 0),
+            slowed_level=body.get("advanced_slowed_level", 0),
+            reverb_level=body.get("advanced_reverb_level", 0),
+        )
+        ffmpeg_options = "-vn -sn -dn -loglevel warning"
+        if effect_filter:
+            ffmpeg_options = f"{ffmpeg_options} -af {effect_filter}"
         key = self._tts_cache_key_for_body(body, engine=engine, text=text) if self._tts_cache_enabled() else ''
         cache_hit = key and self._tts_cache_mode_allows_read(body) and await asyncio.to_thread(
             self._try_read_tts_cache_to_target, key=key, target=target, body=body)
         if cache_hit:
             source = discord.FFmpegPCMAudio(str(target), executable=self.ffmpeg_executable,
-                before_options='-nostdin', options='-vn -sn -dn -loglevel warning')
+                before_options='-nostdin', options=ffmpeg_options)
             return await self._buffer_tts_source(source, started=started, timeout=body.get('timeout_seconds') or 30), f'{engine}-cache'
         try:
             transport = importlib.import_module('tts_transport')
         except ImportError:
             await self._synthesize_tts_file(body, target)
             source = discord.FFmpegPCMAudio(str(target), executable=self.ffmpeg_executable,
-                before_options='-nostdin', options='-vn -sn -dn -loglevel warning')
+                before_options='-nostdin', options=ffmpeg_options)
             return await self._buffer_tts_source(source, started=started, timeout=body.get('timeout_seconds') or 30), engine
 
         provider_module = {'gtts': 'gtts', 'edge': 'edge_tts'}.get(engine)
@@ -464,7 +489,7 @@ class TTSMixin:
         try:
             source = discord.FFmpegPCMAudio(reader, pipe=True, executable=self.ffmpeg_executable,
                 before_options='-nostdin -f mp3 -probesize 32768 -analyzeduration 0',
-                options='-vn -sn -dn -loglevel warning')
+                options=ffmpeg_options)
             timed = await self._buffer_tts_source(source, started=started, reader=reader, timeout=body.get('timeout_seconds') or 30)
             return timed, engine
         except BaseException:
@@ -540,9 +565,10 @@ class TTSMixin:
                 else:
                     tts_source, engine = await self._prepare_tts_source(body, path, started=started)
                 if tts_source is None:
+                    ffmpeg_options, _effect_filter = self._tts_ffmpeg_options_from_body(body)
                     tts_source = await self._buffer_tts_source(
                         discord.FFmpegPCMAudio(tts_input, executable=self.ffmpeg_executable,
-                            before_options="-nostdin", options="-vn -sn -dn -loglevel warning"),
+                            before_options="-nostdin", options=ffmpeg_options),
                         started=started, timeout=timeout,
                     )
                 future = source.add_tts(tts_source, volume=max(0.0, min(2.0, env_float("MUSIC_AGENT_TTS_VOLUME", 1.0))))
@@ -645,30 +671,35 @@ class TTSMixin:
 
                     def _build_tts_audio_source(tts_input_path: str, *, audio_format: str = "") -> Any:
                         suffix = _audio_suffix_from_format(audio_format or Path(str(tts_input_path)).suffix)
+                        ffmpeg_options, effect_filter = self._tts_ffmpeg_options_from_body(body)
                         opus_cls = getattr(discord, "FFmpegOpusAudio", None)
                         if suffix == ".ogg" and opus_cls is not None:
+                            if not effect_filter:
+                                try:
+                                    return opus_cls(
+                                        tts_input_path,
+                                        executable=self.ffmpeg_executable,
+                                        before_options="-nostdin",
+                                        options=ffmpeg_options,
+                                        codec="copy",
+                                    )
+                                except TypeError:
+                                    pass
+                                except Exception as exc:
+                                    self.log("voice_direct_tts_opus_copy_fallback", error=short_text(exc, 180))
                             try:
                                 return opus_cls(
                                     tts_input_path,
                                     executable=self.ffmpeg_executable,
                                     before_options="-nostdin",
-                                    options="-vn -sn -dn -loglevel warning",
-                                    codec="copy",
-                                )
-                            except TypeError:
-                                pass
-                            except Exception as exc:
-                                self.log("voice_direct_tts_opus_copy_fallback", error=short_text(exc, 180))
-                            try:
-                                return opus_cls(
-                                    tts_input_path,
-                                    executable=self.ffmpeg_executable,
-                                    before_options="-nostdin",
-                                    options="-vn -sn -dn -loglevel warning",
+                                    options=ffmpeg_options,
                                 )
                             except Exception as exc:
                                 self.log("voice_direct_tts_opus_source_fallback", error=short_text(exc, 180))
-                        return discord.FFmpegPCMAudio(tts_input_path, executable=self.ffmpeg_executable, before_options="-nostdin", options="-vn -sn -dn -loglevel warning")
+                        return discord.FFmpegPCMAudio(
+                            tts_input_path, executable=self.ffmpeg_executable,
+                            before_options="-nostdin", options=ffmpeg_options
+                        )
 
                     audio_format = str(body.get("audio_format") or body.get("format") or "").strip().lower()
                     path = Path(tmp) / f"tts{_audio_suffix_from_format(audio_format)}"

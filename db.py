@@ -1005,6 +1005,9 @@ class SettingsDB:
             "android_rate": str(tts.get("android_rate", "") or ""),
             "android_pitch": str(tts.get("android_pitch", "") or ""),
             "teto_pitch_semitones": str(tts.get("teto_pitch_semitones", "") or ""),
+            "advanced_nightcore_level": str(tts.get("advanced_nightcore_level", "") or ""),
+            "advanced_slowed_level": str(tts.get("advanced_slowed_level", "") or ""),
+            "advanced_reverb_level": str(tts.get("advanced_reverb_level", "") or ""),
             "speaker_name": str(tts.get("speaker_name", "") or ""),
         }
 
@@ -1023,6 +1026,9 @@ class SettingsDB:
         android_rate: Optional[str] = None,
         android_pitch: Optional[str] = None,
         teto_pitch_semitones: Optional[str] = None,
+        advanced_nightcore_level: Optional[int] = None,
+        advanced_slowed_level: Optional[int] = None,
+        advanced_reverb_level: Optional[int] = None,
         speaker_name: Optional[str] = None,
     ):
         key = (guild_id, user_id)
@@ -1049,6 +1055,19 @@ class SettingsDB:
             tts["android_pitch"] = android_pitch
         if teto_pitch_semitones is not None:
             tts["teto_pitch_semitones"] = str(teto_pitch_semitones)
+
+        def _effect_level(value: object) -> int:
+            try:
+                return max(0, min(3, int(value or 0)))
+            except (TypeError, ValueError):
+                return 0
+
+        if advanced_nightcore_level is not None:
+            tts["advanced_nightcore_level"] = _effect_level(advanced_nightcore_level)
+        if advanced_slowed_level is not None:
+            tts["advanced_slowed_level"] = _effect_level(advanced_slowed_level)
+        if advanced_reverb_level is not None:
+            tts["advanced_reverb_level"] = _effect_level(advanced_reverb_level)
         if speaker_name is not None:
             cleaned_speaker_name = str(speaker_name or "").strip()
             if cleaned_speaker_name:
@@ -1141,6 +1160,11 @@ class SettingsDB:
                 "teto_pitch_semitones",
                 str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)),
             ),
+            # Efeitos avançados são pessoais e só são aplicados por Edge/gTTS.
+            # Não entram nos defaults da guild para evitar alterar TTS alheio.
+            "advanced_nightcore_level": str(user.get("advanced_nightcore_level", "") or "0"),
+            "advanced_slowed_level": str(user.get("advanced_slowed_level", "") or "0"),
+            "advanced_reverb_level": str(user.get("advanced_reverb_level", "") or "0"),
             "speaker_name": str(user.get("speaker_name", "") or ""),
             "bot_prefix": str(guild.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(guild.get("tts_prefix", ",") or ","),

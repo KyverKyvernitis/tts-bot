@@ -31,6 +31,7 @@ from gtts.tts import gTTSError
 
 
 import config
+from cogs.musica.runtime_telefone.agente.efeitos import filtros_tts, normalizar_efeitos_tts
 from cogs.musica.integracoes.tts import (
     agendar_idle_musica,
     deve_adiar_auto_leave_tts,
@@ -489,6 +490,9 @@ class QueueItem:
     language: str
     rate: str
     pitch: str
+    advanced_nightcore_level: int = field(default=0, repr=False, compare=False)
+    advanced_slowed_level: int = field(default=0, repr=False, compare=False)
+    advanced_reverb_level: int = field(default=0, repr=False, compare=False)
     teto_pitch_semitones: str = field(default_factory=lambda: str(TTS_TETO_DEFAULT_PITCH_SEMITONES), repr=False, compare=False)
     enqueued_at_monotonic: float = field(default_factory=time.monotonic, repr=False, compare=False)
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
@@ -3027,6 +3031,15 @@ class TTSAudioMixin(SharedSynthesisMixin):
             item.teto_pitch_semitones = self._normalize_teto_pitch_semitones(
                 getattr(item, "teto_pitch_semitones", TTS_TETO_DEFAULT_PITCH_SEMITONES)
             )
+        (
+            item.advanced_nightcore_level,
+            item.advanced_slowed_level,
+            item.advanced_reverb_level,
+        ) = normalizar_efeitos_tts(
+            getattr(item, "advanced_nightcore_level", 0),
+            getattr(item, "advanced_slowed_level", 0),
+            getattr(item, "advanced_reverb_level", 0),
+        )
         item._tts_settings_frozen = True
 
     def _cache_key(self, item: QueueItem) -> str:
@@ -4074,6 +4087,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
             "language": str(item.language or "pt-br"),
             "rate": str(item.rate or "+0%"),
             "pitch": str(item.pitch or "+0Hz"),
+            "advanced_nightcore_level": int(getattr(item, "advanced_nightcore_level", 0) or 0),
+            "advanced_slowed_level": int(getattr(item, "advanced_slowed_level", 0) or 0),
+            "advanced_reverb_level": int(getattr(item, "advanced_reverb_level", 0) or 0),
             "cache_key": self._cache_key(item),
             "cache_mode": "prefer",
             "timeout_seconds": max(3.0, min(WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS, self._estimate_playback_timeout(item))),
@@ -4338,30 +4354,63 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 options += ' -analyzeduration 0'
         return options
 
-    def _make_discord_tts_source(self, path: str) -> tuple[Any, str]:
-        if bool(getattr(config, 'TTS_PREPARED_OPUS_CACHE_ENABLED', False)) and os.path.dirname(os.path.abspath(path)) == os.path.abspath(_CACHE_DIR):
+    def _tts_effect_filter(self, item: QueueItem | None) -> str:
+        if item is None:
+            return ""
+        return filtros_tts(
+            # Se a síntese precisou cair para outra engine, a elegibilidade do
+            # DSP acompanha a engine que realmente gerou o áudio. Isso impede
+            # um fallback ATTS/Teto/Piper de receber efeitos destinados apenas
+            # a Edge/gTTS.
+            engine=getattr(item, "_tts_actual_engine", "") or getattr(item, "engine", ""),
+            nightcore_level=getattr(item, "advanced_nightcore_level", 0),
+            slowed_level=getattr(item, "advanced_slowed_level", 0),
+            reverb_level=getattr(item, "advanced_reverb_level", 0),
+        )
+
+    def _tts_ffmpeg_options_for_item(self, item: QueueItem | None) -> tuple[str, str]:
+        effect_filter = self._tts_effect_filter(item)
+        options = str(TTS_FFMPEG_OPTIONS or "-vn -loglevel error").strip()
+        if effect_filter:
+            options = f"{options} -af {effect_filter}".strip()
+        return options, effect_filter
+
+    def _make_discord_tts_source_for_item(self, path: str, item: QueueItem | None) -> tuple[Any, str]:
+        factory = self._make_discord_tts_source
+        try:
+            return factory(path, item=item)
+        except TypeError as exc:
+            # Mantém compatibilidade com probes/subclasses legados que ainda
+            # implementam _make_discord_tts_source(path) sem o kwarg novo.
+            if "unexpected keyword argument 'item'" not in str(exc):
+                raise
+            return factory(path)
+
+    def _make_discord_tts_source(self, path: str, *, item: QueueItem | None = None) -> tuple[Any, str]:
+        ffmpeg_options, effect_filter = self._tts_ffmpeg_options_for_item(item)
+        if not effect_filter and bool(getattr(config, 'TTS_PREPARED_OPUS_CACHE_ENABLED', False)) and os.path.dirname(os.path.abspath(path)) == os.path.abspath(_CACHE_DIR):
             cache = getattr(self, '_tts_prepared_opus', None)
             if cache is None:
                 cache = self._tts_prepared_opus = PreparedOpusCache(max_bytes=int(getattr(config, 'TTS_PREPARED_OPUS_CACHE_MAX_BYTES', 8 * 1024 * 1024)))
             with contextlib.suppress(OSError):
-                key = cache.key(path, TTS_FFMPEG_OPTIONS)
+                key = cache.key(path, ffmpeg_options)
                 source = cache.get(key)
                 if source is not None:
                     return source, 'prepared_opus'
                 if cache.repeated(key) and not cache.busy and callable(getattr(discord, 'FFmpegOpusAudio', None)):
                     def idle():
                         return not any(getattr(state, 'active_item', None) is not None for state in getattr(self, 'guild_states', {}).values())
-                    self._schedule_tts_background(cache.prepare(key, path, TTS_FFMPEG_OPTIONS, idle=idle))
+                    self._schedule_tts_background(cache.prepare(key, path, ffmpeg_options, idle=idle))
         before_options = self._tts_ffmpeg_before_options(path)
         if self._audio_file_should_use_opus_source(path):
             opus_cls = getattr(discord, "FFmpegOpusAudio", None)
             if opus_cls is not None:
-                if TTS_OPUS_PLAYBACK_COPY_CODEC:
+                if TTS_OPUS_PLAYBACK_COPY_CODEC and not effect_filter:
                     try:
                         return opus_cls(
                             path,
                             before_options=before_options,
-                            options=TTS_FFMPEG_OPTIONS,
+                            options=ffmpeg_options,
                             codec="copy",
                         ), "ffmpeg_opus_copy"
                     except TypeError:
@@ -4373,7 +4422,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     return opus_cls(
                         path,
                         before_options=before_options,
-                        options=TTS_FFMPEG_OPTIONS,
+                        options=ffmpeg_options,
                     ), "ffmpeg_opus"
                 except Exception as exc:
                     logger.debug("[tts_voice] FFmpegOpusAudio falhou; usando PCM fallback | path=%s erro=%s", path, exc)
@@ -4396,12 +4445,12 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 # serve para entrada já Opus e deixaria MP3/WAV sem áudio.
                 return opus_cls(
                     path, before_options=before_options,
-                    options=TTS_FFMPEG_OPTIONS,
+                    options=ffmpeg_options,
                 ), "ffmpeg_opus_fallback"
         return discord.FFmpegPCMAudio(
             path,
             before_options=before_options,
-            options=TTS_FFMPEG_OPTIONS,
+            options=ffmpeg_options,
         ), "ffmpeg_pcm"
 
     async def _try_get_worker_turbo_cache_path(self, item: QueueItem) -> str | None:
@@ -5814,7 +5863,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     self._tts_early_decoders = max(0, getattr(self, '_tts_early_decoders', 1) - 1)
                     edge_stream._early_counted = False
             else:
-                source, source_kind = self._make_discord_tts_source(path)
+                source, source_kind = self._make_discord_tts_source_for_item(path, item)
                 read_task = asyncio.create_task(asyncio.to_thread(source.read))
             first_frame = await asyncio.wait_for(
                 asyncio.shield(read_task),
@@ -5940,14 +5989,15 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 # impede que uma rota remota tente tratar o pipe como arquivo.
                 if edge_stream is None and prepared is None and not bool(getattr(item, "chatbot_no_auto_connect", False)) and roteador_suporta_tts(self.bot) and guild is not None:
                     if item is not None:
-                        item._tts_source_factory = self._make_discord_tts_source
+                        item._tts_source_factory = lambda source_path, _item=item: self._make_discord_tts_source_for_item(source_path, _item)
+                    router_options, _router_effect_filter = self._tts_ffmpeg_options_for_item(item)
                     router_result = await tocar_tts_via_roteador(
                         self.bot,
                         guild=guild,
                         vc=vc,
                         path=path,
                         before_options=TTS_FFMPEG_BEFORE_OPTIONS,
-                        options=TTS_FFMPEG_OPTIONS,
+                        options=router_options,
                         timeout=self._estimate_playback_timeout(item),
                         item=item,
                     )
@@ -5985,7 +6035,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         source_prime_ms = prepared.prime_ms
                         used_prepared_source = True
                     else:
-                        source, source_kind = self._make_discord_tts_source(path)
+                        source, source_kind = self._make_discord_tts_source_for_item(path, item)
                 except Exception as exc:
                     raise TTSPlaybackError("audio_source_failed") from exc
                 if callable(getattr(source, "read", None)):

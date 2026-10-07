@@ -119,6 +119,12 @@ async def preparar_payload_tts_mensagem(
         language=str(resolved.get("language") or ""),
         rate=str(resolved.get("rate") or "+0%"),
         pitch=str(resolved.get("pitch") or "+0Hz"),
+        # A normalização 0..3 acontece no snapshot do QueueItem. Manter o
+        # valor bruto aqui evita derrubar uma fala por configuração legada
+        # malformada; engines não elegíveis simplesmente não aplicam o DSP.
+        advanced_nightcore_level=resolved.get("advanced_nightcore_level") or 0,
+        advanced_slowed_level=resolved.get("advanced_slowed_level") or 0,
+        advanced_reverb_level=resolved.get("advanced_reverb_level") or 0,
         teto_pitch_semitones=str(
             resolved.get("teto_pitch_semitones")
             or getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)

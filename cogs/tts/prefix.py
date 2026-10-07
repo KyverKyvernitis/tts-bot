@@ -98,6 +98,8 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
         return PrefixControlCommand("ping")
     if matches_prefixed_command(raw, bot_prefix, kind="help"):
         return PrefixControlCommand("help")
+    if matches_prefixed_command(raw, bot_prefix, kind="advanced"):
+        return PrefixControlCommand("advanced")
     if matches_prefixed_command(raw, bot_prefix, kind="clear"):
         return PrefixControlCommand("clear")
     if matches_prefixed_command(raw, bot_prefix, kind="leave"):
@@ -173,6 +175,9 @@ async def dispatch_prefix_control_command(cog: Any, message: Any, command: Prefi
     kind = command.kind
 
     if kind in {"help", "ping"}:
+        return True
+    if kind == "advanced":
+        await cog._prefix_advanced(message)
         return True
     if kind == "clear":
         await cog._prefix_clear(message)

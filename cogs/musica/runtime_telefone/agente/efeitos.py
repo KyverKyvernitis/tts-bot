@@ -78,3 +78,88 @@ def filtros(
     # Bassboost preserva o áudio original aqui: o mixer aplica o ganho somente
     # ao grave depois do volume, usando a folga disponível no PCM de saída.
     return ",".join(parts)
+
+
+TTS_EFFECT_ENGINES = {"edge", "gtts"}
+TTS_NIGHTCORE_MULTIPLIERS = (1.0, 1.10, 1.20, 1.30)
+TTS_SLOWED_MULTIPLIERS = (1.0, 0.92, 0.84, 0.76)
+TTS_REVERB_DECAYS = (
+    (0.12, 0.07, 0.04),
+    (0.20, 0.12, 0.07),
+    (0.28, 0.17, 0.10),
+)
+
+
+def nivel_efeito_tts(value: object) -> int:
+    """Normaliza o nível de DSP do TTS para 0..3."""
+    try:
+        level = int(value or 0)
+    except (TypeError, ValueError):
+        level = 0
+    return max(0, min(MAX_EFFECT_LEVEL, level))
+
+
+def normalizar_efeitos_tts(
+    nightcore_level: object = 0,
+    slowed_level: object = 0,
+    reverb_level: object = 0,
+) -> tuple[int, int, int]:
+    """Normaliza níveis e impede Nightcore + Slowed simultâneos.
+
+    A UI já garante exclusividade. Esta defesa mantém payloads antigos ou
+    malformados determinísticos sem tocar no estado dos efeitos da música.
+    """
+    night = nivel_efeito_tts(nightcore_level)
+    slow = nivel_efeito_tts(slowed_level)
+    reverb = nivel_efeito_tts(reverb_level)
+    if night and slow:
+        slow = 0
+    return night, slow, reverb
+
+
+def filtros_tts(
+    *,
+    engine: object,
+    nightcore_level: object = 0,
+    slowed_level: object = 0,
+    reverb_level: object = 0,
+) -> str:
+    """Monta o DSP pós-síntese do TTS sem afetar música/ducking.
+
+    Só Edge e gTTS são elegíveis. A cauda do reverb é deliberadamente curta
+    (até 250 ms) para que o overlay não mantenha a música duckada por tempo
+    excessivo depois que a fala termina.
+    """
+    normalized_engine = str(engine or "").strip().lower().replace("-", "_")
+    if normalized_engine not in TTS_EFFECT_ENGINES:
+        return ""
+    night, slow, reverb = normalizar_efeitos_tts(
+        nightcore_level, slowed_level, reverb_level
+    )
+    if not (night or slow or reverb):
+        return ""
+
+    parts: list[str] = []
+    if night:
+        multiplier = TTS_NIGHTCORE_MULTIPLIERS[night]
+        parts.extend((
+            "aresample=48000",
+            f"asetrate={round(SAMPLE_RATE * multiplier)}",
+            "aresample=48000",
+        ))
+    elif slow:
+        multiplier = TTS_SLOWED_MULTIPLIERS[slow]
+        parts.extend((
+            "aresample=48000",
+            f"asetrate={round(SAMPLE_RATE * multiplier)}",
+            "aresample=48000",
+        ))
+
+    if reverb:
+        decays = "|".join(f"{value:.2f}" for value in TTS_REVERB_DECAYS[reverb - 1])
+        parts.append(f"aecho=0.82:0.58:55|120|250:{decays}")
+
+    # Protege apenas o ramo TTS. O limiter/mix gain global continua sendo
+    # responsabilidade do mixer, e o bassboost continua exclusivo da música.
+    parts.append("alimiter=limit=0.96:attack=5:release=80:level=0:latency=1")
+    return ",".join(parts)

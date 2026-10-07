@@ -95,6 +95,7 @@ from .configuracao.autocompletar import (
     opcoes_autocomplete_vozes_edge,
     opcoes_autocomplete_idiomas_gtts,
 )
+from .interface.visao_efeitos_avancados import VisaoEfeitosAvancadosTTS
 from .interface.status_tts import (
     origem_configuracao_status,
     texto_booleano_status,
@@ -3949,6 +3950,38 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
 
     def _resolve_gtts_language_input(self, raw_language: str) -> tuple[str | None, str | None]:
         return resolve_gtts_language_input(raw_language, self.gtts_languages, self.gtts_language_aliases)
+
+    async def _prefix_advanced(self, message: discord.Message):
+        if message.guild is None:
+            return
+        db = self._get_db()
+        if db is None:
+            await message.channel.send(
+                embed=self._make_embed(
+                    "Banco indisponível",
+                    "Não consegui acessar as configurações avançadas do TTS agora.",
+                    ok=False,
+                )
+            )
+            return
+        resolved = dict(await self._maybe_await(db.resolve_tts(message.guild.id, message.author.id)) or {})
+        engine = str(resolved.get("engine") or "gtts").strip().lower().replace("-", "_")
+        if engine not in {"edge", "gtts"}:
+            await message.channel.send(
+                embed=self._make_embed(
+                    "TTS avançado indisponível",
+                    "O `_advanced` funciona somente com **Edge** e **gTTS**. Troque sua engine e tente novamente.",
+                    ok=False,
+                )
+            )
+            return
+        view = VisaoEfeitosAvancadosTTS(
+            self,
+            message.author.id,
+            message.guild.id,
+            resolved=resolved,
+        )
+        await view.send_for_message(message)
 
     async def _prefix_set_lang(self, message: discord.Message, raw_language: str):
         if message.guild is None:
