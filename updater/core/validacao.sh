@@ -387,11 +387,20 @@ verify_bot_after_restart() {
   local restarts_before="${2:-0}"
   local allowed_restart_delta="${3:-1}"
   local profile="${4:-standard}"
-  local default_stability=7 default_successes=3 default_timeout=35
+  # O tempo para o processo chegar a `discord_ready` depende do boot frio
+  # completo, não do tamanho do diff. Em uma VPS de 1 GB o bot pode levar
+  # mais de 70 s para terminar DB + cogs + login do Discord. Os antigos
+  # timeouts de 18/25/35 s transformavam um boot saudável em rollback.
+  #
+  # Estes valores são apenas limites máximos: a verificação continua saindo
+  # assim que `ready_healthy` fica estável, portanto não deixam updates
+  # saudáveis artificialmente mais lentos. Variáveis UPDATE_BOT_HEALTH_*
+  # continuam podendo sobrescrever os defaults.
+  local default_stability=7 default_successes=3 default_timeout=120
   case "$profile" in
-    reload) default_stability=3; default_successes=2; default_timeout=18 ;;
-    cogs) default_stability=5; default_successes=3; default_timeout=25 ;;
-    critical) default_stability=10; default_successes=3; default_timeout=45 ;;
+    reload) default_stability=3; default_successes=2; default_timeout=120 ;;
+    cogs) default_stability=5; default_successes=3; default_timeout=120 ;;
+    critical) default_stability=10; default_successes=3; default_timeout=150 ;;
     *) profile="standard" ;;
   esac
   local timeout="${UPDATE_BOT_RESTART_TIMEOUT_SECONDS:-$default_timeout}"

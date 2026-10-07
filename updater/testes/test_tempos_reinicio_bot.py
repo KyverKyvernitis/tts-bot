@@ -78,3 +78,17 @@ def test_detailed_timings_do_not_reset_coarse_step_clock() -> None:
     block = source[start:end]
     assert "UPDATER_STEP_LAST=" not in block
     assert 'UPDATER_TIMINGS+="${label}=${elapsed_text}"' in block
+
+
+def test_full_restart_profiles_allow_slow_but_healthy_cold_boot() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    start = source.index("verify_bot_after_restart() {")
+    end = source.index("\nis_placeholder_status_text() {", start)
+    block = source[start:end]
+    # Perfis controlam a estabilidade, mas um fallback para restart completo
+    # sempre paga o mesmo boot frio. Nenhum perfil deve voltar a uma janela
+    # menor que 90 s em hosts pequenos.
+    assert "default_timeout=120" in block
+    assert "reload) default_stability=3; default_successes=2; default_timeout=120" in block
+    assert "cogs) default_stability=5; default_successes=3; default_timeout=120" in block
+    assert "critical) default_stability=10; default_successes=3; default_timeout=150" in block
