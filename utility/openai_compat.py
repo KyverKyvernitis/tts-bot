@@ -18,6 +18,9 @@ from flask import Response, g, jsonify, request
 from utility.openai_compat_tools import (
     ToolPayloadError, normalize_messages, normalize_tools,
 )
+from utility.openai_compat_vision import (
+    InlineImageError, MAX_INLINE_IMAGES, MAX_TOTAL_IMAGE_INPUT_BYTES, parse_inline_image_url,
+)
 
 
 _MODEL_OWNER = "osaka"
@@ -61,6 +64,8 @@ _AUDIT_ERROR_CODES = frozenset({
     "content_filter", "upstream_error", "other_error",
     "invalid_tools", "unsupported_tool_choice", "invalid_tool_history",
     "invalid_tool_arguments", "invalid_backend_tools",
+    "invalid_image_url", "invalid_image_data", "unsupported_image_source",
+    "image_too_large", "too_many_images", "invalid_image", "vision_unavailable",
 })
 
 
@@ -364,6 +369,12 @@ def _authorize_capability_discovery():
     return None
 
 
+def _vision_enabled() -> bool:
+    return str(os.getenv("BOT_OPENAI_VISION_ENABLED", "true")).strip().lower() not in {
+        "0", "false", "off", "no",
+    }
+
+
 def _capability_response(data: dict[str, Any]):
     response = jsonify(data)
     response.headers["Cache-Control"] = "no-store"
@@ -396,23 +407,32 @@ def _chat_semaphore() -> threading.BoundedSemaphore:
         return _chat_slots
 
 
-def _content_text(content: Any) -> tuple[str | None, str | None]:
+def _content_parts(content: Any, *, allow_images: bool) -> tuple[str, list[bytes]]:
+    """Converte blocos OGAM em texto + bytes, sem reter base64 no backend.
+
+    URL HTTPS arbitrária não é suportada deliberadamente (mitigação SSRF).
+    """
     if isinstance(content, str):
-        return content, None
+        return content, []
     if content is None:
-        return "", None
+        return "", []
     if not isinstance(content, list):
-        return None, "Message content must be a string or text-content array."
-    parts: list[str] = []
+        raise InlineImageError("unsupported_content")
+    texts: list[str] = []
+    images: list[bytes] = []
     for block in content:
         if not isinstance(block, dict):
-            return None, "Only text content blocks are supported in this version."
+            raise InlineImageError("unsupported_content")
         kind = str(block.get("type") or "").strip().lower()
         if kind in {"text", "input_text"} and isinstance(block.get("text"), str):
-            parts.append(block["text"])
-            continue
-        return None, "Only text content blocks are supported in this version."
-    return "".join(parts), None
+            texts.append(block["text"])
+        elif kind == "image_url" and allow_images:
+            if len(images) >= MAX_INLINE_IMAGES:
+                raise InlineImageError("too_many_images")
+            images.append(parse_inline_image_url(block.get("image_url")))
+        else:
+            raise InlineImageError("unsupported_content")
+    return "".join(texts), images
 
 
 def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[Any, int] | None]:
@@ -451,6 +471,8 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
     messages: list[dict[str, Any]] = []
     total_chars = 0
     has_user = False
+    total_image_bytes = 0
+    total_image_count = 0
     max_chars = _env_int("BOT_OPENAI_MAX_TEXT_CHARS", 120_000, minimum=4_096, maximum=800_000)
     for index, raw in enumerate(raw_messages):
         if not isinstance(raw, dict):
@@ -463,10 +485,20 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
                 error_type="invalid_request_error",
                 code="unsupported_role",
             )
-        text, content_error = _content_text(raw.get("content"))
-        if content_error is not None:
-            return None, _error(content_error, 400, error_type="invalid_request_error", code="unsupported_content")
-        assert text is not None
+        try:
+            text, image_data = _content_parts(raw.get("content"), allow_images=role == "user")
+        except InlineImageError as exc:
+            return None, _error("Invalid or unsupported image/content payload.",
+                                413 if exc.code == "image_too_large" else 400,
+                                error_type="invalid_request_error", code=exc.code)
+        total_image_count += len(image_data)
+        total_image_bytes += sum(len(image) for image in image_data)
+        if total_image_count > MAX_INLINE_IMAGES:
+            return None, _error("Too many images in the request.", 400,
+                                error_type="invalid_request_error", code="too_many_images")
+        if total_image_bytes > MAX_TOTAL_IMAGE_INPUT_BYTES:
+            return None, _error("Image payload is too large.", 413,
+                                error_type="invalid_request_error", code="image_too_large")
         total_chars += len(text)
         if total_chars > max_chars:
             return None, _error("Message content is too large.", 413, error_type="invalid_request_error", code="context_too_large")
@@ -477,6 +509,8 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
         if role == "user":
             has_user = True
         message = {"role": role, "content": text}
+        if image_data:
+            message["inline_image_bytes"] = image_data
         if role == "assistant" and "tool_calls" in raw:
             message["tool_calls"] = raw["tool_calls"]
         if role == "tool":
@@ -521,6 +555,7 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
         "messages": messages,
         "tools": tools,
         "allow_tool_calls": allow_tool_calls,
+        "image_count": total_image_count,
         "temperature": temperature,
         "max_output_tokens": max_output_tokens,
         "timeout_seconds": _env_float("BOT_OPENAI_REQUEST_TIMEOUT", 45.0, minimum=5.0, maximum=120.0),
@@ -540,10 +575,10 @@ def _list_models():
                 "object": "model",
                 "created": _MODEL_CREATED,
                 "owned_by": _MODEL_OWNER,
-                "kind": "chat",
-                # OGAM 0.0.111 lê especificamente um array de capabilities
-                # no catálogo. Não inventar visão/thinking para modelos virtuais.
-                "capabilities": ["tools"],
+                "kind": "vision" if _vision_enabled() else "chat",
+                # OGAM v0.0.111 interpreta capabilities + kind:'vision'.
+                # Visão depende das credenciais/modelos já configurados no chatbot.
+                "capabilities": ["tools", "vision"] if _vision_enabled() else ["tools"],
             }
             for model_id in _MODEL_IDS
         ],
@@ -561,7 +596,7 @@ def _model_props():
     if auth_error is not None:
         return auth_error
     return _capability_response({
-        "modalities": {"vision": False, "video": False, "audio": False},
+        "modalities": {"vision": _vision_enabled(), "video": False, "audio": False},
         "chat_template_caps": {
             "supports_tools": True,
             "supports_preserve_reasoning": False,
@@ -578,7 +613,8 @@ def _chat_completions():
     if auth_error is not None:
         return auth_error
 
-    max_body = _env_int("BOT_OPENAI_MAX_BODY_BYTES", 1_048_576, minimum=16_384, maximum=4_194_304)
+    # Base64 acrescenta ~33%; limite total contém 3 imagens pequenas.
+    max_body = _env_int("BOT_OPENAI_MAX_BODY_BYTES", 8_388_608, minimum=16_384, maximum=12_582_912)
     if request.content_length is not None and request.content_length > max_body:
         return _error("Request body is too large.", 413, error_type="invalid_request_error", code="request_too_large")
     raw_body = request.get_data(cache=True)
@@ -590,6 +626,10 @@ def _chat_completions():
     if payload_error is not None:
         return payload_error
     assert spec is not None
+
+    if spec["image_count"] and not _vision_enabled():
+        return _error("Vision is disabled for this server.", 400,
+                      error_type="invalid_request_error", code="vision_unavailable")
 
     provider = _get_chat_provider()
     if provider is None:

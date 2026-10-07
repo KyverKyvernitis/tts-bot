@@ -117,6 +117,7 @@ async def _download_image(
 
 def _prepare_image_bytes(
     data: bytes, filename: str, *, byte_limit: int, deadline: Optional[float] = None,
+    max_pixels: Optional[int] = None,
 ) -> PreparedImage:
     """O worker mantém o slot até liberar os pixels, independentemente do caller."""
     if deadline is None:
@@ -131,14 +132,18 @@ def _prepare_image_bytes(
     try:
         if deadline is not None and time.monotonic() >= deadline:
             raise ImagePreparationError("tempo de preparo da imagem esgotado", kind="timeout")
-        return _decode_image_bytes(data, filename, byte_limit=byte_limit)
+        if max_pixels is None:
+            return _decode_image_bytes(data, filename, byte_limit=byte_limit)
+        return _decode_image_bytes(data, filename, byte_limit=byte_limit, max_pixels=max_pixels)
     finally:
         _IMAGE_PREPARATION_SLOTS.release()
 
 
-def _decode_image_bytes(data: bytes, filename: str, *, byte_limit: int) -> PreparedImage:
+def _decode_image_bytes(data: bytes, filename: str, *, byte_limit: int,
+                        max_pixels: Optional[int] = None) -> PreparedImage:
     """Decodifica antes de enviar; PNG preserva texto e JPEG limita fotos grandes."""
-    max_pixels = getattr(C, "MAX_VISION_IMAGE_PIXELS", 40_000_000)
+    if max_pixels is None:
+        max_pixels = getattr(C, "MAX_VISION_IMAGE_PIXELS", 40_000_000)
     max_side = getattr(C, "MAX_VISION_IMAGE_SIDE", 4096)
     try:
         with warnings.catch_warnings():
@@ -187,6 +192,27 @@ def _decode_image_bytes(data: bytes, filename: str, *, byte_limit: int) -> Prepa
         raise ImagePreparationError("a imagem possui pixels demais", kind="size") from exc
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise ImagePreparationError("não foi possível decodificar a imagem", kind="unreadable") from exc
+
+
+async def prepare_openai_inline_image(
+    data: bytes, *, timeout_seconds: float = 15.0,
+) -> PreparedImage:
+    """Normaliza imagem remota INLINE com orçamento menor para VPS de 1 GB.
+
+    Não lê URLs, não escreve no disco e usa o slot global de preparação.
+    """
+    deadline = time.monotonic() + max(.01, timeout_seconds)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _prepare_image_bytes, data, "osaka-inline",
+                byte_limit=3 * 1024 * 1024, max_pixels=12_000_000,
+                deadline=deadline,
+            ),
+            timeout=max(.01, deadline - time.monotonic()),
+        )
+    except asyncio.TimeoutError as exc:
+        raise ImagePreparationError("tempo de preparo da imagem esgotado", kind="timeout") from exc
 
 
 async def prepare_image_attachments(

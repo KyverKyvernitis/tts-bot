@@ -678,3 +678,127 @@ def test_r6_backend_cannot_inject_unrequested_function(monkeypatch):
         "messages": [{"role": "user", "content": "hi"}]})
     assert response.status_code == 502
     assert response.get_json()["error"]["code"] == "invalid_backend_tools"
+
+
+def _r7_image_url(*, color=(200, 20, 30)):
+    import base64
+    import io
+    from PIL import Image
+    output = io.BytesIO()
+    Image.new("RGB", (16, 12), color).save(output, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def test_r7_discovery_announces_vision_and_can_disable_it(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    monkeypatch.delenv("BOT_OPENAI_VISION_ENABLED", raising=False)
+    client = _client()
+    models = _get(client)
+    props = _props(client)
+    assert models.status_code == props.status_code == 200
+    assert all(model["capabilities"] == ["tools", "vision"] for model in models.get_json()["data"])
+    assert all(model["kind"] == "vision" for model in models.get_json()["data"])
+    assert props.get_json()["modalities"]["vision"] is True
+    monkeypatch.setenv("BOT_OPENAI_VISION_ENABLED", "false")
+    assert all(model["capabilities"] == ["tools"] for model in _get(client).get_json()["data"])
+    assert _props(client).get_json()["modalities"]["vision"] is False
+
+
+def test_r7_vision_bytes_are_forwarded_to_bridge_without_prompt_leak(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    seen = {}
+    def provider(spec):
+        seen.update(spec)
+        return {"ok": True, "text": "O print contém um ícone vermelho.", "usage": {}}
+    set_openai_chat_provider(provider)
+    res = _post(_client(), {
+        "model": "osaka-smart", "stream": False,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Descreva a imagem"},
+            {"type": "image_url", "image_url": {"url": _r7_image_url(), "detail": "auto"}},
+        ]}],
+    })
+    assert res.status_code == 200
+    assert res.get_json()["choices"][0]["message"]["content"] == "O print contém um ícone vermelho."
+    assert seen["image_count"] == 1
+    msg = seen["messages"][0]
+    assert msg["content"] == "Descreva a imagem"
+    assert msg["inline_image_bytes"][0].startswith(b"\x89PNG")
+    assert "base64" not in msg["content"]
+
+
+def test_r7_vision_rejects_image_in_system_message(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    res = _post(_client(), {"model": "osaka-auto", "messages": [
+        {"role": "system", "content": [{"type": "image_url", "image_url": {"url": _r7_image_url()}}]},
+        {"role": "user", "content": "oi"},
+    ]})
+    assert res.status_code == 400
+    assert res.get_json()["error"]["code"] == "unsupported_content"
+
+
+def test_r7_vision_rejects_arbitrary_remote_image_url(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    res = _post(_client(), {"model": "osaka-auto", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "leia"},
+        {"type": "image_url", "image_url": {"url": "http://127.0.0.1:22/internal"}},
+    ]}]})
+    assert res.status_code == 400
+    assert res.get_json()["error"]["code"] == "unsupported_image_source"
+
+
+def test_r7_vision_rejects_more_than_three_images_across_history(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    blocks = [{"type": "image_url", "image_url": {"url": _r7_image_url()}}] * 4
+    res = _post(_client(), {"model": "osaka-auto", "messages": [
+        {"role": "user", "content": blocks}
+    ]})
+    assert res.status_code == 400
+    assert res.get_json()["error"]["code"] == "too_many_images"
+
+
+def test_r7_vision_disabled_rejects_image_but_preserves_text(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    monkeypatch.setenv("BOT_OPENAI_VISION_ENABLED", "false")
+    messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": _r7_image_url()}}]}]
+    assert _post(_client(), {"model": "osaka-fast", "messages": messages}).get_json()["error"]["code"] == "vision_unavailable"
+    set_openai_chat_provider(lambda _spec: {"ok": True, "text": "ok", "usage": {}})
+    res = _post(_client(), {"model": "osaka-fast", "messages": [{"role": "user", "content": "oi"}]})
+    assert res.status_code == 200
+
+
+def test_r7_streaming_image_payload_passed_without_text_mutation(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    from utility.openai_compat import OpenAIChatStream
+    seen = {}
+    def provider(spec):
+        seen.update(spec)
+        source = OpenAIChatStream(4.0)
+        source.events.put_nowait(("delta", "Vejo uma imagem vermelha."))
+        source.events.put_nowait(("done", {"ok": True, "text": "Vejo uma imagem vermelha.", "usage": {}}))
+        return source
+    set_openai_chat_provider(provider)
+    client = _client()
+    response = _post(client, {"model": "osaka-auto", "stream": True, "messages": [
+        {"role": "user", "content": [
+            {"type": "text", "text": "O que aparece?"},
+            {"type": "image_url", "image_url": {"url": _r7_image_url()}},
+        ]},
+    ]})
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert "Vejo uma imagem vermelha." in body
+    assert "data: [DONE]" in body
+    assert seen["image_count"] == 1
+    assert seen["messages"][0]["content"] == "O que aparece?"
+
+
+def test_r7_vision_rejects_excessive_data_uri_with_413(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    from utility.openai_compat_vision import MAX_IMAGE_INPUT_BYTES
+    url = "data:image/png;base64," + "A" * (((MAX_IMAGE_INPUT_BYTES + 5) // 3) * 4 + 100)
+    response = _post(_client(), {"model": "osaka-smart", "messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]},
+    ]})
+    assert response.status_code == 413
+    assert response.get_json()["error"]["code"] == "image_too_large"

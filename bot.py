@@ -290,6 +290,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
     ) -> dict[str, object]:
         """Executa uma completion externa dentro do loop dono do ProviderRouter."""
         from cogs.chatbot.providers import AllProvidersExhausted, ChatMessage
+        from cogs.chatbot.media import ImagePreparationError, prepare_openai_inline_image
         from cogs.chatbot.action_protocol import NativeToolCall
         from cogs.chatbot.tool_registry import ToolSpec
         from utility.openai_compat_tools import external_response_calls, ToolPayloadError
@@ -313,8 +314,21 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                 NativeToolCall(id=call["id"], name=call["name"], arguments=call["arguments"])
                 for call in item.get("tool_calls", ())
             )
+            prepared_images = []
+            for image_data in item.get("inline_image_bytes", ()):
+                try:
+                    prepared_images.append(await prepare_openai_inline_image(
+                        image_data, timeout_seconds=min(15.0, float(spec.get("timeout_seconds") or 45.0)),
+                    ))
+                except ImagePreparationError as exc:
+                    return {
+                        "ok": False, "status": 408 if exc.kind == "timeout" else 400,
+                        "code": "invalid_image", "type": "invalid_request_error",
+                        "message": "The attached image could not be processed.",
+                    }
             messages.append(ChatMessage(
                 role=str(item.get("role") or "user"), content=str(item.get("content") or ""),
+                images=prepared_images,
                 tool_calls=native_calls, tool_call_id=str(item.get("tool_call_id") or ""),
                 name=str(item.get("name") or ""),
             ))
