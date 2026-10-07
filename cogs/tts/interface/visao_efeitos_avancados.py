@@ -9,7 +9,6 @@ import discord
 from .visoes_base import (
     DURACAO_DESPACHO_PAINEL_TTS,
     DURACAO_EXPIRACAO_PAINEL_TTS,
-    mensagem_painel_expirado,
 )
 
 
@@ -31,14 +30,6 @@ def _engine_name(value: object) -> str:
         "google_tts": "gtts",
     }
     return aliases.get(engine, engine)
-
-
-def _engine_label(engine: str) -> str:
-    if engine == "edge":
-        return "Edge"
-    if engine == "gtts":
-        return "gTTS"
-    return engine
 
 
 def _effect_detail(effect: str, level: int) -> str:
@@ -63,12 +54,39 @@ def _effect_detail(effect: str, level: int) -> str:
     )[level - 1]
 
 
+def _resolve_exclusive_levels(
+    original_nightcore: int,
+    original_slowed: int,
+    nightcore: int,
+    slowed: int,
+) -> tuple[int, int]:
+    """Mantém Nightcore/Slowed exclusivos sem rejeitar o modal."""
+    nightcore = _level(nightcore)
+    slowed = _level(slowed)
+    if not (nightcore and slowed):
+        return nightcore, slowed
+
+    nightcore_turned_on = _level(original_nightcore) == 0 and nightcore > 0
+    slowed_turned_on = _level(original_slowed) == 0 and slowed > 0
+    if nightcore_turned_on and not slowed_turned_on:
+        return nightcore, 0
+    if slowed_turned_on and not nightcore_turned_on:
+        return 0, slowed
+    if nightcore != _level(original_nightcore) and slowed == _level(original_slowed):
+        return nightcore, 0
+    if slowed != _level(original_slowed) and nightcore == _level(original_nightcore):
+        return 0, slowed
+
+    # Se ambos forem ligados na mesma edição, o Discord não informa a ordem
+    # dos cliques dos RadioGroups; Slowed prevalece de forma determinística.
+    return 0, slowed
+
+
 def _radio_group(effect: str, current: int) -> discord.ui.RadioGroup:
     group = discord.ui.RadioGroup(custom_id=f"tts_advanced_{effect}", required=True)
     group.add_option(
         label="Desligado",
         value="0",
-        description="Não aplica este efeito ao TTS.",
         default=current == 0,
     )
 
@@ -85,20 +103,18 @@ def _radio_group(effect: str, current: int) -> discord.ui.RadioGroup:
             "Velocidade e tom −24%.",
         )
     else:
-        descriptions = (
-            "Ambiência curta e discreta.",
-            "Ambiência média e perceptível.",
-            "Ambiência forte com cauda controlada.",
-        )
+        descriptions = (None, None, None)
 
     for level, description in enumerate(descriptions, start=1):
         strength = ("Leve", "Médio", "Forte")[level - 1]
-        group.add_option(
-            label=f"Nível {level} · {strength}",
-            value=str(level),
-            description=description,
-            default=current == level,
-        )
+        option_kwargs = {
+            "label": f"Nível {level} · {strength}",
+            "value": str(level),
+            "default": current == level,
+        }
+        if description:
+            option_kwargs["description"] = description
+        group.add_option(**option_kwargs)
     return group
 
 
@@ -109,6 +125,8 @@ class ModalEfeitosAvancadosTTS(discord.ui.Modal, title="Editar efeitos do TTS"):
         super().__init__(timeout=300.0)
         self.panel = panel
         night, slowed, reverb = panel._levels()
+        self.original_nightcore = night
+        self.original_slowed = slowed
 
         self.nightcore = _radio_group("nightcore", night)
         self.slowed = _radio_group("slowed", slowed)
@@ -138,18 +156,14 @@ class ModalEfeitosAvancadosTTS(discord.ui.Modal, title="Editar efeitos do TTS"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.panel.owner_id:
-            await interaction.response.send_message(
-                "Esse painel pertence a quem abriu o comando.",
-                ephemeral=True,
-            )
+            with contextlib.suppress(Exception):
+                await interaction.response.defer()
             return
 
         await self.panel._reload()
         if not self.panel._engine_is_eligible():
-            await interaction.response.send_message(
-                "Sua engine atual não é Edge nem gTTS. Nenhuma configuração foi alterada.",
-                ephemeral=True,
-            )
+            with contextlib.suppress(Exception):
+                await interaction.response.edit_message(view=self.panel)
             return
 
         try:
@@ -157,20 +171,17 @@ class ModalEfeitosAvancadosTTS(discord.ui.Modal, title="Editar efeitos do TTS"):
             slowed = _level(self.slowed.value)
             reverb = _level(self.reverb.value)
         except (TypeError, ValueError):
-            await interaction.response.send_message(
-                "Não consegui ler os níveis escolhidos. Abra o painel novamente.",
-                ephemeral=True,
-            )
+            with contextlib.suppress(Exception):
+                await interaction.response.edit_message(view=self.panel)
             return
 
-        if night and slowed:
-            await interaction.response.send_message(
-                "Nightcore e Slowed são exclusivos. Deixe um deles como **Desligado** e tente novamente.",
-                ephemeral=True,
-            )
-            return
+        night, slowed = _resolve_exclusive_levels(
+            self.original_nightcore,
+            self.original_slowed,
+            night,
+            slowed,
+        )
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
         await self.panel.cog._set_user_tts_and_refresh(
             self.panel.guild_id,
             self.panel.owner_id,
@@ -179,8 +190,10 @@ class ModalEfeitosAvancadosTTS(discord.ui.Modal, title="Editar efeitos do TTS"):
             advanced_reverb_level=reverb,
         )
         await self.panel._reload()
-        await self.panel._refresh_panel_message()
-        await interaction.followup.send("Efeitos atualizados.", ephemeral=True)
+        if interaction.response.is_done():
+            await self.panel._refresh_panel_message()
+        else:
+            await interaction.response.edit_message(view=self.panel)
 
 
 class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
@@ -226,8 +239,7 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
     def _summary_text(self) -> str:
         night, slowed, reverb = self._levels()
         return (
-            "# TTS avançado\n"
-            f"-# {_engine_label(self.engine)} · efeitos pessoais\n\n"
+            "# TTS avançado\n\n"
             f"⚡ **Nightcore**\n-# {_effect_detail('nightcore', night)}\n\n"
             f"🐌 **Slowed**\n-# {_effect_detail('slowed', slowed)}\n\n"
             f"🌊 **Reverb**\n-# {_effect_detail('reverb', reverb)}"
@@ -264,23 +276,16 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self._is_expired():
-            try:
-                message = await self.cog._build_expired_panel_message(self.guild_id, self.panel_kind)
-            except Exception:
-                message = mensagem_painel_expirado(self.panel_kind)
-            if interaction.response.is_done():
-                await interaction.followup.send(message, ephemeral=True)
-            else:
-                await interaction.response.send_message(message, ephemeral=True)
+            with contextlib.suppress(Exception):
+                await interaction.response.defer()
             return False
 
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                "Esse painel pertence a quem abriu o comando.",
-                ephemeral=True,
-            )
+            with contextlib.suppress(Exception):
+                await interaction.response.defer()
             return False
         return True
+
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
         print(
@@ -290,16 +295,9 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
             f"error={repr(error)}"
         )
         with contextlib.suppress(Exception):
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    "Essa interação falhou. Abra o `_advanced` novamente.",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    "Essa interação falhou. Abra o `_advanced` novamente.",
-                    ephemeral=True,
-                )
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+
 
     async def on_timeout(self) -> None:
         pass
@@ -315,12 +313,11 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
         await self._reload()
         if self._engine_is_eligible():
             return True
-        message = "Sua engine atual não é Edge nem gTTS. A configuração salva foi preservada."
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+        with contextlib.suppress(Exception):
+            if not interaction.response.is_done():
+                await interaction.response.defer()
         return False
+
 
     async def _open_modal(self, interaction: discord.Interaction) -> None:
         if not await self._ensure_current_engine_is_eligible(interaction):
@@ -353,8 +350,8 @@ class VisaoEfeitosAvancadosTTS(discord.ui.LayoutView):
 
     async def send(self, interaction: discord.Interaction) -> None:
         if interaction.response.is_done():
-            sent = await interaction.followup.send(view=self, ephemeral=True, wait=True)
+            sent = await interaction.followup.send(view=self, wait=True)
         else:
-            await interaction.response.send_message(view=self, ephemeral=True)
+            await interaction.response.send_message(view=self)
             sent = await interaction.original_response()
         self.message = sent
