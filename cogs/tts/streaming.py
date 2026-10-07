@@ -118,20 +118,32 @@ class SharedSynthesisMixin:
             return False
         task = asyncio.current_task()
         job.pending_io.add(task)
+        received_at = time.monotonic()
         try:
             await job.buffer.append(data)
             if not job.first_audio_ms:
-                now = time.monotonic()
-                job.first_audio_ms = (now - job.started_at) * 1000.0
+                job.first_audio_ms = (received_at - job.started_at) * 1000.0
                 job.network_first_audio_ms = max(0.0, job.first_audio_ms - job.slot_wait_ms)
+                self._record_latency_sample(f'{job.item.engine}_first_byte', job.first_audio_ms)
+                self._record_latency_sample(f'{job.item.engine}_network_first_byte', job.network_first_audio_ms)
             return not job.stop.is_set()
         finally:
             job.pending_io.discard(task)
 
     async def _shared_prefetch_slot(self, job: StreamJob):
-        if job.foreground.is_set() or job.item.engine != 'edge':
+        if job.foreground.is_set():
             return None
-        semaphore = self._get_edge_prefetch_semaphore()
+        if job.item.engine == 'edge':
+            semaphore = self._get_edge_prefetch_semaphore()
+        elif job.item.engine == 'gtts':
+            semaphore = self._get_gtts_prefetch_semaphore()
+        else:
+            return None
+        if semaphore is None:
+            # With one physical gTTS worker, speculative work must not occupy
+            # the only slot before its queued speech becomes foreground.
+            await job.foreground.wait()
+            return None
         waiter = asyncio.create_task(semaphore.acquire())
         promotion = asyncio.create_task(job.foreground.wait())
         transferred = False
@@ -318,7 +330,8 @@ class SharedSynthesisMixin:
         handle = None
         try:
             await job.slot_ready.wait()
-            consumer_slot_wait = (time.monotonic() - consumer_started) * 1000
+            slot_ready_at = time.monotonic()
+            consumer_slot_wait = (slot_ready_at - consumer_started) * 1000
             if job.buffer.error is not None:
                 raise job.buffer.error
             edge = item.engine == 'edge'
@@ -347,7 +360,8 @@ class SharedSynthesisMixin:
                 handle._early_source, handle._early_kind = self._make_discord_tts_source_for_item(path, item)
                 handle._early_read = asyncio.create_task(asyncio.to_thread(handle._early_source.read))
             await asyncio.wait_for(job.buffer.wait_for_bytes(minimum), timeout=timeout)
-            handle.first_audio_ms = (time.monotonic() - consumer_started) * 1000
+            ready_at = time.monotonic()
+            handle.first_audio_ms = (ready_at - consumer_started) * 1000
             handle.network_first_audio_ms = max(0, handle.first_audio_ms - consumer_slot_wait)
             handle.first_audio_ready.set()
             item._tts_actual_engine = job.actual_engine
@@ -358,6 +372,9 @@ class SharedSynthesisMixin:
             self._record_average_metric(f'{item.engine}_stream_first_audio_total_ms',
                 f'{item.engine}_stream_first_audio_samples', handle.first_audio_ms)
             self._record_latency_sample(f'{item.engine}_first_audio', handle.first_audio_ms)
+            first_byte_at = job.started_at + job.first_audio_ms / 1000.0
+            self._record_latency_sample(f'{item.engine}_prebuffer_wait',
+                max(0.0, (ready_at - max(slot_ready_at, first_byte_at)) * 1000.0))
             return handle
         except BaseException:
             if handle is not None:

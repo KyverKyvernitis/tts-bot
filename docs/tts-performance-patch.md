@@ -1,5 +1,9 @@
 # Patch de desempenho TTS — 8 de setembro de 2026
 
+> Relatório histórico da versão de setembro. As otimizações e os padrões atuais
+> da VPS, incluindo `_advanced`, estão em
+> [tts-vps-latency-20261007.md](tts-vps-latency-20261007.md).
+
 Implementação sobre `repo-20260906-195842.zip`. Este pacote contém somente arquivos novos ou alterados e pode ser aplicado na raiz pelo atualizador normal do bot. Não é uma cópia completa do projeto.
 
 SHA-256 da base: `c40e506009da74cf073c9c0fc826d98b9031f6b8390a529f5a5abb1fd396c354`.

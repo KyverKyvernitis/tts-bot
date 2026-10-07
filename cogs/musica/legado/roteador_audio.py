@@ -45,6 +45,7 @@ from ..agente_telefone.monitor import iniciar_monitor_music_agent
 from ..runtime_telefone.agente.efeitos import payload_efeitos_tts
 from ..agente_telefone.estado import atualizar_estado_controle_remoto, usar_controles_fila_remota
 from ..integracoes.status_canal import VoiceStatusController
+from ..integracoes.pcm_tts import BufferedPCMSource
 from ..nucleo.fila import (
     chaves_da_faixa,
     chaves_em_uso,
@@ -308,6 +309,8 @@ class MixedAudioSource(discord.AudioSource):
         future = self.loop.create_future()
         overlay = TTSOverlay(source=source, volume=max(0.0, min(2.0, float(volume))), future=future)
         with self._overlay_lock:
+            if self._closed:
+                raise RuntimeError("mixer local encerrou antes da admissão TTS")
             self._overlays.append(overlay)
         return future
 
@@ -633,6 +636,8 @@ class AudioRouter:
     Música usa MixedAudioSource. TTS usa overlay quando existe música ativa; caso contrário,
     cai no playback direto para manter latência baixa.
     """
+
+    supports_prepared_tts_source = True
 
     def __init__(self, bot) -> None:
         self.bot = bot
@@ -4142,6 +4147,24 @@ class AudioRouter:
             return self.should_route_tts_to_music_agent(guild_id, channel_id)
         return self.should_route_tts_to_music_agent(guild_id, channel_id)
 
+    def should_allow_local_tts_streaming(self, guild_id: int, *, vc: Any = None) -> bool:
+        """Only the active local PCM mixer can consume a progressive overlay."""
+        state = self._states.get(int(guild_id))
+        if state is None or str(state.current_backend or "").lower() in {"agent", "lavalink"}:
+            return False
+        source = state.current_source
+        if not isinstance(source, MixedAudioSource) or source._closed:
+            return False
+        if vc is None:
+            guild = self.bot.get_guild(int(guild_id))
+            vc = getattr(guild, "voice_client", None)
+        return bool(
+            not self._is_lavalink_voice_client(vc)
+            and self._vc_is_connected(vc)
+            and self._vc_is_playing(vc)
+            and getattr(vc, "source", None) is source
+        )
+
     _supports_tts_cached_audio = True
 
     async def play_tts_via_music_agent(
@@ -4764,6 +4787,8 @@ class AudioRouter:
         options: str = MUSIC_TTS_FFMPEG_OPTIONS,
         timeout: float = 120.0,
         item=None,
+        prepared=None,
+        stream_error_getter=None,
     ) -> dict[str, Any]:
         """Toca TTS integrado ao player de música mantendo o volume normal da música."""
         loop = asyncio.get_running_loop()
@@ -4772,6 +4797,8 @@ class AudioRouter:
         play_call_ms = 0.0
 
         guild_id = getattr(guild, "id", None) or getattr(getattr(vc, "guild", None), "id", None)
+        if stream_error_getter is not None and not self.should_allow_local_tts_streaming(int(guild_id or 0), vc=vc):
+            raise RuntimeError("posse do mixer mudou antes do despacho TTS progressivo")
         state = self.get_state(int(guild_id)) if guild_id is not None else None
         if state is not None:
             state.tts_voice_touched = True
@@ -4971,27 +4998,71 @@ class AudioRouter:
                 "worker_result": result,
             }
 
-        first_frame = {}
+        first_frame = {"first_frame_observed": False}
         class MeasuredSource(discord.AudioSource):
             def __init__(self, source):
                 self.source = source
+                self._cleaned = False
             def read(self):
                 frame = self.source.read()
-                if frame and not first_frame:
+                if frame and getattr(self.source, "last_read_had_audio", True) and not first_frame["first_frame_observed"]:
                     first_frame['first_frame_at'] = time.monotonic()
                     first_frame['first_frame_observed'] = True
                 return frame
             def is_opus(self):
                 return self.source.is_opus()
             def cleanup(self):
-                self.source.cleanup()
+                if not self._cleaned:
+                    self._cleaned = True
+                    self.source.cleanup()
         source_factory = getattr(item, '_tts_source_factory', None)
         mixing = active_source is not None and not getattr(active_source, '_closed', True) and self._vc_is_playing_or_paused(vc)
-        raw_source = source_factory(path)[0] if callable(source_factory) and not mixing else discord.FFmpegPCMAudio(path, before_options=before_options, options=options)
+        source_kind = "ffmpeg_pcm"
+        source_prime_ms = 0.0
+        source_primed = False
+        raw_source = None
+        if prepared is not None:
+            prepared_source = getattr(prepared, "source", None)
+            matching_path = os.path.abspath(str(getattr(prepared, "path", ""))) == os.path.abspath(path)
+            compatible = prepared_source is not None and (not mixing or not prepared_source.is_opus())
+            if matching_path and compatible:
+                raw_source = prepared.take_source()
+                source_kind = str(getattr(prepared, "source_kind", source_kind))
+                source_prime_ms = float(getattr(prepared, "prime_ms", 0.0) or 0.0)
+                source_primed = True
+            else:
+                prepared.cleanup()
+        if raw_source is None:
+            if callable(source_factory) and not mixing:
+                raw_source, source_kind = source_factory(path)
+            else:
+                raw_source = discord.FFmpegPCMAudio(path, before_options=before_options, options=options)
+        if mixing:
+            raw_source = BufferedPCMSource(raw_source, error_getter=stream_error_getter)
+            try:
+                await raw_source.wait_ready(min(5.0, max(0.1, float(timeout))))
+                # Decoder preparation yields to the loop. The old mixer may
+                # have ended or been replaced while the provider was starting.
+                if (
+                    state.current_source is not active_source
+                    or getattr(active_source, "_closed", True)
+                    or not self._vc_is_connected(vc)
+                    or getattr(vc, "source", None) is not active_source
+                    or str(state.current_backend or "").lower() in {"agent", "lavalink"}
+                ):
+                    raise RuntimeError("posse do mixer mudou durante o preparo TTS")
+            except BaseException:
+                raw_source.cleanup()
+                raise
         source = MeasuredSource(raw_source)
         source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
+        source_details = {
+            "source_prime_ms": source_prime_ms,
+            "source_primed": source_primed,
+            "playback_source": source_kind,
+        }
 
-        if active_source is not None and not getattr(active_source, "_closed", True) and (self._vc_is_playing_or_paused(vc)):
+        if mixing:
             with contextlib.suppress(Exception):
                 active_source.set_duck_factor(MUSIC_TTS_LOCAL_DUCK_FACTOR)
             logger.info(
@@ -5000,7 +5071,12 @@ class AudioRouter:
                 MUSIC_TTS_LOCAL_DUCK_FACTOR * 100.0,
                 getattr(active_source, "normal_music_volume", state.volume if state is not None else 0.0),
             )
-            future = active_source.add_tts(source, volume=TTS_VOLUME)
+            try:
+                future = active_source.add_tts(source, volume=TTS_VOLUME)
+            except BaseException:
+                source.cleanup()
+                raise
+            playback_started_at = time.monotonic()
             try:
                 await asyncio.wait_for(future, timeout=max(1.0, float(timeout)))
             except asyncio.CancelledError:
@@ -5020,7 +5096,8 @@ class AudioRouter:
                         "play_call_ms": play_call_ms,
                         "playback_ms": playback_ms,
                         "playback_started_at": playback_started_at,
-                **first_frame,
+                        **first_frame,
+                        **source_details,
                         "tts_overlay_cancelled": True,
                         "tts_local_ducked": True,
                         "tts_local_duck_percent": MUSIC_TTS_LOCAL_DUCK_FACTOR * 100.0,
@@ -5034,6 +5111,7 @@ class AudioRouter:
                 "playback_ms": playback_ms,
                 "playback_started_at": playback_started_at,
                 **first_frame,
+                **source_details,
                 "tts_local_ducked": True,
                 "tts_local_duck_percent": MUSIC_TTS_LOCAL_DUCK_FACTOR * 100.0,
             }
@@ -5071,6 +5149,7 @@ class AudioRouter:
                 "playback_ms": playback_ms,
                 "playback_started_at": playback_started_at,
                 **first_frame,
+                **source_details,
                 "tts_agent_ducked": bool(agent_ducked),
                 "tts_agent_duck_percent": MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT if agent_ducked else 0,
             }

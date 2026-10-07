@@ -163,6 +163,9 @@ TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS = max(TTS_EDGE_STREAM_PREBUFFER_MS, min(1200,
 TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS = max(4, _parse_int(os.getenv("TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS", "20"), 20))
 TTS_EDGE_STREAM_STALL_THRESHOLD_MS = max(20.0, _parse_float(os.getenv("TTS_EDGE_STREAM_STALL_THRESHOLD_MS", "35.0"), 35.0))
 TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED = _parse_bool(os.getenv("TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED", "true"), True)
+# MP3 progressivo tem formato conhecido; reduzir a sondagem antecipa o PCM.
+# O valor antigo (2048) continua disponível para rollback ou links instáveis.
+TTS_STREAM_FFMPEG_PROBESIZE_BYTES = min(16384, max(32, _parse_int(os.getenv("TTS_STREAM_FFMPEG_PROBESIZE_BYTES", "512"), 512)))
 TTS_EDGE_CIRCUIT_BREAKER_ENABLED = _parse_bool(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_ENABLED", "true"), True)
 TTS_EDGE_CIRCUIT_BREAKER_FAILURES = max(2, _parse_int(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_FAILURES", "3"), 3))
 TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = max(5.0, _parse_float(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "15.0"), 15.0))
@@ -174,6 +177,9 @@ TTS_EDGE_PREFETCH_CONCURRENCY = max(1, _parse_int(os.getenv("TTS_EDGE_PREFETCH_C
 # gTTS: executor limitado mantém a concorrência física correta mesmo quando uma
 # coroutine expira. Os timeouts nativos impedem thread zumbi em requests.
 TTS_GTTS_CONCURRENCY = _parse_int(os.getenv("TTS_GTTS_CONCURRENCY", "2"), 2)
+# Uma vaga continua disponível para a fala atual. Com uma só vaga, a próxima
+# fala só inicia a síntese quando for promovida, sem ocupar o executor antes.
+TTS_GTTS_PREFETCH_CONCURRENCY = max(0, min(max(0, TTS_GTTS_CONCURRENCY - 1), _parse_int(os.getenv("TTS_GTTS_PREFETCH_CONCURRENCY", "1"), 1)))
 TTS_GTTS_TIMEOUT_SECONDS = max(5.0, _parse_float(os.getenv("TTS_GTTS_TIMEOUT_SECONDS", "20.0"), 20.0))
 TTS_GTTS_CONNECT_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("TTS_GTTS_CONNECT_TIMEOUT_SECONDS", "3.5"), 3.5))
 TTS_GTTS_READ_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_GTTS_READ_TIMEOUT_SECONDS", "8.0"), 8.0))
@@ -183,9 +189,9 @@ TTS_GTTS_PERSISTENT_SESSION_ENABLED = _parse_bool(os.getenv("TTS_GTTS_PERSISTENT
 TTS_GTTS_SESSION_TTL_SECONDS = max(10.0, _parse_float(os.getenv("TTS_GTTS_SESSION_TTL_SECONDS", "90.0"), 90.0))
 TTS_GTTS_SESSION_MAX_REQUESTS = max(4, _parse_int(os.getenv("TTS_GTTS_SESSION_MAX_REQUESTS", "256"), 256))
 TTS_GTTS_STREAMING_ENABLED = _parse_bool(os.getenv("TTS_GTTS_STREAMING_ENABLED", "true"), True)
-# Acima de 100 caracteres o gTTS divide o texto em mais de uma requisição; o
-# stream permite tocar a primeira parte enquanto as próximas são sintetizadas.
-TTS_GTTS_STREAM_MIN_CHARS = max(1, _parse_int(os.getenv("TTS_GTTS_STREAM_MIN_CHARS", "101"), 101))
+# Mesmo com uma única resposta, o FFmpeg pode iniciar durante a espera HTTP.
+# Definir 101 recupera o comportamento anterior para mensagens curtas.
+TTS_GTTS_STREAM_MIN_CHARS = max(1, _parse_int(os.getenv("TTS_GTTS_STREAM_MIN_CHARS", "1"), 1))
 TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS", "6.0"), 6.0))
 TTS_CACHE_MAINTENANCE_DELAY_SECONDS = max(0.1, _parse_float(os.getenv("TTS_CACHE_MAINTENANCE_DELAY_SECONDS", "0.75"), 0.75))
 TTS_LATENCY_SAMPLE_WINDOW = max(32, _parse_int(os.getenv("TTS_LATENCY_SAMPLE_WINDOW", "256"), 256))
@@ -359,6 +365,7 @@ TTS_CACHE_INDEX_SWEEP_MAX_ENTRIES = max(4, _parse_int(os.getenv("TTS_CACHE_INDEX
 TTS_STREAM_MEMORY_BUDGET_BYTES = max(1048576, _parse_int(os.getenv("TTS_STREAM_MEMORY_BUDGET_BYTES", "16777216"), 16777216))
 TTS_FFMPEG_OVERLAP_ENABLED = _parse_bool(os.getenv("TTS_FFMPEG_OVERLAP_ENABLED", "true"), True)
 TTS_FFMPEG_OVERLAP_CONCURRENCY = max(1, min(4, _parse_int(os.getenv("TTS_FFMPEG_OVERLAP_CONCURRENCY", "2"), 2)))
-# Optional: background Opus preparation consumes CPU; enable after measuring the VPS.
-TTS_PREPARED_OPUS_CACHE_ENABLED = _parse_bool(os.getenv("TTS_PREPARED_OPUS_CACHE_ENABLED", "false"), False)
+# Prepara somente variantes repetidas e durante ociosidade, com orçamento fixo.
+# Uma configuração explícita false mantém o cache preparado desativado.
+TTS_PREPARED_OPUS_CACHE_ENABLED = _parse_bool(os.getenv("TTS_PREPARED_OPUS_CACHE_ENABLED", "true"), True)
 TTS_PREPARED_OPUS_CACHE_MAX_BYTES = max(524288, _parse_int(os.getenv("TTS_PREPARED_OPUS_CACHE_MAX_BYTES", "8388608"), 8388608))

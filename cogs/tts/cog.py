@@ -194,6 +194,8 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         self._public_panel_states: dict[int, dict] = {}
         self._status_views_by_target: dict[tuple[int, int], weakref.WeakSet[TTSStatusView]] = {}
         self._status_refresh_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._status_refresh_tasks: dict[tuple[int, int], asyncio.Task] = {}
+        self._status_refresh_pending: set[tuple[int, int]] = set()
         self._last_announced_author_by_guild: dict[int, int] = {}
         self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
         self._voice_restore_task: asyncio.Task | None = None
@@ -2018,12 +2020,17 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         return
 
 
-    async def _set_user_tts_and_refresh(self, guild_id: int, user_id: int, **kwargs):
+    async def _set_user_tts_and_refresh(
+        self, guild_id: int, user_id: int, *, background_refresh: bool = False, **kwargs
+    ):
         db = self._get_db()
         if db is None:
             raise RuntimeError("settings db unavailable")
         result = await self._maybe_await(db.set_user_tts(guild_id, user_id, **kwargs))
-        await self._notify_status_views_changed(guild_id, user_id)
+        if background_refresh:
+            await self._notify_status_views_changed(guild_id, user_id, background=True)
+        else:
+            await self._notify_status_views_changed(guild_id, user_id)
         return result
 
     async def _reset_user_tts_and_refresh(self, guild_id: int, user_id: int):
@@ -2060,10 +2067,41 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             self._status_views_by_target.pop(key, None)
             self._status_refresh_locks.pop(key, None)
 
-    async def _notify_status_views_changed(self, guild_id: int, user_id: int) -> None:
+    async def _notify_status_views_changed(
+        self, guild_id: int, user_id: int, *, background: bool = False
+    ) -> None:
         key = (int(guild_id), int(user_id))
         views = self._status_views_by_target.get(key)
         if not views:
+            return
+        if background:
+            self._status_refresh_pending.add(key)
+            task = self._status_refresh_tasks.get(key)
+            if task is not None and not task.done():
+                return
+
+            async def refresh() -> None:
+                try:
+                    # Mudanças admitidas juntas compartilham o mesmo refresh.
+                    await asyncio.sleep(0)
+                    while key in self._status_refresh_pending:
+                        self._status_refresh_pending.discard(key)
+                        await self._notify_status_views_changed(guild_id, user_id)
+                except Exception:
+                    logger.exception("[tts_status_refresh] falha no refresh agrupado | guild=%s user=%s", guild_id, user_id)
+
+            task = self._schedule_tts_background(refresh())
+            if task is not None:
+                self._status_refresh_tasks[key] = task
+
+                def completed(done: asyncio.Task) -> None:
+                    if self._status_refresh_tasks.get(key) is done:
+                        self._status_refresh_tasks.pop(key, None)
+                        self._status_refresh_pending.discard(key)
+
+                task.add_done_callback(completed)
+            else:
+                self._status_refresh_pending.discard(key)
             return
         active_views = [view for view in list(views) if getattr(view, "message", None) is not None and not view.is_finished()]
         if not active_views:
@@ -3477,6 +3515,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         return await asyncio.shield(task)
 
     async def _process_tts_message(self, message: discord.Message):
+        received_at_monotonic = time.monotonic()
         gate = await analisar_mensagem_para_tts(self, message)
 
         if gate.should_dispatch_prefix_command:
@@ -3553,6 +3592,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             guild_defaults=guild_defaults,
             active_prefix=active_prefix,
             forced_engine=forced_engine,
+            received_at_monotonic=received_at_monotonic,
         )
         payload = dispatch_result.payload
         if payload is None:

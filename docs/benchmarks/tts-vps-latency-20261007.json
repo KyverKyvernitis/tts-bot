@@ -1,0 +1,1694 @@
+{
+  "scope": "offline_local_first_pcm_and_audio_source_read",
+  "production_benchmark": false,
+  "baseline": {
+    "schema": 1,
+    "scope": "offline_local_first_pcm_and_audio_source_read",
+    "discord_voice_first_frame_ms": null,
+    "limitations": [
+      "synthetic_sine_mp3_and_provider_delay",
+      "no_network_provider_voice_player_or_user_audio",
+      "sequential_cold_sources_without_production_queue_or_cpu_contention",
+      "p95_interpolated_from_small_local_sample"
+    ],
+    "versions": {
+      "python": "3.12.14",
+      "ffmpeg": "ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers",
+      "discord_py": "2.7.1",
+      "gtts": "2.5.4",
+      "edge_tts": "7.2.8"
+    },
+    "runs": 7,
+    "warmup_per_case": 1,
+    "timeout_seconds_per_trial": 10,
+    "temp_storage": "ram",
+    "fixture": {
+      "mp3_bytes": 12384,
+      "mp3_sha256": "a97dad17d1ffea07b124e84ab1f78383f551fe93f00dacedc78f5fbef34fc1c9",
+      "duration_seconds": 2,
+      "sample_rate": 24000,
+      "bitrate_kbps": 48,
+      "chunk_bytes": 512,
+      "initial_delay_ms": 80,
+      "chunk_interval_ms": 8,
+      "runtime_provider_delay_ms": 120
+    },
+    "filters": {
+      "none": "",
+      "nightcore3_reverb3": "aresample=48000,asetrate=62400,aresample=48000,aecho=0.82:0.58:55|120|250:0.28|0.17|0.10",
+      "slowed3_reverb3": "aresample=48000,asetrate=36480,aresample=48000,aecho=0.82:0.58:55|120|250:0.28|0.17|0.10"
+    },
+    "cases": {
+      "progressive_mp3/none/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.101,
+            "p95_ms": 286.07
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.439,
+            "p95_ms": 0.522
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 42.346,
+            "p95_ms": 42.734
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 122.996,
+            "p95_ms": 123.498
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 279.711,
+            "p95_ms": 280.619
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.691,
+            "p95_ms": 80.801
+          }
+        },
+        "pcm_bytes": [
+          396288
+        ],
+        "pcm_sha256": [
+          "1160c8f1e8b4471fe38a93d5a37a6b1bb89283efccc1eff170c25f4048a737b3"
+        ]
+      },
+      "progressive_mp3/none/probesize1024": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.318,
+            "p95_ms": 286.395
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.554,
+            "p95_ms": 0.713
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 26.104,
+            "p95_ms": 26.382
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 107.035,
+            "p95_ms": 107.232
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 280.035,
+            "p95_ms": 281.536
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.813,
+            "p95_ms": 80.964
+          }
+        },
+        "pcm_bytes": [
+          396288
+        ],
+        "pcm_sha256": [
+          "1160c8f1e8b4471fe38a93d5a37a6b1bb89283efccc1eff170c25f4048a737b3"
+        ]
+      },
+      "progressive_mp3/none/probesize512": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.152,
+            "p95_ms": 285.772
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.467,
+            "p95_ms": 0.584
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 9.626,
+            "p95_ms": 10.722
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 90.332,
+            "p95_ms": 91.58
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 280.026,
+            "p95_ms": 282.5
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.769,
+            "p95_ms": 80.894
+          }
+        },
+        "pcm_bytes": [
+          396288
+        ],
+        "pcm_sha256": [
+          "1160c8f1e8b4471fe38a93d5a37a6b1bb89283efccc1eff170c25f4048a737b3"
+        ]
+      },
+      "complete_mp3/none/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 62.845,
+            "p95_ms": 66.917
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.481,
+            "p95_ms": 0.633
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 57.781,
+            "p95_ms": 60.29
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 58.243,
+            "p95_ms": 60.802
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 0.528,
+            "p95_ms": 0.682
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 0.522,
+            "p95_ms": 0.675
+          }
+        },
+        "pcm_bytes": [
+          396288
+        ],
+        "pcm_sha256": [
+          "1160c8f1e8b4471fe38a93d5a37a6b1bb89283efccc1eff170c25f4048a737b3"
+        ]
+      },
+      "gtts_short_runtime/none/min_chars101": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 179.766,
+            "p95_ms": 184.1
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.017
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 121.791,
+            "p95_ms": 122.128
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.556,
+            "p95_ms": 120.759
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.552,
+            "p95_ms": 120.755
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 59.032,
+            "p95_ms": 63.592
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 179.637,
+            "p95_ms": 184.021
+          }
+        },
+        "pcm_bytes": [
+          395520
+        ],
+        "pcm_sha256": [
+          "ce276e43d1b44000804e8b4f9c2fd850c80d1c507fe3d3ed7e960e4f125ba121"
+        ],
+        "audio_route": [
+          "generated"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "gtts_short_runtime/none/min_chars1": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 123.312,
+            "p95_ms": 127.509
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.001
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 0.864,
+            "p95_ms": 0.951
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.506,
+            "p95_ms": 120.54
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.503,
+            "p95_ms": 120.537
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 2.781,
+            "p95_ms": 7.025
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 123.152,
+            "p95_ms": 127.44
+          }
+        },
+        "pcm_bytes": [
+          395520
+        ],
+        "pcm_sha256": [
+          "ce276e43d1b44000804e8b4f9c2fd850c80d1c507fe3d3ed7e960e4f125ba121"
+        ],
+        "audio_route": [
+          "progressive"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "progressive_mp3/nightcore3_reverb3/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 284.304,
+            "p95_ms": 285.582
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.417,
+            "p95_ms": 0.508
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 42.685,
+            "p95_ms": 43.197
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 123.326,
+            "p95_ms": 123.901
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 280.369,
+            "p95_ms": 280.835
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.709,
+            "p95_ms": 80.782
+          }
+        },
+        "pcm_bytes": [
+          352840
+        ],
+        "pcm_sha256": [
+          "58aa9d656ca0112d3cff7977090d9d078ec1e3d37454825646ed3ac31ce60af0"
+        ]
+      },
+      "progressive_mp3/nightcore3_reverb3/probesize1024": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 284.12,
+            "p95_ms": 286.441
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.564,
+            "p95_ms": 0.64
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 26.285,
+            "p95_ms": 26.617
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 107.055,
+            "p95_ms": 107.537
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 280.607,
+            "p95_ms": 282.418
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.823,
+            "p95_ms": 80.92
+          }
+        },
+        "pcm_bytes": [
+          352840
+        ],
+        "pcm_sha256": [
+          "58aa9d656ca0112d3cff7977090d9d078ec1e3d37454825646ed3ac31ce60af0"
+        ]
+      },
+      "progressive_mp3/nightcore3_reverb3/probesize512": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 285.472,
+            "p95_ms": 287.927
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.591,
+            "p95_ms": 0.788
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 9.92,
+            "p95_ms": 10.031
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 90.662,
+            "p95_ms": 91.017
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 281.619,
+            "p95_ms": 283.25
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.839,
+            "p95_ms": 81.033
+          }
+        },
+        "pcm_bytes": [
+          352840
+        ],
+        "pcm_sha256": [
+          "58aa9d656ca0112d3cff7977090d9d078ec1e3d37454825646ed3ac31ce60af0"
+        ]
+      },
+      "complete_mp3/nightcore3_reverb3/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 63.336,
+            "p95_ms": 67.277
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.593,
+            "p95_ms": 0.691
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 56.54,
+            "p95_ms": 60.14
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 57.045,
+            "p95_ms": 60.802
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 0.624,
+            "p95_ms": 0.738
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 0.618,
+            "p95_ms": 0.73
+          }
+        },
+        "pcm_bytes": [
+          352840
+        ],
+        "pcm_sha256": [
+          "58aa9d656ca0112d3cff7977090d9d078ec1e3d37454825646ed3ac31ce60af0"
+        ]
+      },
+      "gtts_short_runtime/nightcore3_reverb3/min_chars101": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 179.586,
+            "p95_ms": 185.053
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.015
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 121.859,
+            "p95_ms": 121.995
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.525,
+            "p95_ms": 120.62
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.522,
+            "p95_ms": 120.615
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 59.064,
+            "p95_ms": 64.501
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 179.336,
+            "p95_ms": 184.973
+          }
+        },
+        "pcm_bytes": [
+          349440
+        ],
+        "pcm_sha256": [
+          "10ccc501d5bbf80a82a02cb4a5acba1178da6cee8570f2d557916f1fe413e8eb"
+        ],
+        "audio_route": [
+          "generated"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "gtts_short_runtime/nightcore3_reverb3/min_chars1": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 123.826,
+            "p95_ms": 124.031
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.002
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 1.013,
+            "p95_ms": 14.245
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.503,
+            "p95_ms": 120.617
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.497,
+            "p95_ms": 120.613
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 3.316,
+            "p95_ms": 3.442
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 123.548,
+            "p95_ms": 123.782
+          }
+        },
+        "pcm_bytes": [
+          349440
+        ],
+        "pcm_sha256": [
+          "10ccc501d5bbf80a82a02cb4a5acba1178da6cee8570f2d557916f1fe413e8eb"
+        ],
+        "audio_route": [
+          "progressive"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "progressive_mp3/slowed3_reverb3/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.683,
+            "p95_ms": 286.93
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.431,
+            "p95_ms": 0.564
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 42.456,
+            "p95_ms": 42.659
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 123.203,
+            "p95_ms": 123.458
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 279.991,
+            "p95_ms": 283.254
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.691,
+            "p95_ms": 80.802
+          }
+        },
+        "pcm_bytes": [
+          569432
+        ],
+        "pcm_sha256": [
+          "4a54e078f0c9b7029ada2f509250f495f0f15f055d8cf57b8ee0d6a0acb628f0"
+        ]
+      },
+      "progressive_mp3/slowed3_reverb3/probesize1024": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 284.688,
+            "p95_ms": 285.23
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.576,
+            "p95_ms": 0.798
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 26.535,
+            "p95_ms": 26.998
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 107.374,
+            "p95_ms": 107.819
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 281.174,
+            "p95_ms": 281.628
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.837,
+            "p95_ms": 81.091
+          }
+        },
+        "pcm_bytes": [
+          569432
+        ],
+        "pcm_sha256": [
+          "4a54e078f0c9b7029ada2f509250f495f0f15f055d8cf57b8ee0d6a0acb628f0"
+        ]
+      },
+      "progressive_mp3/slowed3_reverb3/probesize512": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 285.333,
+            "p95_ms": 289.671
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.5,
+            "p95_ms": 0.833
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 9.928,
+            "p95_ms": 10.497
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 90.696,
+            "p95_ms": 91.346
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 281.517,
+            "p95_ms": 284.706
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.747,
+            "p95_ms": 81.087
+          }
+        },
+        "pcm_bytes": [
+          569432
+        ],
+        "pcm_sha256": [
+          "4a54e078f0c9b7029ada2f509250f495f0f15f055d8cf57b8ee0d6a0acb628f0"
+        ]
+      },
+      "complete_mp3/slowed3_reverb3/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 64.496,
+            "p95_ms": 70.65
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.485,
+            "p95_ms": 0.607
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 57.047,
+            "p95_ms": 64.063
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 57.528,
+            "p95_ms": 64.592
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 0.519,
+            "p95_ms": 0.646
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 0.512,
+            "p95_ms": 0.64
+          }
+        },
+        "pcm_bytes": [
+          569432
+        ],
+        "pcm_sha256": [
+          "4a54e078f0c9b7029ada2f509250f495f0f15f055d8cf57b8ee0d6a0acb628f0"
+        ]
+      },
+      "gtts_short_runtime/slowed3_reverb3/min_chars101": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 182.25,
+            "p95_ms": 185.024
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.002
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 121.854,
+            "p95_ms": 121.998
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.56,
+            "p95_ms": 120.644
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.555,
+            "p95_ms": 120.64
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 61.729,
+            "p95_ms": 64.501
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 182.138,
+            "p95_ms": 184.911
+          }
+        },
+        "pcm_bytes": [
+          568320
+        ],
+        "pcm_sha256": [
+          "6989246c828f91996480845784d0e80a1c1405be2459172ba4d1925a117d56dc"
+        ],
+        "audio_route": [
+          "generated"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "gtts_short_runtime/slowed3_reverb3/min_chars1": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 123.732,
+            "p95_ms": 124.42
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.001
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 0.905,
+            "p95_ms": 0.957
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.465,
+            "p95_ms": 120.534
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.462,
+            "p95_ms": 120.53
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 3.271,
+            "p95_ms": 3.958
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 123.411,
+            "p95_ms": 124.297
+          }
+        },
+        "pcm_bytes": [
+          568320
+        ],
+        "pcm_sha256": [
+          "6989246c828f91996480845784d0e80a1c1405be2459172ba4d1925a117d56dc"
+        ],
+        "audio_route": [
+          "progressive"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      }
+    },
+    "failures": []
+  },
+  "updated": {
+    "schema": 1,
+    "scope": "offline_local_first_pcm_and_audio_source_read",
+    "discord_voice_first_frame_ms": null,
+    "limitations": [
+      "synthetic_sine_mp3_and_provider_delay",
+      "no_network_provider_voice_player_or_user_audio",
+      "sequential_cold_sources_without_production_queue_or_cpu_contention",
+      "p95_interpolated_from_small_local_sample"
+    ],
+    "versions": {
+      "python": "3.12.14",
+      "ffmpeg": "ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers",
+      "discord_py": "2.7.1",
+      "gtts": "2.5.4",
+      "edge_tts": "7.2.8"
+    },
+    "runs": 7,
+    "warmup_per_case": 1,
+    "timeout_seconds_per_trial": 10,
+    "temp_storage": "ram",
+    "fixture": {
+      "mp3_bytes": 12384,
+      "mp3_sha256": "a97dad17d1ffea07b124e84ab1f78383f551fe93f00dacedc78f5fbef34fc1c9",
+      "duration_seconds": 2,
+      "sample_rate": 24000,
+      "bitrate_kbps": 48,
+      "chunk_bytes": 512,
+      "initial_delay_ms": 80,
+      "chunk_interval_ms": 8,
+      "runtime_provider_delay_ms": 120
+    },
+    "filters": {
+      "none": "",
+      "nightcore3_reverb3": "aresample=48000,asetrate=62400,aresample=48000,aecho=0.82:0.58:55|120|250:0.28|0.17|0.10",
+      "slowed3_reverb3": "aresample=48000,asetrate=36480,aresample=48000,aecho=0.82:0.58:55|120|250:0.28|0.17|0.10"
+    },
+    "cases": {
+      "progressive_mp3/none/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.78,
+            "p95_ms": 285.559
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.538,
+            "p95_ms": 0.715
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 42.372,
+            "p95_ms": 42.942
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 123.197,
+            "p95_ms": 123.9
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 279.994,
+            "p95_ms": 281.468
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.821,
+            "p95_ms": 80.987
+          }
+        },
+        "pcm_bytes": [
+          396288
+        ],
+        "pcm_sha256": [
+          "1160c8f1e8b4471fe38a93d5a37a6b1bb89283efccc1eff170c25f4048a737b3"
+        ]
+      },
+      "progressive_mp3/none/probesize1024": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.737,
+            "p95_ms": 286.183
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.516,
+            "p95_ms": 3.241
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 25.831,
+            "p95_ms": 26.25
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 106.84,
+            "p95_ms": 109.424
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 280.55,
+            "p95_ms": 283.033
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.851,
+            "p95_ms": 83.528
+          }
+        },
+        "pcm_bytes": [
+          396288
+        ],
+        "pcm_sha256": [
+          "1160c8f1e8b4471fe38a93d5a37a6b1bb89283efccc1eff170c25f4048a737b3"
+        ]
+      },
+      "progressive_mp3/none/probesize512": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.445,
+            "p95_ms": 286.177
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.525,
+            "p95_ms": 0.673
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 9.53,
+            "p95_ms": 9.615
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 90.376,
+            "p95_ms": 90.428
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 280.045,
+            "p95_ms": 283.053
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.79,
+            "p95_ms": 80.917
+          }
+        },
+        "pcm_bytes": [
+          396288
+        ],
+        "pcm_sha256": [
+          "1160c8f1e8b4471fe38a93d5a37a6b1bb89283efccc1eff170c25f4048a737b3"
+        ]
+      },
+      "complete_mp3/none/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 62.656,
+            "p95_ms": 71.894
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.552,
+            "p95_ms": 0.671
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 58.491,
+            "p95_ms": 66.961
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 59.107,
+            "p95_ms": 67.53
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 0.586,
+            "p95_ms": 0.708
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 0.58,
+            "p95_ms": 0.701
+          }
+        },
+        "pcm_bytes": [
+          396288
+        ],
+        "pcm_sha256": [
+          "1160c8f1e8b4471fe38a93d5a37a6b1bb89283efccc1eff170c25f4048a737b3"
+        ]
+      },
+      "gtts_short_runtime/none/min_chars101": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 181.718,
+            "p95_ms": 185.857
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.001
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 121.971,
+            "p95_ms": 122.151
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.548,
+            "p95_ms": 120.639
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.544,
+            "p95_ms": 120.629
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 61.206,
+            "p95_ms": 65.34
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 181.619,
+            "p95_ms": 185.756
+          }
+        },
+        "pcm_bytes": [
+          395520
+        ],
+        "pcm_sha256": [
+          "ce276e43d1b44000804e8b4f9c2fd850c80d1c507fe3d3ed7e960e4f125ba121"
+        ],
+        "audio_route": [
+          "generated"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "gtts_short_runtime/none/min_chars1": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 123.337,
+            "p95_ms": 123.655
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.001
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 0.884,
+            "p95_ms": 1.11
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.524,
+            "p95_ms": 120.725
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.52,
+            "p95_ms": 120.72
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 2.746,
+            "p95_ms": 3.137
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 123.21,
+            "p95_ms": 123.576
+          }
+        },
+        "pcm_bytes": [
+          395520
+        ],
+        "pcm_sha256": [
+          "ce276e43d1b44000804e8b4f9c2fd850c80d1c507fe3d3ed7e960e4f125ba121"
+        ],
+        "audio_route": [
+          "progressive"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "progressive_mp3/nightcore3_reverb3/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.721,
+            "p95_ms": 284.618
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.425,
+            "p95_ms": 0.473
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 42.577,
+            "p95_ms": 43.228
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 123.265,
+            "p95_ms": 123.902
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 280.23,
+            "p95_ms": 280.651
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.675,
+            "p95_ms": 80.715
+          }
+        },
+        "pcm_bytes": [
+          352840
+        ],
+        "pcm_sha256": [
+          "58aa9d656ca0112d3cff7977090d9d078ec1e3d37454825646ed3ac31ce60af0"
+        ]
+      },
+      "progressive_mp3/nightcore3_reverb3/probesize1024": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.966,
+            "p95_ms": 285.313
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.486,
+            "p95_ms": 0.634
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 26.381,
+            "p95_ms": 26.712
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 107.108,
+            "p95_ms": 107.494
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 280.691,
+            "p95_ms": 281.592
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.732,
+            "p95_ms": 80.901
+          }
+        },
+        "pcm_bytes": [
+          352840
+        ],
+        "pcm_sha256": [
+          "58aa9d656ca0112d3cff7977090d9d078ec1e3d37454825646ed3ac31ce60af0"
+        ]
+      },
+      "progressive_mp3/nightcore3_reverb3/probesize512": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 284.876,
+            "p95_ms": 285.992
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.498,
+            "p95_ms": 0.528
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 9.796,
+            "p95_ms": 9.908
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 90.594,
+            "p95_ms": 90.627
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 281.467,
+            "p95_ms": 282.072
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.728,
+            "p95_ms": 80.815
+          }
+        },
+        "pcm_bytes": [
+          352840
+        ],
+        "pcm_sha256": [
+          "58aa9d656ca0112d3cff7977090d9d078ec1e3d37454825646ed3ac31ce60af0"
+        ]
+      },
+      "complete_mp3/nightcore3_reverb3/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 62.829,
+            "p95_ms": 66.417
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.489,
+            "p95_ms": 0.526
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 57.407,
+            "p95_ms": 61.635
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 57.915,
+            "p95_ms": 62.193
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 0.521,
+            "p95_ms": 0.565
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 0.515,
+            "p95_ms": 0.558
+          }
+        },
+        "pcm_bytes": [
+          352840
+        ],
+        "pcm_sha256": [
+          "58aa9d656ca0112d3cff7977090d9d078ec1e3d37454825646ed3ac31ce60af0"
+        ]
+      },
+      "gtts_short_runtime/nightcore3_reverb3/min_chars101": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 180.033,
+            "p95_ms": 183.187
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.002
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 121.813,
+            "p95_ms": 122.132
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.544,
+            "p95_ms": 120.748
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.54,
+            "p95_ms": 120.743
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 59.533,
+            "p95_ms": 62.57
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 179.935,
+            "p95_ms": 183.004
+          }
+        },
+        "pcm_bytes": [
+          349440
+        ],
+        "pcm_sha256": [
+          "10ccc501d5bbf80a82a02cb4a5acba1178da6cee8570f2d557916f1fe413e8eb"
+        ],
+        "audio_route": [
+          "generated"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "gtts_short_runtime/nightcore3_reverb3/min_chars1": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 124.058,
+            "p95_ms": 124.293
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.004
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 0.977,
+            "p95_ms": 1.145
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.495,
+            "p95_ms": 120.576
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.491,
+            "p95_ms": 120.572
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 3.575,
+            "p95_ms": 3.761
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 123.844,
+            "p95_ms": 124.132
+          }
+        },
+        "pcm_bytes": [
+          349440
+        ],
+        "pcm_sha256": [
+          "10ccc501d5bbf80a82a02cb4a5acba1178da6cee8570f2d557916f1fe413e8eb"
+        ],
+        "audio_route": [
+          "progressive"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "progressive_mp3/slowed3_reverb3/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 283.965,
+            "p95_ms": 285.107
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.476,
+            "p95_ms": 0.621
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 42.734,
+            "p95_ms": 42.985
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 123.412,
+            "p95_ms": 123.819
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 280.721,
+            "p95_ms": 281.636
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.727,
+            "p95_ms": 80.937
+          }
+        },
+        "pcm_bytes": [
+          569432
+        ],
+        "pcm_sha256": [
+          "4a54e078f0c9b7029ada2f509250f495f0f15f055d8cf57b8ee0d6a0acb628f0"
+        ]
+      },
+      "progressive_mp3/slowed3_reverb3/probesize1024": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 284.249,
+            "p95_ms": 285.47
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.482,
+            "p95_ms": 0.572
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 26.355,
+            "p95_ms": 26.747
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 107.102,
+            "p95_ms": 107.501
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 281.036,
+            "p95_ms": 282.026
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.758,
+            "p95_ms": 80.829
+          }
+        },
+        "pcm_bytes": [
+          569432
+        ],
+        "pcm_sha256": [
+          "4a54e078f0c9b7029ada2f509250f495f0f15f055d8cf57b8ee0d6a0acb628f0"
+        ]
+      },
+      "progressive_mp3/slowed3_reverb3/probesize512": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 285.881,
+            "p95_ms": 290.308
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.578,
+            "p95_ms": 0.638
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 9.889,
+            "p95_ms": 10.046
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 90.66,
+            "p95_ms": 90.901
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 281.902,
+            "p95_ms": 283.049
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 80.849,
+            "p95_ms": 80.89
+          }
+        },
+        "pcm_bytes": [
+          569432
+        ],
+        "pcm_sha256": [
+          "4a54e078f0c9b7029ada2f509250f495f0f15f055d8cf57b8ee0d6a0acb628f0"
+        ]
+      },
+      "complete_mp3/slowed3_reverb3/probesize2048": {
+        "n": 7,
+        "metrics": {
+          "decode_complete_ms": {
+            "n": 7,
+            "p50_ms": 63.545,
+            "p95_ms": 66.888
+          },
+          "ffmpeg_spawn_ms": {
+            "n": 7,
+            "p50_ms": 0.482,
+            "p95_ms": 0.58
+          },
+          "first_pcm_after_input_ms": {
+            "n": 7,
+            "p50_ms": 57.137,
+            "p95_ms": 59.944
+          },
+          "first_pcm_frame_ms": {
+            "n": 7,
+            "p50_ms": 57.625,
+            "p95_ms": 60.537
+          },
+          "input_complete_ms": {
+            "n": 7,
+            "p50_ms": 0.516,
+            "p95_ms": 0.63
+          },
+          "input_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 0.51,
+            "p95_ms": 0.622
+          }
+        },
+        "pcm_bytes": [
+          569432
+        ],
+        "pcm_sha256": [
+          "4a54e078f0c9b7029ada2f509250f495f0f15f055d8cf57b8ee0d6a0acb628f0"
+        ]
+      },
+      "gtts_short_runtime/slowed3_reverb3/min_chars101": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 180.29,
+            "p95_ms": 186.89
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.002
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 121.801,
+            "p95_ms": 122.246
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.555,
+            "p95_ms": 120.604
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.551,
+            "p95_ms": 120.6
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 59.792,
+            "p95_ms": 66.353
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 179.929,
+            "p95_ms": 186.706
+          }
+        },
+        "pcm_bytes": [
+          568320
+        ],
+        "pcm_sha256": [
+          "6989246c828f91996480845784d0e80a1c1405be2459172ba4d1925a117d56dc"
+        ],
+        "audio_route": [
+          "generated"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      },
+      "gtts_short_runtime/slowed3_reverb3/min_chars1": {
+        "n": 7,
+        "metrics": {
+          "audio_source_first_frame_read_ms": {
+            "n": 7,
+            "p50_ms": 123.401,
+            "p95_ms": 124.583
+          },
+          "audio_source_first_read_duration_ms": {
+            "n": 7,
+            "p50_ms": 0.001,
+            "p95_ms": 0.002
+          },
+          "ffmpeg_source_created_ms": {
+            "n": 7,
+            "p50_ms": 0.891,
+            "p95_ms": 0.951
+          },
+          "provider_complete_ms": {
+            "n": 7,
+            "p50_ms": 120.517,
+            "p95_ms": 120.561
+          },
+          "provider_first_chunk_ms": {
+            "n": 7,
+            "p50_ms": 120.512,
+            "p95_ms": 120.555
+          },
+          "source_first_frame_after_provider_ms": {
+            "n": 7,
+            "p50_ms": 2.879,
+            "p95_ms": 4.099
+          },
+          "source_primed_ms": {
+            "n": 7,
+            "p50_ms": 123.356,
+            "p95_ms": 124.097
+          }
+        },
+        "pcm_bytes": [
+          568320
+        ],
+        "pcm_sha256": [
+          "6989246c828f91996480845784d0e80a1c1405be2459172ba4d1925a117d56dc"
+        ],
+        "audio_route": [
+          "progressive"
+        ],
+        "source_kind": [
+          "ffmpeg_pcm"
+        ]
+      }
+    },
+    "failures": []
+  }
+}

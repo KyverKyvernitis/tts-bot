@@ -165,11 +165,25 @@ def roteador_suporta_tts(bot: Any) -> bool:
     return callable(getattr(_roteador(bot), "play_tts", None))
 
 
-async def tocar_tts_via_roteador(bot: Any, **kwargs):
+def roteador_suporta_preparo_tts(bot: Any) -> bool:
+    return bool(getattr(_roteador(bot), "supports_prepared_tts_source", False))
+
+
+def permite_streaming_tts_mixer_local(bot: Any, guild_id: int, vc: Any = None) -> bool:
+    metodo = getattr(_roteador(bot), "should_allow_local_tts_streaming", None)
+    if callable(metodo):
+        with contextlib.suppress(Exception):
+            return bool(metodo(int(guild_id), vc=vc))
+    return False
+
+
+async def tocar_tts_via_roteador(bot: Any, *, prepared: Any = None, **kwargs):
     router = _roteador(bot)
     metodo = getattr(router, "play_tts", None)
     if not callable(metodo):
         return None
+    if prepared is not None:
+        kwargs["prepared"] = prepared
     return normalizar_resultado_rota_tts(await metodo(**kwargs))
 
 
@@ -394,6 +408,8 @@ def estado_cliente_voz_musical(vc: Any, estado: str) -> bool | None:
 
 def motivo_bloqueio_streaming_local(bot: Any, guild_id: int, vc: Any = None) -> str | None:
     """Centraliza os motivos musicais que tornam FIFO/stream local inadequado."""
+    if permite_streaming_tts_mixer_local(bot, guild_id, vc):
+        return None
     if musica_ativa(bot, guild_id):
         return "music_active"
     if lavalink_ativo(bot, guild_id):

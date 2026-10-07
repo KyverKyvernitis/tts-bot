@@ -101,15 +101,7 @@ class ModalEfeitosAvancadosTTS(discord.ui.Modal, title="Editar efeitos do TTS"):
         )
         reverb = _level(self.reverb.value)
 
-        await panel.cog._set_user_tts_and_refresh(
-            panel.guild_id,
-            panel.owner_id,
-            advanced_nightcore_level=night,
-            advanced_slowed_level=slowed,
-            advanced_reverb_level=reverb,
-        )
-        panel._apply_levels(night, slowed, reverb)
-        await interaction.response.edit_message(view=panel)
+        await panel._save_levels(interaction, night, slowed, reverb)
 
 
 class VisaoEfeitosAvancadosTTS(VisaoLayoutBaseTTS):
@@ -213,15 +205,26 @@ class VisaoEfeitosAvancadosTTS(VisaoLayoutBaseTTS):
         await interaction.response.send_modal(ModalEfeitosAvancadosTTS(self))
 
     async def _disable_all(self, interaction: discord.Interaction) -> None:
-        await self.cog._set_user_tts_and_refresh(
-            self.guild_id,
-            self.owner_id,
-            advanced_nightcore_level=0,
-            advanced_slowed_level=0,
-            advanced_reverb_level=0,
-        )
-        self._apply_levels(0, 0, 0)
-        await interaction.response.edit_message(view=self)
+        await self._save_levels(interaction, 0, 0, 0)
+
+    async def _save_levels(
+        self, interaction: discord.Interaction, nightcore: int, slowed: int, reverb: int
+    ) -> None:
+        # Reconhece a interação antes do Mongo e dos edits de outros painéis.
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        await self._load_resolved()
+        if self._levels() != (nightcore, slowed, reverb):
+            await self.cog._set_user_tts_and_refresh(
+                self.guild_id,
+                self.owner_id,
+                background_refresh=True,
+                advanced_nightcore_level=nightcore,
+                advanced_slowed_level=slowed,
+                advanced_reverb_level=reverb,
+            )
+        self._apply_levels(nightcore, slowed, reverb)
+        await interaction.edit_original_response(view=self)
 
     async def send_for_message(self, message: discord.Message) -> discord.Message:
         return await message.channel.send(view=self)

@@ -865,6 +865,7 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(tts_audio.edge_tts, "Communicate", FailingCommunicate),
             patch.object(tts_audio, "gTTS", side_effect=FakeGTTS) as gtts_mock,
+            patch.object(tts_audio, "TTS_GTTS_STREAMING_ENABLED", False),
         ):
             path, should_cleanup = await probe._resolve_audio_path(
                 state,
@@ -1019,6 +1020,7 @@ class EdgeStreamingFastPathTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(tts_audio, "gTTS", side_effect=FakeGTTS),
+            patch.object(tts_audio, "TTS_GTTS_STREAMING_ENABLED", False),
             patch.object(
                 probe,
                 "_prepare_edge_stream",

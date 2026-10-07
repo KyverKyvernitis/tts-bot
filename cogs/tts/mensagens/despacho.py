@@ -25,6 +25,7 @@ async def despachar_mensagem_tts(
     active_prefix: str,
     forced_engine: str,
     construir_payload: Callable[..., Awaitable[PayloadTTSMensagem | None]] | None = None,
+    received_at_monotonic: float | None = None,
 ) -> ResultadoDespachoMensagem:
     dispatch_started = time.monotonic()
     payload_started = time.monotonic()
@@ -48,6 +49,7 @@ async def despachar_mensagem_tts(
     payload.queue_item.message_id = int(getattr(message, "id", 0) or 0)
     payload.queue_item.text_channel_id = int(getattr(message.channel, "id", 0) or 0)
     payload.queue_item.enqueued_at_monotonic = dispatch_started
+    payload.queue_item.received_at_monotonic = received_at_monotonic if received_at_monotonic is not None else dispatch_started
     state = cog._get_state(message.guild.id)
     state.last_text_channel_id = getattr(message.channel, "id", None)
     items = [payload.queue_item]

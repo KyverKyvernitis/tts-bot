@@ -33,6 +33,8 @@ from gtts.tts import gTTSError
 import config
 from cogs.musica.runtime_telefone.agente.efeitos import (
     TTS_EFFECT_ENGINES,
+    TTS_NIGHTCORE_MULTIPLIERS,
+    TTS_SLOWED_MULTIPLIERS,
     filtros_tts,
     normalizar_efeitos_tts,
     payload_efeitos_tts,
@@ -47,6 +49,8 @@ from cogs.musica.integracoes.tts import (
     preparar_cliente_voz_tts,
     preparar_fallback_local_apos_rota_musical,
     roteador_suporta_tts,
+    roteador_suporta_preparo_tts,
+    permite_streaming_tts_mixer_local,
     tocar_tts_via_roteador,
     bloqueio_tts_direto_por_musica,
     cancelar_tts_remoto,
@@ -58,6 +62,7 @@ from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_te
 from .streaming import SharedSynthesisMixin
 from .routing import RouteMeasurements
 from .prepared import PreparedOpusCache
+from .utils.ffmpeg import compose_audio_filters
 
 try:
     import fcntl
@@ -99,6 +104,7 @@ TTS_EDGE_ADAPTIVE_PREBUFFER_MAX_MS = max(TTS_EDGE_STREAM_PREBUFFER_MS, min(1200,
 TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS = max(4, int(getattr(config, "TTS_EDGE_ADAPTIVE_PREBUFFER_STABLE_STREAMS", 20)))
 TTS_EDGE_STREAM_STALL_THRESHOLD_MS = max(20.0, float(getattr(config, "TTS_EDGE_STREAM_STALL_THRESHOLD_MS", 35.0)))
 TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED = bool(getattr(config, "TTS_EDGE_FFMPEG_MP3_INPUT_HINT_ENABLED", True))
+TTS_STREAM_FFMPEG_PROBESIZE_BYTES = min(16384, max(32, int(getattr(config, "TTS_STREAM_FFMPEG_PROBESIZE_BYTES", 512))))
 TTS_EDGE_CIRCUIT_BREAKER_ENABLED = bool(getattr(config, "TTS_EDGE_CIRCUIT_BREAKER_ENABLED", True))
 TTS_EDGE_CIRCUIT_BREAKER_FAILURES = max(2, int(getattr(config, "TTS_EDGE_CIRCUIT_BREAKER_FAILURES", 3)))
 TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 15.0)))
@@ -107,6 +113,7 @@ TTS_EDGE_PREFETCH_CONCURRENCY = min(
     max(1, int(getattr(config, "TTS_EDGE_PREFETCH_CONCURRENCY", max(1, TTS_SYNTH_CONCURRENCY - 1)))),
 )
 TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 2)))
+TTS_GTTS_PREFETCH_CONCURRENCY = max(0, min(TTS_GTTS_CONCURRENCY - 1, int(getattr(config, "TTS_GTTS_PREFETCH_CONCURRENCY", 1))))
 TTS_GTTS_TIMEOUT_SECONDS = max(5.0, float(getattr(config, "TTS_GTTS_TIMEOUT_SECONDS", 20.0)))
 TTS_GTTS_CONNECT_TIMEOUT_SECONDS = max(0.5, float(getattr(config, "TTS_GTTS_CONNECT_TIMEOUT_SECONDS", 3.5)))
 TTS_GTTS_READ_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_GTTS_READ_TIMEOUT_SECONDS", 8.0)))
@@ -114,7 +121,7 @@ TTS_GTTS_PERSISTENT_SESSION_ENABLED = bool(getattr(config, "TTS_GTTS_PERSISTENT_
 TTS_GTTS_SESSION_TTL_SECONDS = max(10.0, float(getattr(config, "TTS_GTTS_SESSION_TTL_SECONDS", 90.0)))
 TTS_GTTS_SESSION_MAX_REQUESTS = max(4, int(getattr(config, "TTS_GTTS_SESSION_MAX_REQUESTS", 256)))
 TTS_GTTS_STREAMING_ENABLED = bool(getattr(config, "TTS_GTTS_STREAMING_ENABLED", True))
-TTS_GTTS_STREAM_MIN_CHARS = max(1, int(getattr(config, "TTS_GTTS_STREAM_MIN_CHARS", 101)))
+TTS_GTTS_STREAM_MIN_CHARS = max(1, int(getattr(config, "TTS_GTTS_STREAM_MIN_CHARS", 1)))
 TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS = max(
     1.0,
     float(getattr(config, "TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS", 6.0)),
@@ -500,6 +507,7 @@ class QueueItem:
     advanced_reverb_level: int = field(default=0, repr=False, compare=False)
     teto_pitch_semitones: str = field(default_factory=lambda: str(TTS_TETO_DEFAULT_PITCH_SEMITONES), repr=False, compare=False)
     enqueued_at_monotonic: float = field(default_factory=time.monotonic, repr=False, compare=False)
+    received_at_monotonic: float = field(default=0.0, repr=False, compare=False)
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
     _cache_key_value: Optional[str] = field(default=None, repr=False, compare=False)
     _dedup_signature: Optional[str] = field(default=None, repr=False, compare=False)
@@ -828,7 +836,21 @@ class TTSAudioMixin(SharedSynthesisMixin):
             # o teto já existente, em vez do tamanho do rótulo do anexo.
             return TTS_PLAYBACK_TIMEOUT_MAX_SECONDS
         text_len = len((getattr(item, "text", "") or "").strip()) if item is not None else 0
-        timeout = TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + (min(text_len, 1600) * TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS)
+        speech_seconds = min(text_len, 1600) * TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS
+        timeout = TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + speech_seconds
+        engine = str(getattr(item, "_tts_actual_engine", "") or getattr(item, "engine", "")).lower()
+        if item is not None and engine in TTS_EFFECT_ENGINES:
+            night, slow, reverb = normalizar_efeitos_tts(
+                item.advanced_nightcore_level, item.advanced_slowed_level, item.advanced_reverb_level,
+            )
+            speed = TTS_NIGHTCORE_MULTIPLIERS[night] if night else TTS_SLOWED_MULTIPLIERS[slow]
+            if engine == "edge":
+                rate = self._normalize_edge_rate(item.rate)
+                speed *= max(0.05, 1.0 + int(rate[:-1]) / 100.0)
+            # Keep the previous safety margin even when playback is faster.
+            timeout = max(timeout, TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + speech_seconds / speed)
+            if reverb:
+                timeout += 0.25
         return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, timeout))
 
     def _normalize_cache_text(self, text: str) -> str:
@@ -861,6 +883,15 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if semaphore is None:
             semaphore = _PrioritySemaphore(TTS_GTTS_CONCURRENCY)
             setattr(self, "_tts_gtts_semaphore", semaphore)
+        return semaphore
+
+    def _get_gtts_prefetch_semaphore(self) -> asyncio.Semaphore | None:
+        if TTS_GTTS_PREFETCH_CONCURRENCY <= 0:
+            return None
+        semaphore = getattr(self, "_tts_gtts_prefetch_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(TTS_GTTS_PREFETCH_CONCURRENCY)
+            self._tts_gtts_prefetch_semaphore = semaphore
         return semaphore
 
     def _get_gtts_executor(self) -> concurrent.futures.ThreadPoolExecutor:
@@ -1139,8 +1170,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if str(getattr(item, "engine", "") or "").strip().lower() != "gtts":
             return False, "not_gtts"
         if len(self._get_item_normalized_cache_text(item)) < TTS_GTTS_STREAM_MIN_CHARS:
-            # Até 100 caracteres o gTTS normalmente faz uma única requisição;
-            # o stream público só entrega o MP3 quando essa resposta termina.
+            # Explicit opt-out for short-message decoder overlap.
             return False, "gtts_single_request"
         preferred, _ = self._tts_agent_should_try_worker(item)
         if preferred and int(self._tts_agent_route_state().get('stream_protocol') or 0) < 2:
@@ -2472,6 +2502,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
 
     def _shutdown_tts_runtime(self) -> None:
         self._tts_shutting_down = True
+        prepared_cache = getattr(self, "_tts_prepared_opus", None)
+        if prepared_cache is not None:
+            prepared_cache.close()
         for state in list(self.guild_states.values()):
             state.generation += 1
             state.accepting = False
@@ -4361,7 +4394,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             options = f"{options} -f mp3".strip()
         if handle is not None:
             if '-probesize' not in options:
-                options += ' -probesize 2048'
+                options += f' -probesize {TTS_STREAM_FFMPEG_PROBESIZE_BYTES}'
             if '-analyzeduration' not in options:
                 options += ' -analyzeduration 0'
         return options
@@ -4381,11 +4414,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         )
 
     def _tts_ffmpeg_options_for_item(self, item: QueueItem | None) -> tuple[str, str]:
-        effect_filter = self._tts_effect_filter(item)
-        options = TTS_FFMPEG_OPTIONS
-        if effect_filter:
-            options = f"{options} -af {effect_filter}".strip()
-        return options, effect_filter
+        return compose_audio_filters(TTS_FFMPEG_OPTIONS, self._tts_effect_filter(item))
 
     def _make_discord_tts_source_for_item(self, path: str, item: QueueItem | None) -> tuple[Any, str]:
         factory = self._make_discord_tts_source
@@ -4400,20 +4429,25 @@ class TTSAudioMixin(SharedSynthesisMixin):
 
     def _make_discord_tts_source(self, path: str, *, item: QueueItem | None = None) -> tuple[Any, str]:
         ffmpeg_options, effect_filter = self._tts_ffmpeg_options_for_item(item)
-        if not effect_filter and bool(getattr(config, 'TTS_PREPARED_OPUS_CACHE_ENABLED', False)) and os.path.dirname(os.path.abspath(path)) == os.path.abspath(_CACHE_DIR):
+        before_options = self._tts_ffmpeg_before_options(path)
+        if bool(getattr(config, 'TTS_PREPARED_OPUS_CACHE_ENABLED', True)) and os.path.dirname(os.path.abspath(path)) == os.path.abspath(_CACHE_DIR):
             cache = getattr(self, '_tts_prepared_opus', None)
             if cache is None:
                 cache = self._tts_prepared_opus = PreparedOpusCache(max_bytes=int(getattr(config, 'TTS_PREPARED_OPUS_CACHE_MAX_BYTES', 8 * 1024 * 1024)))
             with contextlib.suppress(OSError):
-                key = cache.key(path, ffmpeg_options)
+                key = cache.key(path, ffmpeg_options, before_options=before_options)
                 source = cache.get(key)
                 if source is not None:
                     return source, 'prepared_opus'
-                if cache.repeated(key) and not cache.busy and callable(getattr(discord, 'FFmpegOpusAudio', None)):
+                if cache.repeated(key) and callable(getattr(discord, 'FFmpegOpusAudio', None)):
                     def idle():
-                        return not any(getattr(state, 'active_item', None) is not None for state in getattr(self, 'guild_states', {}).values())
-                    self._schedule_tts_background(cache.prepare(key, path, ffmpeg_options, idle=idle))
-        before_options = self._tts_ffmpeg_before_options(path)
+                        if getattr(self, '_tts_shutting_down', False):
+                            return False
+                        return not any(
+                            getattr(state, 'active_item', None) is not None or not state.queue.empty()
+                            for state in getattr(self, 'guild_states', {}).values()
+                        )
+                    self._schedule_tts_background(cache.prepare(key, path, ffmpeg_options, idle=idle, before_options=before_options))
         if self._audio_file_should_use_opus_source(path):
             opus_cls = getattr(discord, "FFmpegOpusAudio", None)
             if opus_cls is not None:
@@ -5584,7 +5618,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
             language=item.language,
             rate="+0%",
             pitch="+0Hz",
+            advanced_nightcore_level=item.advanced_nightcore_level,
+            advanced_slowed_level=item.advanced_slowed_level,
+            advanced_reverb_level=item.advanced_reverb_level,
             enqueued_at_monotonic=item.enqueued_at_monotonic,
+            received_at_monotonic=item.received_at_monotonic,
             request_id=item.request_id, message_id=item.message_id,
             text_channel_id=item.text_channel_id,
             generation=item.generation, tld=item.tld,
@@ -5854,10 +5892,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
             return path, should_cleanup, None
 
         edge_stream = self._edge_stream_handle_for_path(path)
-        if edge_stream is None and roteador_suporta_tts(self.bot):
-            # Arquivos comuns continuam passando pelo roteador, que também
-            # coordena ducking e ownership. O FIFO progressivo já é um fast
-            # path local e pode ser preparado sem alterar essa decisão.
+        if edge_stream is None and roteador_suporta_tts(self.bot) and not roteador_suporta_preparo_tts(self.bot):
+            # Legacy routers cannot accept a prepared source. The local router
+            # advertises the contract while retaining voice/ducking decisions.
             return path, should_cleanup, None
         source = None
         read_task: asyncio.Task | None = None
@@ -5996,10 +6033,13 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 ):
                     prepared.cleanup()
                     prepared = None
-                # FIFO é um fast path exclusivamente local. Música remota e
-                # agent são filtrados antes da síntese; pular o router aqui
-                # impede que uma rota remota tente tratar o pipe como arquivo.
-                if edge_stream is None and prepared is None and not bool(getattr(item, "chatbot_no_auto_connect", False)) and roteador_suporta_tts(self.bot) and guild is not None:
+                # A progressive overlay is admitted only by a local mixer with
+                # a bounded, nonblocking PCM reader. Remote routers still need
+                # complete files, and all voice ownership checks stay in place.
+                local_stream_overlay = edge_stream is not None and permite_streaming_tts_mixer_local(self.bot, guild_id, vc)
+                if (edge_stream is None or local_stream_overlay) and not bool(getattr(item, "chatbot_no_auto_connect", False)) and roteador_suporta_tts(self.bot) and guild is not None:
+                    if local_stream_overlay:
+                        await self._activate_edge_stream(edge_stream)
                     if item is not None:
                         item._tts_source_factory = lambda source_path, _item=item: self._make_discord_tts_source_for_item(source_path, _item)
                     router_options, _router_effect_filter = self._tts_ffmpeg_options_for_item(item)
@@ -6008,13 +6048,21 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         guild=guild,
                         vc=vc,
                         path=path,
-                        before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+                        before_options=self._tts_ffmpeg_before_options(path),
                         options=router_options,
                         timeout=self._estimate_playback_timeout(item),
                         item=item,
+                        prepared=prepared,
+                        **({"stream_error_getter": lambda: edge_stream.error or edge_stream.pipe_error} if local_stream_overlay else {}),
                     )
                     if not (isinstance(router_result, dict) and router_result.get("music_route_failed")):
-                        return _validate_tts_playback_result(router_result)
+                        result = _validate_tts_playback_result(router_result)
+                        if local_stream_overlay:
+                            stream_playback_ok = not bool(edge_stream.error or edge_stream.pipe_error)
+                            result["progressive_stream"] = True
+                            result[f"{edge_stream.engine}_stream"] = True
+                            result[f"{edge_stream.engine}_first_audio_ms"] = edge_stream.first_audio_ms
+                        return result
 
                     reason = str(router_result.get("music_route_error") or router_result.get("error") or "music_route_failed")
                     fallback_vc = await preparar_fallback_local_apos_rota_musical(
@@ -6819,6 +6867,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         first_frame_observed = bool(playback_result.get("first_frame_observed", False))
                         if first_frame_observed:
                             self._record_latency_sample("total_to_first_frame", total_to_playback_ms)
+                            received_at = float(getattr(item, "received_at_monotonic", 0.0) or getattr(item, "enqueued_at_monotonic", first_frame_at))
+                            self._record_latency_sample("message_to_first_frame", max(0.0, (first_frame_at - received_at) * 1000.0))
                             source_label = "progressive" if edge_stream is not None else getattr(item, "_tts_audio_origin", "file")
                             call_label = "hot" if bool(getattr(item, "_tts_call_was_hot", False)) else "cold"
                             priority_label = "prefetched" if bool(getattr(item, "_tts_was_prefetched", False)) else "foreground"
