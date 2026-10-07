@@ -1544,12 +1544,10 @@ def _adaptive_mistral_models(models, *, profile: str, wants_tools: bool) -> tupl
     elegível, mas não é inserido automaticamente na cadeia gratuita.
     """
     models = tuple(dict.fromkeys(model for model in models if isinstance(model, str) and model))
-    if profile == "closing_economy":
+    if profile in {"closing_economy", "economy", "fast"}:
         preferred = ("ministral-3b-latest", "ministral-8b-latest", "ministral-14b-latest")
-    elif wants_tools:
+    elif profile == "smart" or wants_tools:
         preferred = ("ministral-14b-latest", "ministral-8b-latest", "ministral-3b-latest")
-    elif profile == "economy":
-        preferred = ("ministral-3b-latest", "ministral-8b-latest", "ministral-14b-latest")
     else:
         preferred = ("ministral-8b-latest", "ministral-14b-latest", "ministral-3b-latest")
     known = set(preferred)
@@ -1782,6 +1780,7 @@ class ProviderRouter:
         repair_state: dict | None = None,
         request_report: dict | None = None,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+        routing_profile_override: str | None = None,
     ) -> str | ChatReply:
         # O contador HTTP é herdado por wait_for e por descoberta single-flight,
         # mas não pode permanecer ativo para outra operação após este await.
@@ -1796,7 +1795,8 @@ class ProviderRouter:
                                     allow_protected_reserves=allow_protected_reserves,
                                     max_output_tokens=max_output_tokens,
                                     repair_state=repair_state, request_report=report,
-                                    on_text_delta=on_text_delta)
+                                    on_text_delta=on_text_delta,
+                                    routing_profile_override=routing_profile_override)
         finally:
             _REQUEST_REPORT.reset(token)
 
@@ -1809,6 +1809,7 @@ class ProviderRouter:
         allow_protected_reserves: bool = True, max_output_tokens: int | None = None,
         repair_state: dict | None = None, request_report: dict | None = None,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+        routing_profile_override: str | None = None,
     ) -> str | ChatReply:
         actions = enabled_actions(actions)
         started = time.monotonic()
@@ -1896,23 +1897,37 @@ class ProviderRouter:
         has_native_history = any(message.tool_calls or message.role == "tool" for message in messages)
         latest_user = _latest_request_text(messages)
         closing_economy = not has_images and not allow_tool_calls
-        economy_route = closing_economy or (
+        automatic_economy = closing_economy or (
             not has_images and not wants_tools and not has_native_history
             and len(latest_user.strip()) <= 700
         )
-        routing_profile = ("closing_economy" if closing_economy else
-                           "economy" if economy_route else "full")
-        if economy_route:
-            # Só reordene modelos que o operador configurou explicitamente.
-            # Candidatos descobertos continuam depois da cadeia configurada: isso
-            # evita que uma descoberta barata desloque um modelo saudável escolhido
-            # no ambiente. Para os defaults conhecidos, trocamos apenas as posições
-            # entre os próprios modelos conhecidos (small-first), preservando
-            # quaisquer modelos customizados e sua prioridade relativa.
-            preferred = {
+        forced_profile = (routing_profile_override if not has_images and
+                          isinstance(routing_profile_override, str) and
+                          routing_profile_override in {"auto", "fast", "smart"} else None)
+        if forced_profile == "auto":
+            # Clientes OpenAI não estão em uma etapa de fechamento do agente só
+            # porque tool calling foi desativado. Preserve o mesmo heurístico
+            # de complexidade do router: curto -> economia; longo -> full.
+            routing_profile = "economy" if (
+                not has_images and not wants_tools and not has_native_history
+                and len(latest_user.strip()) <= 700
+            ) else "full"
+        else:
+            routing_profile = (forced_profile or
+                               ("closing_economy" if closing_economy else
+                                "economy" if automatic_economy else "full"))
+        economy_route = routing_profile in {"closing_economy", "economy", "fast"}
+        if economy_route or routing_profile == "smart":
+            # Reordene somente os modelos conhecidos que o operador configurou.
+            # IDs customizados conservam prioridade relativa e candidatos
+            # descobertos não deslocam os configurados.
+            preferred = ({
                 "groq": ("openai/gpt-oss-20b", "openai/gpt-oss-120b"),
                 "gemini": ("gemini-2.5-flash-lite", "gemini-2.5-flash"),
-            }
+            } if economy_route else {
+                "groq": ("openai/gpt-oss-120b", "openai/gpt-oss-20b"),
+                "gemini": ("gemini-2.5-flash", "gemini-2.5-flash-lite"),
+            })
             configured_by_provider = {
                 "groq": tuple(C.GROQ_MODELS),
                 "gemini": tuple(C.GEMINI_MODELS),

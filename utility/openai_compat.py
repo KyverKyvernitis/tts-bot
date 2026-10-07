@@ -16,9 +16,14 @@ from typing import Any, Callable
 from flask import Response, g, jsonify, request
 
 
-_MODEL_ID = "osaka-auto"
 _MODEL_OWNER = "osaka"
 _MODEL_CREATED = int(time.time())
+_MODEL_PROFILES: dict[str, str] = {
+    "osaka-auto": "auto",
+    "osaka-fast": "fast",
+    "osaka-smart": "smart",
+}
+_MODEL_IDS = tuple(_MODEL_PROFILES)
 _TAILSCALE_V4 = ipaddress.ip_network("100.64.0.0/10")
 _TAILSCALE_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 _chat_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None
@@ -149,9 +154,12 @@ def _audit_request_shape(payload: Any, body_bytes: int) -> None:
                 non_text += 1
     tools = payload.get("tools")
     stream = payload.get("stream", False)
+    requested_model = payload.get("model")
+    model_known = isinstance(requested_model, str) and requested_model in _MODEL_PROFILES
     _audit_log(
         "request_shape", request_id=request_id, json_object=True, body_bytes=body_bytes,
-        model_known=payload.get("model") == _MODEL_ID,
+        model_known=model_known,
+        virtual_model=requested_model if model_known else "unknown",
         stream=stream if isinstance(stream, bool) else "invalid",
         message_count=len(messages) if isinstance(messages, list) else None,
         roles=roles, content_arrays=arrays, non_text_blocks=non_text,
@@ -372,7 +380,7 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
         return None, _error("Request body must be a JSON object.", 400, error_type="invalid_request_error", code="invalid_json")
 
     model = str(payload.get("model") or "").strip()
-    if model != _MODEL_ID:
+    if model not in _MODEL_PROFILES:
         return None, _error("Unknown model.", 404, error_type="invalid_request_error", code="model_not_found")
 
     stream = payload.get("stream", False)
@@ -455,7 +463,8 @@ def _normalize_chat_payload(payload: Any) -> tuple[dict[str, Any] | None, tuple[
         max_output_tokens = min(raw_max_tokens, 4096)
 
     return {
-        "model": _MODEL_ID,
+        "model": model,
+        "routing_profile": _MODEL_PROFILES[model],
         "stream": stream,
         "include_usage": bool(options.get("include_usage")),
         "system": "\n\n".join(system_parts),
@@ -475,11 +484,12 @@ def _list_models():
         "object": "list",
         "data": [
             {
-                "id": _MODEL_ID,
+                "id": model_id,
                 "object": "model",
                 "created": _MODEL_CREATED,
                 "owned_by": _MODEL_OWNER,
             }
+            for model_id in _MODEL_IDS
         ],
     })
     response.headers["Cache-Control"] = "no-store"
@@ -577,7 +587,7 @@ def _chat_completions():
         "id": "chatcmpl-" + secrets.token_hex(12),
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": _MODEL_ID,
+        "model": spec["model"],
         "choices": [
             {
                 "index": 0,
@@ -610,7 +620,7 @@ def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemapho
 
     def chunk(delta: dict, *, finish_reason: str | None = None, usage: dict | None = None):
         data = {"id": chat_id, "object": "chat.completion.chunk", "created": created,
-                "model": _MODEL_ID, "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+                "model": spec["model"], "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
         if usage is not None:
             data["usage"] = usage
         return _sse_data(data)
@@ -694,7 +704,7 @@ def _streaming_response(source: OpenAIChatStream, slot: threading.BoundedSemapho
                                                 "completion_tokens": usage["output_tokens"],
                                                 "total_tokens": usage["total_tokens"]}
                             yield _sse_data({"id": chat_id, "object": "chat.completion.chunk", "created": created,
-                                             "model": _MODEL_ID, "choices": [], "usage": openai_usage})
+                                             "model": spec["model"], "choices": [], "usage": openai_usage})
                     stats["sse_done_generated"] = True
                     yield _sse_data("[DONE]")
                     break

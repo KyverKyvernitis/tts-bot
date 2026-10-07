@@ -317,6 +317,9 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                 max_output_tokens=spec.get("max_output_tokens") if isinstance(spec.get("max_output_tokens"), int) else None,
                 request_report=report,
             )
+            routing_profile = spec.get("routing_profile")
+            if isinstance(routing_profile, str) and routing_profile in {"auto", "fast", "smart"}:
+                kwargs["routing_profile_override"] = routing_profile
             if on_text_delta is not None:
                 kwargs["on_text_delta"] = on_text_delta
             reply = await router.chat(**kwargs)

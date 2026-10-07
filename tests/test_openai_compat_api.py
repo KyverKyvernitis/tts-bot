@@ -78,15 +78,12 @@ def test_models_accepts_loopback_and_tailscale_addresses(monkeypatch, remote):
     assert response.status_code == 200
     body = response.get_json()
     assert body["object"] == "list"
-    assert body["data"] == [
-        {
-            "id": "osaka-auto",
-            "object": "model",
-            "created": body["data"][0]["created"],
-            "owned_by": "osaka",
-        }
+    assert [item["id"] for item in body["data"]] == [
+        "osaka-auto", "osaka-fast", "osaka-smart",
     ]
-    assert isinstance(body["data"][0]["created"], int)
+    assert all(item["object"] == "model" for item in body["data"])
+    assert all(item["owned_by"] == "osaka" for item in body["data"])
+    assert all(isinstance(item["created"], int) for item in body["data"])
     assert response.headers["Cache-Control"] == "no-store"
 
 
@@ -125,6 +122,63 @@ def test_chat_completion_calls_bridge_and_returns_openai_shape(monkeypatch):
     assert seen["system"] == "Seja breve."
     assert seen["messages"] == [{"role": "user", "content": "Olá"}]
     assert seen["temperature"] == 0.4
+    assert seen["routing_profile"] == "auto"
+
+
+@pytest.mark.parametrize(("model", "profile"), [
+    ("osaka-auto", "auto"),
+    ("osaka-fast", "fast"),
+    ("osaka-smart", "smart"),
+])
+def test_r5_virtual_models_select_profile_and_echo_requested_model(monkeypatch, model, profile):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    seen = {}
+
+    def provider(spec):
+        seen.update(spec)
+        return {"ok": True, "text": "ok", "provider": "groq", "usage": {}}
+
+    set_openai_chat_provider(provider)
+    response = _post(_client(), {
+        "model": model,
+        "messages": [{"role": "user", "content": "teste"}],
+        "stream": False,
+    })
+
+    assert response.status_code == 200
+    assert response.get_json()["model"] == model
+    assert seen["model"] == model
+    assert seen["routing_profile"] == profile
+
+
+def test_r5_virtual_profile_cannot_be_overridden_by_untrusted_payload(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    seen = {}
+
+    def provider(spec):
+        seen.update(spec)
+        return {"ok": True, "text": "ok", "usage": {}}
+
+    set_openai_chat_provider(provider)
+    response = _post(_client(), {
+        "model": "osaka-fast",
+        "routing_profile": "smart",
+        "messages": [{"role": "user", "content": "teste"}],
+    })
+    assert response.status_code == 200
+    assert seen["routing_profile"] == "fast"
+    assert response.get_json()["model"] == "osaka-fast"
+
+
+def test_r5_malformed_model_id_is_rejected_not_a_server_error(monkeypatch):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+    monkeypatch.setenv("BOT_OPENAI_AUDIT_ENABLED", "true")
+    response = _post(_client(), {
+        "model": ["osaka-auto"],
+        "messages": [{"role": "user", "content": "oi"}],
+    })
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "model_not_found"
 
 
 def test_chat_requires_auth_and_tailscale(monkeypatch):
@@ -219,6 +273,29 @@ def test_streaming_sse_incremental_openai_schema(monkeypatch):
     assert events[4]["usage"] == {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}
     assert events[5] == "[DONE]"
     assert seen["stream"] is True
+    response.close()
+
+
+@pytest.mark.parametrize("model", ["osaka-auto", "osaka-fast", "osaka-smart"])
+def test_r5_streaming_chunks_echo_virtual_model(monkeypatch, model):
+    monkeypatch.setenv("BOT_OPENAI_API_KEY", "correct-secret")
+
+    def provider(_spec):
+        stream = OpenAIChatStream(5)
+        stream.events.put_nowait(("delta", "ok"))
+        stream.events.put_nowait(("done", {"ok": True, "provider": "groq", "usage": {}}))
+        return stream
+
+    set_openai_chat_provider(provider)
+    response = _post(_client(), {
+        "model": model, "stream": True,
+        "messages": [{"role": "user", "content": "x"}],
+    })
+    assert response.status_code == 200
+    events = _sse_payloads(response)
+    chunks = [event for event in events if isinstance(event, dict) and event.get("object") == "chat.completion.chunk"]
+    assert chunks
+    assert all(event["model"] == model for event in chunks)
     response.close()
 
 

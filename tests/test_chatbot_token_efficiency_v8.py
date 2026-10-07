@@ -106,3 +106,68 @@ async def test_api_parameter_error_is_not_repaired_on_same_model(monkeypatch):
     assert len(session.requests) == 1
     assert caught.value.kind == "request"
     assert caught.value.diagnostic_code == "api_parameter"
+
+@pytest.mark.asyncio
+async def test_r5_osaka_auto_keeps_dynamic_router_profile_even_without_tools(monkeypatch):
+    monkeypatch.setattr(C, "GROQ_MODELS", ("openai/gpt-oss-120b", "openai/gpt-oss-20b"))
+
+    short_session = _Session(_Response(_groq("curto", finish="stop")))
+    short_router = P.ProviderRouter(short_session, groq_key="offline-key")
+    assert await short_router.chat(
+        system="s", messages=[P.ChatMessage("user", "oi")], allow_tool_calls=False,
+        routing_profile_override="auto",
+    ) == "curto"
+    assert short_router.get_request_report()["routing_profile"] == "economy"
+    assert short_session.requests[0][1]["json"]["model"] == "openai/gpt-oss-20b"
+
+    long_session = _Session(_Response(_groq("longo", finish="stop")))
+    long_router = P.ProviderRouter(long_session, groq_key="offline-key")
+    long_message = "explique " + ("contexto " * 100)
+    assert len(long_message) > 700
+    assert await long_router.chat(
+        system="s", messages=[P.ChatMessage("user", long_message)], allow_tool_calls=False,
+        routing_profile_override="auto",
+    ) == "longo"
+    assert long_router.get_request_report()["routing_profile"] == "full"
+    assert long_session.requests[0][1]["json"]["model"] == "openai/gpt-oss-120b"
+
+
+@pytest.mark.asyncio
+async def test_r5_osaka_fast_forces_small_known_text_model(monkeypatch):
+    monkeypatch.setattr(C, "GROQ_MODELS", ("openai/gpt-oss-120b", "openai/gpt-oss-20b"))
+    session = _Session(_Response(_groq("rápido", finish="stop")))
+    router = P.ProviderRouter(session, groq_key="offline-key")
+    long_message = "explique " + ("contexto " * 100)
+    assert await router.chat(
+        system="s", messages=[P.ChatMessage("user", long_message)], allow_tool_calls=False,
+        routing_profile_override="fast",
+    ) == "rápido"
+    assert router.get_request_report()["routing_profile"] == "fast"
+    assert session.requests[0][1]["json"]["model"] == "openai/gpt-oss-20b"
+
+
+@pytest.mark.asyncio
+async def test_r5_osaka_smart_forces_large_known_text_model(monkeypatch):
+    # Mesmo se o operador deixou os dois conhecidos em ordem small-first,
+    # smart só troca as posições desses conhecidos e preserva customizados.
+    monkeypatch.setattr(C, "GROQ_MODELS", ("openai/gpt-oss-20b", "openai/gpt-oss-120b"))
+    session = _Session(_Response(_groq("smart", finish="stop")))
+    router = P.ProviderRouter(session, groq_key="offline-key")
+    assert await router.chat(
+        system="s", messages=[P.ChatMessage("user", "oi")], allow_tool_calls=False,
+        routing_profile_override="smart",
+    ) == "smart"
+    assert router.get_request_report()["routing_profile"] == "smart"
+    assert session.requests[0][1]["json"]["model"] == "openai/gpt-oss-120b"
+
+
+def test_r5_mistral_virtual_profiles_choose_expected_known_tier():
+    models = ("custom-a", *MODELS, "custom-b")
+    assert P._adaptive_mistral_models(models, profile="fast", wants_tools=False) == (
+        "custom-a", "ministral-3b-latest", "ministral-8b-latest",
+        "ministral-14b-latest", "custom-b",
+    )
+    assert P._adaptive_mistral_models(models, profile="smart", wants_tools=False) == (
+        "custom-a", "ministral-14b-latest", "ministral-8b-latest",
+        "ministral-3b-latest", "custom-b",
+    )
