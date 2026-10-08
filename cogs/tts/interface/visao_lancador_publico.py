@@ -232,6 +232,14 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     discord.ui.TextDisplay(self._texto_motor(motor="teto")),
                     accessory=botao_teto,
                 ))
+            prefixo_bot = self._configuracao_servidor(
+                "bot_prefix",
+                str(getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_")) or "_"),
+            )
+            container.add_item(self._separador())
+            container.add_item(discord.ui.TextDisplay(
+                f"-# Dica: você pode customizar ainda mais a voz usando {self._codigo(prefixo_bot + 'advanced')}!"
+            ))
             self.add_item(container)
             return
 
