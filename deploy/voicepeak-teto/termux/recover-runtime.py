@@ -36,13 +36,14 @@ def _stop(process: subprocess.Popen) -> None:
     process.wait()
 
 
-def bounded(command: list[str], deadline: float) -> dict:
+def bounded(command: list[str], deadline: float, *, include_stderr: bool = False, capture_failed_output: bool = False) -> dict:
     """Run with one total deadline and a bounded pipe, hiding failed output."""
     if deadline - time.monotonic() <= 0:
         return {"ok": False, "error": "tempo total esgotado"}
     process = None
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT if include_stderr else subprocess.DEVNULL, start_new_session=True)
         os.set_blocking(process.stdout.fileno(), False)
         output = bytearray()
         with selectors.DefaultSelector() as selector:
@@ -74,7 +75,10 @@ def bounded(command: list[str], deadline: float) -> dict:
             _stop(process)
             return {"ok": False, "error": "tempo total esgotado"}
         if process.returncode:
-            return {"ok": False, "code": process.returncode}
+            result = {"ok": False, "code": process.returncode}
+            if capture_failed_output:
+                result["output"] = output.decode("utf-8-sig", errors="replace")
+            return result
         return {"ok": True, "code": 0, "output": output.decode("utf-8-sig", errors="replace")}
     except OSError:
         if process is not None and process.poll() is None:
@@ -112,7 +116,8 @@ def recover(*, timeout: float = 120.0) -> dict:
             value = {"ok": False, "error": "tempo total esgotado"}
         else:
             try:
-                value = bounded(login_command(config, command, gui=False), deadline)
+                options = {"include_stderr": True, "capture_failed_output": True} if name == "dpkg_configure" else {}
+                value = bounded(login_command(config, command, gui=False), deadline, **options)
             except ConfigurationError as exc:
                 value = {"ok": False, "error": str(exc)}
         result["repair_steps" if repair else "checks"][name] = outcome(value)
@@ -159,6 +164,13 @@ def recover(*, timeout: float = 120.0) -> dict:
     configure = probe("dpkg_configure", ["/usr/bin/dpkg", "--configure", "-a"], repair=True)
     if not configure.get("ok"):
         result["error"] = "dpkg retornou falha; recuperação não foi confirmada"
+        # This command configures Ubuntu packages only; it never invokes the
+        # commercial application. Preserve its bounded error details so the
+        # post-installation failure can be diagnosed instead of hidden.
+        details = "\n".join(configure.get("output", "").splitlines()[-40:])
+        details = "".join(char for char in details if char in "\n\t" or ord(char) >= 32)
+        result["dpkg_error_output"] = details[-8192:]
+        result["hint"] = "envie dpkg_error_output e diagnostic.py --probe-system --probe-details; não execute novamente o reparo sem identificar a falha"
         return result
     package = probe("libc_bin_status", ["/usr/bin/dpkg-query", "-W", "-f=${Status}\\n", "libc-bin"])
     result["libc_bin_installed"] = bool(package.get("ok") and package.get("output", "").strip() in {"install ok installed", "hold ok installed"})

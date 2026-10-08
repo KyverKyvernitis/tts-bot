@@ -43,7 +43,7 @@ def bounded(command: list[str], timeout: float, *, include_stderr: bool = False,
             return {"ok": False, "error": "saída excede limite"}
         if process.returncode:
             return {"ok": False, "code": process.returncode}
-        return {"ok": True, "code": 0, "output": output.decode("utf-8-sig", errors="replace")}
+        return {"ok": True, "code": 0, "output": output.decode("utf-8-sig", errors="replace"), "stdout_bytes": len(output)}
     except OSError:
         return {"ok": False, "error": "comando indisponível"}
 
@@ -63,7 +63,31 @@ def libc_state(value: dict) -> str | None:
     return match.group(1) if match else None
 
 
-def report(*, probe_runtime: bool = False, probe_system: bool = False, timeout: float = 20.0) -> dict:
+def cache_details(value: dict) -> dict:
+    """Describe stdout without publishing library paths or changing health checks."""
+    if not value.get("ok"):
+        return {"stdout_bytes": None, "cache_header_count": None, "library_entry_count": None}
+    output = value.get("output", "")
+    # glibc 2.35 prints the same header for old and new cache formats. The
+    # guest always receives LC_ALL=C.UTF-8, so the English header is expected.
+    header = re.search(r"(?m)^([0-9]{1,10}) libs found in cache ", output)
+    entries = re.findall(r"(?m)^[\t ]+[^\s()]+[\t ]+\([^\r\n]+\)[\t ]+=>[\t ]+/[^\r\n]+\r?$", output)
+    return {"stdout_bytes": value.get("stdout_bytes", len(output.encode("utf-8"))),
+            "cache_header_count": int(header.group(1)) if header else None,
+            "library_entry_count": len(entries)}
+
+
+def version_details(value: dict) -> dict:
+    """Distinguish a successful wrapper from recognisable glibc version output."""
+    output = value.get("output", "") if value.get("ok") else ""
+    valid = bool(re.search(r"(?m)^ldconfig(?: \([^\r\n]{1,160}\))? [0-9]+(?:\.[0-9]+){1,3}\r?$", output))
+    return {"stdout_bytes": value.get("stdout_bytes", len(output.encode("utf-8"))) if value.get("ok") else None,
+            "version_content_validated": valid}
+
+
+def report(*, probe_runtime: bool = False, probe_system: bool = False, probe_details: bool = False, timeout: float = 20.0) -> dict:
+    if probe_details and (not probe_system or probe_runtime):
+        raise ValueError("probe_details requer probe_system sem probe_runtime")
     deadline = time.monotonic() + timeout if probe_runtime or probe_system else None
     def host_probe(command: list[str], *, limit: float | None = None, **kwargs) -> dict:
         remaining = deadline - time.monotonic() if deadline is not None else timeout
@@ -154,6 +178,22 @@ def report(*, probe_runtime: bool = False, probe_system: bool = False, timeout: 
         system["ldconfig_scan_without_aux_cache_no_seccomp"] = outcome(scan_without_aux_no_seccomp)
         system["scan_test_note"] = "-N -X não grava caches nem altera links; diferença com -i não comprova uma correção"
         system["system_healthy"] = bool(system["guest_architecture"] == "amd64" and system["libc_bin_status_ok"] and audit.get("ok") and not system["audit_has_findings"] and system["ldconfig_cache_readable"] and scan.get("ok"))
+        if probe_details:
+            details = {"read_only": True,
+                       "note": "contagens de stdout não comprovam saúde do sistema; nenhum pacote ou cache é alterado",
+                       "wrapper_cache": cache_details(cache),
+                       "wrapper_cache_no_seccomp": cache_details(alternate)}
+            system["details"] = details
+            version = system_probe(["/sbin/ldconfig", "--version"])
+            details["wrapper_version"] = {**outcome(version), **version_details(version)}
+            real_exists = system_probe(["/usr/bin/test", "-x", "/sbin/ldconfig.real"])
+            details["real_executable_probe"] = outcome(real_exists)
+            details["real_executable_present"] = True if real_exists.get("ok") else False if real_exists.get("code") == 1 else None
+            if real_exists.get("ok"):
+                real_version = system_probe(["/sbin/ldconfig.real", "--version"])
+                details["real_version"] = {**outcome(real_version), **version_details(real_version)}
+                real_cache = system_probe(["/sbin/ldconfig.real", "-p"])
+                details["real_cache"] = {**outcome(real_cache), **cache_details(real_cache)}
 
     try:
         # These commands use positional arguments; executable paths never become shell source.
@@ -191,12 +231,15 @@ def report(*, probe_runtime: bool = False, probe_system: bool = False, timeout: 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe-system", action="store_true", help="inspeciona dpkg e lê o cache ldconfig, sem configurar pacotes ou iniciar o motor")
+    parser.add_argument("--probe-details", action="store_true", help="com --probe-system, compara stdout do wrapper e ldconfig.real somente para leitura")
     parser.add_argument("--probe-runtime", action="store_true", help="testa guest, ELF e inventário com prazo total")
     parser.add_argument("--timeout", type=float, default=20.0, help="prazo total dos testes, de 1 a 120 segundos")
     arguments = parser.parse_args()
     if not 1 <= arguments.timeout <= 120:
         parser.error("timeout deve estar entre 1 e 120 segundos")
-    result = report(probe_runtime=arguments.probe_runtime, probe_system=arguments.probe_system, timeout=arguments.timeout)
+    if arguments.probe_details and (not arguments.probe_system or arguments.probe_runtime):
+        parser.error("--probe-details requer --probe-system e não pode usar --probe-runtime")
+    result = report(probe_runtime=arguments.probe_runtime, probe_system=arguments.probe_system, probe_details=arguments.probe_details, timeout=arguments.timeout)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if arguments.probe_runtime:
         return 0 if result["engine_verified"] else 1

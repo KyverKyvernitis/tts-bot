@@ -45,7 +45,7 @@ def stub_guest(recovery, monkeypatch, *, architecture="amd64", version_ok=True, 
                fail_final=None):
     commands = []
     scans = 0
-    def run(command, deadline):
+    def run(command, deadline, **options):
         nonlocal scans
         commands.append(command)
         if command == ["/usr/bin/dpkg", "--print-architecture"]:
@@ -65,7 +65,9 @@ def stub_guest(recovery, monkeypatch, *, architecture="amd64", version_ok=True, 
         if command in (["/sbin/ldconfig"], ["/sbin/ldconfig", "-i"]):
             return {"ok": rebuild_ok, "code": 0 if rebuild_ok else 139}
         if command == ["/usr/bin/dpkg", "--configure", "-a"]:
-            return {"ok": dpkg_ok, "code": 0 if dpkg_ok else 1, "output": "private dpkg diagnostic"}
+            assert options == {"include_stderr": True, "capture_failed_output": True}
+            return {"ok": dpkg_ok, "code": 0 if dpkg_ok else 1,
+                    "output": "Setting up libc-bin...\ndpkg: libc-bin post-installation returned exit status 139\n"}
         if command == ["/usr/bin/dpkg-query", "-W", "-f=${Status}\\n", "libc-bin"]:
             return {"ok": fail_final != "package", "code": 1 if fail_final == "package" else 0, "output": package + "\n"}
         if command == ["/usr/bin/dpkg", "--audit"]:
@@ -258,6 +260,37 @@ def test_bounded_output_is_capped_without_leaking_stderr(recovery):
 def test_failed_command_hides_output_and_keeps_exit_code(recovery):
     command = [sys.executable, "-c", "import sys; print('private token'); print('private token',file=sys.stderr); sys.exit(139)"]
     assert recovery.bounded(command, time.monotonic() + 3) == {"ok": False, "code": 139}
+
+
+def test_package_failure_captures_stderr_only_when_explicitly_requested(recovery):
+    command = [sys.executable, "-c", "import sys; print('Setting up libc-bin'); print('postinst returned exit status 139',file=sys.stderr); sys.exit(1)"]
+    result = recovery.bounded(command, time.monotonic() + 3, include_stderr=True, capture_failed_output=True)
+    assert result["ok"] is False and result["code"] == 1
+    assert "Setting up libc-bin" in result["output"]
+    assert "postinst returned exit status 139" in result["output"]
+
+
+def test_failed_repair_publishes_package_error_without_claiming_recovered(recovery, configured, monkeypatch):
+    stub_guest(recovery, monkeypatch, dpkg_ok=False)
+    result = recovery.recover()
+    assert result["recovered"] is False and result["engine_verified"] is False
+    assert "libc-bin post-installation returned exit status 139" in result["dpkg_error_output"]
+    assert "--probe-details" in result["hint"]
+
+
+def test_package_error_tail_is_bounded_and_has_no_terminal_control_characters(recovery, configured, monkeypatch):
+    stub_guest(recovery, monkeypatch, dpkg_ok=False)
+    stub = recovery.bounded
+    def run(command, deadline, **options):
+        if "--configure" in command:
+            return {"ok": False, "code": 1, "output": "earlier context\n" * 80 + "\x1b" + "x" * 9000 + "\nlast failure\n"}
+        return stub(command, deadline, **options)
+    monkeypatch.setattr(recovery, "bounded", run)
+    result = recovery.recover()
+    assert len(result["dpkg_error_output"]) <= 8192
+    assert "earlier context" not in result["dpkg_error_output"]
+    assert "\x1b" not in result["dpkg_error_output"]
+    assert result["dpkg_error_output"].endswith("last failure")
 
 
 def test_missing_command_is_controlled_json_metadata(recovery):

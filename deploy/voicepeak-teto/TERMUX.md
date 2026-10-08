@@ -13,7 +13,7 @@ Não execute esta preparação dentro de outro PRoot: comece no Termux nativo.
 
 O ZIP incremental do updater atualiza o bot e o runtime do worker. Este toolkit
 fica fora da release limitada do worker, por isso use também o ZIP separado
-`teto-voicepeak-termux-kit-v2.zip` no telefone. Ele contém somente scripts e as
+`teto-voicepeak-termux-kit-v3.zip` no telefone. Ele contém somente scripts e as
 bibliotecas Python da integração; não contém o programa comercial nem vozes.
 
 Baixe o kit para Downloads. No Termux nativo:
@@ -22,7 +22,7 @@ Baixe o kit para Downloads. No Termux nativo:
 pkg install -y python unzip
 termux-setup-storage
 mkdir -p "$HOME/voicepeak-termux-kit"
-unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-kit-v2.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-kit-v3.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 ```
 
@@ -84,7 +84,7 @@ também reconhece `sys.platform="android"` no instalador do programa.
 Esse ajuste corrige a rejeição do Python Android; não resolve por si só o
 SIGSEGV do QEMU.
 
-Atualize os scripts extraindo o ZIP v2 com `unzip -o`, como acima, e mantenha
+Atualize os scripts extraindo o ZIP v3 com `unzip -o`, como acima, e mantenha
 o container existente. Na raiz do kit:
 
 ```bash
@@ -121,6 +121,39 @@ Se o reparo não funcionar, envie os JSONs de reparo e diagnóstico. Não remova
 o Ubuntu existente nem compre a voz antes de confirmar a abertura do programa.
 Os testes do kit simulam falhas e estados de pacotes; este reparo ainda não
 foi validado no Poco.
+
+## Quando ldconfig passa, mas dpkg continua falhando
+
+`code=0` nas varreduras e `libc_bin_state=half-configured` não identificam a
+causa da falha do pós-instalação. O kit v2 descartava a mensagem de erro do
+`dpkg`; no v3, `recover-runtime.py` preserva em `dpkg_error_output` as últimas
+40 linhas, até 8192 caracteres, dessa falha específica de pacotes Ubuntu.
+Ele continua marcando `recovered=false` enquanto a configuração falhar.
+
+Para mostrar o erro diretamente, usando o container existente:
+
+```bash
+proot-distro login voicepeak-x64 -- /usr/bin/env LANG=C LC_ALL=C /usr/bin/dpkg --configure -a
+proot-distro login voicepeak-x64 -- /usr/bin/env LANG=C LC_ALL=C /sbin/ldconfig.real -p
+```
+
+O primeiro comando repete a configuração dos pacotes pendentes com o erro
+visível. O segundo apenas lê o cache usando o executável real do Ubuntu.
+Compartilhe a saída para distinguir falha do pós-instalação, falha intermitente
+sob QEMU e diferenças no cache. O VOICEPEAK não é executado por esses comandos.
+
+No kit v3, o diagnóstico detalhado também compara o wrapper e o binário real
+sem alterar pacotes ou caches:
+
+```bash
+python deploy/voicepeak-teto/termux/diagnostic.py --probe-system --probe-details --timeout 90
+```
+
+O campo `system_probe.details` informa bytes recebidos em stdout, contagem do
+header do cache, quantidade de entradas e se `--version` retornou o conteúdo
+esperado do `ldconfig`. Uma saída vazia, um cache com zero entradas e um formato
+desconhecido ficam distinguíveis. Esses detalhes não tornam o sistema saudável
+nem confirmam a execução da Teto.
 
 ## Interface gráfica e ativação oficial
 
