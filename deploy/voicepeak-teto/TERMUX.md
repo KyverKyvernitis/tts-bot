@@ -1,5 +1,10 @@
 # VOICEPEAK no Poco via Termux — tentativa experimental
 
+No Poco, o teste direto de `ldconfig.real` sob QEMU apresentou SIGSEGV.
+A alternativa atual é [Ubuntu 24.04 ARM64 + Box64](BOX64.md), que deixa os
+comandos e bibliotecas do Ubuntu nativos. O roteiro QEMU abaixo continua
+documentado para comparação e recuperação do container existente.
+
 O caminho preparado é:
 
 `worker/Python ARM64 no Termux → launcher → PRoot Ubuntu x86_64 → QEMU → VOICEPEAK → WAV`

@@ -1,0 +1,154 @@
+# VOICEPEAK no Termux com Ubuntu ARM64 + Box64
+
+Esta é a alternativa ao Ubuntu x86_64/QEMU que apresentou SIGSEGV no
+`ldconfig.real` do Poco. O Ubuntu 24.04 **ARM64**, seu `apt`, `dpkg` e as
+bibliotecas do sistema rodam na arquitetura do telefone. O Box64 emula
+somente o programa Linux x86_64 do VOICEPEAK.
+
+Não precisa de root. O funcionamento do programa, a GUI, a ativação e a
+síntese ainda precisam ser testados no aparelho. O kit não contém o motor
+comercial, a voz Teto ou uma licença.
+
+## Instalar o kit e o runtime
+
+Baixe `teto-voicepeak-termux-box64-kit.zip` para Downloads. No Termux nativo,
+fora de outro PRoot:
+
+```bash
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit.zip" -d "$HOME/voicepeak-termux-kit"
+cd "$HOME/voicepeak-termux-kit"
+bash deploy/voicepeak-teto/termux/setup-box64.sh
+```
+
+O setup cria `voicepeak-arm64` separado do container anterior `voicepeak-x64`.
+Instala pacotes ARM64 e compila Box64 com dois processos de compilação. Essa
+etapa pode demorar vários minutos; reserve alguns GB de armazenamento livre.
+Uma falha preserva o container para investigação e impede anunciar o runtime
+como pronto.
+
+O código do Box64 fica fixado na versão oficial **v0.4.0**, commit
+`dae0917c47b4edd8956f314210417a20fd225c4b`. O setup também usa as duas
+bibliotecas abertas x86_64 incluídas nesse commit, `libstdc++.so.6` e
+`libgcc_s.so.1`, sem instalar pacotes amd64 no Ubuntu ARM64. Ubuntu 24.04 foi
+escolhido porque a glibc 2.39 atende à exigência GLIBC_2.36 de uma dessas
+bibliotecas. Nenhuma biblioteca comercial é distribuída no kit.
+
+O executável nativo fica em `/opt/voicepeak-box64/bin/box64`; as duas
+bibliotecas x64 ficam em `/opt/voicepeak-box64/lib/x86_64-linux-gnu`.
+O checkout existente é preservado se tiver um commit diferente ou alterações
+locais. O setup não registra binfmt nem substitui executáveis do Ubuntu.
+
+## Testar o programa oficial antes de comprar a voz
+
+Se o programa ainda não foi instalado, na raiz do kit:
+
+```bash
+python deploy/voicepeak-teto/termux/fetch-engine.py
+"$HOME/.voicepeak-termux/bin/voicepeak-termux-box64-diagnostic" --probe-system --probe-runtime --timeout 120
+```
+
+O downloader baixa o pacote oficial público 1.2.22, aproximadamente 194 MiB,
+e verifica o SHA-256 do arquivo Linux. Essa versão é fixa para o primeiro
+teste de compatibilidade; não inclui a voz Teto. Se o programa já existir, o
+downloader recusa sobrescrevê-lo. Nesse caso, execute apenas o diagnóstico.
+
+O launcher usa `~/.voicepeak-termux/config-box64.json` e apresenta a pasta
+persistente do programa como `/opt/Voicepeak`. O alias
+`voicepeak-termux-box64` seleciona essa configuração automaticamente;
+`voicepeak-termux` e a configuração QEMU antiga continuam separados.
+
+O diagnóstico deve mostrar:
+
+- `system_probe.guest_architecture = "arm64"`;
+- `system_probe.system_healthy = true`;
+- `system_probe.box64_verified = true`;
+- `engine_elf_x86_64 = true`;
+- `cli_help_ok = true` quando o programa realmente retornar suas opções.
+
+Sem a voz instalada e ativada, `teto_inventory_ok = false` e
+`engine_verified = false` são esperados. O inventário pode expirar enquanto o
+programa espera a ativação. A abertura do `--help` comprova somente essa etapa,
+sem comprovar GUI ou síntese.
+
+Para testar apenas a abertura do programa:
+
+```bash
+timeout 90 "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64" --help
+```
+
+Envie a saída se houver erro de biblioteca, crash ou ausência das opções do
+programa. O diagnóstico identifica mensagens de término por sinal mesmo
+quando PRoot devolve código zero. Os comandos de bibliotecas verificam o
+`ldconfig.real` diretamente, evitando usar o wrapper como prova de execução.
+
+## Interface gráfica e ativação
+
+Depois que o programa abrir, instale o APK e o pacote complementar do
+[Termux:X11](https://github.com/termux/termux-x11) conforme o projeto oficial.
+No Termux:
+
+```bash
+termux-x11 :1 &
+DISPLAY=:1 "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64"
+```
+
+Abra o aplicativo Termux:X11 no Android. A voz Teto exige compra, instalação
+e ativação oficiais pela interface do VOICEPEAK. Esse passo não foi validado
+no Poco. A emulação não fornece licença nem acrescenta suporte nativo a
+português.
+
+Após ativar a voz, confira o nome exato:
+
+```bash
+timeout 90 "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64" --list-narrator
+```
+
+O backend aceita `重音テト`, `Kasane Teto` ou `Teto`. Sem esse inventário e um
+WAV real validado, não configure o bot como Teto pronta.
+
+## Português e worker
+
+Teste a síntese na raiz do kit, usando o narrador que seu programa retornar:
+
+```bash
+export PHONE_WORKER_TETO_ENABLED=true
+export PHONE_WORKER_VOICEPEAK_COMMAND="$HOME/.voicepeak-termux/bin/voicepeak-termux-box64"
+export PHONE_WORKER_VOICEPEAK_URL=
+export PHONE_WORKER_VOICEPEAK_NARRATOR=重音テト
+export PHONE_WORKER_VOICEPEAK_TEXT_MODE=ptbr-kana
+export PHONE_WORKER_VOICEPEAK_STATUS_TIMEOUT_SECONDS=30
+python deploy/voicepeak-teto/validate.py --render-test --timeout 120 --output "$HOME/teto-voicepeak-box64-teste.wav"
+```
+
+Ouça o WAV e meça o tempo. Português continua sendo uma aproximação em kana
+para a voz japonesa. Se a síntese e a latência forem adequadas, use no ambiente
+persistente do worker, `~/.phone-worker.env`:
+
+```bash
+PHONE_WORKER_TETO_ENABLED=true
+PHONE_WORKER_TETO_BACKEND=voicepeak
+PHONE_WORKER_VOICEPEAK_COMMAND="$HOME/.voicepeak-termux/bin/voicepeak-termux-box64"
+PHONE_WORKER_VOICEPEAK_URL=
+PHONE_WORKER_VOICEPEAK_NARRATOR=重音テト
+PHONE_WORKER_VOICEPEAK_TEXT_MODE=ptbr-kana
+PHONE_WORKER_VOICEPEAK_STATUS_TIMEOUT_SECONDS=30
+PHONE_WORKER_VOICEPEAK_STATUS_CACHE_SECONDS=60
+PHONE_WORKER_VOICEPEAK_CACHE_REVISION=termux-box64-v040-teto-1
+PHONE_WORKER_VOICEPEAK_ALLOW_OTHER_VOICES=false
+```
+
+Reinicie pelo supervisor:
+
+```bash
+bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart
+```
+
+Alinhe os prazos do worker e da VPS somente depois de medir a síntese, como
+descrito em [TERMUX.md](TERMUX.md). O toolkit fica fora da release limitada do
+worker; por isso o ZIP do updater e o kit do telefone são separados.
+
+Fontes: [Box64 v0.4.0](https://github.com/ptitSeb/box64/tree/v0.4.0),
+[compilação em Termux/PRoot](https://github.com/ptitSeb/box64/blob/v0.4.0/docs/COMPILE.md),
+[variáveis do Box64](https://github.com/ptitSeb/box64/blob/v0.4.0/docs/USAGE.md),
+[PRoot Distro](https://github.com/termux/proot-distro),
+[programa oficial](https://www.ah-soft.com/voice/setup/).

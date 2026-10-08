@@ -146,7 +146,7 @@ def test_diagnostic_help_does_not_prove_teto_activation(modules, configured, mon
             return {"ok": True, "output": "7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00 03 00 3e 00\n"}
         if "--list-narrator" in command:
             return {"ok": False, "error": "tempo esgotado"}
-        return {"ok": True, "output": "VOICEPEAK help\n"}
+        return {"ok": True, "output": "VOICEPEAK help: -s text --speed value --list-narrator\n"}
     monkeypatch.setattr(diagnostic, "bounded", run)
     result = diagnostic.report(probe_runtime=True)
     assert result["cli_help_ok"] is True
@@ -182,7 +182,7 @@ def test_bounded_diagnostic_caps_output_and_discards_stderr(modules, tmp_path):
 
 def test_stderr_inventory_is_recognized_without_publishing_licence_text(modules, configured, tmp_path, monkeypatch):
     _, diagnostic = modules
-    vendor = executable(tmp_path / "stderr-vendor", "import sys\na=sys.argv\nif '--print-architecture' in a: print('amd64')\nelif '/bin/sh' in a: print('7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00 03 00 3e 00')\nelif '--help' in a: print('VOICEPEAK help; private activation token',file=sys.stderr)\nelif '--list-narrator' in a: print('private activation token\\n重音テト',file=sys.stderr)\n")
+    vendor = executable(tmp_path / "stderr-vendor", "import sys\na=sys.argv\nif '--print-architecture' in a: print('amd64')\nelif '/bin/sh' in a: print('7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00 03 00 3e 00')\nelif '--help' in a: print('VOICEPEAK help: -s text --speed value --list-narrator; private activation token',file=sys.stderr)\nelif '--list-narrator' in a: print('private activation token\\n重音テト',file=sys.stderr)\n")
     monkeypatch.setattr(diagnostic, "login_command", lambda config, command, **kwargs: [vendor, *command])
     result = diagnostic.report(probe_runtime=True)
     assert result["cli_help_ok"] is True and result["teto_inventory_ok"] is True

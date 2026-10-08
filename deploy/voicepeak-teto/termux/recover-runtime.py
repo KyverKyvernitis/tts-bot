@@ -26,6 +26,14 @@ from launcher import ConfigurationError, load_config, login_command
 MAX_OUTPUT_BYTES = 65536
 AUX_CACHE = "/var/cache/ldconfig/aux-cache"
 AUX_BACKUP = "/var/cache/ldconfig/aux-cache.voicepeak-repair.bak"
+LDCONFIG = "/sbin/ldconfig.real"
+FATAL_SIGNAL = re.compile(
+    r"(?im)^(?:qemu(?:-[A-Za-z0-9_-]+)?:\s*uncaught target signal\s+"
+    r"|proot\s+info:\s*[^\r\n]{0,512}?terminated with signal\s+)([1-9][0-9]{0,2})\b"
+)
+LDCONFIG_VERSION = re.compile(
+    r"(?m)^ldconfig(?: \([^\r\n]{1,160}\))? [0-9]+(?:\.[0-9]+){1,3}\r?$"
+)
 
 
 def _stop(process: subprocess.Popen) -> None:
@@ -74,12 +82,18 @@ def bounded(command: list[str], deadline: float, *, include_stderr: bool = False
         except subprocess.TimeoutExpired:
             _stop(process)
             return {"ok": False, "error": "tempo total esgotado"}
-        if process.returncode:
+        decoded = output.decode("utf-8-sig", errors="replace")
+        fatal = FATAL_SIGNAL.search(decoded)
+        if process.returncode or fatal:
             result = {"ok": False, "code": process.returncode}
+            # PRoot can retain a previous child's successful exit status when
+            # a later guest process dies by signal. Never trust that zero.
+            if fatal:
+                result.update(error="processo do guest terminou com sinal fatal", signal=int(fatal.group(1)))
             if capture_failed_output:
-                result["output"] = output.decode("utf-8-sig", errors="replace")
+                result["output"] = decoded
             return result
-        return {"ok": True, "code": 0, "output": output.decode("utf-8-sig", errors="replace")}
+        return {"ok": True, "code": 0, "output": decoded}
     except OSError:
         if process is not None and process.poll() is None:
             _stop(process)
@@ -90,7 +104,7 @@ def bounded(command: list[str], deadline: float, *, include_stderr: bool = False
 
 
 def outcome(value: dict) -> dict:
-    return {key: value[key] for key in ("ok", "code", "error") if key in value}
+    return {key: value[key] for key in ("ok", "code", "error", "signal") if key in value}
 
 
 def recover(*, timeout: float = 120.0) -> dict:
@@ -109,33 +123,45 @@ def recover(*, timeout: float = 120.0) -> dict:
         result["error"] = str(exc)
         return result
     result["container"] = config["container"]
+    expected_architecture = "arm64" if config.get("backend", "qemu") == "box64" else "amd64"
     deadline = time.monotonic() + timeout
 
-    def probe(name: str, command: list[str], *, repair: bool = False) -> dict:
+    def probe(name: str, command: list[str], *, repair: bool = False, include_stderr: bool = False) -> dict:
         if deadline - time.monotonic() <= 0:
             value = {"ok": False, "error": "tempo total esgotado"}
         else:
             try:
                 options = {"include_stderr": True, "capture_failed_output": True} if name == "dpkg_configure" else {}
+                if include_stderr:
+                    options["include_stderr"] = True
                 value = bounded(login_command(config, command, gui=False), deadline, **options)
             except ConfigurationError as exc:
                 value = {"ok": False, "error": str(exc)}
         result["repair_steps" if repair else "checks"][name] = outcome(value)
         return value
 
+    def probe_ldconfig(name: str, arguments: list[str], *, repair: bool = False) -> dict:
+        # Ubuntu's shell wrapper can defer updates, while PRoot can hide a
+        # signalled child's failure. Probe the real ELF and inspect stderr.
+        value = probe(name, [LDCONFIG, *arguments], repair=repair, include_stderr=True)
+        if arguments == ["--version"] and value.get("ok") and not LDCONFIG_VERSION.search(value.get("output", "")):
+            value = {"ok": False, "code": value.get("code", 0), "error": "saída não confirmou a versão de ldconfig.real"}
+            result["repair_steps" if repair else "checks"][name] = outcome(value)
+        return value
+
     architecture = probe("architecture", ["/usr/bin/dpkg", "--print-architecture"])
-    if not architecture.get("ok") or architecture.get("output", "").strip() != "amd64":
-        result["error"] = "guest indisponível ou arquitetura diferente de amd64; ambiente preservado"
+    if not architecture.get("ok") or architecture.get("output", "").strip() != expected_architecture:
+        result["error"] = f"guest indisponível ou arquitetura diferente de {expected_architecture}; ambiente preservado"
         return result
-    result["guest_architecture"] = "amd64"
-    version = probe("ldconfig_version", ["/sbin/ldconfig", "--version"])
+    result["guest_architecture"] = expected_architecture
+    version = probe_ldconfig("ldconfig_version", ["--version"])
     if not version.get("ok"):
         result["error"] = "ldconfig não abriu; nenhum reparo foi executado"
         return result
-    scan = probe("ldconfig_scan", ["/sbin/ldconfig", "-N", "-X"])
+    scan = probe_ldconfig("ldconfig_scan", ["-N", "-X"])
     ignore_auxiliary = False
     if not scan.get("ok"):
-        alternate = probe("ldconfig_ignore_aux_scan", ["/sbin/ldconfig", "-N", "-X", "-i"])
+        alternate = probe_ldconfig("ldconfig_ignore_aux_scan", ["-N", "-X", "-i"])
         if not alternate.get("ok"):
             result["error"] = "ambas as leituras ldconfig falharam; nenhum reparo foi executado"
             result["hint"] = "envie o diagnóstico --probe-system; falha de QEMU/PRoot ainda precisa de investigação"
@@ -153,11 +179,11 @@ def recover(*, timeout: float = 120.0) -> dict:
         elif auxiliary.get("code") != 1:
             result["error"] = "não foi possível verificar o cache auxiliar; reparo interrompido"
             return result
-    rebuild = probe("ldconfig_rebuild", ["/sbin/ldconfig", *(["-i"] if ignore_auxiliary else [])], repair=True)
+    rebuild = probe_ldconfig("ldconfig_rebuild", ["-i"] if ignore_auxiliary else [], repair=True)
     if not rebuild.get("ok"):
         result["error"] = "reconstrução ldconfig falhou; dpkg não foi executado"
         return result
-    recheck = probe("ldconfig_scan_after_rebuild", ["/sbin/ldconfig", "-N", "-X"])
+    recheck = probe_ldconfig("ldconfig_scan_after_rebuild", ["-N", "-X"])
     if not recheck.get("ok"):
         result["error"] = "ldconfig ainda falha após reconstrução; dpkg não foi executado"
         return result
@@ -176,7 +202,7 @@ def recover(*, timeout: float = 120.0) -> dict:
     result["libc_bin_installed"] = bool(package.get("ok") and package.get("output", "").strip() in {"install ok installed", "hold ok installed"})
     audit = probe("dpkg_audit", ["/usr/bin/dpkg", "--audit"])
     result["dpkg_audit_empty"] = bool(audit.get("ok") and not audit.get("output", "").strip())
-    cache = probe("ldconfig_cache", ["/sbin/ldconfig", "-p"])
+    cache = probe_ldconfig("ldconfig_cache", ["-p"])
     result["ldconfig_cache_readable"] = bool(cache.get("ok") and re.search(r"(?m)^[1-9][0-9]* libs found in cache ", cache.get("output", "")))
     result["recovered"] = bool(result["libc_bin_installed"] and result["dpkg_audit_empty"] and result["ldconfig_cache_readable"])
     if not result["recovered"]:

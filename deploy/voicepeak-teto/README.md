@@ -2,7 +2,8 @@
 
 Esta integração mantém a engine `teto` e o prefixo `'` do bot. O Poco/Termux
 pode enviar o texto para um host com VOICEPEAK e receber WAV, ou tentar a
-[execução local experimental via QEMU](TERMUX.md). A leitura em português
+[execução local experimental via Ubuntu ARM64 + Box64](BOX64.md), com o
+[roteiro QEMU anterior](TERMUX.md) disponível para comparação. A leitura em português
 é experimental: o adaptador converte os sons para kana e o motor japonês os
 pronuncia. Não traduz a mensagem para japonês.
 

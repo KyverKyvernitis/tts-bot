@@ -55,7 +55,7 @@ def test_missing_config_can_inspect_guest_without_starting_voicepeak(diagnostic,
     assert len(calls) == 8
     for command, _, _ in calls:
         assert "--configure" not in command and "--list-narrator" not in command
-        if "/sbin/ldconfig" in command:
+        if "/sbin/ldconfig.real" in command:
             assert "-p" in command or {"-N", "-X"}.issubset(command)
     assert "activation token" not in json.dumps(result)
     assert "private failure" not in json.dumps(result)
@@ -104,8 +104,8 @@ def test_no_seccomp_and_aux_cache_variants_are_comparisons_without_repair(diagno
     calls = fake_system(diagnostic, monkeypatch, scan_code=139, no_aux_code=0)
     system = diagnostic.report(probe_system=True)["system_probe"]
     overrides = [(command, options["environment"]) for command, _, options in calls if "environment" in options]
-    assert len(overrides) == 2 and overrides[0][0][-2:] == ["/sbin/ldconfig", "-p"]
-    assert overrides[1][0][-4:] == ["/sbin/ldconfig", "-N", "-X", "-i"]
+    assert len(overrides) == 2 and overrides[0][0][-2:] == ["/sbin/ldconfig.real", "-p"]
+    assert overrides[1][0][-4:] == ["/sbin/ldconfig.real", "-N", "-X", "-i"]
     assert all(environment["PROOT_NO_SECCOMP"] == "1" for _, environment in overrides)
     assert "PROOT_NO_SECCOMP" not in os.environ
     assert system["ldconfig_scan_without_aux_cache"] == {"ok": True, "code": 0}

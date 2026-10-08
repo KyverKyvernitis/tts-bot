@@ -57,7 +57,7 @@ def test_details_compare_wrapper_and_real_without_exposing_paths(diagnostic, mon
     system = result["system_probe"]
     details = system["details"]
     assert details["read_only"] is True
-    assert details["wrapper_cache"] == {"stdout_bytes": len(CACHE.encode()), "cache_header_count": 2, "library_entry_count": 2}
+    assert details["wrapper_cache"] == {"ok": True, "code": 0, "stdout_bytes": len(CACHE.encode()), "cache_header_count": 2, "library_entry_count": 2}
     assert details["wrapper_cache_no_seccomp"] == details["wrapper_cache"]
     assert details["wrapper_version"]["version_content_validated"] is True
     assert details["real_version"]["version_content_validated"] is True
@@ -71,16 +71,16 @@ def test_details_compare_wrapper_and_real_without_exposing_paths(diagnostic, mon
         assert "--configure" not in command and "--list-narrator" not in command
         assert "/opt/Voicepeak/voicepeak" not in command
         if "/sbin/ldconfig.real" in command and "/usr/bin/test" not in command:
-            assert command[-1] in {"-p", "--version"}
+            assert command[-1] in {"-p", "--version"} or {"-N", "-X"}.issubset(command)
 
 
-def test_real_helper_is_evidence_and_cannot_approve_empty_wrapper_cache(diagnostic, monkeypatch):
-    fake_system(diagnostic, monkeypatch, wrapper_cache="", wrapper_version="")
+def test_wrapper_success_cannot_approve_empty_real_cache(diagnostic, monkeypatch):
+    fake_system(diagnostic, monkeypatch, real_cache="", real_version="")
     system = diagnostic.report(probe_system=True, probe_details=True)["system_probe"]
-    assert system["details"]["wrapper_cache"] == {"stdout_bytes": 0, "cache_header_count": None, "library_entry_count": 0}
-    assert system["details"]["wrapper_version"]["ok"] is True
-    assert system["details"]["wrapper_version"]["version_content_validated"] is False
-    assert system["details"]["real_cache"]["cache_header_count"] == 2
+    assert system["details"]["real_cache"] == {"ok": True, "code": 0, "stdout_bytes": 0, "cache_header_count": None, "library_entry_count": 0}
+    assert system["details"]["wrapper_version"]["version_content_validated"] is True
+    assert system["details"]["real_version"]["version_content_validated"] is False
+    assert system["details"]["wrapper_cache"]["cache_header_count"] == 2
     assert system["system_healthy"] is False
 
 
@@ -90,8 +90,8 @@ def test_missing_or_failed_real_executable_probe_skips_real_program(diagnostic, 
     details = diagnostic.report(probe_system=True, probe_details=True)["system_probe"]["details"]
     assert details["real_executable_present"] is present
     assert details["real_executable_probe"]["code"] == real_exists
-    assert "real_version" not in details and "real_cache" not in details
-    assert not any(command[-2:] == ["/sbin/ldconfig.real", "-p"] for command, _, _ in calls)
+    assert "real_version" not in details
+    assert sum(command[-2:] == ["/sbin/ldconfig.real", "-p"] for command, _, _ in calls) == 2
 
 
 def test_details_are_optional_and_do_not_add_default_guest_commands(diagnostic, monkeypatch):
@@ -99,7 +99,7 @@ def test_details_are_optional_and_do_not_add_default_guest_commands(diagnostic, 
     result = diagnostic.report(probe_system=True)
     assert "details" not in result["system_probe"]
     assert len(calls) == 8
-    assert not any("/sbin/ldconfig.real" in command or "--version" in command for command, _, _ in calls)
+    assert not any("/sbin/ldconfig" in command or "--version" in command for command, _, _ in calls)
 
 
 @pytest.mark.parametrize("output,count,entries", [

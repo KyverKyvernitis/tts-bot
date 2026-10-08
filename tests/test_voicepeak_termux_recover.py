@@ -50,19 +50,19 @@ def stub_guest(recovery, monkeypatch, *, architecture="amd64", version_ok=True, 
         commands.append(command)
         if command == ["/usr/bin/dpkg", "--print-architecture"]:
             return {"ok": True, "code": 0, "output": architecture + "\n"}
-        if command == ["/sbin/ldconfig", "--version"]:
-            return {"ok": True, "code": 0, "output": "glibc version; private token"} if version_ok else {"ok": False, "code": 139}
-        if command == ["/sbin/ldconfig", "-N", "-X"]:
+        if command == ["/sbin/ldconfig.real", "--version"]:
+            return {"ok": True, "code": 0, "output": "ldconfig (Ubuntu GLIBC 2.35-0ubuntu3.15) 2.35\nprivate token"} if version_ok else {"ok": False, "code": 139}
+        if command == ["/sbin/ldconfig.real", "-N", "-X"]:
             scans += 1
             ok = scan_ok if scans == 1 else recheck_ok
             return {"ok": ok, "code": 0 if ok else 139, "output": "private scan token"}
-        if command == ["/sbin/ldconfig", "-N", "-X", "-i"]:
+        if command == ["/sbin/ldconfig.real", "-N", "-X", "-i"]:
             return {"ok": alternate_ok, "code": 0 if alternate_ok else 139, "output": "private alternate token"}
         if command == ["/usr/bin/test", "-f", recovery.AUX_CACHE]:
             return {"ok": auxiliary, "code": 0 if auxiliary else 1}
         if command[0] == "/bin/cp":
             return {"ok": backup_ok, "code": 0 if backup_ok else 1}
-        if command in (["/sbin/ldconfig"], ["/sbin/ldconfig", "-i"]):
+        if command in (["/sbin/ldconfig.real"], ["/sbin/ldconfig.real", "-i"]):
             return {"ok": rebuild_ok, "code": 0 if rebuild_ok else 139}
         if command == ["/usr/bin/dpkg", "--configure", "-a"]:
             assert options == {"include_stderr": True, "capture_failed_output": True}
@@ -72,7 +72,7 @@ def stub_guest(recovery, monkeypatch, *, architecture="amd64", version_ok=True, 
             return {"ok": fail_final != "package", "code": 1 if fail_final == "package" else 0, "output": package + "\n"}
         if command == ["/usr/bin/dpkg", "--audit"]:
             return {"ok": fail_final != "audit", "code": 1 if fail_final == "audit" else 0, "output": audit}
-        if command == ["/sbin/ldconfig", "-p"]:
+        if command == ["/sbin/ldconfig.real", "-p"]:
             return {"ok": fail_final != "cache", "code": 1 if fail_final == "cache" else 0, "output": cache}
         pytest.fail("Unexpected guest command: " + repr(command))
     monkeypatch.setattr(recovery, "login_command", lambda config, command, *, gui: command if gui is False else pytest.fail("GUI must remain off"))
@@ -87,10 +87,10 @@ def test_normal_recovery_rebuilds_rechecks_and_configures_existing_guest(recover
     assert result["recovered"] is True and result["engine_verified"] is False
     assert result["strategy"] == "normal_rebuild"
     assert commands == [
-        ["/usr/bin/dpkg", "--print-architecture"], ["/sbin/ldconfig", "--version"],
-        ["/sbin/ldconfig", "-N", "-X"], ["/sbin/ldconfig"], ["/sbin/ldconfig", "-N", "-X"],
+        ["/usr/bin/dpkg", "--print-architecture"], ["/sbin/ldconfig.real", "--version"],
+        ["/sbin/ldconfig.real", "-N", "-X"], ["/sbin/ldconfig.real"], ["/sbin/ldconfig.real", "-N", "-X"],
         ["/usr/bin/dpkg", "--configure", "-a"], ["/usr/bin/dpkg-query", "-W", "-f=${Status}\\n", "libc-bin"],
-        ["/usr/bin/dpkg", "--audit"], ["/sbin/ldconfig", "-p"],
+        ["/usr/bin/dpkg", "--audit"], ["/sbin/ldconfig.real", "-p"],
     ]
     assert configured[1].read_bytes() == before
     assert "private" not in json.dumps(result)
@@ -103,11 +103,11 @@ def test_ignore_auxiliary_route_backs_up_without_replacing_then_rebuilds(recover
     result = recovery.recover()
     assert result["recovered"] is True
     assert result["strategy"] == "rebuild_ignoring_auxiliary_cache"
-    assert commands[:4] == [["/usr/bin/dpkg", "--print-architecture"], ["/sbin/ldconfig", "--version"], ["/sbin/ldconfig", "-N", "-X"], ["/sbin/ldconfig", "-N", "-X", "-i"]]
+    assert commands[:4] == [["/usr/bin/dpkg", "--print-architecture"], ["/sbin/ldconfig.real", "--version"], ["/sbin/ldconfig.real", "-N", "-X"], ["/sbin/ldconfig.real", "-N", "-X", "-i"]]
     backup = ["/bin/cp", "-p", "--no-clobber", "--", recovery.AUX_CACHE, recovery.AUX_BACKUP]
     assert (backup in commands) is auxiliary
-    rebuild_index = commands.index(["/sbin/ldconfig", "-i"])
-    assert commands[rebuild_index + 1] == ["/sbin/ldconfig", "-N", "-X"]
+    rebuild_index = commands.index(["/sbin/ldconfig.real", "-i"])
+    assert commands[rebuild_index + 1] == ["/sbin/ldconfig.real", "-N", "-X"]
     assert commands[rebuild_index + 2] == ["/usr/bin/dpkg", "--configure", "-a"]
 
 
@@ -235,10 +235,10 @@ def test_one_deadline_is_shared_and_expired_commands_never_spawn(recovery, confi
     monkeypatch.setattr(recovery.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(recovery, "login_command", lambda config, command, *, gui: command)
     calls = []
-    def run(command, deadline):
+    def run(command, deadline, **options):
         calls.append((command, deadline))
         clock[0] += 0.25
-        return {"ok": True, "output": "amd64\n" if "--print-architecture" in command else ""}
+        return {"ok": True, "output": "amd64\n" if "--print-architecture" in command else "ldconfig (Ubuntu GLIBC 2.35-0ubuntu3.15) 2.35\n" if "--version" in command else ""}
     monkeypatch.setattr(recovery, "bounded", run)
     result = recovery.recover(timeout=1)
     assert result["recovered"] is False
