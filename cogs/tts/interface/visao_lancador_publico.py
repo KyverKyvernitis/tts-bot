@@ -37,8 +37,17 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         classe_modal_apelido: Type[discord.ui.Modal] = ModalApelidoFalado,
         enviar_modal_fallback: EnviadorModalFallback = enviar_modal_configuracao_com_fallback,
         descricao_lancador: str = DESCRICAO_LANCADOR_TTS,
+        id_usuario_alvo: int | None = None,
+        nome_usuario_alvo: str | None = None,
     ):
-        super().__init__(cog, id_dono, id_servidor, timeout=duracao)
+        super().__init__(
+            cog,
+            id_dono,
+            id_servidor,
+            timeout=duracao,
+            target_user_id=id_usuario_alvo,
+            target_user_name=nome_usuario_alvo,
+        )
         self.panel_kind = "launcher"
         self._classe_botao = classe_botao
         self._classe_modal_edge = classe_modal_edge
@@ -71,10 +80,11 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                 padroes_servidor = dict(db.get_guild_tts_defaults(self.guild_id) or {})
         except Exception as erro:
             print(f"[tts_panel] falha ao carregar padrões do launcher: {erro!r}")
-        if self.owner_id > 0:
+        id_configurado = int(self.target_user_id or self.owner_id or 0)
+        if id_configurado > 0:
             try:
                 if hasattr(db, "get_user_tts"):
-                    configuracoes_usuario = dict(db.get_user_tts(self.guild_id, self.owner_id) or {})
+                    configuracoes_usuario = dict(db.get_user_tts(self.guild_id, id_configurado) or {})
             except Exception as erro:
                 print(f"[tts_panel] falha ao carregar ajustes pessoais do launcher: {erro!r}")
         return padroes_servidor, configuracoes_usuario
@@ -115,7 +125,23 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
             return discord.ui.Separator()
 
     def _texto_introducao(self) -> str:
-        return f"### TTS\n{self._descricao_lancador}"
+        titulo = "TTS"
+        if self.target_user_id and self.target_user_name:
+            titulo = f"TTS de {self.target_user_name}"
+        return f"### {titulo}\n{self._descricao_lancador}"
+
+    def _alvo_interacao(self, interaction: discord.Interaction) -> tuple[int, str]:
+        if self.target_user_id:
+            nome = str(self.target_user_name or "").strip()
+            if not nome:
+                member = getattr(getattr(interaction, "guild", None), "get_member", lambda _id: None)(self.target_user_id)
+                nome = self.cog._member_panel_name(member)
+            return int(self.target_user_id), nome
+        usuario = interaction.user
+        return int(usuario.id), self.cog._member_panel_name(usuario)
+
+    def _painel_de_outro_usuario(self) -> bool:
+        return bool(self.target_user_id and int(self.target_user_id) != int(self.owner_id or 0))
 
     @staticmethod
     def _limpar_configuracao(valor: object) -> str:
@@ -216,7 +242,6 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                 discord.ui.Section(discord.ui.TextDisplay(self._texto_motor(motor="edge")), accessory=botao_edge),
                 self._separador(),
                 discord.ui.Section(discord.ui.TextDisplay(self._texto_motor(motor="gtts")), accessory=botao_gtts),
-                accent_color=discord.Color.blurple(),
             )
             if apelido_ativo:
                 botao_apelido = self._criar_botao(acao="spoken_name", rotulo="Alterar")
@@ -232,14 +257,15 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     discord.ui.TextDisplay(self._texto_motor(motor="teto")),
                     accessory=botao_teto,
                 ))
-            prefixo_bot = self._configuracao_servidor(
-                "bot_prefix",
-                str(getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_")) or "_"),
-            )
-            container.add_item(self._separador())
-            container.add_item(discord.ui.TextDisplay(
-                f"-# Dica: você pode customizar ainda mais a voz usando {self._codigo(prefixo_bot + 'advanced')}!"
-            ))
+            if not self._painel_de_outro_usuario():
+                prefixo_bot = self._configuracao_servidor(
+                    "bot_prefix",
+                    str(getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_")) or "_"),
+                )
+                container.add_item(self._separador())
+                container.add_item(discord.ui.TextDisplay(
+                    f"-# Dica: você pode customizar ainda mais a voz usando {self._codigo(prefixo_bot + 'advanced')}!"
+                ))
             self.add_item(container)
             return
 
@@ -255,7 +281,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
             await interaction.response.send_message("Esse painel só pode ser usado dentro de um servidor.", ephemeral=True)
             return
 
-        nome_alvo = self.cog._member_panel_name(interaction.user)
+        id_alvo, nome_alvo = self._alvo_interacao(interaction)
         mensagem_painel = getattr(interaction, "message", None)
         if acao == "edge":
             await self._enviar_modal_fallback(
@@ -264,14 +290,14 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     self.cog,
                     mensagem_painel,
                     server=False,
-                    target_user_id=interaction.user.id,
+                    target_user_id=id_alvo,
                     target_user_name=nome_alvo,
                 ),
                 lambda: self._classe_modal_edge(
                     self.cog,
                     mensagem_painel,
                     server=False,
-                    target_user_id=interaction.user.id,
+                    target_user_id=id_alvo,
                     target_user_name=nome_alvo,
                     force_text_fallback=True,
                 ),
@@ -286,14 +312,14 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     self.cog,
                     mensagem_painel,
                     server=False,
-                    target_user_id=interaction.user.id,
+                    target_user_id=id_alvo,
                     target_user_name=nome_alvo,
                 ),
                 lambda: self._classe_modal_gtts(
                     self.cog,
                     mensagem_painel,
                     server=False,
-                    target_user_id=interaction.user.id,
+                    target_user_id=id_alvo,
                     target_user_name=nome_alvo,
                     force_text_fallback=True,
                 ),
@@ -319,19 +345,19 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     self.cog,
                     mensagem_painel,
                     server=False,
-                    target_user_id=interaction.user.id,
+                    target_user_id=id_alvo,
                     target_user_name=nome_alvo,
                 )
             )
             return
 
         if acao == "spoken_name" and self._apelido_falado_ativo():
-            valor_atual = self.cog._get_saved_spoken_name(interaction.guild.id, interaction.user.id)
+            valor_atual = self.cog._get_saved_spoken_name(interaction.guild.id, id_alvo)
             await interaction.response.send_modal(
                 self._classe_modal_apelido(
                     self.cog,
                     mensagem_painel,
-                    target_user_id=interaction.user.id,
+                    target_user_id=id_alvo,
                     target_user_name=nome_alvo,
                     current_value=valor_atual,
                 )

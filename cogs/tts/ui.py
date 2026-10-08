@@ -348,7 +348,7 @@ class TTSModeActionSelect(SeletorAcaoModoTTS):
 class TTSPublicLauncherView(VisaoLancadorPublicoTTS):
     """Fachada legada do launcher público."""
 
-    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 300):
+    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 300, **kwargs):
         super().__init__(
             cog,
             owner_id,
@@ -361,6 +361,8 @@ class TTSPublicLauncherView(VisaoLancadorPublicoTTS):
             classe_modal_apelido=SpokenNameModal,
             enviar_modal_fallback=_send_settings_modal_with_fallback,
             descricao_lancador=TTS_LAUNCHER_DESCRIPTION,
+            id_usuario_alvo=kwargs.get("target_user_id"),
+            nome_usuario_alvo=kwargs.get("target_user_name"),
         )
 
 

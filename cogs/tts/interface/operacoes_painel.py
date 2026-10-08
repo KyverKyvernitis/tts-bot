@@ -67,11 +67,14 @@ async def salvar_atualizacoes_modal_tts(
 
     state = cog._public_panel_states.get(message_id or 0, {}) if message_id else {}
     if panel_message is not None and state.get("panel_kind") == "launcher":
-        view = cog._build_public_tts_launcher_view(
-            interaction.guild.id,
+        launcher_kwargs = dict(
             owner_id=int(state.get("owner_id", 0) or 0),
             timeout=300,
         )
+        if state.get("target_user_id"):
+            launcher_kwargs["target_user_id"] = int(state["target_user_id"])
+            launcher_kwargs["target_user_name"] = state.get("target_user_name")
+        view = cog._build_public_tts_launcher_view(interaction.guild.id, **launcher_kwargs)
         view.message = panel_message
         await cog._panel_update_after_change(
             interaction,
@@ -171,11 +174,14 @@ async def reiniciar_selecao_lancador_publico(interaction: discord.Interaction, p
         return
 
     try:
-        view = cog._build_public_tts_launcher_view(
-            guild.id,
+        launcher_kwargs = dict(
             owner_id=int(state.get("owner_id", 0) or 0),
             timeout=300,
         )
+        if state.get("target_user_id"):
+            launcher_kwargs["target_user_id"] = int(state["target_user_id"])
+            launcher_kwargs["target_user_name"] = state.get("target_user_name")
+        view = cog._build_public_tts_launcher_view(guild.id, **launcher_kwargs)
         view.message = message
         await cog._edit_panel_message_payload(
             message,

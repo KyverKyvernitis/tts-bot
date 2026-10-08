@@ -3922,8 +3922,17 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
     def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None) -> discord.ui.View:
         return TTSMainPanelView(self, owner_id, guild_id, server=server, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
 
-    def _build_public_tts_launcher_view(self, guild_id: int, *, owner_id: int = 0, timeout: float = 300) -> discord.ui.View:
-        return TTSPublicLauncherView(self, int(owner_id or 0), guild_id, timeout=timeout)
+    def _build_public_tts_launcher_view(
+        self,
+        guild_id: int,
+        *,
+        owner_id: int = 0,
+        timeout: float = 300,
+        target_user_id: int | None = None,
+        target_user_name: str | None = None,
+    ) -> discord.ui.View:
+        return TTSPublicLauncherView(self, int(owner_id or 0), guild_id, timeout=timeout,
+                                     target_user_id=target_user_id, target_user_name=target_user_name)
 
     def _member_panel_name(self, member: discord.abc.User | None) -> str:
         if member is None:
@@ -4478,10 +4487,16 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         state = self._public_panel_states.get(target_id or 0, {}) if target_id else {}
         if message_to_edit is not None and state.get("panel_kind") == "launcher":
             try:
+                launcher_kwargs = {
+                    "owner_id": int(state.get("owner_id", 0) or 0),
+                    "timeout": 300,
+                }
+                if state.get("target_user_id"):
+                    launcher_kwargs["target_user_id"] = int(state["target_user_id"])
+                    launcher_kwargs["target_user_name"] = state.get("target_user_name")
                 launcher_view = self._build_public_tts_launcher_view(
                     getattr(getattr(message_to_edit, "guild", None), "id", getattr(interaction.guild, "id", 0)),
-                    owner_id=int(state.get("owner_id", 0) or 0),
-                    timeout=300,
+                    **launcher_kwargs,
                 )
                 launcher_view.message = message_to_edit
                 if not interaction.response.is_done():
@@ -4881,20 +4896,12 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             embed = await self._build_toggle_embed(message.guild.id, message.author.id)
             view = self._build_toggle_view(0, message.guild.id, timeout=300)
         elif target_member is not None:
-            panel_kind = "user_target"
+            panel_kind = "launcher_target"
             target_name = self._member_panel_name(target_member)
-            embed = await self._build_settings_embed(
+            embed = self._make_embed("TTS", TTS_LAUNCHER_DESCRIPTION, ok=True)
+            view = self._build_public_tts_launcher_view(
                 message.guild.id,
-                target_member.id,
-                server=False,
-                panel_kind="user",
-                target_user_name=target_name,
-                viewer_user_id=message.author.id,
-            )
-            view = self._build_panel_view(
-                message.author.id,
-                message.guild.id,
-                server=False,
+                owner_id=message.author.id,
                 timeout=300,
                 target_user_id=target_member.id,
                 target_user_name=target_name,
@@ -4926,9 +4933,10 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         )
         view.message = sent
         self._public_panel_states[sent.id] = {
-            "panel_kind": "user" if panel_kind == "user_target" else panel_kind,
+            "panel_kind": "launcher" if panel_kind == "launcher_target" else panel_kind,
             "owner_id": message.author.id,
             "target_user_id": int(getattr(target_member, "id", 0) or 0) if target_member is not None else None,
+            "target_user_name": self._member_panel_name(target_member) if target_member is not None else None,
         }
         self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
         return True
