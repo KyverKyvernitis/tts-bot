@@ -51,6 +51,9 @@ else:
     sys.exit(90)
 """)
     executable(fakebin / "cmake", common + """record('cmake', a)
+if '--build' not in a and (not (Path(os.environ['BOX64_TEST_GUEST']) / 'python3-installed').is_file() or '-DPython3_EXECUTABLE=/usr/bin/python3' not in a):
+    print('Could NOT find Python3: guest interpreter required', file=sys.stderr)
+    sys.exit(1)
 if os.environ.get('FAKE_CMAKE_FAILURE') == ('build' if '--build' in a else 'configure'):
     print('compiler failed', file=sys.stderr)
     sys.exit(1)
@@ -76,6 +79,8 @@ elif 'GNU_LIBC_VERSION' in a:
 elif '/usr/bin/apt-get' in a:
     if os.environ.get('FAKE_APT_FAILURE') in a:
         sys.exit(1)
+    if 'install' in a and 'python3' in a:
+        (Path(os.environ['BOX64_TEST_GUEST']) / 'python3-installed').touch()
 elif '/bin/bash' in a:
     script = sys.stdin.read()
     record('guest-script', [script])
@@ -114,11 +119,12 @@ def test_new_container_builds_pinned_official_runtime_and_libraries(prepared):
     assert ["proot-distro", "install", "ubuntu:24.04", "--architecture", "aarch64", "--name", "voicepeak-arm64"] in commands
     dependencies = next(command for command in commands if '/usr/bin/apt-get' in command and 'install' in command)
     assert 'libcurl4t64' in dependencies and 'libasound2t64' in dependencies
+    assert 'python3' in dependencies
     clone = next(command for command in commands if command[:2] == ["git", "clone"])
     assert clone[1:6] == ["clone", "--depth", "1", "--branch", "v0.4.0"]
     assert "https://github.com/ptitSeb/box64.git" in clone
     configure = next(command for command in commands if command[0] == "cmake" and "-S" in command)
-    assert set(("-DARM64=1", "-DARM_DYNAREC=ON", "-DBAD_SIGNAL=ON", "-DCMAKE_C_COMPILER=gcc", "-DCMAKE_BUILD_TYPE=RelWithDebInfo")) <= set(configure)
+    assert set(("-DARM64=1", "-DARM_DYNAREC=ON", "-DBAD_SIGNAL=ON", "-DCMAKE_C_COMPILER=gcc", "-DCMAKE_BUILD_TYPE=RelWithDebInfo", "-DPython3_EXECUTABLE=/usr/bin/python3")) <= set(configure)
     build = next(command for command in commands if command[:2] == ["cmake", "--build"])
     assert build[-2:] == ["--parallel", "2"]
     script = next(command[1] for command in commands if command[0] == "guest-script")
@@ -168,6 +174,21 @@ def test_repeat_setup_preserves_box64_configuration_and_checkout(prepared):
     assert config.read_text() == original
     assert len([command for command in calls(log) if command[:2] == ["git", "clone"]]) == 1
     assert not any("reset" in command or "checkout" in command or "upgrade" in command for command in calls(log))
+
+
+def test_resume_after_configure_failure_reuses_guest_and_source(prepared):
+    home, _, log, _, env = prepared
+    env['FAKE_CMAKE_FAILURE'] = 'configure'
+    first = run_setup(env)
+    assert first.returncode != 0
+    assert not (home / '.voicepeak-termux/config-box64.json').exists()
+    env.pop('FAKE_CMAKE_FAILURE')
+    second = run_setup(env)
+    assert second.returncode == 0, second.stderr
+    commands = calls(log)
+    assert len([command for command in commands if command[:2] == ['git', 'clone']]) == 1
+    assert len([command for command in commands if command[:2] == ['proot-distro', 'install'] and '--help' not in command]) == 1
+    assert (home / '.voicepeak-termux/config-box64.json').is_file()
 
 
 @pytest.mark.parametrize("variable,value", [("FAKE_APT_FAILURE", "update"), ("FAKE_APT_FAILURE", "install"),

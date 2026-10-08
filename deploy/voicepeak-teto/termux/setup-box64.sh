@@ -88,7 +88,7 @@ if ! proot-distro login "${toolkit_container}" -- /usr/bin/env LANG=C LC_ALL=C /
     echo "apt update ARM64 falhou; o container existente foi preservado." >&2
     exit 1
 fi
-if ! proot-distro login "${toolkit_container}" -- /usr/bin/env LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --no-install-recommends git cmake gcc g++ make pkg-config ca-certificates libcurl4t64 libfreetype6 libstdc++6 libgcc-s1 libasound2t64 libx11-6 libxext6 libxrender1 libxrandr2 libxcursor1 libxinerama1 libxfixes3 fonts-noto-cjk; then
+if ! proot-distro login "${toolkit_container}" -- /usr/bin/env LANG=C LC_ALL=C DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --no-install-recommends python3 git cmake gcc g++ make pkg-config ca-certificates libcurl4t64 libfreetype6 libstdc++6 libgcc-s1 libasound2t64 libx11-6 libxext6 libxrender1 libxrandr2 libxcursor1 libxinerama1 libxfixes3 fonts-noto-cjk; then
     echo "Bibliotecas ARM64 não confirmadas; nenhum runtime pronto foi anunciado." >&2
     exit 1
 fi
@@ -120,7 +120,7 @@ if [[ -n "$(git -C "${box64_source}" status --porcelain --untracked-files=all)" 
 fi
 # Follow the official COMPILE.md Termux CHRoot/PRoot instructions. Keep the
 # build at two jobs to avoid competing with the phone worker for memory.
-cmake -S "${box64_source}" -B "${box64_build}" -DARM64=1 -DARM_DYNAREC=ON -DBAD_SIGNAL=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake -S "${box64_source}" -B "${box64_build}" -DARM64=1 -DARM_DYNAREC=ON -DBAD_SIGNAL=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=RelWithDebInfo -DPython3_EXECUTABLE=/usr/bin/python3
 cmake --build "${box64_build}" --parallel 2
 # Confirm that both emulated libraries really are 64-bit x86 ELF before copying.
 for box64_library in libstdc++.so.6 libgcc_s.so.1; do

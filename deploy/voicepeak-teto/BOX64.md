@@ -11,11 +11,11 @@ comercial, a voz Teto ou uma licença.
 
 ## Instalar o kit e o runtime
 
-Baixe `teto-voicepeak-termux-box64-kit.zip` para Downloads. No Termux nativo,
+Baixe `teto-voicepeak-termux-box64-kit-v2.zip` para Downloads. No Termux nativo,
 fora de outro PRoot:
 
 ```bash
-unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v2.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 bash deploy/voicepeak-teto/termux/setup-box64.sh
 ```
@@ -25,6 +25,11 @@ Instala pacotes ARM64 e compila Box64 com dois processos de compilação. Essa
 etapa pode demorar vários minutos; reserve alguns GB de armazenamento livre.
 Uma falha preserva o container para investigação e impede anunciar o runtime
 como pronto.
+
+O kit v2 instala também `python3` dentro do Ubuntu e seleciona
+`/usr/bin/python3` no CMake. Se a primeira tentativa parou em
+`Could NOT find Python3`, execute novamente o setup atualizado: ele reutiliza
+o container, o checkout e a pasta de compilação existentes.
 
 O código do Box64 fica fixado na versão oficial **v0.4.0**, commit
 `dae0917c47b4edd8956f314210417a20fd225c4b`. O setup também usa as duas
