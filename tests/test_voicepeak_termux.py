@@ -232,14 +232,31 @@ def setup_environment(tmp_path):
     log = tmp_path / "commands.jsonl"
     executable(fakebin / "uname", "print('aarch64')\n")
     executable(fakebin / "pkg", "import json,os,sys\nwith open(os.environ['TERMUX_TEST_LOG'],'a') as f: f.write(json.dumps(['pkg']+sys.argv[1:])+'\\n')\n")
-    executable(fakebin / "proot-distro", "import json,os,sys\nfrom pathlib import Path\na=sys.argv[1:]\nwith open(os.environ['TERMUX_TEST_LOG'],'a') as f: f.write(json.dumps(['proot-distro']+a)+'\\n')\nif a==['install','--help']: print('--architecture' if os.environ.get('FAKE_OLD_PROOT')!='1' else 'old install usage')\nelif '--print-architecture' in a: print(os.environ.get('FAKE_GUEST_ARCH','amd64'))\nelif a and a[0]=='install': (Path(os.environ['PREFIX'])/'var/lib/proot-distro/containers'/a[a.index('--name')+1]/'rootfs').mkdir(parents=True)\n")
+    executable(fakebin / "proot-distro", """import json, os, sys
+from pathlib import Path
+a = sys.argv[1:]
+with open(os.environ['TERMUX_TEST_LOG'], 'a') as f:
+    f.write(json.dumps(['proot-distro'] + a) + '\\n')
+if a == ['install', '--help']:
+    print('--architecture' if os.environ.get('FAKE_OLD_PROOT') != '1' else 'old install usage')
+elif '--print-architecture' in a:
+    print(os.environ.get('FAKE_GUEST_ARCH', 'amd64'))
+elif a and a[0] == 'install':
+    (Path(os.environ['PREFIX']) / 'var/lib/proot-distro/containers' / a[a.index('--name') + 1] / 'rootfs').mkdir(parents=True)
+elif '/usr/bin/apt-get' in a:
+    if not (Path.home() / '.voicepeak-termux/config.json').is_file():
+        sys.exit(88)
+    if os.environ.get('FAKE_APT_FAILURE') in a:
+        print('libc-bin trigger: qemu signal 11', file=sys.stderr)
+        sys.exit(1)
+""")
     env = dict(os.environ, HOME=str(home), PREFIX=str(prefix), TERMUX_VERSION="test", TERMUX_TEST_LOG=str(log), PATH=str(fakebin) + os.pathsep + os.environ["PATH"])
     env.pop("VOICEPEAK_TERMUX_CONFIG", None)
     return home, prefix, log, env
 
 
-def run_setup(env):
-    return subprocess.run(["bash", str(TOOLKIT / "setup.sh")], env=env, text=True, capture_output=True, timeout=20)
+def run_setup(env, *arguments):
+    return subprocess.run(["bash", str(TOOLKIT / "setup.sh"), *arguments], env=env, text=True, capture_output=True, timeout=20)
 
 
 def test_setup_new_container_and_native_interpreter(setup_environment):
@@ -290,6 +307,44 @@ def test_setup_refuses_wrong_architecture_or_legacy_plugins(setup_environment, v
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert not any("/usr/bin/apt-get" in command for command in calls)
     assert not (home / ".voicepeak-termux/config.json").exists()
+
+
+@pytest.mark.parametrize("failed_step", ["update", "install"])
+def test_setup_keeps_diagnostics_after_failed_guest_packages(setup_environment, failed_step):
+    home, prefix, _, env = setup_environment
+    env["FAKE_APT_FAILURE"] = failed_step
+    marker = prefix / "var/lib/proot-distro/containers/voicepeak-x64/rootfs/licensed-settings"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("preserve")
+    result = run_setup(env)
+    assert result.returncode == 1
+    assert "--probe-system" in result.stderr
+    assert "Runtime preparado" not in result.stdout
+    assert (home / ".voicepeak-termux/config.json").is_file()
+    assert (home / ".voicepeak-termux/bin/voicepeak-termux-diagnostic").is_file()
+    assert marker.read_text() == "preserve"
+
+
+def test_setup_prepare_only_resumes_without_running_guest_package_manager(setup_environment):
+    home, prefix, log, env = setup_environment
+    (prefix / "var/lib/proot-distro/containers/voicepeak-x64/rootfs").mkdir(parents=True)
+    env["FAKE_APT_FAILURE"] = "install"
+    result = run_setup(env, "--prepare-only")
+    assert result.returncode == 0, result.stderr
+    assert "ainda não verificadas" in result.stdout
+    assert (home / ".voicepeak-termux/config.json").is_file()
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert not any("/usr/bin/apt-get" in command or "/usr/bin/dpkg" in command and "--configure" in command for command in calls)
+    assert not any(command[:2] == ["proot-distro", "install"] and "--help" not in command for command in calls)
+
+
+def test_setup_rejects_unknown_option_before_installing_any_package(setup_environment):
+    _, _, log, env = setup_environment
+    result = run_setup(env, "--reset")
+    assert result.returncode == 2
+    assert not log.exists()
+
+
 def test_diagnostic_help_works_from_external_directory_with_isolated_python(tmp_path):
     result = subprocess.run([sys.executable, '-I', str(TOOLKIT / 'diagnostic.py'), '--help'],
                             cwd=tmp_path, capture_output=True, text=True, timeout=5)

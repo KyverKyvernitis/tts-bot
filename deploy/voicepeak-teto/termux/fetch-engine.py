@@ -172,21 +172,59 @@ def _extract_linux_zip(linux_zip: Path, staging: Path, *, deadline: float) -> Pa
     return tree
 
 
-def _rename_new(source: Path, destination: Path) -> None:
-    """Commit without overwriting even a directory created concurrently."""
-    if sys.platform.startswith("linux"):
-        libc = ctypes.CDLL(None, use_errno=True)
-        rename = getattr(libc, "renameat2", None)
-        if rename is None:
-            raise InstallError("Este sistema não oferece a instalação atômica sem sobrescrever pastas.")
+def _linux_rename_new(source: Path, destination: Path) -> None:
+    # Android Python now reports sys.platform="android". Bionic symbols can
+    # also be unavailable through the process handle, so try libc explicitly.
+    libraries = []
+    for name in (None, "libc.so") if sys.platform == "android" or hasattr(sys, "getandroidapilevel") else (None,):
+        try:
+            libraries.append(ctypes.CDLL(name, use_errno=True))
+        except OSError:
+            continue
+    rename = next((function for library in libraries if (function := getattr(library, "renameat2", None)) is not None), None)
+    # AT_FDCWD=-100; RENAME_NOREPLACE=1. Never substitute ordinary rename,
+    # which could replace an empty directory created during extraction.
+    arguments = (-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+    ctypes.set_errno(0)
+    if rename is not None:
         rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
         rename.restype = ctypes.c_int
-        # AT_FDCWD=-100, RENAME_NOREPLACE=1. Available on current Android/Linux.
-        if rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
-            failure = ctypes.get_errno()
-            if failure == errno.EEXIST:
-                raise InstallError("Voicepeak já existe; a instalação atual foi preservada.")
-            raise OSError(failure, os.strerror(failure))
+        result = rename(*arguments)
+    else:
+        # Some Bionic versions lack the renameat2 wrapper even though their
+        # Linux kernel supports it. Only use syscall numbers for known native
+        # 64-bit ABIs; guessing a number or using a 32-bit/x32 ABI is unsafe.
+        native_abi = (os.uname().machine.lower(), ctypes.sizeof(ctypes.c_void_p), ctypes.sizeof(ctypes.c_long))
+        syscall_number = {
+            ("aarch64", 8, 8): 276,
+            ("arm64", 8, 8): 276,
+            ("x86_64", 8, 8): 316,
+            ("amd64", 8, 8): 316,
+            ("riscv64", 8, 8): 276,
+        }.get(native_abi)
+        syscall = next((function for library in libraries if (function := getattr(library, "syscall", None)) is not None), None)
+        if syscall is None or syscall_number is None:
+            raise InstallError("Este sistema não oferece a instalação atômica sem sobrescrever pastas.")
+        syscall.restype = ctypes.c_long
+        # syscall is variadic: explicitly type every argument, including the
+        # pointer arguments, rather than relying on ctypes' int conversion.
+        result = syscall(
+            ctypes.c_long(syscall_number), ctypes.c_int(arguments[0]), ctypes.c_char_p(arguments[1]),
+            ctypes.c_int(arguments[2]), ctypes.c_char_p(arguments[3]), ctypes.c_uint(arguments[4]),
+        )
+    if result != 0:
+        failure = ctypes.get_errno() or errno.EIO
+        if failure == errno.EEXIST:
+            raise InstallError("Voicepeak já existe; a instalação atual foi preservada.")
+        if failure in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+            raise InstallError("O kernel ou sistema de arquivos não oferece instalação atômica sem sobrescrever pastas.")
+        raise OSError(failure, os.strerror(failure))
+
+
+def _rename_new(source: Path, destination: Path) -> None:
+    """Commit without overwriting even a directory created concurrently."""
+    if sys.platform.startswith("linux") or sys.platform == "android":
+        _linux_rename_new(source, destination)
     elif os.name == "nt":
         os.rename(source, destination)  # Windows rename refuses existing targets.
     else:

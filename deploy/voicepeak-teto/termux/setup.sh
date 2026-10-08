@@ -2,6 +2,22 @@
 # Prepare only the open-source runtime. Install and activate VOICEPEAK separately.
 set -euo pipefail
 
+toolkit_prepare_only=false
+case "${1:-}" in
+    "") ;;
+    --prepare-only) toolkit_prepare_only=true ;;
+    --help|-h)
+        echo "Uso: bash setup.sh [--prepare-only]"
+        echo "--prepare-only: prepara launcher e diagnóstico sem executar apt/dpkg no guest."
+        exit 0
+        ;;
+    *) echo "Opção desconhecida: ${1}" >&2; exit 2 ;;
+esac
+if (( $# > 1 )); then
+    echo "Uso: bash setup.sh [--prepare-only]" >&2
+    exit 2
+fi
+
 if [[ -z "${TERMUX_VERSION:-}" || -z "${PREFIX:-}" ]]; then
     echo "Execute este script no Termux nativo, fora do PRoot." >&2
     exit 2
@@ -46,11 +62,10 @@ if [[ "${toolkit_architecture}" != "amd64" ]]; then
     echo "O container existente não é amd64; ele foi preservado. Corrija a escolha do ambiente." >&2
     exit 2
 fi
-proot-distro login "${toolkit_container}" -- /usr/bin/apt-get update
-proot-distro login "${toolkit_container}" -- /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --no-install-recommends ca-certificates libcurl4 libfreetype6 libstdc++6 libgcc-s1 libasound2 libx11-6 libxext6 libxrender1 libxrandr2 libxcursor1 libxinerama1 libxfixes3 fonts-noto-cjk
-
 # Python writes the native Termux interpreter into the shebang. /usr/bin/env
 # does not exist on Android, even though it exists inside the guest.
+# Publish diagnostics before apt: a failed libc-bin trigger must not leave the
+# native configuration missing or force the user to reinstall the container.
 python - "${toolkit_source}" "${toolkit_directory}" "${toolkit_container}" <<'PY'
 import json
 from pathlib import Path
@@ -73,6 +88,22 @@ if not configuration.exists():
     configuration.write_text(json.dumps({"container": container, "guest_executable": "/opt/Voicepeak/voicepeak", "engine_directory": str(target / "engine/Voicepeak"), "display": ""}, indent=2) + "\n", encoding="utf-8")
     configuration.chmod(0o600)
 PY
+if [[ "${toolkit_prepare_only}" == true ]]; then
+    echo "Launcher e diagnóstico preparados; bibliotecas do guest ainda não verificadas."
+    echo "Diagnóstico: ${toolkit_directory}/bin/voicepeak-termux-diagnostic --probe-system"
+    exit 0
+fi
+if ! proot-distro login "${toolkit_container}" -- /usr/bin/apt-get update; then
+    echo "apt update falhou; o container existente e o diagnóstico foram preservados." >&2
+    echo "Execute: ${toolkit_directory}/bin/voicepeak-termux-diagnostic --probe-system" >&2
+    exit 1
+fi
+if ! proot-distro login "${toolkit_container}" -- /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y --no-install-recommends ca-certificates libcurl4 libfreetype6 libstdc++6 libgcc-s1 libasound2 libx11-6 libxext6 libxrender1 libxrandr2 libxcursor1 libxinerama1 libxfixes3 fonts-noto-cjk; then
+    echo "As bibliotecas do guest não foram confirmadas; não considere o runtime pronto." >&2
+    echo "O container, o programa e as licenças existentes foram preservados." >&2
+    echo "Execute: ${toolkit_directory}/bin/voicepeak-termux-diagnostic --probe-system" >&2
+    exit 1
+fi
 echo "Runtime preparado; nenhum VOICEPEAK ou voicebank foi baixado."
 echo "Teste opcional do programa oficial: python ${toolkit_source}/fetch-engine.py"
 echo "A voz Teto continua exigindo instalação e ativação oficiais pela GUI."

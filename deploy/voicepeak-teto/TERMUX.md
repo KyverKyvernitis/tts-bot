@@ -13,7 +13,7 @@ Não execute esta preparação dentro de outro PRoot: comece no Termux nativo.
 
 O ZIP incremental do updater atualiza o bot e o runtime do worker. Este toolkit
 fica fora da release limitada do worker, por isso use também o ZIP separado
-`teto-voicepeak-termux-kit.zip` no telefone. Ele contém somente scripts e as
+`teto-voicepeak-termux-kit-v2.zip` no telefone. Ele contém somente scripts e as
 bibliotecas Python da integração; não contém o programa comercial nem vozes.
 
 Baixe o kit para Downloads. No Termux nativo:
@@ -22,7 +22,7 @@ Baixe o kit para Downloads. No Termux nativo:
 pkg install -y python unzip
 termux-setup-storage
 mkdir -p "$HOME/voicepeak-termux-kit"
-unzip "$HOME/storage/downloads/teto-voicepeak-termux-kit.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-kit-v2.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 ```
 
@@ -37,7 +37,7 @@ Na raiz do repositório atualizado, execute:
 ```bash
 bash deploy/voicepeak-teto/termux/setup.sh
 python deploy/voicepeak-teto/termux/fetch-engine.py
-python deploy/voicepeak-teto/termux/diagnostic.py --probe-runtime
+python deploy/voicepeak-teto/termux/diagnostic.py --probe-system --probe-runtime --timeout 60
 ```
 
 O setup instala os pacotes Termux necessários e prepara um Ubuntu 22.04
@@ -58,7 +58,8 @@ existente, preservando ajustes e possíveis ativações.
 
 O diagnóstico verifica arquitetura, páginas de memória, RAM disponível,
 armazenamento, QEMU, guest e abertura do `--help`. Ele também tenta o inventário
-de narradores com prazo limitado. Sem ativação, o inventário pode ficar
+de narradores com prazo limitado. Também verifica o estado de `libc-bin` e do
+cache de bibliotecas, sem corrigir pacotes durante o diagnóstico. Sem ativação, o inventário pode ficar
 indisponível ou expirar; **isso não deve ser apresentado como Teto pronta**.
 
 Para conferir só a abertura do programa:
@@ -73,6 +74,53 @@ funcionar, ainda precisamos verificar a interface, a ativação e a síntese rea
 Para o próximo diagnóstico, compartilhe os campos `page_size_bytes`,
 `guest_architecture`, `engine_elf_x86_64`, `cli_help_ok` e `runtime_error`, se
 existir. `teto_inventory_ok=false` é esperado sem voz instalada e ativada.
+
+## Retomar após o erro de libc-bin / QEMU
+
+Se o terminal mostrou `qemu: uncaught target signal 11` durante o trigger de
+`libc-bin`, o setup anterior abortou antes de gravar a configuração nativa.
+O kit v2 grava o launcher e o diagnóstico antes dos pacotes do guest. Ele
+também reconhece `sys.platform="android"` no instalador do programa.
+Esse ajuste corrige a rejeição do Python Android; não resolve por si só o
+SIGSEGV do QEMU.
+
+Atualize os scripts extraindo o ZIP v2 com `unzip -o`, como acima, e mantenha
+o container existente. Na raiz do kit:
+
+```bash
+bash deploy/voicepeak-teto/termux/setup.sh --prepare-only
+python deploy/voicepeak-teto/termux/recover-runtime.py --repair --timeout 180
+python deploy/voicepeak-teto/termux/diagnostic.py --probe-system --timeout 60
+```
+
+`--prepare-only` prepara os comandos nativos e preserva a configuração, sem
+executar `apt` nem reconfigurar pacotes dentro do Ubuntu. O reparo testa o
+`ldconfig` real antes de chamar `dpkg --configure -a`. Se a varredura normal
+falhar mas a varredura com `--ignore-aux-cache` funcionar, ele tenta reconstruir
+o cache com o próprio `ldconfig -i`. Se ambas falharem, o reparo para e deixa o
+container para investigação. Não troca `ldconfig` por um comando vazio nem
+ignora o erro do `dpkg`.
+
+O diagnóstico compara varreduras de bibliotecas sem atualizar links ou caches
+(`-N -X`, com e sem `-i`) e registra somente estados e códigos de saída. Ele
+também testa o cache e a varredura sem cache auxiliar com `PROOT_NO_SECCOMP=1`, sem persistir essa variável nem
+aplicá-la automaticamente ao worker. Esse teste serve para investigar a
+interação com PRoot; um resultado positivo isolado não comprova reparo.
+
+Se o reparo retornar `recovered=true`, retome a instalação normal:
+
+```bash
+bash deploy/voicepeak-teto/termux/setup.sh &&
+python deploy/voicepeak-teto/termux/fetch-engine.py &&
+python deploy/voicepeak-teto/termux/diagnostic.py --probe-system --probe-runtime --timeout 60
+```
+
+O download anterior malsucedido era temporário e foi removido pelo instalador;
+sem um ZIP oficial salvo à parte, o programa precisará ser baixado novamente.
+Se o reparo não funcionar, envie os JSONs de reparo e diagnóstico. Não remova
+o Ubuntu existente nem compre a voz antes de confirmar a abertura do programa.
+Os testes do kit simulam falhas e estados de pacotes; este reparo ainda não
+foi validado no Poco.
 
 ## Interface gráfica e ativação oficial
 

@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import http.server
 import importlib.util
 import io
 from pathlib import Path
 import stat
 import threading
+from types import SimpleNamespace
 import warnings
 import zipfile
 
@@ -190,6 +192,141 @@ def test_concurrent_empty_installation_is_never_overwritten(tmp_path, monkeypatc
         install(tmp_path, archive)
     assert list((tmp_path / "installation" / "Voicepeak").iterdir()) == []
     assert not list((tmp_path / "installation").glob(".voicepeak-extract-*"))
+
+
+def test_android_python_platform_commits_without_overwriting(tmp_path, monkeypatch):
+    archive = outer_archive(tmp_path, monkeypatch, linux_archive())
+    monkeypatch.setattr(fetch.sys, "platform", "android")
+    tree = install(tmp_path, archive)
+    assert (tree / "voicepeak").read_bytes() == b"test executable"
+    with pytest.raises(fetch.InstallError, match="já existe"):
+        install(tmp_path, archive)
+
+
+@pytest.mark.parametrize("process_handle", ["missing_symbol", "load_failure"])
+def test_android_resolves_bionic_libc_when_process_handle_lacks_wrapper(tmp_path, monkeypatch, process_handle):
+    real_rename = fetch.ctypes.CDLL(None, use_errno=True).renameat2
+    loaded = []
+
+    def load(name, *, use_errno):
+        assert use_errno is True
+        loaded.append(name)
+        if name is None:
+            if process_handle == "load_failure":
+                raise OSError("process handle unavailable")
+            return SimpleNamespace()
+        assert name == "libc.so"
+        return SimpleNamespace(renameat2=real_rename)
+
+    monkeypatch.setattr(fetch.sys, "platform", "android")
+    monkeypatch.setattr(fetch.ctypes, "CDLL", load)
+    source = tmp_path / "staging"
+    source.mkdir()
+    destination = tmp_path / "Voicepeak"
+    fetch._rename_new(source, destination)
+    assert destination.is_dir() and not source.exists()
+    assert loaded == [None, "libc.so"]
+
+
+class NativeFunction:
+    """A callable symbol that permits ctypes signature attributes."""
+    def __init__(self, function):
+        self.function = function
+
+    def __call__(self, *args):
+        return self.function(*args)
+
+
+@pytest.mark.parametrize("existing", ["none", "empty_directory", "file", "broken_symlink"])
+def test_real_syscall_fallback_is_atomic_and_never_replaces(tmp_path, monkeypatch, existing):
+    real_syscall = fetch.ctypes.CDLL(None, use_errno=True).syscall
+    real_syscall.restype = fetch.ctypes.c_long
+    monkeypatch.setattr(fetch.sys, "platform", "android")
+    monkeypatch.setattr(fetch.ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(syscall=real_syscall))
+    monkeypatch.setattr(fetch.os, "rename", lambda *args: pytest.fail("Ordinary rename cannot preserve no-replace semantics"))
+    source = tmp_path / "staging"
+    source.mkdir()
+    (source / "program").write_bytes(b"new application")
+    destination = tmp_path / "Voicepeak"
+    if existing == "empty_directory":
+        destination.mkdir()
+    elif existing == "file":
+        destination.write_bytes(b"existing file")
+    elif existing == "broken_symlink":
+        destination.symlink_to(tmp_path / "missing")
+    if existing == "none":
+        fetch._rename_new(source, destination)
+        assert (destination / "program").read_bytes() == b"new application"
+        assert not source.exists()
+    else:
+        with pytest.raises(fetch.InstallError, match="já existe"):
+            fetch._rename_new(source, destination)
+        assert (source / "program").read_bytes() == b"new application"
+        if existing == "empty_directory":
+            assert list(destination.iterdir()) == []
+        elif existing == "file":
+            assert destination.read_bytes() == b"existing file"
+        else:
+            assert destination.is_symlink()
+
+
+@pytest.mark.parametrize("machine,number", [("aarch64", 276), ("x86_64", 316), ("riscv64", 276)])
+def test_syscall_fallback_uses_known_64_bit_abi_and_typed_pointers(tmp_path, monkeypatch, machine, number):
+    calls = []
+    syscall = NativeFunction(lambda *args: calls.append(args) or 0)
+    monkeypatch.setattr(fetch.sys, "platform", "android")
+    monkeypatch.setattr(fetch.os, "uname", lambda: SimpleNamespace(machine=machine))
+    monkeypatch.setattr(fetch.ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(syscall=syscall))
+    source, destination = tmp_path / "staging", tmp_path / "Voicepeak"
+    fetch._rename_new(source, destination)
+    assert [[arg.value for arg in call] for call in calls] == [[number, -100, bytes(source), -100, bytes(destination), 1]]
+    assert tuple(type(arg) for arg in calls[0]) == (
+        fetch.ctypes.c_long, fetch.ctypes.c_int, fetch.ctypes.c_char_p,
+        fetch.ctypes.c_int, fetch.ctypes.c_char_p, fetch.ctypes.c_uint,
+    )
+    assert syscall.restype is fetch.ctypes.c_long
+
+
+@pytest.mark.parametrize("machine,pointer_bytes,long_bytes", [("armv7l", 4, 4), ("x86_64", 4, 4), ("aarch64", 8, 4), ("unknown", 8, 8)])
+def test_syscall_fallback_refuses_unknown_or_mismatched_abi(tmp_path, monkeypatch, machine, pointer_bytes, long_bytes):
+    syscall = NativeFunction(lambda *args: pytest.fail("An unknown ABI must not execute a syscall"))
+    monkeypatch.setattr(fetch.sys, "platform", "android")
+    monkeypatch.setattr(fetch.os, "uname", lambda: SimpleNamespace(machine=machine))
+    real_sizeof = fetch.ctypes.sizeof
+    monkeypatch.setattr(fetch.ctypes, "sizeof", lambda kind: pointer_bytes if kind is fetch.ctypes.c_void_p else long_bytes if kind is fetch.ctypes.c_long else real_sizeof(kind))
+    monkeypatch.setattr(fetch.ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(syscall=syscall))
+    with pytest.raises(fetch.InstallError, match="atômica"):
+        fetch._rename_new(tmp_path / "staging", tmp_path / "Voicepeak")
+
+
+@pytest.mark.parametrize("symbol", ["renameat2", "syscall"])
+@pytest.mark.parametrize("failure", [errno.EEXIST, errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.EACCES])
+def test_native_rename_errors_preserve_errno_and_never_use_ordinary_rename(tmp_path, monkeypatch, symbol, failure):
+    def fail(*args):
+        assert fetch.ctypes.get_errno() == 0
+        fetch.ctypes.set_errno(failure)
+        return -1
+
+    native_function = NativeFunction(fail)
+    monkeypatch.setattr(fetch.sys, "platform", "android")
+    monkeypatch.setattr(fetch.ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace(**{symbol: native_function}))
+    monkeypatch.setattr(fetch.os, "rename", lambda *args: pytest.fail("Failure must not fall back to ordinary rename"))
+    fetch.ctypes.set_errno(errno.EPERM)  # A stale errno cannot change the result.
+    if failure == errno.EACCES:
+        with pytest.raises(OSError) as caught:
+            fetch._rename_new(tmp_path / "staging", tmp_path / "Voicepeak")
+        assert caught.value.errno == errno.EACCES
+    else:
+        message = "já existe" if failure == errno.EEXIST else "atômica"
+        with pytest.raises(fetch.InstallError, match=message):
+            fetch._rename_new(tmp_path / "staging", tmp_path / "Voicepeak")
+
+
+def test_android_without_usable_native_symbols_refuses_atomic_commit(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetch.sys, "platform", "android")
+    monkeypatch.setattr(fetch.ctypes, "CDLL", lambda *args, **kwargs: SimpleNamespace())
+    with pytest.raises(fetch.InstallError, match="atômica"):
+        fetch._rename_new(tmp_path / "staging", tmp_path / "Voicepeak")
 
 
 def test_failure_before_atomic_commit_leaves_no_partial_install(tmp_path, monkeypatch):
