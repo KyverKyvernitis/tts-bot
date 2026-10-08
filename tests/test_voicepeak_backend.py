@@ -34,11 +34,11 @@ with (root / "args.jsonl").open("a") as log:
     log.write(json.dumps(args, ensure_ascii=False) + "\\n")
 time.sleep(state.get("delay", 0))
 if args == ["--list-narrator"]:
-    print("\\n".join(state.get("narrators", [])))
+    print("\\n".join(state.get("narrators", [])), file=sys.stderr if state.get("stderr") else sys.stdout)
 elif args == ["--help"]:
-    print(state["help"])
+    print(state["help"], file=sys.stderr if state.get("stderr") else sys.stdout)
 elif args[:1] == ["--list-emotion"]:
-    print("\\n".join(state.get("emotions", [])))
+    print("\\n".join(state.get("emotions", [])), file=sys.stderr if state.get("stderr") else sys.stdout)
 else:
     text = args[args.index("-s") + 1]
     assert len(text) <= 140
@@ -215,6 +215,61 @@ def test_status_respects_short_caller_budget(voicepeak_assets):
     status = VoicepeakRenderer().status(timeout_seconds=0.05)
     assert not status["ready"] and "prazo" in status["last_error"]
     assert time.monotonic() - started < 0.5
+
+
+def test_emulated_cli_can_use_a_longer_configured_inventory_budget(voicepeak_assets, monkeypatch):
+    _, configure, _ = voicepeak_assets
+    # Two cold CLI processes exceed the historical five-second status budget.
+    configure(delay=2.6)
+    monkeypatch.setenv("PHONE_WORKER_VOICEPEAK_STATUS_TIMEOUT_SECONDS", "10")
+    assert VoicepeakRenderer().status()["ready"]
+
+
+@pytest.mark.parametrize("budget", ("0", "61", "invalid"))
+def test_status_budget_configuration_is_bounded(voicepeak_assets, monkeypatch, budget):
+    monkeypatch.setenv("PHONE_WORKER_VOICEPEAK_STATUS_TIMEOUT_SECONDS", budget)
+    with pytest.raises(ValueError, match="STATUS_TIMEOUT_SECONDS"):
+        VoicepeakRenderer().status()
+
+
+def test_model_revision_invalidates_cache_identity_behind_an_unchanged_launcher(voicepeak_assets, monkeypatch):
+    renderer = VoicepeakRenderer()
+    initial = renderer.fingerprint()
+    monkeypatch.setenv("PHONE_WORKER_VOICEPEAK_CACHE_REVISION", "termux-v1222-teto-1")
+    revised = renderer.fingerprint()
+    assert revised != initial
+    monkeypatch.setenv("PHONE_WORKER_VOICEPEAK_CACHE_REVISION", "termux-v1222-teto-2")
+    assert renderer.fingerprint() != revised
+
+
+def test_successful_cli_help_and_inventory_on_stderr_are_recognized(voicepeak_assets):
+    _, configure, _ = voicepeak_assets
+    configure(stderr=True)
+    renderer = VoicepeakRenderer()
+    status = renderer.status()
+    assert status['ready'] and status['engine_version'] == 'VOICEPEAK fake-engine-1'
+    first = status['fingerprint']
+    configure(help='VOICEPEAK fake-engine-2')
+    assert renderer.status(force=True)['fingerprint'] != first
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='PRoot/QEMU process groups are POSIX')
+def test_timeout_stops_launcher_descendants_before_next_request(tmp_path):
+    import time
+    heartbeat = tmp_path / 'child-heartbeat'
+    script = tmp_path / 'emulated-cli'
+    child = ("import pathlib,time; p=pathlib.Path(" + repr(str(heartbeat)) + "); "
+             "exec('while True:\\n p.write_text(str(time.monotonic()))\\n time.sleep(0.03)')")
+    script.write_text('#!' + sys.executable + '\nimport subprocess,time\n'
+                      + 'subprocess.Popen([' + repr(sys.executable) + ', "-c", ' + repr(child) + '])\n'
+                      + 'time.sleep(20)\n')
+    script.chmod(0o700)
+    with pytest.raises(TimeoutError, match='prazo'):
+        VoicepeakRenderer()._run(str(script), [], time.monotonic() + 0.4)
+    assert heartbeat.is_file()
+    stopped = heartbeat.read_text()
+    time.sleep(0.15)
+    assert heartbeat.read_text() == stopped
 
 
 @pytest.mark.parametrize("narrator,ready", (("Kasane Teto", True), ("Teto", True), ("別の声", False)))

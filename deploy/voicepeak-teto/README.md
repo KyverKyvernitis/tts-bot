@@ -1,7 +1,8 @@
 # TextToTeto com VOICEPEAK
 
 Esta integração mantém a engine `teto` e o prefixo `'` do bot. O Poco/Termux
-envia o texto para um host com VOICEPEAK e recebe WAV. A leitura em português
+pode enviar o texto para um host com VOICEPEAK e receber WAV, ou tentar a
+[execução local experimental via QEMU](TERMUX.md). A leitura em português
 é experimental: o adaptador converte os sons para kana e o motor japonês os
 pronuncia. Não traduz a mensagem para japonês.
 
@@ -13,6 +14,9 @@ macOS e Ubuntu 64 bits, com mínimo de **2 GB de RAM**. Confirme também a CPU e
 a versão do sistema na página. Não há versão nativa para Android/Termux.
 Uma VPS de 1 GB fica abaixo do mínimo: não há garantia de inicialização,
 estabilidade ou latência. Os 11 GB do telefone não aumentam a RAM da VPS.
+Para usar a memória do próprio telefone, o roteiro Termux prepara Ubuntu
+x86_64 em PRoot/QEMU. Essa configuração não é oficialmente suportada pelo
+VOICEPEAK e ainda precisa de teste no aparelho.
 
 O ZIP fornece somente a integração. Não inclui o programa comercial, a voz,
 ativação ou credenciais. Os testes automatizados usam um CLI simulado;
@@ -88,7 +92,7 @@ bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart
 ```
 
 O status `/tts-agent/status` passa a informar `teto.backend=voicepeak`,
-`reading_mode=ptbr-kana` e `ready`. A versão do worker é `1.11.28`. O texto
+`reading_mode=ptbr-kana` e `ready`. A versão do worker é `1.11.29`. O texto
 `'Olá, eu sou a Teto` segue usando o prefixo já configurado no bot.
 Se o host falhar, a solicitação explícita à Teto retorna erro; não troca
 silenciosamente a personagem por outra voz. Para retornar à síntese UTAU,

@@ -2,7 +2,7 @@
 
 ## VOICEPEAK da Teto: integração remota experimental
 
-O worker `1.11.28` permite `PHONE_WORKER_TETO_BACKEND=voicepeak`. No Termux,
+O worker `1.11.29` permite `PHONE_WORKER_TETO_BACKEND=voicepeak`. No Termux,
 configure uma ponte HTTP para um host com VOICEPEAK da Teto instalado e
 licenciado. O modo `ptbr-kana` aproxima a leitura de mensagens em português;
 ele precisa de validação auditiva e não oferece português nativo.
@@ -11,6 +11,12 @@ Consulte [configuração do host e do worker](../../voicepeak-teto/README.md).
 Uma VPS de 1 GB está abaixo dos 2 GB mínimos publicados; Android/Termux não
 é um sistema nativo suportado pelo motor. Aplicar o patch preserva o backend
 UTAU existente até configurar e ativar a ponte.
+
+Para tentar sintetizar no próprio telefone, consulte o
+[roteiro experimental PRoot/QEMU](../../voicepeak-teto/TERMUX.md). Ele prepara
+Ubuntu x86_64 e um launcher local que preserva os caminhos dos WAVs. O
+diagnóstico separa abertura do programa de disponibilidade da voz Teto;
+executar `--help` não comprova síntese nem ativação da licença.
 
 ## Reinício após atualização de fontes
 

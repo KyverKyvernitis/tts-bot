@@ -131,6 +131,9 @@ class VoicepeakRenderer:
         if narrator not in {"重音テト", "Kasane Teto", "Teto"}:
             raise ValueError("PHONE_WORKER_VOICEPEAK_NARRATOR deve identificar a Teto: 重音テト, Kasane Teto ou Teto")
         emotion = str(os.getenv("PHONE_WORKER_VOICEPEAK_EMOTION", "")).strip()
+        cache_revision = str(os.getenv("PHONE_WORKER_VOICEPEAK_CACHE_REVISION", "")).strip()
+        if len(cache_revision) > 128 or any(ord(ch) < 32 for ch in cache_revision):
+            raise ValueError("PHONE_WORKER_VOICEPEAK_CACHE_REVISION deve ter até 128 caracteres sem controles")
         if emotion:
             parts = emotion.split(",")
             seen = set()
@@ -159,7 +162,9 @@ class VoicepeakRenderer:
             "max_chars": self._env_int("PHONE_WORKER_TETO_MAX_CHARACTERS", 180, 1, 4096),
             "max_seconds": self._env_int("PHONE_WORKER_TETO_MAX_AUDIO_SECONDS", 20, 1, 120),
             "status_ttl": self._env_int("PHONE_WORKER_VOICEPEAK_STATUS_CACHE_SECONDS", 15, 1, 300),
+            "status_timeout": self._env_int("PHONE_WORKER_VOICEPEAK_STATUS_TIMEOUT_SECONDS", 5, 1, 60),
             "reading_version": self._reading_version(),
+            "cache_revision": cache_revision,
         }
 
     @staticmethod
@@ -193,19 +198,42 @@ class VoicepeakRenderer:
         return executable
 
     def _run(self, executable, args, deadline):
+        import os
+        import signal
         import subprocess
         import tempfile
         # CLI output is diagnostic, not audio. Keep it out of memory and errors.
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-            try:
-                completed = subprocess.run([executable, *args], stdout=stdout, stderr=stderr,
-                                           timeout=self._remaining(deadline), check=False)
-            except subprocess.TimeoutExpired as exc:
-                raise TimeoutError("prazo de síntese VOICEPEAK excedido") from exc
-            if completed.returncode:
-                raise RuntimeError(f"VOICEPEAK CLI falhou (código {completed.returncode})")
+            self._remaining(deadline)
+            with subprocess.Popen([executable, *args], stdout=stdout, stderr=stderr,
+                                  start_new_session=os.name == "posix") as process:
+                try:
+                    process.wait(timeout=self._remaining(deadline))
+                except (subprocess.TimeoutExpired, TimeoutError) as exc:
+                    # A Termux launcher has PRoot/QEMU descendants. Terminate
+                    # this request's process group before releasing admission.
+                    if os.name == "posix":
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.kill()
+                    process.wait()
+                    raise TimeoutError("prazo de síntese VOICEPEAK excedido") from exc
+                if process.returncode:
+                    raise RuntimeError(f"VOICEPEAK CLI falhou (código {process.returncode})")
             stdout.seek(0)
             result = stdout.read(65537)
+            if len(result) > 65536:
+                raise RuntimeError("resposta de diagnóstico VOICEPEAK grande demais")
+            # The official Linux app prints --help to stderr. Some builds may
+            # use it for inventory too; only successful, bounded output enters
+            # parsing/fingerprints. Failed CLI diagnostics are never returned.
+            stderr.seek(0)
+            diagnostic = stderr.read(65537 - len(result))
+            if diagnostic:
+                result += (b"\n" if result and not result.endswith(b"\n") else b"") + diagnostic
             if len(result) > 65536:
                 raise RuntimeError("resposta de diagnóstico VOICEPEAK grande demais")
             return result.decode("utf-8-sig", errors="replace")
@@ -305,6 +333,7 @@ class VoicepeakRenderer:
                 fingerprint_data = {"renderer": self.RENDER_VERSION, "source": "remote", "url": config["url"],
                                     "narrator": config["narrator"], "reading_mode": config["reading_mode"],
                                     "host": host_fingerprint, "adapter": result["phonemizer_version"],
+                                    "cache_revision": config["cache_revision"],
                                     "max_seconds": config["max_seconds"], "max_chars": config["max_chars"]}
             else:
                 executable = self._executable(config)
@@ -326,6 +355,7 @@ class VoicepeakRenderer:
                                     "narrators": self._digest(narrators), "narrator": config["narrator"],
                                     "reading_mode": config["reading_mode"], "speed": config["speed"],
                                     "pitch": config["pitch"], "emotion": config["emotion"],
+                                    "cache_revision": config["cache_revision"],
                                     "max_seconds": config["max_seconds"], "max_chars": config["max_chars"]}
             result.update(ok=True, available=True, ready=True, fingerprint=self._digest(fingerprint_data))
             result["voicebank_fingerprint"] = result["fingerprint"]
@@ -340,13 +370,14 @@ class VoicepeakRenderer:
         self._last_status = dict(result)
         return result
 
-    def status(self, *, force=False, timeout_seconds=5.0):
+    def status(self, *, force=False, timeout_seconds=None):
         import math
         import time
-        timeout = float(timeout_seconds)
+        configured_timeout = self._env_int("PHONE_WORKER_VOICEPEAK_STATUS_TIMEOUT_SECONDS", 5, 1, 60)
+        timeout = float(configured_timeout if timeout_seconds is None else timeout_seconds)
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("prazo de status VOICEPEAK inválido")
-        deadline = time.monotonic() + min(5.0, timeout)
+        deadline = time.monotonic() + min(float(configured_timeout), timeout)
         # Health probes must not launch another native CLI while rendering.
         if not self._lock.acquire(blocking=False):
             try:
