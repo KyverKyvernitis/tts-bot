@@ -12,8 +12,8 @@ import discord
 from .visoes_base import (
     DURACAO_DESPACHO_PAINEL_TTS,
     DURACAO_EXPIRACAO_PAINEL_TTS,
-    dica_comando_painel_expirado,
     mensagem_painel_expirado,
+    responder_painel_tts_de_outro,
 )
 
 
@@ -61,25 +61,7 @@ class VisaoLayoutBaseTTS(_CLASSE_VIEW_LAYOUT_TTS):
         if self.owner_id == 0:
             return True
         if interaction.user.id != self.owner_id:
-            if self.panel_kind == "launcher":
-                try:
-                    dica_comando = await self.cog._get_panel_prefix_hint(self.guild_id, "launcher")
-                except Exception:
-                    dica_comando = dica_comando_painel_expirado("launcher")
-                await interaction.response.send_message(
-                    f"Essa configuração não é sua, use o comando {dica_comando} para configurar a sua voz",
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            else:
-                await interaction.response.send_message(
-                    embed=self.cog._make_embed(
-                        "Painel bloqueado",
-                        "Só quem abriu esse painel pode usar esses botões e menus.",
-                        ok=False,
-                    ),
-                    ephemeral=True,
-                )
+            await responder_painel_tts_de_outro(interaction)
             return False
         return True
 

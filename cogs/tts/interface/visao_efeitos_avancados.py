@@ -5,6 +5,7 @@ import contextlib
 
 import discord
 
+from .visoes_base import responder_painel_tts_de_outro
 from .visoes_layout import VisaoLayoutBaseTTS
 
 
@@ -89,7 +90,10 @@ class ModalEfeitosAvancadosTTS(discord.ui.Modal, title="Editar efeitos do TTS"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         panel = self.panel
-        if panel._is_expired() or interaction.user.id != panel.owner_id:
+        if panel.owner_id and interaction.user.id != panel.owner_id:
+            await responder_painel_tts_de_outro(interaction)
+            return
+        if panel._is_expired():
             await _silent_defer(interaction)
             return
 
@@ -175,12 +179,6 @@ class VisaoEfeitosAvancadosTTS(VisaoLayoutBaseTTS):
             advanced_reverb_level=reverb,
         )
         self._rebuild_items()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if self._is_expired() or interaction.user.id != self.owner_id:
-            await _silent_defer(interaction)
-            return False
-        return True
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
         print(

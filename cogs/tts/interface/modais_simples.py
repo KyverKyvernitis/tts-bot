@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import discord
 
+from .visoes_base import responder_painel_tts_de_outro
+
 
 class ModalCodigoIdioma(discord.ui.Modal, title="Selecionar idioma"):
     language_code = discord.ui.TextInput(
@@ -62,10 +64,7 @@ class VisaoAjudaIdioma(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         target_owner = interaction.user.id if self.owner_id == 0 else self.owner_id
         if interaction.user.id != target_owner:
-            await interaction.response.send_message(
-                embed=self.cog._make_embed("Sem permissão", "Esse painel pertence a outro usuário.", ok=False),
-                ephemeral=True,
-            )
+            await responder_painel_tts_de_outro(interaction)
             return False
         return True
 

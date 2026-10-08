@@ -124,12 +124,9 @@ class TTSInterfaceVisoesLayoutComportamentoTests(unittest.IsolatedAsyncioTestCas
         with patch.object(view, "_is_expired", return_value=False):
             self.assertTrue(await view.interaction_check(interaction))
 
-    async def test_launcher_rejeita_outro_usuario_com_dica_curta_e_mentions_bloqueadas(self):
+    async def test_launcher_rejeita_outro_usuario_com_mensagem_padrao(self):
         modulo = _carregar_modulo()
-        cog = types.SimpleNamespace(
-            _get_panel_prefix_hint=AsyncMock(return_value="`!tts`"),
-            _make_embed=lambda *args, **kwargs: (args, kwargs),
-        )
+        cog = types.SimpleNamespace(_make_embed=lambda *args, **kwargs: (args, kwargs))
         view = modulo.VisaoLayoutBaseTTS(cog, 10, 20)
         view.panel_kind = "launcher"
         response = types.SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False)
@@ -138,28 +135,21 @@ class TTSInterfaceVisoesLayoutComportamentoTests(unittest.IsolatedAsyncioTestCas
         with patch.object(view, "_is_expired", return_value=False):
             self.assertFalse(await view.interaction_check(interaction))
 
-        cog._get_panel_prefix_hint.assert_awaited_once_with(20, "launcher")
-        args, kwargs = response.send_message.await_args
-        self.assertEqual(args[0], "Essa configuração não é sua, use o comando `!tts` para configurar a sua voz")
-        self.assertTrue(kwargs["ephemeral"])
-        self.assertIs(kwargs["allowed_mentions"], _AllowedMentions.MARCADOR)
+        response.send_message.assert_awaited_once_with("Esse painel neh seu não djacho!", ephemeral=True)
 
-    async def test_launcher_preserva_fallback_de_prefixo(self):
-        modulo = _carregar_modulo(prefixo="$")
-        cog = types.SimpleNamespace(
-            _get_panel_prefix_hint=AsyncMock(side_effect=RuntimeError("falha")),
-            _make_embed=lambda *args, **kwargs: (args, kwargs),
-        )
+    async def test_bloqueio_padrao_usa_followup_se_interacao_ja_foi_reconhecida(self):
+        modulo = _carregar_modulo()
+        cog = types.SimpleNamespace(_make_embed=lambda *args, **kwargs: (args, kwargs))
         view = modulo.VisaoLayoutBaseTTS(cog, 10, 20)
-        view.panel_kind = "launcher"
-        response = types.SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False)
-        interaction = types.SimpleNamespace(user=types.SimpleNamespace(id=99), response=response)
+        response = types.SimpleNamespace(send_message=AsyncMock(), is_done=lambda: True)
+        followup = types.SimpleNamespace(send=AsyncMock())
+        interaction = types.SimpleNamespace(user=types.SimpleNamespace(id=99), response=response, followup=followup)
 
         with patch.object(view, "_is_expired", return_value=False):
             self.assertFalse(await view.interaction_check(interaction))
 
-        texto = response.send_message.await_args.args[0]
-        self.assertIn("`$tts`", texto)
+        followup.send.assert_awaited_once_with("Esse painel neh seu não djacho!", ephemeral=True)
+        response.send_message.assert_not_awaited()
 
     async def test_expiracao_preserva_followup_quando_resposta_ja_foi_usada(self):
         modulo = _carregar_modulo()
@@ -178,10 +168,9 @@ class TTSInterfaceVisoesLayoutComportamentoTests(unittest.IsolatedAsyncioTestCas
         followup.send.assert_awaited_once_with("expirou", ephemeral=True)
         response.send_message.assert_not_awaited()
 
-    async def test_painel_comum_rejeita_outro_usuario_com_embed(self):
+    async def test_painel_comum_rejeita_outro_usuario_com_a_mesma_mensagem(self):
         modulo = _carregar_modulo()
-        embed = object()
-        cog = types.SimpleNamespace(_make_embed=lambda *args, **kwargs: embed)
+        cog = types.SimpleNamespace(_make_embed=lambda *args, **kwargs: (args, kwargs))
         view = modulo.VisaoLayoutBaseTTS(cog, 10, 20)
         response = types.SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False)
         interaction = types.SimpleNamespace(user=types.SimpleNamespace(id=99), response=response)
@@ -189,7 +178,7 @@ class TTSInterfaceVisoesLayoutComportamentoTests(unittest.IsolatedAsyncioTestCas
         with patch.object(view, "_is_expired", return_value=False):
             self.assertFalse(await view.interaction_check(interaction))
 
-        response.send_message.assert_awaited_once_with(embed=embed, ephemeral=True)
+        response.send_message.assert_awaited_once_with("Esse painel neh seu não djacho!", ephemeral=True)
 
 
 if __name__ == "__main__":

@@ -21,10 +21,10 @@ class TTSInterfaceVisoesBaseEstruturaTests(unittest.TestCase):
 
         classes_ui = {n.name for n in ui_tree.body if isinstance(n, ast.ClassDef)}
         classes_modulo = {n.name for n in modulo_tree.body if isinstance(n, ast.ClassDef)}
-        funcoes_modulo = {n.name for n in modulo_tree.body if isinstance(n, ast.FunctionDef)}
+        funcoes_modulo = {n.name for n in modulo_tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
         self.assertTrue({"VisaoBaseTTS", "VisaoSelecaoSimples"} <= classes_modulo)
-        self.assertTrue({"dica_comando_painel_expirado", "mensagem_painel_expirado"} <= funcoes_modulo)
+        self.assertTrue({"dica_comando_painel_expirado", "mensagem_painel_expirado", "responder_painel_tts_de_outro"} <= funcoes_modulo)
         self.assertNotIn("_BaseTTSView", classes_ui)
         self.assertNotIn("_SimpleSelectView", classes_ui)
 
@@ -147,7 +147,7 @@ class TTSInterfaceVisoesBaseComportamentoTests(unittest.IsolatedAsyncioTestCase)
         interaction.user.id = 999
         with patch.object(view, "_is_expired", return_value=False):
             self.assertFalse(await view.interaction_check(interaction))
-        interaction.response.send_message.assert_awaited_once()
+        interaction.response.send_message.assert_awaited_once_with("Esse painel neh seu não djacho!", ephemeral=True)
 
     async def test_visao_base_preserva_fallback_de_expiracao(self):
         modulo = _carregar_modulo(prefixo="$")

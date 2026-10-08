@@ -128,15 +128,11 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         self.assertIn("owner_id: int = 0", builder)
         self.assertIn("TTSPublicLauncherView(self, int(owner_id or 0)", builder)
 
-    def test_launcher_rejects_other_users_with_the_short_tts_hint(self):
+    def test_launcher_rejects_other_users_with_the_shared_tts_owner_message(self):
         base = self._class_source(self.visoes_layout_text, self.visoes_layout_tree, "VisaoLayoutBaseTTS")
-        self.assertIn('if self.panel_kind == "launcher":', base)
-        self.assertIn(
-            'dica_comando = await self.cog._get_panel_prefix_hint(self.guild_id, "launcher")',
-            base,
-        )
-        self.assertIn('Essa configuração não é sua, use o comando {dica_comando} para configurar a sua voz', base)
-        self.assertIn("allowed_mentions=discord.AllowedMentions.none()", base)
+        self.assertIn("await responder_painel_tts_de_outro(interaction)", base)
+        self.assertNotIn("Essa configuração não é sua", base)
+        self.assertNotIn("Painel bloqueado", base)
 
     def test_launcher_description_and_sections_match_the_compact_design(self):
         launcher = self._class_source(self.lancador_text, self.lancador_tree, "VisaoLancadorPublicoTTS")

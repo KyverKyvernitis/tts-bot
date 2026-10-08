@@ -15,6 +15,15 @@ import config
 DURACAO_EXPIRACAO_PAINEL_TTS = 180.0
 DURACAO_DESPACHO_PAINEL_TTS = 86400.0
 EMOJI_PAINEL_TTS_EXPIRADO = "<:osaka:1539137127852539944>"
+MENSAGEM_PAINEL_TTS_DE_OUTRO = "Esse painel neh seu não djacho!"
+
+
+async def responder_painel_tts_de_outro(interaction: discord.Interaction) -> None:
+    """Responde de forma uniforme quando alguém tenta usar um painel TTS alheio."""
+    if interaction.response.is_done():
+        await interaction.followup.send(MENSAGEM_PAINEL_TTS_DE_OUTRO, ephemeral=True)
+    else:
+        await interaction.response.send_message(MENSAGEM_PAINEL_TTS_DE_OUTRO, ephemeral=True)
 
 
 def dica_comando_painel_expirado(tipo_painel: str) -> str:
@@ -76,14 +85,7 @@ class VisaoBaseTTS(discord.ui.View):
         if self.owner_id == 0:
             return True
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                embed=self.cog._make_embed(
-                    "Painel bloqueado",
-                    "Só quem abriu esse painel pode usar esses botões e menus.",
-                    ok=False,
-                ),
-                ephemeral=True,
-            )
+            await responder_painel_tts_de_outro(interaction)
             return False
         return True
 

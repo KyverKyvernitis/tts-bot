@@ -55,12 +55,18 @@ def _panel_module():
     discord.ButtonStyle = types.SimpleNamespace(primary=1, secondary=2)
     base = types.ModuleType("cogs.tts.interface.visoes_layout")
     base.VisaoLayoutBaseTTS = _Layout
+    ownership = types.ModuleType("cogs.tts.interface.visoes_base")
+
+    async def responder_painel_tts_de_outro(interaction):
+        await interaction.response.send_message("Esse painel neh seu não djacho!", ephemeral=True)
+
+    ownership.responder_painel_tts_de_outro = responder_painel_tts_de_outro
     name = "cogs.tts.interface._advanced_panel_test"
     spec = importlib.util.spec_from_file_location(
         name, ROOT / "cogs/tts/interface/visao_efeitos_avancados.py"
     )
     module = importlib.util.module_from_spec(spec)
-    with patch.dict(sys.modules, {"discord": discord, base.__name__: base, name: module}):
+    with patch.dict(sys.modules, {"discord": discord, base.__name__: base, ownership.__name__: ownership, name: module}):
         spec.loader.exec_module(module)
     return module
 
@@ -87,7 +93,7 @@ def _settings_probe():
 
 
 def _interaction(owner=2):
-    response = types.SimpleNamespace(is_done=Mock(return_value=False), defer=AsyncMock())
+    response = types.SimpleNamespace(is_done=Mock(return_value=False), defer=AsyncMock(), send_message=AsyncMock())
 
     async def defer():
         response.is_done.return_value = True
@@ -188,6 +194,7 @@ class AdvancedPanelTests(unittest.IsolatedAsyncioTestCase):
         self.db.resolve_tts.assert_not_called()
         self.cog._set_user_tts_and_refresh.assert_not_awaited()
         interaction.edit_original_response.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with("Esse painel neh seu não djacho!", ephemeral=True)
 
     async def test_selecting_slowed_disables_existing_nightcore(self):
         modal = self.module.ModalEfeitosAvancadosTTS(self.panel)

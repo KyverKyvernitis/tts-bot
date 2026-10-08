@@ -147,10 +147,17 @@ def _carregar_modulo():
         button=_button,
     )
 
-    spec = importlib.util.spec_from_file_location("_tts_modais_simples_teste", MODAIS_PATH)
+    base = types.ModuleType("cogs.tts.interface.visoes_base")
+
+    async def responder_painel_tts_de_outro(interaction):
+        await interaction.response.send_message("Esse painel neh seu não djacho!", ephemeral=True)
+
+    base.responder_painel_tts_de_outro = responder_painel_tts_de_outro
+    nome = "cogs.tts.interface._modais_simples_teste"
+    spec = importlib.util.spec_from_file_location(nome, MODAIS_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
-    with patch.dict(sys.modules, {"discord": discord}):
+    with patch.dict(sys.modules, {"discord": discord, base.__name__: base, nome: module}):
         spec.loader.exec_module(module)
     return module, discord
 
@@ -279,7 +286,7 @@ class TTSInterfaceModaisSimplesComportamentoTests(unittest.IsolatedAsyncioTestCa
         interaction = types.SimpleNamespace(user=types.SimpleNamespace(id=101), response=response)
 
         self.assertFalse(await view.interaction_check(interaction))
-        response.send_message.assert_awaited_once()
+        response.send_message.assert_awaited_once_with("Esse painel neh seu não djacho!", ephemeral=True)
 
         response.send_message.reset_mock()
         interaction.user.id = 100
