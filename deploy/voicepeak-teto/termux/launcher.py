@@ -75,6 +75,26 @@ def voicepeak_command(config: dict[str, str], arguments: list[str]) -> list[str]
     return command
 
 
+def box64_environment() -> list[str]:
+    """Forward supported debug options explicitly across PRoot's clean env."""
+    options = {
+        "BOX64_LOG": (3, "0"),
+        "BOX64_NOBANNER": (1, "1"),
+        "BOX64_DYNAREC": (1, None),
+        "BOX64_SHOWSEGV": (1, None),
+        "BOX64_SHOWBT": (1, None),
+    }
+    result = []
+    for name, (maximum, default) in options.items():
+        value = os.environ.get(name, default)
+        if value is None:
+            continue
+        if not re.fullmatch(r"[0-9]{1,4}", value) or int(value) > maximum:
+            raise ConfigurationError(f"{name} deve ser um inteiro de 0 a {maximum}")
+        result.append(f"{name}={int(value)}")
+    return result
+
+
 def login_command(config: dict[str, str], command: list[str], *, gui: bool = True) -> list[str]:
     proot = shutil.which("proot-distro")
     backend = config.get("backend", "qemu")
@@ -95,7 +115,7 @@ def login_command(config: dict[str, str], command: list[str], *, gui: bool = Tru
         result.append("--shared-tmp")
     result.extend(["--", "/usr/bin/env", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"])
     if backend == "box64":
-        result.extend(["BOX64_LOG=0", "BOX64_NOBANNER=1"])
+        result.extend(box64_environment())
         if config.get("box64_library_path"):
             result.append(f"BOX64_LD_LIBRARY_PATH={config['box64_library_path']}")
     if gui and config["display"]:

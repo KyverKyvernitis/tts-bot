@@ -112,6 +112,41 @@ def test_box64_shared_x11_tmp_and_environment_display(launcher, environment, mon
     assert "--shared-tmp" not in headless and "DISPLAY=:2.0" not in headless
 
 
+def test_debug_and_interpreter_options_reach_guest_without_changing_config(environment, monkeypatch):
+    _, path, _, _, _ = environment
+    original = path.read_bytes()
+    options = {"BOX64_LOG": "2", "BOX64_NOBANNER": "0", "BOX64_DYNAREC": "0",
+               "BOX64_SHOWSEGV": "1", "BOX64_SHOWBT": "1"}
+    for name, value in options.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("DISPLAY", ":1")
+    monkeypatch.setenv("BOX64_LD_LIBRARY_PATH", "/host-only")
+    monkeypatch.setenv("BOX64_UNRELATED_SETTING", "must-not-be-forwarded")
+    result = subprocess.run([sys.executable, "-I", str(LAUNCHER)], env=dict(os.environ),
+                            text=True, capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    arguments = json.loads(result.stdout)
+    env_arguments = arguments[arguments.index("/usr/bin/env") + 1:-2]
+    assert {f"{name}={value}" for name, value in options.items()} <= set(env_arguments)
+    assert "BOX64_LOG=0" not in env_arguments and "BOX64_NOBANNER=1" not in env_arguments
+    assert "DISPLAY=:1" in env_arguments and "--shared-tmp" in arguments
+    assert not any("host-only" in item or "must-not-be-forwarded" in item for item in arguments)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("name,value", [
+    ("BOX64_LOG", "4"), ("BOX64_LOG", "-1"), ("BOX64_LOG", "2\nDISPLAY=:2"),
+    ("BOX64_NOBANNER", "yes"), ("BOX64_DYNAREC", "2"),
+    ("BOX64_SHOWSEGV", ""), ("BOX64_SHOWBT", "1;command"),
+])
+def test_invalid_debug_option_stops_before_guest_exec(environment, monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    result = subprocess.run([sys.executable, "-I", str(LAUNCHER)], env=dict(os.environ),
+                            text=True, capture_output=True, timeout=5)
+    assert result.returncode == 2 and result.stdout == ""
+    assert name in result.stderr
+
+
 def test_box64_missing_proot_fails_before_exec(launcher, environment, monkeypatch):
     config = launcher.load_config()
     monkeypatch.setattr(launcher.shutil, "which", lambda name: None)

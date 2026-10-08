@@ -120,6 +120,7 @@ def test_new_container_builds_pinned_official_runtime_and_libraries(prepared):
     dependencies = next(command for command in commands if '/usr/bin/apt-get' in command and 'install' in command)
     assert 'libcurl4t64' in dependencies and 'libasound2t64' in dependencies
     assert 'python3' in dependencies
+    assert 'libxss1' in dependencies and 'x11-utils' in dependencies
     clone = next(command for command in commands if command[:2] == ["git", "clone"])
     assert clone[1:6] == ["clone", "--depth", "1", "--branch", "v0.4.0"]
     assert "https://github.com/ptitSeb/box64.git" in clone

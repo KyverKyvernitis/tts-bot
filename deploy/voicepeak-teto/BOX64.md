@@ -5,17 +5,19 @@ Esta é a alternativa ao Ubuntu x86_64/QEMU que apresentou SIGSEGV no
 bibliotecas do sistema rodam na arquitetura do telefone. O Box64 emula
 somente o programa Linux x86_64 do VOICEPEAK.
 
-Não precisa de root. O funcionamento do programa, a GUI, a ativação e a
-síntese ainda precisam ser testados no aparelho. O kit não contém o motor
+Não precisa de root. No Poco X7 Pro, o Ubuntu ARM64, Box64 v0.4.0 e o
+`--help` do VOICEPEAK já foram confirmados. A primeira tentativa de GUI
+terminou com sinal 11; interface, ativação e síntese ainda precisam ser
+verificadas. O kit não contém o motor
 comercial, a voz Teto ou uma licença.
 
 ## Instalar o kit e o runtime
 
-Baixe `teto-voicepeak-termux-box64-kit-v2.zip` para Downloads. No Termux nativo,
+Baixe `teto-voicepeak-termux-box64-kit-v3.zip` para Downloads. No Termux nativo,
 fora de outro PRoot:
 
 ```bash
-unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v2.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v3.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 bash deploy/voicepeak-teto/termux/setup-box64.sh
 ```
@@ -30,6 +32,13 @@ O kit v2 instala também `python3` dentro do Ubuntu e seleciona
 `/usr/bin/python3` no CMake. Se a primeira tentativa parou em
 `Could NOT find Python3`, execute novamente o setup atualizado: ele reutiliza
 o container, o checkout e a pasta de compilação existentes.
+
+O kit v3 encaminha opções de diagnóstico do Box64 explicitamente ao Ubuntu,
+pois o PRoot limpa as variáveis do Termux. Também inclui `x11-utils` para
+testar a conexão gráfica com clientes ARM64 e `libxss1`, usado opcionalmente
+pela interface do VOICEPEAK. Essa biblioteca adicional não é uma correção
+confirmada para o sinal 11. Reexecutar o setup mantém o checkout, o programa
+instalado e a compilação existente.
 
 O código do Box64 fica fixado na versão oficial **v0.4.0**, commit
 `dae0917c47b4edd8956f314210417a20fd225c4b`. O setup também usa as duas
@@ -90,9 +99,11 @@ quando PRoot devolve código zero. Os comandos de bibliotecas verificam o
 
 Depois que o programa abrir, instale o APK e o pacote complementar do
 [Termux:X11](https://github.com/termux/termux-x11) conforme o projeto oficial.
-No Termux:
+Instale `termux-x11-universal-debug.apk` do release nightly no Android e,
+no Termux:
 
 ```bash
+pkg install -y x11-repo && pkg install -y termux-x11-nightly
 termux-x11 :1 &
 DISPLAY=:1 "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64"
 ```
@@ -101,6 +112,47 @@ Abra o aplicativo Termux:X11 no Android. A voz Teto exige compra, instalação
 e ativação oficiais pela interface do VOICEPEAK. Esse passo não foi validado
 no Poco. A emulação não fornece licença nem acrescenta suporte nativo a
 português.
+
+### Investigar sinal 11 ao abrir a interface
+
+A CLI `--help` não exercita a interface gráfica. Tela preta com cursor pode
+ser o servidor X11 sem janelas após o encerramento do programa. O aviso sobre
+`/sys/module/mali_kbase/parameters/large_page_conf` não identifica por si só
+a causa do crash. Mantenha o servidor `termux-x11 :1` iniciado.
+
+Após instalar o kit v3 e reexecutar o setup, teste uma janela ARM64 sem Box64:
+
+```bash
+proot-distro login voicepeak-arm64 --shared-tmp -- /usr/bin/env DISPLAY=:1 /usr/bin/xdpyinfo > "$HOME/voicepeak-x11-probe.log" 2>&1 &&
+proot-distro login voicepeak-arm64 --shared-tmp -- /usr/bin/env DISPLAY=:1 /usr/bin/xmessage -center -timeout 30 "Ubuntu ARM64 conectado ao Termux:X11"
+```
+
+Abra o aplicativo Termux:X11 para conferir a mensagem. Se `xdpyinfo` falhar,
+envie `voicepeak-x11-probe.log` antes de testar a emulação. Se a conexão for
+confirmada, registre a execução com Dynarec:
+
+```bash
+DISPLAY=:1 BOX64_LOG=2 BOX64_NOBANNER=0 BOX64_DYNAREC=1 BOX64_SHOWSEGV=1 BOX64_SHOWBT=1 \
+  "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64" 2>&1 | tee "$HOME/voicepeak-box64-gui-dynarec.log"
+```
+
+Se o programa cair, compare sem Dynarec, usando o interpretador:
+
+```bash
+DISPLAY=:1 BOX64_LOG=2 BOX64_NOBANNER=0 BOX64_DYNAREC=0 BOX64_SHOWSEGV=1 BOX64_SHOWBT=1 \
+  timeout -k 5s 180s "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64" 2>&1 | tee "$HOME/voicepeak-box64-gui-interpreter.log"
+```
+
+O interpretador pode ser bem mais lento; o teste termina após três minutos
+ou ao fechar o programa. Envie os dois logs e informe se alguma janela abriu.
+Eles permitem comparar os caminhos de execução, sem concluir antecipadamente
+que o Dynarec causa o sinal. Os comandos não alteram a configuração persistente
+e não precisam baixar novamente o programa.
+
+O launcher aceita `BOX64_LOG` de 0 a 3 e `BOX64_NOBANNER`, `BOX64_DYNAREC`,
+`BOX64_SHOWSEGV`, `BOX64_SHOWBT` com 0 ou 1. Sem opções explícitas, os logs
+continuam desativados e o modo de emulação mantém seu padrão. O caminho de
+bibliotecas continua vindo de `config-box64.json`.
 
 Após ativar a voz, confira o nome exato:
 
