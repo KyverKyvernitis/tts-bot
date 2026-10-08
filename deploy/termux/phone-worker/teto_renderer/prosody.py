@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from bisect import bisect_right
+from dataclasses import dataclass, replace
 
 from .phonemizer import Mora
 
@@ -32,6 +33,7 @@ class RenderNote:
     word_syllables: int = 1
     pitch_start_cents: int = 0
     pitch_end_cents: int = 0
+    pitch_peak_cents: int | None = None
 
 
 _PITCH_CLASSES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
@@ -39,14 +41,18 @@ _PITCH_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 _UTAU_BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 
-def _relative_pitch(base_pitch: str, semitones: int) -> str:
+def _pitch_midi(base_pitch: str) -> int:
     match = re.fullmatch(r"([A-Ga-g])([#b]?)(-?\d{1,2})", str(base_pitch).strip())
     midi = 60  # C4 is the defensive fallback for an invalid configuration.
     if match:
         name, accidental, octave = match.groups()
         midi = (int(octave) + 1) * 12 + _PITCH_CLASSES[name.upper()]
         midi += {"#": 1, "b": -1, "": 0}[accidental]
-    midi = max(0, min(127, midi + semitones))
+    return midi
+
+
+def _relative_pitch(base_pitch: str, semitones: int) -> str:
+    midi = max(0, min(127, _pitch_midi(base_pitch) + semitones))
     return f"{_PITCH_NAMES[midi % 12]}{midi // 12 - 1}"
 
 
@@ -132,7 +138,7 @@ def _pitch_line(start: int, end: int, *, duration_ms: int, tempo: int) -> str:
     return encode_pitchbend(bend)
 
 
-def _phrase_spans(moras: list[Mora]) -> list[tuple[int, int]]:
+def _phrase_spans(moras: list[Mora] | list[RenderNote]) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     start = 0
     for index, mora in enumerate(moras):
@@ -142,6 +148,88 @@ def _phrase_spans(moras: list[Mora]) -> list[tuple[int, int]]:
     if start < len(moras):
         spans.append((start, len(moras) - 1))
     return spans
+
+
+def align_pitch_to_timeline(
+    notes: list[RenderNote], placements: list[dict[str, float]], *, tempo: int = 140,
+) -> list[RenderNote]:
+    """Sample one F0 envelope per phrase at each fragment's actual PCM time.
+
+    CVVC fragments include preutterance before their lexical anchors and can
+    overlap other notes for much of their duration. Matching successive note
+    endpoints therefore does not make their simultaneous pitch targets match.
+    Nucleus peaks define a shared absolute-time contour; auxiliary aliases sample
+    it instead of creating local contours. Phrase edges are held through the
+    leading/trailing articulation, with independent contours across punctuation.
+    """
+    if len(notes) != len(placements):
+        raise ValueError("notas e posições Teto têm tamanhos diferentes")
+    if not notes or not any(note.profile == "english-cvvc" for note in notes):
+        return list(notes)
+
+    interval_ms = 60000.0 / (_tempo(tempo) * 96.0)
+    aligned = list(notes)
+    for first, last in _phrase_spans(notes):
+        nuclei = [index for index in range(first, last + 1) if notes[index].role == "nucleus"]
+        if not nuclei:
+            nuclei = list(range(first, last + 1))
+        initial = notes[nuclei[0]]
+        terminal = notes[nuclei[-1]]
+        knots: list[tuple[float, float]] = [(
+            float(placements[nuclei[0]]["anchor_ms"]),
+            _pitch_midi(initial.pitch) * 100.0 + initial.pitch_start_cents,
+        )]
+        for index in nuclei:
+            note = notes[index]
+            peak = note.pitch_peak_cents
+            if peak is None:
+                peak = (note.pitch_start_cents + note.pitch_end_cents) / 2.0
+            knots.append((
+                float(placements[index]["anchor_ms"]) + note.duration_ms * 0.48,
+                _pitch_midi(note.pitch) * 100.0 + peak,
+            ))
+        knots.append((
+            float(placements[nuclei[-1]]["anchor_ms"]) + terminal.duration_ms,
+            _pitch_midi(terminal.pitch) * 100.0 + terminal.pitch_end_cents,
+        ))
+        # Defensive sorting also handles a phrase consisting only of malformed
+        # auxiliary notes with identical anchors. The last target owns a tie.
+        ordered = dict(sorted(knots, key=lambda knot: knot[0]))
+        times = sorted(ordered)
+
+        def pitch_at(time_ms: float) -> float:
+            right = bisect_right(times, time_ms)
+            if right == 0:
+                return ordered[times[0]]
+            if right == len(times):
+                return ordered[times[-1]]
+            left_time, right_time = times[right - 1], times[right]
+            ratio = _smoothstep((time_ms - left_time) / (right_time - left_time))
+            return ordered[left_time] + (ordered[right_time] - ordered[left_time]) * ratio
+
+        for index in range(first, last + 1):
+            note = notes[index]
+            if note.profile != "english-cvvc":
+                continue
+            placement = placements[index]
+            start_ms = float(placement["start_ms"])
+            duration_ms = note.duration_ms + max(0.0, float(placement["lead_ms"]))
+            base_cents = _pitch_midi(note.pitch) * 100.0
+            # UTAU points have a fixed tempo-derived interval. Include the point
+            # beyond the PCM tail so its interpolation remains defined; a fixed
+            # 64-point cap would flatten longer fragments before their endings.
+            points = max(2, math.ceil(duration_ms / interval_ms) + 1)
+            values = [
+                round(pitch_at(start_ms + point * interval_ms) - base_cents)
+                for point in range(points)
+            ]
+            aligned[index] = replace(
+                note,
+                pitchbend=encode_pitchbend(values),
+                pitch_start_cents=round(pitch_at(start_ms) - base_cents),
+                pitch_end_cents=round(pitch_at(start_ms + duration_ms) - base_cents),
+            )
+    return aligned
 
 
 def _phrase_terminal_nuclei(moras: list[Mora]) -> dict[int, str]:
@@ -415,5 +503,6 @@ def build_notes(
             word_syllables=mora.word_syllables,
             pitch_start_cents=int(start + residual_cents),
             pitch_end_cents=int(end + residual_cents),
+            pitch_peak_cents=int(peak + residual_cents),
         ))
     return notes

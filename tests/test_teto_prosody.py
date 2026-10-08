@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +11,40 @@ if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 
 from teto_renderer.phonemizer import phonemize
-from teto_renderer.prosody import build_notes, encode_pitchbend
+from teto_renderer.prosody import RenderNote, align_pitch_to_timeline, build_notes, encode_pitchbend
+
+
+def _decode_pitchbend(encoded: str) -> list[int]:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    values: list[int] = []
+    index = 0
+    while index < len(encoded):
+        value = alphabet.index(encoded[index]) * 64 + alphabet.index(encoded[index + 1])
+        value = value - 4096 if value >= 2048 else value
+        index += 2
+        count = 1
+        if index < len(encoded) and encoded[index] == "#":
+            end = encoded.index("#", index + 1)
+            count = int(encoded[index + 1:end])
+            index = end + 1
+        values.extend([value] * count)
+    return values
+
+
+def _timeline_pitch(note: RenderNote, start_ms: float, time_ms: float, *, tempo: int = 140) -> float:
+    values = _decode_pitchbend(note.pitchbend)
+    position = (time_ms - start_ms) * tempo * 96.0 / 60000.0
+    left = max(0, min(len(values) - 1, math.floor(position)))
+    right = min(len(values) - 1, left + 1)
+    ratio = max(0.0, min(1.0, position - left))
+    return values[left] + (values[right] - values[left]) * ratio
+
+
+def _placement(anchor_ms: float, lead_ms: float) -> dict[str, float]:
+    return {
+        "anchor_ms": anchor_ms, "lead_ms": lead_ms,
+        "start_ms": anchor_ms - lead_ms, "fade_ms": 18.0,
+    }
 
 
 def _aliases(text: str) -> list[str]:
@@ -135,10 +169,88 @@ class TetoProsodyTests(unittest.TestCase):
         nuclei = [n for n in notes if n.role == "nucleus"]
         self.assertTrue(nuclei)
         self.assertTrue(any(n.pitchbend != "AA" for n in nuclei))
-        # All CVVC fragments now sample one phrase envelope. Adjacent note
-        # boundaries must meet exactly instead of resetting to zero cents.
+        # Lexical plan boundaries share a target. The separate timeline
+        # alignment tests below check simultaneous, overlapping PCM positions.
         for left, right in zip(notes, notes[1:]):
             self.assertEqual(left.pitch_end_cents, right.pitch_start_cents)
+
+    def test_timeline_pitch_agrees_during_real_nucleus_auxiliary_and_lead_overlaps(self):
+        notes = [
+            RenderNote(("ka",), "C4", 160, 0, profile="english-cvvc",
+                       pitch_start_cents=-10, pitch_peak_cents=30, pitch_end_cents=0),
+            # Its local pitch targets must not create a reset when this auxiliary
+            # occupies the same PCM time as the surrounding lexical fragments.
+            RenderNote(("a z",), "C4", 44, 0, role="transition", profile="english-cvvc",
+                       pitch_start_cents=250, pitch_peak_cents=-200, pitch_end_cents=100),
+            RenderNote(("zi",), "C4", 140, 0, profile="english-cvvc", phrase_end=".",
+                       pitch_start_cents=0, pitch_peak_cents=-20, pitch_end_cents=-35),
+        ]
+        placements = [_placement(70.0, 60.0), _placement(150.0, 40.0), _placement(230.0, 130.0)]
+        aligned = align_pitch_to_timeline(notes, placements)
+        for time_ms in (120.0, 145.0, 180.0, 192.0):
+            simultaneous = [
+                _timeline_pitch(note, placement["start_ms"], time_ms)
+                for note, placement in zip(aligned, placements)
+            ]
+            self.assertLess(max(simultaneous) - min(simultaneous), 1.5)
+        self.assertGreater(_timeline_pitch(aligned[0], 10.0, 146.8), 28.0)
+        self.assertEqual([note.duration_ms for note in aligned], [note.duration_ms for note in notes])
+
+    def test_timeline_pitch_includes_negative_preutterance_and_full_long_tail(self):
+        note = RenderNote(("ka",), "C4", 500, 0, profile="english-cvvc", phrase_end=".",
+                          pitch_start_cents=-25, pitch_peak_cents=90, pitch_end_cents=-70)
+        placement = _placement(100.0, 180.0)
+        aligned = align_pitch_to_timeline([note], [placement])[0]
+        values = _decode_pitchbend(aligned.pitchbend)
+        self.assertGreater(len(values), 64)
+        self.assertGreaterEqual((len(values) - 1) * 60000.0 / (140 * 96), 680.0)
+        self.assertEqual(_timeline_pitch(aligned, -80.0, -40.0), -25.0)
+        self.assertGreater(_timeline_pitch(aligned, -80.0, 340.0), 88.0)
+        self.assertLess(_timeline_pitch(aligned, -80.0, 590.0), -68.0)
+        self.assertEqual(aligned.pitch_start_cents, -25)
+        self.assertEqual(aligned.pitch_end_cents, -70)
+
+    def test_timeline_pitch_keeps_half_semitone_residual_and_configured_base(self):
+        moras = _english_moras("Brasil", {"- br", "ra", "a zi", "i w"})
+        neutral = build_notes(moras, base_pitch="D4")
+        lower = build_notes(moras, base_pitch="D4", pitch_offset_semitones=-1.5)
+        placements = [_placement(float(index * 70), 50.0) for index in range(len(moras))]
+        aligned_neutral = align_pitch_to_timeline(neutral, placements)
+        aligned_lower = align_pitch_to_timeline(lower, placements)
+        self.assertEqual({note.pitch for note in aligned_lower}, {"C#4"})
+        for plain, lowered in zip(aligned_neutral, aligned_lower):
+            self.assertEqual(
+                _decode_pitchbend(lowered.pitchbend),
+                [value - 50 for value in _decode_pitchbend(plain.pitchbend)],
+            )
+
+    def test_timeline_pitch_holds_independent_phrase_edges_across_pause(self):
+        notes = [
+            RenderNote(("ka",), "C4", 100, 120, profile="english-cvvc", phrase_end=".",
+                       pitch_start_cents=0, pitch_peak_cents=20, pitch_end_cents=-40),
+            RenderNote(("a z",), "C4", 44, 0, role="transition", profile="english-cvvc"),
+            RenderNote(("zi",), "C4", 100, 0, profile="english-cvvc", phrase_end="?",
+                       pitch_start_cents=15, pitch_peak_cents=45, pitch_end_cents=35),
+        ]
+        placements = [_placement(50.0, 50.0), _placement(295.0, 55.0), _placement(300.0, 50.0)]
+        aligned = align_pitch_to_timeline(notes, placements)
+        # The next phrase's lead holds its own onset pitch during the pause;
+        # it does not sweep from the preceding statement's terminal pitch.
+        self.assertEqual(_timeline_pitch(aligned[1], 240.0, 260.0), 15.0)
+        self.assertEqual(_timeline_pitch(aligned[2], 250.0, 260.0), 15.0)
+        for time_ms in (280.0, 305.0, 325.0):
+            self.assertLess(abs(
+                _timeline_pitch(aligned[1], 240.0, time_ms)
+                - _timeline_pitch(aligned[2], 250.0, time_ms)
+            ), 1.5)
+        self.assertEqual(aligned[0].pitch_end_cents, -40)
+
+    def test_timeline_pitch_leaves_standard_bank_behavior_unchanged(self):
+        notes = build_notes(phonemize("Teto?"))
+        placements = [_placement(float(index * 100), 60.0) for index in range(len(notes))]
+        self.assertEqual(align_pitch_to_timeline(notes, placements), notes)
+        with self.assertRaises(ValueError):
+            align_pitch_to_timeline(notes, placements[:-1])
 
     def test_english_speech_timing_varies_nuclei_instead_of_fixed_138ms(self):
         available = {"- pro", "o ble", "e ma"}

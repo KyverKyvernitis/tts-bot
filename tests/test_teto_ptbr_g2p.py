@@ -21,7 +21,7 @@ def test_g2p_resolves_portuguese_before_japanese_alias_mapping():
 
 def test_g2p_nasalizes_coda_m_n_and_keeps_intervocalic_n_consonantal():
     assert g2p_word("bom").phonemes == ("b", "o~")
-    assert g2p_word("bem").phonemes == ("b", "e~")
+    assert g2p_word("bem").phonemes == ("b", "e~", "j")
     assert g2p_word("grande").phonemes[:3] == ("g", "r", "a~")
     assert g2p_word("banana").phonemes == ("b", "a", "n", "a", "n", "a")
 
@@ -32,6 +32,20 @@ def test_g2p_diphthong_vs_hiatus_and_explicit_stress():
     assert g2p_word("saída").phonemes == ("s", "a", "i", "d", "a")
     assert g2p_word("saída").syllables[1].stressed
     assert g2p_word("saúde").syllables[1].stressed
+
+
+def test_final_nasal_e_diphthong_keeps_glide_before_plural_s():
+    assert g2p_word("também").phonemes == ("t", "a~", "b", "e~", "j")
+    assert g2p_word("armazém").phonemes[-2:] == ("e~", "j")
+    assert g2p_word("bens").phonemes == ("b", "e~", "j", "s")
+    assert g2p_word("homens").phonemes[-3:] == ("e~", "j", "s")
+    assert g2p_word("também").syllables[-1].coda == ("j",)
+    assert g2p_word("bens").syllables[-1].coda == ("j", "s")
+
+
+def test_final_nasal_glide_rule_does_not_guess_unstressed_verb_endings():
+    assert g2p_word("falem").phonemes == ("f", "a", "l", "e~")
+    assert g2p_word("fazem").phonemes == ("f", "a", "z", "e~")
 
 
 def test_g2p_syllabification_preserves_legal_onset_clusters():

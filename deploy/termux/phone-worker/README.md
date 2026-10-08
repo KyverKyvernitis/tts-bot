@@ -9,21 +9,20 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-4e-phrase-speech` e
-`phonemizer_version=ptbr-g2p-xsampa-cvvc-v1`. Se o serviço ainda mostra o
+o renderer atualizado anuncia `renderer_version=speech-4f-articulation` e
+`phonemizer_version=ptbr-g2p-xsampa-cvvc-v2`. Se o serviço ainda mostra o
 estado antigo, o reinício manual canônico é
 `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
 bloqueando a síntese pesada até sua conclusão.
 
-## Teto English CVVC para PT-BR: renderer `speech-4e-phrase-speech`
+## Teto English CVVC para PT-BR: renderer `speech-4f-articulation`
 
-A revisão 4E mantém a voicebank English 150401 e transforma o estágio final em
-um renderer de fala por frase. O objetivo é reduzir resets de pitch, cadência fixa
-e degraus de energia entre aliases, mantendo a síntese no Straycat/WORLD. O G2P PT-BR continua separado da voicebank, mas
-os fonemas agora são planejados diretamente contra o inventário X-SAMPA/CVVC
-da Teto English. A bank japonesa permanece disponível como fallback de
-compatibilidade.
+A revisão 4F mantém a voicebank English 150401 e o renderer de fala por frase
+da 4E, com correções de articulação e planejamento fonético. A síntese continua
+no Straycat/WORLD. O G2P PT-BR permanece separado da voicebank, com fonemas
+planejados contra o inventário X-SAMPA/CVVC da Teto English. A bank japonesa
+permanece disponível como fallback de compatibilidade.
 
 Seleção padrão (`PHONE_WORKER_TETO_VOICEBANK_MODE=auto`):
 
@@ -36,6 +35,9 @@ Seleção padrão (`PHONE_WORKER_TETO_VOICEBANK_MODE=auto`):
 `PHONE_WORKER_TETO_VOICEBANK_MODE`. O caminho da English pode ser substituído
 por `PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR`. Nenhuma voicebank é distribuída
 no updater.
+O status informa `voicebank_mode`, `voicebank_fallback` e
+`voicebank_fallback_reason`; em `auto`, o motivo da troca para o banco japonês
+fica visível mesmo quando a engine continua pronta.
 
 O pipeline principal fica:
 
@@ -51,22 +53,28 @@ O planner tenta primeiro aliases completos de início/VCV/CCV. Se eles não
 existirem, usa transições VC e CC presentes no `oto.ini`. Encontros como `br`,
 `tr`, `pr`, `gr`, `pl` deixam de exigir uma vogal japonesa artificial quando a
 English possui o cluster. `S`, `Z`, `tS`, `dZ`, `v`, `j`, `w`, `N` e outros
-fonemas da bank são usados diretamente. Os três sons PT-BR sem unidade dedicada
-no banco recebem aproximações composicionais: `nh -> n+j`, `lh -> l+j` e o
-`r/rr` forte -> `h`; o `r` fraco usa os aliases contextuais de `r` e tenta `4`
+fonemas da bank são usados diretamente. Quando o banco não oferece `J`/`L`
+dedicados, os sons `nh` e `lh` recebem aproximações composicionais:
+`nh -> n+j`, `lh -> l+j`. O `r/rr` forte é aproximado por `h`; o `r` fraco usa
+os aliases contextuais de `r` e tenta `4`
 quando a combinação existir.
 
-Ditongos frequentes tentam aliases nativos como `aI`, `eI`, `OI`, `aU` e `oU`.
-Vogais nasais mantêm o núcleo oral e acrescentam uma cauda nasal curta com `N`
-quando o banco não oferece nasalização direta. Isso evita voltar ao padrão de
-sílabas japonesas completas.
+Ditongos orais tentam aliases nativos como `aI`, `eI`, `OI`, `aU` e `oU`
+somente quando eles existem no banco carregado; senão preservam vogal e glide.
+Vogais e ditongos nasais procuram aliases dedicados, como `a~` e `a~w`. Sem
+esses aliases, usam núcleo oral, cauda nasal curta com `N` e, nos ditongos, o
+glide ao final. A revisão G2P v2 preserva esse glide em palavras como `bem`,
+`também`, `bens` e `homens` e mantém a ordem vogal, nasal e glide.
+A English oficial ainda depende dessas aproximações para sons PT-BR ausentes;
+um alias existente não garante que a gravação reproduza a pronúncia portuguesa.
 
 A resposta de síntese publica `voicebank_profile`, `cvvc_direct`,
 `cvvc_transitions`, `cluster_hits`, `approximated_phonemes` e
 `coverage_percent`. A resposta raw também inclui
 `X-Core-Worker-Teto-Voicebank-Profile`, `X-Core-Worker-Teto-Coverage` e
-`X-Core-Worker-Teto-Cluster-Hits`. Assim a inteligibilidade pode ser auditada
-por cobertura real do banco em vez de apenas por audição.
+`X-Core-Worker-Teto-Cluster-Hits`. Esses campos ajudam a localizar aliases
+ausentes e aproximações, mas cobertura e telemetria não medem inteligibilidade
+ou naturalidade. A validação da fala exige ouvir o WAV.
 
 Os caches WORLD `*_wav.sc` não precisam existir na instalação inicial. Straycat
 os cria sob demanda por WAV; o agrupamento por arquivo continua impedindo duas
@@ -80,9 +88,26 @@ a maior parte do relógio da fala. O renderer também inclui o preutterance no
 budget entregue ao Straycat, evitando que um VCV posicionado cedo termine cedo
 e corte o começo/fim da sílaba.
 
-A 4E remove o pitchbend neutro dos auxiliares: cada fragmento recebe um trecho
-da mesma curva de pitch da frase e as fronteiras compartilham o mesmo valor em
-cents. O timing dos núcleos deixa de partir de 138 ms fixos e passa a considerar
+A 4F reserva o tempo de articulação das transições e dos clusters a partir do
+`preutterance` e da duração de cada fragmento. Isso protege o trecho consonantal
+antes da entrada do próximo núcleo vocálico. Nasais, glides e codas sucessivos
+também recebem tempo para chegar à sua região articulada; o núcleo anterior
+mantém uma janela mínima de vogal. Pausas de pontuação passam a considerar o
+fim dos samples e a entrada antecipada do próximo fragmento. Caudas que o
+resampler arredonda além do tempo pedido são cortadas para não ocupar essas
+pausas ou a articulação seguinte.
+
+Quando o OTO traz uma entrada longa (por exemplo, 250 ms antes de `e N`),
+o renderer remove o excesso de vogal no `offset` enviado ao resampler,
+ajustando consonant, preutterance, overlap e cutoff junto. A posição original
+da consoante no WAV fica preservada; limitar apenas o PCM cortaria a nasal.
+A compensação considera a velocidade UTAU. Auxiliares sem alias não reservam
+articulação silenciosa, mas continuam registrados em `missing_phonemes`.
+
+A 4F amostra a mesma curva de pitch em coordenadas de tempo reais da frase,
+incluindo o preutterance e a cauda de cada fragmento. Auxiliares e núcleos
+sobrepostos recebem o mesmo alvo de F0 no mesmo instante, preservando tonicidade
+e o deslocamento de tom. O timing dos núcleos considera
 tonicidade, palavra funcional, onset/coda, ditongo e posição na palavra. O
 planner de aliases deixa de aceitar simplesmente o primeiro hit e pontua aliases
 renderizáveis por cobertura de contexto e saúde do OTO.
@@ -93,6 +118,11 @@ janela OTO usa fade sin²/cos² com inclinação nula nas bordas. A telemetria p
 `alias_path_cost`, `mean_nucleus_ms`, `nucleus_duration_stddev_ms`,
 `pitch_boundary_max_cents`, `continuity_repairs`, `energy_boundary_max_db`, além
 dos campos `timeline_*` anteriores.
+`pitch_alignment_mode=absolute-timeline` identifica o alinhamento da 4F.
+`pitch_boundary_max_cents` continua sendo uma métrica do plano lexical anterior
+ao alinhamento, identificada por `pitch_boundary_metric=lexical-plan-not-audio`;
+ela não mede o pitch do WAV. O fingerprint de render e o schema de fragmentos
+mudaram para separar os caches desta revisão.
 
 
 Configuração recomendada:
@@ -117,8 +147,62 @@ python ~/phone-worker/scripts/validate-teto-assets.py \
   --mode english \
   --voicebank "$HOME/voicebanks/kasane-teto-english" \
   --resampler "$HOME/bin/straycat-rs" \
-  --render-test --text "Brasil trabalho problema"
+  --render-test --text "Brasil trabalho problema" \
+  --output "$HOME/teto-teste.wav"
 ```
+
+O JSON informa o banco realmente selecionado em `status.root` e
+`status.voicebank_profile`, além das versões do renderer e do phonemizer.
+`--output` salva os mesmos bytes WAV retornados pelo renderer e requer
+`--render-test`; a pasta de destino deve existir. Sem `--output`, o teste antigo
+continua retornando apenas os metadados. Falhas de síntese ou escrita saem com
+código `3`; assets indisponíveis saem com `2`.
+
+### Auditoria por audição e comparação com OpenUTAU
+
+Execute a auditoria isolada quando o worker e os builds estiverem ociosos. O
+validador não participa do guard de recursos do daemon; os limites de tamanho,
+texto e tempo do renderer continuam ativos. O guard do serviço permanece
+inalterado. Fixe `--mode english` durante o diagnóstico para não confundir uma
+volta automática ao banco japonês com o resultado da English.
+
+```bash
+python ~/phone-worker/scripts/validate-teto-assets.py \
+  --mode english \
+  --voicebank "$HOME/voicebanks/kasane-teto-english" \
+  --resampler "$HOME/bin/straycat-rs" \
+  --audit-dir "$HOME/teto-audit/atual"
+```
+
+A pasta recebe dez WAVs de frases PT-BR com encontros consonantais, nasais,
+`nh`/`lh`, róticos, perguntas e exclamações. Cada WAV tem um JSON com o texto e
+metadados; `summary.json` reúne as versões, banco selecionado e falhas. Cada
+frase tem limite de 30 segundos de processamento e 8 MiB de áudio; as frases
+são renderizadas em sequência. A auditoria só roda quando `--audit-dir` é
+pedido. Uma nova tentativa remove o WAV antigo da frase antes de renderizá-la,
+para não apresentar áudio anterior em caso de falha.
+
+Para comparar revisões, gere uma pasta `antes` com a revisão anterior, se ela
+estiver disponível, e outra `atual` com esta revisão. Use exatamente a mesma
+voicebank, `oto.ini`, resampler, velocidade, tom base e dispositivo de saída.
+O validador usa deslocamento de tom `0.0`; o bot usa `-1.0` por padrão, portanto
+essas saídas só são comparáveis se o pedido no bot usar o mesmo valor.
+
+Ouça cada WAV sem abrir o texto nem os JSONs e anote o que entendeu. Depois
+confira a frase esperada e registre palavras erradas, consoantes ausentes,
+nasais, pausas e naturalidade. Se outra pessoa puder embaralhar a ordem entre
+`antes` e `atual`, o teste reduz a influência de saber qual revisão está tocando.
+Cobertura alta ou transcrição automática correta são evidências auxiliares;
+não substituem esse teste.
+
+No OpenUTAU, carregue a mesma instalação da voicebank e o mesmo `oto.ini`,
+selecione o mesmo resampler compatível e recrie algumas frases com os aliases
+e os tempos de fala. Exporte WAV com tom e velocidade comparáveis. O banco
+English não fornece pronúncia PT-BR automática; registre os aliases escolhidos,
+pois o phonemizer do OpenUTAU pode produzir uma sequência diferente. Se a
+articulação ficar clara no OpenUTAU e borrada no bot, revise o planejamento e
+as sobreposições do bot. Se a mesma aproximação soar ruim nos dois, ela é uma
+limitação dos samples/aliases e pode exigir outro banco ou outro motor.
 
 ## Painéis técnicos do bot
 

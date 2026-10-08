@@ -357,10 +357,13 @@ def _xsampa_phone_sequence(phone: str) -> tuple[str, ...]:
     return (phone,)
 
 
-def _xsampa_onset(phones: Iterable[str]) -> tuple[str, ...]:
+def _xsampa_onset(phones: Iterable[str], *, dedicated_palatal: bool = False) -> tuple[str, ...]:
     output: list[str] = []
     for phone in phones:
-        output.extend(_xsampa_phone_sequence(phone))
+        if dedicated_palatal and phone in {"J", "L"}:
+            output.append(phone)
+        else:
+            output.extend(_xsampa_phone_sequence(phone))
     return tuple(output)
 
 
@@ -450,7 +453,7 @@ def _english_resolve(
             order += 1
 
     if not renderable:
-        return first, first_kind, 99.0
+        return first, "approximation", 99.0
     score, _, kind, alias, _ = min(renderable, key=lambda item: (item[0], item[1]))
     return _unique((alias, *flattened)), kind, score
 
@@ -508,6 +511,7 @@ def _english_nucleus_candidates(
 def _english_cluster_units(
     onset: tuple[str, ...], *, word_start: bool, previous_vowel: str,
     resolve_alias: Callable[[Iterable[str]], object | None] | None,
+    compositional_palatal_cv: bool = False,
 ) -> list[Mora]:
     if not onset:
         return []
@@ -532,26 +536,62 @@ def _english_cluster_units(
     elif previous_vowel:
         # A VC/VCC transition retains the previous vowel's exit into the onset.
         prefix2 = "".join(onset[:2])
+        fallback_clusters = (f"- {cluster}", cluster) if len(onset) > 1 else ()
+        try:
+            full_fallback = bool(
+                fallback_clusters and resolve_alias is not None and resolve_alias(fallback_clusters) is not None
+            )
+        except Exception:
+            full_fallback = False
+        # If the vowel-to-cluster transition is absent, a recorded full attack
+        # retains the cluster without scheduling a missing VC plus another CC.
+        # Do not let an isolated first consonant outrank an available cluster.
+        fallback = fallback_clusters if full_fallback else (*fallback_clusters, f"- {first}", first)
         units.append(_english_mora(
             [
                 ("cluster-hit", (f"{previous_vowel} {prefix2}",)) if len(onset) > 1 else ("cvvc-transition", ()),
                 ("cvvc-transition", (f"{previous_vowel} {first}", f"{previous_vowel}{first}")),
+                ("approximation", fallback),
             ],
             duration_ms=_ENGLISH_ROLE_DURATIONS["transition"], role="transition",
             source=(previous_vowel, first), deaccented=True, resolve_alias=resolve_alias,
         ))
 
     cluster_already_covered = False
-    if units and units[0].coverage == "cluster-hit":
-        compact = units[0].candidates[0].replace("-", "").replace(" ", "") if units[0].candidates else ""
-        cluster_already_covered = cluster in compact
+    if units and units[0].candidates:
+        alias = units[0].candidates[0]
+        compact = alias.replace("-", "").replace(" ", "")
+        try:
+            renderable = resolve_alias is None or resolve_alias((alias,)) is not None
+        except Exception:
+            renderable = False
+        cluster_already_covered = bool(renderable and cluster in compact)
+        if cluster_already_covered and units[0].coverage == "approximation":
+            units[0] = replace(units[0], role="cluster", source_phonemes=tuple(onset))
 
     if len(onset) > 1 and not cluster_already_covered:
         # Each CC alias bridges the cluster without an epenthetic vowel.
         for left, right in zip(onset, onset[1:]):
+            cc_aliases = (f"{left} {right}", f"{left}{right}")
+            if (
+                compositional_palatal_cv and not word_start and previous_vowel
+                and onset in {("n", "j"), ("l", "j")}
+                and units and units[0].coverage == "cvvc-transition"
+                and resolve_alias is not None
+            ):
+                try:
+                    vc_renderable = resolve_alias((units[0].candidates[0],)) is not None
+                    cc_renderable = resolve_alias(cc_aliases) is not None
+                except Exception:
+                    vc_renderable = cc_renderable = False
+                if vc_renderable and not cc_renderable:
+                    # For /nh/ -> n+j and /lh/ -> l+j, a real VC has already
+                    # articulated n/l and the selected jV owns j. Repeating an
+                    # isolated n/l for a missing CC would duplicate its attack.
+                    continue
             units.append(_english_mora(
                 [
-                    ("cluster-hit", (f"{left} {right}", f"{left}{right}")),
+                    ("cluster-hit", cc_aliases),
                     ("approximation", (left, right)),
                 ],
                 duration_ms=_ENGLISH_ROLE_DURATIONS["cluster"], role="cluster",
@@ -574,10 +614,27 @@ def _english_coda_units(
     for raw in phones:
         phone = "4" if raw == "r" else raw
         role = "nasal" if raw == "N" else "glide" if raw in {"j", "w"} else "coda"
+        contextual = [f"{previous} {phone}", f"{previous}{phone}"]
+        if raw == "r":
+            # Teto English has vowel+r exits, but no isolated r/4. A bank
+            # without tap recordings must retain this contextual rhotic.
+            contextual.extend((f"{previous} {raw}", f"{previous}{raw}"))
+        fallback = [phone, raw]
+        if previous == "N" and role == "glide" and resolve_alias is not None:
+            try:
+                standalone = resolve_alias(_unique(fallback))
+            except Exception:
+                standalone = None
+            if standalone is None:
+                # A nasal+glide recording is ideal; an isolated glide also
+                # avoids reintroducing an oral vowel after the nasal tail.
+                # Only banks without either need the original vowel's glide
+                # exit as a contextual approximation. Keep N as its own unit.
+                fallback.extend((f"{vowel} {phone}", f"{vowel}{phone}"))
         units.append(_english_mora(
             [
-                ("cvvc-transition", (f"{previous} {phone}", f"{previous}{phone}")),
-                ("approximation", (phone, raw)),
+                ("cvvc-transition", tuple(contextual)),
+                ("approximation", tuple(fallback)),
             ],
             duration_ms=_ENGLISH_ROLE_DURATIONS[role], role=role,
             source=(raw,), deaccented=True, resolve_alias=resolve_alias,
@@ -616,21 +673,69 @@ def _english_word_to_moras(
     previous_vowel = ""
     word_syllables = max(1, len(word.syllables))
     for syllable_index, syllable in enumerate(word.syllables):
-        onset = _xsampa_onset(syllable.onset)
+        fallback_onset = _xsampa_onset(syllable.onset)
+        dedicated_onset = _xsampa_onset(syllable.onset, dedicated_palatal=True)
         base_vowel = _xsampa_vowel(syllable.vowel)
         coda_source = list(syllable.coda)
-        diphthong = None
-        if coda_source and coda_source[0] in {"j", "w"}:
-            diphthong = _XSAMPA_DIPHTHONGS.get((base_vowel, coda_source[0]))
-        vowel = diphthong or base_vowel
-        if diphthong:
-            coda_source = coda_source[1:]
+        glide = coda_source[0] if coda_source and coda_source[0] in {"j", "w"} else ""
+        nasal = syllable.vowel.endswith("~")
         word_start = syllable_index == 0
 
-        nucleus_tiers = _english_nucleus_candidates(
-            onset=onset, vowel=vowel, previous_vowel=previous_vowel, word_start=word_start,
-        )
-        nucleus_candidates, nucleus_coverage, nucleus_cost = _english_resolve(nucleus_tiers, resolve_alias)
+        # Dedicated PT nasal/palatal aliases are optional: the official English
+        # bank lacks them, but a compatible extended bank may supply them. Only
+        # choose such a representation when the loaded bank actually has it.
+        # An oral aU/aI recording cannot stand for a nasal diphthong: appending
+        # N afterwards moves the nasal cue past the glide. Use vowel + N + glide
+        # when a dedicated nasal recording is unavailable.
+        vowel_options: list[tuple[str, bool, bool]] = []
+        if nasal:
+            if glide:
+                vowel_options.append((syllable.vowel + glide, True, False))
+            vowel_options.append((syllable.vowel, False, False))
+        elif glide:
+            diphthong_alias = _XSAMPA_DIPHTHONGS.get((base_vowel, glide))
+            if diphthong_alias:
+                vowel_options.append((diphthong_alias, True, False))
+        vowel_options.append((base_vowel, False, nasal))
+        onset_options = [dedicated_onset] if dedicated_onset != fallback_onset else []
+        onset_options.append(fallback_onset)
+
+        selected = None
+        if resolve_alias is not None:
+            for candidate_vowel, absorbs_glide, needs_nasal_tail in vowel_options:
+                for candidate_onset in onset_options:
+                    tiers = _english_nucleus_candidates(
+                        onset=candidate_onset, vowel=candidate_vowel,
+                        previous_vowel=previous_vowel, word_start=word_start,
+                    )
+                    resolved = _english_resolve(tiers, resolve_alias)
+                    candidates = resolved[0]
+                    try:
+                        available = bool(candidates and resolve_alias((candidates[0],)) is not None)
+                    except Exception:
+                        available = False
+                    if available:
+                        selected = (candidate_onset, candidate_vowel, absorbs_glide, needs_nasal_tail, resolved)
+                        break
+                if selected is not None:
+                    break
+        if selected is None:
+            # With no matching alias (or no bank resolver), preserve every
+            # source phone in the fallback plan instead of consuming a glide
+            # merely because a diphthong exists in the theoretical inventory.
+            tiers = _english_nucleus_candidates(
+                onset=fallback_onset, vowel=base_vowel,
+                previous_vowel=previous_vowel, word_start=word_start,
+            )
+            selected = (fallback_onset, base_vowel, False, nasal, _english_resolve(tiers, resolve_alias))
+        onset, vowel, absorbs_glide, nasal, resolved = selected
+        nucleus_candidates, nucleus_coverage, nucleus_cost = resolved
+        if nasal or (dedicated_onset != fallback_onset and onset == fallback_onset):
+            # A valid English recording still approximates a PT-only phone.
+            # Alias availability must not report that pronunciation as exact.
+            nucleus_coverage = "approximation"
+        if absorbs_glide:
+            coda_source = coda_source[1:]
 
         # A full-context nucleus owns the onset already. Do not schedule another
         # consonant attack around it; duplicated attacks are especially audible
@@ -648,6 +753,11 @@ def _english_word_to_moras(
             syllable_moras.extend(_english_cluster_units(
                 onset, word_start=word_start, previous_vowel=previous_vowel,
                 resolve_alias=resolve_alias,
+                compositional_palatal_cv=(
+                    syllable.onset in {("J",), ("L",)}
+                    and onset == fallback_onset
+                    and compact_alias.endswith(f"{onset[-1]}{vowel}")
+                ),
             ))
 
         syllable_moras.append(Mora(
@@ -657,18 +767,17 @@ def _english_word_to_moras(
                 deaccented=deaccented,
                 syllable_index=syllable_index,
                 word_syllables=word_syllables,
-                diphthong=bool(diphthong),
+                diphthong=bool(glide),
             ),
             stressed=bool(syllable.stressed and not deaccented),
             deaccented=deaccented,
             role="nucleus",
-            source_phonemes=tuple(syllable.onset) + (syllable.vowel,) + (tuple(syllable.coda[:1]) if diphthong else ()),
+            source_phonemes=tuple(syllable.onset) + (syllable.vowel,) + (tuple(syllable.coda[:1]) if absorbs_glide else ()),
             coverage=nucleus_coverage,
             profile="english-cvvc",
             planner_cost=nucleus_cost,
         ))
 
-        nasal = syllable.vowel.endswith("~")
         syllable_moras.extend(_english_coda_units(
             vowel=vowel, coda=tuple(coda_source), nasal=nasal, resolve_alias=resolve_alias,
         ))

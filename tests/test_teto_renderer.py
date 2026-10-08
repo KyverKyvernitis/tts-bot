@@ -131,11 +131,15 @@ class TetoRendererTests(unittest.TestCase):
                 status = renderer.status(force=True)
                 self.assertTrue(status["ready"])
                 self.assertEqual(status["voicebank_profile"], "english-cvvc")
+                self.assertFalse(status["voicebank_fallback"])
+                self.assertEqual(status["voicebank_fallback_reason"], "")
                 self.assertEqual(status["voice"], "kasane-teto-english-cvvc")
                 self.assertEqual(status["name"], "Kasane Teto English Test")
                 result = renderer.synthesize("teto", timeout_seconds=10)
             self.assertEqual(result["voicebank_profile"], "english-cvvc")
-            self.assertEqual(result["renderer_version"], "speech-4e-phrase-speech")
+            self.assertEqual(result["renderer_version"], "speech-4f-articulation")
+            self.assertEqual(result["pitch_alignment_mode"], "absolute-timeline")
+            self.assertEqual(result["pitch_boundary_metric"], "lexical-plan-not-audio")
             self.assertEqual(result["missing_phonemes"], [])
             self.assertGreaterEqual(result["cvvc_direct"], 2)
             self.assertGreater(result["coverage_percent"], 90.0)
@@ -270,6 +274,8 @@ class TetoRendererTests(unittest.TestCase):
                 status = TetoRenderer().status(force=True)
             self.assertTrue(status["ready"])
             self.assertEqual(status["voicebank_profile"], "standard")
+            self.assertTrue(status["voicebank_fallback"])
+            self.assertIn("missing-english", status["voicebank_fallback_reason"])
             self.assertEqual(status["voice"], "kasane-teto-standard")
 
     def test_resource_guard_blocks_without_starting_resampler(self):
@@ -385,8 +391,8 @@ class TetoRendererTests(unittest.TestCase):
             resampler.chmod(0o755)
             with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
                 result = TetoRenderer().synthesize("teto")
-            self.assertEqual(result["renderer_version"], "speech-4e-phrase-speech")
-            self.assertEqual(result["phonemizer_version"], "ptbr-g2p-xsampa-cvvc-v1")
+            self.assertEqual(result["renderer_version"], "speech-4f-articulation")
+            self.assertEqual(result["phonemizer_version"], "ptbr-g2p-xsampa-cvvc-v2")
             self.assertEqual(result["pitchbend_fallbacks"], 2)
             self.assertTrue(bytes(result["audio"]).startswith(b"RIFF"))
 

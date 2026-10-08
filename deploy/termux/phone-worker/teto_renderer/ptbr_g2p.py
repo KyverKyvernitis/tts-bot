@@ -318,6 +318,28 @@ def _reduce_final_unstressed(phones: list[str], stressed_nucleus: int | None) ->
     return output
 
 
+def _restore_final_nasal_glide(
+    word: str, phones: list[str], stressed_nucleus: int | None,
+) -> list[str]:
+    """Keep the nasal diphthong in stressed -em/-ém and plural -ens.
+
+    Applying this to every written -em would also change unstressed verb
+    endings. Keep those unchanged until the G2P has a lexical/morphological
+    pronunciation layer rather than guessing their realization from spelling.
+    """
+    value = unicodedata.normalize("NFC", str(word or "").lower())
+    if not value.endswith(("em", "ém", "ens", "éns")):
+        return phones
+    nuclei = [index for index, symbol in enumerate(phones) if symbol in VOWELS]
+    if not nuclei or phones[nuclei[-1]] != "e~":
+        return phones
+    if not value.endswith(("ens", "éns")) and stressed_nucleus != len(nuclei) - 1:
+        return phones
+    output = list(phones)
+    output.insert(nuclei[-1] + 1, "j")
+    return output
+
+
 def _syllabify(symbols: list[str], stressed_nucleus: int | None) -> tuple[Syllable, ...]:
     nucleus_positions = [index for index, symbol in enumerate(symbols) if symbol in VOWELS]
     if not nucleus_positions:
@@ -381,6 +403,7 @@ def g2p_word(word: str, *, deaccented: bool = False) -> PhoneticWord:
     nucleus_count = sum(symbol in VOWELS for symbol in symbols)
     stressed_nucleus = None if deaccented else _stress_nucleus(source.lower(), nucleus_count)
     symbols = _reduce_final_unstressed(symbols, stressed_nucleus)
+    symbols = _restore_final_nasal_glide(source, symbols, stressed_nucleus)
 
     phones: list[Phone] = []
     nucleus = -1
