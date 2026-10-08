@@ -1590,6 +1590,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
             "worker_version": str(state.get("worker_version") or ""),
             "engine": str(state.get("engine") or ""),
             "available_engines": list(state.get("available_engines") or [])[:8],
+            "teto_backend": str(state.get("teto_backend") or ""),
+            "teto_reading_mode": str(state.get("teto_reading_mode") or ""),
             "last_ok_age_seconds": round(now - last_ok, 1) if last_ok else None,
             "last_check_age_seconds": round(now - last_check, 1) if last_check else None,
             "cooldown_remaining_seconds": round(max(0.0, disabled_until - now), 1),
@@ -1851,6 +1853,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 voice_agent = {}
             if voice_agent:
                 self._update_worker_voice_agent_snapshot(voice_agent)
+            teto_state = agent.get("teto") if isinstance(agent.get("teto"), dict) else {}
+            route = self._tts_agent_route_state()
+            route["teto_backend"] = str(teto_state.get("backend") or "")
+            route["teto_reading_mode"] = str(teto_state.get("reading_mode") or "")
+            route["teto_fingerprint"] = str(teto_state.get("fingerprint") or "")
             ok = bool(data.get("ok", True) and agent.get("ok") and agent.get("available") and agent.get("synth_ready"))
             if ok:
                 metrics["tts_agent_health_ok"] = int(metrics.get("tts_agent_health_ok", 0) or 0) + 1
@@ -1870,7 +1877,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 route = self._tts_agent_route_state()
                 route['stream_protocol'] = int(agent.get('stream_protocol') or 0)
                 route['cache_binary_protocol'] = int(agent.get('cache_binary_protocol') or 0)
-                route['teto_fingerprint'] = str((agent.get('teto') or {}).get('fingerprint') or '')
             else:
                 metrics["tts_agent_health_fail"] = int(metrics.get("tts_agent_health_fail", 0) or 0) + 1
                 reason = str(agent.get("reason") or agent.get("state") or "tts_agent_not_ready")
@@ -3100,8 +3106,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
             model = str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME).strip() or TTS_PIPER_MODEL_NAME
             payload = f"piper|worker|{model}|{text}"
         elif engine == "teto":
-            fingerprint = self._tts_agent_route_state().get('teto_fingerprint') or 'unavailable'
-            teto_pitch = self._normalize_teto_pitch_semitones(
+            teto_state = self._tts_agent_route_state()
+            fingerprint = teto_state.get('teto_fingerprint') or 'unavailable'
+            teto_pitch = 'voicepeak-native' if teto_state.get('teto_backend') == 'voicepeak' else self._normalize_teto_pitch_semitones(
                 getattr(item, "teto_pitch_semitones", TTS_TETO_DEFAULT_PITCH_SEMITONES)
             )
             payload = f"teto|worker|{fingerprint}|{item.voice}|{item.language}|{item.rate}|{item.pitch}|{teto_pitch}|{text}"
@@ -5541,11 +5548,15 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     persistent_engine=lambda: getattr(item, "_tts_agent_selected_engine", "") or item.engine,
                 )
             except Exception as e:
+                if item.engine == "teto":
+                    raise RuntimeError("Kasane Teto indisponível no worker de síntese") from e
                 logger.warning("[tts_agent] TTS no worker falhou; usando fallback local/VPS | guild=%s engine=%s erro=%s", item.guild_id, item.engine, e)
 
-        if item.engine in {"android_native", "teto"}:
-            label = "Kasane Teto" if item.engine == "teto" else "Android TTS nativo"
-            logger.warning("[tts_fallback] %s indisponível; usando engine normal do usuário | guild=%s motivo=%s", label, item.guild_id, agent_decision)
+        if item.engine == "teto":
+            raise RuntimeError("Kasane Teto indisponível: worker de síntese offline ou não pronto")
+
+        if item.engine == "android_native":
+            logger.warning("[tts_fallback] Android TTS nativo indisponível; usando engine normal do usuário | guild=%s motivo=%s", item.guild_id, agent_decision)
             return await self._generate_piper_fallback_file(item)
 
         if item.engine == "piper":

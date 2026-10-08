@@ -8,6 +8,9 @@ from typing import Callable, Iterable
 from .ptbr_g2p import PhoneticWord, g2p_word
 
 
+VOICEPEAK_READING_VERSION = "ptbr-kana-v1"
+
+
 @dataclass(frozen=True, slots=True)
 class Mora:
     candidates: tuple[str, ...]
@@ -871,4 +874,72 @@ def phonemize(
     return result
 
 
-__all__ = ["Mora", "phonemize", "g2p_word"]
+_VOICEPEAK_PT_WORD = r"[A-Za-zÀÁÂÃÇÉÊÍÓÔÕÚÜàáâãçéêíóôõúü]+"
+_VOICEPEAK_KANA = r"[ぁ-ゖァ-ヺー]+"
+_VOICEPEAK_DIGITS = ("zero", "um", "dois", "três", "quatro", "cinco", "seis", "sete", "oito", "nove")
+
+
+def _voicepeak_portuguese_reading(word: str) -> str:
+    deaccented = _is_deaccented_word(word)
+    # Use the complete word, rather than the public phonemizer's token/mora
+    # limits: validation and size limits belong to the VOICEPEAK caller.
+    moras = _phonetic_word_to_moras(g2p_word(word, deaccented=deaccented), deaccented=deaccented)
+    if not moras:
+        raise ValueError(f"Não há leitura fonética para {word!r} no modo ptbr-kana.")
+    reading: list[str] = []
+    for mora in moras:
+        kana = next((candidate for candidate in mora.candidates if re.fullmatch(_VOICEPEAK_KANA, candidate)), "")
+        if not kana:
+            raise ValueError(f"Não há aproximação em kana para {word!r} no modo ptbr-kana.")
+        # Each planned unit is used once. Nasal/glide helpers already occur in
+        # the CV plan; adding them again from source_phonemes would duplicate
+        # /nh/, /lh/ and nasal diphthongs.
+        reading.append(_katakana_to_hiragana(kana))
+    return "".join(reading)
+
+
+def prepare_voicepeak_text(text: str, mode: str = "ja") -> str:
+    """Prepare Japanese text or an experimental PT-BR approximation in kana.
+
+    ``ja`` passes the original text through without translating it. The optional
+    ``ptbr-kana`` mode approximates Portuguese sounds with Japanese CV syllables;
+    it does not provide native Portuguese pronunciation. Digits are read one at
+    a time, and punctuation/whitespace retain sentence and word boundaries.
+    Unsupported scripts/symbols fail explicitly rather than disappearing.
+    """
+    reading_mode = str(mode or "").strip().lower()
+    if reading_mode not in {"ja", "ptbr-kana"}:
+        raise ValueError(f"Modo de leitura VOICEPEAK inválido: {mode!r}. Use 'ja' ou 'ptbr-kana'.")
+    if not isinstance(text, str):
+        raise TypeError("O texto VOICEPEAK deve ser uma string.")
+    if reading_mode == "ja":
+        return text
+
+    normalized = unicodedata.normalize("NFKC", text)
+    prepared: list[str] = []
+    has_reading = False
+    pattern = rf"{_VOICEPEAK_PT_WORD}|\d+|{_VOICEPEAK_KANA}|\s+|."
+    for match in re.finditer(pattern, normalized, flags=re.DOTALL):
+        token = match.group(0)
+        if re.fullmatch(_VOICEPEAK_PT_WORD, token):
+            prepared.append(_voicepeak_portuguese_reading(token))
+            has_reading = True
+        elif token.isdecimal():
+            prepared.append(" ".join(_voicepeak_portuguese_reading(_VOICEPEAK_DIGITS[int(digit)]) for digit in token))
+            has_reading = True
+        elif re.fullmatch(_VOICEPEAK_KANA, token):
+            prepared.append(_katakana_to_hiragana(token))
+            has_reading = True
+        elif token.isspace() or unicodedata.category(token).startswith("P"):
+            prepared.append(token)
+        else:
+            raise ValueError(
+                f"Caractere {token!r} na posição {match.start() + 1} não é suportado no modo ptbr-kana. "
+                "Use texto em português/kana; para japonês com kanji, use o modo 'ja'."
+            )
+    if not has_reading:
+        raise ValueError("O modo ptbr-kana precisa de texto pronunciável em português, kana ou dígitos.")
+    return "".join(prepared)
+
+
+__all__ = ["Mora", "phonemize", "g2p_word", "prepare_voicepeak_text", "VOICEPEAK_READING_VERSION"]

@@ -1,5 +1,17 @@
 # Phone Worker Termux
 
+## VOICEPEAK da Teto: integração remota experimental
+
+O worker `1.11.28` permite `PHONE_WORKER_TETO_BACKEND=voicepeak`. No Termux,
+configure uma ponte HTTP para um host com VOICEPEAK da Teto instalado e
+licenciado. O modo `ptbr-kana` aproxima a leitura de mensagens em português;
+ele precisa de validação auditiva e não oferece português nativo.
+
+Consulte [configuração do host e do worker](../../voicepeak-teto/README.md).
+Uma VPS de 1 GB está abaixo dos 2 GB mínimos publicados; Android/Termux não
+é um sistema nativo suportado pelo motor. Aplicar o patch preserva o backend
+UTAU existente até configurar e ativar a ponte.
+
 ## Reinício após atualização de fontes
 
 O supervisor compara o hash do processo confirmado com o manifesto da release
@@ -8,8 +20,8 @@ número de versão não muda. O bootstrap usa o mesmo arquivo de PID padrão do
 supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
-Para conferir a Teto depois de receber a release, consulte `/tts-agent/status`:
-o renderer atualizado anuncia `renderer_version=speech-4f-articulation` e
+Para conferir a Teto UTAU depois de receber a release, consulte `/tts-agent/status`:
+esse renderer anuncia `renderer_version=speech-4f-articulation` e
 `phonemizer_version=ptbr-g2p-xsampa-cvvc-v2`. Se o serviço ainda mostra o
 estado antigo, o reinício manual canônico é
 `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.

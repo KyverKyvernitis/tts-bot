@@ -152,6 +152,8 @@ _HEAVY_RESOURCE_LOCK = threading.Lock()
 _TETO_RENDERER_LOCK = threading.RLock()
 _TETO_RENDERER: Any = None
 _TETO_RENDERER_ERROR = ""
+_TETO_RENDERER_BACKEND = ""
+_TETO_RENDERER_CONFIG = ""
 _TETO_BATTERY_CACHE_LOCK = threading.RLock()
 _TETO_BATTERY_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 _TETO_BATTERY_MONITOR_STARTED = False
@@ -161,7 +163,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.27"
+PHONE_WORKER_VERSION = "1.11.28"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2073,6 +2075,10 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
     handler.send_header("X-Core-Worker-Version", _header_ascii(meta.get("worker_version"), limit=40))
     if meta.get("teto_renderer_version"):
         handler.send_header("X-Core-Worker-Teto-Renderer", _header_ascii(meta.get("teto_renderer_version"), limit=60))
+    if meta.get("teto_backend"):
+        handler.send_header("X-Core-Worker-Teto-Backend", _header_ascii(meta.get("teto_backend"), limit=40))
+    if meta.get("teto_reading_mode"):
+        handler.send_header("X-Core-Worker-Teto-Reading", _header_ascii(meta.get("teto_reading_mode"), limit=40))
     if meta.get("teto_phonemizer_version"):
         handler.send_header("X-Core-Worker-Teto-Phonemizer", _header_ascii(meta.get("teto_phonemizer_version"), limit=60))
     if meta.get("teto_epenthetic_phonemes") not in (None, ""):
@@ -2363,14 +2369,42 @@ def _phone_worker_tts_providers_module() -> Any:
         return _PHONE_WORKER_TTS_PROVIDERS_MODULE
 
 
+def _teto_backend() -> str:
+    backend = str(os.getenv("PHONE_WORKER_TETO_BACKEND") or "utau").strip().lower()
+    if backend not in {"utau", "voicepeak"}:
+        raise ValueError("PHONE_WORKER_TETO_BACKEND deve ser utau ou voicepeak")
+    return backend
+
+
+def _teto_backend_resource_snapshot() -> dict[str, Any]:
+    if _teto_backend() == "voicepeak" and str(os.getenv("PHONE_WORKER_VOICEPEAK_URL") or "").strip():
+        # The phone receives a bounded WAV; the synthesis CPU/RAM lives on the
+        # licensed host. Provider admission still holds the maintenance lock.
+        return {"ok": True, "reason": "síntese VOICEPEAK na máquina remota", "scope": "remote"}
+    return _teto_resource_snapshot()
+
+
 def _get_teto_renderer():
-    global _TETO_RENDERER, _TETO_RENDERER_ERROR
+    global _TETO_RENDERER, _TETO_RENDERER_ERROR, _TETO_RENDERER_BACKEND, _TETO_RENDERER_CONFIG
+    backend = _teto_backend()
+    config = ""
+    if backend == "voicepeak":
+        values = {key: value for key, value in os.environ.items() if key.startswith("PHONE_WORKER_VOICEPEAK_")}
+        config = hashlib.sha256(json.dumps(values, sort_keys=True).encode("utf-8")).hexdigest()
     with _TETO_RENDERER_LOCK:
-        if _TETO_RENDERER is not None:
+        if _TETO_RENDERER is not None and _TETO_RENDERER_BACKEND == backend and _TETO_RENDERER_CONFIG == config:
             return _TETO_RENDERER
+        _TETO_RENDERER = None
         try:
-            from teto_renderer import TetoRenderer
-            _TETO_RENDERER = TetoRenderer(resource_guard=_teto_resource_snapshot)
+            if backend == "voicepeak":
+                renderer_class = _phone_worker_tts_providers_module().VoicepeakRenderer
+            else:
+                from teto_renderer import TetoRenderer
+                renderer_class = TetoRenderer
+            guard = _teto_backend_resource_snapshot if backend == "voicepeak" else _teto_resource_snapshot
+            _TETO_RENDERER = renderer_class(resource_guard=guard)
+            _TETO_RENDERER_BACKEND = backend
+            _TETO_RENDERER_CONFIG = config
             _TETO_RENDERER_ERROR = ""
             return _TETO_RENDERER
         except Exception as exc:
@@ -2378,7 +2412,7 @@ def _get_teto_renderer():
             raise RuntimeError(f"renderer Teto indisponível: {_TETO_RENDERER_ERROR}") from exc
 
 
-def _teto_status(*, force: bool = False) -> dict[str, Any]:
+def _teto_status(*, force: bool = False, timeout_seconds: float | None = None) -> dict[str, Any]:
     enabled = _env_bool("PHONE_WORKER_TETO_ENABLED", False)
     result: dict[str, Any] = {
         "ok": False,
@@ -2386,16 +2420,23 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
         "ready": False,
         "enabled": enabled,
         "engine": "teto",
+        "backend": str(os.getenv("PHONE_WORKER_TETO_BACKEND") or "utau").strip().lower(),
     }
     if not enabled:
         result["last_error"] = "PHONE_WORKER_TETO_ENABLED=false"
         result["resources"] = {"ok": False, "reason": "engine desativada"}
         return result
     try:
-        result.update(_get_teto_renderer().status(force=force))
+        status_kwargs: dict[str, Any] = {"force": force}
+        if _teto_backend() == "voicepeak" and timeout_seconds is not None:
+            status_kwargs["timeout_seconds"] = timeout_seconds
+        result.update(_get_teto_renderer().status(**status_kwargs))
     except Exception as exc:
         result["last_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=180)}"
-    result["resources"] = _teto_resource_snapshot()
+    try:
+        result["resources"] = _teto_backend_resource_snapshot()
+    except Exception as exc:
+        result["resources"] = {"ok": False, "reason": _short_text(exc, limit=180)}
     return result
 
 
@@ -2455,7 +2496,7 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
     return deps
 
 
-def _teto_dependency_snapshot_fast() -> dict[str, Any]:
+def _teto_dependency_snapshot_fast(*, timeout_seconds: float | None = None) -> dict[str, Any]:
     """Resolve only Teto readiness for an explicit Teto request.
 
     This avoids probing Android TTS and importing unrelated network providers
@@ -2463,7 +2504,7 @@ def _teto_dependency_snapshot_fast() -> dict[str, Any]:
     discovery is deferred until a real fallback is necessary.
     """
     profile = _current_core_worker_profile()
-    teto_status = _teto_status()
+    teto_status = _teto_status(timeout_seconds=timeout_seconds) if timeout_seconds is not None else _teto_status()
     teto_resources = teto_status.get("resources") if isinstance(teto_status.get("resources"), dict) else {}
     return {
         "profile": profile,
@@ -4683,6 +4724,15 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 # A falha de prebuild não deve quebrar o TTS direto: o Music Agent ainda
                 # pode sintetizar no caminho antigo. Guardamos o motivo só para diagnóstico.
                 proxy_body["tts_agent_prebuild_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=140)}"
+        if (
+            _tts_agent_normalize_engine(body.get("engine")) == "teto"
+            and _teto_backend() == "voicepeak"
+            and not _env_bool("PHONE_WORKER_VOICEPEAK_ALLOW_OTHER_VOICES", False)
+        ):
+            if not (proxy_body.get("audio_b64") or proxy_body.get("audio_url") or proxy_body.get("url")):
+                raise RuntimeError("Teto VOICEPEAK indisponível: síntese obrigatória antes da reprodução direta")
+            if _tts_agent_normalize_engine(proxy_body.get("engine")) != "teto":
+                raise RuntimeError("Teto VOICEPEAK não permite reprodução direta com outra voz")
         result = self._task_music_agent_proxy(proxy_body)
         ok = bool(isinstance(result, dict) and result.get("ok", False))
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
@@ -4784,6 +4834,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if normalized_engine == "teto":
             fingerprint = str(_teto_status().get("fingerprint") or "unavailable")
             base_pitch = str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4")
+            if _teto_backend() == "voicepeak":
+                # UTAU semitone controls are not VOICEPEAK native pitch units.
+                body = {**body, "teto_pitch_semitones": 0.0}
+                base_pitch = "voicepeak-native"
         return _phone_worker_tts_policy_module().standard_cache_key(
             body, engine=normalized_engine, sanitize_key=self._sanitize_tts_cache_key,
             normalize_rate=self._normalize_tts_edge_rate, normalize_pitch=self._normalize_tts_edge_pitch,
@@ -4842,6 +4896,17 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "sha256": digest,
             "logs": logs[:10],
         }
+        if engine == "teto" and _teto_backend() == "voicepeak":
+            status = _teto_status()
+            result.update({
+                "teto_backend": "voicepeak",
+                "teto_renderer_version": status.get("renderer_version", ""),
+                "teto_voicebank_profile": status.get("voicebank_profile", ""),
+                "teto_narrator": status.get("narrator", ""),
+                "teto_reading_mode": status.get("reading_mode", ""),
+                "teto_portuguese_experimental": status.get("reading_mode") == "ptbr-kana",
+                "teto_pitch_mode": "voicepeak-native",
+            })
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _store_tts_agent_standard_cache(self, *, key: str, data: bytes, audio_format: str, logs: list[str]) -> None:
@@ -4897,11 +4962,18 @@ class WorkerHandler(BaseHTTPRequestHandler):
             teto_pitch = _phone_worker_tts_policy_module().normalize_teto_pitch_semitones(
                 body.get("teto_pitch_semitones"), default=0.0
             )
+            requested_teto_pitch = teto_pitch
+            teto_audio_limit = max_audio_bytes
+            if _teto_backend() == "voicepeak":
+                teto_pitch = 0.0
+                teto_audio_limit = min(max_audio_bytes, 8 * 1024 * 1024)
             data, audio_format, teto_meta = _phone_worker_tts_providers_module().synthesize_teto(
-                text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
+                text=text, timeout=timeout, max_audio_bytes=teto_audio_limit, logs=logs, stage_ms=stage_ms,
                 heavy_lock=_HEAVY_RESOURCE_LOCK, get_renderer=_get_teto_renderer,
                 monotonic=time.monotonic, normalize_format=self._normalize_tts_cache_format,
                 pitch_offset_semitones=teto_pitch)
+            if _teto_backend() == "voicepeak":
+                teto_meta["requested_utau_pitch_semitones"] = requested_teto_pitch
         elif engine == "android_native":
             data, audio_format, response = _phone_worker_tts_android_module().synthesize(
                 body, text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
@@ -4955,6 +5027,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "android_voice": response.get("voice") if engine == "android_native" and isinstance(response, dict) else "",
             "android_locale": response.get("locale") if engine == "android_native" and isinstance(response, dict) else "",
             "teto_voicebank": teto_meta.get("voicebank") if engine == "teto" else "",
+            "teto_backend": (teto_meta.get("backend") or _teto_backend()) if engine == "teto" else "",
+            "teto_narrator": teto_meta.get("narrator", "") if engine == "teto" else "",
+            "teto_reading_mode": teto_meta.get("reading_mode", "") if engine == "teto" else "",
+            "teto_portuguese_experimental": bool(engine == "teto" and teto_meta.get("reading_mode") == "ptbr-kana"),
+            "teto_pitch_mode": "voicepeak-native" if engine == "teto" and _teto_backend() == "voicepeak" else "utau-semitones" if engine == "teto" else "",
+            "teto_requested_utau_pitch_semitones": teto_meta.get("requested_utau_pitch_semitones") if engine == "teto" else None,
             "teto_fingerprint": teto_meta.get("voicebank_fingerprint") if engine == "teto" else "",
             "teto_renderer_version": teto_meta.get("renderer_version") if engine == "teto" else "",
             "teto_phonemizer_version": teto_meta.get("phonemizer_version") if engine == "teto" else "",
@@ -5013,12 +5091,26 @@ class WorkerHandler(BaseHTTPRequestHandler):
         timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or os.getenv("PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS") or self.job_timeout))))
         max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
         fast_teto_preflight = requested_engine == "teto"
+        voicepeak_request = requested_engine == "teto" and _teto_backend() == "voicepeak"
         dependency_started = time.monotonic()
-        deps = _teto_dependency_snapshot_fast() if fast_teto_preflight else _turbo_dependency_snapshot()
+        if voicepeak_request:
+            preflight_budget = timeout - (time.monotonic() - request_started)
+            if preflight_budget <= 0:
+                raise TimeoutError("prazo total do TTS Agent esgotado")
+            deps = _teto_dependency_snapshot_fast(timeout_seconds=preflight_budget)
+        else:
+            deps = _teto_dependency_snapshot_fast() if fast_teto_preflight else _turbo_dependency_snapshot()
+        strict_voicepeak = requested_engine == "teto" and _teto_backend() == "voicepeak" and not _env_bool("PHONE_WORKER_VOICEPEAK_ALLOW_OTHER_VOICES", False)
+        if strict_voicepeak and not deps.get("teto_tts"):
+            teto_state = deps.get("teto") if isinstance(deps.get("teto"), dict) else {}
+            reason = teto_state.get("last_error") or (teto_state.get("resources") or {}).get("reason") or "instalação licenciada ou ponte indisponível"
+            raise RuntimeError(f"Teto VOICEPEAK indisponível: {_short_text(reason, limit=180)}")
         dependency_ms = (time.monotonic() - dependency_started) * 1000.0
         available = _tts_agent_available_engines(deps)
         order_started = time.monotonic()
         order = self._tts_agent_engine_order(body, available)
+        if strict_voicepeak:
+            order = ["teto"]
         engine_order_ms = (time.monotonic() - order_started) * 1000.0
         fallback_dependencies_resolved = not fast_teto_preflight
         if not order and fast_teto_preflight:
@@ -5039,7 +5131,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         ]
         errors: list[str] = []
         _tts_agent_record_start()
-        started = time.monotonic()
+        started = request_started if voicepeak_request else time.monotonic()
         selected = ""
 
         def finalize_timing(result: dict[str, Any]) -> dict[str, Any]:
@@ -5111,6 +5203,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     failure = f"{engine}: {type(exc).__name__}: {_short_text(exc, limit=140)}"
                     errors.append(failure)
+                    if strict_voicepeak:
+                        raise
                     if engine == "teto":
                         print(f"[phone-worker-tts] Teto falhou antes do fallback: {failure}", flush=True)
                     if fast_teto_preflight and engine == "teto" and not fallback_dependencies_resolved:
