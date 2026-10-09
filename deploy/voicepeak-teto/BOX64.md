@@ -5,19 +5,19 @@ Esta é a alternativa ao Ubuntu x86_64/QEMU que apresentou SIGSEGV no
 bibliotecas do sistema rodam na arquitetura do telefone. O Box64 emula
 somente o programa Linux x86_64 do VOICEPEAK.
 
-Não precisa de root. No Poco X7 Pro, o Ubuntu ARM64, Box64 v0.4.0 e o
-`--help` do VOICEPEAK já foram confirmados. A primeira tentativa de GUI
-terminou com sinal 11; interface, ativação e síntese ainda precisam ser
-verificadas. O kit não contém o motor
+Não precisa de root. No Poco X7 Pro, o Ubuntu ARM64, Box64 v0.4.0, o
+`--help` e a interface do VOICEPEAK 1.2.22 já foram confirmados com a correção
+XPutPixel e o servidor Termux:X11 conectado. O probe também verificou pixels
+e callbacks. Ativação e síntese ainda precisam ser verificadas. O kit não contém o motor
 comercial, a voz Teto ou uma licença.
 
 ## Instalar o kit e o runtime
 
-Baixe `teto-voicepeak-termux-box64-kit-v5.zip` para Downloads. No Termux nativo,
+Baixe `teto-voicepeak-termux-box64-kit-v6.zip` para Downloads. No Termux nativo,
 fora de outro PRoot:
 
 ```bash
-unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v5.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v6.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 bash deploy/voicepeak-teto/termux/setup-box64.sh
 ```
@@ -54,8 +54,11 @@ símbolos Xlib e interrompe a inicialização se algum estiver ausente. Box64
 v0.4.0 não exporta `XPutPixel`, o único obrigatório ausente nessa comparação.
 O kit v5 implementa esse wrapper numa cópia isolada do código do Box64,
 restaurando os callbacks da imagem após a chamada nativa. O programa
-comercial não é modificado. O funcionamento da GUI corrigida ainda precisa
-ser confirmado no Poco.
+comercial não é modificado. A GUI corrigida já abriu no Poco, e o probe de
+pixels e callbacks passou com o servidor X11 conectado.
+
+O kit v6 acrescenta um comando para mudar a interface para inglês ou japonês,
+usando a preferência persistente do programa e um backup do arquivo existente.
 
 O código do Box64 fica fixado na versão oficial **v0.4.0**, commit
 `dae0917c47b4edd8956f314210417a20fd225c4b`. O setup também usa as duas
@@ -71,10 +74,10 @@ locais. O setup não registra binfmt nem substitui executáveis do Ubuntu.
 
 ## Corrigir XPutPixel num runtime já instalado
 
-Para o Poco que já completou o setup, extraia o kit v5 e execute:
+Para o Poco que já completou o setup, extraia o kit atual e execute:
 
 ```bash
-unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v5.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v6.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 bash deploy/voicepeak-teto/termux/patch-box64-x11.sh
 ```
@@ -125,6 +128,38 @@ envie o JSON e o log completo. Sucesso do probe comprova esse caminho Xlib;
 GUI, ativação, síntese e latência são verificações separadas. Depois de a GUI
 abrir, teste novamente com `BOX64_DYNAREC=1` para avaliar o modo mais rápido.
 O launcher anterior continua disponível como comparação.
+
+## Mudar a interface por comando
+
+A versão 1.2.22 tem interface em inglês; português não está disponível.
+Feche o VOICEPEAK antes de alterar a preferência, para que ele a carregue ao
+reiniciar e não grave a configuração antiga por cima da alteração.
+Na raiz do kit:
+
+```bash
+python deploy/voicepeak-teto/termux/set-ui-language.py --language english
+DISPLAY=:1 BOX64_DYNAREC=0 "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64-x11fix"
+```
+
+O comando seleciona a configuração X11 corrigida quando ela existe, ou a
+configuração Box64 original. `VOICEPEAK_TERMUX_CONFIG` permite selecionar
+outra configuração explicitamente. A preferência fica em
+`engine_directory/usersettings/settings/settings.xml`; altera somente
+`ApplicationSettings/Interface/@language`. Um arquivo existente recebe backup
+antes da gravação, e uma configuração já em inglês fica como está. Para
+voltar ao japonês, execute com `--language japanese`.
+
+O formato e o carregamento da preferência em inglês foram verificados no
+programa Linux oficial 1.2.22, num ambiente x86_64 isolado. O comando ainda
+precisa ser executado no telefone. Mudar `LANG` no Termux não substitui essa
+preferência: o launcher usa a locale UTF-8 do guest.
+
+O `--help` oficial da versão 1.2.22 oferece síntese e exportação de áudio,
+inventário de vozes e emoções, velocidade e pitch. Não lista comandos para
+instalar ou ativar vozes, nem para escolher o idioma da interface. A ativação
+da Teto segue pela janela `Licenses And Updates`, botão `Install New Product`,
+com o código oficial do produto. Alterar o idioma dos menus não muda o idioma
+de fala do voicebank.
 
 ## Testar o programa oficial antes de comprar a voz
 
@@ -196,7 +231,7 @@ a causa do crash. Mantenha o servidor `termux-x11 :1` iniciado.
 
 #### Testar a ponte Xlib x86_64
 
-Na raiz do kit v5, escolha a configuração corrigida:
+Na raiz do kit atual, escolha a configuração corrigida:
 
 ```bash
 VOICEPEAK_TERMUX_CONFIG="$HOME/.voicepeak-termux/config-box64-x11fix.json" \
