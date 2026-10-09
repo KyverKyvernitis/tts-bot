@@ -3108,7 +3108,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         elif engine == "teto":
             teto_state = self._tts_agent_route_state()
             fingerprint = teto_state.get('teto_fingerprint') or 'unavailable'
-            teto_pitch = 'voicepeak-native' if teto_state.get('teto_backend') == 'voicepeak' else self._normalize_teto_pitch_semitones(
+            teto_pitch = self._normalize_teto_pitch_semitones(
                 getattr(item, "teto_pitch_semitones", TTS_TETO_DEFAULT_PITCH_SEMITONES)
             )
             payload = f"teto|worker|{fingerprint}|{item.voice}|{item.language}|{item.rate}|{item.pitch}|{teto_pitch}|{text}"

@@ -264,7 +264,7 @@ def test_explicit_teto_success_uses_fast_preflight_without_full_dependency_scan(
     assert result["timing_ms"]["worker_total"] == result["worker_total_ms"]
 
 
-def test_explicit_teto_failure_resolves_full_dependencies_only_for_fallback(tts, monkeypatch):
+def test_explicit_teto_failure_does_not_substitute_another_voice(tts, monkeypatch):
     calls = []
     original = tts.handler._synthesize_standard_tts_bytes
 
@@ -279,13 +279,13 @@ def test_explicit_teto_failure_resolves_full_dependencies_only_for_fallback(tts,
 
     monkeypatch.setattr(tts.worker, "_turbo_dependency_snapshot", full_deps)
     monkeypatch.setattr(tts.handler, "_synthesize_standard_tts_bytes", attempt)
-    result = tts.handler._task_tts_agent_synthesize(
-        {"engine": "teto", "fallback_engine": "gtts", "text": "Fallback.", "cache_mode": "bypass"},
-        raw_response=True,
-    )
-    assert calls == ["full"]
-    assert result["selected_engine"] == "gtts"
-    assert result["available_engines"] == ["teto", "android_native", "edge", "gtts"]
+    with pytest.raises(RuntimeError, match="controlled Teto failure"):
+        tts.handler._task_tts_agent_synthesize(
+            {"engine": "teto", "fallback_engine": "gtts", "text": "Fallback.", "cache_mode": "bypass"},
+            raw_response=True,
+        )
+    assert calls == [] and tts.calls == []
+    assert tts.worker._TTS_AGENT_ACTIVE == 0 and tts.worker._TTS_AGENT_FAILED == 1
 
 
 def test_bypass_skips_standard_cache_key_entirely(tts, monkeypatch):

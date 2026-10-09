@@ -117,10 +117,6 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         value = round(value * 2.0) / 2.0
         return f"{value:+.1f}" if value >= 0 else f"{value:.1f}"
 
-    def _teto_usa_voicepeak(self) -> bool:
-        getter = getattr(self.cog, "_tts_agent_route_state", None)
-        return bool(callable(getter) and getter().get("teto_backend") == "voicepeak")
-
     @staticmethod
     def _separador():
         try:
@@ -211,10 +207,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                 "**TTS (TextToTeto)**",
                 f"Voz sintetizada da Kasane Teto · Prefixo {self._codigo(prefixo)}",
             ]
-            if self._teto_usa_voicepeak():
-                resumo = "VOICEPEAK · Português experimental · Tom ajustado pelo administrador"
-            else:
-                resumo = f"Tom: {self._codigo(self._tom_teto_atual() + ' semitom')}"
+            resumo = f"Tom: {self._codigo(self._tom_teto_atual() + ' semitom')}"
         else:
             prefixo = self._configuracao_servidor("gtts_prefix", ".")
             linhas = [
@@ -258,7 +251,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     accessory=botao_apelido,
                 ))
             if teto_disponivel:
-                botao_teto = self._criar_botao(acao="teto", rotulo="Informações" if self._teto_usa_voicepeak() else "Configurar")
+                botao_teto = self._criar_botao(acao="teto", rotulo="Configurar")
                 container.add_item(self._separador())
                 container.add_item(discord.ui.Section(
                     discord.ui.TextDisplay(self._texto_motor(motor="teto")),
@@ -281,7 +274,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         if apelido_ativo:
             self.add_item(self._criar_botao(acao="spoken_name", rotulo="Alterar apelido"))
         if teto_disponivel:
-            self.add_item(self._criar_botao(acao="teto", rotulo="Sobre TextToTeto" if self._teto_usa_voicepeak() else "Configurar TextToTeto"))
+            self.add_item(self._criar_botao(acao="teto", rotulo="Configurar TextToTeto"))
 
     async def _abrir_acao(self, interaction: discord.Interaction, acao: str) -> None:
         if interaction.guild is None:
@@ -346,12 +339,6 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                         await mensagem_painel.edit(view=self)
                 except Exception:
                     pass
-                return
-            if self._teto_usa_voicepeak():
-                await interaction.response.send_message(
-                    "A Teto usa VOICEPEAK com português experimental. O tom e a velocidade são ajustados pelo administrador no host de síntese.",
-                    ephemeral=True,
-                )
                 return
             await interaction.response.send_modal(
                 self._classe_modal_teto(

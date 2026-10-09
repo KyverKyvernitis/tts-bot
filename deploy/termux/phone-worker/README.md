@@ -1,22 +1,20 @@
 # Phone Worker Termux
 
-## VOICEPEAK da Teto: integração remota experimental
+## Teto UTAU e verificação do WORLDLINE-R
 
-O worker `1.11.29` permite `PHONE_WORKER_TETO_BACKEND=voicepeak`. No Termux,
-configure uma ponte HTTP para um host com VOICEPEAK da Teto instalado e
-licenciado. O modo `ptbr-kana` aproxima a leitura de mensagens em português;
-ele precisa de validação auditiva e não oferece português nativo.
+O worker `1.11.30` usa a Teto UTAU local. A integração VOICEPEAK foi retirada:
+configurações antigas que selecionavam esse backend passam a usar UTAU e as
+variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
+o `.env` do aparelho. Selecione `PHONE_WORKER_TETO_BACKEND=utau` ao revisá-lo.
+Uma solicitação explícita da Teto não troca para outra voz quando a síntese falha.
 
-Consulte [configuração do host e do worker](../../voicepeak-teto/README.md).
-Uma VPS de 1 GB está abaixo dos 2 GB mínimos publicados; Android/Termux não
-é um sistema nativo suportado pelo motor. Aplicar o patch preserva o backend
-UTAU existente até configurar e ativar a ponte.
-
-Para tentar sintetizar no próprio telefone, consulte o
-[roteiro experimental PRoot/QEMU](../../voicepeak-teto/TERMUX.md). Ele prepara
-Ubuntu x86_64 e um launcher local que preserva os caminhos dos WAVs. O
-diagnóstico separa abertura do programa de disponibilidade da voz Teto;
-executar `--help` não comprova síntese nem ativação da licença.
+O nome oficial do motor pesquisado é **WORLDLINE-R**. Sua biblioteca Linux ARM64
+pode ser verificada no Ubuntu ARM64 do Termux, sem Box64 nem interface gráfica.
+Consulte o [diagnóstico e os requisitos](../../worldline-r/README.md).
+Essa biblioteca ainda não está integrada ao pipeline de frases do worker;
+não coloque `libworldline.so` em `PHONE_WORKER_TETO_RESAMPLER_COMMAND`.
+O renderer UTAU existente continua usando o resampler configurado até a
+implementação e validação do adaptador de frases WORLDLINE-R.
 
 ## Reinício após atualização de fontes
 

@@ -417,13 +417,6 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Editar TextToTeto"):
 
     async def on_submit(self, interaction: discord.Interaction):
         raw = valor_item(getattr(self, "teto_pitch_semitones", None)) or self.current_pitch
-        route_getter = getattr(self.cog, "_tts_agent_route_state", None)
-        if callable(route_getter) and route_getter().get("teto_backend") == "voicepeak":
-            await interaction.response.send_message(
-                "O tom da Teto no VOICEPEAK é ajustado pelo administrador no host de síntese.",
-                ephemeral=True,
-            )
-            return
         normalized = normalizar_tom_teto_semitons(raw)
         if normalized is None:
             await interaction.response.send_message(
