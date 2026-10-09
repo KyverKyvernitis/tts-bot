@@ -2,10 +2,10 @@
 
 ## Teto UTAU e WORLDLINE-R
 
-O worker `1.11.31` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
+O worker `1.11.32` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
 configurações antigas que selecionavam esse backend passam a usar UTAU e as
 variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
-o `.env` do aparelho. Selecione `PHONE_WORKER_TETO_BACKEND=utau` ao revisá-lo.
+o `.env` do aparelho. Para WORLDLINE-R, use a configuração indicada abaixo.
 Uma solicitação explícita da Teto não troca para outra voz quando a síntese falha.
 
 O backend **WORLDLINE-R** sintetiza a frase inteira com uma curva de altura
@@ -19,7 +19,10 @@ O nome do container é histórico e não inicia VOICEPEAK.
 O padrão continua `utau`. Teste o WAV com a sua voicebank antes de selecionar
 `PHONE_WORKER_TETO_BACKEND=worldline-r` no `.env`. Consulte o
 [teste e os comandos](../../worldline-r/README.md). O status WORLDLINE-R anuncia
-`renderer_version=worldline-r-phrase-1`. A pronúncia PT-BR usa aproximações dos
+`renderer_version=worldline-r-phrase-2`. Essa versão corrige os fades de pares
+isolados de sílabas sobrepostas. O [kit de comparação](../../worldline-r/README.md#comparar-o-timbre-e-as-junções)
+gera WAVs com os envelopes anteriores, os corrigidos e a bank English oficial
+opcional, sem alterar o `.env`. A pronúncia PT-BR usa aproximações dos
 sons disponíveis na voicebank; geração válida de WAV não comprova naturalidade.
 
 ## Reinício após atualização de fontes

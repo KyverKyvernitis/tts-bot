@@ -39,7 +39,8 @@ SOURCE_VERSION = "0.1.565"
 
 
 class WorldlineRenderer(TetoRenderer):
-    RENDER_VERSION = "worldline-r-phrase-1"
+    RENDER_VERSION = "worldline-r-phrase-2"
+    ENVELOPE_MODE = "complementary-native-envelopes"
     FRAME_MS = 10.0
     MAX_SOURCE_BYTES = 30 * 1024 * 1024
     MAX_DECODED_BYTES = 64 * 1024 * 1024
@@ -177,6 +178,7 @@ class WorldlineRenderer(TetoRenderer):
             "engine": "teto", "backend": "worldline-r", "voice": "kasane-teto-standard",
             "voicebank_profile": "standard", "renderer_version": self.RENDER_VERSION,
             "phrase_adapter_available": True, "box64_required": False, "voicepeak_required": False,
+            "envelope_mode": self.ENVELOPE_MODE,
             "portuguese_speech_verified": False,
         }
         try:
@@ -331,6 +333,58 @@ class WorldlineRenderer(TetoRenderer):
             sources[source] = name
         return sources
 
+    def _balance_crossfades(self, requests: list[dict[str, Any]]) -> int:
+        """Match spectral fade weights for isolated, adjacent note pairs.
+
+        The pinned native compositor sums spectral envelopes, rather than
+        normalizing their weights. A 40 ms incoming fade over a fixed 10 ms
+        outgoing fade therefore adds too much spectral energy at the join.
+        Pair the fades on the native 10 ms grid without moving a source, note
+        or consonant. Leave layered auxiliaries and nested/long lead regions
+        alone: their envelopes do not describe a simple two-note crossfade.
+        """
+        def frame(milliseconds: float) -> int:
+            # C++ round(), including its away-from-zero half-frame rounding.
+            return math.floor(float(milliseconds) / self.FRAME_MS + 0.5)
+
+        ordered = sorted(requests, key=lambda item: (frame(item["position_ms"]),
+                         frame(item["position_ms"] + item["length_ms"])))
+        starts = [frame(item["position_ms"]) for item in ordered]
+        ends = [frame(item["position_ms"] + item["length_ms"]) for item in ordered]
+        prefix_ends: list[int] = []
+        for end in ends:
+            prefix_ends.append(max(end, prefix_ends[-1] if prefix_ends else 0))
+        paired = 0
+        for number, (left, right) in enumerate(zip(ordered, ordered[1:])):
+            begin, stop = starts[number + 1], ends[number]
+            if not starts[number] < begin < stop < ends[number + 1]:
+                continue
+            # Any third model in this window makes complementary pairing an
+            # invalid assumption. Prefix maxima also catch earlier long tails.
+            if number and prefix_ends[number - 1] > begin:
+                continue
+            if number + 2 < len(ordered) and starts[number + 2] < stop:
+                continue
+            overlap = stop - begin
+            right_fade = max(1, frame(right["position_ms"] + right["fade_in_ms"]) - begin)
+            # One-frame discrepancies come from independently quantizing the
+            # placement and required length. Longer leads are intentional OTO
+            # articulation and must not be converted to long fades.
+            if abs(right_fade - overlap) > 1:
+                continue
+            left_fade_end = max(starts[number] + 1,
+                                 frame(left["position_ms"] + left["fade_in_ms"]))
+            right_fade_start = min(ends[number + 1] - 1,
+                                    frame(right["position_ms"] + right["length_ms"] - right["fade_out_ms"]))
+            # Native fade-in wins if its own fade-out overlaps it. Only balance
+            # pairs whose complete ramps can remain separate inside each note.
+            if left_fade_end > begin or right_fade_start < stop:
+                continue
+            left["fade_out_ms"] = overlap * self.FRAME_MS
+            right["fade_in_ms"] = overlap * self.FRAME_MS
+            paired += 1
+        return paired
+
     def _job(self, notes: list[RenderNote], entries: list[OtoEntry | None], sources: dict[Path, str],
              max_seconds: int) -> dict[str, Any]:
         placements, end_ms = self._placements(notes, entries)
@@ -357,6 +411,7 @@ class WorldlineRenderer(TetoRenderer):
                 pauses.append([stop, min(end_ms, stop + note.pause_after_ms)])
         if not requests:
             raise TetoSynthesisError("nenhum alias da voicebank correspondeu ao texto")
+        crossfade_pairs = self._balance_crossfades(requests)
         requests.sort(key=lambda req: (req["position_ms"] + req["length_ms"], req["position_ms"]))
         # Merge adjacent/missing-note pauses so the native bounded interval
         # list stays bounded by the number of requests and note boundaries.
@@ -371,6 +426,7 @@ class WorldlineRenderer(TetoRenderer):
         pauses = merged
         return {"schema_version": 1, "sample_rate": self.SAMPLE_RATE, "frame_ms": self.FRAME_MS,
                 "duration_ms": end_ms, "max_output_seconds": max_seconds, "requests": requests,
+                "envelope_mode": self.ENVELOPE_MODE, "crossfade_pairs": crossfade_pairs,
                 "curves": self._curves(notes, placements, end_ms, pauses), "silence_intervals_ms": pauses}
 
     def _read_output(self, path: Path, *, max_audio_bytes: int, max_seconds: int) -> bytes:
@@ -486,6 +542,7 @@ class WorldlineRenderer(TetoRenderer):
                 "nucleus_duration_stddev_ms": round(math.sqrt(sum((v - mean) ** 2 for v in nuclei) / max(1, len(nuclei))), 2),
                 "pitch_alignment_mode": "absolute-timeline", "pitch_boundary_metric": "not-measured",
                 "pitch_boundary_max_cents": None, "f0_control_mode": "phrase-shared-absolute-timeline",
+                "envelope_mode": self.ENVELOPE_MODE, "crossfade_pairs": job["crossfade_pairs"],
                 "pitchbend_fallbacks": 0, "legacy_fragment_hits": 0,
                 "timeline_mode": "worldline-phrase-continuous", "timeline_planned_ms": job["duration_ms"],
                 "timeline_audio_ms": 1000 * proof.get("frames", 0) / self.SAMPLE_RATE,

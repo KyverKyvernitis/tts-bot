@@ -36,6 +36,22 @@ def wav(path: Path, *, seconds=0.5, rate=44100):
         target.writeframes(pcm.tobytes())
 
 
+def native_envelope_weight(request, frame):
+    """Pinned phrase_synth.cpp envelope on its actual integer frame grid."""
+    rounded = lambda value: math.floor(value / 10 + 0.5)
+    p0 = max(0, rounded(request["position_ms"]))
+    p4 = rounded(request["position_ms"] + request["length_ms"])
+    p1 = max(p0 + 1, rounded(request["position_ms"] + request["fade_in_ms"]))
+    p3 = min(p4 - 1, rounded(request["position_ms"] + request["length_ms"] - request["fade_out_ms"]))
+    if not p0 <= frame < p4:
+        return 0
+    if frame < p1:
+        return (frame - p0) / (p1 - p0)
+    if frame >= p3:
+        return (p4 - frame) / (p4 - p3)
+    return 1
+
+
 class WorldlineRendererTests(unittest.TestCase):
     def fixture(self, root: Path):
         bank = root / "voicebank"
@@ -95,6 +111,7 @@ class WorldlineRendererTests(unittest.TestCase):
             self.assertTrue(result["native_phrase_render_verified"])
             self.assertFalse(result["portuguese_speech_verified"])
             self.assertEqual(result["pitch_alignment_mode"], "absolute-timeline")
+            self.assertEqual(result["envelope_mode"], "complementary-native-envelopes")
             with wave.open(io.BytesIO(result["audio"]), "rb") as output:
                 self.assertEqual((output.getnchannels(), output.getsampwidth(), output.getframerate()), (1, 2, 44100))
                 samples = array.array("h", output.readframes(output.getnframes()))
@@ -165,6 +182,73 @@ class WorldlineRendererTests(unittest.TestCase):
         self.assertEqual(job["curves"]["f0"][10:20], [0.0] * 10)
         self.assertGreater(job["curves"]["f0"][5], job["curves"]["f0"][0])
         self.assertGreater(job["curves"]["f0"][20], 200)
+
+    def test_paired_40ms_native_crossfade_weights_sum_to_one(self):
+        entry = OtoEntry("a", Path("a.wav"), 0, 20, 0, 80, 40)
+        notes = [RenderNote(("a",), "C4", 100, 0) for _ in range(2)]
+        job = WorldlineRenderer()._job(notes, [entry, entry], {entry.wav_path: "source_0.wav"}, 5)
+        left, right = job["requests"]
+        self.assertEqual((left["position_ms"], left["length_ms"], right["position_ms"], right["length_ms"]),
+                         (0, 100, 60, 100))
+        self.assertEqual(left["fade_out_ms"], 40)
+        self.assertEqual(right["fade_in_ms"], 40)
+        self.assertEqual(right["fade_out_ms"], 10)
+        self.assertEqual(job["crossfade_pairs"], 1)
+        self.assertEqual(job["duration_ms"], 170)
+        self.assertEqual(job["silence_intervals_ms"], [])
+        self.assertEqual(job["envelope_mode"], "complementary-native-envelopes")
+        for frame in range(6, 10):
+            self.assertAlmostEqual(native_envelope_weight(left, frame) + native_envelope_weight(right, frame), 1)
+        # This is the original excess spectral energy, not just a flag change.
+        previous = {**left, "fade_out_ms": 10}
+        self.assertAlmostEqual(native_envelope_weight(previous, 9) + native_envelope_weight(right, 9), 1.75)
+
+    def test_adjacent_pair_balancing_preserves_sources_consonants_pitch_pauses_and_duration(self):
+        class PreviousRenderer(WorldlineRenderer):
+            def _balance_crossfades(self, requests):
+                return 0
+        entry = OtoEntry("a", Path("a.wav"), 10, 20, -300, 80, 40)
+        notes = [RenderNote(("a",), "C4", 100, 0), RenderNote(("a",), "C4", 100, 80, phrase_end="."),
+                 RenderNote(("a",), "C4", 100, 0)]
+        previous = PreviousRenderer()._job(notes, [entry] * 3, {entry.wav_path: "source_0.wav"}, 5)
+        current = WorldlineRenderer()._job(notes, [entry] * 3, {entry.wav_path: "source_0.wav"}, 5)
+        for key in ("curves", "silence_intervals_ms", "duration_ms", "max_output_seconds"):
+            self.assertEqual(current[key], previous[key])
+        self.assertEqual(current["silence_intervals_ms"], [[160, 240]])
+        for before, after in zip(previous["requests"], current["requests"]):
+            self.assertEqual({key: value for key, value in before.items() if key not in ("fade_in_ms", "fade_out_ms")},
+                             {key: value for key, value in after.items() if key not in ("fade_in_ms", "fade_out_ms")})
+        self.assertEqual(current["crossfade_pairs"], 1)
+        self.assertEqual(current["requests"][1]["fade_out_ms"], 10)
+        self.assertEqual(current["requests"][2]["fade_in_ms"], 0)
+
+    def test_nested_layered_and_short_note_envelopes_remain_unchanged(self):
+        def request(start, length, fade_in=40, fade_out=10):
+            return {"position_ms": start, "length_ms": length, "fade_in_ms": fade_in, "fade_out_ms": fade_out}
+        cases = [
+            [request(0, 100, 0), request(60, 100), request(80, 100)],  # A third model occupies the join.
+            [request(0, 200, 0), request(60, 80)],  # Nested auxiliary.
+            [request(0, 100, 0), request(40, 150, 10)],  # Longer OTO lead, not a matched fade.
+            [request(0, 100, 80), request(60, 100)],  # Outgoing ramp would overlap its incoming ramp.
+            [request(0, 100, 0), request(60, 60, 40, 40)],  # Incoming note already fades out in the join.
+            [request(0, 100, 0)],  # Isolated ending.
+            [request(0, 100, 0), request(100, 100, 0)],  # No overlap.
+        ]
+        renderer = WorldlineRenderer()
+        for requests in cases:
+            with self.subTest(requests=requests):
+                before = [dict(item) for item in requests]
+                self.assertEqual(renderer._balance_crossfades(requests), 0)
+                self.assertEqual(requests, before)
+
+    def test_native_grid_alignment_allows_only_one_frame_placement_discrepancy(self):
+        requests = [{"position_ms": 0, "length_ms": 110, "fade_in_ms": 0, "fade_out_ms": 10},
+                    {"position_ms": 60, "length_ms": 100, "fade_in_ms": 40, "fade_out_ms": 10}]
+        self.assertEqual(WorldlineRenderer()._balance_crossfades(requests), 1)
+        self.assertEqual(requests[0]["fade_out_ms"], 50)
+        self.assertEqual(requests[1]["fade_in_ms"], 50)
+        for frame in range(6, 11):
+            self.assertAlmostEqual(sum(native_envelope_weight(item, frame) for item in requests), 1)
 
     def test_guest_command_binds_private_sources_and_native_code_without_box64(self):
         renderer = WorldlineRenderer()
@@ -250,6 +334,28 @@ class WorldlineRendererTests(unittest.TestCase):
             self.assertEqual(result["rendered_phonemes"], 4)
             self.assertFalse(result["portuguese_speech_verified"])
             self.assertAlmostEqual(result["timeline_audio_ms"], result["timeline_planned_ms"], delta=0.03)
+            self.assertEqual(result["envelope_mode"], "complementary-native-envelopes")
+            self.assertGreater(result["crossfade_pairs"], 0)
+
+    @unittest.skipUnless(os.getenv("WORLDLINE_TEST_LIBRARY"), "set WORLDLINE_TEST_LIBRARY to pinned local native library")
+    def test_real_pinned_api_accepts_complementary_40ms_pair_and_preserves_output_grid(self):
+        from teto_renderer.worldline_native import run_isolated
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            wav(directory / "source.wav")
+            entry = OtoEntry("a", directory / "source.wav", 0, 20, -300, 80, 40)
+            notes = [RenderNote(("a",), "C4", 100, 0) for _ in range(2)]
+            job = WorldlineRenderer()._job(notes, [entry] * 2, {entry.wav_path: "source.wav"}, 5)
+            path, output = directory / "job.json", directory / "output.wav"
+            path.write_text(json.dumps(job), encoding="utf-8")
+            result = run_isolated(Path(os.environ["WORLDLINE_TEST_LIBRARY"]).resolve(), path, output, timeout=30)
+            self.assertTrue(result["ok"], result)
+            self.assertTrue(result["phrase_render_verified"])
+            self.assertEqual(result["frames"], 7498)
+            with wave.open(str(output), "rb") as source:
+                self.assertEqual(source.getnframes(), 7498)
+                self.assertTrue(any(array.array("h", source.readframes(source.getnframes()))))
 
 
 if __name__ == "__main__":
