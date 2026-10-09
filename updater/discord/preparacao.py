@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -832,6 +833,7 @@ class PreparacaoUpdaterMixin:
     ) -> list[dict[str, str]]:
         clone_root = clone_dir.resolve()
         normalized = normalize_update_operations(operations, allowed_ops={"delete", "move"})
+        applied: list[dict[str, str]] = []
         for item in normalized:
             op = item["op"]
             if op == "delete":
@@ -840,15 +842,33 @@ class PreparacaoUpdaterMixin:
                 resolved = target.resolve(strict=False)
                 if resolved != clone_root and clone_root not in resolved.parents:
                     raise RuntimeError(f"delete resolve para fora do repositório: {rel}")
-                if target.is_symlink() or not target.is_file():
-                    raise RuntimeError(f"delete exige arquivo regular existente: {rel}")
-                tracked = self._run_cmd(["git", "ls-files", "--error-unmatch", "--", rel], clone_dir, env=env)
+                try:
+                    target_mode = target.lstat().st_mode
+                except FileNotFoundError:
+                    target_present = False
+                else:
+                    target_present = True
+                    if not stat.S_ISREG(target_mode):
+                        raise RuntimeError(f"delete exige arquivo regular existente: {rel}")
+                tracked = self._run_cmd(
+                    ["git", "--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel],
+                    clone_dir,
+                    env=env,
+                )
                 if tracked.returncode != 0:
+                    if tracked.returncode != 1:
+                        err = (tracked.stderr or tracked.stdout or "").strip()
+                        raise RuntimeError(f"Falha ao verificar arquivo rastreado pelo Git: {rel}: {err}")
+                    # Pacotes de limpeza também podem listar componentes opcionais
+                    # nunca instalados ou removidos por um update anterior.
+                    if not target_present:
+                        continue
                     raise RuntimeError(f"delete exige arquivo rastreado pelo Git: {rel}")
-                result = self._run_cmd(["git", "rm", "-f", "--", rel], clone_dir, env=env)
+                result = self._run_cmd(["git", "--literal-pathspecs", "rm", "-f", "--", rel], clone_dir, env=env)
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or "").strip()
                     raise RuntimeError(f"git rm falhou para {rel}: {err}")
+                applied.append(item)
                 continue
 
             source_rel = item["from"]
@@ -872,7 +892,8 @@ class PreparacaoUpdaterMixin:
             if result.returncode != 0:
                 err = (result.stderr or result.stdout or "").strip()
                 raise RuntimeError(f"git mv falhou para {source_rel} -> {target_rel}: {err}")
-        return normalized
+            applied.append(item)
+        return applied
 
 
     def _apply_patch_to_clone(self, extracted_files: list[tuple[Path, Path]], clone_dir: Path) -> list[dict[str, str]]:
