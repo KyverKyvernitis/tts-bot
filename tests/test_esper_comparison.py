@@ -11,6 +11,7 @@ import sys
 import time
 import types
 import wave
+import shlex
 
 import pytest
 
@@ -55,9 +56,29 @@ def test_controls_pin_defaults_isolate_cache_and_force_english(tmp_path, compari
     assert controls["PHONE_WORKER_TETO_FLAGS"] == ""
     assert float(controls["PHONE_WORKER_ESPER_DEADLINE"]) == request["deadline"]
     assert "bin/resampler.py" in controls["PHONE_WORKER_TETO_RESAMPLER_COMMAND"]
+    command = shlex.split(controls["PHONE_WORKER_TETO_RESAMPLER_COMMAND"])
+    assert command[-2] == "--implementation-id"
     before = controls["PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR"]
+    previous_command = controls["PHONE_WORKER_TETO_RESAMPLER_COMMAND"]
     (Path(request["esper_root"]) / "bin" / "resampler.py").write_bytes(b"# changed wrapper\n")
     assert comparison.controls(request)["PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR"] != before
+    assert comparison.controls(request)["PHONE_WORKER_TETO_RESAMPLER_COMMAND"] != previous_command
+
+
+def test_wrapper_update_changes_real_utterance_and_fragment_fingerprints(tmp_path, comparison, monkeypatch):
+    request = job(tmp_path)
+    worker = SCRIPT.parents[2] / "termux" / "phone-worker"
+    monkeypatch.syspath_prepend(str(worker))
+    from teto_renderer.renderer import TetoRenderer
+    index = types.SimpleNamespace(fingerprint="unchanged-official-voicebank")
+    def fingerprints():
+        with comparison.settings(comparison.controls(request)):
+            renderer = TetoRenderer(resource_guard=lambda: {"ok": True})
+            return renderer._render_fingerprint(index), renderer._fragment_fingerprint(index)
+    previous = fingerprints()
+    (Path(request["esper_root"]) / "bin" / "resampler.py").write_bytes(b"# corrected native analysis\n")
+    current = fingerprints()
+    assert current[0] != previous[0] and current[1] != previous[1]
 
 
 def renderer_factory(*, audio=None, profile="english-cvvc", ready=True, native=True):

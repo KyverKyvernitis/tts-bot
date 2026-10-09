@@ -32,10 +32,11 @@ TOOLKIT_ROOT = Path(__file__).resolve().parent
 REQUIRED_PACKAGES = ("libc6", "libstdc++6", "libgcc-s1", "zlib1g")
 MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
 DOTNET_FREE_SPACE_RESERVE = 400 * 1024 * 1024
-# Exact source shipped in teto-esper-termux-kit-v1.zip. Other local launchers
-# belong to the operator and must never be replaced by an installation retry.
+# Exact source shipped in kits v1 and v2/v3. Other local launchers belong to
+# the operator and must never be replaced by an installation retry.
 KNOWN_LAUNCHER_SHA256 = frozenset({
     "da55173230453b3e06c74416c88bdec73a94ae86e8afda320a2b7f12b04305e1",
+    "072c37648c164db924add41a56dd234fe97080703a5317cbe96cc9f86bb912c5",
 })
 ASSETS = {
     "engine": {

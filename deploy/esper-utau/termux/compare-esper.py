@@ -65,6 +65,12 @@ def controls(job: dict) -> dict[str, str]:
         wrapper_hash = hashlib.sha256(wrapper.read_bytes()).hexdigest()
     else:
         wrapper_hash = "worldline"
+    resampler_command = [sys.executable, str(wrapper)]
+    if job["engine"] == "esper-utau":
+        # The UTAU renderer stamps the executable (Python), rather than its
+        # script argument. Include the wrapper content in argv so a wrapper
+        # update also invalidates phrase caches and the VPS health fingerprint.
+        resampler_command.extend(["--implementation-id", wrapper_hash])
     bank_key = "PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR" if job["mode"] == "english" else "PHONE_WORKER_TETO_VOICEBANK_DIR"
     return {
         "PHONE_WORKER_TETO_ENABLED": "true",
@@ -75,7 +81,7 @@ def controls(job: dict) -> dict[str, str]:
         bank_key: job["voicebank"],
         "PHONE_WORKER_TETO_MIN_ALIASES": "10",
         "PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES": "500",
-        "PHONE_WORKER_TETO_RESAMPLER_COMMAND": shlex.join([sys.executable, str(wrapper)]),
+        "PHONE_WORKER_TETO_RESAMPLER_COMMAND": shlex.join(resampler_command),
         "PHONE_WORKER_TETO_LENGTH_MODE": "total",
         "PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR": str(root / "cache" / "fragments" / wrapper_hash),
         "PHONE_WORKER_TETO_BASE_PITCH": "C4", "PHONE_WORKER_TETO_SPEECH_RATE": "1.0",

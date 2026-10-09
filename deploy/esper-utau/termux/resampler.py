@@ -39,6 +39,14 @@ CONFIG_SHA256 = "21951154b9bafdebde0b3a1d6533bb1fde549113b63b99a573b49ea68fadbe8
 # Environment values for GCHeapHardLimit are hexadecimal: 40000000 = 1 GiB.
 # This caps the managed heap, not total RSS, and does not preallocate 1 GiB.
 GC_ENVIRONMENT = {"DOTNET_GCHeapHardLimit": "40000000", "DOTNET_gcServer": "0"}
+# External FRQ zero/unvoiced frames make ESPER 2.5.0 select wrong pitch
+# periods. Keep its own analysis and generated FRQ in a new private namespace.
+ANALYSIS_CACHE_VERSION = "native-pitch-v1"
+PITCH_ANALYSIS_MODE = "esper-native"
+# The upstream PCM16 writer wraps over-range samples instead of limiting them.
+# Leave nominal 6 dB headroom before that irreversible conversion.
+NATIVE_VOLUME_GAIN = 0.5
+MAX_NATIVE_VOLUME_PERCENT = 50.0
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_FRQ_BYTES = 16 * 1024 * 1024
 MAX_ANALYSIS_BYTES = 256 * 1024 * 1024
@@ -253,17 +261,12 @@ def runtime_info(root: Path, cache: Path, *, deadline: float) -> dict:
             "config_sha256": CONFIG_SHA256, "engine_elf_arm64": True}
 
 
-def source_data(path: Path) -> tuple[bytes, bytes | None]:
+def source_data(path: Path) -> bytes:
     data = read_regular(path, minimum=45, maximum=MAX_SOURCE_BYTES)
     pcm_evidence(data, output=False)
-    frq = path.with_name(path.stem + "_wav.frq")
-    if frq.exists() or frq.is_symlink():
-        frq_data = read_regular(frq, minimum=40, maximum=MAX_FRQ_BYTES)
-        if frq_data[:8] != b"FREQ0003":
-            raise EsperError("FRQ original não possui formato FREQ0003")
-    else:
-        frq_data = None
-    return data, frq_data
+    # Do not even read the voicebank FRQ. It remains available to other engines;
+    # ESPER must infer pitch from this recording rather than import those hints.
+    return data
 
 
 @contextlib.contextmanager
@@ -283,7 +286,7 @@ def source_lock(path: Path, deadline: float):
         os.close(descriptor)
 
 
-def private_source(cache: Path, key: str, data: bytes, frq: bytes | None) -> Path:
+def private_source(cache: Path, key: str, data: bytes) -> Path:
     directory = cache / "sources" / key
     real_directories(directory, create=True)
     source = directory / "source.wav"
@@ -294,8 +297,6 @@ def private_source(cache: Path, key: str, data: bytes, frq: bytes | None) -> Pat
     else:
         atomic_write(source, data)
     cached_frq = directory / "source_wav.frq"
-    if frq is not None and not cached_frq.exists() and not cached_frq.is_symlink():
-        atomic_write(cached_frq, frq)
     for auxiliary, maximum in ((directory / "source.esp", MAX_ANALYSIS_BYTES), (cached_frq, MAX_FRQ_BYTES)):
         if auxiliary.exists() or auxiliary.is_symlink():
             regular_info(auxiliary, maximum=maximum)
@@ -397,6 +398,9 @@ def synthesize(values: list[str], *, root: Path, cache: Path, container: str, ti
     started = time.monotonic()
     deadline = deadline_for(timeout)
     args = validate_arguments(values)
+    requested_volume = float(args[9])
+    native_volume = min(requested_volume * NATIVE_VOLUME_GAIN, MAX_NATIVE_VOLUME_PERCENT)
+    args[9] = format(native_volume, ".12g")
     root, cache = root.expanduser().absolute(), cache.expanduser().absolute()
     source, target = Path(args[0]).expanduser().absolute(), Path(args[1]).expanduser().absolute()
     real_directories(source.parent)
@@ -419,15 +423,15 @@ def synthesize(values: list[str], *, root: Path, cache: Path, container: str, ti
     real_directories(cache / "jobs", create=True)
     real_directories(cache / "dotnet", create=True)
     runtime = runtime_info(root, cache, deadline=deadline)
-    data, frq = source_data(source)
+    data = source_data(source)
     require_time(deadline)
     identity = hashlib.sha256()
-    for part in (ENGINE_SHA256.encode(), CONFIG_SHA256.encode(), data, frq or b"no-original-frq"):
+    for part in (ANALYSIS_CACHE_VERSION.encode(), ENGINE_SHA256.encode(), CONFIG_SHA256.encode(), data):
         identity.update(len(part).to_bytes(8, "little"))
         identity.update(part)
     key = identity.hexdigest()
     with source_lock(cache / "sources" / f"{key}.lock", deadline):
-        directory = private_source(cache, key, data, frq)
+        directory = private_source(cache, key, data)
         with tempfile.TemporaryDirectory(prefix="esper-job-", dir=cache / "jobs") as temporary:
             workdir = Path(temporary)
             command = guest_command(container, runtime["release"], cache, directory, workdir, args)
@@ -441,11 +445,14 @@ def synthesize(values: list[str], *, root: Path, cache: Path, container: str, ti
                     regular_info(auxiliary, maximum=maximum)
             atomic_write(target, rendered)
     return {"ok": True, "resampler": "ESPER-Utau", "source_version": RELEASE,
+            "implementation_id": hashlib.sha256(read_regular(SCRIPT, maximum=128 * 1024)).hexdigest(),
             "engine_sha256": runtime["engine_sha256"], "config_sha256": runtime["config_sha256"],
             "engine_elf_arm64": runtime["engine_elf_arm64"], "native_architecture": "arm64",
             "gc_settings_requested": GC_ENVIRONMENT,
             "container": container, "original_voicebank_changed": False,
-            "source_cache_key": key, "original_frq_copied": frq is not None,
+            "source_cache_key": key, "original_frq_copied": False,
+            "pitch_analysis_mode": PITCH_ANALYSIS_MODE, "analysis_cache_version": ANALYSIS_CACHE_VERSION,
+            "requested_volume_percent": requested_volume, "native_volume_percent": native_volume,
             "analysis_directory": str(directory), "output": str(target),
             "sha256": hashlib.sha256(rendered).hexdigest(), "bytes": len(rendered),
             "worker_synth_ms": round((time.monotonic() - started) * 1000, 2), **evidence}
@@ -484,6 +491,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache-dir", default=os.getenv("PHONE_WORKER_ESPER_CACHE_DIR"))
     parser.add_argument("--container", default=os.getenv("PHONE_WORKER_ESPER_CONTAINER") or "voicepeak-arm64")
     parser.add_argument("--timeout", default=os.getenv("PHONE_WORKER_ESPER_TIMEOUT") or "60")
+    parser.add_argument("--implementation-id", help="SHA256 esperado deste bridge; também identifica o cache do worker.")
     parser.add_argument("--probe", action="store_true", help="Sintetiza fonte artificial e verifica o WAV, sem a Teto.")
     parser.add_argument("--_supervise", help=argparse.SUPPRESS)
     parser.add_argument("utau", nargs="*", help="Os 13 argumentos UTAU: input, output, nota, velocity, flags, OTO, etc.")
@@ -493,6 +501,13 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(options.root).expanduser().absolute()
     cache = Path(options.cache_dir).expanduser().absolute() if options.cache_dir else root / "cache"
     try:
+        if options.implementation_id is not None:
+            expected = options.implementation_id
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+                raise EsperError("--implementation-id deve ser um SHA256 de 64 caracteres hexadecimais")
+            actual = hashlib.sha256(read_regular(SCRIPT, maximum=128 * 1024)).hexdigest()
+            if actual != expected.lower():
+                raise EsperError("SHA256 do bridge difere de --implementation-id; atualize a configuração do ESPER")
         timeout = positive_timeout(options.timeout)
         if options.probe:
             if options.utau:

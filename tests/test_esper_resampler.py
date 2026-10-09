@@ -70,12 +70,16 @@ def fake_runtime(tmp_path, bridge, monkeypatch):
         "config_sha256": bridge.CONFIG_SHA256, "engine_elf_arm64": True})
     monkeypatch.setattr(bridge.shutil, "which", lambda name: "/fake/proot-distro")
     calls = []
+    private_before = []
 
     def run(command, job, deadline):
         calls.append(command)
         binds = dict(item.split(":", 1) for item in command[4:11:2])
         copied = next(Path(host) for host, guest in binds.items() if guest == "/opt/esper-source")
         assert (copied / "source.wav").read_bytes() == source.read_bytes()
+        private_before.append({name: (copied / name).read_bytes()
+                               for name in ("source.wav", "source.esp", "source_wav.frq")
+                               if (copied / name).exists()})
         (copied / "source.esp").write_bytes(b"analysis")
         (copied / "source_wav.frq").write_bytes(frq())
         (job / "output.wav").write_bytes(pcm(seconds=.241))
@@ -83,7 +87,7 @@ def fake_runtime(tmp_path, bridge, monkeypatch):
 
     monkeypatch.setattr(bridge, "run_guest", run)
     return types.SimpleNamespace(root=root, release=release, original=original, source=source, target=target,
-                                 cache=root / "cache", calls=calls, run=run)
+                                 cache=root / "cache", calls=calls, run=run, private_before=private_before)
 
 
 def synthesize(bridge, runtime, **updates):
@@ -103,7 +107,11 @@ def test_bridge_renders_from_private_copy_and_never_mounts_original_voicebank(br
     environment = dict(os.environ)
     result = synthesize(bridge, runtime)
     assert result["ok"] and result["wav_verified"]
-    assert result["original_frq_copied"]
+    assert not result["original_frq_copied"]
+    assert result["pitch_analysis_mode"] == "esper-native"
+    assert result["analysis_cache_version"] == "native-pitch-v1"
+    assert result["implementation_id"] == hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
+    assert runtime.private_before[0] == {"source.wav": runtime.source.read_bytes()}
     assert not result["original_voicebank_changed"]
     assert runtime.target.read_bytes() == pcm(seconds=.241)
     assert {path.name: path.read_bytes() for path in runtime.original.iterdir()} == before
@@ -172,23 +180,62 @@ def test_private_recording_cache_reuses_source_and_changes_when_content_changes(
     assert copied.read_bytes() == pcm()
 
 
-def test_original_frq_changes_private_analysis_identity(bridge, fake_runtime):
+def test_original_frq_changes_do_not_replace_native_analysis_or_modify_original(bridge, fake_runtime):
     runtime = fake_runtime
     first = synthesize(bridge, runtime)
-    runtime.source.with_name("recording_wav.frq").write_bytes(frq())
+    original_frq = runtime.source.with_name("recording_wav.frq")
+    original_frq.write_bytes(b"another engine's private FRQ format")
     second = synthesize(bridge, runtime)
-    assert first["source_cache_key"] != second["source_cache_key"]
-    assert second["original_frq_copied"]
+    assert first["source_cache_key"] == second["source_cache_key"]
+    assert not second["original_frq_copied"]
+    assert original_frq.read_bytes() == b"another engine's private FRQ format"
+    assert runtime.private_before[1]["source_wav.frq"] == frq()
+    assert runtime.private_before[1]["source.esp"] == b"analysis"
 
 
-def test_symbolic_frq_cannot_be_used_to_modify_original_bank(bridge, fake_runtime):
+def test_symbolic_original_frq_is_ignored_and_never_followed_by_engine(bridge, fake_runtime):
     runtime = fake_runtime
     external = runtime.original.parent / "external.frq"
     external.write_bytes(frq())
     runtime.source.with_name("recording_wav.frq").symlink_to(external)
-    with pytest.raises(bridge.EsperError, match="regular"):
-        synthesize(bridge, runtime)
-    assert external.read_bytes() == frq() and runtime.calls == []
+    result = synthesize(bridge, runtime)
+    assert result["ok"] and not result["original_frq_copied"]
+    assert external.read_bytes() == frq()
+    assert runtime.source.with_name("recording_wav.frq").is_symlink()
+    assert "source_wav.frq" not in runtime.private_before[0]
+
+
+@pytest.mark.parametrize("original_frq", [None, b"existing legacy FRQ"])
+def test_pre_fix_analysis_cache_is_preserved_and_never_reused(bridge, fake_runtime, original_frq):
+    runtime = fake_runtime
+    if original_frq is not None:
+        runtime.source.with_name("recording_wav.frq").write_bytes(original_frq)
+    identity = hashlib.sha256()
+    for part in (bridge.ENGINE_SHA256.encode(), bridge.CONFIG_SHA256.encode(), runtime.source.read_bytes(),
+                 original_frq or b"no-original-frq"):
+        identity.update(len(part).to_bytes(8, "little"))
+        identity.update(part)
+    old_directory = runtime.cache / "sources" / identity.hexdigest()
+    old_directory.mkdir(parents=True)
+    (old_directory / "source.wav").write_bytes(runtime.source.read_bytes())
+    (old_directory / "source.esp").write_bytes(b"contaminated legacy pitch")
+    before = {p.name: p.read_bytes() for p in old_directory.iterdir()}
+    result = synthesize(bridge, runtime)
+    assert result["source_cache_key"] != identity.hexdigest()
+    assert Path(result["analysis_directory"]) != old_directory
+    assert runtime.private_before[0] == {"source.wav": runtime.source.read_bytes()}
+    assert {p.name: p.read_bytes() for p in old_directory.iterdir()} == before
+
+
+@pytest.mark.parametrize("requested,effective", [(100, 50), (200, 50), (20, 10)])
+def test_native_volume_leaves_headroom_before_upstream_pcm16_conversion(bridge, fake_runtime, requested, effective):
+    values = arguments(fake_runtime.source, fake_runtime.target)
+    values[9] = str(requested)
+    result = bridge.synthesize(values, root=fake_runtime.root, cache=fake_runtime.cache,
+                               container="voicepeak-arm64", timeout=10)
+    assert float(fake_runtime.calls[0][-4]) == effective
+    assert result["requested_volume_percent"] == requested
+    assert result["native_volume_percent"] == effective
 
 
 @pytest.mark.parametrize("kind", ["source.wav", "source.esp", "source_wav.frq"])
@@ -276,6 +323,147 @@ def test_cli_preserves_utau_positions_empty_flags_negative_cutoff_and_decimal_le
     assert calls[0][0] == original
     assert calls[0][1]["container"] == "voicepeak-arm64"
     assert json.loads(capsys.readouterr().out) == {"ok": True, "length": "138"}
+
+
+@pytest.mark.parametrize("identifier", ["", "not-a-sha256", "a" * 63, "a" * 65, "0" * 64])
+def test_cli_implementation_guard_fails_before_rendering_or_creating_cache(bridge, tmp_path, monkeypatch, capsys,
+                                                                        identifier):
+    calls = []
+    monkeypatch.setattr(bridge, "synthesize", lambda *a, **kw: calls.append((a, kw)))
+    root = tmp_path / "runtime"
+    assert bridge.main(["--root", str(root), "--implementation-id", identifier,
+                        *arguments(tmp_path / "source.wav", tmp_path / "out.wav")]) == 1
+    report = json.loads(capsys.readouterr().err)
+    assert not report["ok"] and "implementation-id" in report["error"]
+    assert calls == [] and not root.exists()
+
+
+def test_cli_accepts_matching_implementation_hash_as_cache_identity(bridge, tmp_path, monkeypatch, capsys):
+    expected = hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
+    calls = []
+
+    def render(values, **options):
+        calls.append(values)
+        return {"ok": True}
+
+    monkeypatch.setattr(bridge, "synthesize", render)
+    args = arguments(tmp_path / "source.wav", tmp_path / "out.wav")
+    assert bridge.main(["--implementation-id", expected, *args]) == 0
+    assert calls == [args] and json.loads(capsys.readouterr().out)["ok"]
+
+
+@pytest.mark.parametrize("recording", ["_e+_he+_e+_e+_e+-.wav", "_ou+_hou+_ou+-.wav", "_lau+_lau+_l-.wav"])
+def test_real_esper_native_pitch_avoids_original_frq_zero_frame_bug(bridge, fake_runtime, monkeypatch, recording):
+    binary_path = os.environ.get("ESPER_TEST_X64_BINARY")
+    archive_path = os.environ.get("TETO_ENGLISH_TEST_ARCHIVE")
+    if not binary_path or not archive_path or sys.platform != "linux" or bridge.platform.machine().lower() not in {"x86_64", "amd64"}:
+        pytest.skip("requires official ESPER Linux x64 and official Teto English archive for the FRQ regression")
+    import statistics
+    import zipfile
+
+    binary = Path(binary_path)
+    assert hashlib.sha256(binary.read_bytes()).hexdigest() == "d613a715b451d9fff4dfa902e3fa55e3431a595833c61c369622405d21020eee"
+    assert hashlib.sha256((binary.parent / "esper-config.ini").read_bytes()).hexdigest() == bridge.CONFIG_SHA256
+    archive = Path(archive_path)
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == "addb3ab9dbe3dce7cb40fe6ba0c93ab5814d02acf5b091d0a762de370b813d6e"
+
+    with zipfile.ZipFile(archive) as bank:
+        wav_entry = next(name for name in bank.namelist() if name.endswith("/" + recording))
+        frq_entry = wav_entry[:-4] + "_wav.frq"
+        recording_data, original_frq = bank.read(wav_entry), bank.read(frq_entry)
+    runtime = fake_runtime
+    runtime.source.write_bytes(recording_data)
+    frq_file = runtime.source.with_name("recording_wav.frq")
+    frq_file.write_bytes(original_frq)
+    frame_count = struct.unpack_from("<i", original_frq, 36)[0]
+    source_f0 = [struct.unpack_from("<d", original_frq, 40 + i * 16)[0] for i in range(frame_count)]
+    expected_f0 = statistics.median(f for f in source_f0 if f > 0)
+    assert any(f == 0 for f in source_f0) and 250 < expected_f0 < 300
+    environment = os.environ.copy()
+    environment.update(bridge.GC_ENVIRONMENT)
+    environment.update(LANG="C", LC_ALL="C", DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="1",
+                       DOTNET_BUNDLE_EXTRACT_BASE_DIR=str(runtime.root / "dotnet"))
+
+    def median_analysis_f0(path):
+        analysis = path.read_bytes()
+        assert struct.unpack_from("<I?", analysis) == (12, False)
+        n_voiced, n_unvoiced, step, frames = struct.unpack_from("<HHii", analysis, 5)
+        assert (n_voiced, n_unvoiced, step) == (33, 257, 256)
+        width = 1 + 2 * n_voiced + n_unvoiced
+        periods = [struct.unpack_from("<f", analysis, 17 + i * width * 4)[0] for i in range(frames)]
+        return statistics.median(44100 / period for period in periods if period > 0)
+
+    # Reproduce the upstream problem in a separate private source directory.
+    legacy = runtime.root / "legacy"
+    legacy.mkdir()
+    (legacy / "source.wav").write_bytes(recording_data)
+    (legacy / "source_wav.frq").write_bytes(original_frq)
+    bad_args = arguments(legacy / "source.wav", legacy / "output.wav")
+    bad_args[6], bad_args[9] = "241", "50"
+    failed_analysis = subprocess.run([str(binary), *bad_args], env=environment, capture_output=True, timeout=20)
+    assert failed_analysis.returncode == 0, failed_analysis.stderr.decode(errors="replace")
+    wrong_f0 = median_analysis_f0(legacy / "source.esp")
+    assert abs(wrong_f0 / expected_f0 - 1) > .6
+
+    def real_native_run(command, job, deadline):
+        mounts = dict(item.split(":", 1) for item in command[4:11:2])
+        copied = next(Path(host) for host, guest in mounts.items() if guest == "/opt/esper-source")
+        assert not (copied / "source_wav.frq").exists()
+        engine_args = command[command.index("/opt/esper-engine/ESPER-Utau") + 1:]
+        for host, guest in mounts.items():
+            engine_args = [arg.replace(guest, host) for arg in engine_args]
+        completed = subprocess.run([str(binary), *engine_args], env=environment, capture_output=True,
+                                   timeout=max(.1, deadline - time.monotonic()))
+        assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+        return completed.stdout.decode(), completed.stderr.decode()
+
+    monkeypatch.setattr(bridge, "run_guest", real_native_run)
+    result = synthesize(bridge, runtime, timeout=20)
+    corrected_f0 = median_analysis_f0(Path(result["analysis_directory"]) / "source.esp")
+    assert abs(corrected_f0 / expected_f0 - 1) < .08
+    assert result["pitch_analysis_mode"] == "esper-native" and not result["original_frq_copied"]
+    assert runtime.source.read_bytes() == recording_data and frq_file.read_bytes() == original_frq
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == "addb3ab9dbe3dce7cb40fe6ba0c93ab5814d02acf5b091d0a762de370b813d6e"
+
+
+def test_real_esper_headroom_prevents_pcm16_wrap_on_native_pitch_teto_fragment(bridge, tmp_path):
+    binary_path = os.environ.get("ESPER_TEST_X64_BINARY")
+    archive_path = os.environ.get("TETO_ENGLISH_TEST_ARCHIVE")
+    if not binary_path or not archive_path or sys.platform != "linux" or bridge.platform.machine().lower() not in {"x86_64", "amd64"}:
+        pytest.skip("requires official ESPER Linux x64 and official Teto English archive for the PCM16 regression")
+    import zipfile
+
+    binary, archive = Path(binary_path), Path(archive_path)
+    assert hashlib.sha256(binary.read_bytes()).hexdigest() == "d613a715b451d9fff4dfa902e3fa55e3431a595833c61c369622405d21020eee"
+    assert hashlib.sha256((binary.parent / "esper-config.ini").read_bytes()).hexdigest() == bridge.CONFIG_SHA256
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == "addb3ab9dbe3dce7cb40fe6ba0c93ab5814d02acf5b091d0a762de370b813d6e"
+    source = tmp_path / "source.wav"
+    with zipfile.ZipFile(archive) as bank:
+        entry = next(name for name in bank.namelist() if name.endswith("/_lau+_lau+_l-.wav"))
+        source.write_bytes(bank.read(entry))
+    assert not source.with_name("source_wav.frq").exists()
+    environment = os.environ.copy()
+    environment.update(bridge.GC_ENVIRONMENT)
+    environment.update(LANG="C", LC_ALL="C", DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="1",
+                       DOTNET_BUNDLE_EXTRACT_BASE_DIR=str(tmp_path / "dotnet"))
+    rendered = {}
+    for volume in (100, 50):
+        output = tmp_path / f"volume-{volume}.wav"
+        args = [str(source), str(output), "C4", "100", "B0", "649.335", "214", "123.332", "-366.668",
+                str(volume), "15", "!140", "/5/6#7#/5/5/4/3/3/2/1/0/z/y/x/x/w/v/u/t/s/r/r/q/q/p#11#/o#9#"]
+        result = subprocess.run([str(binary), *args], env=environment, capture_output=True, timeout=20)
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        with wave.open(str(output), "rb") as reader:
+            assert (reader.getframerate(), reader.getnchannels(), reader.getsampwidth()) == (44100, 1, 2)
+            data = reader.readframes(reader.getnframes())
+        rendered[volume] = struct.unpack("<" + str(len(data) // 2) + "h", data)
+    full, safe = rendered[100], rendered[50]
+    assert len(full) == len(safe)
+    assert max(abs(value * 2) for value in safe) > 32767
+    assert any(abs(a - b) > 40000 for a, b in zip(full, full[1:]))
+    assert not any(abs(a - b) > 40000 for a, b in zip(safe, safe[1:]))
+    rewrapped = [((value * 2 + 32768) % 65536) - 32768 for value in safe]
+    assert max(abs(a - b) for a, b in zip(full, rewrapped)) <= 2
 
 
 def test_deadline_from_phrase_is_respected_before_creating_guest(bridge, fake_runtime, monkeypatch):

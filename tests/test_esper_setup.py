@@ -452,8 +452,8 @@ def test_guest_report_only_prints_required_packages(prepared):
     assert "unrelated" not in check["output"] and "another-package" not in check["output"]
 
 
-def known_prior_launcher(monkeypatch):
-    path = Path("/workspace/library-files/teto-esper-termux-kit-v1.zip")
+def known_prior_launcher(monkeypatch, version="v1"):
+    path = Path(f"/workspace/library-files/teto-esper-termux-kit-{version}.zip")
     if not path.exists():
         # Keep the upgrade behavior covered in a normal checkout as well. The
         # shipped prior artifact, when available, exercises its exact real hash.
@@ -467,8 +467,9 @@ def known_prior_launcher(monkeypatch):
     return source
 
 
-def test_known_v1_launchers_are_backed_up_exactly_and_updated_after_probe(prepared, monkeypatch):
-    previous = known_prior_launcher(monkeypatch)
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
+def test_known_launchers_are_backed_up_exactly_and_updated_after_probe(prepared, monkeypatch, version):
+    previous = known_prior_launcher(monkeypatch, version)
     directory = prepared.root / "bin"
     directory.mkdir(parents=True)
     launchers = [directory / "resampler.py", directory / "esper-utau-resampler"]
@@ -490,8 +491,9 @@ def test_known_v1_launchers_are_backed_up_exactly_and_updated_after_probe(prepar
     assert prepared.downloads == ["engine", "config"]
 
 
-def test_failed_probe_never_upgrades_known_prior_launcher(prepared, monkeypatch):
-    previous = known_prior_launcher(monkeypatch)
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
+def test_failed_probe_never_upgrades_known_prior_launcher(prepared, monkeypatch, version):
+    previous = known_prior_launcher(monkeypatch, version)
     launcher = prepared.root / "bin" / "resampler.py"
     launcher.parent.mkdir(parents=True)
     launcher.write_bytes(previous)
@@ -517,12 +519,13 @@ def test_existing_foreign_backup_is_preserved_with_prior_launcher(prepared, monk
     assert backup.read_bytes() == b"operator-owned unrelated backup"
 
 
-def test_previously_published_runtime_reuses_assets_and_upgrades_known_launcher(prepared, monkeypatch):
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
+def test_previously_published_runtime_reuses_assets_and_upgrades_known_launcher(prepared, monkeypatch, version):
     assert install(prepared)["ok"]
     release = prepared.root / "releases" / setup.VERSION
     engine = release / "ESPER-Utau"
     before = engine.stat()
-    previous = known_prior_launcher(monkeypatch)
+    previous = known_prior_launcher(monkeypatch, version)
     launcher = prepared.root / "bin" / "resampler.py"
     launcher.write_bytes(previous)
     monkeypatch.delattr(setup.os, "link", raising=False)
@@ -535,3 +538,19 @@ def test_previously_published_runtime_reuses_assets_and_upgrades_known_launcher(
     assert engine.stat().st_mtime_ns == before.st_mtime_ns
     assert prepared.downloads == ["engine", "config"]
     assert prepared.probes == 2
+
+
+@pytest.mark.parametrize("asset", ["engine", "config"])
+def test_known_gc_wrapper_upgrade_still_checks_installed_asset_pins(prepared, monkeypatch, asset):
+    assert install(prepared)["ok"]
+    launcher = prepared.root / "bin/resampler.py"
+    previous = known_prior_launcher(monkeypatch, "v2")
+    launcher.write_bytes(previous)
+    path = prepared.root / "releases" / setup.VERSION / setup.ASSETS[asset]["name"]
+    changed = path.read_bytes() + b"local modification"
+    path.write_bytes(changed)
+    report = install(prepared)
+    assert not report["ok"] and "SHA-256 divergente" in report["error"]
+    assert launcher.read_bytes() == previous and path.read_bytes() == changed
+    assert not list(launcher.parent.glob("*.backup-*"))
+    assert prepared.downloads == ["engine", "config"] and prepared.probes == 1

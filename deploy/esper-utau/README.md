@@ -12,11 +12,11 @@ natural com uma voicebank de canto.
 
 ## Instalar e comparar no Poco
 
-Baixe `teto-esper-termux-kit-v2.zip` para Downloads e execute:
+Baixe `teto-esper-termux-kit-v4.zip` para Downloads e execute:
 
 ```bash
 mkdir -p "$HOME/esper-utau-termux-kit"
-unzip -o "$HOME/storage/downloads/teto-esper-termux-kit-v2.zip" \
+unzip -o "$HOME/storage/downloads/teto-esper-termux-kit-v4.zip" \
   -d "$HOME/esper-utau-termux-kit"
 
 if python "$HOME/esper-utau-termux-kit/deploy/esper-utau/termux/setup.py" \
@@ -92,9 +92,9 @@ do teste de áudio.
 
 ESPER normalmente escreve `.esp` e `.frq` junto ao WAV de entrada. O wrapper
 passa ao guest uma cópia privada, inteira, de cada gravação, em
-`~/.esper-utau/cache/sources`. Copia o FRQ original quando válido; os arquivos
-gerados permanecem nessa pasta privada. Isso também evita que o FRQ produzido
-pelo ESPER afete outros motores.
+`~/.esper-utau/cache/sources`. O kit v4 não importa o FRQ original: o ESPER faz
+a própria análise do WAV, e os arquivos gerados ficam nessa pasta privada.
+Os WAVs, FRQs e avisos da voicebank original permanecem intactos.
 
 O cache de fragmentos é separado do WORLDLINE e dos resamplers anteriores.
 Pedidos da mesma fonte são serializados para evitar corridas na análise.
@@ -135,13 +135,118 @@ UTAU. Os scripts deste kit oferecem `--help` normalmente. Se o setup encontrar
 arquivos diferentes no destino, preserva-os e informa o erro. Não apague o
 Ubuntu nem a biblioteca WORLDLINE para instalar ESPER.
 
-## Seleção futura no worker
+## Corrigir o timbre do kit v3 e anteriores
 
-Este kit executa a comparação sem selecionar ESPER em produção. O worker já
-aceita resamplers UTAU por `PHONE_WORKER_TETO_RESAMPLER_COMMAND`; após escolher
-o resultado por audição, a integração usa `PHONE_WORKER_TETO_BACKEND=utau`, o
-wrapper instalado e `PHONE_WORKER_TETO_LENGTH_MODE=total`. Configurações
-anteriores de Straycat ou flags WORLDLINE não devem ser herdadas.
+Os testes com o executável oficial identificaram dois problemas anteriores à
+montagem da frase. A FRQ oficial da Teto English contém quadros sem voz, com
+`F0=0`. Ao importar esse arquivo, o ESPER analisou três gravações de cerca de
+280 Hz como se fossem próximas de 60 Hz. Sem importar a FRQ, analisou as mesmas
+gravações entre 277 e 280 Hz. Preencher somente os zeros em cópias privadas da
+FRQ produziu a mesma análise `.esp` da execução sem FRQ, nos três casos.
+
+Por isso, o wrapper v4 usa a análise nativa do ESPER, com uma nova chave para
+o cache de fontes. Não reutiliza as `.esp` produzidas pela política anterior,
+nem apaga os caches antigos. Esse erro altera a separação entre componentes
+tonais e ruído antes de o efeito `B` ser aplicado; mudar a soprosidade não
+repara essa análise.
+
+Também foi reproduzido estouro de inteiro de 16 bits na saída do ESPER com
+volume nativo 100: a forma de onda ultrapassava +32767 e reaparecia negativa.
+Em sete dos quinze fragmentos havia 22 saltos acima de 40000 unidades. Usar
+volume nativo 50 eliminou esses saltos no teste. O wrapper agora reduz o
+volume antes de o ESPER gravar PCM; a montagem da frase continua ajustando o
+ganho. Tom, velocidade e flags B0 são preservados.
+
+O setup reconhece os wrappers oficiais dos kits v1/v2/v3 e faz backup antes
+de atualizá-los. Se o motor já está instalado, reutiliza o executável e o INI
+verificados, sem baixar novamente os 102 MiB. Depois, execute a ativação para
+gravar o novo identificador de implementação no comando do resampler:
+
+```bash
+if python "$HOME/esper-utau-termux-kit/deploy/esper-utau/termux/setup.py" \
+  --container voicepeak-arm64; then
+  python "$HOME/esper-utau-termux-kit/deploy/esper-utau/termux/activate-esper.py" \
+    --container voicepeak-arm64 --flags B0
+fi
+```
+
+Esse identificador muda os fingerprints dos fragmentos, das frases e do cache
+da VPS, evitando que o áudio antigo seja confundido com a correção. Reinicie
+o worker após ativar. A primeira frase pode demorar mais, porque o ESPER
+precisa refazer a análise privada. A comparação corrigida foi gerada com o
+motor oficial em Linux x64; a confirmação de qualidade depende de audição e
+o novo wrapper ainda precisa ser executado no Poco.
+
+O patch `teto-worldline-09-esper-timbre.zip` contém os arquivos alterados nas
+pastas originais para o updater do Discord. A instalação do wrapper no Poco
+exige executar os comandos do kit v4 acima.
+
+## Ativar ESPER como motor da Teto
+
+Depois do setup, o helper de ativação confere o wrapper instalado, testa o
+runtime e gera uma frase real com a Teto English. Somente após esses testes
+grava `~/.phone-worker.env`, com backup, preservando as outras configurações:
+
+```bash
+python "$HOME/esper-utau-termux-kit/deploy/esper-utau/termux/activate-esper.py" \
+  --container voicepeak-arm64 --flags B0
+```
+
+O backend passa a `utau`, usando o wrapper ESPER instalado como resampler,
+`length_mode=total`, voicebank English, C4, tom de 0 semitons e velocidade 1.0.
+As flags antigas do resampler são substituídas por `B0`, a referência neutra.
+O limite do job e da síntese do worker passa a 120 s, pois a primeira geração
+da frase de comparação no Poco levou cerca de 38 s. A configuração de tom
+personalizada de cada usuário no bot continua valendo.
+
+Reinicie o worker para carregar o novo `.env`:
+
+```bash
+bash "$HOME/.core-worker-runtime/current/start-phone-worker.sh" --force-restart
+```
+
+Se a instalação ainda usa somente a pasta histórica `~/phone-worker`, o mesmo
+comando está em `~/phone-worker/start-phone-worker.sh`. O helper de ativação
+informa `restart_required`; ele não encerra processos por nome.
+
+O patch `teto-worldline-08-esper-activate.zip` também ajusta o prazo padrão da
+Teto no bot para 120 s e prepara o áudio antes da reprodução direta no worker.
+Aplique esse patch pelo updater do Discord. Se a VPS já tem um valor explícito
+para `TTS_TETO_WORKER_TIMEOUT_SECONDS`, configure-o como `120` no ambiente do
+bot; configurações explícitas continuam tendo precedência sobre o padrão.
+
+## Comparar os níveis de soprosidade
+
+A flag `B` controla a relação entre a componente tonal e o ruído de ar. `B0`
+é neutro; `B25`, `B50`, `B75` e `B100` aumentam a soprosidade. Em `B100`, a
+biblioteca reduz a componente tonal a zero. Valores negativos reduzem a
+componente de ruído, mas também podem enfraquecer consoantes como “s” e “f”.
+O código da biblioteca aceita valores de -100 a 100; a tabela oficial do
+ESPER-Utau documenta somente 0 a 100, por isso os negativos são experimentais.
+
+```bash
+python "$HOME/esper-utau-termux-kit/deploy/esper-utau/termux/compare-breathiness.py" \
+  --direction both
+```
+
+O comparador gera WAVs originais e MP3s com volume nivelado em
+**Downloads/teto-esper-niveis**. Mantém texto, voicebank, tom, velocidade e os
+demais efeitos iguais. Não modifica o `.env` nem o nível selecionado no bot.
+Use `--direction positive` para gerar somente 0/25/50/75/100, ou `negative`
+para 0/-25/-50/-75/-100.
+
+Se os arquivos ainda não aparecem no gerenciador Android, confira-os pelo
+Termux e abra diretamente um MP3:
+
+```bash
+ls -lh "$HOME/storage/downloads/teto-esper-niveis/"*.mp3
+termux-open --chooser --content-type audio/mpeg \
+  "$HOME/storage/downloads/teto-esper-niveis/esper-B000.mp3"
+```
+
+Para escolher outro nível em produção, repita a ativação com `--flags B25`
+(ou um nível negativo experimental), depois reinicie o worker. Esse comando
+faz a validação de áudio novamente antes de alterar a configuração.
 
 ## Fontes e licença
 
