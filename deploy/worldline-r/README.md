@@ -112,9 +112,12 @@ English no worker. O comparador detecta essa pasta automaticamente.
 - [Regras de uso oficiais](https://kasaneteto.jp/guidelines/voice.html)
 
 Para mudar o motor de síntese, o [ESPER-Utau 2.5.0](https://github.com/CdrSonan/ESPER-Utau/releases/tag/v2.5.0)
-oferece uma distribuição Linux ARM64 e constitui uma opção para avaliar depois
-desta comparação. Ainda não foi integrado ou verificado no Poco: ele precisa
-de um backend de resampler separado; não substitui `libworldline.so`.
+oferece uma distribuição Linux ARM64. O [kit ESPER-Utau](../esper-utau/README.md)
+instala e verifica esse runtime no Ubuntu ARM64 existente e compara os dois
+motores com a mesma bank English. Usa o backend UTAU com um wrapper que mantém
+os arquivos de análise fora do banco original; não substitui `libworldline.so`.
+O teste de voz local foi realizado em Linux x64; a execução no Poco ainda
+precisa ser confirmada pelo relatório do kit.
 
 ## Selecionar no worker
 

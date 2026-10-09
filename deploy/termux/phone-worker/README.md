@@ -25,6 +25,11 @@ gera WAVs com os envelopes anteriores, os corrigidos e a bank English oficial
 opcional, sem alterar o `.env`. A pronúncia PT-BR usa aproximações dos
 sons disponíveis na voicebank; geração válida de WAV não comprova naturalidade.
 
+O [kit ESPER-Utau](../../esper-utau/README.md) usa o backend UTAU existente para
+comparar esse resampler Linux ARM64 com WORLDLINE-R no Termux. Instala o runtime
+em pasta separada, mantém os arquivos de análise fora da voicebank e gera WAV
+ou MP3 sem selecionar o motor no `.env` do worker.
+
 ## Reinício após atualização de fontes
 
 O supervisor compara o hash do processo confirmado com o manifesto da release
