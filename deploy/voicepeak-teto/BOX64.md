@@ -13,11 +13,11 @@ comercial, a voz Teto ou uma licença.
 
 ## Instalar o kit e o runtime
 
-Baixe `teto-voicepeak-termux-box64-kit-v6.zip` para Downloads. No Termux nativo,
+Baixe `teto-voicepeak-termux-box64-kit-v7.zip` para Downloads. No Termux nativo,
 fora de outro PRoot:
 
 ```bash
-unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v6.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v7.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 bash deploy/voicepeak-teto/termux/setup-box64.sh
 ```
@@ -59,6 +59,9 @@ pixels e callbacks passou com o servidor X11 conectado.
 
 O kit v6 acrescenta um comando para mudar a interface para inglês ou japonês,
 usando a preferência persistente do programa e um backup do arquivo existente.
+O kit v7 corrige a criação dessa preferência no Python do Android, que pode
+não fornecer `os.link`. Usa `renameat2` com `RENAME_NOREPLACE`, diretamente
+pela libc ou pelo syscall da arquitetura nativa, quando esse método é necessário.
 
 O código do Box64 fica fixado na versão oficial **v0.4.0**, commit
 `dae0917c47b4edd8956f314210417a20fd225c4b`. O setup também usa as duas
@@ -77,7 +80,7 @@ locais. O setup não registra binfmt nem substitui executáveis do Ubuntu.
 Para o Poco que já completou o setup, extraia o kit atual e execute:
 
 ```bash
-unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v6.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v7.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 bash deploy/voicepeak-teto/termux/patch-box64-x11.sh
 ```
@@ -148,6 +151,10 @@ outra configuração explicitamente. A preferência fica em
 `ApplicationSettings/Interface/@language`. Um arquivo existente recebe backup
 antes da gravação, e uma configuração já em inglês fica como está. Para
 voltar ao japonês, execute com `--language japanese`.
+
+Se o kit v6 parou em `AttributeError: module 'os' has no attribute 'link'`,
+extraia o kit v7 e repita o comando de idioma. Não é necessário executar o
+setup ou recompilar o Box64 para essa correção.
 
 O formato e o carregamento da preferência em inglês foram verificados no
 programa Linux oficial 1.2.22, num ambiente x86_64 isolado. O comando ainda

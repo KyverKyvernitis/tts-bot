@@ -1,11 +1,13 @@
 """Validate offline UI settings changes without a voice, activation or GUI."""
 import importlib.util
+import errno
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 from xml.dom import minidom
 
 import pytest
@@ -326,4 +328,129 @@ def test_isolated_help_and_explicit_settings_need_no_runtime_or_launcher(tmp_pat
 def test_unsupported_language_rejected_before_creating_directories(helper, tmp_path):
     with pytest.raises(helper.LanguageSettingError, match="idioma"):
         helper.set_ui_language(tmp_path / "missing/settings.xml", "portuguese")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_android_without_os_link_creates_updates_and_repeats_settings(helper, tmp_path, monkeypatch):
+    monkeypatch.delattr(helper.os, "link")
+    monkeypatch.setattr(helper.sys, "platform", "android")
+    path = tmp_path / "engine/usersettings/settings/settings.xml"
+    assert helper.set_ui_language(path) == (True, None)
+    original = path.read_bytes()
+    assert 'language="english"' in original.decode()
+    assert helper.set_ui_language(path) == (False, None)
+    changed, backup = helper.set_ui_language(path, "japanese")
+    assert changed and backup.read_bytes() == original
+    assert 'language="japanese"' in path.read_text()
+    assert sorted(p.name for p in path.parent.iterdir()) == sorted([path.name, backup.name])
+
+
+@pytest.mark.parametrize("backend", ["renameat2", "syscall"])
+@pytest.mark.parametrize("existing", ["none", "file", "broken-symlink", "directory"])
+def test_real_native_publication_preserves_concurrent_destination(helper, tmp_path, monkeypatch, backend, existing):
+    library = helper.ctypes.CDLL(None, use_errno=True)
+    native = getattr(library, backend)
+    if backend == "syscall":
+        native.restype = helper.ctypes.c_long
+    monkeypatch.delattr(helper.os, "link")
+    monkeypatch.setattr(helper.sys, "platform", "android")
+    monkeypatch.setattr(helper.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace(**{backend: native}))
+    path = tmp_path / "settings.xml"
+    competing = b"created by another writer"
+    publish = helper._rename_new_no_replace
+
+    def create_then_publish(parent, source, destination):
+        if existing == "file":
+            path.write_bytes(competing)
+        elif existing == "broken-symlink":
+            path.symlink_to(tmp_path / "absent")
+        elif existing == "directory":
+            path.mkdir()
+        publish(parent, source, destination)
+
+    monkeypatch.setattr(helper, "_rename_new_no_replace", create_then_publish)
+    if existing == "none":
+        assert helper.set_ui_language(path) == (True, None)
+        assert 'language="english"' in path.read_text()
+    else:
+        with pytest.raises(FileExistsError):
+            helper.set_ui_language(path)
+        if existing == "file":
+            assert path.read_bytes() == competing
+        elif existing == "broken-symlink":
+            assert path.is_symlink() and not path.exists()
+        else:
+            assert path.is_dir() and list(path.iterdir()) == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["settings.xml"]
+
+
+@pytest.mark.parametrize("process_handle", ["unavailable", "missing-wrapper"])
+def test_android_publication_loads_explicit_bionic_libc(helper, tmp_path, monkeypatch, process_handle):
+    native = helper.ctypes.CDLL(None, use_errno=True).renameat2
+    loaded = []
+
+    def load(name, *, use_errno):
+        assert use_errno
+        loaded.append(name)
+        if name is None:
+            if process_handle == "unavailable":
+                raise OSError("process handle not available")
+            return SimpleNamespace()
+        assert name == "libc.so"
+        return SimpleNamespace(renameat2=native)
+
+    monkeypatch.delattr(helper.os, "link")
+    monkeypatch.setattr(helper.sys, "platform", "android")
+    monkeypatch.setattr(helper.ctypes, "CDLL", load)
+    path = tmp_path / "settings.xml"
+    assert helper.set_ui_language(path) == (True, None)
+    assert 'language="english"' in path.read_text()
+    assert loaded == [None, "libc.so"]
+
+
+class NativeFunction:
+    def __init__(self, function):
+        self.function = function
+
+    def __call__(self, *args):
+        return self.function(*args)
+
+
+def test_android_syscall_uses_arm64_number_relative_fd_and_typed_pointers(helper, monkeypatch):
+    calls = []
+    native = NativeFunction(lambda *arguments: calls.append(arguments) or 0)
+    monkeypatch.setattr(helper.sys, "platform", "android")
+    monkeypatch.setattr(helper.os, "uname", lambda: SimpleNamespace(machine="aarch64"))
+    monkeypatch.setattr(helper.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace(syscall=native))
+    helper._rename_new_no_replace(57, ".settings.tmp", "settings.xml")
+    assert [[arg.value for arg in call] for call in calls] == [[276, 57, b".settings.tmp", 57, b"settings.xml", 1]]
+    assert tuple(type(arg) for arg in calls[0]) == (
+        helper.ctypes.c_long, helper.ctypes.c_int, helper.ctypes.c_char_p,
+        helper.ctypes.c_int, helper.ctypes.c_char_p, helper.ctypes.c_uint,
+    )
+
+
+def test_unsupported_atomic_publication_preserves_absence_and_cleans_staging(helper, tmp_path, monkeypatch):
+    def fail(*_arguments):
+        assert helper.ctypes.get_errno() == 0
+        helper.ctypes.set_errno(errno.ENOSYS)
+        return -1
+
+    native = NativeFunction(fail)
+    monkeypatch.delattr(helper.os, "link")
+    monkeypatch.setattr(helper.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace(renameat2=native))
+    monkeypatch.setattr(helper.os, "rename", lambda *_args, **_kwargs: pytest.fail("ordinary rename may overwrite"))
+    helper.ctypes.set_errno(errno.EACCES)
+    with pytest.raises(helper.LanguageSettingError, match="atômica"):
+        helper.set_ui_language(tmp_path / "settings.xml")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_unknown_syscall_abi_preserves_absence(helper, tmp_path, monkeypatch):
+    native = NativeFunction(lambda *_arguments: pytest.fail("unknown ABI cannot issue syscall"))
+    monkeypatch.delattr(helper.os, "link")
+    monkeypatch.setattr(helper.os, "uname", lambda: SimpleNamespace(machine="unknown"))
+    monkeypatch.setattr(helper.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace(syscall=native))
+    with pytest.raises(helper.LanguageSettingError, match="atômica"):
+        helper.set_ui_language(tmp_path / "settings.xml")
     assert list(tmp_path.iterdir()) == []

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import fcntl
 import importlib.util
 import os
@@ -194,6 +196,61 @@ def _write_exclusive(parent: int, name: str, contents: bytes, mode: int = 0o600)
         os.close(descriptor)
 
 
+def _rename_new_no_replace(parent: int, source: str, destination: str) -> None:
+    """Publish a new file using Linux/Bionic without replacing another writer."""
+    if not (sys.platform.startswith("linux") or sys.platform == "android" or hasattr(sys, "getandroidapilevel")):
+        raise LanguageSettingError("a criação atômica deste arquivo exige Android/Linux")
+    libraries = []
+    names = (None, "libc.so") if sys.platform == "android" or hasattr(sys, "getandroidapilevel") else (None,)
+    for name in names:
+        try:
+            libraries.append(ctypes.CDLL(name, use_errno=True))
+        except OSError:
+            continue
+    rename = next((function for library in libraries if (function := getattr(library, "renameat2", None)) is not None), None)
+    arguments = (parent, os.fsencode(source), parent, os.fsencode(destination), 1)
+    ctypes.set_errno(0)
+    if rename is not None:
+        rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        result = rename(*arguments)
+    else:
+        native_abi = (os.uname().machine.lower(), ctypes.sizeof(ctypes.c_void_p), ctypes.sizeof(ctypes.c_long))
+        syscall_number = {
+            ("aarch64", 8, 8): 276,
+            ("arm64", 8, 8): 276,
+            ("x86_64", 8, 8): 316,
+            ("amd64", 8, 8): 316,
+            ("riscv64", 8, 8): 276,
+        }.get(native_abi)
+        syscall = next((function for library in libraries if (function := getattr(library, "syscall", None)) is not None), None)
+        if syscall_number is None or syscall is None:
+            raise LanguageSettingError("o sistema não oferece criação atômica sem substituir um arquivo existente")
+        syscall.restype = ctypes.c_long
+        # Bionic may lack the renameat2 symbol despite kernel support. The
+        # variadic syscall needs explicit pointer and integer types.
+        result = syscall(
+            ctypes.c_long(syscall_number), ctypes.c_int(arguments[0]), ctypes.c_char_p(arguments[1]),
+            ctypes.c_int(arguments[2]), ctypes.c_char_p(arguments[3]), ctypes.c_uint(arguments[4]),
+        )
+    if result != 0:
+        failure = ctypes.get_errno() or errno.EIO
+        if failure in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+            raise LanguageSettingError("o sistema de arquivos não oferece criação atômica sem substituir um arquivo existente")
+        raise OSError(failure, os.strerror(failure), destination)
+
+
+def _publish_new(parent: int, source: str, destination: str) -> None:
+    link = getattr(os, "link", None)
+    if callable(link):
+        try:
+            link(source, destination, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+            return
+        except NotImplementedError:
+            pass
+    _rename_new_no_replace(parent, source, destination)
+
+
 def set_ui_language(path: Path, language: str = "english") -> tuple[bool, Path | None]:
     """Change only the UI language, backing up exact existing bytes before replacement."""
     path = Path(os.path.abspath(path))
@@ -226,9 +283,9 @@ def set_ui_language(path: Path, language: str = "english") -> tuple[bool, Path |
             _verify_source(parent, path, source)
             os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
         else:
-            # Linking publishes a complete new file atomically without replacing
-            # a file created by another writer after our absence check.
-            os.link(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+            # Android's Python may omit os.link. Both publication methods
+            # preserve a file created by another writer after our absence check.
+            _publish_new(parent, temporary, path.name)
         committed = True
         return True, None if backup is None else path.with_name(backup)
     finally:
