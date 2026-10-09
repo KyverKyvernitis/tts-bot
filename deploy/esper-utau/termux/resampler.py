@@ -34,6 +34,11 @@ ENGINE_BYTES = 107335629
 ENGINE_SHA256 = "e2cb6dc113593cb3b788debb51996f591a5f9d47bbd2a54df57bc1ecd843602f"
 CONFIG_BYTES = 762
 CONFIG_SHA256 = "21951154b9bafdebde0b3a1d6533bb1fde549113b63b99a573b49ea68fadbe83"
+# .NET 8 otherwise reserves at least 256 GiB of virtual address space for
+# region GC. Termux/PRoot ARM64 can reject that reservation before synthesis.
+# Environment values for GCHeapHardLimit are hexadecimal: 40000000 = 1 GiB.
+# This caps the managed heap, not total RSS, and does not preallocate 1 GiB.
+GC_ENVIRONMENT = {"DOTNET_GCHeapHardLimit": "40000000", "DOTNET_gcServer": "0"}
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_FRQ_BYTES = 16 * 1024 * 1024
 MAX_ANALYSIS_BYTES = 256 * 1024 * 1024
@@ -311,6 +316,7 @@ def guest_command(container: str, release: Path, cache: Path, source: Path, job:
                "--", "/usr/bin/env", "LANG=C", "LC_ALL=C",
                "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1",
                "DOTNET_BUNDLE_EXTRACT_BASE_DIR=/opt/esper-cache/dotnet",
+               *[f"{key}={value}" for key, value in GC_ENVIRONMENT.items()],
                "OMP_NUM_THREADS=2", "OPENBLAS_NUM_THREADS=2",
                "/opt/esper-engine/ESPER-Utau"]
     return command + ["/opt/esper-source/source.wav", "/opt/esper-job/output.wav", *args[2:]]
@@ -437,6 +443,7 @@ def synthesize(values: list[str], *, root: Path, cache: Path, container: str, ti
     return {"ok": True, "resampler": "ESPER-Utau", "source_version": RELEASE,
             "engine_sha256": runtime["engine_sha256"], "config_sha256": runtime["config_sha256"],
             "engine_elf_arm64": runtime["engine_elf_arm64"], "native_architecture": "arm64",
+            "gc_settings_requested": GC_ENVIRONMENT,
             "container": container, "original_voicebank_changed": False,
             "source_cache_key": key, "original_frq_copied": frq is not None,
             "analysis_directory": str(directory), "output": str(target),
@@ -497,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (EsperError, OSError, ValueError, TimeoutError, subprocess.TimeoutExpired) as exc:
         result = {"ok": False, "resampler": "ESPER-Utau", "source_version": RELEASE,
+                  "gc_settings_requested": GC_ENVIRONMENT,
                   "synthetic_render_verified": False, "teto_synthesis_verified": False,
                   "portuguese_speech_verified": False, "original_voicebank_changed": False,
                   "error": f"{type(exc).__name__}: {exc}"}

@@ -12,6 +12,7 @@ import struct
 import sys
 from types import SimpleNamespace
 import wave
+import zipfile
 
 import pytest
 
@@ -327,3 +328,210 @@ def test_release_pins_match_independently_verified_official_api_assets():
     assert setup.ASSETS["engine"]["sha256"] == "e2cb6dc113593cb3b788debb51996f591a5f9d47bbd2a54df57bc1ecd843602f"
     assert setup.ASSETS["config"]["bytes"] == 762
     assert setup.ASSETS["config"]["sha256"] == "21951154b9bafdebde0b3a1d6533bb1fde549113b63b99a573b49ea68fadbe83"
+
+
+def test_failed_probe_keeps_verified_downloads_and_next_retry_reuses_them(prepared):
+    prepared.failure = "probe"
+    failure = install(prepared)
+    assert not failure["ok"] and not failure["runtime_ready"]
+    assert not (prepared.root / "releases" / setup.VERSION).exists()
+    assert not (prepared.root / "bin" / "resampler.py").exists()
+    cache = prepared.root / "downloads" / setup.VERSION
+    snapshots = {}
+    for asset, expected in prepared.assets.items():
+        path = cache / expected["name"]
+        assert path.read_bytes() == prepared.payloads[asset]
+        assert path.stat().st_mode & 0o777 == 0o600
+        snapshots[asset] = path.stat()
+    assert not failure["checks"]["download"]["skipped"]
+    assert not failure["checks"]["download"]["cached_download"]
+    prepared.failure = None
+    recovered = install(prepared)
+    assert recovered["ok"] and recovered["runtime_ready"]
+    assert recovered["checks"]["download"]["cached_download"]
+    assert recovered["checks"]["download"]["skipped"]
+    assert set(recovered["checks"]["download"]["cached_assets"]) == {"engine", "config"}
+    assert prepared.downloads == ["engine", "config"]
+    assert prepared.probes == 2
+    for asset, expected in prepared.assets.items():
+        path = cache / expected["name"]
+        published = prepared.root / "releases" / setup.VERSION / expected["name"]
+        assert path.stat().st_ino == snapshots[asset].st_ino
+        assert path.stat().st_mtime_ns == snapshots[asset].st_mtime_ns
+        assert published.stat().st_ino != path.stat().st_ino
+
+
+def test_retry_revalidates_cache_and_preserves_modified_download(prepared):
+    prepared.failure = "probe"
+    assert not install(prepared)["ok"]
+    path = prepared.root / "downloads" / setup.VERSION / "ESPER-Utau"
+    changed = b"customized cached engine"
+    path.write_bytes(changed)
+    prepared.failure = None
+    report = install(prepared)
+    assert not report["ok"] and "preservado" in report["error"]
+    assert path.read_bytes() == changed
+    assert prepared.downloads == ["engine", "config"]
+    assert prepared.probes == 1
+    assert not (prepared.root / "releases" / setup.VERSION).exists()
+
+
+def test_config_download_failure_keeps_engine_for_partial_retry(prepared, monkeypatch):
+    original_download = setup.download_asset
+
+    def download(asset, output, timeout):
+        if asset == "config":
+            raise setup.SetupError("connection failed")
+        original_download(asset, output, timeout)
+
+    monkeypatch.setattr(setup, "download_asset", download)
+    failure = install(prepared)
+    assert not failure["ok"]
+    cache = prepared.root / "downloads" / setup.VERSION
+    assert (cache / "ESPER-Utau").read_bytes() == prepared.payloads["engine"]
+    assert not (cache / "esper-config.ini").exists()
+    assert not list(cache.glob(".download-stage-*"))
+    monkeypatch.setattr(setup, "download_asset", original_download)
+    recovered = install(prepared)
+    assert recovered["ok"]
+    assert recovered["checks"]["download"]["cached_download"]
+    assert not recovered["checks"]["download"]["skipped"]
+    assert recovered["checks"]["download"]["cached_assets"] == ["engine"]
+    assert prepared.downloads == ["engine", "config"]
+
+
+def test_malformed_cached_config_is_preserved_before_any_download(prepared):
+    cache = prepared.root / "downloads" / setup.VERSION
+    cache.mkdir(parents=True)
+    changed = b"operator modified configuration"
+    (cache / "esper-config.ini").write_bytes(changed)
+    report = install(prepared)
+    assert not report["ok"] and not prepared.downloads and not prepared.probes
+    assert (cache / "esper-config.ini").read_bytes() == changed
+    assert not (cache / "ESPER-Utau").exists()
+    assert not (prepared.root / "releases" / setup.VERSION).exists()
+
+
+def test_symlink_download_cache_cannot_redirect_installation(prepared, tmp_path):
+    outside = tmp_path / "foreign"
+    outside.mkdir()
+    parent = prepared.root / "downloads"
+    parent.mkdir(parents=True)
+    (parent / setup.VERSION).symlink_to(outside, target_is_directory=True)
+    report = install(prepared)
+    assert not report["ok"] and not prepared.downloads and not prepared.commands
+    assert not list(outside.iterdir())
+
+
+def test_invalid_download_is_not_retained_as_a_reusable_asset(prepared):
+    prepared.payloads["engine"] = b"wrong binary"
+    report = install(prepared)
+    assert not report["ok"]
+    cache = prepared.root / "downloads" / setup.VERSION
+    assert not (cache / "ESPER-Utau").exists()
+    assert not list(cache.glob(".download-stage-*"))
+
+
+def test_setup_accounts_for_download_stage_and_dotnet_space_before_network(prepared, monkeypatch):
+    asset_bytes = sum(asset["bytes"] for asset in prepared.assets.values())
+    expected_free = 2 * asset_bytes + 400 * 1024 * 1024
+    monkeypatch.setattr(setup.shutil, "disk_usage", lambda path: SimpleNamespace(free=expected_free - 1))
+    report = install(prepared)
+    assert not report["ok"] and not prepared.downloads
+    assert report["checks"]["free_space"]["required_bytes"] == expected_free
+    assert not (prepared.root / "downloads" / setup.VERSION).exists()
+
+
+def test_guest_report_only_prints_required_packages(prepared):
+    prepared.installed.update({"large-unrelated-package", "another-package"})
+    report = install(prepared)
+    assert report["ok"]
+    check = report["checks"]["guest_packages_before"]
+    assert all(check["packages"].values())
+    assert len(check["output"].splitlines()) == len(setup.REQUIRED_PACKAGES)
+    assert "unrelated" not in check["output"] and "another-package" not in check["output"]
+
+
+def known_prior_launcher(monkeypatch):
+    path = Path("/workspace/library-files/teto-esper-termux-kit-v1.zip")
+    if not path.exists():
+        # Keep the upgrade behavior covered in a normal checkout as well. The
+        # shipped prior artifact, when available, exercises its exact real hash.
+        source = b"#!/usr/bin/env python3\n# known previous release fixture\n"
+        digest = hashlib.sha256(source).hexdigest()
+        monkeypatch.setattr(setup, "KNOWN_LAUNCHER_SHA256", setup.KNOWN_LAUNCHER_SHA256 | {digest})
+    else:
+        with zipfile.ZipFile(path) as archive:
+            source = archive.read("deploy/esper-utau/termux/resampler.py")
+    assert hashlib.sha256(source).hexdigest() in setup.KNOWN_LAUNCHER_SHA256
+    return source
+
+
+def test_known_v1_launchers_are_backed_up_exactly_and_updated_after_probe(prepared, monkeypatch):
+    previous = known_prior_launcher(monkeypatch)
+    directory = prepared.root / "bin"
+    directory.mkdir(parents=True)
+    launchers = [directory / "resampler.py", directory / "esper-utau-resampler"]
+    for path in launchers:
+        path.write_bytes(previous)
+    report = install(prepared)
+    assert report["ok"] and report["runtime_changed"]
+    assert len(report["launcher_updates"]) == 2
+    for update in report["launcher_updates"]:
+        path, backup = Path(update["path"]), Path(update["backup"])
+        assert backup.read_bytes() == previous
+        assert path.read_bytes() == (prepared.bundle / "resampler.py").read_bytes()
+        assert path.stat().st_mode & 0o777 == 0o755
+    # Already-current wrappers cause no new backup, replacement or download.
+    snapshots = {path: path.stat().st_ino for path in launchers}
+    retry = install(prepared)
+    assert retry["ok"] and not retry["runtime_changed"] and not retry["launcher_updates"]
+    assert {path: path.stat().st_ino for path in launchers} == snapshots
+    assert prepared.downloads == ["engine", "config"]
+
+
+def test_failed_probe_never_upgrades_known_prior_launcher(prepared, monkeypatch):
+    previous = known_prior_launcher(monkeypatch)
+    launcher = prepared.root / "bin" / "resampler.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes(previous)
+    prepared.failure = "probe"
+    report = install(prepared)
+    assert not report["ok"]
+    assert launcher.read_bytes() == previous
+    assert not list(launcher.parent.glob("*.backup-*"))
+    assert not (prepared.root / "releases" / setup.VERSION).exists()
+
+
+def test_existing_foreign_backup_is_preserved_with_prior_launcher(prepared, monkeypatch):
+    previous = known_prior_launcher(monkeypatch)
+    launcher = prepared.root / "bin" / "resampler.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes(previous)
+    digest = hashlib.sha256(previous).hexdigest()
+    backup = launcher.with_name(f"{launcher.name}.backup-{digest[:12]}")
+    backup.write_bytes(b"operator-owned unrelated backup")
+    report = install(prepared)
+    assert not report["ok"] and "backup existente" in report["error"]
+    assert launcher.read_bytes() == previous
+    assert backup.read_bytes() == b"operator-owned unrelated backup"
+
+
+def test_previously_published_runtime_reuses_assets_and_upgrades_known_launcher(prepared, monkeypatch):
+    assert install(prepared)["ok"]
+    release = prepared.root / "releases" / setup.VERSION
+    engine = release / "ESPER-Utau"
+    before = engine.stat()
+    previous = known_prior_launcher(monkeypatch)
+    launcher = prepared.root / "bin" / "resampler.py"
+    launcher.write_bytes(previous)
+    monkeypatch.delattr(setup.os, "link", raising=False)
+    report = install(prepared)
+    assert report["ok"] and report["runtime_changed"]
+    assert len(report["launcher_updates"]) == 1
+    assert Path(report["launcher_updates"][0]["backup"]).read_bytes() == previous
+    assert launcher.read_bytes() == (prepared.bundle / "resampler.py").read_bytes()
+    assert engine.stat().st_ino == before.st_ino
+    assert engine.stat().st_mtime_ns == before.st_mtime_ns
+    assert prepared.downloads == ["engine", "config"]
+    assert prepared.probes == 2

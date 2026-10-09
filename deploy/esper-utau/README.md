@@ -12,18 +12,18 @@ natural com uma voicebank de canto.
 
 ## Instalar e comparar no Poco
 
-Baixe `teto-esper-termux-kit-v1.zip` para Downloads e execute:
+Baixe `teto-esper-termux-kit-v2.zip` para Downloads e execute:
 
 ```bash
 mkdir -p "$HOME/esper-utau-termux-kit"
-unzip -o "$HOME/storage/downloads/teto-esper-termux-kit-v1.zip" \
+unzip -o "$HOME/storage/downloads/teto-esper-termux-kit-v2.zip" \
   -d "$HOME/esper-utau-termux-kit"
 
-python "$HOME/esper-utau-termux-kit/deploy/esper-utau/termux/setup.py" \
-  --container voicepeak-arm64
-
-python "$HOME/esper-utau-termux-kit/deploy/esper-utau/termux/compare-esper.py" \
-  --mp3
+if python "$HOME/esper-utau-termux-kit/deploy/esper-utau/termux/setup.py" \
+  --container voicepeak-arm64; then
+  python "$HOME/esper-utau-termux-kit/deploy/esper-utau/termux/compare-esper.py" \
+    --mp3
+fi
 ```
 
 O setup baixa aproximadamente **102 MiB**, verifica os arquivos oficiais,
@@ -53,7 +53,40 @@ O primeiro uso analisa as gravações; usos posteriores podem aproveitar os
 caches. A amostra local “Olá. Eu sou a Teto.” levou cerca de 8,09 s inicialmente
 e 0,046 s com cache de fragmentos, em Linux x64. Esses tempos não representam
 o desempenho no Poco. O prazo do comparador é 180 s por amostra, mais até 5 s
-para limpeza; MP3 permite até 15 s adicionais por arquivo.
+para limpeza; MP3 permite até 15 s adicionais por arquivo. O prazo passado à
+síntese WORLDLINE é limitado a 120 s, conforme a API desse backend. Isso corrige
+o erro de timeout que impedia a referência WORLDLINE no kit v1.
+
+## Recuperar a inicialização do .NET
+
+O kit v2 aplica ao processo ESPER `DOTNET_GCHeapHardLimit=40000000` e
+`DOTNET_gcServer=0`. O limite é hexadecimal: **1 GiB para o heap gerenciado**.
+Não reserva previamente esse volume nem limita toda a memória do processo.
+Sem esse ajuste, o coletor do .NET 8 pode tentar reservar uma região virtual
+maior do que o ambiente Termux/PRoot permite e emitir:
+
+```text
+GC heap initialization failed with error 0x8007000E
+Failed to create CoreCLR, HRESULT: 0x8007000E
+```
+
+Esse erro foi reproduzido com o executável oficial Linux x64 e um limite de
+16 GiB para o espaço virtual. Com o ajuste, o mesmo teste inicializou o motor
+e gerou um WAV não silencioso. A confirmação no Poco exige executar o setup
+novamente; o teste local não comprova execução ARM64 no aparelho.
+
+Os downloads validados agora ficam em `~/.esper-utau/downloads/v2.5.0` mesmo
+quando o teste de síntese falha. Na próxima tentativa, tamanho, hash e ELF são
+conferidos novamente antes de reutilizar cada arquivo. A recuperação de uma
+tentativa feita com o kit v1 baixa o executável uma vez mais, porque aquela
+versão eliminava sua pasta temporária ao falhar.
+
+Se o wrapper do kit v1 já estiver instalado, o setup reconhece seu hash,
+cria uma cópia de segurança e publica o wrapper corrigido somente após o teste
+sintético passar. Arquivos modificados por outra instalação são preservados.
+O relatório do resampler inclui `gc_settings_requested`; esse campo informa os valores
+solicitados ao .NET, enquanto `synthetic_render_verified` comprova o resultado
+do teste de áudio.
 
 ## Banco original e caches
 
@@ -119,6 +152,8 @@ anteriores de Straycat ou flags WORLDLINE não devem ser herdadas.
 - [INI oficial](https://github.com/CdrSonan/ESPER-Utau/releases/download/v2.5.0/esper-config.ini): 762 bytes.
 - SHA-256 INI: `21951154b9bafdebde0b3a1d6533bb1fde549113b63b99a573b49ea68fadbe83`.
 - [Licença MIT](LICENSE.txt).
+- [.NET: limite de heap e região do GC](https://learn.microsoft.com/en-us/dotnet/core/runtime-config/garbage-collector#region-range).
+- [Relato do mesmo erro no Termux/PRoot ARM64](https://github.com/dotnet/runtime/issues/85556).
 
 Os ZIPs do patch e do kit mantêm as pastas originais do repositório. Não contêm
 executáveis, voicebanks ou credenciais; o setup baixa os assets oficiais.

@@ -31,6 +31,12 @@ DEFAULT_CONTAINER = "voicepeak-arm64"
 TOOLKIT_ROOT = Path(__file__).resolve().parent
 REQUIRED_PACKAGES = ("libc6", "libstdc++6", "libgcc-s1", "zlib1g")
 MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
+DOTNET_FREE_SPACE_RESERVE = 400 * 1024 * 1024
+# Exact source shipped in teto-esper-termux-kit-v1.zip. Other local launchers
+# belong to the operator and must never be replaced by an installation retry.
+KNOWN_LAUNCHER_SHA256 = frozenset({
+    "da55173230453b3e06c74416c88bdec73a94ae86e8afda320a2b7f12b04305e1",
+})
 ASSETS = {
     "engine": {
         "name": "ESPER-Utau", "bytes": 107335629,
@@ -205,11 +211,16 @@ def packages(report: dict, container: str, label: str) -> dict[str, bool]:
     result = checked_guest(report, label, container,
                            ["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Status}\\n"])
     inventory = {name: False for name in REQUIRED_PACKAGES}
+    relevant_lines = []
     for line in result.get("output", "").splitlines():
         name, _, state = line.partition("\t")
         name = name.split(":", 1)[0]
         if name in inventory:
             inventory[name] = state.strip() == "install ok installed"
+            relevant_lines.append(f"{name}\t{state.strip()}\n")
+    # dpkg-query still checks the complete inventory; the JSON only needs the
+    # four dependencies instead of hundreds of unrelated package names.
+    report["checks"][label]["output"] = "".join(relevant_lines)
     report["checks"][label]["packages"] = inventory
     return inventory
 
@@ -280,6 +291,94 @@ def release_descriptor() -> dict:
             "assets": ASSETS, "license": "MIT", "source_url": "https://github.com/CdrSonan/ESPER-Utau"}
 
 
+def cache_downloads(directory: Path, timeout: float, report: dict) -> None:
+    """Keep independently verified assets even if a subsequent probe fails."""
+    real_directories(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    reused = []
+    # Refuse a changed cache before downloading any other asset. Existing files
+    # are preserved rather than silently overwritten with the official release.
+    for asset, expected in ASSETS.items():
+        target = directory / expected["name"]
+        if target.exists() or target.is_symlink():
+            report["checks"][asset + "_pin"] = verify_asset(target, asset)
+            reused.append(asset)
+    deadline = time.monotonic() + timeout
+    for asset, expected in ASSETS.items():
+        if asset in reused:
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SetupError("download excedeu o tempo total permitido")
+        target = directory / expected["name"]
+        with tempfile.TemporaryDirectory(prefix=".download-stage-", dir=directory) as temporary:
+            staged = Path(temporary) / expected["name"]
+            download_asset(asset, staged, remaining)
+            evidence = verify_asset(staged, asset)
+            if target.exists() or target.is_symlink():
+                raise SetupError("cache mudou durante o download; arquivo existente preservado")
+            staged.chmod(0o600)
+            staged.rename(target)
+            report["checks"][asset + "_pin"] = evidence
+    report["checks"]["download"] = {
+        "ok": True, "skipped": len(reused) == len(ASSETS),
+        "cached_download": bool(reused), "cached_assets": reused,
+        "cache_directory": str(directory),
+    }
+
+
+def checked_launcher(path: Path, wrapper_digest: str) -> str | None:
+    if not (path.exists() or path.is_symlink()):
+        return None
+    _, digest, _ = regular_digest(path, 1024 * 1024)
+    if digest != wrapper_digest and digest not in KNOWN_LAUNCHER_SHA256:
+        raise SetupError("launcher existente é diferente; foi preservado")
+    return digest
+
+
+def atomic_launcher(path: Path, data: bytes, previous_digest: str | None) -> Path | None:
+    """Publish current code, backing up an unchanged, known prior launcher."""
+    digest = hashlib.sha256(data).hexdigest()
+    current_digest = checked_launcher(path, digest)
+    if current_digest != previous_digest:
+        raise SetupError("launcher mudou durante instalação; arquivo existente preservado")
+    if current_digest == digest:
+        return None
+    backup = None
+    if current_digest is not None:
+        previous = path.read_bytes()
+        if hashlib.sha256(previous).hexdigest() != current_digest:
+            raise SetupError("launcher mudou antes do backup; arquivo existente preservado")
+        backup = path.with_name(f"{path.name}.backup-{current_digest[:12]}")
+        if backup.exists() or backup.is_symlink():
+            _, backup_digest, _ = regular_digest(backup, 1024 * 1024)
+            if backup_digest != current_digest:
+                raise SetupError("backup existente é diferente; arquivo e launcher foram preservados")
+        else:
+            descriptor, filename = tempfile.mkstemp(prefix=".esper-launcher-backup-", dir=path.parent)
+            temporary = Path(filename)
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(previous); output.flush(); os.fsync(output.fileno())
+                if backup.exists() or backup.is_symlink():
+                    raise SetupError("backup mudou durante instalação; arquivo existente preservado")
+                temporary.rename(backup)
+            finally:
+                temporary.unlink(missing_ok=True)
+    descriptor, filename = tempfile.mkstemp(prefix=".esper-launcher-", dir=path.parent)
+    temporary = Path(filename)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(data); output.flush(); os.fsync(output.fileno())
+        temporary.chmod(0o755)
+        if checked_launcher(path, digest) != previous_digest:
+            raise SetupError("launcher mudou antes da publicação; arquivo existente preservado")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return backup
+
+
 def install_runtime(*, root: Path | None = None, container: str = DEFAULT_CONTAINER, download_timeout: float = 180) -> dict:
     report = {"ok": False, "runtime_ready": False, "runtime_changed": False, "version": VERSION,
               "native_architecture": platform.machine().lower(), "container": container, "checks": {},
@@ -295,12 +394,14 @@ def install_runtime(*, root: Path | None = None, container: str = DEFAULT_CONTAI
         destination = Path(os.path.abspath(Path(root or DEFAULT_ROOT).expanduser()))
         release = destination / "releases" / VERSION
         cache = destination / "cache"
+        downloads = destination / "downloads" / VERSION
         launcher = destination / "bin" / "resampler.py"
         convenience_launcher = launcher.with_name("esper-utau-resampler")
         real_directories(destination)
         real_directories(release)
         real_directories(launcher.parent)
         real_directories(cache)
+        real_directories(downloads)
         report["root"] = str(destination)
         if report["native_architecture"] not in {"aarch64", "arm64"}:
             raise SetupError("execute este setup no Termux ARM64 do Poco")
@@ -313,12 +414,10 @@ def install_runtime(*, root: Path | None = None, container: str = DEFAULT_CONTAI
                 raise SetupError(f"{executable} ausente no Termux; instale antes de continuar")
         wrapper = TOOLKIT_ROOT / "resampler.py"
         wrapper_bytes = wrapper.read_bytes()
+        wrapper_digest = hashlib.sha256(wrapper_bytes).hexdigest()
         license_bytes = (TOOLKIT_ROOT.parent / "LICENSE.txt").read_bytes()
-        for existing_launcher in (launcher, convenience_launcher):
-            if existing_launcher.exists() or existing_launcher.is_symlink():
-                regular_digest(existing_launcher, 1024 * 1024)
-                if existing_launcher.read_bytes() != wrapper_bytes:
-                    raise SetupError("launcher existente é diferente; foi preservado")
+        prior_launchers = {path: checked_launcher(path, wrapper_digest)
+                           for path in (launcher, convenience_launcher)}
         existing = release.exists()
         if existing:
             report["checks"]["engine_pin"] = verify_asset(release / ASSETS["engine"]["name"], "engine")
@@ -344,48 +443,50 @@ def install_runtime(*, root: Path | None = None, container: str = DEFAULT_CONTAI
         release.parent.mkdir(parents=True, exist_ok=True)
         launcher.parent.mkdir(parents=True, exist_ok=True)
         if existing:
-            report["checks"]["download"] = {"ok": True, "skipped": True}
+            report["checks"]["download"] = {"ok": True, "skipped": True, "cached_download": False}
             report["checks"]["native_probe"] = probe_runtime(destination, container, cache)
         else:
             if release.exists() or release.is_symlink():
                 raise SetupError("destino mudou durante a instalação; execute novamente")
-            if shutil.disk_usage(destination).free < 300 * 1024 * 1024:
-                raise SetupError("reserve pelo menos 300 MiB para baixar e verificar ESPER")
+            cached_assets = set()
+            for asset, expected in ASSETS.items():
+                path = downloads / expected["name"]
+                if path.exists() or path.is_symlink():
+                    report["checks"][asset + "_pin"] = verify_asset(path, asset)
+                    cached_assets.add(asset)
+            runtime_bytes = sum(asset["bytes"] for asset in ASSETS.values())
+            download_bytes = sum(expected["bytes"] for asset, expected in ASSETS.items()
+                                 if asset not in cached_assets)
+            required_free = runtime_bytes + download_bytes + DOTNET_FREE_SPACE_RESERVE
+            report["checks"]["free_space"] = {"ok": shutil.disk_usage(destination).free >= required_free,
+                                                "required_bytes": required_free,
+                                                "dotnet_reserve_bytes": DOTNET_FREE_SPACE_RESERVE}
+            if not report["checks"]["free_space"]["ok"]:
+                raise SetupError("espaço livre insuficiente para o cache, a cópia do runtime e 400 MiB do .NET")
+            cache_downloads(downloads, download_timeout, report)
             with tempfile.TemporaryDirectory(prefix=".esper-stage-", dir=destination) as temporary:
                 stage = Path(temporary)
                 staged_release = stage / "releases" / VERSION
                 staged_release.mkdir(parents=True)
-                deadline = time.monotonic() + download_timeout
                 for asset, expected in ASSETS.items():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise SetupError("download excedeu o tempo total permitido")
                     output = staged_release / expected["name"]
-                    download_asset(asset, output, remaining)
+                    shutil.copyfile(downloads / expected["name"], output)
                     report["checks"][asset + "_pin"] = verify_asset(output, asset)
                     output.chmod(0o755 if asset == "engine" else 0o600)
                 write_file(staged_release / "release.json", (json.dumps(release_descriptor(), indent=2) + "\n").encode())
                 write_file(staged_release / "LICENSE.txt", license_bytes)
-                report["checks"]["download"] = {"ok": True, "skipped": False}
                 report["checks"]["native_probe"] = probe_runtime(stage, container, cache)
                 if release.exists() or release.is_symlink():
                     raise SetupError("destino mudou antes da publicação; nada foi substituído")
                 staged_release.rename(release)
                 report["runtime_changed"] = True
-        for target_launcher in (launcher, convenience_launcher):
-            if target_launcher.exists():
-                continue
-            descriptor, filename = tempfile.mkstemp(prefix=".esper-launcher-", dir=target_launcher.parent)
-            temporary_launcher = Path(filename)
-            try:
-                with os.fdopen(descriptor, "wb") as output:
-                    output.write(wrapper_bytes); output.flush(); os.fsync(output.fileno())
-                temporary_launcher.chmod(0o755)
-                if target_launcher.exists() or target_launcher.is_symlink():
-                    raise SetupError("launcher mudou durante instalação; arquivo existente preservado")
-                temporary_launcher.rename(target_launcher)
-            finally:
-                temporary_launcher.unlink(missing_ok=True)
+        report["launcher_updates"] = []
+        for target_launcher, previous_digest in prior_launchers.items():
+            backup = atomic_launcher(target_launcher, wrapper_bytes, previous_digest)
+            if backup is not None:
+                report["runtime_changed"] = True
+                report["launcher_updates"].append({"path": str(target_launcher), "backup": str(backup),
+                                                   "previous_sha256": previous_digest})
         report.update({"ok": True, "runtime_ready": True, "launcher": str(convenience_launcher),
                        "resampler_script": str(launcher), "release": str(release),
                        "publication": {"ok": True, "atomic_release": True}})

@@ -139,6 +139,71 @@ def test_cli_independent_failure_does_not_change_env_or_reuse_old_audio(tmp_path
     assert dict(os.environ) == before
 
 
+@pytest.mark.parametrize("worldline_fails", [False, True])
+def test_default_comparison_budget_respects_native_timeout_without_shortening_esper(
+        tmp_path, comparison, monkeypatch, capsys, worldline_fails):
+    clock = [100.0]
+    jobs, rendered_timeouts, native_deadlines, esper_deadlines = [], {}, [], []
+    monkeypatch.setattr(comparison.time, "monotonic", lambda: clock[0])
+    root = tmp_path / "esper"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "resampler.py").write_bytes(b"# comparison fixture\n")
+
+    def factory(engine):
+        class Renderer:
+            def __init__(self, resource_guard):
+                assert resource_guard()["ok"]
+
+            @staticmethod
+            def _run(command, *, deadline):
+                native_deadlines.append(deadline)
+                return "proof", ""
+
+            def status(self, force):
+                assert force
+                clock[0] += 2  # Runtime diagnostics consume part of each budget.
+                if engine == "worldline-r" and worldline_fails:
+                    return {"ready": False, "last_error": "fixture runtime failure"}
+                return {"ready": True, "voicebank_profile": "english-cvvc"}
+
+            def synthesize(self, text, *, timeout_seconds, **kwargs):
+                rendered_timeouts[engine] = timeout_seconds
+                if engine == "worldline-r":
+                    if not 0 < timeout_seconds <= 120:
+                        raise ValueError("timeout Teto deve estar entre 0 e 120 segundos")
+                    self._run([], deadline=clock[0] + 300)
+                else:
+                    esper_deadlines.append(float(os.environ["PHONE_WORKER_ESPER_DEADLINE"]))
+                return {"audio": pcm(), "voicebank_profile": "english-cvvc",
+                        "backend": "worldline-r" if engine == "worldline-r" else "utau",
+                        "native_phrase_render_verified": engine == "worldline-r"}
+        return Renderer
+
+    def run(request):
+        jobs.append(request)
+        return comparison.render_job(request)
+
+    monkeypatch.setattr(comparison, "load_renderers", lambda: {
+        engine: factory(engine) for engine in ("worldline-r", "esper-utau")})
+    monkeypatch.setattr(comparison, "run_job", run)
+    environment_before = dict(os.environ)
+    assert comparison.main(["--esper-root", str(root), "--output-dir", str(tmp_path / "results")]) == (
+        2 if worldline_fails else 0)
+    summary = json.loads(capsys.readouterr().out)
+    assert all(request["timeout"] == 180 for request in jobs)
+    assert rendered_timeouts["esper-utau"] == 178.0
+    assert esper_deadlines == [jobs[1]["deadline"]]
+    if worldline_fails:
+        assert "fixture runtime failure" in summary["samples"][0]["error"]
+        assert summary["rendered"] == 1
+    else:
+        assert rendered_timeouts["worldline-r"] == 120.0
+        assert native_deadlines == [jobs[0]["deadline"]]
+        assert summary["rendered"] == 2
+    assert summary["samples"][1]["ok"]
+    assert dict(os.environ) == environment_before
+
+
 def test_existing_symlink_is_preserved_and_never_rendered(tmp_path, comparison, monkeypatch, capsys):
     saved = tmp_path / "saved"
     saved.write_bytes(b"keep")

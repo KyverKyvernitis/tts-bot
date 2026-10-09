@@ -115,7 +115,10 @@ def render_job(job: dict) -> dict:
         remaining = job["deadline"] - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("prazo da amostra esgotado no diagnóstico")
-        rendered = renderer.synthesize(job["text"], timeout_seconds=remaining,
+        # WORLDLINE-R's native API accepts at most 120 seconds. ESPER's
+        # fragment renderer retains the full remaining comparison budget.
+        synthesis_timeout = min(remaining, 120.0) if job["engine"] == "worldline-r" else remaining
+        rendered = renderer.synthesize(job["text"], timeout_seconds=synthesis_timeout,
                                       max_audio_bytes=MAX_AUDIO_BYTES, pitch_offset_semitones=0.0)
         audio = rendered.pop("audio", None)
         if not isinstance(audio, (bytes, bytearray)) or not 44 < len(audio) <= MAX_AUDIO_BYTES:

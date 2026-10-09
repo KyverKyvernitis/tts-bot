@@ -109,12 +109,53 @@ def test_bridge_renders_from_private_copy_and_never_mounts_original_voicebank(br
     assert {path.name: path.read_bytes() for path in runtime.original.iterdir()} == before
     assert dict(os.environ) == environment
     assert not any(str(runtime.original) in part for part in runtime.calls[0])
+    assert "DOTNET_GCHeapHardLimit=40000000" in runtime.calls[0]
+    assert "DOTNET_gcServer=0" in runtime.calls[0]
+    assert result["gc_settings_requested"] == bridge.GC_ENVIRONMENT
     assert runtime.calls[0][-7] == "241"  # integer LENGTH, rounded up
     directory = Path(result["analysis_directory"])
     assert directory / "source.esp" != runtime.source.with_suffix(".esp")
     assert (directory / "source.esp").read_bytes() == b"analysis"
     assert (directory / "source_wav.frq").read_bytes() == frq()
     assert list((runtime.cache / "jobs").iterdir()) == []
+
+
+def test_real_esper_initialization_under_limited_virtual_address_space(bridge, tmp_path):
+    configured = os.environ.get("ESPER_TEST_X64_BINARY")
+    if not configured or sys.platform != "linux" or bridge.platform.machine().lower() not in {"x86_64", "amd64"}:
+        pytest.skip("requires pinned official ESPER Linux x64 binary for the GC reservation regression")
+    import resource
+
+    binary = Path(configured)
+    assert hashlib.sha256(binary.read_bytes()).hexdigest() == "d613a715b451d9fff4dfa902e3fa55e3431a595833c61c369622405d21020eee"
+    assert hashlib.sha256((binary.parent / "esper-config.ini").read_bytes()).hexdigest() == bridge.CONFIG_SHA256
+    source = tmp_path / "synthetic.wav"
+    source.write_bytes(pcm(seconds=.5))
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.casefold().startswith(("dotnet_gc", "complus_gc"))}
+    environment.update(LANG="C", LC_ALL="C", DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="1",
+                       DOTNET_BUNDLE_EXTRACT_BASE_DIR=str(tmp_path / "dotnet"))
+
+    def restrict_virtual_space():
+        # Reproduces failed GC reservation without exhausting physical RAM.
+        limit = 16 * 1024 ** 3
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+    output = tmp_path / "probe.wav"
+    command = [str(binary), str(source), str(output), "C4", "100", "", "0", "240", "30",
+               "-400", "100", "0", "!140", "AA#100#"]
+    failed = subprocess.run(command, env=environment, capture_output=True, timeout=20,
+                            preexec_fn=restrict_virtual_space)
+    assert failed.returncode == 137
+    assert b"GC heap initialization failed" in failed.stderr and b"0x8007000E" in failed.stderr
+    assert not output.exists()
+    environment.update(bridge.GC_ENVIRONMENT)
+    fixed = subprocess.run(command, env=environment, capture_output=True, timeout=20,
+                           preexec_fn=restrict_virtual_space)
+    assert fixed.returncode == 0, fixed.stderr.decode(errors="replace")
+    evidence = bridge.pcm_evidence(output.read_bytes(), output=True)
+    assert evidence["wav_verified"] and evidence["sample_rate"] == 44100
+    assert .08 <= evidence["duration_seconds"] <= .35
 
 
 def test_private_recording_cache_reuses_source_and_changes_when_content_changes(bridge, fake_runtime):
