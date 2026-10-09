@@ -13,11 +13,11 @@ comercial, a voz Teto ou uma licença.
 
 ## Instalar o kit e o runtime
 
-Baixe `teto-voicepeak-termux-box64-kit-v4.zip` para Downloads. No Termux nativo,
+Baixe `teto-voicepeak-termux-box64-kit-v5.zip` para Downloads. No Termux nativo,
 fora de outro PRoot:
 
 ```bash
-unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v4.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v5.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 bash deploy/voicepeak-teto/termux/setup-box64.sh
 ```
@@ -45,8 +45,17 @@ registrar as últimas chamadas e iniciar as threads X11 antecipadamente.
 O `xmessage` ARM64 já abriu no Poco. A interface do VOICEPEAK caiu também
 sem Dynarec, em `XGetWindowProperty` da biblioteca X11 nativa; desativar o
 Dynarec não resolveu essa tentativa. O mesmo programa abriu em Linux x86_64
-nativo, sem gerenciador de janelas. A próxima comparação isola a ponte Xlib
-do Box64 sem exigir instalação ou ativação de uma voz.
+nativo, sem gerenciador de janelas. O probe v4 passou nas duas configurações
+de threads no Poco, incluindo propriedades e callback de erro.
+
+O trace do programa real mostrou a chamada a `XGetWindowProperty` com
+display, janela e átomo nulos. O JUCE 7.0.12 usado pelo VOICEPEAK exige 111
+símbolos Xlib e interrompe a inicialização se algum estiver ausente. Box64
+v0.4.0 não exporta `XPutPixel`, o único obrigatório ausente nessa comparação.
+O kit v5 implementa esse wrapper numa cópia isolada do código do Box64,
+restaurando os callbacks da imagem após a chamada nativa. O programa
+comercial não é modificado. O funcionamento da GUI corrigida ainda precisa
+ser confirmado no Poco.
 
 O código do Box64 fica fixado na versão oficial **v0.4.0**, commit
 `dae0917c47b4edd8956f314210417a20fd225c4b`. O setup também usa as duas
@@ -59,6 +68,63 @@ O executável nativo fica em `/opt/voicepeak-box64/bin/box64`; as duas
 bibliotecas x64 ficam em `/opt/voicepeak-box64/lib/x86_64-linux-gnu`.
 O checkout existente é preservado se tiver um commit diferente ou alterações
 locais. O setup não registra binfmt nem substitui executáveis do Ubuntu.
+
+## Corrigir XPutPixel num runtime já instalado
+
+Para o Poco que já completou o setup, extraia o kit v5 e execute:
+
+```bash
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v5.zip" -d "$HOME/voicepeak-termux-kit"
+cd "$HOME/voicepeak-termux-kit"
+bash deploy/voicepeak-teto/termux/patch-box64-x11.sh
+```
+
+Esse instalador usa o container existente. Valida o checkout limpo no commit
+fixado e os hashes dos dois arquivos que precisam da correção. Cria
+`/opt/voicepeak-box64/src-x11fix-1` e compila em
+`/opt/voicepeak-box64/build-x11fix-1`, sem modificar a fonte ou o binário
+originais. A primeira compilação pode demorar vários minutos.
+
+O binário separado é `/opt/voicepeak-box64/bin/box64-x11fix-1`. Antes de
+publicar os launchers, o instalador exige o sucesso do probe dos 111 símbolos,
+que dispensa servidor X11. A configuração separada é
+`~/.voicepeak-termux/config-box64-x11fix.json`; os aliases são
+`voicepeak-termux-box64-x11fix` e
+`voicepeak-termux-box64-x11fix-diagnostic`. A pasta do programa, o display e
+o container vêm da configuração anterior. Configurações e aliases externos
+ao instalador são preservados.
+
+A cópia corrigida tem um inventário de arquivos para detectar alterações
+locais antes de uma tentativa posterior. Somente arquivos explicitamente
+gerados pelo build são excluídos dessa comparação. Uma falha não anuncia a
+correção como instalada.
+
+Com o Termux:X11 iniciado, teste símbolos, propriedades e pixels pelo
+runtime corrigido:
+
+```bash
+VOICEPEAK_TERMUX_CONFIG="$HOME/.voicepeak-termux/config-box64-x11fix.json" \
+DISPLAY=:1 python deploy/voicepeak-teto/termux/probe-x11.py
+```
+
+O JSON `voicepeak-box64-x11-probe.json` é salvo em Downloads quando essa
+pasta está disponível. Deve mostrar os dois checks com `ok: true`. Agora o
+probe verifica todos os símbolos obrigatórios e exercita `XPutPixel` numa
+imagem real, incluindo chamadas dos callbacks após sua restauração.
+
+Se passar, teste a interface com a mesma emulação usada pelo probe:
+
+```bash
+DISPLAY=:1 BOX64_DYNAREC=0 BOX64_LOG=1 BOX64_NOBANNER=0 BOX64_SHOWSEGV=1 BOX64_SHOWBT=0 BOX64_ROLLING_LOG=64 \
+  timeout -k 5s 180s "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64-x11fix" \
+  > "$HOME/storage/downloads/voicepeak-box64-x11fix-gui.log" 2>&1
+```
+
+Abra o aplicativo Termux:X11 para conferir a janela. Se houver outra queda,
+envie o JSON e o log completo. Sucesso do probe comprova esse caminho Xlib;
+GUI, ativação, síntese e latência são verificações separadas. Depois de a GUI
+abrir, teste novamente com `BOX64_DYNAREC=1` para avaliar o modo mais rápido.
+O launcher anterior continua disponível como comparação.
 
 ## Testar o programa oficial antes de comprar a voz
 
@@ -130,17 +196,19 @@ a causa do crash. Mantenha o servidor `termux-x11 :1` iniciado.
 
 #### Testar a ponte Xlib x86_64
 
-Na raiz do kit v4, com o runtime Box64 já preparado:
+Na raiz do kit v5, escolha a configuração corrigida:
 
 ```bash
+VOICEPEAK_TERMUX_CONFIG="$HOME/.voicepeak-termux/config-box64-x11fix.json" \
 DISPLAY=:1 python deploy/voicepeak-teto/termux/probe-x11.py
 ```
 
 Esse probe usa os arquivos do próprio kit e a configuração existente;
-não exige reexecutar o setup nem recompilar Box64. Reexecute o setup somente
-para atualizar também o alias instalado antes dos comandos de log abaixo.
+depois de instalar a correção, não exige outra compilação. A configuração
+original é útil como controle negativo: deve falhar ao buscar `XPutPixel`,
+antes de abrir o display, em vez de anunciar sucesso parcial.
 
-O teste abre uma conexão X11 pelo Box64 e verifica `XGetWindowProperty` para
+O teste exige os 111 símbolos Xlib do JUCE, testa pixels e verifica `XGetWindowProperty` para
 propriedades válidas de 8 e 32 bits, propriedade ausente e callback de erro
 para um átomo inválido. Usa uma janela própria invisível e a destrói depois;
 não executa o VOICEPEAK. Repete pelo interpretador, com e sem
@@ -214,7 +282,7 @@ bibliotecas continua vindo de `config-box64.json`.
 Após ativar a voz, confira o nome exato:
 
 ```bash
-timeout 90 "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64" --list-narrator
+timeout 90 "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64-x11fix" --list-narrator
 ```
 
 O backend aceita `重音テト`, `Kasane Teto` ou `Teto`. Sem esse inventário e um
@@ -226,7 +294,7 @@ Teste a síntese na raiz do kit, usando o narrador que seu programa retornar:
 
 ```bash
 export PHONE_WORKER_TETO_ENABLED=true
-export PHONE_WORKER_VOICEPEAK_COMMAND="$HOME/.voicepeak-termux/bin/voicepeak-termux-box64"
+export PHONE_WORKER_VOICEPEAK_COMMAND="$HOME/.voicepeak-termux/bin/voicepeak-termux-box64-x11fix"
 export PHONE_WORKER_VOICEPEAK_URL=
 export PHONE_WORKER_VOICEPEAK_NARRATOR=重音テト
 export PHONE_WORKER_VOICEPEAK_TEXT_MODE=ptbr-kana
@@ -241,13 +309,13 @@ persistente do worker, `~/.phone-worker.env`:
 ```bash
 PHONE_WORKER_TETO_ENABLED=true
 PHONE_WORKER_TETO_BACKEND=voicepeak
-PHONE_WORKER_VOICEPEAK_COMMAND="$HOME/.voicepeak-termux/bin/voicepeak-termux-box64"
+PHONE_WORKER_VOICEPEAK_COMMAND="$HOME/.voicepeak-termux/bin/voicepeak-termux-box64-x11fix"
 PHONE_WORKER_VOICEPEAK_URL=
 PHONE_WORKER_VOICEPEAK_NARRATOR=重音テト
 PHONE_WORKER_VOICEPEAK_TEXT_MODE=ptbr-kana
 PHONE_WORKER_VOICEPEAK_STATUS_TIMEOUT_SECONDS=30
 PHONE_WORKER_VOICEPEAK_STATUS_CACHE_SECONDS=60
-PHONE_WORKER_VOICEPEAK_CACHE_REVISION=termux-box64-v040-teto-1
+PHONE_WORKER_VOICEPEAK_CACHE_REVISION=termux-box64-v040-xputpixel1-teto-1
 PHONE_WORKER_VOICEPEAK_ALLOW_OTHER_VOICES=false
 ```
 
