@@ -83,6 +83,8 @@ def box64_environment() -> list[str]:
         "BOX64_DYNAREC": (1, None),
         "BOX64_SHOWSEGV": (1, None),
         "BOX64_SHOWBT": (1, None),
+        "BOX64_ROLLING_LOG": (2048, None),
+        "BOX64_X11THREADS": (1, None),
     }
     result = []
     for name, (maximum, default) in options.items():

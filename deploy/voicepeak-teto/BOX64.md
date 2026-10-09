@@ -13,11 +13,11 @@ comercial, a voz Teto ou uma licença.
 
 ## Instalar o kit e o runtime
 
-Baixe `teto-voicepeak-termux-box64-kit-v3.zip` para Downloads. No Termux nativo,
+Baixe `teto-voicepeak-termux-box64-kit-v4.zip` para Downloads. No Termux nativo,
 fora de outro PRoot:
 
 ```bash
-unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v3.zip" -d "$HOME/voicepeak-termux-kit"
+unzip -o "$HOME/storage/downloads/teto-voicepeak-termux-box64-kit-v4.zip" -d "$HOME/voicepeak-termux-kit"
 cd "$HOME/voicepeak-termux-kit"
 bash deploy/voicepeak-teto/termux/setup-box64.sh
 ```
@@ -39,6 +39,14 @@ testar a conexão gráfica com clientes ARM64 e `libxss1`, usado opcionalmente
 pela interface do VOICEPEAK. Essa biblioteca adicional não é uma correção
 confirmada para o sinal 11. Reexecutar o setup mantém o checkout, o programa
 instalado e a compilação existente.
+
+O kit v4 inclui um teste Xlib x86_64 independente do VOICEPEAK e opções para
+registrar as últimas chamadas e iniciar as threads X11 antecipadamente.
+O `xmessage` ARM64 já abriu no Poco. A interface do VOICEPEAK caiu também
+sem Dynarec, em `XGetWindowProperty` da biblioteca X11 nativa; desativar o
+Dynarec não resolveu essa tentativa. O mesmo programa abriu em Linux x86_64
+nativo, sem gerenciador de janelas. A próxima comparação isola a ponte Xlib
+do Box64 sem exigir instalação ou ativação de uma voz.
 
 O código do Box64 fica fixado na versão oficial **v0.4.0**, commit
 `dae0917c47b4edd8956f314210417a20fd225c4b`. O setup também usa as duas
@@ -120,6 +128,54 @@ ser o servidor X11 sem janelas após o encerramento do programa. O aviso sobre
 `/sys/module/mali_kbase/parameters/large_page_conf` não identifica por si só
 a causa do crash. Mantenha o servidor `termux-x11 :1` iniciado.
 
+#### Testar a ponte Xlib x86_64
+
+Na raiz do kit v4, com o runtime Box64 já preparado:
+
+```bash
+DISPLAY=:1 python deploy/voicepeak-teto/termux/probe-x11.py
+```
+
+Esse probe usa os arquivos do próprio kit e a configuração existente;
+não exige reexecutar o setup nem recompilar Box64. Reexecute o setup somente
+para atualizar também o alias instalado antes dos comandos de log abaixo.
+
+O teste abre uma conexão X11 pelo Box64 e verifica `XGetWindowProperty` para
+propriedades válidas de 8 e 32 bits, propriedade ausente e callback de erro
+para um átomo inválido. Usa uma janela própria invisível e a destrói depois;
+não executa o VOICEPEAK. Repete pelo interpretador, com e sem
+`BOX64_X11THREADS=1`, que chama `XInitThreads` logo ao carregar Xlib. Isso é
+uma comparação, não uma correção comprovada para o crash.
+
+O JSON preserva o estágio e a saída quando há falha. Sucesso requer tanto o
+marcador final `VOICEPEAK_X11_PROBE_OK` quanto código zero, sem mensagem de
+término por sinal. PRoot pode retornar zero mesmo quando o guest cai. Envie
+`voicepeak-box64-x11-probe.json`, salvo em Downloads quando a pasta está
+disponível, ou na pasta pessoal do Termux.
+
+O kit contém o código-fonte aberto `x11-probe.c` e seu pequeno binário x86_64,
+compilado com `gcc -O2 -Wall -Wextra ... -ldl`, exigindo no máximo GLIBC 2.34.
+Ele passou nativamente num Xvfb sem gerenciador de janelas. Nenhum binário
+comercial acompanha o arquivo.
+
+#### Registrar as chamadas antes do crash
+
+Com o launcher v4, registre o VOICEPEAK pelo interpretador sem a saída de
+backtrace que gerou os avisos repetidos `LSDA unsupported`:
+
+```bash
+DISPLAY=:1 BOX64_LOG=1 BOX64_NOBANNER=0 BOX64_DYNAREC=0 BOX64_SHOWSEGV=1 BOX64_SHOWBT=0 BOX64_ROLLING_LOG=64 \
+  timeout -k 5s 180s "$HOME/.voicepeak-termux/bin/voicepeak-termux-box64" 2>&1 | tee "$HOME/voicepeak-box64-gui-calls.log"
+```
+
+`BOX64_ROLLING_LOG` registra as últimas chamadas nativas antes do sinal;
+Box64 o desativa se `BOX64_LOG` for maior que 1. O aviso LSDA é relacionado
+ao backtrace e não demonstra a causa inicial da queda. Se for necessário
+comparar inicialização antecipada de threads no programa, acrescente
+`BOX64_X11THREADS=1` ao mesmo comando e salve em outro log.
+
+#### Conferir a conexão ARM64 e comparar Dynarec
+
 Após instalar o kit v3 e reexecutar o setup, teste uma janela ARM64 sem Box64:
 
 ```bash
@@ -150,7 +206,8 @@ que o Dynarec causa o sinal. Os comandos não alteram a configuração persisten
 e não precisam baixar novamente o programa.
 
 O launcher aceita `BOX64_LOG` de 0 a 3 e `BOX64_NOBANNER`, `BOX64_DYNAREC`,
-`BOX64_SHOWSEGV`, `BOX64_SHOWBT` com 0 ou 1. Sem opções explícitas, os logs
+`BOX64_SHOWSEGV`, `BOX64_SHOWBT`, `BOX64_X11THREADS` com 0 ou 1, e
+`BOX64_ROLLING_LOG` de 0 a 2048. Sem opções explícitas, os logs
 continuam desativados e o modo de emulação mantém seu padrão. O caminho de
 bibliotecas continua vindo de `config-box64.json`.
 

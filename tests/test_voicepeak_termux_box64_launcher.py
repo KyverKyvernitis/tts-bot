@@ -116,7 +116,8 @@ def test_debug_and_interpreter_options_reach_guest_without_changing_config(envir
     _, path, _, _, _ = environment
     original = path.read_bytes()
     options = {"BOX64_LOG": "2", "BOX64_NOBANNER": "0", "BOX64_DYNAREC": "0",
-               "BOX64_SHOWSEGV": "1", "BOX64_SHOWBT": "1"}
+               "BOX64_SHOWSEGV": "1", "BOX64_SHOWBT": "1",
+               "BOX64_X11THREADS": "1", "BOX64_ROLLING_LOG": "64"}
     for name, value in options.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("DISPLAY", ":1")
@@ -138,6 +139,7 @@ def test_debug_and_interpreter_options_reach_guest_without_changing_config(envir
     ("BOX64_LOG", "4"), ("BOX64_LOG", "-1"), ("BOX64_LOG", "2\nDISPLAY=:2"),
     ("BOX64_NOBANNER", "yes"), ("BOX64_DYNAREC", "2"),
     ("BOX64_SHOWSEGV", ""), ("BOX64_SHOWBT", "1;command"),
+    ("BOX64_X11THREADS", "2"), ("BOX64_ROLLING_LOG", "2049"),
 ])
 def test_invalid_debug_option_stops_before_guest_exec(environment, monkeypatch, name, value):
     monkeypatch.setenv(name, value)
