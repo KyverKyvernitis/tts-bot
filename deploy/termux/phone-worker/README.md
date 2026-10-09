@@ -67,7 +67,7 @@ O pipeline principal fica:
 
 O deslocamento de tom pode ser enviado por requisição em
 `teto_pitch_semitones`, limitado a `-4.0..+4.0` e quantizado em passos de `0.5`.
-O bot usa `-1.0` como padrão de TextToTeto; chamadas antigas que não enviam o
+O bot usa `0.0` como padrão de TextToTeto, igual ao WAV do validador; chamadas que não enviam o
 campo preservam offset `0.0`. O valor participa da identidade de cache para não
 reutilizar áudio sintetizado em outro tom.
 
@@ -207,8 +207,8 @@ para não apresentar áudio anterior em caso de falha.
 Para comparar revisões, gere uma pasta `antes` com a revisão anterior, se ela
 estiver disponível, e outra `atual` com esta revisão. Use exatamente a mesma
 voicebank, `oto.ini`, resampler, velocidade, tom base e dispositivo de saída.
-O validador usa deslocamento de tom `0.0`; o bot usa `-1.0` por padrão, portanto
-essas saídas só são comparáveis se o pedido no bot usar o mesmo valor.
+O validador e o bot usam deslocamento de tom `0.0` por padrão. Se houver um tom
+personalizado salvo, use `0.0` no painel para comparar as mesmas configurações.
 
 Ouça cada WAV sem abrir o texto nem os JSONs e anote o que entendeu. Depois
 confira a frase esperada e registre palavras erradas, consoantes ausentes,

@@ -204,7 +204,7 @@ TTS_TETO_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_TETO_MAX_TEXT_LENGTH
 TTS_TETO_WORKER_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "TTS_TETO_WORKER_TIMEOUT_SECONDS", 25.0) or 25.0))
 TTS_TETO_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TETO_MAX_AUDIO_MB", 8) or 8))
 TTS_TETO_DEFAULT_PITCH_SEMITONES = max(
-    -4.0, min(4.0, float(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)))
+    -4.0, min(4.0, float(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0)))
 )
 TTS_WORKER_AGENT_PREFERRED_ENGINE = str(getattr(config, "TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
 TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD = max(1, int(getattr(config, "TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD", 3) or 3))

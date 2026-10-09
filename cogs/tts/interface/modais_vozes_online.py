@@ -393,7 +393,7 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Editar TextToTeto"):
         self.force_text_fallback = bool(force_text_fallback)
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
-        default_pitch = str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0))
+        default_pitch = str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0))
         current = valor_tts_atual(
             cog,
             guild_id,
@@ -402,7 +402,7 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Editar TextToTeto"):
             default_pitch,
             server=server,
         )
-        self.current_pitch = normalizar_tom_teto_semitons(current) or "-1.0"
+        self.current_pitch = normalizar_tom_teto_semitons(current) or "+0.0"
         self._build_text_field()
 
     def _build_text_field(self) -> None:
@@ -410,7 +410,7 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Editar TextToTeto"):
             self,
             "teto_pitch_semitones",
             label="Tom da Teto (semitons)",
-            placeholder="-1.0 = um pouco mais grave · passos de 0.5",
+            placeholder="0.0 = tom original · passos de 0.5",
             current=self.current_pitch,
             max_length=8,
         )
@@ -422,7 +422,7 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Editar TextToTeto"):
             await interaction.response.send_message(
                 embed=self.cog._make_embed(
                     "Tom inválido",
-                    "Use um valor de `-4.0` a `+4.0`, em passos de `0.5`. Ex.: `-1.0`.",
+                    "Use um valor de `-4.0` a `+4.0`, em passos de `0.5`. Ex.: `0.0`.",
                     ok=False,
                 ),
                 ephemeral=True,

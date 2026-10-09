@@ -60,6 +60,25 @@ frases de comparação. Comece com uma frase: a análise de voz custa CPU e o
 
 ## Selecionar no worker
 
+### Restaurar o tom e a velocidade do WAV de teste
+
+O WAV usa tom base C4, deslocamento de 0 semitons, velocidade 1.0, tempo 140
+e velocidade consonantal 100. O patch `teto-worldline-04-defaults.zip` também
+alinha o tom padrão do bot a 0 semitons. Para restaurar esses parâmetros no
+Termux, com backup do `.env` e sem alterar os tokens:
+
+```bash
+python "$HOME/worldline-r-termux-kit/deploy/worldline-r/termux/reset-speech-defaults.py"
+bash "$HOME/.core-worker-runtime/current/start-phone-worker.sh" --force-restart
+```
+
+Se um tom personalizado tiver sido salvo no Discord, abra
+**Configurar TextToTeto → Tom da Teto (semitons)** e informe `0.0`.
+Configurações explícitas salvas continuam tendo prioridade sobre o padrão.
+Se a VPS definir `TTS_TETO_DEFAULT_PITCH_SEMITONES` no ambiente, use `0.0`
+nessa variável para o mesmo padrão neutro.
+Velocidade e tom do Edge não controlam a Teto.
+
 Depois do WAV e da atualização para `1.11.31`, revise estas chaves em
 `~/.phone-worker.env`, preservando os tokens e as outras configurações:
 

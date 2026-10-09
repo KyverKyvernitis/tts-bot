@@ -108,12 +108,12 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         return False
 
     def _tom_teto_atual(self) -> str:
-        fallback = str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0))
+        fallback = str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0))
         raw = self._limpar_configuracao((self._user_settings or {}).get("teto_pitch_semitones")) or fallback
         try:
             value = max(-4.0, min(4.0, float(str(raw).replace(",", "."))))
         except (TypeError, ValueError):
-            value = -1.0
+            value = 0.0
         value = round(value * 2.0) / 2.0
         return f"{value:+.1f}" if value >= 0 else f"{value:.1f}"
 

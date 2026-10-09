@@ -1159,7 +1159,7 @@ class SettingsDB:
             "android_pitch": pick("android_pitch", "1.0"),
             "teto_pitch_semitones": pick(
                 "teto_pitch_semitones",
-                str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)),
+                str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0)),
             ),
             # Efeitos avançados são pessoais e só são aplicados por Edge/gTTS.
             # Não entram nos defaults da guild para evitar alterar TTS alheio.

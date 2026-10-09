@@ -83,7 +83,7 @@ async def preparar_payload_tts_mensagem(
         resolved["rate"] = "1.0"
         resolved["pitch"] = "C4"
         resolved["teto_pitch_semitones"] = resolved.get("teto_pitch_semitones") or str(
-            getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)
+            getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0)
         )
 
     # Texto final: tira o prefixo de fala, limpa marcadores e prepende o
@@ -127,7 +127,7 @@ async def preparar_payload_tts_mensagem(
         advanced_reverb_level=resolved.get("advanced_reverb_level") or 0,
         teto_pitch_semitones=str(
             resolved.get("teto_pitch_semitones")
-            or getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", -1.0)
+            or getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0)
         ),
         piper_fallback_engine=fallback_engine,
         piper_fallback_voice=fallback_voice,

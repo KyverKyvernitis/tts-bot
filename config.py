@@ -267,7 +267,7 @@ TTS_TETO_WORKER_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("TTS_TETO_WORK
 TTS_TETO_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TETO_MAX_AUDIO_MB", "8"), 8))
 TTS_TETO_DEFAULT_PITCH_SEMITONES = max(
     -4.0,
-    min(4.0, _parse_float(os.getenv("TTS_TETO_DEFAULT_PITCH_SEMITONES", "-1.0"), -1.0)),
+    min(4.0, _parse_float(os.getenv("TTS_TETO_DEFAULT_PITCH_SEMITONES", "0.0"), 0.0)),
 )
 TTS_PIPER_EXPERIMENT_ENABLED = TTS_ATTS_ENABLED
 TTS_PIPER_EXPERIMENT_GUILD_ID = _parse_int(os.getenv("TTS_PIPER_EXPERIMENT_GUILD_ID", "0"), 0)
