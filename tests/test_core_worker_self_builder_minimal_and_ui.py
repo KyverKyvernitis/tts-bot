@@ -90,6 +90,23 @@ def test_vps_and_phone_worker_compute_the_same_runtime_source_hash(monkeypatch: 
     assert automation._hash_phone_worker_files(worker_dir) == phone_worker._phone_worker_source_hash()
 
 
+def test_full_worldline_release_extracts_with_the_installed_bootstrap_1_0_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    automation = _load("worldline_full_release_budget", AUTOMATION_PATH)
+    bootstrap = _load("worldline_installed_bootstrap_budget", ROOT / "tests/fixtures/phone_worker_bootstrap_1_0_0.py")
+    monkeypatch.setattr(automation, "AGENT_RELEASE_ROOT", tmp_path / "agent")
+    monkeypatch.setattr(automation, "_public_base_url", lambda: "https://vps.invalid")
+    inline = automation._build_worker_update_payload()
+    latest = automation._publish_phone_worker_release(inline)
+    archive = tmp_path / "agent/releases" / f"{latest['source_hash']}.zip"
+    with zipfile.ZipFile(archive) as packed:
+        assert len(packed.infolist()) <= bootstrap.DEFAULT_MAX_MEMBERS
+        assert {"teto_renderer/worldline.py", "teto_renderer/worldline_native.py"} <= set(packed.namelist())
+        assert "Permission is hereby granted" in packed.read("teto_renderer/worldline_native.py").decode()
+    checked = bootstrap._validate_manifest(latest, "https://vps.invalid")
+    bootstrap._extract_and_validate(archive, tmp_path / "installed", checked)
+    assert (tmp_path / "installed/teto_renderer/worldline_native.py").is_file()
+
+
 def test_recovery_bootstrap_is_small_and_legacy_requires_manual_repair() -> None:
     automation = _load("core_worker_bootstrap_budget_test", AUTOMATION_PATH)
     bootstrap = ROOT / "deploy/termux/phone-worker/phone_worker_bootstrap.py"

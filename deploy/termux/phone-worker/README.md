@@ -1,20 +1,26 @@
 # Phone Worker Termux
 
-## Teto UTAU e verificação do WORLDLINE-R
+## Teto UTAU e WORLDLINE-R
 
-O worker `1.11.30` usa a Teto UTAU local. A integração VOICEPEAK foi retirada:
+O worker `1.11.31` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
 configurações antigas que selecionavam esse backend passam a usar UTAU e as
 variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
 o `.env` do aparelho. Selecione `PHONE_WORKER_TETO_BACKEND=utau` ao revisá-lo.
 Uma solicitação explícita da Teto não troca para outra voz quando a síntese falha.
 
-O nome oficial do motor pesquisado é **WORLDLINE-R**. Sua biblioteca Linux ARM64
-pode ser verificada no Ubuntu ARM64 do Termux, sem Box64 nem interface gráfica.
-Consulte o [diagnóstico e os requisitos](../../worldline-r/README.md).
-Essa biblioteca ainda não está integrada ao pipeline de frases do worker;
-não coloque `libworldline.so` em `PHONE_WORKER_TETO_RESAMPLER_COMMAND`.
-O renderer UTAU existente continua usando o resampler configurado até a
-implementação e validação do adaptador de frases WORLDLINE-R.
+O backend **WORLDLINE-R** sintetiza a frase inteira com uma curva de altura
+compartilhada, usando a API nativa do OpenUtau 0.1.565. Ele roda pelo Python do
+Ubuntu ARM64 existente no Termux, sem Box64 nem interface gráfica. Não coloque
+`libworldline.so` em `PHONE_WORKER_TETO_RESAMPLER_COMMAND`: configure
+`PHONE_WORKER_WORLDLINE_CONTAINER=voicepeak-arm64` e
+`PHONE_WORKER_WORLDLINE_LIBRARY=/data/data/com.termux/files/home/.worldline-r/lib/libworldline.so`.
+O nome do container é histórico e não inicia VOICEPEAK.
+
+O padrão continua `utau`. Teste o WAV com a sua voicebank antes de selecionar
+`PHONE_WORKER_TETO_BACKEND=worldline-r` no `.env`. Consulte o
+[teste e os comandos](../../worldline-r/README.md). O status WORLDLINE-R anuncia
+`renderer_version=worldline-r-phrase-1`. A pronúncia PT-BR usa aproximações dos
+sons disponíveis na voicebank; geração válida de WAV não comprova naturalidade.
 
 ## Reinício após atualização de fontes
 

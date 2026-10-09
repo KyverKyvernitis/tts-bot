@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -30,6 +31,11 @@ ENV_ALLOWLIST = frozenset({
     "PHONE_WORKER_TETO_VOICEBANK_MODE", "PHONE_WORKER_TETO_VOICEBANK_DIR",
     "PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR", "PHONE_WORKER_TETO_MIN_ALIASES",
     "PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES", "PHONE_WORKER_TETO_RESAMPLER_COMMAND",
+    "PHONE_WORKER_WORLDLINE_CONTAINER", "PHONE_WORKER_WORLDLINE_LIBRARY",
+    "PHONE_WORKER_TETO_WORLDLINE_CONTAINER", "PHONE_WORKER_TETO_WORLDLINE_LIBRARY",
+    "PHONE_WORKER_TETO_BASE_PITCH", "PHONE_WORKER_TETO_SPEECH_RATE",
+    "PHONE_WORKER_TETO_TEMPO", "PHONE_WORKER_TETO_VELOCITY", "PHONE_WORKER_TETO_MODULATION",
+    "PHONE_WORKER_TETO_STATUS_CACHE_SECONDS",
 })
 REQUIRED_PACKAGES = ("python3", "libc6", "libstdc++6", "libgcc-s1")
 SIGNALLED_PROCESS = re.compile(
@@ -38,14 +44,14 @@ SIGNALLED_PROCESS = re.compile(
 )
 
 
-def bounded(command: list[str], timeout: float = 20.0) -> dict:
+def bounded(command: list[str], timeout: float = 20.0, *, env: dict[str, str] | None = None) -> dict:
     """Cap time and output for a process group; distrust PRoot's false zero."""
     if timeout <= 0:
         return {"ok": False, "error": "tempo esgotado"}
     process = None
     try:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, start_new_session=True)
+                                   stderr=subprocess.PIPE, start_new_session=True, env=env)
         assert process.stdout is not None and process.stderr is not None
         chunks = {"output": bytearray(), "errors": bytearray()}
         failure = None
@@ -248,10 +254,132 @@ def library_inventory(path: Path) -> dict:
     return result
 
 
+def bundled_worker_directory() -> Path:
+    return TOOLKIT_ROOT.parents[1] / "termux" / "phone-worker"
+
+
+def _adapter_files_present(worker: Path) -> bool:
+    return all((worker / "teto_renderer" / name).is_file() for name in
+               ("__init__.py", "worldline.py", "worldline_native.py", "voicebank.py"))
+
+
 def default_worker_directory() -> Path:
     installed = Path.home() / "phone-worker"
-    bundled = TOOLKIT_ROOT.parents[1] / "termux" / "phone-worker"
-    return installed if (installed / "teto_renderer" / "voicebank.py").is_file() else bundled
+    return installed if _adapter_files_present(installed) else bundled_worker_directory()
+
+
+def worker_source(worker: Path) -> str:
+    resolved = worker.resolve()
+    if resolved == (Path.home() / "phone-worker").resolve():
+        return "installed"
+    if resolved == bundled_worker_directory().resolve():
+        return "bundled"
+    return "explicit"
+
+
+def worker_backend_registered(worker: Path) -> bool:
+    """Inspect dispatch source only; importing the full worker would read secrets."""
+    try:
+        tree = ast.parse(read_regular_file(worker / "phone_worker.py", 2 * 1024 * 1024))
+        functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        backend = functions.get("_teto_backend")
+        factory = functions.get("_get_teto_renderer")
+        if backend is None or factory is None:
+            return False
+        registered = any(isinstance(node, ast.Constant) and node.value == "worldline-r" for node in ast.walk(backend))
+        imported = any(isinstance(node, ast.ImportFrom) and node.module == "teto_renderer" and
+                       any(alias.name == "WorldlineRenderer" for alias in node.names) for node in ast.walk(factory))
+        selected = any(isinstance(node, ast.Constant) and node.value == "worldline-r" for node in ast.walk(factory))
+        return registered and imported and selected
+    except (OSError, ValueError, SyntaxError):
+        return False
+
+
+def adapter_environment(values: dict[str, str]) -> dict[str, str]:
+    """Pass infrastructure and explicit renderer settings, never authentication."""
+    names = {"PATH", "HOME", "PREFIX", "TMPDIR", "ANDROID_ROOT", "ANDROID_DATA",
+             "LD_LIBRARY_PATH", "PROOT_TMP_DIR", "PROOT_NO_SECCOMP"}
+    result = {name: value for name, value in os.environ.items() if name in names}
+    result.update({name: value for name, value in values.items() if name in ENV_ALLOWLIST})
+    result.update({"LANG": "C", "LC_ALL": "C", "PYTHONDONTWRITEBYTECODE": "1"})
+    return result
+
+
+def adapter_status(worker: Path) -> dict:
+    """Import and call the real phrase adapter's read-only status in a child."""
+    result = {"importable": False, "status_ready": False, "tts_ready": False,
+              "teto_synthesis_verified": False, "portuguese_speech_verified": False,
+              "read_only": True}
+    source = worker / "teto_renderer"
+    package_name = "_worldline_adapter_audit"
+    module_names = ("errors", "voicebank", "ptbr_g2p", "phonemizer", "prosody", "cache", "renderer", "worldline", "worldline_native")
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(source)]
+    package.__package__ = package_name
+    package.__file__ = str(source / "__init__.py")
+    sys.modules[package_name] = package
+    previous_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        for name in module_names:
+            load_bundled_source(source / f"{name}.py", f"{package_name}.{name}")
+        # Validate the same package export used by the worker factory.
+        exec(compile(read_regular_file(source / "__init__.py", 65536), str(source / "__init__.py"), "exec"), package.__dict__)
+        renderer_class = getattr(package, "WorldlineRenderer", None)
+        native = sys.modules[f"{package_name}.worldline_native"]
+        pinned = load_runtime_module()
+        if (not isinstance(renderer_class, type) or not callable(getattr(renderer_class, "status", None)) or
+                native.SOURCE_COMMIT != pinned.SOURCE_COMMIT or native.SOURCE_VERSION != pinned.SOURCE_VERSION or
+                native.LIBRARY_SHA256.get("arm64") != pinned.RELEASE_SHA256):
+            raise ValueError("contrato do adaptador inválido")
+        result["importable"] = True
+        status = renderer_class().status(force=True)
+        if not isinstance(status, dict):
+            raise ValueError("status inválido")
+        result.update({key: status.get(key) is True for key in
+                       ("enabled", "native_c_api", "runtime_ready", "phrase_adapter_available")})
+        ready = (all(status.get(key) is True for key in ("ok", "ready", "available", "native_c_api", "runtime_ready")) and
+                 status.get("backend") == "worldline-r" and status.get("library_sha256") == pinned.RELEASE_SHA256 and
+                 status.get("native_architecture") == "arm64" and
+                 bool(re.fullmatch(r"[0-9a-f]{64}", str(status.get("adapter_sha256") or ""))))
+        result["status_ready"] = ready
+        result["tts_ready"] = ready
+        for key in ("renderer_version", "adapter_sha256", "voicebank_profile", "voicebank_mode", "library_sha256"):
+            value = status.get(key)
+            if isinstance(value, str) and len(value) <= 128 and not any(char in value for char in "\r\n\x00"):
+                result[key] = value
+        if not ready:
+            result["error"] = "status do adaptador não confirmou configuração, voicebank e API"
+    except Exception as exc:
+        result["error"] = "adaptador ausente, não importável ou status inválido"
+        result["error_type"] = type(exc).__name__[:80]
+    finally:
+        sys.dont_write_bytecode = previous_bytecode
+        for name in tuple(sys.modules):
+            if name == package_name or name.startswith(package_name + "."):
+                sys.modules.pop(name, None)
+    return result
+
+
+def decode_adapter_status(value: dict) -> dict:
+    if not value.get("ok"):
+        return {**outcome(value), "importable": False, "status_ready": False}
+    try:
+        data = json.loads(value.get("output", ""))
+        if not isinstance(data, dict):
+            raise ValueError("objeto esperado")
+    except (ValueError, TypeError):
+        return {"importable": False, "status_ready": False, "error": "adaptador não retornou JSON válido"}
+    result = {key: data.get(key) is True for key in
+              ("importable", "status_ready", "tts_ready", "enabled", "native_c_api", "runtime_ready", "phrase_adapter_available")}
+    for key in ("renderer_version", "adapter_sha256", "voicebank_profile", "voicebank_mode", "library_sha256"):
+        text = data.get(key)
+        if isinstance(text, str) and len(text) <= 128 and not any(char in text for char in "\r\n\x00"):
+            result[key] = text
+    if not result["importable"] or not result["status_ready"]:
+        result["error"] = "status do adaptador não confirmou configuração, voicebank e API"
+    result.update({"read_only": True, "teto_synthesis_verified": False, "portuguese_speech_verified": False})
+    return result
 
 
 def audit_voicebank(root: Path, worker: Path, minimum: int) -> dict:
@@ -316,19 +444,31 @@ def _minimum(values: dict[str, str], key: str, default: int) -> int:
         return default
 
 
-def build_report(*, container: str = DEFAULT_CONTAINER, library: Path | None = None,
+def build_report(*, container: str | None = None, library: Path | None = None,
                  voicebank: Path | None = None, english_voicebank: Path | None = None,
                  worker_dir: Path | None = None, timeout: float = 25.0) -> dict:
-    container = validate_container(container)
-    library = safe_path(library or DEFAULT_LIBRARY)
     values, env_info = read_teto_environment()
+    values.update({key: value for key, value in os.environ.items() if key in ENV_ALLOWLIST and
+                   not any(character in value for character in ("\x00", "\n", "\r", "$", "`"))})
+    container = validate_container(container or values.get("PHONE_WORKER_WORLDLINE_CONTAINER") or
+                                   values.get("PHONE_WORKER_TETO_WORLDLINE_CONTAINER") or DEFAULT_CONTAINER)
+    library = safe_path(library or values.get("PHONE_WORKER_WORLDLINE_LIBRARY") or
+                        values.get("PHONE_WORKER_TETO_WORLDLINE_LIBRARY") or DEFAULT_LIBRARY)
+    values["PHONE_WORKER_WORLDLINE_CONTAINER"] = container
+    values["PHONE_WORKER_WORLDLINE_LIBRARY"] = str(library)
+    if voicebank is not None:
+        values["PHONE_WORKER_TETO_VOICEBANK_DIR"] = str(safe_path(voicebank))
+    if english_voicebank is not None:
+        values["PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR"] = str(safe_path(english_voicebank))
     selected = (("standard", voicebank, "PHONE_WORKER_TETO_VOICEBANK_DIR", "PHONE_WORKER_TETO_MIN_ALIASES", 10),
                 ("english", english_voicebank, "PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR", "PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES", 500))
     worker = safe_path(worker_dir or default_worker_directory())
     deadline = time.monotonic() + timeout
-    def probe(command: list[str]) -> dict:
+    def probe(command: list[str], *, environment: dict[str, str] | None = None) -> dict:
         remaining = deadline - time.monotonic()
-        return bounded(command, remaining) if remaining > 0 else {"ok": False, "error": "tempo total esgotado"}
+        if remaining <= 0:
+            return {"ok": False, "error": "tempo total esgotado"}
+        return bounded(command, remaining) if environment is None else bounded(command, remaining, env=environment)
     memory = {}
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
@@ -343,7 +483,9 @@ def build_report(*, container: str = DEFAULT_CONTAINER, library: Path | None = N
               "container": container, "environment": env_info, "native_arm64": architecture in {"aarch64", "arm64"},
               "box64_required": False, "voicepeak_required": False, "voicebanks": {}, "requirements": {},
               "phrase_adapter_available": False, "runtime_ready": False, "tts_ready": False,
-              "note": "WORLDLINE-R é uma biblioteca. O adaptador de frases do worker ainda não foi implementado; este diagnóstico não sintetiza a Teto."}
+              "worker_tts_ready": False, "kit_tts_ready": False,
+              "teto_synthesis_verified": False, "portuguese_speech_verified": False,
+              "note": "O diagnóstico verifica configuração e status do adaptador; não gera fala da Teto nem comprova português."}
     try:
         report["free_disk_bytes"] = shutil.disk_usage(Path.home()).free
     except OSError:
@@ -400,10 +542,29 @@ def build_report(*, container: str = DEFAULT_CONTAINER, library: Path | None = N
                 bank["error"] = "caminho ou relatório da voicebank inválido"
         report["voicebanks"][name] = bank
     requirements["valid_voicebank"] = any(bank.get("ok") for bank in report["voicebanks"].values())
-    requirements["phrase_adapter"] = False
+    result = probe([sys.executable, "-B", str(TOOLKIT_ROOT / "diagnostic.py"), "--_adapter-status",
+                    "--worker-dir", str(worker)], environment=adapter_environment(values))
+    adapter = decode_adapter_status(result)
+    source = worker_source(worker)
+    adapter.update({"source": source, "worker_dir": str(worker),
+                    "worker_backend_registered": worker_backend_registered(worker)})
+    report["phrase_adapter"] = adapter
+    report["phrase_adapter_available"] = adapter["importable"]
+    requirements["phrase_adapter"] = adapter["importable"]
+    requirements["teto_enabled"] = str(values.get("PHONE_WORKER_TETO_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on", "sim"}
+    requirements["worldline_backend_selected"] = str(values.get("PHONE_WORKER_TETO_BACKEND") or "utau").strip().lower().replace("_", "-") == "worldline-r"
+    requirements["adapter_status"] = adapter["status_ready"]
     runtime_keys = ("host_arm64", "host_python", "proot_distro", "guest_arm64", "guest_packages",
                     "library_arm64", "library_pinned", "native_c_api")
     report["runtime_ready"] = all(requirements[key] for key in runtime_keys)
+    # The adapter status follows the renderer's selected profile and fallback.
+    # Its status can find the default English bank even when no path was in .env.
+    requirements["valid_voicebank"] = requirements["valid_voicebank"] or adapter["status_ready"]
+    report["tts_ready"] = all(requirements.values())
+    report["worker_tts_ready"] = (report["tts_ready"] and source == "installed" and adapter["worker_backend_registered"])
+    report["kit_tts_ready"] = report["tts_ready"] and source == "bundled"
+    if source == "bundled" and report["tts_ready"]:
+        report["note"] = "Kit pronto para gerar fala; worker instalado ainda não confirmado. O diagnóstico não gera fala da Teto nem comprova português."
     report["blockers"] = [key for key, satisfied in requirements.items() if not satisfied]
     return report
 
@@ -430,7 +591,7 @@ def write_report(path: Path, data: dict) -> None:
 
 def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verifica WORLDLINE-R no Termux sem instalar pacotes nem alterar o worker.")
-    parser.add_argument("--container", default=DEFAULT_CONTAINER, help="guest ARM64 existente (padrão: voicepeak-arm64)")
+    parser.add_argument("--container", help="guest ARM64 existente (padrão: configuração WORLDLINE ou voicepeak-arm64)")
     parser.add_argument("--library", type=Path, help="libworldline.so ARM64 (padrão: ~/.worldline-r/lib/libworldline.so)")
     parser.add_argument("--voicebank", type=Path, help="voicebank Teto padrão; senão lê apenas a chave Teto de ~/.phone-worker.env")
     parser.add_argument("--english-voicebank", type=Path, help="voicebank Teto English")
@@ -438,11 +599,16 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, help="salva explicitamente este JSON; nenhum segredo do worker é publicado")
     parser.add_argument("--timeout", type=float, default=25.0, help="limite total dos probes em segundos (1 a 120)")
     parser.add_argument("--_voicebank-audit", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--_adapter-status", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--_minimum", type=int, default=10, help=argparse.SUPPRESS)
     options = parser.parse_args(arguments)
     if not 1 <= options.timeout <= 120:
         parser.error("--timeout deve estar entre 1 e 120")
     try:
+        if options._adapter_status:
+            data = adapter_status(safe_path(options.worker_dir or default_worker_directory()))
+            print(json.dumps(data, ensure_ascii=False))
+            return 0
         if options._voicebank_audit is not None:
             data = audit_voicebank(safe_path(options._voicebank_audit), safe_path(options.worker_dir or default_worker_directory()),
                                   max(1, min(100000, options._minimum)))

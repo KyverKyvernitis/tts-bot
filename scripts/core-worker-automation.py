@@ -80,7 +80,6 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("start-phone-worker.sh", 0o755),
     ("watch-phone-worker.sh", 0o755),
     ("pair-phone-worker.sh", 0o755),
-    ("bootstrap-phone-worker.sh", 0o755),
     ("teto_renderer/__init__.py", 0o644),
     ("teto_renderer/errors.py", 0o644),
     ("teto_renderer/cache.py", 0o644),
@@ -89,7 +88,8 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("teto_renderer/ptbr_g2p.py", 0o644),
     ("teto_renderer/prosody.py", 0o644),
     ("teto_renderer/renderer.py", 0o644),
-    ("scripts/validate-teto-assets.py", 0o755),
+    ("teto_renderer/worldline.py", 0o644),
+    ("teto_renderer/worldline_native.py", 0o644),
 )
 # Installation and documentation remain in the checkout and SSH installer.
 # They are not required to boot an immutable runtime release. Keeping them
@@ -100,6 +100,9 @@ PHONE_WORKER_INSTALLATION_FILES = (
     ("accept-core-worker-on-device.sh", 0o755),
     ("README.md", 0o644),
     ("phone-worker.env.example", 0o600),
+    ("bootstrap-phone-worker.sh", 0o755),
+    ("teto_renderer/OPENUTAU_LICENSE.txt", 0o644),
+    ("scripts/validate-teto-assets.py", 0o755),
     ("cogs/musica/runtime_telefone/termux/musica.env.example", 0o600),
 )
 PHONE_WORKER_UPDATE_ARCHIVE_MIN_VERSION = "1.11.0"

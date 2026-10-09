@@ -1,121 +1,127 @@
-# Teto no Termux: requisitos do WORLDLINE-R
+# Teto com WORLDLINE-R no Termux
 
-Esta revisão retira a integração VOICEPEAK do bot e do phone worker. O worker
-`1.11.30` volta a usar a voicebank UTAU da Teto e o resampler já configurado.
-O valor antigo `PHONE_WORKER_TETO_BACKEND=voicepeak` é interpretado como `utau`;
-as variáveis do motor retirado são ignoradas. O `.env` do aparelho não é alterado
-pelos ZIPs. Um pedido explícito da Teto não troca para outra voz em caso de falha.
+O worker `1.11.31` inclui o adaptador de frases **WORLDLINE-R**. Ele converte o
+planejamento fonético PT-BR e os tempos de `oto.ini` em requisições nativas,
+com uma curva de altura compartilhada pela frase. Aceita a bank japonesa e a
+English CVVC da Teto já suportadas pelo worker. Não usa um resampler separado.
 
-O nome oficial do renderer do OpenUtau é **WORLDLINE-R**. Ele utiliza uma
-biblioteca nativa, `libworldline.so`, com uma API de síntese de frases. Esse arquivo
-não é um executável UTAU: colocá-lo em `PHONE_WORKER_TETO_RESAMPLER_COMMAND` não
-integra o WORLDLINE-R. O executável resampler WORLDLINE também não equivale ao
-renderer de frases WORLDLINE-R.
+O relatório do Poco X7 Pro confirmou a biblioteca ARM64, a API, o ABI e a geração
+de um tom sintético no Ubuntu ARM64. Ainda é necessário gerar e ouvir o WAV da
+Teto no aparelho. Os 345 aliases da bank japonesa foram indexados; isso não
+confirma a decodificação dos WAVs ou a inteligibilidade da adaptação portuguesa.
 
-O Poco X7 Pro já mostrou `aarch64`, aproximadamente 11 GiB de RAM e um Ubuntu
-ARM64 saudável com glibc 2.39 nos relatórios anteriores. Isso é compatível com
-os requisitos binários da biblioteca escolhida. Ainda falta confirmar no aparelho
-os pacotes do guest, o carregamento da biblioteca e a voicebank. O adaptador de
-frases para o worker **ainda não está implementado nesta revisão**; por isso o
-diagnóstico sempre mantém `phrase_adapter_available=false` e `tts_ready=false`.
+Box64, QEMU, X11, GUI do OpenUtau e VOICEPEAK não são necessários. Python do
+Termux usa Bionic, enquanto a biblioteca usa glibc: as chamadas rodam pelo Python
+do Ubuntu ARM64. O nome histórico `voicepeak-arm64` não inicia VOICEPEAK.
 
-| Requisito | Como verificar |
-| --- | --- |
-| Termux ARM64 e Python 3.10 ou posterior | Inventário do host |
-| PRoot e Ubuntu ARM64 existente | Arquitetura real do guest, sem emulação x86 |
-| Python 3, libc6, libstdc++6 e libgcc-s1 no guest | Estado dos pacotes e carregamento nativo |
-| glibc >= 2.34 e GLIBCXX >= 3.4.29 | Dependências da biblioteca; o loader verifica as versões ao carregá-la |
-| `libworldline.so` Linux ARM64 do pin abaixo | ELF, SHA-256, símbolos e chamadas da API |
-| FFmpeg do Termux | Execução de `ffmpeg -version` |
-| Teto UTAU: `oto.ini`, aliases e arquivos WAV presentes | Mesmo índice usado pelo worker, com contagem mínima; sem decodificação de todos os WAVs |
-| Adaptador de frases, tempos e curvas | Falta implementar e testar com a Teto |
+## Aplicar o patch no bot
 
-Box64, QEMU, X11, GUI do OpenUtau e licença VOICEPEAK não são necessários para
-verificar essa API nativa. Python do Termux usa Bionic; a biblioteca oficial usa
-glibc, então suas chamadas são feitas pelo Python do Ubuntu ARM64.
+Os ZIPs preservam as pastas originais, sem pasta externa envolvendo o patch.
+Se as duas etapas anteriores já foram aplicadas, prossiga para o terceiro ZIP:
 
-## Aplicar os ZIPs do updater
+1. `teto-worldline-01-updater.zip`: correção da exclusão de arquivos opcionais.
+2. `teto-worldline-02-patch.zip`: retirada de VOICEPEAK e instalador nativo.
+3. `teto-worldline-03-adapter.zip`: adaptador, backend, publicação e teste de WAV.
 
-Os arquivos ficam nas pastas originais, sem uma pasta externa envolvendo o patch.
-Envie os ZIPs nesta ordem, aguardando o sucesso de cada update:
+O terceiro ZIP não contém exclusões. A release normal distribui os módulos ao
+worker e preserva `~/.phone-worker.env`. O padrão permanece `utau`. Um pedido
+explícito da Teto falha com diagnóstico quando o motor está indisponível;
+não troca para outra voz.
 
-1. `teto-worldline-01-updater.zip`: permite excluir componentes opcionais que já
-   estão ausentes, preservando as verificações de caminhos, Git e arquivos.
-2. `teto-worldline-02-patch.zip`: retira o backend VOICEPEAK, restaura os controles
-   UTAU e exclui os 36 arquivos antigos declarados em `update-manifest.json`.
+## Primeiro WAV no Poco
 
-Essa ordem é necessária porque o updater que prepara o segundo ZIP já precisa
-conhecer a correção do primeiro. O processo normal de release atualiza o worker;
-o kit de diagnóstico abaixo também funciona independentemente desse processo.
-
-## Conferir o telefone sem instalar nada
-
-Extraia `teto-worldline-termux-kit.zip` em `~/worldline-r-termux-kit`. Exemplo,
-depois de permitir o acesso do Termux ao armazenamento:
+O kit v2 permite testar antes da release chegar ao worker. Não distribui áudio,
+voicebanks ou bibliotecas binárias. A biblioteca já verificada não precisa ser
+reinstalada.
 
 ```bash
 mkdir -p "$HOME/worldline-r-termux-kit"
-unzip -o "$HOME/storage/downloads/teto-worldline-termux-kit.zip" -d "$HOME/worldline-r-termux-kit"
-python "$HOME/worldline-r-termux-kit/deploy/worldline-r/termux/diagnostic.py" \
-  --report "$HOME/storage/downloads/teto-worldline-diagnostic.json"
+unzip -o "$HOME/storage/downloads/teto-worldline-termux-kit-v2.zip" \
+  -d "$HOME/worldline-r-termux-kit"
+
+python "$HOME/worldline-r-termux-kit/deploy/termux/phone-worker/scripts/validate-teto-assets.py" \
+  --backend worldline-r --container voicepeak-arm64 \
+  --voicebank "$HOME/voicebanks/kasane-teto" \
+  --render-test --text "Olá. Eu sou a Teto." --timeout 90 \
+  --output "$HOME/storage/downloads/teto-worldline-teste.wav" \
+  --report "$HOME/storage/downloads/teto-worldline-teste.json"
 ```
 
-O padrão reaproveita o guest existente chamado `voicepeak-arm64`; o nome é
-histórico e não inicia o programa retirado. Se o seu guest tiver outro nome,
-passe `--container NOME`. O diagnóstico não configura pacotes nem o worker.
-Ele lê apenas as chaves da Teto de `~/.phone-worker.env`, sem avaliar comandos
-shell e sem incluir tokens de acesso no relatório.
+Abra o WAV em Downloads. Sucesso exige confirmação JSON nativa, PCM válido e
+áudio não silencioso. `teto_synthesis_verified=true` confirma a geração com os
+assets selecionados; `portuguese_speech_verified=false` permanece porque a
+pronúncia precisa ser avaliada por audição. Timeout ou erro não é sucesso.
 
-Se as voicebanks estiverem em outras pastas, informe os caminhos:
+Para a English instalada separadamente, acrescente `--mode english` e use
+`--voicebank "$HOME/voicebanks/kasane-teto-english"`. O modo standard usa a bank
+informada e não exige English. O validador aceita `--audit-dir CAMINHO` para dez
+frases de comparação. Comece com uma frase: a análise de voz custa CPU e o
+ desempenho real no Poco ainda precisa ser medido.
+
+## Selecionar no worker
+
+Depois do WAV e da atualização para `1.11.31`, revise estas chaves em
+`~/.phone-worker.env`, preservando os tokens e as outras configurações:
+
+```dotenv
+PHONE_WORKER_TETO_ENABLED=true
+PHONE_WORKER_TETO_BACKEND=worldline-r
+PHONE_WORKER_TETO_VOICEBANK_MODE=standard
+PHONE_WORKER_TETO_VOICEBANK_DIR=/data/data/com.termux/files/home/voicebanks/kasane-teto
+PHONE_WORKER_WORLDLINE_CONTAINER=voicepeak-arm64
+PHONE_WORKER_WORLDLINE_LIBRARY=/data/data/com.termux/files/home/.worldline-r/lib/libworldline.so
+```
+
+Reinício canônico após a release:
+
+```bash
+bash "$HOME/.core-worker-runtime/current/start-phone-worker.sh" --force-restart
+```
+
+O status anuncia `backend=worldline-r` e `renderer_version=worldline-r-phrase-1`.
+Os limites de texto, áudio, memória, bateria, temperatura, concorrência e prazo
+continuam sendo aplicados. O cache distingue backend, código do adaptador,
+biblioteca, configuração e identidade da bank.
+
+## Diagnóstico e instalação
 
 ```bash
 python "$HOME/worldline-r-termux-kit/deploy/worldline-r/termux/diagnostic.py" \
-  --voicebank "$HOME/voicebanks/kasane-teto" \
-  --english-voicebank "$HOME/voicebanks/kasane-teto-english" \
   --report "$HOME/storage/downloads/teto-worldline-diagnostic.json"
 ```
 
-O kit contém o código do índice de voicebanks; nenhum áudio ou voicebank é
-distribuído. Se o `.env` usar expressões shell em vez de caminhos literais, o
-diagnóstico rejeita essas expressões. Use os argumentos de caminho nesse caso.
+O diagnóstico distingue o adaptador no kit do worker instalado. `runtime_ready`
+confirma o motor; `tts_ready` confirma a configuração de render;
+`worker_tts_ready` exige a integração no worker instalado. Esses campos não
+comprovam naturalidade. O diagnóstico não gera fala da Teto por padrão e não
+altera `.env`, pacotes ou voicebank. Lê somente configurações permitidas, sem
+avaliar comandos shell ou incluir credenciais no relatório.
 
-## Preparar a biblioteca nativa, se faltar
-
-O instalador trabalha no guest ARM64 já existente. Ele verifica a arquitetura,
-instala apenas os pacotes necessários ausentes e baixa a biblioteca oficial
-fixada abaixo. A publicação ocorre depois de verificar SHA-256 e a API nativa;
-uma biblioteca anterior diferente recebe backup antes da substituição. O
-instalador não habilita um backend WORLDLINE-R no worker.
+Se a biblioteca faltar em outro aparelho:
 
 ```bash
 python "$HOME/worldline-r-termux-kit/deploy/worldline-r/termux/setup.py" \
   --container voicepeak-arm64
-python "$HOME/worldline-r-termux-kit/deploy/worldline-r/termux/diagnostic.py" \
-  --report "$HOME/storage/downloads/teto-worldline-diagnostic.json"
 ```
 
-O diagnóstico também exercita a API com um tom sintético em memória.
-`runtime_ready=true` significa que o ambiente e a API nativa foram confirmados.
-Isso não significa que a Teto foi sintetizada. O teste sintético do instalador
-gera um tom matemático em memória, sem usar a voicebank. A próxima etapa técnica
-é converter o planejamento PT-BR/CVVC e o `oto.ini` em requisições de frase,
-curvas de F0 e envelopes WORLDLINE-R, e comparar a fala por audição.
+O instalador usa o guest ARM64 existente, instala somente pacotes necessários
+ ausentes, verifica hash/API antes da publicação e preserva uma biblioteca
+anterior diferente. Requer Termux ARM64, Python 3.10+, FFmpeg, PRoot e Ubuntu
+ARM64 com Python 3, libc6, libstdc++6 e libgcc-s1. A biblioteca exige glibc >=2.34
+e GLIBCXX >=3.4.29; o loader confirma as versões.
 
-## Fonte fixada e validação
+## Fonte e verificação
 
-Usamos [OpenUtau 0.1.565](https://github.com/openutau/OpenUtau/releases/tag/0.1.565),
-commit `a60ca5830b9064556157245d4bf8f5920d93e5f8`, cuja biblioteca ainda exporta
-`PhraseSynthNew`, `PhraseSynthDelete`, `PhraseSynthAddRequest`,
-`PhraseSynthSetCurves` e `PhraseSynthSynth`. A API do branch principal mudou;
-trocar o pin sem adaptar o código pode quebrar a integração.
+API fixada em [OpenUtau 0.1.565](https://github.com/openutau/OpenUtau/releases/tag/0.1.565),
+commit `a60ca5830b9064556157245d4bf8f5920d93e5f8`. A API atual mudou; não substitua
+esse pin sem adaptar o código.
 
 - [Biblioteca ARM64 oficial](https://raw.githubusercontent.com/openutau/OpenUtau/a60ca5830b9064556157245d4bf8f5920d93e5f8/runtimes/linux-arm64/native/libworldline.so)
-- SHA-256 ARM64: `80fb77357de4fae608e2d2fa12db867d0c48d0366263e6a280eccd90a1584dfe`
-- [Documentação dos renderers do OpenUtau](https://github.com/openutau/OpenUtau/wiki/Tutorials)
-- Licença OpenUtau: [LICENSE.openutau.txt](LICENSE.openutau.txt)
+- SHA-256: `80fb77357de4fae608e2d2fa12db867d0c48d0366263e6a280eccd90a1584dfe`
+- [Documentação dos renderers](https://github.com/openutau/OpenUtau/wiki/Tutorials)
+- [Licença MIT OpenUtau](LICENSE.openutau.txt)
 
-O probe isola as chamadas nativas em outro processo. Erros do loader, término
-por sinal, timeout e respostas sem prova JSON são falhas; um código zero do
-PRoot sozinho não confirma execução. O teste Linux x64 de desenvolvimento
-confirmou a API e a geração de 13.231 amostras finitas de um tom sintético.
-A biblioteca ARM64 e a síntese da Teto ainda precisam ser verificadas no Poco.
+Chamadas nativas rodam em processo isolado, com entradas e tempo limitados.
+Falhas por sinal, JSON ausente, WAV inválido e código zero enganoso do PRoot são
+rejeitados. Testes Linux x64 verificam síntese real, altura e volume com gravações
+matemáticas; isso não simula prova de voz da Teto ou qualidade PT-BR no Poco.

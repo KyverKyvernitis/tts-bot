@@ -65,8 +65,12 @@ LEGACY_SOURCE_HASH_TARGETS = (
     "teto_renderer/cache.py",
     "teto_renderer/voicebank.py",
     "teto_renderer/phonemizer.py",
+    "teto_renderer/ptbr_g2p.py",
     "teto_renderer/prosody.py",
     "teto_renderer/renderer.py",
+    "teto_renderer/worldline.py",
+    "teto_renderer/worldline_native.py",
+    "teto_renderer/OPENUTAU_LICENSE.txt",
     "scripts/validate-teto-assets.py",
 )
 LEGACY_OPTIONAL_SNAPSHOT_TARGETS = ("README.md", "phone-worker.env.example")

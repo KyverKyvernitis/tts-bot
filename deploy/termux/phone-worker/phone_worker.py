@@ -152,6 +152,7 @@ _HEAVY_RESOURCE_LOCK = threading.Lock()
 _TETO_RENDERER_LOCK = threading.RLock()
 _TETO_RENDERER: Any = None
 _TETO_RENDERER_ERROR = ""
+_TETO_RENDERER_CONFIG = ""
 _TETO_BATTERY_CACHE_LOCK = threading.RLock()
 _TETO_BATTERY_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 _TETO_BATTERY_MONITOR_STARTED = False
@@ -161,7 +162,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.30"
+PHONE_WORKER_VERSION = "1.11.31"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2368,25 +2369,55 @@ def _phone_worker_tts_providers_module() -> Any:
 
 
 def _teto_backend() -> str:
-    backend = str(os.getenv("PHONE_WORKER_TETO_BACKEND") or "utau").strip().lower()
+    backend = str(os.getenv("PHONE_WORKER_TETO_BACKEND") or "utau").strip().lower().replace("_", "-")
     # Migrate the retired backend setting without invoking a paid engine or
     # leaving an existing phone installation unable to select its UTAU assets.
     if backend == "voicepeak":
         return "utau"
-    if backend != "utau":
-        raise ValueError("PHONE_WORKER_TETO_BACKEND deve ser utau")
-    return "utau"
+    if backend not in {"utau", "worldline-r"}:
+        raise ValueError("PHONE_WORKER_TETO_BACKEND deve ser utau ou worldline-r")
+    return backend
+
+
+def _teto_renderer_config_fingerprint(*, backend: str | None = None) -> str:
+    # Only explicit renderer settings participate. Pairing/authentication and
+    # retired remote-provider credentials must never enter the renderer identity.
+    keys = (
+        "PHONE_WORKER_TETO_ENABLED", "PHONE_WORKER_TETO_VOICEBANK_DIR",
+        "PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR", "PHONE_WORKER_TETO_VOICEBANK_MODE",
+        "PHONE_WORKER_TETO_MIN_ALIASES", "PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES",
+        "PHONE_WORKER_TETO_BASE_PITCH", "PHONE_WORKER_TETO_SPEECH_RATE",
+        "PHONE_WORKER_TETO_TEMPO", "PHONE_WORKER_TETO_VELOCITY",
+        "PHONE_WORKER_TETO_MODULATION", "PHONE_WORKER_TETO_FLAGS",
+        "PHONE_WORKER_TETO_LENGTH_MODE", "PHONE_WORKER_TETO_RESAMPLER_COMMAND",
+        "PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR", "PHONE_WORKER_TETO_FRAGMENT_CACHE_MB",
+        "PHONE_WORKER_TETO_STATUS_CACHE_SECONDS", "PHONE_WORKER_TETO_WORLDLINE_CONTAINER",
+        "PHONE_WORKER_TETO_WORLDLINE_LIBRARY", "PHONE_WORKER_WORLDLINE_CONTAINER",
+        "PHONE_WORKER_WORLDLINE_LIBRARY",
+    )
+    profile = {name: str(os.getenv(name) or "") for name in keys}
+    profile["backend"] = backend or _teto_backend()
+    return hashlib.sha256(json.dumps(profile, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _get_teto_renderer():
-    global _TETO_RENDERER, _TETO_RENDERER_ERROR
-    _teto_backend()
+    global _TETO_RENDERER, _TETO_RENDERER_ERROR, _TETO_RENDERER_CONFIG
+    backend = _teto_backend()
+    configuration = _teto_renderer_config_fingerprint(backend=backend)
     with _TETO_RENDERER_LOCK:
-        if _TETO_RENDERER is not None:
+        if _TETO_RENDERER is not None and _TETO_RENDERER_CONFIG == configuration:
             return _TETO_RENDERER
+        _TETO_RENDERER = None
+        _TETO_RENDERER_CONFIG = ""
         try:
-            from teto_renderer import TetoRenderer
-            _TETO_RENDERER = TetoRenderer(resource_guard=_teto_resource_snapshot)
+            if backend == "worldline-r":
+                from teto_renderer import WorldlineRenderer
+                renderer_class = WorldlineRenderer
+            else:
+                from teto_renderer import TetoRenderer
+                renderer_class = TetoRenderer
+            _TETO_RENDERER = renderer_class(resource_guard=_teto_resource_snapshot)
+            _TETO_RENDERER_CONFIG = configuration
             _TETO_RENDERER_ERROR = ""
             return _TETO_RENDERER
         except Exception as exc:
@@ -4807,7 +4838,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
         # Only Teto consults renderer status/environment, exactly at the old boundary.
         fingerprint, base_pitch = "unavailable", "C4"
         if normalized_engine == "teto":
-            fingerprint = str(_teto_status().get("fingerprint") or "unavailable")
+            status = _teto_status()
+            fingerprint = str(status.get("fingerprint") or "unavailable")
+            if _teto_backend() == "worldline-r":
+                # Keep the established UTAU cache contract while isolating the
+                # native phrase renderer, including when no fingerprint exists.
+                identity = ["worldline-r", status.get("renderer_version", ""),
+                            _teto_renderer_config_fingerprint(), fingerprint]
+                fingerprint = hashlib.sha256(json.dumps(identity).encode("utf-8")).hexdigest()
             base_pitch = str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4")
         return _phone_worker_tts_policy_module().standard_cache_key(
             body, engine=normalized_engine, sanitize_key=self._sanitize_tts_cache_key,
@@ -4870,7 +4908,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if engine == "teto":
             status = _teto_status()
             result.update({
-                "teto_backend": "utau",
+                "teto_backend": status.get("backend") or _teto_backend(),
                 "teto_renderer_version": status.get("renderer_version", ""),
                 "teto_voicebank_profile": status.get("voicebank_profile", ""),
                 "teto_pitch_mode": "utau-semitones",
@@ -4903,8 +4941,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
         cache_enabled = self._tts_agent_standard_cache_enabled(roles, capabilities)
         cache_read_allowed = cache_enabled and self._tts_agent_cache_mode_allows_read(body)
         cache_store_allowed = cache_enabled and self._tts_agent_cache_mode_allows_store(body)
+        cache_started = None
         if cache_read_allowed or cache_store_allowed:
             key_started = time.monotonic()
+            cache_started = key_started
             with contextlib.suppress(Exception):
                 cache_key = self._tts_agent_standard_cache_key(body, engine=engine)
             stage_ms["cache_key"] = round((time.monotonic() - key_started) * 1000.0, 2)
@@ -4923,6 +4963,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     teto_pitch_semitones=body.get("teto_pitch_semitones", 0.0),
                 )
                 if hit is not None:
+                    if engine == "teto" and time.monotonic() - cache_started >= float(timeout):
+                        raise TimeoutError("prazo total do TTS Agent esgotado")
                     return hit
         audio_format = "mp3"
         data = b""
@@ -4930,11 +4972,16 @@ class WorkerHandler(BaseHTTPRequestHandler):
         teto_meta: dict[str, Any] = {}
         synth_started = None if engine == "teto" else time.monotonic()
         if engine == "teto":
+            remaining = float(timeout)
+            if cache_started is not None:
+                remaining -= time.monotonic() - cache_started
+            if remaining <= 0:
+                raise TimeoutError("prazo total do TTS Agent esgotado")
             teto_pitch = _phone_worker_tts_policy_module().normalize_teto_pitch_semitones(
                 body.get("teto_pitch_semitones"), default=0.0
             )
             data, audio_format, teto_meta = _phone_worker_tts_providers_module().synthesize_teto(
-                text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
+                text=text, timeout=remaining, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
                 heavy_lock=_HEAVY_RESOURCE_LOCK, get_renderer=_get_teto_renderer,
                 monotonic=time.monotonic, normalize_format=self._normalize_tts_cache_format,
                 pitch_offset_semitones=teto_pitch)
@@ -9690,11 +9737,14 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "teto_renderer/ptbr_g2p.py": ("worker", "teto_renderer/ptbr_g2p.py", 0o644),
     "teto_renderer/prosody.py": ("worker", "teto_renderer/prosody.py", 0o644),
     "teto_renderer/renderer.py": ("worker", "teto_renderer/renderer.py", 0o644),
+    "teto_renderer/worldline.py": ("worker", "teto_renderer/worldline.py", 0o644),
+    "teto_renderer/worldline_native.py": ("worker", "teto_renderer/worldline_native.py", 0o644),
+    "teto_renderer/OPENUTAU_LICENSE.txt": ("worker", "teto_renderer/OPENUTAU_LICENSE.txt", 0o644),
     "scripts/validate-teto-assets.py": ("worker", "scripts/validate-teto-assets.py", 0o755),
 }
 # These installation-only files remain accepted for manual/legacy updates,
 # but are not part of the immutable runtime release or its source hash.
-_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"repair-phone-worker.sh", "install.sh", "accept-core-worker-on-device.sh", "README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example"})
+_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"repair-phone-worker.sh", "install.sh", "accept-core-worker-on-device.sh", "bootstrap-phone-worker.sh", "README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example", "scripts/validate-teto-assets.py", "teto_renderer/OPENUTAU_LICENSE.txt"})
 _PHONE_WORKER_SOURCE_HASH_CACHE: dict[str, Any] = {"signature": None, "value": ""}
 _PHONE_WORKER_SOURCE_HASH_LOCK = threading.Lock()
 
