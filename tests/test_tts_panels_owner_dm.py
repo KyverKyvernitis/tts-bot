@@ -144,7 +144,7 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         self.assertIn('self._configuracao_servidor("gtts_prefix", ".")', launcher)
         self.assertIn('self._configuracao_servidor("teto_prefix", "\'")', launcher)
         self.assertIn("**TTV (TextToVocaloid)**", launcher)
-        self.assertIn("Transforme suas mensagens em fala com a vocaloid que você escolher.", launcher)
+        self.assertIn("Voz da vocaloid escolhida · Prefixo", launcher)
         self.assertNotIn("Como funciona", launcher)
 
         self.assertIn(

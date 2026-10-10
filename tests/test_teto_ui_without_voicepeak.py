@@ -75,7 +75,7 @@ def test_launcher_restores_pitch_controls_even_with_stale_backend_state():
         _member_panel_name=lambda member: "Usuário",
     )
     view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
-    assert "semitons" in view._texto_motor(motor="teto")
+    assert "Voz: `Kasane Teto`" in view._texto_motor(motor="teto")
     assert view.children[-1].label == "Configurar TTV"
     response = SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock())
     interaction = SimpleNamespace(

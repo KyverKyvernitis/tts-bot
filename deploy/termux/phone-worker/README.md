@@ -12,8 +12,8 @@ O painel `_tts` chama esse modo de **TTV (TextToVocaloid)**. O formulário
 oferece seleção de voz, tom de -4 a +4 semitons em passos de 0,5 e velocidades
 de 85%, 100% e 115%. Velocidades personalizadas já salvas são preservadas.
 O botão **Ouvir amostra** envia um MP3 privado; **Restaurar padrões** volta
-ao tom original e à velocidade normal. Preferências podem ser salvas com o
-telefone offline, enquanto a amostra exige o renderer pronto.
+ao tom original e à velocidade normal. O bloco TTV é ocultado com o telefone
+offline, enquanto a amostra exige o renderer pronto.
 
 Pedidos antigos continuam aceitando `teto_pitch_semitones` e a velocidade
 global. Os pedidos novos usam controles pessoais e caches separados. Uma

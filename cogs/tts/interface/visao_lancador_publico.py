@@ -95,10 +95,17 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         return bool((self._guild_defaults or {}).get("announce_author", False))
 
     def _teto_disponivel(self) -> bool:
+        # Visibilidade do bloco segue a conexão; a amostra verifica o renderer.
+        online = getattr(self.cog, "_tts_phone_worker_online_for_ui", None)
+        if callable(online):
+            try:
+                return bool(online())
+            except Exception:
+                return False
         checker = getattr(self.cog, "_ttv_voice_status", None)
         if callable(checker):
             try:
-                return bool(checker().get("ready"))
+                return bool(checker().get("online"))
             except Exception:
                 return False
         return False
@@ -125,10 +132,15 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         except ValueError:
             voice = "Voz indisponível"
         pitch = float(preferences["ttv_pitch_semitones"])
-        tone = "Original" if pitch == 0 else f"{pitch:+g} semitons".replace(".", ",")
         rate = preferences["ttv_speech_rate"]
-        speed = "Normal" if rate == 1 else f"{rate * 100:g}%".replace(".", ",")
-        return f"Voz: {self._codigo(voice)} · Tom: {self._codigo(tone)} · Velocidade: {self._codigo(speed)}"
+        parts = [f"Voz: {self._codigo(voice)}"]
+        if pitch != 0:
+            tone = f"{pitch:+g}st".replace(".", ",")
+            parts.append(f"Tom: {self._codigo(tone)}")
+        if rate != 1:
+            speed = f"{rate * 100:g}%".replace(".", ",")
+            parts.append(f"Velocidade: {self._codigo(speed)}")
+        return " · ".join(parts)
 
     @staticmethod
     def _separador():
@@ -218,8 +230,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
             prefixo = self._configuracao_servidor("teto_prefix", "'")
             linhas = [
                 "**TTV (TextToVocaloid)**",
-                "Transforme suas mensagens em fala com a vocaloid que você escolher.",
-                f"Prefixo {self._codigo(prefixo)}",
+                f"Voz da vocaloid escolhida · Prefixo {self._codigo(prefixo)}",
             ]
             resumo = self._resumo_ttv()
         else:
@@ -231,8 +242,6 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
             resumo = self._resumo_gtts()
         if resumo:
             linhas.append(f"-# {resumo}")
-        if motor == "teto" and not self._teto_disponivel():
-            linhas.append("-# Amostra indisponível no momento. Você pode salvar seus ajustes.")
         return "\n".join(linhas)
 
     def _criar_botao(self, *, acao: str, rotulo: str, emoji: str | None = None) -> discord.ui.Button:
@@ -265,12 +274,13 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     discord.ui.TextDisplay("**Apelido falado**\nEscolha o nome anunciado antes das suas mensagens"),
                     accessory=botao_apelido,
                 ))
-            botao_teto = self._criar_botao(acao="teto", rotulo="Configurar")
-            container.add_item(self._separador())
-            container.add_item(discord.ui.Section(
-                discord.ui.TextDisplay(self._texto_motor(motor="teto")),
-                accessory=botao_teto,
-            ))
+            if self._teto_disponivel():
+                botao_teto = self._criar_botao(acao="teto", rotulo="Configurar")
+                container.add_item(self._separador())
+                container.add_item(discord.ui.Section(
+                    discord.ui.TextDisplay(self._texto_motor(motor="teto")),
+                    accessory=botao_teto,
+                ))
             if not self._painel_de_outro_usuario():
                 prefixo_bot = self._configuracao_servidor(
                     "bot_prefix",
@@ -278,7 +288,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                 )
                 container.add_item(self._separador())
                 container.add_item(discord.ui.TextDisplay(
-                    f"-# Dica: {self._codigo(prefixo_bot + 'advanced')} personaliza os efeitos de Edge e gTTS."
+                    f"-# Dica: {self._codigo(prefixo_bot + 'advanced')} ajusta Edge e gTTS."
                 ))
             self.add_item(container)
             return
@@ -287,7 +297,8 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         self.add_item(self._criar_botao(acao="gtts", rotulo="Configurar gTTS"))
         if apelido_ativo:
             self.add_item(self._criar_botao(acao="spoken_name", rotulo="Alterar apelido"))
-        self.add_item(self._criar_botao(acao="teto", rotulo="Configurar TTV"))
+        if self._teto_disponivel():
+            self.add_item(self._criar_botao(acao="teto", rotulo="Configurar TTV"))
 
     async def _abrir_acao(self, interaction: discord.Interaction, acao: str) -> None:
         if interaction.guild is None:
@@ -341,6 +352,9 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
             return
 
         if acao == "teto":
+            if not self._teto_disponivel():
+                await interaction.response.send_message("O worker está offline. Abra o painel novamente quando ele voltar.", ephemeral=True)
+                return
             def criar_modal(*, fallback=False):
                 modal = self._classe_modal_teto(
                     self.cog, mensagem_painel, server=False,

@@ -313,12 +313,12 @@ class TTSInterfaceLancadorComportamentoTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(view._resumo_edge(), "Voz: `humana:outra` · Velocidade: `+10%` · Tom: `+5Hz`")
         self.assertEqual(view._resumo_gtts(), "Idioma: `Inglês`")
-        self.assertEqual([b.label for b in view.children], ["Configurar Edge", "Configurar gTTS", "Configurar TTV"])
+        self.assertEqual([b.label for b in view.children], ["Configurar Edge", "Configurar gTTS"])
 
-    def test_ttv_continua_editavel_offline_e_fica_por_ultimo(self):
+    def test_ttv_fica_oculto_offline_e_por_ultimo_online(self):
         modulo = _carregar_lancador()
         offline = modulo.VisaoLancadorPublicoTTS(self._cog(worker_online=False), 10, 20)
-        self.assertEqual([b.label for b in offline.children], ["Configurar Edge", "Configurar gTTS", "Configurar TTV"])
+        self.assertEqual([b.label for b in offline.children], ["Configurar Edge", "Configurar gTTS"])
 
         online = modulo.VisaoLancadorPublicoTTS(
             self._cog(
@@ -331,7 +331,7 @@ class TTSInterfaceLancadorComportamentoTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(online.children[-1].label, "Configurar TTV")
         self.assertIn("**TTV (TextToVocaloid)**", online._texto_motor(motor="teto"))
-        self.assertIn("`-1,5 semitons`", online._texto_motor(motor="teto"))
+        self.assertIn("`-1,5st`", online._texto_motor(motor="teto"))
 
     async def test_acao_teto_revalida_worker_e_abre_modal_pessoal(self):
         modulo = _carregar_lancador()
@@ -347,6 +347,20 @@ class TTSInterfaceLancadorComportamentoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(modal.kwargs["target_user_id"], 30)
         self.assertEqual(modal.kwargs["target_user_name"], "nome-30")
         self.assertFalse(modal.kwargs["server"])
+
+    async def test_botao_legado_antigo_nao_abre_modal_com_worker_offline(self):
+        modulo = _carregar_lancador()
+        cog = self._cog(worker_online=True)
+        view = modulo.VisaoLancadorPublicoTTS(cog, 10, 20)
+        cog._tts_phone_worker_online_for_ui = lambda: False
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=20), user=types.SimpleNamespace(id=30), message="painel",
+            response=types.SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+        )
+        await view._abrir_acao(interaction, "teto")
+        view._enviar_modal_fallback.assert_not_awaited()
+        interaction.response.send_modal.assert_not_awaited()
+        self.assertTrue(interaction.response.send_message.await_args.kwargs["ephemeral"])
 
     async def test_acao_edge_preserva_contexto_e_fallback_textual(self):
         modulo = _carregar_lancador()

@@ -56,7 +56,7 @@ def cog_for(settings=None, *, ready=False):
 
 def interaction(*, actor=10, guild=20, admin=False):
     state = {"done": False}
-    async def finish(**kwargs):
+    async def finish(*args, **kwargs):
         state["done"] = True
     response = SimpleNamespace(send_message=AsyncMock(side_effect=finish), defer=AsyncMock(side_effect=finish), send_modal=AsyncMock(side_effect=finish), is_done=lambda: state["done"])
     return SimpleNamespace(
@@ -241,20 +241,84 @@ def test_saved_preference_updates_existing_launcher_then_sends_private_confirmat
     asyncio.run(run())
 
 
-def test_launcher_uses_ttv_copy_and_actual_readiness_but_edits_offline():
+def test_launcher_uses_same_compact_structure_as_other_engines():
     async def run():
         _, _, module = modules()
-        cog = cog_for({"teto_pitch_semitones": "-2.0", "ttv_speech_rate": 1.075}, ready=False)
+        cog = cog_for({"teto_pitch_semitones": "-2.0"}, ready=True)
         view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
         text = view._texto_motor(motor="teto")
         assert "**TTV (TextToVocaloid)**" in text
-        assert "Transforme suas mensagens em fala com a vocaloid que você escolher." in text
-        assert "Kasane Teto" in text and "-2 semitons" in text and "107,5%" in text
-        assert "Amostra indisponível" in text
-        assert not view._teto_disponivel()
+        assert text.splitlines() == [
+            "**TTV (TextToVocaloid)**",
+            "Voz da vocaloid escolhida · Prefixo `'`",
+            "-# Voz: `Kasane Teto` · Tom: `-2st`",
+        ]
+        assert "Velocidade" not in text and "Amostra indisponível" not in text
         event = interaction()
         await view._abrir_acao(event, "teto")
         modal = event.response.send_modal.await_args.args[0]
         assert modal.owner_id == 10 and modal.guild_id == 20
         assert modal.current_pitch == "-2.0"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("online,ready", [(False, False), (False, True), (True, False), (True, True)])
+def test_real_launcher_hides_ttv_offline_and_keeps_other_sections(online, ready):
+    async def run():
+        _, _, module = modules()
+        cog = cog_for(ready=ready)
+        cog._tts_phone_worker_online_for_ui = lambda: online
+        view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
+        container = view.to_components()[0]["components"]
+        sections = [item for item in container if item["type"] == 9]
+        texts = [item["components"][0]["content"] for item in sections]
+        assert texts[0].startswith("**Edge**") and texts[1].startswith("**gTTS**")
+        assert len(sections) == (3 if online else 2)
+        assert any(text.startswith("**TTV (TextToVocaloid)**") for text in texts) == online
+        assert all(section["accessory"]["label"] == "Configurar" for section in sections)
+        # Cada separador tem uma seção/footer seguinte; TTV offline não deixa espaço vazio.
+        assert all(next_item["type"] != 14 for item, next_item in zip(container, container[1:]) if item["type"] == 14)
+    asyncio.run(run())
+
+
+def test_compact_summary_keeps_only_changed_controls_and_saved_values():
+    async def run():
+        _, _, module = modules()
+        defaults = module.VisaoLancadorPublicoTTS(cog_for(ready=True), 10, 20)
+        assert defaults._resumo_ttv() == "Voz: `Kasane Teto`"
+        settings = {"teto_pitch_semitones": "-1.5", "ttv_speech_rate": 1.075}
+        cog = cog_for(settings, ready=True)
+        view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
+        assert view._resumo_ttv() == "Voz: `Kasane Teto` · Tom: `-1,5st` · Velocidade: `107,5%`"
+        assert cog._get_db().get_user_tts(20, 10) == settings
+        cog._set_user_tts_and_refresh.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_stale_launcher_rechecks_worker_before_opening_ttv_modal():
+    async def run():
+        _, _, module = modules()
+        state = {"online": True}
+        cog = cog_for(ready=True)
+        cog._tts_phone_worker_online_for_ui = lambda: state["online"]
+        view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
+        assert view._teto_disponivel()
+        state["online"] = False
+        event = interaction()
+        await view._abrir_acao(event, "teto")
+        event.response.send_modal.assert_not_awaited()
+        reply = event.response.send_message.await_args.kwargs
+        assert reply["ephemeral"] and "offline" in event.response.send_message.await_args.args[0]
+        cog._set_user_tts_and_refresh.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_worker_status_failure_hides_ttv_without_using_stale_readiness():
+    async def run():
+        _, _, module = modules()
+        cog = cog_for(ready=True)
+        cog._tts_phone_worker_online_for_ui = Mock(side_effect=RuntimeError("status unavailable"))
+        view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
+        sections = [item for item in view.to_components()[0]["components"] if item["type"] == 9]
+        assert len(sections) == 2 and not view._teto_disponivel()
     asyncio.run(run())

@@ -15,7 +15,9 @@ O modal **Configurar TTV** usa Labels com dois String Selects e um RadioGroup:
 Depois de salvar, a confirmação privada oferece **Ouvir amostra** e
 **Restaurar padrões**. A amostra usa os ajustes pessoais em um MP3 sem entrar
 em canal de voz. Restaurar conserva a personagem e volta ao tom 0 e à taxa 1.
-Os ajustes podem ser editados quando o motor está indisponível. Clientes que
+O bloco TTV aparece enquanto o worker está online. O resumo exibe a voz e
+somente tom e velocidade diferentes do padrão, como os outros modos. O tom
+usa a unidade compacta `st` (semitons). Clientes que
 recusam os componentes novos recebem três campos de texto com os valores
 atuais preenchidos.
 
