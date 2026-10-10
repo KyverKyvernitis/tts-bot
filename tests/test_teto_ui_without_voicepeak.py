@@ -75,14 +75,14 @@ def test_launcher_restores_pitch_controls_even_with_stale_backend_state():
         _member_panel_name=lambda member: "Usuário",
     )
     view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
-    assert "semitom" in view._texto_motor(motor="teto")
-    assert view.children[-1].label == "Configurar TextToTeto"
+    assert "semitons" in view._texto_motor(motor="teto")
+    assert view.children[-1].label == "Configurar TTV"
     response = SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock())
     interaction = SimpleNamespace(
         guild=SimpleNamespace(id=20), user=SimpleNamespace(id=10), message=None, response=response,
     )
     asyncio.run(view._abrir_acao(interaction, "teto"))
-    response.send_modal.assert_awaited_once()
+    assert view._enviar_modal_fallback.await_count == 1
     response.send_message.assert_not_awaited()
 
 
@@ -94,7 +94,7 @@ def test_modal_saves_pitch_even_with_stale_backend_state():
     response = SimpleNamespace(send_message=AsyncMock())
     asyncio.run(modal.on_submit(SimpleNamespace(response=response)))
     save.assert_awaited_once()
-    assert save.await_args.kwargs["updates"] == {"teto_pitch_semitones": "+2.0"}
+    assert save.await_args.kwargs["settings"] == {"ttv_voice_id": "kasane-teto", "ttv_pitch_semitones": "+2.0", "ttv_speech_rate": 1.0}
     response.send_message.assert_not_awaited()
 
 

@@ -7,16 +7,20 @@ Admission, cache, output envelopes and the shared transport keep their owners.
 
 def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
                     heavy_lock, get_renderer, monotonic, normalize_format,
-                    pitch_offset_semitones=0.0):
+                    pitch_offset_semitones=0.0, speech_rate=None):
     if not heavy_lock.acquire(blocking=False):
         raise RuntimeError("recurso pesado ocupado por build ou manutenção")
     teto_started = monotonic()
     try:
+        controls = {}
+        if speech_rate is not None:
+            controls["speech_rate"] = float(speech_rate)
         rendered = get_renderer().synthesize(
             text,
             timeout_seconds=float(timeout),
             max_audio_bytes=max_audio_bytes,
             pitch_offset_semitones=float(pitch_offset_semitones),
+            **controls,
         )
     finally:
         heavy_lock.release()

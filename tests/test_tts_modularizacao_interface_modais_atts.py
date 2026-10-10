@@ -249,10 +249,10 @@ class TTSInterfaceModaisATTSComportamentoTests(unittest.IsolatedAsyncioTestCase)
         modulo, _, _ = _carregar_modulo()
         modulo.CACHE_CATALOGO_VOZES_ATTS.clear()
         modulo.CACHE_CATALOGO_VOZES_ATTS.update({"by_locale": {}, "last_error": ""})
-        modulo.urllib.request.urlopen = Mock(side_effect=AssertionError("rede não deveria ser usada"))
-        self.assertEqual(modulo.buscar_catalogo_vozes_atts_sincrono("pt_BR"), [])
-        self.assertEqual(modulo.CACHE_CATALOGO_VOZES_ATTS["last_error"], "worker_unavailable")
-        modulo.urllib.request.urlopen.assert_not_called()
+        with patch.object(modulo.urllib.request, "urlopen", side_effect=AssertionError("rede não deveria ser usada")) as open_url:
+            self.assertEqual(modulo.buscar_catalogo_vozes_atts_sincrono("pt_BR"), [])
+            self.assertEqual(modulo.CACHE_CATALOGO_VOZES_ATTS["last_error"], "worker_unavailable")
+            open_url.assert_not_called()
         self.assertEqual(modulo.chave_cache_catalogo_vozes_atts("pt_BR"), "pt-br")
 
     async def test_indisponibilidade_envia_mensagem_definida_em_vez_de_nameerror(self):

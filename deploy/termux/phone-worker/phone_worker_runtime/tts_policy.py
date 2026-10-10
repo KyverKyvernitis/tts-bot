@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import math
 import re
 from typing import Any
 
@@ -30,6 +31,42 @@ def normalize_teto_pitch_semitones(raw: Any, *, default: float = 0.0) -> float:
         value = float(default)
     value = max(-4.0, min(4.0, value))
     return round(value * 2.0) / 2.0
+
+
+def normalize_ttv_voice_id(raw: Any = "kasane-teto") -> str:
+    voice_id = str(raw).strip().lower()
+    if voice_id != "kasane-teto":
+        raise ValueError("vocaloid TTV desconhecida ou indisponível")
+    return voice_id
+
+
+def normalize_ttv_speech_rate(raw: Any) -> float:
+    if isinstance(raw, bool):
+        raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5") from exc
+    if not math.isfinite(value) or not 0.75 <= value <= 1.5:
+        raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5")
+    return value
+
+
+def effective_ttv_settings(body: dict[str, Any], *, default_speech_rate: Any = 1.0) -> dict[str, Any]:
+    # The global value belongs only to legacy requests. Personal controls are
+    # explicit values and must never be silently repaired to another speed.
+    try:
+        global_rate = float(default_speech_rate)
+    except (TypeError, ValueError, OverflowError):
+        global_rate = 1.0
+    global_rate = max(0.75, min(1.5, global_rate)) if math.isfinite(global_rate) else 1.0
+    return {
+        "ttv_voice_id": normalize_ttv_voice_id(body.get("ttv_voice_id", "kasane-teto")),
+        "ttv_pitch_semitones": normalize_teto_pitch_semitones(
+            body.get("ttv_pitch_semitones", body.get("teto_pitch_semitones")), default=0.0),
+        "ttv_speech_rate": normalize_ttv_speech_rate(body["ttv_speech_rate"])
+        if "ttv_speech_rate" in body else global_rate,
+    }
 
 def available_engines(deps: dict[str, Any]) -> list[str]:
     engines: list[str] = []
@@ -133,7 +170,7 @@ def normalize_cache_format(raw: Any) -> str:
 
 def standard_cache_key(body: dict[str, Any], *, engine: str, sanitize_key, normalize_rate,
                        normalize_pitch, normalize_language, teto_fingerprint: str,
-                       teto_base_pitch: str) -> str:
+                       teto_base_pitch: str, teto_speech_rate: Any = 1.0) -> str:
     normalized_engine = normalize_engine(engine or body.get("engine"))
     requested_engine = normalize_engine(body.get("engine"), default=normalized_engine)
     provided = str(body.get("cache_key") or "").strip()
@@ -147,10 +184,14 @@ def standard_cache_key(body: dict[str, Any], *, engine: str, sanitize_key, norma
         language = str(body.get("language") or "pt-BR").strip() or "pt-BR"
         base_pitch = str(teto_base_pitch or "C4")
         pitch_part = ""
-        if "teto_pitch_semitones" in body:
-            pitch_offset = normalize_teto_pitch_semitones(body.get("teto_pitch_semitones"), default=0.0)
+        controls = effective_ttv_settings(body, default_speech_rate=teto_speech_rate)
+        if "ttv_pitch_semitones" in body or "teto_pitch_semitones" in body:
+            pitch_offset = controls["ttv_pitch_semitones"]
             pitch_part = f"|pitch={pitch_offset:+.1f}"
         payload = f"teto|{fingerprint}|{voice}|{language}|{base_pitch}{pitch_part}|{text}"
+        if any(name in body for name in ("ttv_voice_id", "ttv_pitch_semitones", "ttv_speech_rate")):
+            payload = (f"ttv-v1|voice={controls['ttv_voice_id']}|pitch={controls['ttv_pitch_semitones']:+.1f}"
+                       f"|rate={controls['ttv_speech_rate']!r}|" + payload)
     elif normalized_engine == "android_native":
         language = str(body.get("language") or body.get("fallback_language") or "pt-BR").strip().replace("_", "-") or "pt-BR"
         voice = str(body.get("voice") or "auto").strip() or "auto"

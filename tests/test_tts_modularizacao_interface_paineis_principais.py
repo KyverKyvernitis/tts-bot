@@ -313,12 +313,12 @@ class TTSInterfaceLancadorComportamentoTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(view._resumo_edge(), "Voz: `humana:outra` · Velocidade: `+10%` · Tom: `+5Hz`")
         self.assertEqual(view._resumo_gtts(), "Idioma: `Inglês`")
-        self.assertEqual([b.label for b in view.children], ["Configurar Edge", "Configurar gTTS"])
+        self.assertEqual([b.label for b in view.children], ["Configurar Edge", "Configurar gTTS", "Configurar TTV"])
 
-    def test_texttoteto_so_aparece_com_worker_online_e_fica_por_ultimo(self):
+    def test_ttv_continua_editavel_offline_e_fica_por_ultimo(self):
         modulo = _carregar_lancador()
         offline = modulo.VisaoLancadorPublicoTTS(self._cog(worker_online=False), 10, 20)
-        self.assertEqual([b.label for b in offline.children], ["Configurar Edge", "Configurar gTTS"])
+        self.assertEqual([b.label for b in offline.children], ["Configurar Edge", "Configurar gTTS", "Configurar TTV"])
 
         online = modulo.VisaoLancadorPublicoTTS(
             self._cog(
@@ -329,9 +329,9 @@ class TTSInterfaceLancadorComportamentoTests(unittest.IsolatedAsyncioTestCase):
             10,
             20,
         )
-        self.assertEqual(online.children[-1].label, "Configurar TextToTeto")
-        self.assertIn("**TTS (TextToTeto)**", online._texto_motor(motor="teto"))
-        self.assertIn("`-1.5 semitom`", online._texto_motor(motor="teto"))
+        self.assertEqual(online.children[-1].label, "Configurar TTV")
+        self.assertIn("**TTV (TextToVocaloid)**", online._texto_motor(motor="teto"))
+        self.assertIn("`-1,5 semitons`", online._texto_motor(motor="teto"))
 
     async def test_acao_teto_revalida_worker_e_abre_modal_pessoal(self):
         modulo = _carregar_lancador()
@@ -343,7 +343,7 @@ class TTSInterfaceLancadorComportamentoTests(unittest.IsolatedAsyncioTestCase):
             response=types.SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
         )
         await view._abrir_acao(interaction, "teto")
-        modal = interaction.response.send_modal.await_args.args[0]
+        modal = view._enviar_modal_fallback.await_args.args[1]()
         self.assertEqual(modal.kwargs["target_user_id"], 30)
         self.assertEqual(modal.kwargs["target_user_name"], "nome-30")
         self.assertFalse(modal.kwargs["server"])

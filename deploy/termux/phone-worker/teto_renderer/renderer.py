@@ -93,6 +93,19 @@ class TetoRenderer:
         except (TypeError, ValueError):
             return 1.0
 
+    def _effective_speech_rate(self, requested: float | None) -> float:
+        if requested is None:
+            return self._speech_rate()
+        if isinstance(requested, bool) or not isinstance(requested, (int, float)):
+            raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5")
+        try:
+            value = float(requested)
+        except (ValueError, OverflowError) as exc:
+            raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5") from exc
+        if not math.isfinite(value) or not 0.75 <= value <= 1.5:
+            raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5")
+        return value
+
     def _velocity(self) -> int:
         return max(1, min(200, self._env_int("PHONE_WORKER_TETO_VELOCITY", 100)))
 
@@ -129,6 +142,20 @@ class TetoRenderer:
 
     def _render_fingerprint(self, index: VoicebankIndex) -> str:
         return self._render_fingerprint_for_version(index, self.RENDER_VERSION)
+
+    def _request_fingerprint(
+        self, index: VoicebankIndex, *, pitch_offset_semitones: float,
+        speech_rate: float, character: str = "kasane-teto",
+    ) -> str:
+        # Status describes the installed renderer. A rendered utterance also
+        # depends on the user's controls, captured locally for this request.
+        profile = {
+            "renderer": self._render_fingerprint(index),
+            "character": character,
+            "pitch_offset_semitones": pitch_offset_semitones,
+            "speech_rate": speech_rate,
+        }
+        return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
     def _fragment_fingerprint(self, index: VoicebankIndex) -> str:
         # Fragment identity is intentionally independent from the high-level
@@ -819,7 +846,9 @@ class TetoRenderer:
         timeout_seconds: float = 25.0,
         max_audio_bytes: int = 8 * 1024 * 1024,
         pitch_offset_semitones: float = 0.0,
+        speech_rate: float | None = None,
     ) -> dict[str, Any]:
+        effective_rate = self._effective_speech_rate(speech_rate)
         if not self.status().get("ready"):
             raise TetoConfigurationError(str(self.status().get("last_error") or "Teto indisponível"))
         clean_text = " ".join(str(text or "").strip().split())
@@ -852,7 +881,7 @@ class TetoRenderer:
             notes = build_notes(
                 moras,
                 base_pitch=str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4"),
-                speech_rate=self._speech_rate(),
+                speech_rate=effective_rate,
                 tempo=max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
                 pitch_offset_semitones=pitch_offset,
             )
@@ -1000,10 +1029,12 @@ class TetoRenderer:
                 "audio_format": "wav",
                 "voicebank": index.name,
                 "voicebank_fingerprint": index.fingerprint,
-                "renderer_fingerprint": self._render_fingerprint(index),
+                "renderer_fingerprint": self._request_fingerprint(
+                    index, pitch_offset_semitones=pitch_offset, speech_rate=effective_rate,
+                ),
                 "renderer_version": self.RENDER_VERSION,
                 "phonemizer_version": self.PHONEMIZER_VERSION,
-                "speech_rate": self._speech_rate(),
+                "speech_rate": effective_rate,
                 "pitch_offset_semitones": pitch_offset,
                 "aliases": index.alias_count,
                 "voicebank_profile": self._index_profile,

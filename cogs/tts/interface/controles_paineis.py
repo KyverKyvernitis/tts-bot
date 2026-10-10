@@ -51,7 +51,7 @@ class SeletorAlvoPrefixo(discord.ui.Select):
         options = [
             discord.SelectOption(label="Bot", description="Símbolo usado nos comandos do bot. Exemplo: _panel", value="bot", emoji="🤖"),
             discord.SelectOption(label="ATTS", description="Símbolo antes da frase para usar ATTS. Exemplo: %bom dia", value="atts", emoji="📱"),
-            discord.SelectOption(label="Kasane Teto", description="Símbolo antes da frase para usar a Teto. Exemplo: 'bom dia", value="teto", emoji="🥖"),
+            discord.SelectOption(label="TTV (TextToVocaloid)", description="Símbolo antes da frase para usar sua vocaloid. Exemplo: 'bom dia", value="teto", emoji="🥖"),
             discord.SelectOption(label="gTTS", description="Símbolo antes da frase para usar gTTS. Exemplo: .bom dia", value="gtts", emoji="🔤"),
             discord.SelectOption(label="Edge", description="Símbolo antes da frase para usar Edge. Exemplo: ,bom dia", value="edge", emoji="🔊"),
         ]
@@ -82,7 +82,7 @@ class SeletorPainelPrincipalTTS(discord.ui.Select):
         self.server = self.servidor
         if self.servidor:
             options = [
-                discord.SelectOption(label="Prefixos", description="Símbolos do bot, ATTS, Teto, Edge e gTTS", value="prefixes", emoji="⌨️"),
+                discord.SelectOption(label="Prefixos", description="Símbolos do bot, ATTS, TTV, Edge e gTTS", value="prefixes", emoji="⌨️"),
                 discord.SelectOption(label="ATTS", description="Android TTS padrão do servidor", value="atts", emoji="📱"),
                 discord.SelectOption(label="Edge", description="Idioma, voz e leitura Edge padrão do servidor", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Idioma gTTS padrão do servidor", value="gtts", emoji="🔤"),

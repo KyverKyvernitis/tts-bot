@@ -82,8 +82,8 @@ async def _apply_server_prefix_from_modal(
         title = "Prefixo do ATTS atualizado"
     elif prefix_kind == "teto":
         await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, teto_prefix=cleaned, **migration_updates))
-        desc = f"O prefixo da Kasane Teto do servidor agora é `{cleaned}`"
-        title = "Prefixo da Kasane Teto atualizado"
+        desc = f"O prefixo do TTV do servidor agora é `{cleaned}`"
+        title = "Prefixo do TTV atualizado"
     elif prefix_kind == "edge":
         await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, edge_prefix=cleaned, **migration_updates))
         desc = f"O prefixo do modo Edge do servidor agora é `{cleaned}`"

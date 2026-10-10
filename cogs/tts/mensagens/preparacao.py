@@ -13,6 +13,7 @@ from typing import Any
 import config
 
 from ..audio import QueueItem, _has_speakable_tts_text
+from ..ttv import resolve_preferences
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,21 @@ async def preparar_payload_tts_mensagem(
     fallback_rate = str(resolved.get("rate") or "+0%")
     fallback_pitch = str(resolved.get("pitch") or "+0Hz")
 
+    ttv_values = resolved
+    effective_engine = str(forced_engine or resolved.get("engine") or "gtts").lower()
+    if effective_engine != "teto":
+        # An unavailable TTV selection cannot stop an independent Edge/gTTS
+        # request. The character is validated when its own route is selected.
+        ttv_values = {**resolved, "ttv_voice_id": ""}
+    try:
+        ttv_preferences = resolve_preferences(
+            ttv_values,
+            default_pitch=getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0),
+        )
+    except ValueError as exc:
+        logger.warning("[tts_voice] vocaloid indisponível | guild=%s user=%s erro=%s", message.guild.id, message.author.id, exc)
+        return None
+
     # Override pelo prefixo: se o user usou o prefixo de Edge, ele quer Edge
     # nessa fala mesmo que o engine padrão dele seja gTTS (e idem pros outros).
     if forced_engine == "gtts":
@@ -82,9 +98,8 @@ async def preparar_payload_tts_mensagem(
         resolved["voice"] = "kasane-teto-standard"
         resolved["rate"] = "1.0"
         resolved["pitch"] = "C4"
-        resolved["teto_pitch_semitones"] = resolved.get("teto_pitch_semitones") or str(
-            getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0)
-        )
+        resolved.update(ttv_preferences)
+        resolved["teto_pitch_semitones"] = ttv_preferences["ttv_pitch_semitones"]
 
     # Texto final: tira o prefixo de fala, limpa marcadores e prepende o
     # nome falado do autor quando o servidor tem essa opção ligada.
@@ -125,10 +140,8 @@ async def preparar_payload_tts_mensagem(
         advanced_nightcore_level=resolved.get("advanced_nightcore_level") or 0,
         advanced_slowed_level=resolved.get("advanced_slowed_level") or 0,
         advanced_reverb_level=resolved.get("advanced_reverb_level") or 0,
-        teto_pitch_semitones=str(
-            resolved.get("teto_pitch_semitones")
-            or getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0)
-        ),
+        teto_pitch_semitones=ttv_preferences["ttv_pitch_semitones"],
+        **(ttv_preferences if resolved.get("engine") == "teto" else {}),
         piper_fallback_engine=fallback_engine,
         piper_fallback_voice=fallback_voice,
         piper_fallback_language=fallback_language,

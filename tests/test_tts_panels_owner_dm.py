@@ -143,11 +143,12 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         self.assertIn('self._configuracao_servidor("edge_prefix", ",")', launcher)
         self.assertIn('self._configuracao_servidor("gtts_prefix", ".")', launcher)
         self.assertIn('self._configuracao_servidor("teto_prefix", "\'")', launcher)
-        self.assertIn("**TTS (TextToTeto)**", launcher)
+        self.assertIn("**TTV (TextToVocaloid)**", launcher)
+        self.assertIn("Transforme suas mensagens em fala com a vocaloid que você escolher.", launcher)
         self.assertNotIn("Como funciona", launcher)
 
         self.assertIn(
-            '"Escolha qual modo de texto para voz quer configurar. "',
+            '"Escolha qual modo de texto para voz quer configurar."',
             self.ui_text + self.operacoes_text,
         )
         self.assertNotIn("Escolha o motor pelo prefixo da mensagem", self.ui_text + self.cog_text)
@@ -172,7 +173,8 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
             (self.ui_text + self.operacoes_text).count('owner_id=int(state.get("owner_id", 0) or 0)'),
             2,
         )
-        self.assertIn('owner_id=int(state.get("owner_id", 0) or 0)', self.cog_text)
+        ttv_actions = (ROOT / "cogs" / "tts" / "interface" / "ttv_acoes.py").read_text(encoding="utf-8")
+        self.assertIn('"owner_id": int(state.get("owner_id", 0) or 0)', ttv_actions)
         self.assertIn("self._guild_defaults, self._user_settings = self._carregar_configuracoes_lancador()", self.lancador_text)
 
     def test_expired_interaction_uses_server_prefix_and_short_tts_message(self):
@@ -382,6 +384,9 @@ class TTSPanelHistoryRemovalRegressionTests(unittest.TestCase):
 
     def test_legacy_history_module_contains_no_executable_code(self):
         path = ROOT / "cogs" / "tts" / "utils" / "history.py"
+        if not path.exists():
+            # A remoção completa também garante ausência de código executável.
+            return
         tree = ast.parse(path.read_text(encoding="utf-8"))
         executable = [node for node in tree.body if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str))]
         self.assertEqual(executable, [])

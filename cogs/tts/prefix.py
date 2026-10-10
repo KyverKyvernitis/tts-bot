@@ -129,7 +129,7 @@ def validate_prefix_values(*, bot_prefix: object, atts_prefix: object, teto_pref
     values = {
         "bot": _clean_configurable_prefix(bot_prefix),
         "ATTS": _clean_configurable_prefix(atts_prefix),
-        "Kasane Teto": _clean_configurable_prefix(teto_prefix),
+        "TTV": _clean_configurable_prefix(teto_prefix),
         "Edge": _clean_configurable_prefix(edge_prefix),
         "gTTS": _clean_configurable_prefix(gtts_prefix),
     }

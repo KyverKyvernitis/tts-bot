@@ -1,8 +1,35 @@
 # Phone Worker Termux
 
+## TTV: voz, tom e velocidade por usuário
+
+O worker `1.11.33` aceita `ttv_voice_id`, `ttv_pitch_semitones` e
+`ttv_speech_rate` por requisição. A personagem disponível é `kasane-teto`;
+a escolha não altera o perfil Standard/English da voicebank instalada. Tom e
+velocidade pessoais funcionam tanto com UTAU/ESPER quanto com WORLDLINE-R,
+sem escrever no `.env` nem alterar os controles dos outros usuários.
+
+O painel `_tts` chama esse modo de **TTV (TextToVocaloid)**. O formulário
+oferece seleção de voz, tom de -4 a +4 semitons em passos de 0,5 e velocidades
+de 85%, 100% e 115%. Velocidades personalizadas já salvas são preservadas.
+O botão **Ouvir amostra** envia um MP3 privado; **Restaurar padrões** volta
+ao tom original e à velocidade normal. Preferências podem ser salvas com o
+telefone offline, enquanto a amostra exige o renderer pronto.
+
+Pedidos antigos continuam aceitando `teto_pitch_semitones` e a velocidade
+global. Os pedidos novos usam controles pessoais e caches separados. Uma
+personagem desconhecida é recusada antes da síntese; ela não vira outra voz.
+O status anuncia `ttv_personal_settings` e `ttv_voices`, e a resposta raw
+confirma os controles pelos cabeçalhos `X-Core-Worker-TTV-*`.
+
+Ao aplicar o patch pelo updater do Discord, a automação publica a release
+completa do worker. O bootstrap do Termux consulta a atualização normalmente
+a cada cinco minutos e reinicia o worker após promover a release. Confira a
+versão `1.11.33` no status antes de testar as amostras. Os arquivos locais
+da voicebank, ESPER e a configuração do aparelho continuam em seus caminhos.
+
 ## Teto UTAU e WORLDLINE-R
 
-O worker `1.11.32` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
+O worker `1.11.33` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
 configurações antigas que selecionavam esse backend passam a usar UTAU e as
 variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
 o `.env` do aparelho. Para WORLDLINE-R, use a configuração indicada abaixo.
@@ -28,7 +55,11 @@ sons disponíveis na voicebank; geração válida de WAV não comprova naturalid
 O [kit ESPER-Utau](../../esper-utau/README.md) usa o backend UTAU existente para
 comparar esse resampler Linux ARM64 com WORLDLINE-R no Termux. Instala o runtime
 em pasta separada, mantém os arquivos de análise fora da voicebank e gera WAV
-ou MP3 sem selecionar o motor no `.env` do worker.
+ou MP3. Os comparadores preservam o `.env`; o comando separado
+`activate-esper.py` valida a síntese e seleciona ESPER como resampler da Teto,
+com backup da configuração, English/C4/rate1.0/flagsB0 e prazos de 120 s.
+O comparador `compare-breathiness.py` testa níveis de soprosidade positivos e
+negativos, com volume nivelado somente nos MP3s de comparação.
 
 ## Reinício após atualização de fontes
 
@@ -49,8 +80,8 @@ bloqueando a síntese pesada até sua conclusão.
 ## Teto English CVVC para PT-BR: renderer `speech-4f-articulation`
 
 A revisão 4F mantém a voicebank English 150401 e o renderer de fala por frase
-da 4E, com correções de articulação e planejamento fonético. A síntese continua
-no Straycat/WORLD. O G2P PT-BR permanece separado da voicebank, com fonemas
+da 4E, com correções de articulação e planejamento fonético. A síntese UTAU usa
+o resampler configurado, incluindo Straycat/WORLD ou ESPER. O G2P PT-BR permanece separado da voicebank, com fonemas
 planejados contra o inventário X-SAMPA/CVVC da Teto English. A bank japonesa
 permanece disponível como fallback de compatibilidade.
 
@@ -71,11 +102,11 @@ fica visível mesmo quando a engine continua pronta.
 
 O pipeline principal fica:
 
-`texto PT-BR -> G2P -> X-SAMPA -> planner CVVC/CC -> oto.ini -> Straycat/WORLD -> WAV`
+`texto PT-BR -> G2P -> X-SAMPA -> planner CVVC/CC -> oto.ini -> resampler selecionado -> WAV`
 
 O deslocamento de tom pode ser enviado por requisição em
 `teto_pitch_semitones`, limitado a `-4.0..+4.0` e quantizado em passos de `0.5`.
-O bot usa `0.0` como padrão de TextToTeto, igual ao WAV do validador; chamadas que não enviam o
+O bot usa `0.0` como padrão de TTV, igual ao WAV do validador; chamadas que não enviam o
 campo preservam offset `0.0`. O valor participa da identidade de cache para não
 reutilizar áudio sintetizado em outro tom.
 

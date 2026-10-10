@@ -336,7 +336,7 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
             gtts_prefix="'",
         )
         self.assertFalse(valid)
-        self.assertIn("Kasane Teto", reason)
+        self.assertIn("TTV", reason)
         self.assertIn("gTTS", reason)
 
     async def test_native_tts_experimental_prefix_is_available_in_any_guild_by_default(self):

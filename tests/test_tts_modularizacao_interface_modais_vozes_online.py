@@ -120,11 +120,13 @@ def _carregar_modulo():
 
     operacoes = types.ModuleType("cogs.tts.interface.operacoes_painel")
     operacoes.salvar_atualizacoes_modal_tts = AsyncMock()
+    ttv_acoes = types.ModuleType("cogs.tts.interface.ttv_acoes")
+    ttv_acoes.salvar_configuracao_ttv = operacoes.salvar_atualizacoes_modal_tts
 
     cogs_pkg = types.ModuleType("cogs")
     cogs_pkg.__path__ = []
     tts_pkg = types.ModuleType("cogs.tts")
-    tts_pkg.__path__ = []
+    tts_pkg.__path__ = [str(ROOT / "cogs" / "tts")]
     utils_pkg = types.ModuleType("cogs.tts.utils")
     utils_pkg.__path__ = []
     interface_pkg = types.ModuleType("cogs.tts.interface")
@@ -146,6 +148,7 @@ def _carregar_modulo():
             "cogs.tts.interface.catalogos_de_vozes": catalogos,
             "cogs.tts.interface.componentes": componentes,
             "cogs.tts.interface.operacoes_painel": operacoes,
+            "cogs.tts.interface.ttv_acoes": ttv_acoes,
         },
     ):
         spec.loader.exec_module(module)
@@ -256,8 +259,8 @@ class TTSInterfaceModaisVozesOnlineComportamentoTests(unittest.IsolatedAsyncioTe
         await modal.on_submit(interaction)
         salvar.assert_awaited_once()
         kwargs = salvar.await_args.kwargs
-        self.assertEqual(kwargs["updates"], {"teto_pitch_semitones": "-1.5"})
-        self.assertNotIn("pitch", kwargs["updates"])
+        self.assertEqual(kwargs["settings"], {"ttv_voice_id": "kasane-teto", "ttv_pitch_semitones": "-1.5", "ttv_speech_rate": 1.0})
+        self.assertNotIn("pitch", kwargs["settings"])
         self.assertEqual(kwargs["target_user_id"], 9)
 
     def test_teto_normalizador_aceita_zero_numerico(self):

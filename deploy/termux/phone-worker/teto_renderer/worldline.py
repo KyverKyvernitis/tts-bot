@@ -447,8 +447,9 @@ class WorldlineRenderer(TetoRenderer):
         return path.read_bytes()
 
     def synthesize(self, text: str, *, timeout_seconds: float = 25.0, max_audio_bytes: int = 8 * 1024 * 1024,
-                   pitch_offset_semitones: float = 0.0) -> dict[str, Any]:
+                   pitch_offset_semitones: float = 0.0, speech_rate: float | None = None) -> dict[str, Any]:
         started = time.monotonic()
+        effective_rate = self._effective_speech_rate(speech_rate)
         timeout = float(timeout_seconds)
         if not math.isfinite(timeout) or timeout <= 0 or timeout > 120:
             raise ValueError("timeout Teto deve estar entre 0 e 120 segundos")
@@ -466,7 +467,6 @@ class WorldlineRenderer(TetoRenderer):
             if not shutil.which("ffmpeg"):
                 raise TetoConfigurationError("ffmpeg não encontrado")
             metadata = self._library_metadata()
-            fingerprint = self._render_fingerprint(self._load_index())
             index = self._load_index()
             max_moras = max(8, min(256, self._env_int("PHONE_WORKER_TETO_MAX_PHONEMES", 240)))
             moras = phonemize(clean_text, max_moras=max_moras + 1, resolve_alias=index.resolve, voicebank_profile=self._index_profile)
@@ -477,8 +477,11 @@ class WorldlineRenderer(TetoRenderer):
             except (ValueError, TypeError):
                 offset = 0.0
             offset = max(-4, min(4, round(offset * 2) / 2)) if math.isfinite(offset) else 0.0
+            fingerprint = self._request_fingerprint(
+                index, pitch_offset_semitones=offset, speech_rate=effective_rate,
+            )
             notes = build_notes(moras, base_pitch=os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4",
-                                speech_rate=self._speech_rate(), tempo=self._tempo(), pitch_offset_semitones=offset)
+                                speech_rate=effective_rate, tempo=self._tempo(), pitch_offset_semitones=offset)
             if not notes:
                 raise TetoSynthesisError("texto não gerou fonemas compatíveis")
             entries = [index.resolve(note.candidates) for note in notes]
@@ -526,7 +529,7 @@ class WorldlineRenderer(TetoRenderer):
                 "voicebank_fingerprint": index.fingerprint, "renderer_fingerprint": fingerprint,
                 "renderer_version": self.RENDER_VERSION, "phonemizer_version": self.PHONEMIZER_VERSION,
                 "library_sha256": metadata["library_sha256"], "native_phrase_render_verified": True,
-                "portuguese_speech_verified": False, "speech_rate": self._speech_rate(), "pitch_offset_semitones": offset,
+                "portuguese_speech_verified": False, "speech_rate": effective_rate, "pitch_offset_semitones": offset,
                 "aliases": index.alias_count, "voicebank_profile": self._index_profile,
                 "rendered_phonemes": len(job["requests"]), "missing_phonemes": missing[:12],
                 "phonetic_units": sum(len(n.source_phonemes) for n in notes),

@@ -160,9 +160,9 @@ class ModalPrefixoATTS(discord.ui.Modal, title="Alterar prefixo do ATTS"):
         )
 
 
-class ModalPrefixoTeto(discord.ui.Modal, title="Alterar prefixo da Kasane Teto"):
+class ModalPrefixoTeto(discord.ui.Modal, title="Alterar prefixo do TTV"):
     new_prefix = discord.ui.TextInput(
-        label="Novo prefixo da Kasane Teto",
+        label="Novo prefixo do TTV",
         placeholder="Ex.: '",
         required=True,
         min_length=1,

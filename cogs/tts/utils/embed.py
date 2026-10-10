@@ -125,7 +125,7 @@ def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) 
     description = _clean_display_value(getattr(embed, "description", ""), fallback="")
 
     atts_prefix = _field_value(embed, "Prefixo do ATTS", default="%")
-    teto_prefix = _field_value(embed, "Prefixo da Kasane Teto", default="'")
+    teto_prefix = _field_value(embed, "Prefixo do TTV", default=_field_value(embed, "Prefixo da Kasane Teto", default="'"))
     edge_prefix = _field_value(embed, "Prefixo do modo Edge", default=",")
     gtts_prefix = _field_value(embed, "Prefixo do modo gTTS", default=".")
     edge_voice = human_voice_name(_field_value(embed, "Voz do Edge"))
@@ -145,9 +145,9 @@ def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) 
         "**ATTS**",
         f"Use: {_prefix_example(atts_prefix)}",
         "",
-        "**Kasane Teto · experimental**",
+        "**TTV (TextToVocaloid)**",
         f"Use: {_prefix_example(teto_prefix)}",
-        "Execução: phone worker, com fallback automático.",
+        "Escolha sua vocaloid e personalize tom e velocidade no painel TTS.",
         "",
         "**Edge**",
         f"Use: {_prefix_example(edge_prefix)}",
@@ -268,7 +268,7 @@ def build_settings_embed(*, title: str, description: str, resolved: dict, guild_
     embed.add_field(name="Tom do Edge", value=f"`{resolved.get('edge_pitch', resolved.get('pitch', '+0Hz'))}`", inline=True)
     embed.add_field(name="Prefixo do ATTS", value=f"`{guild_defaults.get('atts_prefix', '%')}`", inline=True)
     teto_prefix = str(guild_defaults.get("teto_prefix") or "'")
-    embed.add_field(name="Prefixo da Kasane Teto", value=f"`{teto_prefix}`", inline=True)
+    embed.add_field(name="Prefixo do TTV", value=f"`{teto_prefix}`", inline=True)
     embed.add_field(name="Prefixo do modo gTTS", value=f"`{guild_defaults.get('gtts_prefix', guild_defaults.get('tts_prefix', '.'))}`", inline=True)
     embed.add_field(name="Prefixo do modo Edge", value=f"`{guild_defaults.get('edge_prefix', ',')}`", inline=True)
     if not server and spoken_name_text is not None:

@@ -13,6 +13,7 @@ import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
 
 import config
+from cogs.tts.ttv import normalize_pitch, normalize_speech_rate, normalize_voice_id, resolve_preferences
 
 
 def _tts_effect_level(value: object) -> int:
@@ -30,7 +31,7 @@ class SettingsDB:
         self.truco_history_coll = self.db[f"{coll_name}_truco_history"]
         self.guild_cache: Dict[int, Dict[str, Any]] = {}
         self.user_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
-        self._resolved_tts_cache: Dict[tuple[int, int], Dict[str, str]] = {}
+        self._resolved_tts_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
         self._truco_history_lock = asyncio.Lock()
         self._chip_change_listeners: list[Any] = []
 
@@ -1011,7 +1012,16 @@ class SettingsDB:
             "android_language": str(tts.get("android_language", "") or ""),
             "android_rate": str(tts.get("android_rate", "") or ""),
             "android_pitch": str(tts.get("android_pitch", "") or ""),
-            "teto_pitch_semitones": str(tts.get("teto_pitch_semitones", "") or ""),
+            "teto_pitch_semitones": str(
+                tts.get("teto_pitch_semitones", "") if tts.get("teto_pitch_semitones") is not None else ""
+            ),
+            "ttv_voice_id": str(tts.get("ttv_voice_id", "") or ""),
+            "ttv_pitch_semitones": str(
+                tts.get("ttv_pitch_semitones", "") if tts.get("ttv_pitch_semitones") is not None else ""
+            ),
+            "ttv_speech_rate": str(
+                tts.get("ttv_speech_rate", "") if tts.get("ttv_speech_rate") is not None else ""
+            ),
             "advanced_nightcore_level": str(tts.get("advanced_nightcore_level", "") or ""),
             "advanced_slowed_level": str(tts.get("advanced_slowed_level", "") or ""),
             "advanced_reverb_level": str(tts.get("advanced_reverb_level", "") or ""),
@@ -1033,14 +1043,30 @@ class SettingsDB:
         android_rate: Optional[str] = None,
         android_pitch: Optional[str] = None,
         teto_pitch_semitones: Optional[str] = None,
+        ttv_voice_id: Optional[str] = None,
+        ttv_pitch_semitones: Optional[str] = None,
+        ttv_speech_rate: Optional[float] = None,
         advanced_nightcore_level: Optional[int] = None,
         advanced_slowed_level: Optional[int] = None,
         advanced_reverb_level: Optional[int] = None,
         speaker_name: Optional[str] = None,
     ):
+        # Validate the complete TTV edit before mutating caches or calling Mongo.
+        # The legacy argument remains accepted during the gradual UI migration.
+        ttv_updates: Dict[str, Any] = {}
+        if ttv_voice_id is not None:
+            ttv_updates["ttv_voice_id"] = normalize_voice_id(ttv_voice_id)
+        pitch_update = ttv_pitch_semitones if ttv_pitch_semitones is not None else teto_pitch_semitones
+        if pitch_update is not None:
+            normalized_pitch = normalize_pitch(pitch_update) if str(pitch_update).strip() else ""
+            ttv_updates["ttv_pitch_semitones"] = normalized_pitch
+            ttv_updates["teto_pitch_semitones"] = normalized_pitch
+        if ttv_speech_rate is not None:
+            ttv_updates["ttv_speech_rate"] = normalize_speech_rate(ttv_speech_rate)
+
         key = (guild_id, user_id)
-        doc = self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id})
-        tts = doc.get("tts", {}) or {}
+        doc = dict(self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id}))
+        tts = dict(doc.get("tts", {}) or {})
 
         if engine is not None:
             tts["engine"] = engine
@@ -1060,8 +1086,7 @@ class SettingsDB:
             tts["android_rate"] = android_rate
         if android_pitch is not None:
             tts["android_pitch"] = android_pitch
-        if teto_pitch_semitones is not None:
-            tts["teto_pitch_semitones"] = str(teto_pitch_semitones)
+        tts.update(ttv_updates)
 
         if advanced_nightcore_level is not None:
             tts["advanced_nightcore_level"] = _tts_effect_level(advanced_nightcore_level)
@@ -1129,7 +1154,7 @@ class SettingsDB:
 
         return had_tts
 
-    def resolve_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
+    def resolve_tts(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         cache_key = (guild_id, user_id)
         cached = self._resolved_tts_cache.get(cache_key)
         if cached is not None:
@@ -1175,6 +1200,20 @@ class SettingsDB:
             "edge_prefix": str(guild.get("edge_prefix", ",") or ","),
             "speech_limit_seconds": int(guild.get("speech_limit_seconds", 30) or 30),
         }
+        ttv_values = {**user, "teto_pitch_semitones": resolved["teto_pitch_semitones"]}
+        # An unavailable saved character must never be silently replaced. Keep
+        # its ID for the TTV route to reject, without preventing Edge/gTTS use.
+        ttv_preferences = resolve_preferences(
+            {**ttv_values, "ttv_voice_id": ""},
+            default_pitch=getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0),
+        )
+        try:
+            ttv_preferences["ttv_voice_id"] = normalize_voice_id(ttv_values.get("ttv_voice_id"))
+        except ValueError:
+            ttv_preferences["ttv_voice_id"] = str(ttv_values["ttv_voice_id"]).strip()
+        resolved.update(ttv_preferences)
+        # Both contracts report the same effective pitch during migration.
+        resolved["teto_pitch_semitones"] = ttv_preferences["ttv_pitch_semitones"]
         self._resolved_tts_cache[cache_key] = dict(resolved)
         return resolved
 

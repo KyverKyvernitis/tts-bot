@@ -162,7 +162,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.32"
+PHONE_WORKER_VERSION = "1.11.33"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2094,6 +2094,13 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
         handler.send_header("X-Core-Worker-Teto-Aux-Overlays", _header_ascii(meta.get("teto_timeline_aux_overlays"), limit=20))
     if meta.get("teto_pitch_offset_semitones") not in (None, ""):
         handler.send_header("X-Core-Worker-Teto-Pitch-Semitones", _header_ascii(meta.get("teto_pitch_offset_semitones"), limit=20))
+    for key, header in (
+        ("ttv_voice_id", "X-Core-Worker-TTV-Voice-Id"),
+        ("ttv_pitch_semitones", "X-Core-Worker-TTV-Pitch-Semitones"),
+        ("ttv_speech_rate", "X-Core-Worker-TTV-Speech-Rate"),
+    ):
+        if meta.get(key) not in (None, ""):
+            handler.send_header(header, _header_ascii(meta.get(key), limit=40))
     if meta.get("teto_alias_path_cost") not in (None, ""):
         handler.send_header("X-Core-Worker-Teto-Path-Cost", _header_ascii(meta.get("teto_alias_path_cost"), limit=20))
     if meta.get("teto_pitch_boundary_max_cents") not in (None, ""):
@@ -2434,6 +2441,9 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
         "enabled": enabled,
         "engine": "teto",
         "backend": _teto_backend(),
+        "ttv_personal_settings": True,
+        "ttv_voices": [{"id": "kasane-teto", "name": "Kasane Teto", "ready": False,
+                        "available": False, "supports_personal_rate": True}],
     }
     if not enabled:
         result["last_error"] = "PHONE_WORKER_TETO_ENABLED=false"
@@ -2447,6 +2457,11 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
         result["resources"] = _teto_resource_snapshot()
     except Exception as exc:
         result["resources"] = {"ok": False, "reason": _short_text(exc, limit=180)}
+    result["ttv_voices"] = [{
+        "id": "kasane-teto", "name": "Kasane Teto",
+        "ready": bool(result.get("ready") and result["resources"].get("ok", True)),
+        "available": bool(result.get("available")), "supports_personal_rate": True,
+    }]
     return result
 
 
@@ -2544,6 +2559,7 @@ def _phone_worker_tts_policy_module() -> Any:
             required = ("normalize_engine", "available_engines", "preferred_engine", "engine_order",
                         "normalize_edge_rate", "normalize_edge_pitch", "normalize_gtts_language",
                         "sanitize_cache_key", "normalize_cache_format", "standard_cache_key",
+                        "effective_ttv_settings", "normalize_ttv_voice_id", "normalize_ttv_speech_rate",
                         "cache_mode_allows_read", "cache_mode_allows_store")
             if not all(callable(getattr(module, name, None)) for name in required):
                 raise RuntimeError("tts_policy.py incompleto")
@@ -4652,6 +4668,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise RuntimeError("Worker Voice Agent desativado")
         if not _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True):
             raise RuntimeError("TTS direto do Worker Voice Agent desativado")
+        if _tts_agent_normalize_engine(body.get("engine")) == "teto":
+            # Validate even a prebuilt request before changing a voice lease.
+            _phone_worker_tts_policy_module().effective_ttv_settings(
+                body, default_speech_rate=os.getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"))
         guild_id = _voice_agent_int(body.get("guild_id"), 0)
         channel_id = _voice_agent_int(body.get("voice_channel_id") or body.get("channel_id"), 0)
         if guild_id <= 0 or channel_id <= 0:
@@ -4852,6 +4872,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             normalize_rate=self._normalize_tts_edge_rate, normalize_pitch=self._normalize_tts_edge_pitch,
             normalize_language=self._normalize_tts_gtts_language,
             teto_fingerprint=fingerprint, teto_base_pitch=base_pitch,
+            teto_speech_rate=os.getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"),
         )
 
     def _tts_agent_cache_mode_allows_read(self, body: dict[str, Any]) -> bool:
@@ -4860,7 +4881,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def _tts_agent_cache_mode_allows_store(self, body: dict[str, Any]) -> bool:
         return _phone_worker_tts_policy_module().cache_mode_allows_store(body)
 
-    def _tts_agent_standard_cache_hit(self, *, key: str, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, stage_ms: dict[str, float] | None = None, available_engines: list[str] | None = None, raw_response: bool = False, teto_pitch_semitones: Any = 0.0) -> dict[str, Any] | None:
+    def _tts_agent_standard_cache_hit(self, *, key: str, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, stage_ms: dict[str, float] | None = None, available_engines: list[str] | None = None, raw_response: bool = False, teto_pitch_semitones: Any = 0.0, ttv_settings: dict[str, Any] | None = None) -> dict[str, Any] | None:
         stage_ms = stage_ms if isinstance(stage_ms, dict) else {}
         lookup_started = time.monotonic()
         path, audio_format = self._find_tts_cache_file(key)
@@ -4907,13 +4928,17 @@ class WorkerHandler(BaseHTTPRequestHandler):
         }
         if engine == "teto":
             status = _teto_status()
+            controls = ttv_settings or _phone_worker_tts_policy_module().effective_ttv_settings(
+                {"teto_pitch_semitones": teto_pitch_semitones},
+                default_speech_rate=os.getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"))
             result.update({
                 "teto_backend": status.get("backend") or _teto_backend(),
                 "teto_renderer_version": status.get("renderer_version", ""),
                 "teto_voicebank_profile": status.get("voicebank_profile", ""),
                 "teto_pitch_mode": "utau-semitones",
-                "teto_pitch_offset_semitones": _phone_worker_tts_policy_module().normalize_teto_pitch_semitones(
-                    teto_pitch_semitones, default=0.0),
+                "teto_pitch_offset_semitones": controls["ttv_pitch_semitones"],
+                "teto_speech_rate": controls["ttv_speech_rate"],
+                **controls,
             })
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
@@ -4936,6 +4961,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
         text = str(body.get("text") or "").strip()
         if not text:
             raise ValueError("texto vazio")
+        ttv_settings = (_phone_worker_tts_policy_module().effective_ttv_settings(
+            body, default_speech_rate=os.getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"))
+            if engine == "teto" else {})
         stage_ms: dict[str, float] = {}
         cache_key = ""
         cache_enabled = self._tts_agent_standard_cache_enabled(roles, capabilities)
@@ -4961,6 +4989,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     available_engines=available_engines,
                     raw_response=raw_response,
                     teto_pitch_semitones=body.get("teto_pitch_semitones", 0.0),
+                    ttv_settings=ttv_settings,
                 )
                 if hit is not None:
                     if engine == "teto" and time.monotonic() - cache_started >= float(timeout):
@@ -4977,14 +5006,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 remaining -= time.monotonic() - cache_started
             if remaining <= 0:
                 raise TimeoutError("prazo total do TTS Agent esgotado")
-            teto_pitch = _phone_worker_tts_policy_module().normalize_teto_pitch_semitones(
-                body.get("teto_pitch_semitones"), default=0.0
-            )
             data, audio_format, teto_meta = _phone_worker_tts_providers_module().synthesize_teto(
                 text=text, timeout=remaining, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
                 heavy_lock=_HEAVY_RESOURCE_LOCK, get_renderer=_get_teto_renderer,
                 monotonic=time.monotonic, normalize_format=self._normalize_tts_cache_format,
-                pitch_offset_semitones=teto_pitch)
+                pitch_offset_semitones=ttv_settings["ttv_pitch_semitones"],
+                speech_rate=ttv_settings["ttv_speech_rate"] if "ttv_speech_rate" in body else None)
         elif engine == "android_native":
             data, audio_format, response = _phone_worker_tts_android_module().synthesize(
                 body, text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
@@ -5058,6 +5085,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "teto_timeline_aux_overlays": teto_meta.get("timeline_aux_overlays") if engine == "teto" else None,
             "teto_timeline_audio_ms": teto_meta.get("timeline_audio_ms") if engine == "teto" else None,
             "teto_pitch_offset_semitones": teto_meta.get("pitch_offset_semitones") if engine == "teto" else None,
+            "teto_speech_rate": teto_meta.get("speech_rate", ttv_settings.get("ttv_speech_rate")) if engine == "teto" else None,
             "teto_alias_path_cost": teto_meta.get("alias_path_cost") if engine == "teto" else None,
             "teto_mean_nucleus_ms": teto_meta.get("mean_nucleus_ms") if engine == "teto" else None,
             "teto_nucleus_duration_stddev_ms": teto_meta.get("nucleus_duration_stddev_ms") if engine == "teto" else None,
@@ -5077,6 +5105,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "sha256": digest,
             "logs": logs[:10],
         }
+        if engine == "teto":
+            result.update(ttv_settings)
+            result["ttv_speech_rate"] = result["teto_speech_rate"]
+            result["ttv_pitch_semitones"] = teto_meta.get("pitch_offset_semitones", ttv_settings["ttv_pitch_semitones"])
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _task_tts_agent_synthesize(self, body: dict[str, Any], *, raw_response: bool = False) -> dict[str, Any]:
@@ -5092,6 +5124,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise ValueError(f"texto grande demais para TTS Agent ({len(text)} > {max_chars})")
         requested_engine = _tts_agent_normalize_engine(body.get("engine"))
         if requested_engine == "teto":
+            _phone_worker_tts_policy_module().effective_ttv_settings(
+                body, default_speech_rate=os.getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"))
             teto_max_chars = max(16, _env_int("PHONE_WORKER_TETO_MAX_CHARACTERS", 180))
             if len(text) > teto_max_chars:
                 raise ValueError(f"texto grande demais para Teto ({len(text)} > {teto_max_chars})")

@@ -84,7 +84,7 @@ class VisaoAcoesAvancadasTTS(VisaoBaseTTS):
             self._target_owner(interaction),
             self.guild_id,
             "Modo de TTS",
-            "Escolhe o motor padrão usado por comandos antigos. Os prefixos ATTS, Kasane Teto, Edge e gTTS continuam escolhendo o motor por mensagem.",
+            "Escolhe o motor padrão usado por comandos antigos. Os prefixos ATTS, TTV, Edge e gTTS continuam escolhendo o motor por mensagem.",
             SeletorModo(self.cog, server=self.server),
             source_panel_message=self.source_panel_message,
             target_user_id=self.target_user_id,
