@@ -2,7 +2,7 @@
 
 ## TTV: voz, idioma, tom e velocidade por usuário
 
-O worker `1.11.35` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
+O worker `1.11.36` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
 `ttv_speech_rate` por requisição. A personagem disponível é `kasane-teto`;
 a escolha da personagem não altera o perfil global da voicebank instalada. Tom e
 velocidade pessoais funcionam tanto com UTAU/ESPER quanto com WORLDLINE-R,
@@ -30,15 +30,20 @@ O status anuncia `ttv_personal_settings`, `ttv_voices`, `ttv_languages` e
 `ttv_language_fingerprints`, e a resposta raw
 confirma os controles pelos cabeçalhos `X-Core-Worker-TTV-*`.
 
+A versão `1.11.36` corrige a resposta raw com tom **Normal**: o valor numérico
+zero agora chega ao bot como `0.0`, em vez de um cabeçalho vazio. Isso permite
+validar o áudio das mensagens e do botão **Ouvir amostra** nos dois idiomas,
+inclusive quando o áudio já está no cache.
+
 Ao aplicar o patch pelo updater do Discord, a automação publica a release
 completa do worker. O bootstrap do Termux consulta a atualização normalmente
 a cada cinco minutos e reinicia o worker após promover a release. Confira a
-versão `1.11.35` no status antes de testar o idioma Inglês. Os arquivos locais
+versão `1.11.36` no status antes de testar mensagens e amostras. Os arquivos locais
 da voicebank, ESPER e a configuração do aparelho continuam em seus caminhos.
 
 ## Teto UTAU e WORLDLINE-R
 
-O worker `1.11.35` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
+O worker `1.11.36` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
 configurações antigas que selecionavam esse backend passam a usar UTAU e as
 variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
 o `.env` do aparelho. Para WORLDLINE-R, use a configuração indicada abaixo.

@@ -67,15 +67,23 @@ O áudio de TTV não muda silenciosamente para outra personagem em caso de erro.
 
 O patch mantém as pastas originais do repositório e não inclui voicebanks,
 binários dos motores, segredos ou um manifesto de exclusões. A automação
-existente do updater publica o worker **1.11.35**, que aceita a escolha de idioma.
+existente do updater publica o worker **1.11.36**, que aceita a escolha de idioma
+e corrige a confirmação do tom **Normal** nas respostas raw.
 O bootstrap no telefone
 promove a release e reinicia o processo; o ciclo normal de consulta é de cinco
 minutos, podendo ter alguns segundos de variação. Não há necessidade de
 reinstalar ESPER para esta mudança.
 
+Na versão 1.11.35, o worker gerava áudio com tom zero, mas enviava esse valor
+como um cabeçalho vazio. O bot recusava a resposta com a mensagem de ajustes
+diferentes dos solicitados. A versão 1.11.36 preserva o zero na serialização;
+a validação dos ajustes pessoais continua exigindo os valores efetivos.
+
 Os testes cobrem serialização real dos componentes em discord.py 2.7.1,
 controle de acesso, respostas privadas, restauração, migração dos ajustes,
 payloads, metadados raw, separação dos caches, idioma e velocidade nos dois renderers.
+Os testes de integração também usam um servidor HTTP local do worker e o cliente
+real do bot, cobrindo tom zero nos dois idiomas, cache e conversão da amostra em MP3.
 A execução local dos testes não confirma a implantação no Discord ou no Poco.
 A inteligibilidade e o timbre em português devem ser avaliados ouvindo as
 amostras; gerar um WAV válido não mede a naturalidade da fala.

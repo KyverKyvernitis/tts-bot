@@ -162,7 +162,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.35"
+PHONE_WORKER_VERSION = "1.11.36"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2048,7 +2048,9 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
 
 
 def _header_ascii(value: Any, *, limit: int = 180) -> str:
-    text = _short_text(value, limit=limit, default="")
+    # Zero is a valid effective control (notably the Normal TTV pitch).
+    # Stringify before _short_text, whose display fallback discards false values.
+    text = _short_text(str(value) if value is not None else "", limit=limit, default="")
     return text.encode("ascii", errors="ignore").decode("ascii", errors="ignore")
 
 
