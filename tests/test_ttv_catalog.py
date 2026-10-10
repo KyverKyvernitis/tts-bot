@@ -53,7 +53,7 @@ def test_new_preferences_win_over_legacy_and_do_not_read_edge_controls():
     assert ttv.resolve_preferences({
         "ttv_pitch_semitones": "-1.5", "teto_pitch_semitones": "-2.0",
         "ttv_speech_rate": "1.07", "voice": "EdgeVoice", "rate": "+25%", "pitch": "+35Hz",
-    }) == {"ttv_voice_id": "kasane-teto", "ttv_pitch_semitones": "-1.5", "ttv_speech_rate": 1.07}
+    }) == {"ttv_voice_id": "kasane-teto", "ttv_language": "pt-BR", "ttv_pitch_semitones": "-1.5", "ttv_speech_rate": 1.07}
 
 
 def test_missing_new_fields_use_legacy_minus_two_without_mutation():
@@ -64,7 +64,35 @@ def test_missing_new_fields_use_legacy_minus_two_without_mutation():
 
 def test_malformed_saved_controls_recover_without_changing_the_voice():
     assert ttv.resolve_preferences({"ttv_pitch_semitones": "nan", "teto_pitch_semitones": "-2", "ttv_speech_rate": "inf"}) == {
-        "ttv_voice_id": "kasane-teto", "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.0,
+        "ttv_voice_id": "kasane-teto", "ttv_language": "pt-BR", "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.0,
     }
     assert ttv.resolve_preferences({}, default_pitch=-1.5)["ttv_pitch_semitones"] == "-1.5"
     assert ttv.resolve_preferences({"ttv_pitch_semitones": 0}, default_pitch=-2)["ttv_pitch_semitones"] == "+0.0"
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", "pt", "PT-br", "pt_BR"])
+def test_portuguese_adapted_is_default_and_language_label_is_canonical(value):
+    assert ttv.normalize_language(value) == "pt-BR"
+    assert ttv.language_label(value) == "Português adaptado"
+
+
+@pytest.mark.parametrize("value", ["en", "en-US", " EN_us "])
+def test_english_language_has_its_own_canonical_selection(value):
+    assert ttv.normalize_language(value) == "en-US"
+    assert ttv.language_label(value) == "Inglês"
+    assert ttv.resolve_preferences({"ttv_language": value})["ttv_language"] == "en-US"
+
+
+@pytest.mark.parametrize("value", ["ja-JP", "en-GB", "português", "../../en", 123, True])
+def test_unknown_explicit_language_never_becomes_portuguese(value):
+    with pytest.raises(ValueError):
+        ttv.normalize_language(value)
+    with pytest.raises(ValueError):
+        ttv.resolve_preferences({"ttv_language": value})
+
+
+def test_language_choices_and_legacy_default_are_isolated_from_edge_language():
+    assert ttv.LANGUAGE_CHOICES == (("pt-BR", "Português adaptado"), ("en-US", "Inglês"))
+    legacy = {"language": "en", "android_language": "en-US", "teto_pitch_semitones": "-2.0"}
+    assert ttv.resolve_preferences(legacy)["ttv_language"] == "pt-BR"
+    assert legacy == {"language": "en", "android_language": "en-US", "teto_pitch_semitones": "-2.0"}

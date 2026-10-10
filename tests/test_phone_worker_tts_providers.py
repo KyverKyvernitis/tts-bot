@@ -70,7 +70,7 @@ def test_teto_parameters_metadata_and_exact_audio_limit(tts, monkeypatch, raw):
     assert result["teto_energy_boundary_max_db"] == 4.6
     assert result["timing_ms"]["teto_render"] == 0
     assert result["logs"] == [
-        "teto voicebank=Test Teto renderer=speech-4e-phrase-speech phonemizer=ptbr-g2p-xsampa-cvvc-v1 "
+        "teto voicebank=Test Teto renderer=speech-4e-phrase-speech phonemizer=ptbr-g2p-xsampa-cvvc-v1 language=pt-BR "
         "rendered=3 aux=2 epenthetic=1 profile=english-cvvc coverage=96.5 clusters=1 "
         "timeline=phrase-continuous pitch=-1.0st overlays=2 path_cost=7.5 pitch_jump=0 "
         "energy_jump=4.6 repairs=2 missing=1"

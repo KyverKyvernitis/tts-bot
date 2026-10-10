@@ -52,6 +52,17 @@ def normalize_ttv_speech_rate(raw: Any) -> float:
     return value
 
 
+def normalize_ttv_language(raw: Any = "pt-BR") -> str:
+    if not isinstance(raw, str):
+        raise ValueError("idioma TTV deve ser Português adaptado ou Inglês")
+    language = raw.strip().lower().replace("_", "-")
+    if language in {"pt", "pt-br"}:
+        return "pt-BR"
+    if language in {"en", "en-us"}:
+        return "en-US"
+    raise ValueError("idioma TTV deve ser Português adaptado ou Inglês")
+
+
 def effective_ttv_settings(body: dict[str, Any], *, default_speech_rate: Any = 1.0) -> dict[str, Any]:
     # The global value belongs only to legacy requests. Personal controls are
     # explicit values and must never be silently repaired to another speed.
@@ -66,6 +77,7 @@ def effective_ttv_settings(body: dict[str, Any], *, default_speech_rate: Any = 1
             body.get("ttv_pitch_semitones", body.get("teto_pitch_semitones")), default=0.0),
         "ttv_speech_rate": normalize_ttv_speech_rate(body["ttv_speech_rate"])
         if "ttv_speech_rate" in body else global_rate,
+        "ttv_language": normalize_ttv_language(body.get("ttv_language", "pt-BR")),
     }
 
 def available_engines(deps: dict[str, Any]) -> list[str]:
@@ -189,9 +201,11 @@ def standard_cache_key(body: dict[str, Any], *, engine: str, sanitize_key, norma
             pitch_offset = controls["ttv_pitch_semitones"]
             pitch_part = f"|pitch={pitch_offset:+.1f}"
         payload = f"teto|{fingerprint}|{voice}|{language}|{base_pitch}{pitch_part}|{text}"
-        if any(name in body for name in ("ttv_voice_id", "ttv_pitch_semitones", "ttv_speech_rate")):
+        if any(name in body for name in ("ttv_voice_id", "ttv_pitch_semitones", "ttv_speech_rate", "ttv_language")):
             payload = (f"ttv-v1|voice={controls['ttv_voice_id']}|pitch={controls['ttv_pitch_semitones']:+.1f}"
                        f"|rate={controls['ttv_speech_rate']!r}|" + payload)
+            if "ttv_language" in body:
+                payload = f"reading={controls['ttv_language']}|" + payload
     elif normalized_engine == "android_native":
         language = str(body.get("language") or body.get("fallback_language") or "pt-BR").strip().replace("_", "-") or "pt-BR"
         voice = str(body.get("voice") or "auto").strip() or "auto"

@@ -59,16 +59,16 @@ async def preparar_payload_tts_mensagem(
     ttv_values = resolved
     effective_engine = str(forced_engine or resolved.get("engine") or "gtts").lower()
     if effective_engine != "teto":
-        # An unavailable TTV selection cannot stop an independent Edge/gTTS
-        # request. The character is validated when its own route is selected.
-        ttv_values = {**resolved, "ttv_voice_id": ""}
+        # Invalid TTV selections cannot stop independent Edge/gTTS requests.
+        # Character and language are validated when their own route is selected.
+        ttv_values = {**resolved, "ttv_voice_id": "", "ttv_language": ""}
     try:
         ttv_preferences = resolve_preferences(
             ttv_values,
             default_pitch=getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0),
         )
     except ValueError as exc:
-        logger.warning("[tts_voice] vocaloid indisponível | guild=%s user=%s erro=%s", message.guild.id, message.author.id, exc)
+        logger.warning("[tts_voice] configuração TTV indisponível | guild=%s user=%s erro=%s", message.guild.id, message.author.id, exc)
         return None
 
     # Override pelo prefixo: se o user usou o prefixo de Edge, ele quer Edge
@@ -94,7 +94,7 @@ async def preparar_payload_tts_mensagem(
         # guardados no QueueItem como fallback caso o renderer esteja offline,
         # ocupado, aquecido ou sem assets válidos.
         resolved["engine"] = "teto"
-        resolved["language"] = "pt-BR"
+        resolved["language"] = ttv_preferences["ttv_language"]
         resolved["voice"] = "kasane-teto-standard"
         resolved["rate"] = "1.0"
         resolved["pitch"] = "C4"

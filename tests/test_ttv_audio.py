@@ -55,11 +55,33 @@ def test_cache_separates_tone_speed_and_engine_implementation():
     base = probe._cache_key(item())
     assert probe._cache_key(item(ttv_speech_rate=.85)) != base
     assert probe._cache_key(item(ttv_pitch_semitones="-2.0")) != base
+    assert probe._cache_key(item(ttv_language="en-US")) != base
     assert probe._cache_key(item(ttv_speech_rate=1.00000001)) != probe._cache_key(item(ttv_speech_rate=1.00000002))
     probe.route["teto_fingerprint"] = "new-voicebank"
     assert probe._cache_key(item()) != base
     with pytest.raises(ValueError, match="desconhecida"):
         probe._cache_key(item(ttv_voice_id="another-uninstalled-character"))
+
+
+def test_language_payload_snapshot_uses_personal_choice_instead_of_other_engine_language():
+    probe = Probe()
+    queued = item(ttv_language="en")
+    payload = probe._tts_agent_payload_for_item(queued)
+    assert payload["ttv_language"] == payload["language"] == "en-US"
+    probe._snapshot_tts_item(queued)
+    assert queued.language == queued.ttv_language == "en-US"
+    legacy = item()
+    legacy.language = "en-US"
+    assert probe._tts_agent_payload_for_item(legacy)["ttv_language"] == "pt-BR"
+
+
+def test_cache_includes_actual_english_voicebank_fingerprint():
+    probe = Probe()
+    english = probe._cache_key(item(ttv_language="en-US"))
+    portuguese = probe._cache_key(item())
+    probe.route["ttv_language_fingerprints"] = {"en-US": "revised-English-bank"}
+    assert probe._cache_key(item(ttv_language="en-US")) != english
+    assert probe._cache_key(item()) == portuguese
 
 
 def test_voice_readiness_requires_actual_renderer_and_support_not_only_phone_online():
@@ -124,3 +146,44 @@ def test_old_worker_cannot_silently_ignore_personal_ttv_controls():
     with pytest.raises(RuntimeError, match="Atualize o worker"):
         asyncio.run(probe._generate_tts_agent_worker_file(item(ttv_speech_rate=.85)))
     probe._request_phone_worker_tts_audio.assert_not_awaited()
+
+
+def test_old_worker_cannot_silently_pronounce_english_as_portuguese():
+    probe = Probe()
+    probe._request_phone_worker_tts_audio = AsyncMock()
+    with pytest.raises(RuntimeError, match="Inglês está indisponível"):
+        asyncio.run(probe._generate_tts_agent_worker_file(item(ttv_language="en-US")))
+    probe._request_phone_worker_tts_audio.assert_not_awaited()
+
+
+@pytest.mark.parametrize("returned", [None, "pt-BR", "fr-FR"])
+def test_wrong_or_unconfirmed_language_audio_is_discarded(tmp_path, returned):
+    probe = Probe()
+    probe.route["ttv_languages"] = ["pt-BR", "en-US"]
+    path = tmp_path / "wrong-language.wav"
+    path.write_bytes(b"should never play")
+    probe._get_metrics_store = lambda: {}
+    probe._mark_tts_agent_synth_failure = Mock()
+    probe._request_phone_worker_tts_audio = AsyncMock(return_value={
+        "engine": "teto", "audio_format": "wav", "audio_path": str(path),
+        "ttv_voice_id": "kasane-teto", "ttv_pitch_semitones": "+0.0", "ttv_speech_rate": 1.0,
+        "ttv_language": returned,
+    })
+    with pytest.raises((RuntimeError, ValueError)):
+        asyncio.run(probe._generate_tts_agent_worker_file(item(ttv_language="en-US")))
+    assert not path.exists()
+
+
+def test_english_preview_reads_english_text_and_preserves_private_controls(tmp_path):
+    source = tmp_path / "preview.mp3"
+    source.write_bytes(b"test mp3 passthrough")
+    probe = Probe()
+    probe.route["ttv_languages"] = ["pt-BR", "en-US"]
+    probe._generate_tts_agent_worker_file = AsyncMock(return_value=str(source))
+    data = asyncio.run(probe._ttv_preview_mp3(1, 3, {"ttv_language": "en-US", "ttv_pitch_semitones": "-2.0"}))
+    queued = probe._generate_tts_agent_worker_file.await_args.args[0]
+    assert queued.text == "Hello. How are you?"
+    assert queued.language == queued.ttv_language == "en-US"
+    assert queued.ttv_pitch_semitones == "-2.0"
+    assert queued.channel_id == 0 and queued.author_id == 3
+    assert data == b"test mp3 passthrough" and not source.exists()

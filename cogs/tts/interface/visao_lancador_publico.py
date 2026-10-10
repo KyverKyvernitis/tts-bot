@@ -11,7 +11,7 @@ from typing import Awaitable, Callable, Type
 import discord
 import config
 
-from ..ttv import resolve_preferences, voice_label
+from ..ttv import DEFAULT_LANGUAGE, language_label, normalize_language, normalize_voice_id, resolve_preferences, voice_label
 
 from ..utils.embed import human_language_name, human_voice_name
 from .controles_paineis import BotaoLancadorPublicoTTS
@@ -115,11 +115,14 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         try:
             return resolve_preferences(self._user_settings, default_pitch=default)
         except ValueError:
-            # Exibir um ID inválido como indisponível, sem trocar a seleção salva.
+            # Keep invalid voice/language selections visible without replacing them.
             settings = dict(self._user_settings or {})
-            voice_id = str(settings.pop("ttv_voice_id", ""))
-            preferences = resolve_preferences(settings, default_pitch=default)
-            preferences["ttv_voice_id"] = voice_id
+            preferences = resolve_preferences({**settings, "ttv_voice_id": "", "ttv_language": ""}, default_pitch=default)
+            for key, normalizer in (("ttv_voice_id", normalize_voice_id), ("ttv_language", normalize_language)):
+                try:
+                    preferences[key] = normalizer(settings.get(key))
+                except ValueError:
+                    preferences[key] = str(settings.get(key) or "").strip()
             return preferences
 
     def _tom_teto_atual(self) -> str:
@@ -134,6 +137,12 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         pitch = float(preferences["ttv_pitch_semitones"])
         rate = preferences["ttv_speech_rate"]
         parts = [f"Voz: {self._codigo(voice)}"]
+        if preferences["ttv_language"] != DEFAULT_LANGUAGE:
+            try:
+                language = language_label(preferences["ttv_language"])
+            except ValueError:
+                language = "Idioma indisponível"
+            parts.append(f"Idioma: {self._codigo(language)}")
         if pitch != 0:
             tone = f"{pitch:+g}st".replace(".", ",")
             parts.append(f"Tom: {self._codigo(tone)}")

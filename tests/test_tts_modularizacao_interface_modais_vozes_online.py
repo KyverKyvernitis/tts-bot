@@ -259,7 +259,7 @@ class TTSInterfaceModaisVozesOnlineComportamentoTests(unittest.IsolatedAsyncioTe
         await modal.on_submit(interaction)
         salvar.assert_awaited_once()
         kwargs = salvar.await_args.kwargs
-        self.assertEqual(kwargs["settings"], {"ttv_voice_id": "kasane-teto", "ttv_pitch_semitones": "-1.5", "ttv_speech_rate": 1.0})
+        self.assertEqual(kwargs["settings"], {"ttv_voice_id": "kasane-teto", "ttv_language": "pt-BR", "ttv_pitch_semitones": "-1.5", "ttv_speech_rate": 1.0})
         self.assertNotIn("pitch", kwargs["settings"])
         self.assertEqual(kwargs["target_user_id"], 9)
 

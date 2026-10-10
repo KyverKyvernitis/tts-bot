@@ -5,7 +5,7 @@ import unicodedata
 from dataclasses import dataclass, replace
 from typing import Callable, Iterable
 
-from .ptbr_g2p import PhoneticWord, g2p_word
+from .ptbr_g2p import PhoneticWord, expand_english_numbers, g2p_english_word, g2p_word
 
 
 
@@ -68,6 +68,13 @@ _PT_FUNCTION_WORDS = {
     "em", "lhe", "lhes", "me", "na", "nas", "no", "nos", "o", "os", "para",
     "por", "que", "se", "sem", "te", "um", "uma", "umas", "uns",
 }
+_ENGLISH_FUNCTION_WORDS = {
+    "a", "an", "the", "and", "or", "but", "of", "to", "for", "in", "on", "at",
+    "by", "with", "as", "from", "than", "that", "is", "are", "was", "were",
+    "has", "have", "had", "be", "been", "do", "does", "did", "can", "could",
+    "would", "should", "will",
+}
+ENGLISH_PHONEMIZER_VERSION = "en-us-cmudict-xsampa-cvvc-v1"
 
 # Short auxiliary units are deliberately much shorter than lexical nuclei. They
 # hide the vowel that a Japanese CV bank must add to realize a Portuguese cluster
@@ -768,7 +775,7 @@ def _english_word_to_moras(
                 deaccented=deaccented,
                 syllable_index=syllable_index,
                 word_syllables=word_syllables,
-                diphthong=bool(glide),
+                diphthong=bool(glide or syllable.vowel in {"aI", "aU", "eI", "oU", "OI"}),
             ),
             stressed=bool(syllable.stressed and not deaccented),
             deaccented=deaccented,
@@ -819,11 +826,22 @@ def phonemize(
     max_moras: int = 240,
     resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
     voicebank_profile: str = "standard",
+    reading_language: str = "pt-BR",
 ) -> list[Mora]:
+    language = str(reading_language or "pt-BR").strip().lower()
+    if language not in {"pt-br", "pt", "en-us", "en"}:
+        raise ValueError("idioma TTV deve ser pt-BR ou en-US")
+    english_reading = language in {"en-us", "en"}
+    if english_reading and not str(voicebank_profile).lower().startswith("english"):
+        raise ValueError("a leitura em inglês requer a voicebank English-CVVC")
     normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
     if not normalized:
         return []
-    tokens = re.findall(r"[ぁ-ゖァ-ヺーA-Za-zÀ-ÿÇç]+|[,.!?:;\n]", normalized)
+    if english_reading:
+        normalized = expand_english_numbers(normalized)
+        tokens = re.findall(r"[A-Za-zÀ-ÿ]+(?:['’][A-Za-zÀ-ÿ]+)*|[ぁ-ゖァ-ヺー]+|[,.!?:;\n]", normalized)
+    else:
+        tokens = re.findall(r"[ぁ-ゖァ-ヺーA-Za-zÀ-ÿÇç]+|[,.!?:;\n]", normalized)
     result: list[Mora] = []
     word_index = 0
     for token in tokens:
@@ -837,11 +855,11 @@ def phonemize(
                 )
             continue
 
-        deaccented = _is_deaccented_word(token)
+        deaccented = token.lower() in _ENGLISH_FUNCTION_WORDS if english_reading else _is_deaccented_word(token)
         if re.search(r"[ぁ-ゖァ-ヺ]", token):
             word_moras = _kana_word_to_moras(token, deaccented=deaccented, resolve_alias=resolve_alias)
         else:
-            phonetic = g2p_word(token, deaccented=deaccented)
+            phonetic = (g2p_english_word if english_reading else g2p_word)(token, deaccented=deaccented)
             if str(voicebank_profile).lower().startswith("english"):
                 word_moras = _english_word_to_moras(
                     phonetic, deaccented=deaccented, resolve_alias=resolve_alias
@@ -872,4 +890,4 @@ def phonemize(
     return result
 
 
-__all__ = ["Mora", "phonemize", "g2p_word"]
+__all__ = ["Mora", "phonemize", "g2p_word", "g2p_english_word", "ENGLISH_PHONEMIZER_VERSION"]

@@ -114,7 +114,7 @@ def test_catalog_health_reports_actual_renderer_and_resource_readiness(tts, monk
     assert status["ttv_voices"] == [{"id": "kasane-teto", "name": "Kasane Teto",
                                     "ready": state == "ready",
                                     "available": state in {"ready", "resource-blocked"},
-                                    "supports_personal_rate": True}]
+                                    "supports_personal_rate": True, "languages": []}]
 
 
 def test_raw_transport_preserves_effective_control_headers(tts):
@@ -124,10 +124,11 @@ def test_raw_transport_preserves_effective_control_headers(tts):
                               end_headers=lambda: None, wfile=io.BytesIO())
     tts.worker._audio_response(handler, 200, b"wav", {
         "audio_format": "wav", "ttv_voice_id": "kasane-teto",
-        "ttv_pitch_semitones": -2.0, "ttv_speech_rate": .85})
+        "ttv_pitch_semitones": -2.0, "ttv_speech_rate": .85, "ttv_language": "en-US"})
     assert headers["X-Core-Worker-TTV-Voice-Id"] == "kasane-teto"
     assert headers["X-Core-Worker-TTV-Pitch-Semitones"] == "-2.0"
     assert headers["X-Core-Worker-TTV-Speech-Rate"] == "0.85"
+    assert headers["X-Core-Worker-TTV-Language"] == "en-US"
     assert handler.wfile.getvalue() == b"wav"
 
 

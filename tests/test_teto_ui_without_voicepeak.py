@@ -94,7 +94,7 @@ def test_modal_saves_pitch_even_with_stale_backend_state():
     response = SimpleNamespace(send_message=AsyncMock())
     asyncio.run(modal.on_submit(SimpleNamespace(response=response)))
     save.assert_awaited_once()
-    assert save.await_args.kwargs["settings"] == {"ttv_voice_id": "kasane-teto", "ttv_pitch_semitones": "+2.0", "ttv_speech_rate": 1.0}
+    assert save.await_args.kwargs["settings"] == {"ttv_voice_id": "kasane-teto", "ttv_language": "pt-BR", "ttv_pitch_semitones": "+2.0", "ttv_speech_rate": 1.0}
     response.send_message.assert_not_awaited()
 
 

@@ -13,7 +13,7 @@ import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
 
 import config
-from cogs.tts.ttv import normalize_pitch, normalize_speech_rate, normalize_voice_id, resolve_preferences
+from cogs.tts.ttv import normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id, resolve_preferences
 
 
 def _tts_effect_level(value: object) -> int:
@@ -1016,6 +1016,7 @@ class SettingsDB:
                 tts.get("teto_pitch_semitones", "") if tts.get("teto_pitch_semitones") is not None else ""
             ),
             "ttv_voice_id": str(tts.get("ttv_voice_id", "") or ""),
+            "ttv_language": str(tts.get("ttv_language", "") or ""),
             "ttv_pitch_semitones": str(
                 tts.get("ttv_pitch_semitones", "") if tts.get("ttv_pitch_semitones") is not None else ""
             ),
@@ -1044,6 +1045,7 @@ class SettingsDB:
         android_pitch: Optional[str] = None,
         teto_pitch_semitones: Optional[str] = None,
         ttv_voice_id: Optional[str] = None,
+        ttv_language: Optional[str] = None,
         ttv_pitch_semitones: Optional[str] = None,
         ttv_speech_rate: Optional[float] = None,
         advanced_nightcore_level: Optional[int] = None,
@@ -1056,6 +1058,8 @@ class SettingsDB:
         ttv_updates: Dict[str, Any] = {}
         if ttv_voice_id is not None:
             ttv_updates["ttv_voice_id"] = normalize_voice_id(ttv_voice_id)
+        if ttv_language is not None:
+            ttv_updates["ttv_language"] = normalize_language(ttv_language)
         pitch_update = ttv_pitch_semitones if ttv_pitch_semitones is not None else teto_pitch_semitones
         if pitch_update is not None:
             normalized_pitch = normalize_pitch(pitch_update) if str(pitch_update).strip() else ""
@@ -1201,16 +1205,20 @@ class SettingsDB:
             "speech_limit_seconds": int(guild.get("speech_limit_seconds", 30) or 30),
         }
         ttv_values = {**user, "teto_pitch_semitones": resolved["teto_pitch_semitones"]}
-        # An unavailable saved character must never be silently replaced. Keep
-        # its ID for the TTV route to reject, without preventing Edge/gTTS use.
+        # Invalid saved TTV selections must never be silently replaced. Keep
+        # them for the TTV route to reject, without preventing Edge/gTTS use.
         ttv_preferences = resolve_preferences(
-            {**ttv_values, "ttv_voice_id": ""},
+            {**ttv_values, "ttv_voice_id": "", "ttv_language": ""},
             default_pitch=getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0),
         )
         try:
             ttv_preferences["ttv_voice_id"] = normalize_voice_id(ttv_values.get("ttv_voice_id"))
         except ValueError:
             ttv_preferences["ttv_voice_id"] = str(ttv_values["ttv_voice_id"]).strip()
+        try:
+            ttv_preferences["ttv_language"] = normalize_language(ttv_values.get("ttv_language"))
+        except ValueError:
+            ttv_preferences["ttv_language"] = str(ttv_values["ttv_language"]).strip()
         resolved.update(ttv_preferences)
         # Both contracts report the same effective pitch during migration.
         resolved["teto_pitch_semitones"] = ttv_preferences["ttv_pitch_semitones"]

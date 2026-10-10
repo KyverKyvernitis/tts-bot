@@ -51,6 +51,10 @@ class WorldlineRenderer(TetoRenderer):
         # spectral timeline across all requests in the utterance.
         self._resource_guard = resource_guard
         self._lock = threading.Lock()
+        self._reading_context = threading.local()
+        self._english_index_lock = threading.Lock()
+        self._english_index = None
+        self._english_index_path = ""
         self._index = None
         self._index_path = ""
         self._index_profile = "standard"
@@ -211,6 +215,7 @@ class WorldlineRenderer(TetoRenderer):
                 "runtime_ready": True, "tts_ready": True, "native_c_api": True,
                 "phonemizer_version": self.PHONEMIZER_VERSION,
                 "pitch_alignment_mode": "absolute-timeline", "speech_rate": self._speech_rate(), "last_error": "",
+                "ttv_languages": self.reading_languages(),
             })
         except Exception as exc:
             result["last_error"] = f"{type(exc).__name__}: {exc}"[:260]
@@ -447,9 +452,11 @@ class WorldlineRenderer(TetoRenderer):
         return path.read_bytes()
 
     def synthesize(self, text: str, *, timeout_seconds: float = 25.0, max_audio_bytes: int = 8 * 1024 * 1024,
-                   pitch_offset_semitones: float = 0.0, speech_rate: float | None = None) -> dict[str, Any]:
+                   pitch_offset_semitones: float = 0.0, speech_rate: float | None = None,
+                   reading_language: str | None = None) -> dict[str, Any]:
         started = time.monotonic()
         effective_rate = self._effective_speech_rate(speech_rate)
+        language = self._effective_reading_language(reading_language)
         timeout = float(timeout_seconds)
         if not math.isfinite(timeout) or timeout <= 0 or timeout > 120:
             raise ValueError("timeout Teto deve estar entre 0 e 120 segundos")
@@ -467,9 +474,11 @@ class WorldlineRenderer(TetoRenderer):
             if not shutil.which("ffmpeg"):
                 raise TetoConfigurationError("ffmpeg não encontrado")
             metadata = self._library_metadata()
-            index = self._load_index()
+            index = self._load_reading_index(language)
             max_moras = max(8, min(256, self._env_int("PHONE_WORKER_TETO_MAX_PHONEMES", 240)))
-            moras = phonemize(clean_text, max_moras=max_moras + 1, resolve_alias=index.resolve, voicebank_profile=self._index_profile)
+            moras = phonemize(clean_text, max_moras=max_moras + 1, resolve_alias=index.resolve,
+                             voicebank_profile=self._index_profile,
+                             **({"reading_language": language} if reading_language is not None else {}))
             if len(moras) > max_moras:
                 raise ValueError(f"texto gerou mais de {max_moras} fonemas para Teto")
             try:
@@ -479,6 +488,7 @@ class WorldlineRenderer(TetoRenderer):
             offset = max(-4, min(4, round(offset * 2) / 2)) if math.isfinite(offset) else 0.0
             fingerprint = self._request_fingerprint(
                 index, pitch_offset_semitones=offset, speech_rate=effective_rate,
+                reading_language=language,
             )
             notes = build_notes(moras, base_pitch=os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4",
                                 speech_rate=effective_rate, tempo=self._tempo(), pitch_offset_semitones=offset)
@@ -527,7 +537,9 @@ class WorldlineRenderer(TetoRenderer):
             return {
                 "audio": raw, "audio_format": "wav", "backend": "worldline-r", "voicebank": index.name,
                 "voicebank_fingerprint": index.fingerprint, "renderer_fingerprint": fingerprint,
-                "renderer_version": self.RENDER_VERSION, "phonemizer_version": self.PHONEMIZER_VERSION,
+                "renderer_version": self.RENDER_VERSION,
+                "phonemizer_version": self.ENGLISH_PHONEMIZER_VERSION if language == "en-US" else self.PHONEMIZER_VERSION,
+                "reading_language": language,
                 "library_sha256": metadata["library_sha256"], "native_phrase_render_verified": True,
                 "portuguese_speech_verified": False, "speech_rate": effective_rate, "pitch_offset_semitones": offset,
                 "aliases": index.alias_count, "voicebank_profile": self._index_profile,
@@ -556,4 +568,5 @@ class WorldlineRenderer(TetoRenderer):
                 "worker_synth_ms": round((time.monotonic() - started) * 1000, 2), "sha256": hashlib.sha256(raw).hexdigest(),
             }
         finally:
+            self._clear_reading_context()
             self._lock.release()

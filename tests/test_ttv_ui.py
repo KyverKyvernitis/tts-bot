@@ -66,26 +66,31 @@ def interaction(*, actor=10, guild=20, admin=False):
     )
 
 
-def test_real_modal_matches_edge_with_one_select_two_five_option_radios_and_no_descriptions():
+def test_real_modal_has_language_below_voice_and_keeps_edge_style_controls_without_descriptions():
     async def run():
         module, _, _ = modules()
         cog = cog_for({"teto_pitch_semitones": "-2.0", "pitch": "+25Hz", "rate": "+25%"})
         modal = module.ModalConfiguracaoTeto(cog, SimpleNamespace(id=77, guild=SimpleNamespace(id=20)), target_user_id=10)
         payload = modal.to_components()
         assert modal.title == "Configurar TTV"
-        assert len(payload) == 3 and all(component["type"] == 18 for component in payload)
-        assert [component["component"]["type"] for component in payload] == [3, 21, 21]
+        assert len(payload) == 4 and all(component["type"] == 18 for component in payload)
+        assert [component["component"]["type"] for component in payload] == [3, 21, 21, 21]
+        assert [component["label"] for component in payload] == ["Escolha sua vocaloid", "Idioma", "Velocidade da fala", "Tom da voz"]
         assert not any(component.get("description") for component in payload)
         assert payload[0]["label"] == "Escolha sua vocaloid"
         assert payload[0]["component"]["options"] == [{"label": "Kasane Teto", "value": "kasane-teto", "default": True}]
-        speed, pitch = [component["component"] for component in payload[1:]]
+        language, speed, pitch = [component["component"] for component in payload[1:]]
+        assert language["required"] is True
+        assert [(option["label"], option["value"], option["default"]) for option in language["options"]] == [
+            ("Português adaptado", "pt-BR", True), ("Inglês", "en-US", False),
+        ]
         assert [option["label"] for option in speed["options"]] == ["Bem mais lenta", "Mais lenta", "Normal", "Mais rápida", "Bem mais rápida"]
         assert [option["label"] for option in pitch["options"]] == ["Bem mais grave", "Mais grave", "Normal", "Mais agudo", "Bem mais agudo"]
         assert [option["value"] for option in speed["options"]] == ["0.5", "0.75", "1.0", "1.25", "1.5"]
         assert [option["value"] for option in pitch["options"]] == ["-4.0", "-2.0", "+0.0", "+2.0", "+4.0"]
         assert [option["value"] for option in speed["options"] if option["default"]] == ["1.0"]
         assert [option["value"] for option in pitch["options"] if option["default"]] == ["-2.0"]
-        assert not any(option.get("description") for group in (speed, pitch) for option in group["options"])
+        assert not any(option.get("description") for group in (language, speed, pitch) for option in group["options"])
     asyncio.run(run())
 
 
@@ -96,7 +101,7 @@ def test_current_speed_survives_guided_and_text_fallback(speed):
         cog = cog_for({"ttv_speech_rate": speed, "ttv_pitch_semitones": "+0.5"})
         panel = SimpleNamespace(id=77, guild=SimpleNamespace(id=20))
         modal = module.ModalConfiguracaoTeto(cog, panel, target_user_id=10)
-        payload = modal.to_components()[1]
+        payload = modal.to_components()[2]
         radio = payload["component"]
         is_preset = speed in (0.5, 0.75, 1.0, 1.25, 1.5)
         assert len(radio["options"]) == 5 and radio["required"] == is_preset
@@ -104,7 +109,8 @@ def test_current_speed_survives_guided_and_text_fallback(speed):
         if not is_preset:
             assert "atual:" in payload["label"]
         fallback = module.ModalConfiguracaoTeto(cog, panel, target_user_id=10, force_text_fallback=True)
-        assert len(fallback.children) == 3
+        assert len(fallback.children) == 4
+        assert fallback.ttv_language.default == "pt-BR"
         assert fallback.ttv_speech_rate.default == str(speed)
         assert fallback.ttv_pitch_semitones.default == "+0.5"
         assert fallback.ttv_voice_id.default == "kasane-teto"
@@ -118,28 +124,82 @@ def test_five_pitch_choices_preserve_nonpreset_tone_without_selecting_another_va
         cog = cog_for({"teto_pitch_semitones": str(pitch), "ttv_speech_rate": .85})
         modal = module.ModalConfiguracaoTeto(cog, None, target_user_id=10)
         modal.owner_id, modal.guild_id = 10, 20
-        payload = modal.to_components()[2]
+        payload = modal.to_components()[3]
         radio = payload["component"]
         is_preset = pitch in (-4, -2, 0, 2, 4)
         assert len(radio["options"]) == 5 and radio["required"] == is_preset
         assert [float(option["value"]) for option in radio["options"] if option["default"]] == ([pitch] if is_preset else [])
         await modal.on_submit(interaction())
         cog._set_user_tts_and_refresh.assert_awaited_once_with(
-            20, 10, ttv_voice_id="kasane-teto", ttv_pitch_semitones=f"{float(pitch):+.1f}", ttv_speech_rate=.85)
+            20, 10, ttv_voice_id="kasane-teto", ttv_language="pt-BR", ttv_pitch_semitones=f"{float(pitch):+.1f}", ttv_speech_rate=.85)
     asyncio.run(run())
 
 
 def test_blank_fallback_fields_preserve_saved_preferences():
     async def run():
         module, _, _ = modules()
-        cog = cog_for({"teto_pitch_semitones": "-2.0", "ttv_speech_rate": 1.0751234567})
+        cog = cog_for({"teto_pitch_semitones": "-2.0", "ttv_speech_rate": 1.0751234567, "ttv_language": "en-US"})
         modal = module.ModalConfiguracaoTeto(cog, None, target_user_id=10, force_text_fallback=True)
         modal.owner_id, modal.guild_id = 10, 20
         for component in modal.children:
             component._value = ""
         await modal.on_submit(interaction())
         cog._set_user_tts_and_refresh.assert_awaited_once_with(
-            20, 10, ttv_voice_id="kasane-teto", ttv_pitch_semitones="-2.0", ttv_speech_rate=1.0751234567)
+            20, 10, ttv_voice_id="kasane-teto", ttv_language="en-US", ttv_pitch_semitones="-2.0", ttv_speech_rate=1.0751234567)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("saved_language,expected", ((None, "pt-BR"), ("pt-BR", "pt-BR"), ("en-US", "en-US"), ("en", "en-US")))
+def test_language_selection_reopens_in_guided_and_text_fallback(saved_language, expected):
+    async def run():
+        module, _, _ = modules()
+        cog = cog_for({"ttv_language": saved_language, "language": "ja", "android_language": "ja-JP"})
+        panel = SimpleNamespace(id=77, guild=SimpleNamespace(id=20))
+        modal = module.ModalConfiguracaoTeto(cog, panel, target_user_id=10)
+        assert modal.current_language == expected
+        options = modal.to_components()[1]["component"]["options"]
+        assert [option["value"] for option in options if option["default"]] == [expected]
+        fallback = module.ModalConfiguracaoTeto(cog, panel, target_user_id=10, force_text_fallback=True)
+        assert fallback.ttv_language.default == expected
+        cog._set_user_tts_and_refresh.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_english_preview_receives_language_and_confirmation_is_private():
+    async def run():
+        _, actions, _ = modules()
+        cog = cog_for({"ttv_language": "en-US", "language": "pt-br"})
+        view = actions.VisaoConfirmacaoTTV(cog, 10, 20, 10, "Usuário", None)
+        event = interaction()
+        await view.ouvir_amostra(event)
+        settings = cog._ttv_preview_mp3.await_args.kwargs["settings"]
+        assert settings["ttv_language"] == "en-US"
+        assert event.followup.send.await_args.kwargs["ephemeral"]
+        assert "Idioma: **Inglês**" in event.followup.send.await_args.kwargs["content"]
+        assert cog._get_db().resolve_tts(20, 10)["language"] == "pt-br"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("saved_voice,saved_language", (("kasane-teto", "ja-JP"), ("uninstalled-voice", "ja-JP")))
+def test_invalid_saved_language_does_not_crash_main_panel_or_silently_become_portuguese(saved_voice, saved_language):
+    async def run():
+        modal_module, _, launcher_module = modules()
+        settings = {"ttv_voice_id": saved_voice, "ttv_language": saved_language, "language": "en"}
+        cog = cog_for(settings, ready=True)
+        view = launcher_module.VisaoLancadorPublicoTTS(cog, 10, 20)
+        sections = [item for item in view.to_components()[0]["components"] if item["type"] == 9]
+        assert len(sections) == 3
+        assert "Idioma: `Idioma indisponível`" in view._resumo_ttv()
+        assert view._preferencias_ttv()["ttv_language"] == saved_language
+        assert cog._get_db().resolve_tts(20, 10) == settings
+        # No replacement option is selected; the user must choose a supported language.
+        modal = modal_module.ModalConfiguracaoTeto(cog, None, target_user_id=10)
+        modal.owner_id, modal.guild_id = 10, 20
+        assert not any(option["default"] for option in modal.to_components()[1]["component"]["options"])
+        event = interaction()
+        await modal.on_submit(event)
+        cog._set_user_tts_and_refresh.assert_not_awaited()
+        assert event.response.send_message.await_args.kwargs["ephemeral"]
     asyncio.run(run())
 
 
@@ -167,37 +227,40 @@ def test_two_clicks_during_discord_defer_generate_only_one_sample():
     asyncio.run(run())
 
 
-def test_partial_component_failure_clears_items_before_three_field_fallback():
+def test_partial_component_failure_clears_items_before_four_field_fallback():
     async def run():
         module, _, _ = modules()
         with patch.object(module, "adicionar_radio_modal", return_value=False):
             modal = module.ModalConfiguracaoTeto(cog_for(), None)
-        assert len(modal.children) == 3
+        assert len(modal.children) == 4
         assert all(isinstance(child, discord.ui.TextInput) for child in modal.children)
     asyncio.run(run())
 
 
-def test_submit_saves_three_ttv_fields_together_and_never_changes_edge():
+def test_submit_saves_language_with_other_ttv_fields_and_never_changes_edge():
     async def run():
         module, _, _ = modules()
-        cog = cog_for({"voice": "pt-BR-AntonioNeural", "pitch": "+25Hz", "rate": "+25%"})
+        cog = cog_for({"voice": "pt-BR-AntonioNeural", "pitch": "+25Hz", "rate": "+25%", "language": "pt-br"})
         modal = module.ModalConfiguracaoTeto(cog, None, target_user_id=10)
         modal.owner_id, modal.guild_id = 10, 20
         modal.ttv_voice_id._values = ["kasane-teto"]
+        modal.ttv_language._value = "en-US"
         modal.ttv_pitch_semitones._value = "-2.0"
         modal.ttv_speech_rate._value = "1.25"
         event = interaction()
         await modal.on_submit(event)
-        cog._set_user_tts_and_refresh.assert_awaited_once_with(20, 10, ttv_voice_id="kasane-teto", ttv_pitch_semitones="-2.0", ttv_speech_rate=1.25)
+        cog._set_user_tts_and_refresh.assert_awaited_once_with(20, 10, ttv_voice_id="kasane-teto", ttv_language="en-US", ttv_pitch_semitones="-2.0", ttv_speech_rate=1.25)
         assert event.response.defer.await_args.kwargs["ephemeral"]
         confirmation = event.followup.send.await_args.kwargs
         assert confirmation["ephemeral"] and "Kasane Teto" in confirmation["content"]
+        assert "Idioma: **Inglês**" in confirmation["content"]
         assert [button.label for button in confirmation["view"].children] == ["Ouvir amostra", "Restaurar padrões"]
         assert cog._get_db().resolve_tts(20, 10)["pitch"] == "+25Hz"
+        assert cog._get_db().resolve_tts(20, 10)["language"] == "pt-br"
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("field,value", (("ttv_voice_id", "future-uninstalled"), ("ttv_pitch_semitones", "-4.5"), ("ttv_pitch_semitones", "0.25"), ("ttv_speech_rate", "nan"), ("ttv_speech_rate", "2.0")))
+@pytest.mark.parametrize("field,value", (("ttv_voice_id", "future-uninstalled"), ("ttv_language", "ja-JP"), ("ttv_pitch_semitones", "-4.5"), ("ttv_pitch_semitones", "0.25"), ("ttv_speech_rate", "nan"), ("ttv_speech_rate", "2.0")))
 def test_invalid_submissions_never_save(field, value):
     async def run():
         module, _, _ = modules()
@@ -242,16 +305,17 @@ def test_offline_sample_returns_private_error_and_preserves_settings():
     asyncio.run(run())
 
 
-def test_reset_retains_voice_and_restores_only_ttv_tone_and_speed():
+def test_reset_retains_voice_and_language_and_restores_only_ttv_tone_and_speed():
     async def run():
         _, actions, _ = modules()
-        cog = cog_for({"ttv_voice_id": "kasane-teto", "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.15, "pitch": "+50Hz"})
+        cog = cog_for({"ttv_voice_id": "kasane-teto", "ttv_language": "en-US", "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.15, "pitch": "+50Hz"})
         view = actions.VisaoConfirmacaoTTV(cog, 10, 20, 10, "Usuário", None)
         event = interaction()
         await view.restaurar_padroes(event)
-        cog._set_user_tts_and_refresh.assert_awaited_once_with(20, 10, ttv_voice_id="kasane-teto", ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
+        cog._set_user_tts_and_refresh.assert_awaited_once_with(20, 10, ttv_voice_id="kasane-teto", ttv_language="en-US", ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
         assert cog._get_db().resolve_tts(20, 10)["pitch"] == "+50Hz"
         assert "Original" in event.followup.send.await_args.kwargs["content"]
+        assert "Idioma: **Inglês**" in event.followup.send.await_args.kwargs["content"]
     asyncio.run(run())
 
 
@@ -320,6 +384,16 @@ def test_compact_summary_keeps_only_changed_controls_and_saved_values():
         assert view._resumo_ttv() == "Voz: `Kasane Teto` · Tom: `-1,5st` · Velocidade: `107,5%`"
         assert cog._get_db().get_user_tts(20, 10) == settings
         cog._set_user_tts_and_refresh.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_compact_summary_shows_english_only_when_selected():
+    async def run():
+        _, _, module = modules()
+        english = module.VisaoLancadorPublicoTTS(cog_for({"ttv_language": "en-US"}, ready=True), 10, 20)
+        assert english._resumo_ttv() == "Voz: `Kasane Teto` · Idioma: `Inglês`"
+        portuguese = module.VisaoLancadorPublicoTTS(cog_for({"ttv_language": "pt-BR"}, ready=True), 10, 20)
+        assert portuguese._resumo_ttv() == "Voz: `Kasane Teto`"
     asyncio.run(run())
 
 

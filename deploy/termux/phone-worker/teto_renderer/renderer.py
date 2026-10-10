@@ -29,12 +29,17 @@ class TetoRenderer:
     SAMPLE_RATE = 44100
     RENDER_VERSION = "speech-4f-articulation"
     PHONEMIZER_VERSION = "ptbr-g2p-xsampa-cvvc-v2"
+    ENGLISH_PHONEMIZER_VERSION = "en-us-cmudict-xsampa-cvvc-v1"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v4-timeline-pitch"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
 
     def __init__(self, *, resource_guard: Callable[[], dict[str, Any]] | None = None):
         self._resource_guard = resource_guard
         self._lock = threading.Lock()
+        self._reading_context = threading.local()
+        self._english_index_lock = threading.Lock()
+        self._english_index: VoicebankIndex | None = None
+        self._english_index_path = ""
         self._index: VoicebankIndex | None = None
         self._index_path = ""
         self._index_profile = "standard"
@@ -43,6 +48,65 @@ class TetoRenderer:
         self._last_status: dict[str, Any] = {}
         cache_root = os.getenv("PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "teto-fragments")
         self._cache = FragmentCache(cache_root, max_mb=self._env_int("PHONE_WORKER_TETO_FRAGMENT_CACHE_MB", 256))
+
+    @property
+    def _index_profile(self) -> str:
+        return getattr(self._reading_context, "profile", self._default_index_profile)
+
+    @_index_profile.setter
+    def _index_profile(self, profile: str) -> None:
+        self._default_index_profile = profile
+
+    @staticmethod
+    def _effective_reading_language(requested: str | None) -> str:
+        if requested is None:
+            return "pt-BR"
+        if isinstance(requested, str):
+            language = requested.strip().lower().replace("_", "-")
+            if language in {"pt", "pt-br"}:
+                return "pt-BR"
+            if language in {"en", "en-us"}:
+                return "en-US"
+        raise ValueError("idioma TTV deve ser Português adaptado ou Inglês")
+
+    def _load_english_index(self) -> VoicebankIndex:
+        path = Path(self._english_voicebank_dir()).expanduser()
+        if not path.is_dir():
+            raise TetoConfigurationError("Inglês exige a voicebank English-CVVC da Teto instalada")
+        resolved = str(path.resolve())
+        with self._english_index_lock:
+            if self._english_index is None or self._english_index_path != resolved:
+                minimum = max(1, self._env_int("PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES", 500))
+                try:
+                    index = VoicebankIndex.load(resolved, minimum_aliases=minimum)
+                except Exception as exc:
+                    raise TetoConfigurationError(f"voicebank English-CVVC indisponível: {exc}") from exc
+                self._english_index = index
+                self._english_index_path = resolved
+            return self._english_index
+
+    def _load_reading_index(self, language: str) -> VoicebankIndex:
+        if language == "pt-BR":
+            return self._load_index()
+        index = self._load_english_index()
+        # The English choice belongs to this request, not the global bank mode.
+        # Status probes on another thread keep the configured Portuguese bank.
+        self._reading_context.profile = "english-cvvc"
+        return index
+
+    def reading_languages(self) -> list[str]:
+        languages = ["pt-BR"]
+        try:
+            self._load_english_index()
+        except TetoConfigurationError:
+            pass
+        else:
+            languages.append("en-US")
+        return languages
+
+    def _clear_reading_context(self) -> None:
+        if hasattr(self._reading_context, "profile"):
+            del self._reading_context.profile
 
     @staticmethod
     def _env_bool(name: str, default: bool = False) -> bool:
@@ -143,18 +207,37 @@ class TetoRenderer:
     def _render_fingerprint(self, index: VoicebankIndex) -> str:
         return self._render_fingerprint_for_version(index, self.RENDER_VERSION)
 
+    def _reading_fingerprint(self, index: VoicebankIndex, language: str) -> str:
+        renderer = self._render_fingerprint(index)
+        if language == "pt-BR":
+            return renderer
+        source_hash = getattr(self, "_english_phonemizer_sha", "")
+        if not source_hash:
+            digest = hashlib.sha256()
+            for name in ("phonemizer.py", "ptbr_g2p.py"):
+                digest.update(name.encode("ascii"))
+                digest.update(Path(__file__).with_name(name).read_bytes())
+            source_hash = digest.hexdigest()
+            self._english_phonemizer_sha = source_hash
+        return hashlib.sha256(json.dumps({
+            "renderer": renderer, "reading_language": language,
+            "phonemizer": self.ENGLISH_PHONEMIZER_VERSION, "phonemizer_sha256": source_hash,
+        }, sort_keys=True).encode()).hexdigest()
+
     def _request_fingerprint(
         self, index: VoicebankIndex, *, pitch_offset_semitones: float,
-        speech_rate: float, character: str = "kasane-teto",
+        speech_rate: float, character: str = "kasane-teto", reading_language: str = "pt-BR",
     ) -> str:
         # Status describes the installed renderer. A rendered utterance also
         # depends on the user's controls, captured locally for this request.
         profile = {
-            "renderer": self._render_fingerprint(index),
+            "renderer": self._reading_fingerprint(index, reading_language),
             "character": character,
             "pitch_offset_semitones": pitch_offset_semitones,
             "speech_rate": speech_rate,
         }
+        if reading_language == "en-US":
+            profile.update(reading_language=reading_language, phonemizer=self.ENGLISH_PHONEMIZER_VERSION)
         return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
     def _fragment_fingerprint(self, index: VoicebankIndex) -> str:
@@ -263,6 +346,7 @@ class TetoRenderer:
                     "phonemizer_version": self.PHONEMIZER_VERSION,
                     "pitch_alignment_mode": "absolute-timeline" if self._index_profile == "english-cvvc" else "lexical",
                     "speech_rate": self._speech_rate(),
+                    "ttv_languages": self.reading_languages(),
                     "last_error": "",
                 })
             except Exception as exc:
@@ -271,11 +355,14 @@ class TetoRenderer:
         self._last_status = dict(result)
         return result
 
-    def fingerprint(self) -> str:
+    def fingerprint(self, *, reading_language: str | None = None) -> str:
         try:
-            return self._render_fingerprint(self._load_index())
+            language = self._effective_reading_language(reading_language)
+            return self._reading_fingerprint(self._load_reading_index(language), language)
         except Exception:
             return "unavailable"
+        finally:
+            self._clear_reading_context()
 
     def _check_resources(self) -> None:
         if self._resource_guard is None:
@@ -847,10 +934,19 @@ class TetoRenderer:
         max_audio_bytes: int = 8 * 1024 * 1024,
         pitch_offset_semitones: float = 0.0,
         speech_rate: float | None = None,
+        reading_language: str | None = None,
     ) -> dict[str, Any]:
         effective_rate = self._effective_speech_rate(speech_rate)
-        if not self.status().get("ready"):
-            raise TetoConfigurationError(str(self.status().get("last_error") or "Teto indisponível"))
+        language = self._effective_reading_language(reading_language)
+        if language == "pt-BR":
+            if not self.status().get("ready"):
+                raise TetoConfigurationError(str(self.status().get("last_error") or "Teto indisponível"))
+        else:
+            if not self._env_bool("PHONE_WORKER_TETO_ENABLED", False):
+                raise TetoConfigurationError("PHONE_WORKER_TETO_ENABLED=false")
+            self._resampler_command()
+            if not shutil.which("ffmpeg"):
+                raise TetoConfigurationError("ffmpeg não encontrado")
         clean_text = " ".join(str(text or "").strip().split())
         max_chars = max(16, self._env_int("PHONE_WORKER_TETO_MAX_CHARACTERS", 180))
         if not clean_text:
@@ -863,13 +959,14 @@ class TetoRenderer:
 
         started = time.monotonic()
         try:
-            index = self._load_index()
+            index = self._load_reading_index(language)
             max_moras = max(8, self._env_int("PHONE_WORKER_TETO_MAX_PHONEMES", 240))
             moras = phonemize(
                 clean_text,
                 max_moras=max_moras,
                 resolve_alias=index.resolve,
                 voicebank_profile=self._index_profile,
+                **({"reading_language": language} if reading_language is not None else {}),
             )
             try:
                 pitch_offset = float(pitch_offset_semitones)
@@ -936,11 +1033,17 @@ class TetoRenderer:
                     if entry is not None:
                         groups.setdefault(entry.wav_path, []).append((number, note, entry))
 
+                request_profile = self._index_profile
+
                 def render_group(items):
                     # One group per source WAV avoids racing Straycat's .sc
                     # analysis cache when two notes use the same recording.
-                    return {number: self._resample_note(index=index, entry=entry, note=note, workdir=workdir, deadline=deadline)
-                            for number, note, entry in items}
+                    self._reading_context.profile = request_profile
+                    try:
+                        return {number: self._resample_note(index=index, entry=entry, note=note, workdir=workdir, deadline=deadline)
+                                for number, note, entry in items}
+                    finally:
+                        self._clear_reading_context()
 
                 fragments: dict[int, tuple[Path, bool, bool]] = {}
                 workers = max(1, min(2, self._env_int("PHONE_WORKER_TETO_RENDER_THREADS", 2)))
@@ -1031,9 +1134,11 @@ class TetoRenderer:
                 "voicebank_fingerprint": index.fingerprint,
                 "renderer_fingerprint": self._request_fingerprint(
                     index, pitch_offset_semitones=pitch_offset, speech_rate=effective_rate,
+                    reading_language=language,
                 ),
                 "renderer_version": self.RENDER_VERSION,
-                "phonemizer_version": self.PHONEMIZER_VERSION,
+                "phonemizer_version": self.ENGLISH_PHONEMIZER_VERSION if language == "en-US" else self.PHONEMIZER_VERSION,
+                "reading_language": language,
                 "speech_rate": effective_rate,
                 "pitch_offset_semitones": pitch_offset,
                 "aliases": index.alias_count,
@@ -1071,4 +1176,5 @@ class TetoRenderer:
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }
         finally:
+            self._clear_reading_context()
             self._lock.release()

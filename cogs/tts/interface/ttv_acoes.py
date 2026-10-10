@@ -6,17 +6,18 @@ import io
 
 import discord
 
-from ..ttv import resolve_preferences, voice_label
+from ..ttv import language_label, resolve_preferences, voice_label
 from .operacoes_painel import DESCRICAO_LANCADOR_TTS
 
 
 def resumo_ttv(settings: dict) -> str:
     voice = voice_label(settings.get("ttv_voice_id"))
+    language = language_label(settings.get("ttv_language"))
     pitch = float(settings.get("ttv_pitch_semitones", 0))
     tone = "Original" if pitch == 0 else f"{pitch:+g} semitons".replace(".", ",")
     rate = float(settings.get("ttv_speech_rate", 1.0))
     speed = "Normal" if rate == 1 else f"{rate * 100:g}%".replace(".", ",")
-    return f"Voz: **{voice}** · Tom: **{tone}** · Velocidade: **{speed}**"
+    return f"Voz: **{voice}** · Idioma: **{language}** · Tom: **{tone}** · Velocidade: **{speed}**"
 
 
 async def _responder(interaction: discord.Interaction, *, content: str, view=None, file=None) -> None:

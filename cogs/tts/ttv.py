@@ -14,6 +14,12 @@ from typing import Any, Mapping
 DEFAULT_VOICE_ID = "kasane-teto"
 DEFAULT_PITCH_SEMITONES = "+0.0"
 DEFAULT_SPEECH_RATE = 1.0
+DEFAULT_LANGUAGE = "pt-BR"
+LANGUAGE_CHOICES = (
+    (DEFAULT_LANGUAGE, "Português adaptado"),
+    ("en-US", "Inglês"),
+)
+_LANGUAGE_LABELS = dict(LANGUAGE_CHOICES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +65,20 @@ def voice_label(value: object = DEFAULT_VOICE_ID) -> str:
     return get_voice(value).name
 
 
+def normalize_language(value: object) -> str:
+    """Resolve the reading language independently of Edge/gTTS preferences."""
+    language = str(value if value is not None else "").strip().lower().replace("_", "-")
+    if not language or language in {"pt", "pt-br"}:
+        return DEFAULT_LANGUAGE
+    if language in {"en", "en-us"}:
+        return "en-US"
+    raise ValueError("Escolha Português adaptado ou Inglês para o idioma do TTV.")
+
+
+def language_label(value: object = DEFAULT_LANGUAGE) -> str:
+    return _LANGUAGE_LABELS[normalize_language(value)]
+
+
 def normalize_pitch(value: object) -> str:
     """Validate finite half-semitone steps in [-4, +4], returning signed text."""
     text = str(value if value is not None else "0").strip().lower()
@@ -96,7 +116,8 @@ def resolve_preferences(mapping: Mapping[str, Any] | None, default_pitch: object
 
     A missing or malformed new pitch uses the legacy Teto value, then the
     configured default. Malformed saved speeds use 1.0. Explicit unknown voice
-    IDs remain an error: only a missing voice selects the default character.
+    IDs and languages remain an error: only missing values select defaults.
+    The separate Edge/gTTS language never changes the TTV reading language.
     """
     values = mapping or {}
     pitch = None
@@ -118,6 +139,7 @@ def resolve_preferences(mapping: Mapping[str, Any] | None, default_pitch: object
         rate = DEFAULT_SPEECH_RATE
     return {
         "ttv_voice_id": normalize_voice_id(values.get("ttv_voice_id")),
+        "ttv_language": normalize_language(values.get("ttv_language")),
         "ttv_pitch_semitones": pitch or DEFAULT_PITCH_SEMITONES,
         "ttv_speech_rate": rate,
     }

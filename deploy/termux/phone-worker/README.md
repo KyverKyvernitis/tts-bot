@@ -1,37 +1,44 @@
 # Phone Worker Termux
 
-## TTV: voz, tom e velocidade por usuário
+## TTV: voz, idioma, tom e velocidade por usuário
 
-O worker `1.11.34` aceita `ttv_voice_id`, `ttv_pitch_semitones` e
+O worker `1.11.35` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
 `ttv_speech_rate` por requisição. A personagem disponível é `kasane-teto`;
-a escolha não altera o perfil Standard/English da voicebank instalada. Tom e
+a escolha da personagem não altera o perfil global da voicebank instalada. Tom e
 velocidade pessoais funcionam tanto com UTAU/ESPER quanto com WORLDLINE-R,
 sem escrever no `.env` nem alterar os controles dos outros usuários.
 
 O painel `_tts` chama esse modo de **TTV (TextToVocaloid)**. O formulário
-oferece seleção de voz e dois grupos de cinco opções, como o Edge, sem textos
+oferece seleção de voz, idioma e dois grupos de cinco opções, como o Edge, sem textos
 explicativos adicionais. Velocidades: 50%, 75%, 100%, 125% e 150%. Tons:
 -4, -2, 0, +2 e +4 semitons. Valores personalizados já salvos são preservados;
 fora dos presets, o valor atual aparece no título e o grupo fica opcional.
 O botão **Ouvir amostra** envia um MP3 privado; **Restaurar padrões** volta
-ao tom original e à velocidade normal. O bloco TTV é ocultado com o telefone
+ao tom original e à velocidade normal, conservando voz e idioma. O bloco TTV é ocultado com o telefone
 offline, enquanto a amostra exige o renderer pronto.
+
+**Português adaptado** (`pt-BR`) é o idioma de leitura padrão, inclusive em
+pedidos antigos. **Inglês** (`en-US`) usa o CMUdict offline embutido, acentos
+ingleses e a bank English-CVVC em `~/voicebanks/kasane-teto-english` ou
+`PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR`. A seleção muda a pronúncia, sem
+traduzir o texto. Sem a bank English, o pedido em inglês falha explicitamente.
 
 Pedidos antigos continuam aceitando `teto_pitch_semitones` e a velocidade
 global. Os pedidos novos usam controles pessoais e caches separados. Uma
 personagem desconhecida é recusada antes da síntese; ela não vira outra voz.
-O status anuncia `ttv_personal_settings` e `ttv_voices`, e a resposta raw
+O status anuncia `ttv_personal_settings`, `ttv_voices`, `ttv_languages` e
+`ttv_language_fingerprints`, e a resposta raw
 confirma os controles pelos cabeçalhos `X-Core-Worker-TTV-*`.
 
 Ao aplicar o patch pelo updater do Discord, a automação publica a release
 completa do worker. O bootstrap do Termux consulta a atualização normalmente
 a cada cinco minutos e reinicia o worker após promover a release. Confira a
-versão `1.11.34` no status antes de testar a velocidade de 50%. Os arquivos locais
+versão `1.11.35` no status antes de testar o idioma Inglês. Os arquivos locais
 da voicebank, ESPER e a configuração do aparelho continuam em seus caminhos.
 
 ## Teto UTAU e WORLDLINE-R
 
-O worker `1.11.34` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
+O worker `1.11.35` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
 configurações antigas que selecionavam esse backend passam a usar UTAU e as
 variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
 o `.env` do aparelho. Para WORLDLINE-R, use a configuração indicada abaixo.

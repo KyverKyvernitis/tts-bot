@@ -7,7 +7,7 @@ Admission, cache, output envelopes and the shared transport keep their owners.
 
 def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
                     heavy_lock, get_renderer, monotonic, normalize_format,
-                    pitch_offset_semitones=0.0, speech_rate=None):
+                    pitch_offset_semitones=0.0, speech_rate=None, reading_language=None):
     if not heavy_lock.acquire(blocking=False):
         raise RuntimeError("recurso pesado ocupado por build ou manutenção")
     teto_started = monotonic()
@@ -15,6 +15,8 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
         controls = {}
         if speech_rate is not None:
             controls["speech_rate"] = float(speech_rate)
+        if reading_language is not None:
+            controls["reading_language"] = reading_language
         rendered = get_renderer().synthesize(
             text,
             timeout_seconds=float(timeout),
@@ -32,6 +34,7 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
         f"teto voicebank={rendered.get('voicebank') or 'Kasane Teto'} "
         f"renderer={rendered.get('renderer_version') or '?'} "
         f"phonemizer={rendered.get('phonemizer_version') or '?'} "
+        f"language={rendered.get('reading_language') or reading_language or 'pt-BR'} "
         f"rendered={rendered.get('rendered_phonemes') or 0} "
         f"aux={rendered.get('auxiliary_phonemes') or 0} "
         f"epenthetic={rendered.get('epenthetic_phonemes') or 0} "

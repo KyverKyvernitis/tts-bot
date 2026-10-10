@@ -162,7 +162,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.34"
+PHONE_WORKER_VERSION = "1.11.35"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2098,6 +2098,7 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
         ("ttv_voice_id", "X-Core-Worker-TTV-Voice-Id"),
         ("ttv_pitch_semitones", "X-Core-Worker-TTV-Pitch-Semitones"),
         ("ttv_speech_rate", "X-Core-Worker-TTV-Speech-Rate"),
+        ("ttv_language", "X-Core-Worker-TTV-Language"),
     ):
         if meta.get(key) not in (None, ""):
             handler.send_header(header, _header_ascii(meta.get(key), limit=40))
@@ -2442,8 +2443,10 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
         "engine": "teto",
         "backend": _teto_backend(),
         "ttv_personal_settings": True,
+        "ttv_languages": [],
+        "ttv_language_fingerprints": {},
         "ttv_voices": [{"id": "kasane-teto", "name": "Kasane Teto", "ready": False,
-                        "available": False, "supports_personal_rate": True}],
+                        "available": False, "supports_personal_rate": True, "languages": []}],
     }
     if not enabled:
         result["last_error"] = "PHONE_WORKER_TETO_ENABLED=false"
@@ -2451,6 +2454,11 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
         return result
     try:
         result.update(_get_teto_renderer().status(force=force))
+        renderer = _get_teto_renderer()
+        result["ttv_language_fingerprints"] = {
+            language: renderer.fingerprint(reading_language=language)
+            for language in result.get("ttv_languages", []) if language == "en-US"
+        }
     except Exception as exc:
         result["last_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=180)}"
     try:
@@ -2461,6 +2469,7 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
         "id": "kasane-teto", "name": "Kasane Teto",
         "ready": bool(result.get("ready") and result["resources"].get("ok", True)),
         "available": bool(result.get("available")), "supports_personal_rate": True,
+        "languages": list(result.get("ttv_languages") or []),
     }]
     return result
 
@@ -2559,7 +2568,7 @@ def _phone_worker_tts_policy_module() -> Any:
             required = ("normalize_engine", "available_engines", "preferred_engine", "engine_order",
                         "normalize_edge_rate", "normalize_edge_pitch", "normalize_gtts_language",
                         "sanitize_cache_key", "normalize_cache_format", "standard_cache_key",
-                        "effective_ttv_settings", "normalize_ttv_voice_id", "normalize_ttv_speech_rate",
+                        "effective_ttv_settings", "normalize_ttv_voice_id", "normalize_ttv_speech_rate", "normalize_ttv_language",
                         "cache_mode_allows_read", "cache_mode_allows_store")
             if not all(callable(getattr(module, name, None)) for name in required):
                 raise RuntimeError("tts_policy.py incompleto")
@@ -4860,6 +4869,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if normalized_engine == "teto":
             status = _teto_status()
             fingerprint = str(status.get("fingerprint") or "unavailable")
+            language = _phone_worker_tts_policy_module().effective_ttv_settings(
+                body, default_speech_rate=os.getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"))["ttv_language"]
+            if language == "en-US":
+                fingerprint = str((status.get("ttv_language_fingerprints") or {}).get(language) or "unavailable")
             if _teto_backend() == "worldline-r":
                 # Keep the established UTAU cache contract while isolating the
                 # native phrase renderer, including when no fingerprint exists.
@@ -4934,7 +4947,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             result.update({
                 "teto_backend": status.get("backend") or _teto_backend(),
                 "teto_renderer_version": status.get("renderer_version", ""),
-                "teto_voicebank_profile": status.get("voicebank_profile", ""),
+                "teto_voicebank_profile": "english-cvvc" if controls["ttv_language"] == "en-US" else status.get("voicebank_profile", ""),
                 "teto_pitch_mode": "utau-semitones",
                 "teto_pitch_offset_semitones": controls["ttv_pitch_semitones"],
                 "teto_speech_rate": controls["ttv_speech_rate"],
@@ -5011,7 +5024,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 heavy_lock=_HEAVY_RESOURCE_LOCK, get_renderer=_get_teto_renderer,
                 monotonic=time.monotonic, normalize_format=self._normalize_tts_cache_format,
                 pitch_offset_semitones=ttv_settings["ttv_pitch_semitones"],
-                speech_rate=ttv_settings["ttv_speech_rate"] if "ttv_speech_rate" in body else None)
+                speech_rate=ttv_settings["ttv_speech_rate"] if "ttv_speech_rate" in body else None,
+                **({"reading_language": ttv_settings["ttv_language"]} if "ttv_language" in body else {}))
         elif engine == "android_native":
             data, audio_format, response = _phone_worker_tts_android_module().synthesize(
                 body, text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
@@ -5109,6 +5123,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             result.update(ttv_settings)
             result["ttv_speech_rate"] = result["teto_speech_rate"]
             result["ttv_pitch_semitones"] = teto_meta.get("pitch_offset_semitones", ttv_settings["ttv_pitch_semitones"])
+            result["ttv_language"] = teto_meta.get("reading_language", ttv_settings["ttv_language"])
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _task_tts_agent_synthesize(self, body: dict[str, Any], *, raw_response: bool = False) -> dict[str, Any]:

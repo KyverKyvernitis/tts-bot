@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 
 import config
-from ..ttv import DEFAULT_VOICE_ID, VOICE_CATALOG, normalize_pitch, normalize_speech_rate, normalize_voice_id
+from ..ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, LANGUAGE_CHOICES, VOICE_CATALOG, normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id
 from ..utils.embed import human_language_name, human_pitch, human_rate, human_voice_name
 from .catalogos_de_vozes import (
     idioma_edge_da_voz,
@@ -404,6 +404,12 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
         current = valor_tts_atual(cog, guild_id, user_id, "ttv_pitch_semitones", legacy_pitch, server=False)
         self.current_pitch = normalizar_tom_teto_semitons(current) or "+0.0"
         self.current_voice = valor_tts_atual(cog, guild_id, user_id, "ttv_voice_id", DEFAULT_VOICE_ID, server=False)
+        language = valor_tts_atual(cog, guild_id, user_id, "ttv_language", DEFAULT_LANGUAGE, server=False)
+        try:
+            self.current_language = normalize_language(language)
+        except ValueError:
+            # Preserve unsupported saved selections until the user chooses one.
+            self.current_language = str(language).strip()
         try:
             self.current_rate = normalize_speech_rate(valor_tts_atual(cog, guild_id, user_id, "ttv_speech_rate", "1.0", server=False))
         except ValueError:
@@ -423,6 +429,10 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
                 voices.insert(0, discord.SelectOption(label="Voz atual indisponível", value=self.current_voice, default=True))
             voice_select = criar_seletor_modal("ttv_voice_id", placeholder="Escolha sua vocaloid", options=voices)
             ok = adicionar_item_rotulo_modal(self, "ttv_voice_id", text="Escolha sua vocaloid", description="", component=voice_select)
+            ok = ok and adicionar_radio_modal(
+                self, "ttv_language", text="Idioma", description="", current=self.current_language,
+                options=[(label, value, "") for value, label in LANGUAGE_CHOICES],
+            )
             ok = ok and self._adicionar_radio_ttv(
                 "ttv_speech_rate", text="Velocidade da fala", current=self.current_rate,
                 current_label=f"{self.current_rate * 100:g}%".replace(".", ","),
@@ -465,20 +475,22 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
 
     def _build_text_fallback(self) -> None:
         adicionar_entrada_texto_modal(self, "ttv_voice_id", label="Escolha sua vocaloid", placeholder="Kasane Teto: kasane-teto", current=self.current_voice, max_length=100)
-        adicionar_entrada_texto_modal(self, "ttv_pitch_semitones", label="Tom da voz (semitons)", placeholder="0.0 = tom original · passos de 0.5", current=self.current_pitch, max_length=8)
+        adicionar_entrada_texto_modal(self, "ttv_language", label="Idioma", placeholder="Português adaptado: pt-BR · Inglês: en-US", current=self.current_language, max_length=16)
         adicionar_entrada_texto_modal(self, "ttv_speech_rate", label="Velocidade da fala", placeholder="0.5 / 0.75 / 1.0 / 1.25 / 1.5", current=str(self.current_rate), max_length=32)
+        adicionar_entrada_texto_modal(self, "ttv_pitch_semitones", label="Tom da voz (semitons)", placeholder="0.0 = tom original · passos de 0.5", current=self.current_pitch, max_length=8)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             normalized = normalize_pitch(valor_unico_componente(self.ttv_pitch_semitones, self.current_pitch) or self.current_pitch)
             voice_id = normalize_voice_id(valor_unico_componente(self.ttv_voice_id, self.current_voice) or self.current_voice)
+            language = normalize_language(valor_unico_componente(self.ttv_language, self.current_language) or self.current_language)
             rate = normalize_speech_rate(valor_unico_componente(self.ttv_speech_rate, str(self.current_rate)) or str(self.current_rate))
         except ValueError as error:
             await interaction.response.send_message(embed=self.cog._make_embed("Ajuste inválido", str(error), ok=False), ephemeral=True)
             return
         await salvar_configuracao_ttv(
             self.cog, interaction, source_panel_message=self.panel_message,
-            settings={"ttv_voice_id": voice_id, "ttv_pitch_semitones": normalized, "ttv_speech_rate": rate},
+            settings={"ttv_voice_id": voice_id, "ttv_language": language, "ttv_pitch_semitones": normalized, "ttv_speech_rate": rate},
             target_user_id=self.target_user_id, target_user_name=self.target_user_name,
             owner_id=self.owner_id, guild_id=self.guild_id,
         )

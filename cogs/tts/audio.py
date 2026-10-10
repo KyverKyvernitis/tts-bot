@@ -58,7 +58,7 @@ from cogs.musica.integracoes.tts import (
 )
 
 from .helpers import validate_voice
-from .ttv import DEFAULT_VOICE_ID, get_voice, normalize_pitch, normalize_speech_rate, resolve_preferences
+from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
 from .streaming import SharedSynthesisMixin
 from .routing import RouteMeasurements
@@ -497,6 +497,7 @@ def _ttv_item_preferences(item) -> dict[str, Any]:
         "ttv_voice_id": getattr(item, "ttv_voice_id", None),
         "ttv_pitch_semitones": getattr(item, "ttv_pitch_semitones", None),
         "ttv_speech_rate": getattr(item, "ttv_speech_rate", None),
+        "ttv_language": getattr(item, "ttv_language", None),
         "teto_pitch_semitones": getattr(item, "teto_pitch_semitones", None),
     }, default_pitch=TTS_TETO_DEFAULT_PITCH_SEMITONES)
 
@@ -519,6 +520,7 @@ class QueueItem:
     ttv_voice_id: str = field(default=DEFAULT_VOICE_ID, repr=False, compare=False)
     ttv_pitch_semitones: str | None = field(default=None, repr=False, compare=False)
     ttv_speech_rate: float | None = field(default=None, repr=False, compare=False)
+    ttv_language: str = field(default=DEFAULT_LANGUAGE, repr=False, compare=False)
     enqueued_at_monotonic: float = field(default_factory=time.monotonic, repr=False, compare=False)
     received_at_monotonic: float = field(default=0.0, repr=False, compare=False)
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
@@ -1607,6 +1609,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             "teto_reading_mode": str(state.get("teto_reading_mode") or ""),
             "ttv_personal_settings": bool(state.get("ttv_personal_settings")),
             "ttv_voices": list(state.get("ttv_voices") or [])[:25],
+            "ttv_languages": list(state.get("ttv_languages") or [])[:2],
             "last_ok_age_seconds": round(now - last_ok, 1) if last_ok else None,
             "last_check_age_seconds": round(now - last_check, 1) if last_check else None,
             "cooldown_remaining_seconds": round(max(0.0, disabled_until - now), 1),
@@ -1755,6 +1758,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         ready = bool(online and self._tts_agent_route_available() and advertised.get("ready"))
         return {"id": voice.id, "name": voice.name, "online": online, "ready": ready,
                 "available": bool(advertised.get("available")),
+                "languages": list(advertised.get("languages") or state.get("ttv_languages") or [DEFAULT_LANGUAGE]),
                 "supports_personal_rate": bool(personal and advertised.get("supports_personal_rate"))}
 
     async def _ttv_preview_mp3(self, guild_id: int, user_id: int, settings: dict | None = None) -> bytes:
@@ -1770,9 +1774,13 @@ class TTSAudioMixin(SharedSynthesisMixin):
             raise RuntimeError("A voz está indisponível agora. Seus ajustes continuam salvos.")
         if not status["supports_personal_rate"]:
             raise RuntimeError("Atualize o worker para usar os ajustes pessoais de TTV.")
+        language = preferences["ttv_language"]
+        if language not in status["languages"]:
+            raise RuntimeError("Inglês está indisponível. Atualize o worker e confira a voicebank English da Teto.")
         item = QueueItem(guild_id=int(guild_id), channel_id=0, author_id=int(user_id),
-                         text="Olá. Como você está?", engine="teto", voice=preferences["ttv_voice_id"],
-                         language="pt-br", rate="1.0", pitch="+0Hz",
+                         text="Hello. How are you?" if language == "en-US" else "Olá. Como você está?",
+                         engine="teto", voice=preferences["ttv_voice_id"],
+                         language=language, rate="1.0", pitch="+0Hz",
                          teto_pitch_semitones=preferences["ttv_pitch_semitones"], **preferences)
         path = ""
         process = None
@@ -1934,6 +1942,12 @@ class TTSAudioMixin(SharedSynthesisMixin):
             route["teto_reading_mode"] = str(teto_state.get("reading_mode") or "")
             route["teto_fingerprint"] = str(teto_state.get("fingerprint") or "")
             route["ttv_personal_settings"] = bool(teto_state.get("ttv_personal_settings"))
+            route["ttv_languages"] = [code for code in (teto_state.get("ttv_languages") or [])
+                                      if code in {"pt-BR", "en-US"}]
+            route["ttv_language_fingerprints"] = {
+                code: value for code, value in (teto_state.get("ttv_language_fingerprints") or {}).items()
+                if code in {"pt-BR", "en-US"} and isinstance(value, str)
+            } if isinstance(teto_state.get("ttv_language_fingerprints"), dict) else {}
             route["ttv_voices"] = [entry for entry in (teto_state.get("ttv_voices") or [])
                                    if isinstance(entry, dict)][:25]
             ok = bool(data.get("ok", True) and agent.get("ok") and agent.get("available") and agent.get("synth_ready"))
@@ -3154,6 +3168,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
             item.ttv_voice_id = preferences["ttv_voice_id"]
             item.ttv_pitch_semitones = preferences["ttv_pitch_semitones"]
             item.ttv_speech_rate = preferences["ttv_speech_rate"]
+            item.ttv_language = preferences["ttv_language"]
+            item.language = item.ttv_language
             item.teto_pitch_semitones = item.ttv_pitch_semitones
         if item.engine in TTS_EFFECT_ENGINES:
             (
@@ -3189,7 +3205,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
             teto_state = self._tts_agent_route_state()
             fingerprint = teto_state.get('teto_fingerprint') or 'unavailable'
             preferences = _ttv_item_preferences(item)
-            payload = f"ttv-v1|worker|{fingerprint}|{preferences['ttv_voice_id']}|{preferences['ttv_pitch_semitones']}|{preferences['ttv_speech_rate']!r}|{item.language}|{text}"
+            fingerprint = (teto_state.get("ttv_language_fingerprints") or {}).get(preferences["ttv_language"], fingerprint)
+            payload = f"ttv-v2|worker|{fingerprint}|{preferences['ttv_voice_id']}|{preferences['ttv_pitch_semitones']}|{preferences['ttv_speech_rate']!r}|{preferences['ttv_language']}|{text}"
         elif engine == "android_native":
             language = (item.language or "pt-BR").strip().lower().replace('_', '-')
             voice = str(item.voice or "auto").strip() or "auto"
@@ -3703,6 +3720,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 data["ttv_voice_id"] = voice_id
                 data["ttv_pitch_semitones"] = self._worker_header_value(response.headers, "X-Core-Worker-TTV-Pitch-Semitones")
                 data["ttv_speech_rate"] = self._worker_header_value(response.headers, "X-Core-Worker-TTV-Speech-Rate")
+                language = self._worker_header_value(response.headers, "X-Core-Worker-TTV-Language")
+                if language:
+                    data["ttv_language"] = language
             if audio_path:
                 data["audio_path"] = audio_path
             elif raw is not None:
@@ -5416,7 +5436,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             "text": str(item.text or "")[:max_text_length],
             "engine": engine,
             "voice": str(preferences.get("ttv_voice_id") or item.voice or ""),
-            "language": str(item.language or ""),
+            "language": str(preferences.get("ttv_language") or item.language or ""),
             "tld": str(getattr(item, "tld", "com")),
             "rate": str(item.rate or "+0%"),
             "pitch": str(item.pitch or "+0Hz"),
@@ -5465,6 +5485,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
         route = route_reader() if callable(route_reader) else {}
         if engine == "teto" and route.get("ttv_personal_settings") is False:
             raise RuntimeError("Atualize o worker para usar os ajustes pessoais de TTV.")
+        if engine == "teto":
+            preferences = _ttv_item_preferences(item)
+            if preferences["ttv_language"] == "en-US" and "en-US" not in (route.get("ttv_languages") or []):
+                raise RuntimeError("Inglês está indisponível. Atualize o worker e confira a voicebank English da Teto.")
         max_text_length = TTS_TETO_MAX_TEXT_LENGTH if engine == "teto" else TTS_WORKER_AGENT_MAX_TEXT_LENGTH
         if len(text) > max_text_length:
             raise RuntimeError(f"texto grande demais para TTS Agent: {len(text)} > {max_text_length}")
@@ -5496,10 +5520,13 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         raise RuntimeError("O worker não sintetizou a vocaloid selecionada.")
                     if route.get("ttv_personal_settings") or data.get("ttv_voice_id"):
                         preferences = _ttv_item_preferences(item)
-                        if (any(data.get(key) in (None, "") for key in preferences)
+                        control_keys = ("ttv_voice_id", "ttv_pitch_semitones", "ttv_speech_rate")
+                        if (any(data.get(key) in (None, "") for key in control_keys)
                                 or str(data.get("ttv_voice_id") or "") != preferences["ttv_voice_id"]
                                 or normalize_pitch(data.get("ttv_pitch_semitones")) != preferences["ttv_pitch_semitones"]
-                                or abs(normalize_speech_rate(data.get("ttv_speech_rate")) - preferences["ttv_speech_rate"]) > 1e-8):
+                                or abs(normalize_speech_rate(data.get("ttv_speech_rate")) - preferences["ttv_speech_rate"]) > 1e-8
+                                or (bool(route.get("ttv_languages")) and data.get("ttv_language") in (None, ""))
+                                or normalize_language(data.get("ttv_language")) != preferences["ttv_language"]):
                             raise RuntimeError("O worker retornou áudio com ajustes de TTV diferentes dos solicitados.")
                 write_ms = 0.0
                 raw = data.get("raw_audio") or data.get("audio_bytes")

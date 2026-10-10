@@ -2,14 +2,15 @@
 
 Aplicar este patch pelo updater e abrir um painel novo com `_tts`. A seção
 TTV mantém o prefixo configurado anteriormente para a Teto e permite escolher
-personagem, tom e velocidade. No catálogo atual aparece somente Kasane Teto.
+personagem, idioma, tom e velocidade. No catálogo atual aparece somente Kasane Teto.
 
 O modal **Configurar TTV** usa Labels sem descrições, com um String Select e
-dois RadioGroups de cinco opções, na mesma ordem do Edge:
+um RadioGroup de idioma e dois RadioGroups de cinco opções, na mesma ordem do Edge:
 
 | Campo | Opções |
 | --- | --- |
 | Escolha sua vocaloid | Kasane Teto |
+| Idioma | Português adaptado (padrão), Inglês |
 | Velocidade da fala | Bem mais lenta, Mais lenta, Normal, Mais rápida, Bem mais rápida |
 | Tom da voz | Bem mais grave, Mais grave, Normal, Mais agudo, Bem mais agudo |
 
@@ -23,12 +24,27 @@ uma sexta opção nem selecionar um preset diferente.
 
 Depois de salvar, a confirmação privada oferece **Ouvir amostra** e
 **Restaurar padrões**. A amostra usa os ajustes pessoais em um MP3 sem entrar
-em canal de voz. Restaurar conserva a personagem e volta ao tom 0 e à taxa 1.
+em canal de voz. Restaurar conserva a personagem e o idioma e volta ao tom 0 e à taxa 1.
 O bloco TTV aparece enquanto o worker está online. O resumo exibe a voz e
 somente tom e velocidade diferentes do padrão, como os outros modos. O tom
 usa a unidade compacta `st` (semitons). Clientes que
-recusam os componentes novos recebem três campos de texto com os valores
+recusam os componentes novos recebem quatro campos de texto com os valores
 atuais preenchidos.
+
+## Idioma de leitura
+
+**Português adaptado** conserva a pronúncia PT-BR existente. **Inglês** lê o
+texto em inglês, com pronúncias e acentos do CMUdict e aproximações para palavras
+fora do dicionário. A seleção não traduz a mensagem. A amostra usa `Olá. Como
+você está?` em português e `Hello. How are you?` em inglês.
+
+O inglês exige a voicebank English-CVVC da própria Teto, já instalada em
+`~/voicebanks/kasane-teto-english` ou no caminho
+`PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR`. A escolha é feita por pedido e não
+muda o perfil global nem os ajustes de outros usuários. Sem essa bank ou sem
+suporte no worker, a leitura em inglês é recusada. O dicionário funciona offline,
+vem embutido no módulo existente e preserva a licença BSD e a identificação da
+fonte. Não requer outro serviço, Box64 ou reinstalação do ESPER.
 
 ## Compatibilidade e extensão
 
@@ -37,29 +53,29 @@ atuais preenchidos.
 uma personagem exige também um renderer instalado e suporte no worker; uma
 voz anunciada na interface não representa, sozinha, capacidade de síntese.
 
-O banco guarda `ttv_voice_id`, `ttv_pitch_semitones` e `ttv_speech_rate`
+O banco guarda `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e `ttv_speech_rate`
 separadamente dos controles Edge/gTTS. O tom legado `teto_pitch_semitones`
 continua sendo lido e espelhado quando editado. Valores antigos como -2,0
 continuam selecionados até uma edição ou restauração explícita.
 
 O identificador interno `teto`, os comandos existentes e os prefixos são
 preservados. Os controles percorrem mensagem, fila, payload, worker e renderer.
-Os caches incluem personagem, tom, taxa e fingerprint da implementação/bank.
+Os caches incluem personagem, idioma, tom, taxa e fingerprint da implementação/bank.
 O áudio de TTV não muda silenciosamente para outra personagem em caso de erro.
 
 ## Atualização e verificação
 
 O patch mantém as pastas originais do repositório e não inclui voicebanks,
 binários dos motores, segredos ou um manifesto de exclusões. A automação
-existente do updater publica o worker **1.11.34**, que aceita a nova velocidade
-de 50%. O bootstrap no telefone
+existente do updater publica o worker **1.11.35**, que aceita a escolha de idioma.
+O bootstrap no telefone
 promove a release e reinicia o processo; o ciclo normal de consulta é de cinco
 minutos, podendo ter alguns segundos de variação. Não há necessidade de
 reinstalar ESPER para esta mudança.
 
 Os testes cobrem serialização real dos componentes em discord.py 2.7.1,
 controle de acesso, respostas privadas, restauração, migração dos ajustes,
-payloads, metadados raw, separação dos caches e velocidade nos dois renderers.
+payloads, metadados raw, separação dos caches, idioma e velocidade nos dois renderers.
 A execução local dos testes não confirma a implantação no Discord ou no Poco.
 A inteligibilidade e o timbre em português devem ser avaliados ouvindo as
 amostras; gerar um WAV válido não mede a naturalidade da fala.
