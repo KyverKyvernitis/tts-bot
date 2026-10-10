@@ -66,7 +66,7 @@ def interaction(*, actor=10, guild=20, admin=False):
     )
 
 
-def test_real_modal_serializes_two_selects_and_radio_preserving_legacy_pitch():
+def test_real_modal_matches_edge_with_one_select_two_five_option_radios_and_no_descriptions():
     async def run():
         module, _, _ = modules()
         cog = cog_for({"teto_pitch_semitones": "-2.0", "pitch": "+25Hz", "rate": "+25%"})
@@ -74,30 +74,58 @@ def test_real_modal_serializes_two_selects_and_radio_preserving_legacy_pitch():
         payload = modal.to_components()
         assert modal.title == "Configurar TTV"
         assert len(payload) == 3 and all(component["type"] == 18 for component in payload)
-        assert [component["component"]["type"] for component in payload] == [3, 3, 21]
+        assert [component["component"]["type"] for component in payload] == [3, 21, 21]
+        assert not any(component.get("description") for component in payload)
         assert payload[0]["label"] == "Escolha sua vocaloid"
         assert payload[0]["component"]["options"] == [{"label": "Kasane Teto", "value": "kasane-teto", "default": True}]
-        assert len(payload[1]["component"]["options"]) == 17
-        assert [option["value"] for option in payload[1]["component"]["options"] if option["default"]] == ["-2.0"]
-        assert next(option for option in payload[1]["component"]["options"] if option["value"] == "+0.0")["label"] == "Original"
-        assert [option["value"] for option in payload[2]["component"]["options"] if option["default"]] == ["1.0"]
+        speed, pitch = [component["component"] for component in payload[1:]]
+        assert [option["label"] for option in speed["options"]] == ["Bem mais lenta", "Mais lenta", "Normal", "Mais rápida", "Bem mais rápida"]
+        assert [option["label"] for option in pitch["options"]] == ["Bem mais grave", "Mais grave", "Normal", "Mais agudo", "Bem mais agudo"]
+        assert [option["value"] for option in speed["options"]] == ["0.5", "0.75", "1.0", "1.25", "1.5"]
+        assert [option["value"] for option in pitch["options"]] == ["-4.0", "-2.0", "+0.0", "+2.0", "+4.0"]
+        assert [option["value"] for option in speed["options"] if option["default"]] == ["1.0"]
+        assert [option["value"] for option in pitch["options"] if option["default"]] == ["-2.0"]
+        assert not any(option.get("description") for group in (speed, pitch) for option in group["options"])
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("speed", (0.85, 1.0, 1.15, 1.075, 1.0005, 0.8505, 1.1505, 1.0751234567))
+@pytest.mark.parametrize("speed", (0.5, 0.75, 1.0, 1.25, 1.5, 0.85, 1.15, 1.075, 1.0005, 0.7505, 1.2505, 1.0751234567))
 def test_current_speed_survives_guided_and_text_fallback(speed):
     async def run():
         module, _, _ = modules()
         cog = cog_for({"ttv_speech_rate": speed, "ttv_pitch_semitones": "+0.5"})
         panel = SimpleNamespace(id=77, guild=SimpleNamespace(id=20))
         modal = module.ModalConfiguracaoTeto(cog, panel, target_user_id=10)
-        radio = modal.to_components()[2]["component"]["options"]
-        assert [float(option["value"]) for option in radio if option["default"]] == [speed]
+        payload = modal.to_components()[1]
+        radio = payload["component"]
+        is_preset = speed in (0.5, 0.75, 1.0, 1.25, 1.5)
+        assert len(radio["options"]) == 5 and radio["required"] == is_preset
+        assert [float(option["value"]) for option in radio["options"] if option["default"]] == ([speed] if is_preset else [])
+        if not is_preset:
+            assert "atual:" in payload["label"]
         fallback = module.ModalConfiguracaoTeto(cog, panel, target_user_id=10, force_text_fallback=True)
         assert len(fallback.children) == 3
         assert fallback.ttv_speech_rate.default == str(speed)
         assert fallback.ttv_pitch_semitones.default == "+0.5"
         assert fallback.ttv_voice_id.default == "kasane-teto"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("pitch", (-4, -2, 0, 2, 4, -3.5, -1.5, 0.5, 1.5))
+def test_five_pitch_choices_preserve_nonpreset_tone_without_selecting_another_value(pitch):
+    async def run():
+        module, _, _ = modules()
+        cog = cog_for({"teto_pitch_semitones": str(pitch), "ttv_speech_rate": .85})
+        modal = module.ModalConfiguracaoTeto(cog, None, target_user_id=10)
+        modal.owner_id, modal.guild_id = 10, 20
+        payload = modal.to_components()[2]
+        radio = payload["component"]
+        is_preset = pitch in (-4, -2, 0, 2, 4)
+        assert len(radio["options"]) == 5 and radio["required"] == is_preset
+        assert [float(option["value"]) for option in radio["options"] if option["default"]] == ([pitch] if is_preset else [])
+        await modal.on_submit(interaction())
+        cog._set_user_tts_and_refresh.assert_awaited_once_with(
+            20, 10, ttv_voice_id="kasane-teto", ttv_pitch_semitones=f"{float(pitch):+.1f}", ttv_speech_rate=.85)
     asyncio.run(run())
 
 
@@ -156,11 +184,11 @@ def test_submit_saves_three_ttv_fields_together_and_never_changes_edge():
         modal = module.ModalConfiguracaoTeto(cog, None, target_user_id=10)
         modal.owner_id, modal.guild_id = 10, 20
         modal.ttv_voice_id._values = ["kasane-teto"]
-        modal.ttv_pitch_semitones._values = ["-0.5"]
-        modal.ttv_speech_rate._value = "0.85"
+        modal.ttv_pitch_semitones._value = "-2.0"
+        modal.ttv_speech_rate._value = "1.25"
         event = interaction()
         await modal.on_submit(event)
-        cog._set_user_tts_and_refresh.assert_awaited_once_with(20, 10, ttv_voice_id="kasane-teto", ttv_pitch_semitones="-0.5", ttv_speech_rate=0.85)
+        cog._set_user_tts_and_refresh.assert_awaited_once_with(20, 10, ttv_voice_id="kasane-teto", ttv_pitch_semitones="-2.0", ttv_speech_rate=1.25)
         assert event.response.defer.await_args.kwargs["ephemeral"]
         confirmation = event.followup.send.await_args.kwargs
         assert confirmation["ephemeral"] and "Kasane Teto" in confirmation["content"]

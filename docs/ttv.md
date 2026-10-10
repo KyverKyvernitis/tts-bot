@@ -4,13 +4,22 @@ Aplicar este patch pelo updater e abrir um painel novo com `_tts`. A seção
 TTV mantém o prefixo configurado anteriormente para a Teto e permite escolher
 personagem, tom e velocidade. No catálogo atual aparece somente Kasane Teto.
 
-O modal **Configurar TTV** usa Labels com dois String Selects e um RadioGroup:
+O modal **Configurar TTV** usa Labels sem descrições, com um String Select e
+dois RadioGroups de cinco opções, na mesma ordem do Edge:
 
 | Campo | Opções |
 | --- | --- |
 | Escolha sua vocaloid | Kasane Teto |
-| Tom da voz | Original ou -4 a +4 semitons, em passos de 0,5 |
-| Velocidade da fala | 85%, 100%, 115%; valor personalizado atual, se houver |
+| Velocidade da fala | Bem mais lenta, Mais lenta, Normal, Mais rápida, Bem mais rápida |
+| Tom da voz | Bem mais grave, Mais grave, Normal, Mais agudo, Bem mais agudo |
+
+Velocidades: 0,5 / 0,75 / 1 / 1,25 / 1,5, equivalentes aos ajustes de -50%,
+-25%, 0%, +25% e +50% do Edge. Tons: -4 / -2 / 0 / +2 / +4 semitons; Hz do
+Edge não é a unidade do renderer Teto. Os valores de meios semitons e
+velocidades personalizadas antigos continuam válidos. Se o valor salvo não
+for um dos cinco presets, o título mostra o valor atual e o grupo fica sem
+seleção obrigatória; enviar sem selecionar conserva esse valor, sem acrescentar
+uma sexta opção nem selecionar um preset diferente.
 
 Depois de salvar, a confirmação privada oferece **Ouvir amostra** e
 **Restaurar padrões**. A amostra usa os ajustes pessoais em um MP3 sem entrar
@@ -42,7 +51,8 @@ O áudio de TTV não muda silenciosamente para outra personagem em caso de erro.
 
 O patch mantém as pastas originais do repositório e não inclui voicebanks,
 binários dos motores, segredos ou um manifesto de exclusões. A automação
-existente do updater publica o worker **1.11.33**. O bootstrap no telefone
+existente do updater publica o worker **1.11.34**, que aceita a nova velocidade
+de 50%. O bootstrap no telefone
 promove a release e reinicia o processo; o ciclo normal de consulta é de cinco
 minutos, podendo ter alguns segundos de variação. Não há necessidade de
 reinstalar ESPER para esta mudança.

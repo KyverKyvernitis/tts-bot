@@ -79,15 +79,15 @@ def normalize_pitch(value: object) -> str:
 
 
 def normalize_speech_rate(value: object, default: float = DEFAULT_SPEECH_RATE) -> float:
-    """Validate a finite speed multiplier in [0.75, 1.5], preserving custom values."""
+    """Validate a finite speed multiplier in [0.5, 1.5], preserving custom values."""
     if value is None or (isinstance(value, str) and not value.strip()):
         value = default
     try:
         rate = float(str(value).strip().replace(",", "."))
     except (TypeError, ValueError):
-        raise ValueError("A velocidade deve ficar entre 75% e 150%.") from None
-    if not math.isfinite(rate) or not 0.75 <= rate <= 1.5:
-        raise ValueError("A velocidade deve ficar entre 75% e 150%.")
+        raise ValueError("A velocidade deve ficar entre 50% e 150%.") from None
+    if not math.isfinite(rate) or not 0.5 <= rate <= 1.5:
+        raise ValueError("A velocidade deve ficar entre 50% e 150%.")
     return rate
 
 

@@ -38,12 +38,12 @@ def test_invalid_pitch_is_rejected(value):
         ttv.normalize_pitch(value)
 
 
-@pytest.mark.parametrize("value,expected", [(None, 1.0), ("", 1.0), ("0,85", 0.85), (1.15, 1.15), (1.07, 1.07), (0.75, 0.75), (1.5, 1.5)])
+@pytest.mark.parametrize("value,expected", [(None, 1.0), ("", 1.0), ("0,85", 0.85), (1.15, 1.15), (1.07, 1.07), (0.5, 0.5), (0.74, 0.74), (0.75, 0.75), (1.25, 1.25), (1.5, 1.5)])
 def test_rate_preserves_custom_valid_values(value, expected):
     assert ttv.normalize_speech_rate(value) == expected
 
 
-@pytest.mark.parametrize("value", [0, 0.74, 1.51, "NaN", "-Infinity", "115%"])
+@pytest.mark.parametrize("value", [0, 0.49, 1.51, "NaN", "-Infinity", "115%"])
 def test_invalid_speed_is_rejected(value):
     with pytest.raises(ValueError):
         ttv.normalize_speech_rate(value)

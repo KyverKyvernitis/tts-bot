@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import struct
 import sys
 import tempfile
@@ -110,20 +111,22 @@ class TtvRendererPersonalControlsTests(unittest.TestCase):
                 def check(renderer, root):
                     status_fingerprint = renderer.fingerprint()
                     before_env = dict(os.environ)
-                    outputs = [renderer.synthesize("teto teto", speech_rate=rate) for rate in (0.85, 1.0, 1.15)]
+                    rates = (.5, .75, 1.0, 1.25, 1.5)
+                    outputs = [renderer.synthesize("teto teto", speech_rate=rate) for rate in rates]
                     duration = [frames(output) for output in outputs]
-                    self.assertGreater(duration[0], duration[1])
-                    self.assertGreater(duration[1], duration[2])
-                    self.assertEqual([output["speech_rate"] for output in outputs], [0.85, 1.0, 1.15])
-                    self.assertEqual([output["pitch_offset_semitones"] for output in outputs], [0, 0, 0])
-                    self.assertEqual(len({output["renderer_fingerprint"] for output in outputs}), 3)
+                    for slower, faster in zip(duration, duration[1:]):
+                        self.assertGreater(slower, faster)
+                    self.assertGreater(duration[0], 1.9 * duration[2])
+                    self.assertEqual([output["speech_rate"] for output in outputs], list(rates))
+                    self.assertEqual([output["pitch_offset_semitones"] for output in outputs], [0] * 5)
+                    self.assertEqual(len({output["renderer_fingerprint"] for output in outputs}), 5)
                     self.assertEqual(len({output["voicebank_fingerprint"] for output in outputs}), 1)
                     self.assertEqual(renderer.fingerprint(), status_fingerprint)
                     self.assertEqual(dict(os.environ), before_env)
                     if renderer_class is WorldlineRenderer:
                         jobs = [json.loads(line) for line in (root / "worldline-jobs.jsonl").read_text().splitlines()]
-                        self.assertEqual(len(jobs), 3)
-                        self.assertEqual([[item["tone"] for item in job["requests"]] for job in jobs], [[60] * 4] * 3)
+                        self.assertEqual(len(jobs), 5)
+                        self.assertEqual([[item["tone"] for item in job["requests"]] for job in jobs], [[60] * 4] * 5)
                     else:
                         jobs = [json.loads(line) for line in (root / "resampler-jobs.jsonl").read_text().splitlines()]
                         self.assertEqual({job["pitch"] for job in jobs}, {"C4"})
@@ -149,11 +152,50 @@ class TtvRendererPersonalControlsTests(unittest.TestCase):
         for renderer_class in (TetoRenderer, WorldlineRenderer):
             renderer = renderer_class()
             with patch.object(renderer, "_load_index") as load:
-                for invalid in (True, False, "1.0", "bad", float("nan"), float("inf"), -float("inf"), 0.74, 1.51):
+                for invalid in (True, False, "1.0", "bad", float("nan"), float("inf"), -float("inf"), 0.49, 1.51):
                     with self.subTest(backend=renderer_class.__name__, rate=invalid):
                         with self.assertRaisesRegex(ValueError, "velocidade TTV"):
                             renderer.synthesize("teto", speech_rate=invalid)
                 load.assert_not_called()
+
+    def test_explicit_half_rate_does_not_relax_the_legacy_global_minimum(self):
+        for renderer_class in (TetoRenderer, WorldlineRenderer):
+            with self.subTest(backend=renderer_class.__name__):
+                renderer = renderer_class()
+                with patch.dict(os.environ, {"PHONE_WORKER_TETO_SPEECH_RATE": "0.5"}):
+                    self.assertEqual(renderer._effective_speech_rate(None), .75)
+                    self.assertEqual(renderer._effective_speech_rate(.5), .5)
+
+    @unittest.skipUnless(os.getenv("WORLDLINE_TEST_LIBRARY") and shutil.which("ffmpeg"), "set WORLDLINE_TEST_LIBRARY to pinned local native library")
+    def test_native_worldline_half_rate_doubles_duration_and_keeps_personal_pitch(self):
+        from teto_renderer.worldline_native import inspect_library
+
+        library = Path(os.environ["WORLDLINE_TEST_LIBRARY"]).resolve()
+
+        class LocalNativeRenderer(WorldlineRenderer):
+            def _library_metadata(self):
+                return inspect_library(library)
+
+            def _library(self):
+                return library
+
+            def _guest_command(self, library, workdir=None):
+                command = [sys.executable, str(WORKER / "teto_renderer" / "worldline_native.py"), "--library", str(library)]
+                return command + (["--probe"] if workdir is None else ["--job", str(workdir / "job.json"), "--output", str(workdir / "output.wav")])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            env, _, _ = fixture(Path(temporary))
+            with patch.dict(os.environ, env):
+                renderer = LocalNativeRenderer()
+                outputs = [renderer.synthesize("teto teto", speech_rate=rate, pitch_offset_semitones=-2) for rate in (.5, 1, 1.5)]
+        durations = [frames(output) for output in outputs]
+        self.assertGreater(durations[0], 1.9 * durations[1])
+        self.assertGreater(durations[1], durations[2])
+        for output, rate in zip(outputs, (.5, 1, 1.5)):
+            self.assertTrue(output["native_phrase_render_verified"])
+            self.assertEqual(output["speech_rate"], rate)
+            self.assertEqual(output["pitch_offset_semitones"], -2)
+            self.assertAlmostEqual(output["timeline_audio_ms"], output["timeline_planned_ms"], delta=.03)
 
     def test_overlapping_request_is_rejected_without_leaking_personal_rate(self):
         for renderer_class in (TetoRenderer, WorldlineRenderer):

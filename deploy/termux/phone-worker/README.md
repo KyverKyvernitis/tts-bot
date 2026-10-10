@@ -2,15 +2,17 @@
 
 ## TTV: voz, tom e velocidade por usuário
 
-O worker `1.11.33` aceita `ttv_voice_id`, `ttv_pitch_semitones` e
+O worker `1.11.34` aceita `ttv_voice_id`, `ttv_pitch_semitones` e
 `ttv_speech_rate` por requisição. A personagem disponível é `kasane-teto`;
 a escolha não altera o perfil Standard/English da voicebank instalada. Tom e
 velocidade pessoais funcionam tanto com UTAU/ESPER quanto com WORLDLINE-R,
 sem escrever no `.env` nem alterar os controles dos outros usuários.
 
 O painel `_tts` chama esse modo de **TTV (TextToVocaloid)**. O formulário
-oferece seleção de voz, tom de -4 a +4 semitons em passos de 0,5 e velocidades
-de 85%, 100% e 115%. Velocidades personalizadas já salvas são preservadas.
+oferece seleção de voz e dois grupos de cinco opções, como o Edge, sem textos
+explicativos adicionais. Velocidades: 50%, 75%, 100%, 125% e 150%. Tons:
+-4, -2, 0, +2 e +4 semitons. Valores personalizados já salvos são preservados;
+fora dos presets, o valor atual aparece no título e o grupo fica opcional.
 O botão **Ouvir amostra** envia um MP3 privado; **Restaurar padrões** volta
 ao tom original e à velocidade normal. O bloco TTV é ocultado com o telefone
 offline, enquanto a amostra exige o renderer pronto.
@@ -24,12 +26,12 @@ confirma os controles pelos cabeçalhos `X-Core-Worker-TTV-*`.
 Ao aplicar o patch pelo updater do Discord, a automação publica a release
 completa do worker. O bootstrap do Termux consulta a atualização normalmente
 a cada cinco minutos e reinicia o worker após promover a release. Confira a
-versão `1.11.33` no status antes de testar as amostras. Os arquivos locais
+versão `1.11.34` no status antes de testar a velocidade de 50%. Os arquivos locais
 da voicebank, ESPER e a configuração do aparelho continuam em seus caminhos.
 
 ## Teto UTAU e WORLDLINE-R
 
-O worker `1.11.33` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
+O worker `1.11.34` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
 configurações antigas que selecionavam esse backend passam a usar UTAU e as
 variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
 o `.env` do aparelho. Para WORLDLINE-R, use a configuração indicada abaixo.

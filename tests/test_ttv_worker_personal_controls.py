@@ -71,11 +71,25 @@ def test_unknown_character_fails_before_discovery_cache_or_any_provider(tts, mon
     assert not tts.calls
 
 
-@pytest.mark.parametrize("rate", [None, "", "invalid", True, float("nan"), float("inf"), 10 ** 400, .74, 1.51])
+@pytest.mark.parametrize("rate", [None, "", "invalid", True, float("nan"), float("inf"), 10 ** 400, .49, 1.51])
 def test_invalid_personal_rate_is_not_replaced_silently(tts, monkeypatch, rate):
     monkeypatch.setattr(tts.worker, "_get_teto_renderer", lambda: pytest.fail("invalid rate rendered"))
     with pytest.raises(ValueError, match="velocidade TTV"):
         tts.handler._task_tts_agent_synthesize({"engine": "teto", "text": "Oi.", "ttv_speech_rate": rate})
+
+
+@pytest.mark.parametrize("rate", [.5, .75, 1.0, 1.25, 1.5])
+@pytest.mark.parametrize("raw", [False, True])
+def test_five_edge_equivalent_rates_reach_renderer_and_cache_metadata(tts, monkeypatch, rate, raw):
+    rendered = install_renderer(tts, monkeypatch)
+    body = {"engine": "teto", "text": "Mesma frase.", "ttv_voice_id": "kasane-teto", "ttv_speech_rate": rate}
+    cold = tts.handler._task_tts_agent_synthesize(body, raw_response=raw)
+    warm = tts.handler._task_tts_agent_synthesize(body, raw_response=raw)
+    assert not cold["cache_hit"] and warm["cache_hit"]
+    assert audio(cold) == audio(warm)
+    assert len(rendered) == 1
+    assert rendered[0]["kwargs"]["speech_rate"] == rate
+    assert cold["ttv_speech_rate"] == warm["ttv_speech_rate"] == rate
 
 
 def test_normalized_controls_share_cache_and_voice_implementation_separates_it(tts, monkeypatch):

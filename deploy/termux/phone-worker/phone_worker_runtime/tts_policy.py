@@ -42,13 +42,13 @@ def normalize_ttv_voice_id(raw: Any = "kasane-teto") -> str:
 
 def normalize_ttv_speech_rate(raw: Any) -> float:
     if isinstance(raw, bool):
-        raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5")
+        raise ValueError("velocidade TTV deve estar entre 0.5 e 1.5")
     try:
         value = float(raw)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5") from exc
-    if not math.isfinite(value) or not 0.75 <= value <= 1.5:
-        raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5")
+        raise ValueError("velocidade TTV deve estar entre 0.5 e 1.5") from exc
+    if not math.isfinite(value) or not 0.5 <= value <= 1.5:
+        raise ValueError("velocidade TTV deve estar entre 0.5 e 1.5")
     return value
 
 

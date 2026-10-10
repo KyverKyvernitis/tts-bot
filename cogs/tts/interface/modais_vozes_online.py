@@ -422,31 +422,51 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
                 # Não substituir um ID salvo sem o usuário escolher outra voz.
                 voices.insert(0, discord.SelectOption(label="Voz atual indisponível", value=self.current_voice, default=True))
             voice_select = criar_seletor_modal("ttv_voice_id", placeholder="Escolha sua vocaloid", options=voices)
-            ok = adicionar_item_rotulo_modal(self, "ttv_voice_id", text="Escolha sua vocaloid", description="A personagem que vai ler suas mensagens.", component=voice_select)
-            pitches = []
-            for half in range(-8, 9):
-                value = f"{half / 2:+.1f}"
-                label = "Original" if half == 0 else f"{value.replace('.', ',')} semitons"
-                pitches.append(discord.SelectOption(label=label, value=value, default=value == self.current_pitch))
-            pitch_select = criar_seletor_modal("ttv_pitch_semitones", placeholder="Tom da voz", options=pitches)
-            ok = ok and adicionar_item_rotulo_modal(self, "ttv_pitch_semitones", text="Tom da voz", description="Mais grave ou mais agudo. Original preserva o tom da voz.", component=pitch_select)
-            rates = [("Mais lenta — 85%", "0.85", ""), ("Normal — 100%", "1.0", ""), ("Mais rápida — 115%", "1.15", "")]
-            if self.current_rate not in (0.85, 1.0, 1.15):
-                rates.append((f"Atual — {self.current_rate * 100:g}%", str(self.current_rate), "Sua velocidade personalizada."))
-            ok = ok and adicionar_radio_modal(self, "ttv_speech_rate", text="Velocidade da fala", description="Muda o ritmo da leitura, preservando o tom.", current=str(self.current_rate), options=rates)
-            if ok:
-                # A custom speed near a preset must have exactly one selection.
-                for option in self.ttv_speech_rate.options:
-                    option.default = float(option.value) == self.current_rate
+            ok = adicionar_item_rotulo_modal(self, "ttv_voice_id", text="Escolha sua vocaloid", description="", component=voice_select)
+            ok = ok and self._adicionar_radio_ttv(
+                "ttv_speech_rate", text="Velocidade da fala", current=self.current_rate,
+                current_label=f"{self.current_rate * 100:g}%".replace(".", ","),
+                options=[
+                    ("Bem mais lenta", "0.5", ""),
+                    ("Mais lenta", "0.75", ""),
+                    ("Normal", "1.0", ""),
+                    ("Mais rápida", "1.25", ""),
+                    ("Bem mais rápida", "1.5", ""),
+                ],
+            )
+            ok = ok and self._adicionar_radio_ttv(
+                "ttv_pitch_semitones", text="Tom da voz", current=self.current_pitch,
+                current_label=f"{float(self.current_pitch):+g}st".replace(".", ","),
+                options=[
+                    ("Bem mais grave", "-4.0", ""),
+                    ("Mais grave", "-2.0", ""),
+                    ("Normal", "+0.0", ""),
+                    ("Mais agudo", "+2.0", ""),
+                    ("Bem mais agudo", "+4.0", ""),
+                ],
+            )
             return bool(ok)
         except Exception as error:
             print(f"[tts_modal] TTV guiado falhou: {error!r}")
             return False
 
+    def _adicionar_radio_ttv(self, attr_name, *, text, current, current_label, options) -> bool:
+        is_preset = any(float(value) == float(current) for _, value, _ in options)
+        if not is_preset:
+            # Cinco opções fixas; não trocar uma preferência antiga por um preset.
+            text = f"{text} (atual: {current_label})"
+        if not adicionar_radio_modal(self, attr_name, text=text, description="", current=str(current), options=options):
+            return False
+        group = getattr(self, attr_name)
+        group.required = is_preset
+        for option in group.options:
+            option.default = float(option.value) == float(current)
+        return True
+
     def _build_text_fallback(self) -> None:
         adicionar_entrada_texto_modal(self, "ttv_voice_id", label="Escolha sua vocaloid", placeholder="Kasane Teto: kasane-teto", current=self.current_voice, max_length=100)
         adicionar_entrada_texto_modal(self, "ttv_pitch_semitones", label="Tom da voz (semitons)", placeholder="0.0 = tom original · passos de 0.5", current=self.current_pitch, max_length=8)
-        adicionar_entrada_texto_modal(self, "ttv_speech_rate", label="Velocidade da fala", placeholder="0.85 = lenta · 1.0 = normal · 1.15 = rápida", current=str(self.current_rate), max_length=32)
+        adicionar_entrada_texto_modal(self, "ttv_speech_rate", label="Velocidade da fala", placeholder="0.5 / 0.75 / 1.0 / 1.25 / 1.5", current=str(self.current_rate), max_length=32)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:

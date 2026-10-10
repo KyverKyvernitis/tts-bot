@@ -97,13 +97,13 @@ class TetoRenderer:
         if requested is None:
             return self._speech_rate()
         if isinstance(requested, bool) or not isinstance(requested, (int, float)):
-            raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5")
+            raise ValueError("velocidade TTV deve estar entre 0.5 e 1.5")
         try:
             value = float(requested)
         except (ValueError, OverflowError) as exc:
-            raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5") from exc
-        if not math.isfinite(value) or not 0.75 <= value <= 1.5:
-            raise ValueError("velocidade TTV deve estar entre 0.75 e 1.5")
+            raise ValueError("velocidade TTV deve estar entre 0.5 e 1.5") from exc
+        if not math.isfinite(value) or not 0.5 <= value <= 1.5:
+            raise ValueError("velocidade TTV deve estar entre 0.5 e 1.5")
         return value
 
     def _velocity(self) -> int:
