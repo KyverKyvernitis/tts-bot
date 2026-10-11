@@ -2,7 +2,7 @@
 
 ## TTV: voz, idioma, tom e velocidade por usuário
 
-O worker `1.11.37` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
+O worker `1.11.38` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
 `ttv_speech_rate` por requisição. As personagens são `kasane-teto` e, quando
 instalada, `hatsune-miku`. A escolha da personagem não altera o perfil global da voicebank instalada. Tom e
 velocidade pessoais funcionam tanto com UTAU/ESPER quanto com WORLDLINE-R,
@@ -38,7 +38,7 @@ inclusive quando o áudio já está no cache.
 Ao aplicar o patch pelo updater do Discord, a automação publica a release
 completa do worker. O bootstrap do Termux consulta a atualização normalmente
 a cada cinco minutos e reinicia o worker após promover a release. Confira a
-versão `1.11.37` no status antes de testar mensagens e amostras. Os arquivos locais
+versão `1.11.38` no status antes de testar mensagens e amostras. Os arquivos locais
 da voicebank, ESPER e a configuração do aparelho continuam em seus caminhos.
 
 ## Hatsune Miku English CVVC
@@ -59,9 +59,22 @@ Após a instalação, reinicie o worker com o script canônico e escolha **Hatsu
 Miku** no formulário TTV. O kit gera WAVs, MP3s e um relatório para testar os dois
 idiomas no aparelho antes de avaliar a pronúncia por audição.
 
+Em `1.11.38`, a Miku admite até quatro grupos de fragmentos simultâneos, com
+notas do mesmo WAV em sequência. `PHONE_WORKER_MIKU_RENDER_THREADS` permite
+selecionar de 1 a 4 tarefas; o limite da Teto permanece em 2. A mudança preserva
+o PCM e as identidades dos caches. O kit v5 de validação compartilha
+`~/phone-worker/cache/miku-fragments` com o worker e respeita
+`PHONE_WORKER_MIKU_FRAGMENT_CACHE_DIR`. As amostras podem ser reutilizadas
+sem nova síntese quando os parâmetros coincidem.
+
+Os logs de síntese passam a informar `workers`, `fragment_hits`,
+`fragment_misses` e `resampler_calls`. O benchmark do kit mede 2 versus 4
+tarefas com análise aquecida e caches temporários; o resultado no aparelho
+determina o ganho, sem inferi-lo dos testes Linux x64.
+
 ## Teto UTAU e WORLDLINE-R
 
-O worker `1.11.37` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
+O worker `1.11.38` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
 configurações antigas que selecionavam esse backend passam a usar UTAU e as
 variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
 o `.env` do aparelho. Para WORLDLINE-R, use a configuração indicada abaixo.

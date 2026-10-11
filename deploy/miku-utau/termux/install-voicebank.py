@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -38,6 +39,7 @@ ALLOWED_ENV_KEYS = frozenset({
     "PHONE_WORKER_TETO_RESAMPLER_COMMAND", "PHONE_WORKER_MIKU_ENABLED",
     "PHONE_WORKER_MIKU_VOICEBANK_DIR", "PHONE_WORKER_MIKU_ENGLISH_VOICEBANK_DIR",
     "PHONE_WORKER_MIKU_ALIAS_SUFFIX", "PHONE_WORKER_MIKU_RESAMPLER_COMMAND",
+    "PHONE_WORKER_MIKU_RENDER_THREADS", "PHONE_WORKER_MIKU_FRAGMENT_CACHE_DIR",
     "PHONE_WORKER_ESPER_ROOT", "PHONE_WORKER_ESPER_CONTAINER",
     "PHONE_WORKER_ESPER_TIMEOUT", "PHONE_WORKER_ESPER_CACHE_DIR",
 })
@@ -127,45 +129,92 @@ def shell_value(value: str) -> str:
     return json.dumps(value, ensure_ascii=False).replace("$", "\\$").replace("`", "\\`")
 
 
-def configuration(directory: Path, values: dict[str, str], *, container: str) -> dict[str, str]:
+def bridge_options(data: bytes) -> frozenset[str]:
+    """Inspect the installed parser without importing or executing the bridge."""
+    try:
+        tree = ast.parse(data)
+    except (SyntaxError, ValueError, UnicodeError) as exc:
+        raise InstallError("ponte ESPER instalada não é um script Python válido") from exc
+    options = frozenset(argument.value for node in ast.walk(tree)
+                        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "add_argument"
+                        for argument in node.args
+                        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                        and argument.value.startswith("--"))
+    if not {"--root", "--cache-dir", "--container", "--timeout"}.issubset(options):
+        raise InstallError("ponte ESPER instalada não declara as opções necessárias")
+    return options
+
+
+def configuration(directory: Path, values: dict[str, str], *, container: str,
+                  esper_root: Path | None = None) -> dict[str, str]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", container):
         raise InstallError("nome do container inválido")
-    raw = values.get("PHONE_WORKER_MIKU_RESAMPLER_COMMAND") or values.get("PHONE_WORKER_TETO_RESAMPLER_COMMAND")
+    # An explicit runtime root configures the new voice independently. Legacy
+    # or stale commands for either voice are never executed or rewritten for
+    # Teto; only the five Miku keys are published after bank verification.
+    raw = None if esper_root is not None else (values.get("PHONE_WORKER_MIKU_RESAMPLER_COMMAND")
+                                              or values.get("PHONE_WORKER_TETO_RESAMPLER_COMMAND"))
     if raw:
         try:
             command = shlex.split(raw)
         except ValueError as exc:
             raise InstallError("comando ESPER configurado inválido") from exc
-        if len(command) < 2 or not Path(command[0]).name.lower().startswith("python") or Path(command[1]).name != "resampler.py":
-            raise InstallError("o comando existente não é a ponte Python do ESPER; execute o setup ESPER")
+        bridge_names = {"resampler.py", "esper-utau-resampler"}
+        if len(command) >= 2 and Path(command[0]).name.lower().startswith("python") and Path(command[1]).name in bridge_names:
+            pass
+        elif command and Path(command[0]).name in bridge_names:
+            # ESPER setup publishes the same Python bridge under both names.
+            # Run direct launchers through this Python, avoiding dependence on
+            # their executable bit or Android's handling of the env shebang.
+            direct = str(Path(command[0]).expanduser())
+            if Path(direct).name == direct:
+                direct = shutil.which(direct) or direct
+            command = [sys.executable, direct, *command[1:]]
+        else:
+            raise InstallError("comando ESPER não reconhecido; use a ponte resampler.py ou esper-utau-resampler")
         wrapper = Path(command[1]).expanduser().absolute()
         wrapper_bytes = regular_bytes(wrapper, MAX_ENV_BYTES)
         if shutil.which(command[0]) is None and not Path(command[0]).is_file():
             raise InstallError("Python da ponte ESPER não encontrado")
         command[1] = str(wrapper)
-        # The new voice gets its own argv. Refresh the implementation identity
-        # and honor --container without rewriting the Teto's command or flags.
-        for option, value in (("--container", container),
-                              ("--implementation-id", hashlib.sha256(wrapper_bytes).hexdigest())):
-            clean, position = command[:2], 2
-            while position < len(command):
-                argument = command[position]
-                if argument == option:
-                    if position + 1 >= len(command):
-                        raise InstallError("opção ESPER sem valor no comando existente")
-                    position += 2
-                elif argument.startswith(option + "="):
-                    position += 1
-                else:
-                    clean.append(argument)
-                    position += 1
-            command = clean + [option, value]
     else:
-        root = Path(values.get("PHONE_WORKER_ESPER_ROOT") or Path.home() / ".esper-utau").expanduser().absolute()
+        root = Path(esper_root if esper_root is not None else
+                    values.get("PHONE_WORKER_ESPER_ROOT") or Path.home() / ".esper-utau").expanduser().absolute()
+        real_directories(root / "bin")
         wrapper = root / "bin" / "resampler.py"
-        data = regular_bytes(wrapper, MAX_ENV_BYTES)
-        command = [sys.executable, str(wrapper), "--root", str(root), "--container", container,
-                   "--timeout", "60", "--implementation-id", hashlib.sha256(data).hexdigest()]
+        if not (wrapper.exists() or wrapper.is_symlink()):
+            wrapper = root / "bin" / "esper-utau-resampler"
+        wrapper_bytes = regular_bytes(wrapper, MAX_ENV_BYTES)
+        command = [sys.executable, str(wrapper), "--root", str(root), "--timeout", "60"]
+    # Old ESPER bridges reject --implementation-id. Keep the bridge digest in
+    # the accepted cache-directory argument instead so both phrase and fragment
+    # fingerprints still change after a bridge update. Teto's argv stays intact.
+    digest = hashlib.sha256(wrapper_bytes).hexdigest()
+    supports_identity = "--implementation-id" in bridge_options(wrapper_bytes)
+    replacements = {"--container": container,
+                    "--implementation-id": digest if supports_identity else None}
+    if not supports_identity:
+        cache = Path(values.get("PHONE_WORKER_ESPER_CACHE_DIR") or wrapper.parent.parent / "cache").expanduser().absolute()
+        replacements["--cache-dir"] = str(cache / "miku-bridge" / digest)
+    clean, position = command[:2], 2
+    while position < len(command):
+        argument = command[position]
+        if argument in replacements:
+            if position + 1 >= len(command) or command[position + 1].startswith("--"):
+                raise InstallError("opção ESPER sem valor no comando existente")
+            position += 2
+        elif argument.partition("=")[0] in replacements:
+            if not argument.partition("=")[2]:
+                raise InstallError("opção ESPER sem valor no comando existente")
+            position += 1
+        else:
+            clean.append(argument)
+            position += 1
+    command = clean
+    for option, value in replacements.items():
+        if value is not None:
+            command.extend((option, value))
     return {
         "PHONE_WORKER_MIKU_ENABLED": "true",
         "PHONE_WORKER_MIKU_VOICEBANK_DIR": str(directory),
@@ -385,7 +434,8 @@ def check_existing(directory: Path) -> dict | None:
     return inspect_bank(directory)
 
 
-def install_voicebank(*, archive: Path, directory: Path, env: Path, container: str = "voicepeak-arm64") -> dict:
+def install_voicebank(*, archive: Path, directory: Path, env: Path, container: str = "voicepeak-arm64",
+                      esper_root: Path | None = None) -> dict:
     report = {"ok": False, "installed": False, "voicebank_ready": False, "voice_id": "hatsune-miku",
               "voicebank_profile": "english-cvvc", "source_url": SOURCE_URL, "author_url": AUTHOR_URL,
               "source_sha256": SOURCE_SHA256, "worker_configuration_changed": False,
@@ -399,7 +449,7 @@ def install_voicebank(*, archive: Path, directory: Path, env: Path, container: s
         archive = Path(os.path.abspath(archive.expanduser()))
         report["directory"] = str(directory)
         original, settings = read_environment(env)
-        configured = configuration(directory, settings, container=container)
+        configured = configuration(directory, settings, container=container, esper_root=esper_root)
         updated = updated_environment(original, configured)
         real_directories(directory)
         existing = check_existing(directory)
@@ -463,9 +513,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--directory", type=Path, default=Path.home() / "voicebanks/hatsune-miku-english")
     parser.add_argument("--env", type=Path, default=Path(os.getenv("PHONE_WORKER_ENV") or Path.home() / ".phone-worker.env"))
     parser.add_argument("--container", default="voicepeak-arm64")
+    parser.add_argument("--esper-root", type=Path,
+                        help="pasta do ESPER instalado; cria o comando da Miku sem reutilizar o comando salvo da Teto")
     options = parser.parse_args(argv)
     report = install_voicebank(archive=options.archive, directory=options.directory, env=options.env,
-                              container=options.container)
+                              container=options.container, esper_root=options.esper_root)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 

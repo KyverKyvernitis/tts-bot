@@ -22,7 +22,7 @@ Depois de extrair o kit em `~/miku-utau-termux-kit`, rode:
 ```bash
 python "$HOME/miku-utau-termux-kit/deploy/miku-utau/termux/install-voicebank.py" \
   --archive "$HOME/storage/downloads/mukki english cvvc.zip" \
-  --container voicepeak-arm64
+  --container voicepeak-arm64 --esper-root "$HOME/.esper-utau"
 
 python "$HOME/miku-utau-termux-kit/deploy/miku-utau/termux/validate-miku.py" \
   --container voicepeak-arm64 --timeout 120
@@ -49,7 +49,20 @@ brasileiros usando o banco inglês.
 
 O instalador registra somente `PHONE_WORKER_MIKU_*` em `~/.phone-worker.env`,
 com backup antes de uma alteração, e preserva os ajustes e comentários da Teto.
-O comando ESPER é reutilizado; se não estiver configurado, a ponte instalada
+O comando ESPER é reutilizado: são aceitos `resampler.py` e
+`esper-utau-resampler`, tanto diretamente quanto depois de `python`. Com
+`--esper-root`, cria o comando da Miku diretamente da ponte instalada nesse root,
+sem depender dos comandos antigos salvos para a Teto ou a Miku. A preferência
+do usuário e o comando da Teto são preservados.
+
+Desde o kit v4, o instalador lê as opções declaradas pelo parser da ponte, sem executá-la. Usa
+`--implementation-id` somente quando disponível. Nas versões antigas, remove
+esse argumento e usa `--cache-dir` com um cache próprio da Miku identificado
+pelo SHA-256 da ponte. Isso mantém a invalidação dos caches quando o código
+muda e preserva a instalação do ESPER. Se a bank já foi instalada pelo v3,
+o instalador apenas confere seu inventário e corrige as configurações da Miku.
+
+Sem comando ou root explícito, a ponte instalada
 `~/.esper-utau/bin/resampler.py` é usada. Nenhum `.env` ou código do ZIP é executado
 durante a instalação. As banks existentes em uma pasta sem marcador válido são
 preservadas.
@@ -60,6 +73,44 @@ No Discord, abra **TTV → Configurar → Escolha sua vocaloid → Hatsune Miku*
 escolha **Português adaptado** ou **Inglês**. A Teto continua selecionada até essa
 troca; instalar o banco não muda as preferências dos usuários.
 
-Os parâmetros `--env`, `--directory` do instalador e `--voicebank`,
+Os parâmetros `--env`, `--directory`, `--esper-root` do instalador e `--voicebank`,
 `--output-dir` do validador permitem usar outros caminhos. `--timeout` admite
 1 a 120 segundos por amostra. O relatório não imprime tokens do worker.
+
+## Otimização e medição no celular
+
+O worker **1.11.38** e o kit v5 usam até quatro grupos de fragmentos da Miku
+em paralelo. Notas do mesmo WAV continuam em sequência para preservar o cache
+de análise do ESPER. Tom, velocidade, montagem e fingerprints de áudio são
+preservados. O limite da Teto continua em duas tarefas.
+
+O validador agora usa o mesmo cache de fragmentos do bot:
+`~/phone-worker/cache/miku-fragments`. Isso permite reaproveitar no bot as
+amostras com os mesmos parâmetros. As variáveis existentes
+`PHONE_WORKER_MIKU_RENDER_THREADS` (1 a 4) e
+`PHONE_WORKER_MIKU_FRAGMENT_CACHE_DIR` são respeitadas. O kit não reinstala a
+bank nem modifica a ponte do ESPER já instalada.
+
+Após aplicar a atualização do bot pelo updater, confira **1.11.38** no status.
+Extraia o kit v5 no mesmo diretório e execute o validador normalmente para
+gerar os dois MP3s e preencher o cache compartilhado.
+
+Para medir duas versus quatro tarefas no aparelho:
+
+```bash
+python "$HOME/miku-utau-termux-kit/deploy/miku-utau/termux/benchmark-miku.py" \
+  --container voicepeak-arm64 \
+  --report "$HOME/storage/downloads/miku-desempenho.json"
+```
+
+O teste aquece a análise em um cache temporário, depois alterna duas rodadas
+com 2 e 4 tarefas. Mede fragmentos novos e a repetição com fragmentos prontos,
+confere WAVs idênticos e remove os temporários. Não altera o `.env`, a bank ou
+os caches do bot. `--language en-US` mede a frase em inglês; `--rounds 1`
+reduz a quantidade de testes.
+
+Compare `worker_synth_ms_median` na fase `fragmentos_novos` do relatório.
+Os campos `resampler_calls`, `fragment_cache_hits`, `fragment_cache_misses` e
+`render_workers` mostram o trabalho executado. Quatro tarefas não garantem
+metade do tempo: núcleos disponíveis, temperatura e outros aplicativos afetam
+a medição. O benchmark não mede o cache de frases inteiras do bot.

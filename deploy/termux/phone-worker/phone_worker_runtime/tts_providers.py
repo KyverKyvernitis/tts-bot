@@ -30,6 +30,13 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
     audio_format = normalize_format(rendered.get("audio_format") or "wav")
     teto_meta = dict(rendered)
     stage_ms["teto_render"] = round((monotonic() - teto_started) * 1000.0, 2)
+    performance_log = (
+        f"workers={rendered.get('render_workers') or 0} "
+        f"fragment_hits={rendered.get('fragment_cache_hits') or 0} "
+        f"fragment_misses={rendered.get('fragment_cache_misses') or 0} "
+        f"resampler_calls={rendered.get('resampler_calls') or 0} "
+        if "render_workers" in rendered else ""
+    )
     logs.append(
         f"teto voicebank={rendered.get('voicebank') or 'Kasane Teto'} "
         f"renderer={rendered.get('renderer_version') or '?'} "
@@ -48,6 +55,7 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
         f"pitch_jump={rendered.get('pitch_boundary_max_cents') if rendered.get('pitch_boundary_max_cents') is not None else '-'} "
         f"energy_jump={rendered.get('energy_boundary_max_db') if rendered.get('energy_boundary_max_db') is not None else '-'} "
         f"repairs={rendered.get('continuity_repairs') or 0} "
+        f"{performance_log}"
         f"missing={len(rendered.get('missing_phonemes') or [])}"
     )
     return data, audio_format, teto_meta

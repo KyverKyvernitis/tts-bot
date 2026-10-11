@@ -79,7 +79,7 @@ O áudio de TTV não muda silenciosamente para outra personagem em caso de erro.
 
 O patch mantém as pastas originais do repositório e não inclui voicebanks,
 binários dos motores, segredos ou um manifesto de exclusões. A automação
-existente do updater publica o worker **1.11.37**, que anuncia as vozes prontas
+existente do updater publica o worker **1.11.38**, que anuncia as vozes prontas
 separadamente e sintetiza a personagem selecionada por pedido. Ele conserva a
 correção do tom **Normal** nas respostas raw da versão 1.11.36.
 O bootstrap no telefone

@@ -164,7 +164,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.37"
+PHONE_WORKER_VERSION = "1.11.38"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2468,7 +2468,7 @@ def _miku_renderer_environment() -> dict[str, str]:
     defaults = {
         "LENGTH_MODE": "total", "FRAGMENT_CACHE_MB": "256", "STATUS_CACHE_SECONDS": "15",
         "MIN_ALIASES": "500", "ENGLISH_MIN_ALIASES": "500", "MAX_CHARACTERS": "180",
-        "MAX_PHONEMES": "240", "MAX_AUDIO_SECONDS": "20", "RENDER_THREADS": "2",
+        "MAX_PHONEMES": "240", "MAX_AUDIO_SECONDS": "20", "RENDER_THREADS": "4",
     }
     environment.update({f"PHONE_WORKER_TETO_{suffix}": str(os.getenv(f"PHONE_WORKER_MIKU_{suffix}") or default)
                         for suffix, default in defaults.items()})

@@ -149,8 +149,16 @@ class TetoRenderer:
         return languages
 
     def _clear_reading_context(self) -> None:
-        if hasattr(self._reading_context, "profile"):
-            del self._reading_context.profile
+        for name in ("profile", "render_metrics"):
+            if hasattr(self._reading_context, name):
+                delattr(self._reading_context, name)
+
+    def _record_render_metric(self, name: str) -> None:
+        # Each source group owns its counters. Status probes and other render
+        # threads do not share mutable request metrics.
+        metrics = getattr(self._reading_context, "render_metrics", None)
+        if metrics is not None:
+            metrics[name] += 1
 
     def _env_bool(self, name: str, default: bool = False) -> bool:
         value = str(self._getenv(name, "") or "").strip().lower()
@@ -530,6 +538,7 @@ class TetoRenderer:
         key = self._cache.key(payload)
         cached = self._cache.get(key)
         if cached is not None:
+            self._record_render_metric("fragment_cache_hits")
             return cached, False, False
 
         # Compatibility lookup for the stable speech-3 fragment cache. 3B
@@ -542,7 +551,10 @@ class TetoRenderer:
         )
         legacy_cached = self._cache.get(self._cache.key(legacy_payload))
         if legacy_cached is not None:
+            self._record_render_metric("fragment_cache_hits")
             return legacy_cached, False, True
+
+        self._record_render_metric("fragment_cache_misses")
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -566,6 +578,7 @@ class TetoRenderer:
                 f"!{max(60, min(240, self._env_int('PHONE_WORKER_TETO_TEMPO', 140)))}",
                 pitchbend,
             ]
+            self._record_render_metric("resampler_calls")
             proc = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
@@ -1093,23 +1106,35 @@ class TetoRenderer:
                     # One group per source WAV avoids racing Straycat's .sc
                     # analysis cache when two notes use the same recording.
                     self._reading_context.profile = request_profile
+                    metrics = {"fragment_cache_hits": 0, "fragment_cache_misses": 0, "resampler_calls": 0}
+                    self._reading_context.render_metrics = metrics
                     try:
-                        return {number: self._resample_note(index=index, entry=entry, note=note, workdir=workdir, deadline=deadline)
-                                for number, note, entry in items}
+                        return ({number: self._resample_note(index=index, entry=entry, note=note, workdir=workdir, deadline=deadline)
+                                 for number, note, entry in items}, metrics)
                     finally:
                         self._clear_reading_context()
 
                 fragments: dict[int, tuple[Path, bool, bool]] = {}
-                workers = max(1, min(2, self._env_int("PHONE_WORKER_TETO_RENDER_THREADS", 2)))
+                # Only Miku opts into the larger pool. Notes sharing a recording
+                # stay serial so ESPER/Straycat analysis files cannot race.
+                maximum_workers = 4 if self.voice_id == "hatsune-miku" else 2
+                workers = max(1, min(maximum_workers, len(groups),
+                                    self._env_int("PHONE_WORKER_TETO_RENDER_THREADS", maximum_workers)))
+                render_metrics = {"fragment_cache_hits": 0, "fragment_cache_misses": 0, "resampler_calls": 0}
+                resample_started = time.monotonic()
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = [pool.submit(render_group, items) for items in groups.values()]
                     try:
                         for future in as_completed(futures):
-                            fragments.update(future.result())
+                            group_fragments, group_metrics = future.result()
+                            fragments.update(group_fragments)
+                            for name, count in group_metrics.items():
+                                render_metrics[name] += count
                     except BaseException:
                         for future in futures:
                             future.cancel()
                         raise
+                resample_ms = (time.monotonic() - resample_started) * 1000.0
 
                 timeline_meta: dict[str, float | int | str] = {"mode": "serial"}
                 if self._index_profile == "english-cvvc":
@@ -1227,6 +1252,10 @@ class TetoRenderer:
                 "timeline_max_preutterance_ms": timeline_meta.get("max_preutterance_ms"),
                 "continuity_repairs": timeline_meta.get("continuity_repairs", 0),
                 "energy_boundary_max_db": timeline_meta.get("energy_boundary_max_db", 0.0),
+                "render_workers": workers,
+                "source_groups": len(groups),
+                **render_metrics,
+                "resample_ms": round(resample_ms, 2),
                 "worker_synth_ms": round(elapsed_ms, 2),
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }
