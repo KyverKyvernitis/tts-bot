@@ -17,34 +17,97 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# Todos os textos públicos são constantes; nunca incluir traceback, URLs ou
+# conteúdo da fala no chat. Preservar a redação aprovada dos seis avisos base.
 _MESSAGES = {
-    "opus_missing": "O codec Opus não está disponível para reproduzir a fala.",
-    "ffmpeg_missing": "O FFmpeg não está disponível para reproduzir a fala.",
-    "no_frames": "O áudio gerado não produziu nenhum quadro de som.",
-    "route_failed": "O destino de reprodução não confirmou a fala.",
-    "synthesis_failed": "O serviço de voz não conseguiu gerar a fala agora.",
-    "tls_failed": "Não consegui abrir uma conexão segura com o serviço de voz. Confira os certificados da instalação.",
-    "network_timeout": "A operação de voz excedeu o tempo de espera.",
-    "network_failed": "Não consegui conectar ao serviço de voz.",
-    "dns_failed": "Não consegui resolver o endereço do serviço de voz.",
-    "voice_rate_limited": "O serviço de voz limitou as solicitações. Tente novamente daqui a pouco.",
-    "voice_auth_failed": "O serviço de voz recusou a autenticação ou o acesso.",
-    "voice_service_failed": "O serviço de voz respondeu com uma falha do servidor.",
-    "no_audio_received": "O serviço de voz respondeu sem enviar áudio.",
-    "storage_denied": "Não consegui acessar o arquivo de áudio. Confira as permissões de armazenamento da instalação.",
-    "internal_error": "Ocorreu um erro interno no processamento da fala.",
-    "connection_failed": "Não consegui usar a conexão da call para falar.",
-    "audio_missing": "O arquivo de áudio não estava disponível para reprodução.",
-    "audio_source_failed": "Não consegui preparar o som para reprodução. Confira o FFmpeg e os codecs da instalação.",
-    "playback_failed": "Não consegui reproduzir a fala na call.",
-    "tts_failed": "Não consegui concluir essa fala.",
-    "queue_unavailable": "O TTS está pausado ou sua fila está indisponível.",
-    "bot_muted": "Estou silenciado na call. A staff precisa retirar meu silenciamento para eu falar.",
-    "tts_disabled": "O TTS está desativado na instalação do bot.",
-    "tts_guild_disabled": "O TTS está desativado neste servidor. A staff pode ativá-lo no painel de TTS.",
-    "ignored_role": "Seu cargo está configurado para não usar TTS neste servidor.",
-    "author_not_in_voice": "Entre em uma call para usar esse prefixo de fala.",
+    "author_not_in_voice": "C tem que estar em call pra poder usar isso <:vish:1533479762230775898>",
+    "voice_channel_mismatch": "C tem que estar na mesma call q eu <:speed:1534287805424074772>",
+    "tts_disabled": "Texto pra fala tá desativado nesse sv chefe <:vish:1533479762230775898>",
+    "tts_guild_disabled": "Texto pra fala tá desativado nesse sv chefe <:vish:1533479762230775898>",
+    "service_unavailable": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "synthesis_failed": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "tls_failed": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "network_timeout": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "network_failed": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "dns_failed": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "voice_auth_failed": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "voice_service_failed": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "voice_rate_limited": "Tão limitando minhas falas agr, tenta dnv daqui a pouco <:speed:1534287805424074772>",
+    "queue_unavailable": "Minha fila de fala tá com problema agr, tenta dnv <:speed:1534287805424074772>",
+    "ignored_role": "C tem um cargo q não pode usar texto pra fala nesse sv <:vish:1533479762230775898>",
+    "bot_muted": "Tô mutada nessa call 💔 (ps: alguém precisa tirar meu mute)",
+    "bot_suppressed": "Me botaram na plateia, n consigo falar 💔",
+    "voice_full": "Essa call tá cheia, n consigo entrar <:vish:1533479762230775898>",
+    "voice_permission_missing": "Não consigo falar nessa call 💔",
+    "teto_disabled": "Essa voz tá desativada agr <:vish:1533479762230775898>",
+    "teto_configuration_invalid": "Essa voz n tá funcionando agora <:speed:1534287805424074772>",
+    "opus_missing": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
+    "ffmpeg_missing": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
+    "no_frames": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
+    "route_failed": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
+    "no_audio_received": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
+    "storage_denied": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
+    "internal_error": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "connection_failed": "Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>",
+    "audio_missing": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
+    "audio_source_failed": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
+    "playback_failed": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
+    "tts_failed": "N consegui falar isso por algum motivo <:speed:1534287805424074772>",
 }
+
+# Os avisos da mesma classe se repetem no máximo uma vez a cada 30s por
+# usuário/servidor, mas um problema diferente não fica escondido.
+_NOTICE_CATEGORY = {
+    **dict.fromkeys(("tts_disabled", "tts_guild_disabled"), "disabled"),
+    **dict.fromkeys(("synthesis_failed", "tls_failed", "network_timeout", "network_failed", "dns_failed", "voice_auth_failed", "voice_service_failed", "service_unavailable", "internal_error"), "service"),
+    **dict.fromkeys(("opus_missing", "ffmpeg_missing", "no_frames", "route_failed", "no_audio_received", "storage_denied", "audio_missing", "audio_source_failed", "playback_failed", "tts_failed"), "playback"),
+    **dict.fromkeys(("voice_permission_missing", "connection_failed"), "voice_connection"),
+}
+
+_PERMISSION_LABELS = (("view_channel", "Ver canal"), ("connect", "Conectar"), ("speak", "Falar"))
+
+
+def diagnose_voice_access(guild, voice_channel) -> tuple[str, str] | None:
+    """Diagnóstico conservador: somente permissão/lotação confirmada."""
+    me = getattr(guild, "me", None)
+    if me is None or voice_channel is None:
+        return None
+    permissions_for = getattr(voice_channel, "permissions_for", None)
+    if not callable(permissions_for):
+        return None
+    try:
+        permissions = permissions_for(me)
+        for attr, label in _PERMISSION_LABELS:
+            if getattr(permissions, attr, None) is False:
+                return "voice_permission_missing", label
+        limit = getattr(voice_channel, "user_limit", None)
+        members = getattr(voice_channel, "members", None)
+        if type(limit) is int and limit > 0 and isinstance(members, (list, tuple)):
+            already_present = getattr(getattr(getattr(me, "voice", None), "channel", None), "id", None) == getattr(voice_channel, "id", None)
+            if not already_present and len(members) >= limit and getattr(permissions, "move_members", None) is False:
+                return "voice_full", ""
+    except Exception:
+        # Permissões não disponíveis não provam bloqueio; não inventar motivo.
+        return None
+    return None
+
+
+def _voice_channel_for_item(guild, item):
+    channel_id = int(getattr(item, "channel_id", 0) or 0)
+    if not channel_id:
+        return None
+    getter = getattr(guild, "get_channel", None)
+    return getter(channel_id) if callable(getter) else None
+
+
+def _public_notice(code: str, *, permission: str = "") -> str:
+    if code == "voice_permission_missing" and permission:
+        # Somente rótulos constantes, nunca strings vindas do Discord/usuário.
+        allowed_labels = {label for _, label in _PERMISSION_LABELS}
+        if permission in allowed_labels:
+            return f"Não consigo falar nessa call 💔  (ps: se vc me der permissão de *{permission}* talvez eu consiga)"
+    return _MESSAGES[code]
+
 
 
 def _exception_types(module, *names: str) -> tuple[type[BaseException], ...]:
@@ -220,7 +283,7 @@ def internal_failure_details(error: BaseException | None) -> str:
 
 
 async def notify_tts_failure(cog, item, reason_code: str, error: Exception | None = None) -> None:
-    """Responde apenas ao prefixo original e limita avisos repetidos por membro."""
+    """Aviso discreto vinculado ao prefixo original, sem conteúdo privado."""
     message_id = int(getattr(item, "message_id", 0) or 0)
     channel_id = int(getattr(item, "text_channel_id", 0) or 0)
     if not message_id or not channel_id:
@@ -248,11 +311,21 @@ async def notify_tts_failure(cog, item, reason_code: str, error: Exception | Non
         can_send = permissions.send_messages_in_threads if isinstance(channel, discord.Thread) else permissions.send_messages
         if not permissions.view_channel or not can_send:
             return
+
+        code = failure_code(reason_code, error)
+        permission = ""
+        if reason_code in {"connection_failed", "voice_permission_missing", "voice_full"} or code in {"connection_failed", "voice_permission_missing", "voice_full"}:
+            diagnosed = diagnose_voice_access(guild, _voice_channel_for_item(guild, item))
+            if diagnosed is not None:
+                code, permission = diagnosed
+        category = _NOTICE_CATEGORY.get(code, code)
+        if permission:
+            category = f"{category}:{permission}"
         notices = getattr(cog, "_tts_failure_notice_times", None)
         if notices is None:
             notices = cog._tts_failure_notice_times = {}
         now = time.monotonic()
-        key = (guild_id, author_id)
+        key = (guild_id, author_id, category)
         if now - notices.get(key, float("-inf")) < 30.0:
             return
         for old_key, stamp in list(notices.items()):
@@ -260,17 +333,25 @@ async def notify_tts_failure(cog, item, reason_code: str, error: Exception | Non
                 notices.pop(old_key, None)
         if len(notices) >= 512:
             notices.pop(min(notices, key=notices.get), None)
+        # Reserva antes do await para evitar múltiplas respostas simultâneas.
         notices[key] = now
-        code = failure_code(reason_code, error)
-        details = internal_failure_details(error) if code == "internal_error" else ""
-        engine = {"edge": "Edge", "gtts": "gTTS"}.get(str(getattr(item, "engine", "")), "TTS")
         reference = discord.MessageReference(
             message_id=message_id, channel_id=channel_id, guild_id=guild_id, fail_if_not_exists=False,
         )
-        await channel.send(
-            f"{engine}: {_MESSAGES[code]} Código: `{code}`{(' · ' + details) if details else ''}.", reference=reference,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        try:
+            await channel.send(
+                "-# " + _public_notice(code, permission=permission), reference=reference,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            if notices.get(key) == now:
+                notices.pop(key, None)
+            raise
+        # Logs restritos: detalhes seguros da causa, sem imprimir a fala.
+        if code == "internal_error":
+            log.warning("[tts_voice] falha interna reportada | guild=%s %s", guild_id, internal_failure_details(error))
+        else:
+            log.info("[tts_voice] aviso de falha | guild=%s code=%s", guild_id, code)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

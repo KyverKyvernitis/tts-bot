@@ -92,8 +92,7 @@ class FailureNoticeTests(unittest.IsolatedAsyncioTestCase):
                 })
                 await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed", error)
                 content = fixture.channel.send.await_args.args[0]
-                self.assertIn("synthesis_failed", content)
-                self.assertIn("gTTS" if engine == "gtts" else "Edge", content)
+                self.assertEqual(content, "-# Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>")
                 for private in ("fala privada", "secret-api-key", "https://", "<@999>", "bad provider"):
                     self.assertNotIn(private, content)
                 mentions = fixture.channel.send.await_args.kwargs["allowed_mentions"]
@@ -111,8 +110,7 @@ class FailureNoticeTests(unittest.IsolatedAsyncioTestCase):
                 error.__context__ = ssl.SSLCertVerificationError(1, "fala privada secret certificate URL")
                 await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed", error)
                 content = fixture.channel.send.await_args.args[0]
-                self.assertIn("tls_failed", content)
-                self.assertIn("certificados", content)
+                self.assertEqual(content, "-# Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>")
                 for private in ("secret-key", "https://", "<@999>", "fala privada", "secret certificate"):
                     self.assertNotIn(private, content)
 
@@ -132,17 +130,15 @@ class FailureNoticeTests(unittest.IsolatedAsyncioTestCase):
             module = modules[name] = ModuleType(name)
             module.__version__ = version
         with patch.dict(sys.modules, modules), patch("cogs.tts.failure_notices.sys.version_info", (3, 10, 14)):
-            await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed", wrapper)
+            with self.assertLogs("cogs.tts.failure_notices", level="WARNING") as captured:
+                await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed", wrapper)
         content = fixture.channel.send.await_args.args[0]
-        self.assertIn("internal_error", content)
-        self.assertIn("TypeError", content)
-        self.assertRegex(content, r"streaming\.py:_iter_with_deadline:[0-9]+")
-        self.assertIn("Python 3.10.14", content)
-        self.assertIn("gTTS 2.5.4", content)
-        self.assertIn("Edge 7.2.1", content)
-        self.assertIn("discord.py 2.6.4", content)
+        self.assertEqual(content, "-# Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>")
+        logged = "\n".join(captured.output)
+        for detail in ("TypeError", "streaming.py:_iter_with_deadline:", "Python 3.10.14", "gTTS 2.5.4", "Edge 7.2.1", "discord.py 2.6.4"):
+            self.assertIn(detail, logged)
         for private in ("RuntimeError", "secret-key", "https://", "<@999>", "private speech", "/workspace/", "private_stream"):
-            self.assertNotIn(private, content)
+            self.assertNotIn(private, content + logged)
 
     async def test_runtime_details_are_not_added_to_non_internal_failure_notice(self):
         fixture = _Fixture()
@@ -150,8 +146,8 @@ class FailureNoticeTests(unittest.IsolatedAsyncioTestCase):
         error.__context__ = TypeError("private internal context")
         await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed", error)
         content = fixture.channel.send.await_args.args[0]
-        self.assertIn("network_failed", content)
-        for internal_detail in ("TypeError", "Python ", "gTTS ", "discord.py ", "private internal context"):
+        self.assertEqual(content, "-# Tem algo de errado comigo agora, tenta dnv mais tarde <:osaka:1539137127852539944>")
+        for internal_detail in ("network_failed", "TypeError", "Python ", "gTTS ", "discord.py ", "private internal context"):
             self.assertNotIn(internal_detail, content)
 
     async def test_missing_message_or_text_channel_binding_skips_notice(self):
@@ -229,14 +225,14 @@ class FailureNoticeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_throttle_retains_at_most_512_members_and_expires_old_entries(self):
         fixture = _Fixture()
-        fixture.cog._tts_failure_notice_times = {(1, ident): 990.0 for ident in range(1000, 1512)}
+        fixture.cog._tts_failure_notice_times = {(1, ident, "playback"): 990.0 for ident in range(1000, 1512)}
         with patch("cogs.tts.failure_notices.time.monotonic", return_value=1000.0):
             await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed")
         self.assertEqual(len(fixture.cog._tts_failure_notice_times), 512)
-        self.assertIn((1, 2), fixture.cog._tts_failure_notice_times)
+        self.assertIn((1, 2, "service"), fixture.cog._tts_failure_notice_times)
         with patch("cogs.tts.failure_notices.time.monotonic", return_value=1061.0):
             await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed")
-        self.assertEqual(fixture.cog._tts_failure_notice_times, {(1, 2): 1061.0})
+        self.assertEqual(fixture.cog._tts_failure_notice_times, {(1, 2, "service"): 1061.0})
 
     async def test_failed_notice_logs_only_error_type_without_payload(self):
         fixture = _Fixture()
@@ -481,7 +477,7 @@ class GateFailureNoticeTests(unittest.IsolatedAsyncioTestCase):
                 dispatch.assert_not_awaited()
                 fixture.cog._notify_tts_failure.assert_awaited_once()
                 item, reason = fixture.cog._notify_tts_failure.await_args.args
-                self.assertEqual(reason, "bot_muted")
+                self.assertEqual(reason, "bot_muted" if voice_flag == "mute" else "bot_suppressed")
                 self.assertEqual(item.text, "")
                 self.assertEqual(item.message_id, 100)
                 self.assertEqual(item.text_channel_id, 10)

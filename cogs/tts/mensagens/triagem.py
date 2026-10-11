@@ -14,6 +14,7 @@ import config
 from ..prefix import (
     build_prefix_routing_config,
     match_engine_prefix,
+    has_speech_after_prefix,
     match_prefix_control_command,
 )
 
@@ -118,6 +119,8 @@ async def analisar_mensagem_para_tts(cog: Any, message: Any) -> DecisaoTriagemMe
             and legacy_prefix in unique_speech_prefixes
             and len(unique_speech_prefixes) < len(speech_prefixes)
         ):
+            if not has_speech_after_prefix(message, legacy_prefix):
+                return DecisaoTriagemMensagem(False, False, guild_defaults, reason="prefix_without_speech")
             return DecisaoTriagemMensagem(
                 should_process_tts=True,
                 should_dispatch_prefix_command=False,
@@ -136,11 +139,16 @@ async def analisar_mensagem_para_tts(cog: Any, message: Any) -> DecisaoTriagemMe
         edge_prefix=routing.edge_prefix,
         gtts_prefix=routing.gtts_prefix,
     )
+    if forced_engine and active_prefix and not has_speech_after_prefix(message, active_prefix):
+        return DecisaoTriagemMensagem(False, False, guild_defaults, reason="prefix_without_speech")
     if forced_engine == "teto" and not getattr(config, "TTS_TETO_ENABLED", True):
-        return DecisaoTriagemMensagem(False, False, guild_defaults, reason="teto_disabled")
+        return DecisaoTriagemMensagem(False, False, guild_defaults, forced_engine=forced_engine,
+                                     active_prefix=active_prefix, reason="teto_disabled")
     if not forced_engine or not active_prefix:
         for legacy_prefix in legacy_prefixes:
             if legacy_prefix and legacy_prefix != routing.bot_prefix and message.content.startswith(legacy_prefix):
+                if not has_speech_after_prefix(message, legacy_prefix):
+                    return DecisaoTriagemMensagem(False, False, guild_defaults, reason="prefix_without_speech")
                 return DecisaoTriagemMensagem(
                     should_process_tts=True,
                     should_dispatch_prefix_command=False,

@@ -148,6 +148,20 @@ def validate_prefix_values(*, bot_prefix: object, atts_prefix: object, teto_pref
     return True, ""
 
 
+def has_speech_after_prefix(message: Any, prefix: str) -> bool:
+    """Barreira barata, antes de call/DB de síntese e de avisos.
+
+    Anexos são narrados pelo renderer; não os descartar quando o prefixo
+    vem sozinho. Para texto puro, exigir ao menos uma letra ou número.
+    """
+    content = str(getattr(message, "content", "") or "")
+    if not prefix or not content.startswith(prefix):
+        return False
+    if getattr(message, "attachments", None):
+        return True
+    return any(char.isalnum() for char in content[len(prefix):])
+
+
 def match_engine_prefix(
     content: str,
     *,

@@ -31,7 +31,7 @@ from cogs.musica.integracoes.tts import (
 logger = logging.getLogger(__name__)
 from .audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED, TTS_TEMP_DIR
 from .chatbot_actions import ChatbotVoiceActionsMixin, ChatbotVoiceActionBlocked
-from .failure_notices import notify_tts_failure
+from .failure_notices import notify_tts_failure, diagnose_voice_access
 from .common import (
     _guild_scoped,
     _shorten,
@@ -61,7 +61,7 @@ from .utils.embed import (
     status_voice_channel_text,
     spoken_name_status_text,
 )
-from .prefix import dispatch_prefix_control_command, build_prefix_routing_config, match_engine_prefix
+from .prefix import dispatch_prefix_control_command, build_prefix_routing_config, match_engine_prefix, has_speech_after_prefix
 from .mensagens.referencias import (
     descricoes_anexos_tts,
     referencia_canal_tts,
@@ -2540,10 +2540,18 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 atts_prefix=routing.atts_prefix, teto_prefix=routing.teto_prefix,
                 edge_prefix=routing.edge_prefix, gtts_prefix=routing.gtts_prefix,
             )
-        if not engine or not prefix or message.guild is None:
+            if not prefix:
+                for legacy in (defaults.get("tts_prefix"), getattr(config, "TTS_PREFIX", "")):
+                    legacy = str(legacy or "").strip()[:8]
+                    if legacy and legacy != routing.bot_prefix and str(message.content).startswith(legacy):
+                        engine, prefix = "tts", legacy
+                        break
+        if not prefix or message.guild is None or not has_speech_after_prefix(message, prefix):
             return
         item = QueueItem(
-            guild_id=message.guild.id, channel_id=0, author_id=message.author.id,
+            guild_id=message.guild.id,
+            channel_id=int(getattr(getattr(getattr(message.author, "voice", None), "channel", None), "id", 0) or 0),
+            author_id=message.author.id,
             text="", engine=engine, voice="", language="", rate="", pitch="",
             message_id=message.id, text_channel_id=message.channel.id,
         )
@@ -3531,7 +3539,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             # o último motivo de gate. Isso evita outro caso de queue_enqueued=0
             # sem pista nenhuma.
             self._record_tts_message_gate(message, gate.reason or "ignored", matched=False)
-            if gate.reason in {"tts_disabled", "tts_guild_disabled"}:
+            if gate.reason in {"tts_disabled", "tts_guild_disabled", "teto_disabled"}:
                 await self._notify_tts_gate_failure(message, gate, gate.reason)
             return
 
@@ -3569,10 +3577,21 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             return
 
         bot_voice = getattr(getattr(message.guild, "me", None), "voice", None)
-        if (getattr(getattr(bot_voice, "channel", None), "id", None) == voice_channel.id
-                and (getattr(bot_voice, "mute", False) or getattr(bot_voice, "suppress", False))):
-            self._record_tts_message_gate(message, "bot_muted", matched=False)
-            await self._notify_tts_gate_failure(message, gate, "bot_muted")
+        if getattr(getattr(bot_voice, "channel", None), "id", None) == voice_channel.id:
+            if getattr(bot_voice, "mute", False):
+                self._record_tts_message_gate(message, "bot_muted", matched=False)
+                await self._notify_tts_gate_failure(message, gate, "bot_muted")
+                return
+            if getattr(bot_voice, "suppress", False):
+                self._record_tts_message_gate(message, "bot_suppressed", matched=False)
+                await self._notify_tts_gate_failure(message, gate, "bot_suppressed")
+                return
+
+        access_failure = diagnose_voice_access(message.guild, voice_channel)
+        if access_failure is not None:
+            reason_code, _ = access_failure
+            self._record_tts_message_gate(message, reason_code, matched=False)
+            await self._notify_tts_gate_failure(message, gate, reason_code)
             return
 
         logger.info(
