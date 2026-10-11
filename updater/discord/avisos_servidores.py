@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from itertools import islice
 import logging
 import os
 import re
@@ -53,7 +54,7 @@ class AvisosServidoresUpdaterMixin:
             self._server_tts_channel_index = index
         key = str(guild_id)
         old = index.get(key) or {}
-        if old.get('channel') == channel_id and now - float(old.get('at') or 0) < 90:
+        if old.get('channel') == channel_id and now - float(old.get('at') or 0) < 300:
             return
         index[key] = {'channel': channel_id, 'at': now}
         # Não manter infinitamente referências a servidores antigos.
@@ -140,11 +141,16 @@ class AvisosServidoresUpdaterMixin:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        for result in (task.result() for task in done if not task.cancelled() and not task.exception()):
-            if result:
-                data['messages'].append(result)
-                _save_json(path, data)
-        if not data['messages']:
+        for task in done:
+            if not task.cancelled() and task.exception() is None:
+                result = task.result()
+                if result:
+                    data['messages'].append(result)
+        # Serialização única por lote; não reescrever a lista inteira para
+        # cada servidor que respondeu ao Discord.
+        if data['messages']:
+            _save_json(path, data)
+        else:
             path.unlink(missing_ok=True)
         return {'ok': True, 'sent': len(data['messages'])}
 
@@ -157,11 +163,22 @@ class AvisosServidoresUpdaterMixin:
 
     async def _server_notice_reconcile_unlocked(self) -> None:
         root = self._server_notice_root()
-        if not root.is_dir() or not self.is_ready():
+        if not self.is_ready():
             return
-        for path in list(root.glob('*.json'))[:100]:
-            if path.name == 'channels.json' or path.name.endswith('.result.json'):
-                continue
+        try:
+            directory_stamp = root.stat().st_mtime_ns
+        except OSError:
+            return
+        # Sem atualizações pendentes, uma única stat substitui o glob a cada
+        # 5 segundos. Arquivos de resultado/criação são escritos por rename
+        # atômico e invalidam o mtime do diretório.
+        if getattr(self, '_server_notice_idle_directory_stamp', None) == directory_stamp:
+            return
+        found_pending = False
+        # islice não carrega toda a pasta, mesmo que tenha arquivos antigos.
+        for path in islice((candidate for candidate in root.glob('*.json')
+                           if candidate.name != 'channels.json' and not candidate.name.endswith('.result.json')), 100):
+            found_pending = True
             data = _load_json(path)
             if not data.get('messages'):
                 path.unlink(missing_ok=True)
@@ -205,7 +222,7 @@ class AvisosServidoresUpdaterMixin:
                     continue
                 # Ordem exigida: apagar segunda mensagem, depois a primeira.
                 for field in ('finish_id', 'start_id'):
-                    if not entry.get(field):
+                    if not entry.get(field) or entry.get(field + '_deleted'):
                         continue
                     try:
                         await asyncio.wait_for(channel.get_partial_message(int(entry[field])).delete(), 2.0)
@@ -214,9 +231,12 @@ class AvisosServidoresUpdaterMixin:
                     except (discord.HTTPException, asyncio.TimeoutError, OSError):
                         LOG.debug('falha removendo aviso %s', field, exc_info=True)
                         entry['delete_attempts'] = int(entry.get('delete_attempts') or 0) + 1
-                        if entry['delete_attempts'] < 3:
-                            changed = True
-                            break
+                        changed = True
+                        # Se falhar a remoção do aviso novo, não apagar o
+                        # antigo antes dele. Próxima rodada retoma daqui.
+                        break
+                    entry[field + '_deleted'] = True
+                    changed = True
                 else:
                     entry['deleted'] = True
                     changed = True
@@ -229,6 +249,7 @@ class AvisosServidoresUpdaterMixin:
             if all(e.get('deleted') or int(e.get('delete_attempts') or 0) >= 3 for e in messages):
                 path.unlink(missing_ok=True)
                 result_path.unlink(missing_ok=True)
+        self._server_notice_idle_directory_stamp = root.stat().st_mtime_ns if not found_pending else None
 
     def _server_notice_schedule_cleanup(self, run_id: str, at: float) -> None:
         tasks = getattr(self, '_server_notice_cleanup_tasks', None)

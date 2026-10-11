@@ -65,6 +65,7 @@ _NOTICE_CATEGORY = {
 }
 
 _PERMISSION_LABELS = (("view_channel", "Ver canal"), ("connect", "Conectar"), ("speak", "Falar"))
+_PERMISSION_ALLOWED_LABELS = frozenset(label for _, label in _PERMISSION_LABELS)
 
 
 def diagnose_voice_access(guild, voice_channel) -> tuple[str, str] | None:
@@ -103,8 +104,7 @@ def _voice_channel_for_item(guild, item):
 def _public_notice(code: str, *, permission: str = "") -> str:
     if code == "voice_permission_missing" and permission:
         # Somente rótulos constantes, nunca strings vindas do Discord/usuário.
-        allowed_labels = {label for _, label in _PERMISSION_LABELS}
-        if permission in allowed_labels:
+        if permission in _PERMISSION_ALLOWED_LABELS:
             return f"Não consigo falar nessa call 💔  (ps: se vc me der permissão de *{permission}* talvez eu consiga)"
     return _MESSAGES[code]
 
@@ -283,7 +283,7 @@ def internal_failure_details(error: BaseException | None) -> str:
 
 
 async def notify_tts_failure(cog, item, reason_code: str, error: Exception | None = None) -> None:
-    """Aviso discreto vinculado ao prefixo original, sem conteúdo privado."""
+    """Aviso discreto com cooldown antes de consultas REST custosas."""
     message_id = int(getattr(item, "message_id", 0) or 0)
     channel_id = int(getattr(item, "text_channel_id", 0) or 0)
     if not message_id or not channel_id:
@@ -296,22 +296,9 @@ async def notify_tts_failure(cog, item, reason_code: str, error: Exception | Non
         channel = guild.get_channel_or_thread(channel_id)
         if channel is None or getattr(getattr(channel, "guild", None), "id", None) != guild_id:
             return
-        member = guild.get_member(author_id)
-        if member is None:
-            member = await guild.fetch_member(author_id)
-        if not channel.permissions_for(member).view_channel:
-            return
-        if isinstance(channel, discord.Thread) and channel.is_private():
-            if not channel.permissions_for(member).manage_threads:
-                participant = await channel.fetch_member(author_id)
-                if participant.id != author_id:
-                    return
-        me = guild.me
-        permissions = channel.permissions_for(me)
-        can_send = permissions.send_messages_in_threads if isinstance(channel, discord.Thread) else permissions.send_messages
-        if not permissions.view_channel or not can_send:
-            return
 
+        # Classificar o erro e consultar somente permissões em cache antes do
+        # cooldown. Repetições não fazem fetch_member nem fetch de threads.
         code = failure_code(reason_code, error)
         permission = ""
         if reason_code in {"connection_failed", "voice_permission_missing", "voice_full"} or code in {"connection_failed", "voice_permission_missing", "voice_full"}:
@@ -328,12 +315,33 @@ async def notify_tts_failure(cog, item, reason_code: str, error: Exception | Non
         key = (guild_id, author_id, category)
         if now - notices.get(key, float("-inf")) < 30.0:
             return
-        for old_key, stamp in list(notices.items()):
-            if now - stamp >= 60.0:
-                notices.pop(old_key, None)
-        if len(notices) >= 512:
+
+        permissions = channel.permissions_for(guild.me)
+        is_thread = isinstance(channel, discord.Thread)
+        can_send = permissions.send_messages_in_threads if is_thread else permissions.send_messages
+        if not permissions.view_channel or not can_send:
+            return
+        member = guild.get_member(author_id)
+        if member is None:
+            member = await guild.fetch_member(author_id)
+        member_permissions = channel.permissions_for(member)
+        if not member_permissions.view_channel:
+            return
+        if is_thread and channel.is_private() and not member_permissions.manage_threads:
+            participant = await channel.fetch_member(author_id)
+            if participant.id != author_id:
+                return
+
+        # O cache é podado periodicamente, nunca a cada erro individual.
+        # Continuar impondo um limite estrito de entradas em qualquer cadência.
+        if now >= getattr(cog, "_tts_failure_notice_next_prune", 0.0):
+            for old_key, stamp in tuple(notices.items()):
+                if now - stamp >= 60.0:
+                    notices.pop(old_key, None)
+            cog._tts_failure_notice_next_prune = now + 60.0
+        if len(notices) >= 512 and key not in notices:
             notices.pop(min(notices, key=notices.get), None)
-        # Reserva antes do await para evitar múltiplas respostas simultâneas.
+        # Reserva sem await: erros simultâneos não criam mensagens duplicadas.
         notices[key] = now
         reference = discord.MessageReference(
             message_id=message_id, channel_id=channel_id, guild_id=guild_id, fail_if_not_exists=False,
@@ -347,7 +355,6 @@ async def notify_tts_failure(cog, item, reason_code: str, error: Exception | Non
             if notices.get(key) == now:
                 notices.pop(key, None)
             raise
-        # Logs restritos: detalhes seguros da causa, sem imprimir a fala.
         if code == "internal_error":
             log.warning("[tts_voice] falha interna reportada | guild=%s %s", guild_id, internal_failure_details(error))
         else:

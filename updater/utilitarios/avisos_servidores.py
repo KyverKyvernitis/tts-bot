@@ -12,7 +12,8 @@ import urllib.request
 
 def send(phase: str, run_id: str) -> bool:
     root = pathlib.Path(os.environ.get('REPO_DIR') or '/home/ubuntu/bot')
-    url = (os.environ.get('BOT_HEALTH_URL') or 'http://127.0.0.1:10000/health').replace('/health', '/internal/update/voice-notices')
+    health_url = (os.environ.get('BOT_HEALTH_URL') or 'http://127.0.0.1:10000/health').rstrip('/')
+    url = health_url.removesuffix('/health') + '/internal/update/voice-notices'
     headers = {'Content-Type': 'application/json'}
     token = os.environ.get('BOT_INTERNAL_UPDATE_TOKEN', '').strip()
     if not token:
@@ -53,7 +54,7 @@ def main() -> int:
         os.replace(tmp, destination)
     finally:
         tmp.unlink(missing_ok=True)
-    send('finish', run_id)  # Não bloquear a atualização se bot ainda está reiniciando.
+    send('finish', run_id)  # O reconciliador recupera o resultado se o bot reiniciou.
     return 0
 
 

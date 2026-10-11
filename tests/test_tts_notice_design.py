@@ -120,6 +120,25 @@ class NoticeDesignTests(unittest.IsolatedAsyncioTestCase):
             await notices.notify_tts_failure(fixture.cog, fixture.item, 'playback_failed')
         self.assertEqual(fixture.text_channel.send.await_count, 4)
 
+    async def test_cooldown_avoids_repeated_member_fetch(self):
+        fixture = Fixture()
+        fixture.guild.get_member = lambda _ident: None
+        with patch.object(notices.time, "monotonic", side_effect=(100.0, 101.0)):
+            await notices.notify_tts_failure(fixture.cog, fixture.item, "playback_failed")
+            await notices.notify_tts_failure(fixture.cog, fixture.item, "playback_failed")
+        fixture.guild.fetch_member.assert_awaited_once()
+        self.assertEqual(fixture.text_channel.send.await_count, 1)
+
+    async def test_bot_cannot_send_skips_member_fetch(self):
+        fixture = Fixture()
+        fixture.guild.get_member = lambda _ident: None
+        fixture.text_channel.permissions_for = lambda member: SimpleNamespace(
+            view_channel=True, send_messages=False, send_messages_in_threads=False,
+        )
+        await notices.notify_tts_failure(fixture.cog, fixture.item, "playback_failed")
+        fixture.guild.fetch_member.assert_not_awaited()
+        fixture.text_channel.send.assert_not_awaited()
+
     async def test_failed_delivery_does_not_hold_cooldown(self):
         fixture = Fixture()
         fixture.text_channel.send.side_effect = RuntimeError('private secret')

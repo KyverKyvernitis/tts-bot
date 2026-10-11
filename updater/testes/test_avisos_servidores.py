@@ -138,3 +138,98 @@ def test_integracao_updater_e_fechamento_nas_rotas():
     assert 'voice_notices_finish success' in (core / 'finalizacao.sh').read_text()
     assert 'internal_update_voice_notices' in (ROOT / 'webserver.py').read_text()
     assert 'record_tts_channel_for_updates' in (ROOT / 'cogs/tts/mensagens/despacho.py').read_text()
+
+
+def test_aviso_lote_escreve_estado_uma_vez(monkeypatch, tmp_path):
+    """O número de gravações independe de quantos servidores recebem aviso."""
+    mod = load_module(monkeypatch)
+    channels = [Channel(gid, 1000 + gid) for gid in (12, 13, 14)]
+    guilds = [Guild(channel) for channel in channels]
+
+    class Bot(mod.AvisosServidoresUpdaterMixin):
+        _repo_root = tmp_path
+        def __init__(self):
+            self.guilds = guilds
+        def get_cog(self, key):
+            return types.SimpleNamespace(guild_states={
+                guild.id: types.SimpleNamespace(last_text_channel_id=guild.channel.id)
+                for guild in guilds
+            })
+        def is_ready(self):
+            return True
+
+    writes = []
+    save = mod._save_json
+    def counting_save(path, data):
+        writes.append(path.name)
+        return save(path, data)
+    monkeypatch.setattr(mod, '_save_json', counting_save)
+
+    result = asyncio.run(Bot()._server_notice_start({'run_id': 'batch'}))
+    assert result['sent'] == 3
+    assert writes.count('batch.json') == 2  # Criação durável + resultado do lote.
+    assert all(len(channel.sent) == 1 for channel in channels)
+
+
+def test_limpeza_retomada_sem_deletar_aviso_final_duas_vezes(monkeypatch, tmp_path):
+    """Se a exclusão do aviso antigo falhar, novo fica marcado como excluído."""
+    mod = load_module(monkeypatch)
+
+    class FlakyChannel(Channel):
+        fail_start_once = True
+        def get_partial_message(self, msg_id):
+            async def delete():
+                if msg_id == 100 and self.fail_start_once:
+                    self.fail_start_once = False
+                    raise HTTPException('temporário')
+                self.deleted.append(msg_id)
+            return types.SimpleNamespace(delete=delete)
+
+    channel = FlakyChannel(12, 230)
+    guild = Guild(channel)
+    class Bot(mod.AvisosServidoresUpdaterMixin):
+        _repo_root = tmp_path
+        guilds = [guild]
+        def get_cog(self, key):
+            return types.SimpleNamespace(guild_states={12: types.SimpleNamespace(last_text_channel_id=230)})
+        def get_channel(self, cid):
+            return channel if cid == 230 else None
+        def is_ready(self):
+            return True
+
+    async def run():
+        bot = Bot()
+        assert (await bot._server_notice_start({'run_id': 'retry'}))['sent'] == 1
+        root = bot._server_notice_root()
+        (root / 'retry.result.json').write_text(json.dumps({'result': 'success'}))
+        monkeypatch.setattr(mod, 'TTL_SECONDS', 0)
+        await bot._server_notice_reconcile_once()
+        assert channel.deleted == [101]
+        state = json.loads((root / 'retry.json').read_text())
+        assert state['messages'][0]['finish_id_deleted'] is True
+        await bot._server_notice_reconcile_once()
+        assert channel.deleted == [101, 100]
+        assert not (root / 'retry.json').exists()
+    asyncio.run(run())
+
+
+def test_reconciliacao_inativa_dispensa_varredura(monkeypatch, tmp_path):
+    """Com nenhuma atualização pendente, o segundo tick só faz uma stat."""
+    mod = load_module(monkeypatch)
+    class Bot(mod.AvisosServidoresUpdaterMixin):
+        _repo_root = tmp_path
+        def is_ready(self):
+            return True
+    async def run():
+        bot = Bot()
+        root = bot._server_notice_root()
+        root.mkdir(parents=True)
+        await bot._server_notice_reconcile_once()
+        stamp = bot._server_notice_idle_directory_stamp
+        assert stamp is not None
+        await bot._server_notice_reconcile_once()
+        assert bot._server_notice_idle_directory_stamp == stamp
+        (root / 'newrun.json').write_text(json.dumps({'created_at': time.time(), 'messages': []}))
+        await bot._server_notice_reconcile_once()
+        assert not (root / 'newrun.json').exists()
+    asyncio.run(run())
