@@ -204,6 +204,9 @@ def test_missing_auxiliary_keeps_punctuation_pause(monkeypatch, tmp_path, role):
     )
     assert placements[2]["start_ms"] == pytest.approx(180.0)
     assert pcm[_frames(100):_frames(180)] == array.array("h", [0] * _frames(80))
-    assert min(pcm[_frames(180):_frames(190)]) > 1000
+    # The exposed incoming edge now fades for 4 ms; it does not serialize the
+    # missing auxiliary or delay the next recorded articulation.
+    assert pcm[_frames(180)] == 0
+    assert min(pcm[_frames(184):_frames(190)]) > 1000
     assert len(pcm) == _frames(280)
 

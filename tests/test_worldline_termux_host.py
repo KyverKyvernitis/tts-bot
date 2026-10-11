@@ -442,6 +442,10 @@ def test_missing_adapter_status_blocks_tts_even_after_runtime_probe(tmp_path, mo
 
 def test_readiness_requires_worldline_backend_and_enabled_setting(tmp_path, monkeypatch, doctor):
     ready_report_dependencies(monkeypatch, doctor, tmp_path)
+    # Process overrides take precedence over .env; isolate the file settings
+    # this case intends to exercise from other CLI tests' environment changes.
+    monkeypatch.delenv("PHONE_WORKER_TETO_ENABLED", raising=False)
+    monkeypatch.delenv("PHONE_WORKER_TETO_BACKEND", raising=False)
     monkeypatch.setattr(doctor, "read_teto_environment", lambda: (
         {"PHONE_WORKER_TETO_ENABLED": "0", "PHONE_WORKER_TETO_BACKEND": "utau"}, {"present": True}))
     original = doctor.bounded

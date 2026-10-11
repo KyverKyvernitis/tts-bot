@@ -28,6 +28,15 @@ _ONSET_CLUSTERS = frozenset({
     ("f", "l"), ("v", "l"),
 })
 
+# These exact spellings need lexical information that a spelling-only G2P
+# cannot infer. In particular, unaccented ``pode`` differs from ``pôde``;
+# stripping accents before this lookup would lose that distinction.
+_PT_PRONUNCIATIONS = {
+    "miku": (("m", "i", "k", "u"), 0),
+    "pode": (("p", "O", "dZ", "i"), 0),
+    "nossa": (("n", "O", "s", "a"), 0),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Phone:
@@ -400,9 +409,14 @@ def _syllabify(symbols: list[str], stressed_nucleus: int | None) -> tuple[Syllab
 
 def g2p_word(word: str, *, deaccented: bool = False) -> PhoneticWord:
     source = unicodedata.normalize("NFC", str(word or "")).strip()
-    symbols = _scan_phones(source)
-    nucleus_count = sum(symbol in VOWELS for symbol in symbols)
-    stressed_nucleus = None if deaccented else _stress_nucleus(source.lower(), nucleus_count)
+    lexical = _PT_PRONUNCIATIONS.get(source.lower())
+    if lexical is None:
+        symbols = _scan_phones(source)
+        nucleus_count = sum(symbol in VOWELS for symbol in symbols)
+        stressed_nucleus = None if deaccented else _stress_nucleus(source.lower(), nucleus_count)
+    else:
+        symbols = list(lexical[0])
+        stressed_nucleus = None if deaccented else lexical[1]
     symbols = _reduce_final_unstressed(symbols, stressed_nucleus)
     symbols = _restore_final_nasal_glide(source, symbols, stressed_nucleus)
 
@@ -445,6 +459,12 @@ _ENGLISH_LETTER_NAMES = {
     "p": "P IY1", "q": "K Y UW1", "r": "AA1 R", "s": "EH1 S", "t": "T IY1",
     "u": "Y UW1", "v": "V IY1", "w": "D AH1 B AH0 L Y UW0", "x": "EH1 K S",
     "y": "W AY1", "z": "Z IY1",
+}
+_ENGLISH_NAME_PRONUNCIATIONS = {
+    # Keep character names recognizable rather than applying the OOV rules
+    # for English short vowels (which yielded M-IH-K-AH and T-EH-T-AA).
+    "miku": "M IY1 K UW0",
+    "teto": "T EH1 T OW0",
 }
 
 
@@ -600,7 +620,7 @@ def g2p_english_word(word: str, *, deaccented: bool = False) -> PhoneticWord:
     source = unicodedata.normalize("NFC", str(word or "")).strip().replace("’", "'")
     key = source.lower()
     lexicon = _english_dictionary()
-    pronunciation = lexicon.get(key)
+    pronunciation = _ENGLISH_NAME_PRONUNCIATIONS.get(key) or lexicon.get(key)
     if pronunciation is None and source.isupper() and 1 < len(source) <= 8 and source.isalpha():
         pronunciation = " ".join(_ENGLISH_LETTER_NAMES[letter] for letter in key if letter in _ENGLISH_LETTER_NAMES)
     if pronunciation is None:

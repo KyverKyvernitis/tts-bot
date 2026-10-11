@@ -28,9 +28,9 @@ from .voicebank import OtoEntry, VoicebankIndex
 
 class TetoRenderer:
     SAMPLE_RATE = 44100
-    RENDER_VERSION = "speech-4f-articulation"
-    PHONEMIZER_VERSION = "ptbr-g2p-xsampa-cvvc-v2"
-    ENGLISH_PHONEMIZER_VERSION = "en-us-cmudict-xsampa-cvvc-v1"
+    RENDER_VERSION = "speech-4g-cvvc-pauses"
+    PHONEMIZER_VERSION = "ptbr-g2p-xsampa-cvvc-v3"
+    ENGLISH_PHONEMIZER_VERSION = "en-us-cmudict-xsampa-cvvc-v2"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v4-timeline-pitch"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
 
@@ -450,7 +450,7 @@ class TetoRenderer:
         overlap = max(0.0, float(entry.overlap_ms)) * stretch
         if note.role == "nucleus":
             cap = 180.0
-        elif note.role in {"transition", "cluster"}:
+        elif note.role in {"transition", "vowel-exit", "cluster"}:
             cap = 120.0
         elif note.role in {"coda", "glide", "nasal"}:
             cap = 90.0
@@ -766,6 +766,8 @@ class TetoRenderer:
         fades = [self._english_fade_ms(entry, lead) for entry, lead in zip(entries, leads)]
         cursor = 0.0
         pending_onsets: list[int] = []
+        pending_exits: list[int] = []
+        trim_leads = [0.0 for _ in notes]
         protected_until = 0.0
         pause_floor: float | None = None
         sample_end = 0.0
@@ -782,6 +784,9 @@ class TetoRenderer:
                 continue
             if note.role in {"transition", "cluster"}:
                 pending_onsets.append(index)
+                continue
+            if note.role == "vowel-exit":
+                pending_exits.append(index)
                 continue
 
             if note.role == "nucleus":
@@ -810,6 +815,22 @@ class TetoRenderer:
                     sample_end = max(sample_end, anchors[pending] + notes[pending].duration_ms)
                 if pending_onsets:
                     pending_onsets.clear()
+
+                for pending in pending_exits:
+                    # The VC consonant cue and the CV consonant attack describe
+                    # the SAME boundary. Align them instead of speaking two
+                    # consonants in series before the incoming vowel nucleus.
+                    anchors[pending] = cursor - leads[index]
+                    raw_start = anchors[pending] - leads[pending]
+                    floor = protected_until - fades[pending] if has_lexical_audio else anchors[pending]
+                    if pause_floor is not None:
+                        floor = max(floor, pause_floor)
+                    # Retain the source's raw time zero for shared F0 and cache
+                    # identity, but discard unused recorded vowel at mix time.
+                    # Even a short preceding vowel never loses the VC cue.
+                    trim_leads[pending] = max(0.0, min(leads[pending], floor - raw_start))
+                    sample_end = max(sample_end, anchors[pending] + notes[pending].duration_ms)
+                pending_exits.clear()
 
                 anchors[index] = cursor
                 # Keep a useful vowel body before the following attack. Longer
@@ -848,6 +869,14 @@ class TetoRenderer:
                 protected_until = anchors[pending] + notes[pending].duration_ms
                 cursor = protected_until
                 sample_end = max(sample_end, cursor)
+        for pending in pending_exits:
+            anchors[pending] = cursor
+            raw_start = cursor - leads[pending]
+            floor = protected_until - fades[pending] if has_lexical_audio else cursor
+            if pause_floor is not None:
+                floor = max(floor, pause_floor)
+            trim_leads[pending] = max(0.0, min(leads[pending], floor - raw_start))
+            sample_end = max(sample_end, cursor + notes[pending].duration_ms)
 
         placements: list[dict[str, float]] = []
         minimum_start = 0.0
@@ -856,15 +885,19 @@ class TetoRenderer:
             lead = leads[index]
             start = anchors[index] - lead
             overlap = fades[index]
-            if first or start < minimum_start:
-                minimum_start = start
+            audible_start = start + trim_leads[index]
+            if first or audible_start < minimum_start:
+                minimum_start = audible_start
                 first = False
-            placements.append({
+            placement = {
                 "anchor_ms": anchors[index],
                 "start_ms": start,
                 "lead_ms": lead,
                 "fade_ms": overlap,
-            })
+            }
+            if note.role == "vowel-exit":
+                placement["trim_lead_ms"] = trim_leads[index]
+            placements.append(placement)
 
         shift = -minimum_start if minimum_start < 0.0 else 0.0
         if shift:
@@ -917,6 +950,49 @@ class TetoRenderer:
                 for offset, sample in enumerate(remainder, start=overlap):
                     target[start + offset] = sample
 
+    @classmethod
+    def _fade_timeline_gaps(
+        cls, samples: array.array, intervals: list[tuple[int, int]]
+    ) -> int:
+        """Soften exposed PCM edges at intentional pauses without changing joins.
+
+        Overlapping CVVC fragments, including auxiliary aliases, occupy one
+        continuous region. Only a gap at least as long as a punctuation pause
+        exposes two new edges; waveform zero crossings inside an occupied
+        region are not pause boundaries. Work from actual fragment lengths so
+        resampler frame rounding cannot leave an unfaded edge near the plan.
+        """
+        regions: list[list[int]] = []
+        for start, end in sorted(intervals):
+            start = max(0, min(len(samples), int(start)))
+            end = max(start, min(len(samples), int(end)))
+            if end <= start:
+                continue
+            if regions and start <= regions[-1][1]:
+                regions[-1][1] = max(regions[-1][1], end)
+            else:
+                regions.append([start, end])
+
+        edge_frames = round(cls.SAMPLE_RATE * 0.004)
+        pause_frames = round(cls.SAMPLE_RATE * 0.024)
+        faded_gaps = 0
+        for left, right in zip(regions, regions[1:]):
+            if right[0] - left[1] < pause_frames:
+                continue
+            # A tiny isolated region may border two pauses. Limit each fade
+            # to half its length so its incoming and outgoing fades stay apart.
+            outgoing = min(edge_frames, (left[1] - left[0]) // 2)
+            incoming = min(edge_frames, (right[1] - right[0]) // 2)
+            for length, boundary, step in (
+                (outgoing, left[1] - 1, -1), (incoming, right[0], 1),
+            ):
+                for offset in range(length):
+                    ratio = math.sin(offset / max(1, length - 1) * math.pi / 2.0) ** 2
+                    position = boundary + step * offset
+                    samples[position] = round(samples[position] * ratio)
+            faded_gaps += int(outgoing > 0 or incoming > 0)
+        return faded_gaps
+
     def _compose_english_cvvc(
         self, *, notes: list[RenderNote], entries: list[OtoEntry | None],
         fragments: dict[int, tuple[Path, bool, bool]], deadline: float,
@@ -933,6 +1009,7 @@ class TetoRenderer:
         max_lead_ms = 0.0
         continuity_repairs = 0
         max_energy_boundary_db = 0.0
+        rendered_intervals: list[tuple[int, int]] = []
 
         for number, (note, entry, placement) in enumerate(zip(notes, entries, placements)):
             if time.monotonic() >= deadline:
@@ -954,6 +1031,10 @@ class TetoRenderer:
             fragment = fragment[:max(1, frames)]
             start_sample = round(self.SAMPLE_RATE * placement["start_ms"] / 1000.0)
             fade_samples = round(self.SAMPLE_RATE * placement["fade_ms"] / 1000.0)
+            trimmed_frames = min(len(fragment), max(0, round(self.SAMPLE_RATE * placement.get("trim_lead_ms", 0.0) / 1000.0)))
+            if trimmed_frames:
+                fragment = fragment[trimmed_frames:]
+                start_sample += trimmed_frames
             fragment, boundary_db, repaired = self._match_fragment_energy(
                 combined, fragment, start_sample=start_sample,
                 fade_samples=fade_samples, role=note.role,
@@ -963,10 +1044,12 @@ class TetoRenderer:
             self._place_timeline_fragment(
                 combined, fragment, start_sample=start_sample, fade_samples=fade_samples
             )
+            rendered_intervals.append((max(0, start_sample), start_sample + len(fragment)))
             max_lead_ms = max(max_lead_ms, float(placement["lead_ms"]))
             auxiliary_overlays += int(note.role != "nucleus")
             rendered += 1
 
+        silence_gap_fades = self._fade_timeline_gaps(combined, rendered_intervals)
         if combined:
             # Phrase-level micro fades eliminate the only two raw PCM edges
             # that remain exposed after timeline composition.
@@ -989,6 +1072,7 @@ class TetoRenderer:
             "max_preutterance_ms": round(max_lead_ms, 2),
             "continuity_repairs": continuity_repairs,
             "energy_boundary_max_db": round(max_energy_boundary_db, 2),
+            "silence_gap_fades": silence_gap_fades,
         }
         return combined, missing, rendered, pitchbend_fallbacks, legacy_fragment_hits, timeline
 
@@ -1252,6 +1336,7 @@ class TetoRenderer:
                 "timeline_max_preutterance_ms": timeline_meta.get("max_preutterance_ms"),
                 "continuity_repairs": timeline_meta.get("continuity_repairs", 0),
                 "energy_boundary_max_db": timeline_meta.get("energy_boundary_max_db", 0.0),
+                "silence_gap_fades": timeline_meta.get("silence_gap_fades", 0),
                 "render_workers": workers,
                 "source_groups": len(groups),
                 **render_metrics,

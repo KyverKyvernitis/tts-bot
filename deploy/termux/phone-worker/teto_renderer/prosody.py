@@ -247,7 +247,10 @@ def _phrase_terminal_nuclei(moras: list[Mora]) -> dict[int, str]:
 def _centers(moras: list[Mora]) -> list[int]:
     values = [0 for _ in moras]
     for start, end in _phrase_spans(moras):
-        count = end - start + 1
+        # A VC exit belongs to the existing vowel/consonant boundary. Adding
+        # that recording must not create another beat in the phrase contour.
+        active = [index for index in range(start, end + 1) if moras[index].role != "vowel-exit"]
+        count = len(active)
         ending = moras[end].phrase_end
         english_speech = any(moras[i].profile == "english-cvvc" for i in range(start, end + 1))
         terminal = next(
@@ -273,7 +276,7 @@ def _centers(moras: list[Mora]) -> list[int]:
             else:
                 phrase_start, phrase_end = 9, -18
 
-        for local_index, index in enumerate(range(start, end + 1)):
+        for local_index, index in enumerate(active):
             ratio = local_index / max(1, count - 1)
             center = phrase_start + (phrase_end - phrase_start) * ratio
             mora = moras[index]
@@ -285,11 +288,19 @@ def _centers(moras: list[Mora]) -> list[int]:
                 center -= 6 if english_speech else 10
             elif mora.word_moras > 1:
                 center -= 2 if english_speech else 3
-            if index + 1 <= end and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
+            following = active[local_index + 1] if local_index + 1 < len(active) else None
+            if following is not None and moras[following].stressed and moras[following].word_index == mora.word_index:
                 center += 5 if english_speech else 7
             if mora.word_end and not mora.phrase_end:
                 center -= 2 if english_speech else 3
             values[index] = int(round(center))
+
+        for index in range(start, end + 1):
+            if moras[index].role == "vowel-exit":
+                previous = next((value for value in reversed(active) if value < index), None)
+                following = next((value for value in active if value > index), None)
+                adjacent = [values[value] for value in (previous, following) if value is not None]
+                values[index] = round(sum(adjacent) / len(adjacent)) if adjacent else 0
 
         previous_nucleus = next(
             (index for index in range(terminal - 1, start - 1, -1) if moras[index].role == "nucleus"),
@@ -323,7 +334,7 @@ def _duration_for(moras: list[Mora], index: int) -> int:
     english_speech = mora.profile == "english-cvvc"
     if mora.role == "epenthetic":
         duration *= 0.90
-    elif mora.role == "transition":
+    elif mora.role in {"transition", "vowel-exit"}:
         duration *= 0.84 if english_speech else 0.92
     elif mora.role == "cluster":
         duration *= 0.82 if english_speech else 0.90
@@ -349,7 +360,8 @@ def _duration_for(moras: list[Mora], index: int) -> int:
         duration *= 0.88
     elif mora.word_moras > 1:
         duration *= 0.90
-    if mora.role == "nucleus" and index + 1 < len(moras) and moras[index + 1].stressed and moras[index + 1].word_index == mora.word_index:
+    following = next((value for value in range(index + 1, len(moras)) if moras[value].role != "vowel-exit"), None)
+    if mora.role == "nucleus" and following is not None and moras[following].stressed and moras[following].word_index == mora.word_index:
         duration *= 0.97 if english_speech else 0.96
     if mora.phrase_end in {".", "!", "?", "\n"}:
         duration *= 1.06 if english_speech else 1.08
@@ -357,8 +369,8 @@ def _duration_for(moras: list[Mora], index: int) -> int:
         duration *= 1.015 if english_speech else 1.02
     elif mora.word_end and mora.role == "nucleus":
         duration *= 1.01 if english_speech else 1.015
-    minimum = 30 if mora.role == "epenthetic" else 30 if mora.role in {"transition", "cluster"} else 32 if mora.role in {"coda", "glide"} else 42 if mora.role == "nasal" else 68
-    maximum = 76 if mora.role == "epenthetic" else 78 if mora.role in {"transition", "cluster"} else 84 if mora.role in {"coda", "glide", "nasal"} else 220
+    minimum = 30 if mora.role == "epenthetic" else 30 if mora.role in {"transition", "vowel-exit", "cluster"} else 32 if mora.role in {"coda", "glide"} else 42 if mora.role == "nasal" else 68
+    maximum = 76 if mora.role == "epenthetic" else 78 if mora.role in {"transition", "vowel-exit", "cluster"} else 84 if mora.role in {"coda", "glide", "nasal"} else 220
     return max(minimum, min(maximum, round(duration)))
 
 
@@ -404,12 +416,14 @@ def build_notes(
 
     for index, mora in enumerate(moras):
         raw_duration = round(_duration_for(moras, index) / rate)
-        minimum = 32 if mora.role == "epenthetic" else 34 if mora.role in {"transition", "cluster"} else 36 if mora.role in {"coda", "glide"} else 44 if mora.role == "nasal" else 70
+        minimum = 32 if mora.role == "epenthetic" else 34 if mora.role in {"transition", "vowel-exit", "cluster"} else 36 if mora.role in {"coda", "glide"} else 44 if mora.role == "nasal" else 70
         duration = max(minimum, min(500, raw_duration))
         pause = max(0, min(1000, round(mora.pause_after_ms / rate)))
         center = centers[index]
-        previous = centers[index - 1] if index > 0 and not moras[index - 1].phrase_end else center
-        following = centers[index + 1] if index + 1 < len(moras) and not mora.phrase_end else center
+        previous_index = next((value for value in range(index - 1, -1, -1) if moras[value].role != "vowel-exit"), None)
+        following_index = next((value for value in range(index + 1, len(moras)) if moras[value].role != "vowel-exit"), None)
+        previous = centers[previous_index] if previous_index is not None and not moras[previous_index].phrase_end else center
+        following = centers[following_index] if following_index is not None and not mora.phrase_end else center
         start = round((previous + center) / 2)
         end = round((center + following) / 2)
         terminal_ending = terminal_endings.get(index, "")
@@ -439,7 +453,7 @@ def build_notes(
                 tempo=tempo_value,
             )
             cap = {
-                "transition": 44, "cluster": 42, "coda": 46,
+                "transition": 44, "vowel-exit": 44, "cluster": 42, "coda": 46,
                 "glide": 44, "nasal": 52,
             }.get(mora.role, 46)
             duration = min(duration, cap)
@@ -454,7 +468,7 @@ def build_notes(
 
         if mora.role == "epenthetic":
             gain = 0.76
-        elif mora.role == "transition":
+        elif mora.role in {"transition", "vowel-exit"}:
             gain = 0.89 if continuous_cvvc_aux else 0.92
         elif mora.role == "cluster":
             gain = 0.87 if continuous_cvvc_aux else 0.91

@@ -167,7 +167,7 @@ def test_english_bank_and_phonemizer_are_request_local(renderer_class, tmp_path)
             assert frames(pt) > 0 and frames(en) > 0
             assert pt["reading_language"] == pt_again["reading_language"] == "pt-BR"
             assert en["reading_language"] == "en-US"
-            assert en["phonemizer_version"] == "en-us-cmudict-xsampa-cvvc-v1"
+            assert en["phonemizer_version"] == "en-us-cmudict-xsampa-cvvc-v2"
             assert pt["voicebank_fingerprint"] != en["voicebank_fingerprint"]
             assert pt["renderer_fingerprint"] == pt_again["renderer_fingerprint"] != en["renderer_fingerprint"]
             assert renderer.fingerprint() == fingerprint

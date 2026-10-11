@@ -736,6 +736,41 @@ def _english_nucleus_duration(
     return max(82, min(142, round(duration)))
 
 
+def _english_vc_before_simple_cv(
+    *, onset: tuple[str, ...], vowel: str, previous_vowel: str,
+    selected_alias: str,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None,
+    inventory_profile: str,
+) -> Mora | None:
+    """Supply the recorded vowel exit that a standalone CV does not own.
+
+    A full VCV already carries that exit. This deliberately handles only a
+    single-consonant CV with an available VC, leaving consonant clusters and
+    approximations to their existing planner without creating missing notes.
+    """
+    if not previous_vowel or len(onset) != 1 or resolve_alias is None:
+        return None
+    consonant = onset[0]
+    if not (
+        selected_alias.startswith(f"{consonant}{vowel}")
+        or selected_alias.startswith(f"{consonant} {vowel}")
+    ):
+        return None
+    candidates = _bank_cc(previous_vowel, consonant, inventory_profile)
+    try:
+        entry = resolve_alias(candidates)
+    except Exception:
+        return None
+    if entry is None:
+        return None
+    return _english_mora(
+        [("cvvc-transition", candidates)],
+        duration_ms=_ENGLISH_ROLE_DURATIONS["transition"], role="vowel-exit",
+        source=(previous_vowel, consonant), deaccented=True,
+        resolve_alias=resolve_alias,
+    )
+
+
 def _english_word_to_moras(
     word: PhoneticWord, *, deaccented: bool,
     resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
@@ -830,6 +865,18 @@ def _english_word_to_moras(
         )
 
         syllable_moras: list[Mora] = []
+        if (
+            cluster_encoded and syllable_index > 0
+            and not word.syllables[syllable_index - 1].vowel.endswith("~")
+            and not word.syllables[syllable_index - 1].coda
+        ):
+            vc = _english_vc_before_simple_cv(
+                onset=onset, vowel=vowel, previous_vowel=previous_vowel,
+                selected_alias=full_alias, resolve_alias=resolve_alias,
+                inventory_profile=inventory_profile,
+            )
+            if vc is not None:
+                syllable_moras.append(vc)
         if onset and not cluster_encoded:
             syllable_moras.extend(_english_cluster_units(
                 onset, word_start=word_start, previous_vowel=previous_vowel,

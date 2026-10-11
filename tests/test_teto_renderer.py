@@ -137,7 +137,7 @@ class TetoRendererTests(unittest.TestCase):
                 self.assertEqual(status["name"], "Kasane Teto English Test")
                 result = renderer.synthesize("teto", timeout_seconds=10)
             self.assertEqual(result["voicebank_profile"], "english-cvvc")
-            self.assertEqual(result["renderer_version"], "speech-4f-articulation")
+            self.assertEqual(result["renderer_version"], "speech-4g-cvvc-pauses")
             self.assertEqual(result["pitch_alignment_mode"], "absolute-timeline")
             self.assertEqual(result["pitch_boundary_metric"], "lexical-plan-not-audio")
             self.assertEqual(result["missing_phonemes"], [])
@@ -391,8 +391,8 @@ class TetoRendererTests(unittest.TestCase):
             resampler.chmod(0o755)
             with patch.dict(os.environ, self._env(bank, resampler, root / "cache")):
                 result = TetoRenderer().synthesize("teto")
-            self.assertEqual(result["renderer_version"], "speech-4f-articulation")
-            self.assertEqual(result["phonemizer_version"], "ptbr-g2p-xsampa-cvvc-v2")
+            self.assertEqual(result["renderer_version"], "speech-4g-cvvc-pauses")
+            self.assertEqual(result["phonemizer_version"], "ptbr-g2p-xsampa-cvvc-v3")
             self.assertEqual(result["pitchbend_fallbacks"], 2)
             self.assertTrue(bytes(result["audio"]).startswith(b"RIFF"))
 

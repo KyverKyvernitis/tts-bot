@@ -258,12 +258,27 @@ class WorldlineRenderer(TetoRenderer):
         # WORLDLINE's phrase compositor uses 10 ms frames. Quantizing positions
         # before generating F0 ensures the curve and request coordinates agree.
         for placement in placements:
+            exit_anchor = placement["anchor_ms"] if "trim_lead_ms" in placement else None
+            trim = max(0.0, min(placement["lead_ms"], placement.get("trim_lead_ms", 0.0)))
+            if trim:
+                # The native skip advances the source model; shortening both
+                # the position and lead keeps the vowel anchor and F0 intact.
+                placement["start_ms"] += trim
+                placement["lead_ms"] -= trim
+                placement["skip_ms"] = trim
             original_fade = placement["fade_ms"]
             for key in ("start_ms", "lead_ms", "fade_ms"):
                 placement[key] = round(placement[key] / self.FRAME_MS) * self.FRAME_MS
+            if exit_anchor is not None:
+                # Quantize the shared consonant marker once. Independently
+                # rounding its shortened start and lead can move it one frame
+                # away from the following CV sample's quantized start.
+                placement["lead_ms"] = max(0.0, round(exit_anchor / self.FRAME_MS) * self.FRAME_MS - placement["start_ms"])
             placement["anchor_ms"] = placement["start_ms"] + placement["lead_ms"]
             if original_fade > 0:
                 placement["fade_ms"] = max(self.FRAME_MS, placement["fade_ms"])
+            if placement.get("skip_ms"):
+                placement["skip_ms"] = round(placement["skip_ms"] / self.FRAME_MS) * self.FRAME_MS
         end = max(end, max((p["start_ms"] + p["lead_ms"] + n.duration_ms for p, n in zip(placements, notes)), default=0))
         return placements, math.ceil(end / self.FRAME_MS) * self.FRAME_MS
 
@@ -413,6 +428,7 @@ class WorldlineRenderer(TetoRenderer):
         pauses: list[list[float]] = []
         for note, entry, placement in zip(notes, entries, placements):
             length_ms = math.ceil((note.duration_ms + placement["lead_ms"]) / self.FRAME_MS) * self.FRAME_MS
+            skip_ms = placement.get("skip_ms", 0.0)
             stop = placement["start_ms"] + length_ms
             if entry is None and (self._index_profile != "english-cvvc" or note.role == "nucleus"):
                 pauses.append([placement["start_ms"], stop])
@@ -420,10 +436,10 @@ class WorldlineRenderer(TetoRenderer):
                 requests.append({
                     "sample_file": sources[entry.wav_path], "tone": _pitch_midi(note.pitch),
                     "con_vel": self._velocity(), "offset_ms": entry.offset_ms,
-                    "required_length_ms": length_ms, "consonant_ms": entry.consonant_ms,
+                    "required_length_ms": length_ms + skip_ms, "consonant_ms": entry.consonant_ms,
                     "cutoff_ms": entry.cutoff_ms, "volume": note.gain * 100,
                     "modulation": self._modulation(), "tempo": self._tempo(),
-                    "position_ms": placement["start_ms"], "skip_ms": 0.0,
+                    "position_ms": placement["start_ms"], "skip_ms": skip_ms,
                     "length_ms": length_ms, "fade_in_ms": placement["fade_ms"], "fade_out_ms": 10.0,
                 })
             if note.pause_after_ms >= 24:

@@ -2,7 +2,7 @@
 
 ## TTV: voz, idioma, tom e velocidade por usuário
 
-O worker `1.11.38` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
+O worker `1.11.39` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
 `ttv_speech_rate` por requisição. As personagens são `kasane-teto` e, quando
 instalada, `hatsune-miku`. A escolha da personagem não altera o perfil global da voicebank instalada. Tom e
 velocidade pessoais funcionam tanto com UTAU/ESPER quanto com WORLDLINE-R,
@@ -38,7 +38,7 @@ inclusive quando o áudio já está no cache.
 Ao aplicar o patch pelo updater do Discord, a automação publica a release
 completa do worker. O bootstrap do Termux consulta a atualização normalmente
 a cada cinco minutos e reinicia o worker após promover a release. Confira a
-versão `1.11.38` no status antes de testar mensagens e amostras. Os arquivos locais
+versão `1.11.39` no status antes de testar mensagens e amostras. Os arquivos locais
 da voicebank, ESPER e a configuração do aparelho continuam em seus caminhos.
 
 ## Hatsune Miku English CVVC
@@ -72,9 +72,29 @@ Os logs de síntese passam a informar `workers`, `fragment_hits`,
 tarefas com análise aquecida e caches temporários; o resultado no aparelho
 determina o ganho, sem inferi-lo dos testes Linux x64.
 
+## Pronúncia e junções da Miku e da Teto
+
+Em `1.11.39`, o renderer UTAU `speech-4g-cvvc-pauses` aproveita transições VC
+gravadas que antes eram ignoradas entre sílabas com CV simples. Ele conserva
+os ataques completos e as caudas já representadas, sem acrescentar aliases
+ausentes. O planejamento também corrige o acento dos nomes e exceções lexicais.
+As pausas internas recebem suavização de quatro milissegundos nas bordas de
+áudio expostas, sem alongar a frase nem alterar as junções contínuas.
+
+Tom, velocidade, flags, banks e número de tarefas são preservados. O cache de
+frases identifica a nova revisão; os fragmentos com parâmetros iguais e a
+análise do ESPER continuam reutilizáveis. A primeira frase nova pode precisar
+de mais transições, mas mantém a execução paralela da revisão anterior.
+
+O [kit de qualidade](../../ttv-quality/README.md) compara MP3s do código anterior
+e do atual usando a mesma configuração, sem mudar a voz do bot. As
+[referências e limites](../../ttv-quality/RESEARCH.md) explicam o que foi
+aproveitado das orientações da comunidade brasileira. A avaliação de clareza
+e naturalidade continua dependendo da audição.
+
 ## Teto UTAU e WORLDLINE-R
 
-O worker `1.11.38` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
+O worker `1.11.39` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
 configurações antigas que selecionavam esse backend passam a usar UTAU e as
 variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
 o `.env` do aparelho. Para WORLDLINE-R, use a configuração indicada abaixo.
@@ -115,8 +135,8 @@ supervisor e solicita `--force-restart` após promoção ou rollback. Isso evita
 manter um daemon com módulos antigos depois de atualizar `current`.
 
 Para conferir a Teto UTAU depois de receber a release, consulte `/tts-agent/status`:
-esse renderer anuncia `renderer_version=speech-4f-articulation` e
-`phonemizer_version=ptbr-g2p-xsampa-cvvc-v2`. Se o serviço ainda mostra o
+esse renderer anuncia `renderer_version=speech-4g-cvvc-pauses` e
+`phonemizer_version=ptbr-g2p-xsampa-cvvc-v3`. Se o serviço ainda mostra o
 estado antigo, o reinício manual canônico é
 `bash ~/.core-worker-runtime/current/start-phone-worker.sh --force-restart`.
 Não desative o guard de recursos: builds e atualizações em andamento continuam
