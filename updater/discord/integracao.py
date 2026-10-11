@@ -4,6 +4,7 @@ import asyncio
 import os
 from pathlib import Path
 
+from .avisos_servidores import AvisosServidoresUpdaterMixin
 from .cartoes import CartoesUpdaterMixin
 from .controles import ControlesUpdaterMixin
 from .eventos import EventosUpdaterMixin
@@ -12,6 +13,7 @@ from .progresso import ProgressoUpdaterMixin
 
 
 class IntegracaoDiscordUpdaterMixin(
+    AvisosServidoresUpdaterMixin,
     EventosUpdaterMixin,
     ControlesUpdaterMixin,
     ProgressoUpdaterMixin,

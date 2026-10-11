@@ -921,6 +921,7 @@ $(format_changed_files)
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   notify_zip_status_message "error" "❌ Atualização rejeitada" $'O commit do GitHub não passou na validação local.\nA VPS continuou no último estado saudável.' || true
   send_error "Atualização do GitHub rejeitada" "$body"
+  voice_notices_finish failure || true
   logger -t "$LOG_TAG" "Commit remoto $(short_commit "$REMOTE_COMMIT") rejeitado antes do live: $reason"
   exit 0
 }

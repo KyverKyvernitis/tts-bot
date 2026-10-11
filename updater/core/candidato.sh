@@ -2647,7 +2647,10 @@ prepare_local_candidate_update() {
       "$LOCAL_CANDIDATE_VERIFY_ERROR"
   fi
   update_local_candidate_heartbeat "validated"
-  zip_progress_done_and_publish "Integridade confirmada" "Analisando segurança"
+  zip_progress_done "Integridade confirmada"
+  zip_progress_publish "Avisando servidores"
+  voice_notices_start
+  zip_progress_done_and_publish "Servidores avisados" "Analisando segurança"
 
   STAGE="validação de segurança do ZIP"
   local suspicion_reason=""
@@ -2708,6 +2711,7 @@ $(format_changed_files)
 Ação sugerida: gere esse patch novamente usando a base atual.
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
         trigger_updater_if_queue_pending
+        voice_notices_finish failure || true
         exit 0
       fi
       logger -t "$LOG_TAG" "Candidato $LOCAL_CANDIDATE_ID preparado sobre $(short_commit "$LOCAL_CANDIDATE_BASE_COMMIT"), aplicando sobre $(short_commit "$REMOTE_COMMIT") sem conflito de arquivos."
@@ -2758,6 +2762,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     archive_local_candidate "done"
     logger -t "$LOG_TAG" "Candidato local sem arquivos alterados"
     trigger_updater_if_queue_pending
+    voice_notices_finish success || true
     exit 0
   fi
 
@@ -2847,6 +2852,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
       archive_local_candidate "done"
       logger -t "$LOG_TAG" "Candidato local não produziu diff no worktree isolado"
       trigger_updater_if_queue_pending
+      voice_notices_finish success || true
       exit 0
     fi
 

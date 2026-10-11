@@ -132,6 +132,8 @@ ROLLBACK_DONE=0
 ROLLBACK_IN_PROGRESS=0
 BOT_RESTARTS_DEPLOY=0
 BOT_RESTARTS_ROLLBACK=0
+VOICE_NOTICES_STARTED=0
+VOICE_NOTICES_FINISHED=0
 MANUAL_FAILURE_ALERT_SENT=0
 LOCAL_CANDIDATE_MODE=0
 LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY=0
@@ -402,6 +404,8 @@ format_changed_processes() {
 
 # módulo: progresso.sh
 . "$UPDATER_SOURCE_DIR/progresso.sh"
+# módulo: avisos_servidores.sh
+. "$UPDATER_SOURCE_DIR/avisos_servidores.sh"
 
 # módulo: reversao.sh
 . "$UPDATER_SOURCE_DIR/reversao.sh"

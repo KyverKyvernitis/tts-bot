@@ -497,7 +497,7 @@ zip_progress_macro_index() {
     *validando\ runtime*|*verificando\ comandos*|*test*|*typescript*|*compilando*|*build*|*dependências*|*dependencias*) printf '4' ;;
     *aplicando\ em\ área*|*worktree*|*staging*|*isolamento*) printf '3' ;;
     *validando\ estado*|*preparando\ arquivos*) printf '2' ;;
-    *integridade*|*segurança*|*seguranca*|*validando\ permissões*|*analisando*) printf '1' ;;
+    *integridade*|*segurança*|*seguranca*|*avisando\ servidores*|*servidores\ avisados*|*validando\ permissões*|*analisando*) printf '1' ;;
     *conferindo\ zip*|*pacote*|*conferindo\ commit*) printf '0' ;;
     *validando*) printf '4' ;;
     *) printf '2' ;;

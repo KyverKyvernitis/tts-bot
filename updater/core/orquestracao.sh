@@ -77,6 +77,9 @@ else
 
   eval "$(create_direct_update_message "applying" "$(zip_progress_title "Conferindo commit do GitHub")" "$UPDATE_STAGE_EMOJI **Conferindo commit do GitHub**")"
   zip_progress_publish "Conferindo commit do GitHub"
+  zip_progress_done_and_publish "Commit conferido" "Avisando servidores"
+  voice_notices_start
+  zip_progress_done_and_publish "Servidores avisados" "Validando commit do GitHub"
 
   remote_ready_fast_path=0
   STAGE="reutilização READY do commit remoto"

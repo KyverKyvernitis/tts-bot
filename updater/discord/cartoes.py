@@ -1027,6 +1027,7 @@ class CartoesUpdaterMixin:
                 # Logs técnicos usam o mesmo bot, inclusive depois de um restart.
                 # O polling curto reduz a latência sem editar a mensagem pública.
                 await self._zip_update_flush_raw_logs_once()
+                await self._server_notice_reconcile_once()
                 if reconcile_tick % 12 == 0:
                     await self._zip_update_reconcile_archived_messages_once()
             except asyncio.CancelledError:

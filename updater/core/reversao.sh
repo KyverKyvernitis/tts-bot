@@ -193,7 +193,10 @@ prepare_rollback_request_update() {
   clear_local_changes_marker_if_clean
   fail_local_changes_before_pull
 
-  zip_progress_done_and_publish "Estado validado" "Aplicando reversão"
+  zip_progress_done "Estado validado"
+  zip_progress_publish "Avisando servidores"
+  voice_notices_start
+  zip_progress_done_and_publish "Servidores avisados" "Aplicando reversão"
 
   STAGE="reversão local"
   if ! repo_git rev-parse --verify "${ROLLBACK_REVERT_COMMIT}^{commit}" >/dev/null 2>&1; then
@@ -204,6 +207,7 @@ prepare_rollback_request_update() {
     logger -t "$LOG_TAG" "commit de rollback/redo não encontrado: action=$ROLLBACK_REQUEST_ACTION expected=$ROLLBACK_EXPECTED_HEAD revert=$ROLLBACK_REVERT_COMMIT current=$CURRENT_COMMIT remote=$REMOTE_COMMIT"
     post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "Não encontrei o commit de destino. Nenhuma alteração foi aplicada." "$retry_control" || true
     archive_rollback_request "failed"
+    voice_notices_finish failure || true
     exit 0
   fi
   if ! repo_git revert --no-commit "$ROLLBACK_REVERT_COMMIT"; then
@@ -215,6 +219,7 @@ prepare_rollback_request_update() {
     retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
     post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "O estado local foi restaurado. Nada foi publicado no GitHub." "$retry_control" || true
     archive_rollback_request "failed"
+    voice_notices_finish failure || true
     exit 0
   fi
   UPDATE_APPLIED=1
@@ -228,6 +233,7 @@ prepare_rollback_request_update() {
     retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
     post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "warn" "Nenhuma alteração" "O estado já estava equivalente." "$retry_control" || true
     archive_rollback_request "done"
+    voice_notices_finish success || true
     exit 0
   fi
   classify_changed_files

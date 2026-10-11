@@ -307,6 +307,7 @@ PYROLLBACKFINAL
     # aplicação. O histórico de recovery foi salvo acima antes de mover o diretório.
     archive_local_candidate "failed" || true
   fi
+  voice_notices_finish failure || true
   exit "$exit_code"
 }
 
@@ -364,6 +365,11 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     archive_rollback_request "done" || true
   fi
 
+  if refresh_bot_health_status >/dev/null 2>&1 && [[ "${BOT_HEALTHCHECK_STATUS:-}" == OK* ]]; then
+    voice_notices_finish success || true
+  else
+    voice_notices_finish failure || true
+  fi
   logger -t "$LOG_TAG" "deploy preservado apesar de falha pós-deploy: $display_id" 2>/dev/null || true
   exit 0
 }
@@ -374,6 +380,7 @@ on_error() {
   local failed_line="${1:-${BASH_LINENO[0]:-?}}"
   local failed_function="${2:-${FUNCNAME[1]:-main}}"
   if (( MANUAL_FAILURE_ALERT_SENT == 1 )); then
+    voice_notices_finish failure || true
     exit "$exit_code"
   fi
   local failed_command="${BASH_COMMAND:-desconhecido}"
@@ -455,6 +462,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
       notify_zip_status_message "error" "Falha na atualização" "O updater falhou antes de concluir a aplicação. Verifique o canal técnico/log interno." || true
     fi
   fi
+  voice_notices_finish failure || true
   send_error "Falha na atualização automática" "$body"
   exit "$exit_code"
 }

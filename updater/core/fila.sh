@@ -428,6 +428,7 @@ Evidência primária: ${UPDATE_FAILURE_FILE:-não persistida}
 Arquivos:
 $(format_changed_files)
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+  voice_notices_finish failure || true
   logger -t "$LOG_TAG" "Candidato local ${LOCAL_CANDIDATE_ID:-desconhecido} rejeitado: $reason"
   exit 0
 }

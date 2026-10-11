@@ -3237,6 +3237,11 @@ def internal_update_create_zip_status():
     return _dispatch_internal_update_action("create_zip_status")
 
 
+@app.post("/internal/update/voice-notices")
+def internal_update_voice_notices():
+    return _dispatch_internal_update_action("voice_notices")
+
+
 @app.post("/internal/update/flush-logs")
 def internal_update_flush_logs():
     return _dispatch_internal_update_action("flush_logs")

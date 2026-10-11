@@ -72,5 +72,12 @@ async def despachar_mensagem_tts(
             enqueued = enqueued or bool(item_enqueued)
             dropped_count += int(item_dropped or 0)
             deduplicated = deduplicated or bool(item_dedup)
+    if enqueued:
+        record_channel = getattr(getattr(cog, "bot", None), "record_tts_channel_for_updates", None)
+        if callable(record_channel):
+            try:
+                record_channel(int(message.guild.id), int(message.channel.id))
+            except Exception:
+                pass  # Indexação é opcional; nunca interfere na fala.
     dispatch_ms = (time.monotonic() - dispatch_started) * 1000.0
     return ResultadoDespachoMensagem(payload, enqueued, dropped_count, deduplicated, dispatch_ms, payload_ms)
