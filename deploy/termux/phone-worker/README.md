@@ -2,9 +2,9 @@
 
 ## TTV: voz, idioma, tom e velocidade por usuário
 
-O worker `1.11.36` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
-`ttv_speech_rate` por requisição. A personagem disponível é `kasane-teto`;
-a escolha da personagem não altera o perfil global da voicebank instalada. Tom e
+O worker `1.11.37` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
+`ttv_speech_rate` por requisição. As personagens são `kasane-teto` e, quando
+instalada, `hatsune-miku`. A escolha da personagem não altera o perfil global da voicebank instalada. Tom e
 velocidade pessoais funcionam tanto com UTAU/ESPER quanto com WORLDLINE-R,
 sem escrever no `.env` nem alterar os controles dos outros usuários.
 
@@ -38,12 +38,30 @@ inclusive quando o áudio já está no cache.
 Ao aplicar o patch pelo updater do Discord, a automação publica a release
 completa do worker. O bootstrap do Termux consulta a atualização normalmente
 a cada cinco minutos e reinicia o worker após promover a release. Confira a
-versão `1.11.36` no status antes de testar mensagens e amostras. Os arquivos locais
+versão `1.11.37` no status antes de testar mensagens e amostras. Os arquivos locais
 da voicebank, ESPER e a configuração do aparelho continuam em seus caminhos.
+
+## Hatsune Miku English CVVC
+
+O [kit da Miku](../../miku-utau/README.md) instala o ZIP English CVVC do autor
+DEMO em `~/voicebanks/hatsune-miku-english`. Ele configura as variáveis
+`PHONE_WORKER_MIKU_*` e usa o ESPER instalado, sem selecionar a personagem nos
+ajustes pessoais nem alterar as variáveis da Teto. O ZIP é um port de terceiros;
+não é um produto UTAU oficial da Crypton.
+
+A Miku possui renderer, status e caches próprios. O worker anuncia os idiomas
+e fingerprints por personagem em `ttv_voices`. O sufixo `_D4` e as vogais do
+inventário inglês são resolvidos somente para esse banco. **Português adaptado**
+usa aproximações desses sons; **Inglês** usa o G2P inglês. Nenhum modo traduz o
+texto. Se a Miku estiver ausente ou indisponível, o pedido falha explicitamente.
+
+Após a instalação, reinicie o worker com o script canônico e escolha **Hatsune
+Miku** no formulário TTV. O kit gera WAVs, MP3s e um relatório para testar os dois
+idiomas no aparelho antes de avaliar a pronúncia por audição.
 
 ## Teto UTAU e WORLDLINE-R
 
-O worker `1.11.36` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
+O worker `1.11.37` usa a Teto UTAU local, com os backends `utau` e `worldline-r`. A integração VOICEPEAK foi retirada:
 configurações antigas que selecionavam esse backend passam a usar UTAU e as
 variáveis `PHONE_WORKER_VOICEPEAK_*` não são utilizadas. A atualização preserva
 o `.env` do aparelho. Para WORLDLINE-R, use a configuração indicada abaixo.

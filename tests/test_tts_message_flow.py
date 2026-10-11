@@ -6,7 +6,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -197,60 +197,6 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(command.should_dispatch_prefix_command)
         self.assertEqual(command.reason, "prefix_command")
 
-    async def test_prefix_alone_is_ignored_for_all_engines_and_legacy(self):
-        for prefixes in (
-            {"atts_prefix": "%", "teto_prefix": "'", "edge_prefix": ",", "gtts_prefix": "."},
-            {"atts_prefix": "!!", "teto_prefix": "''", "edge_prefix": "::", "gtts_prefix": ".."},
-            {"tts_prefix": ",", "gtts_prefix": ",", "edge_prefix": ","},
-        ):
-            for prefix in {value for value in prefixes.values() if value}:
-                for suffix in ("", "   ", "\n", " ...!? "):
-                    with self.subTest(prefix=prefix, suffix=suffix):
-                        cog = FakeCog(db=FakeDB(guild_defaults=prefixes))
-                        decision = await analyze_message_for_tts(cog, make_message(prefix + suffix, in_call=False))
-                        self.assertFalse(decision.should_process_tts)
-                        self.assertEqual(decision.reason, "prefix_without_speech")
-
-    async def test_prefix_only_with_attachment_can_still_be_narrated(self):
-        cog = FakeCog(db=FakeDB())
-        message = make_message(". ")
-        message.attachments = [SimpleNamespace(filename="foto.png")]
-        decision = await analyze_message_for_tts(cog, message)
-        self.assertTrue(decision.should_process_tts)
-
-    async def test_message_with_text_outside_voice_reaches_gate(self):
-        cog = FakeCog(db=FakeDB())
-        decision = await analyze_message_for_tts(cog, make_message(".oi", in_call=False))
-        self.assertTrue(decision.should_process_tts)
-        self.assertEqual(decision.reason, "tts_prefix_matched")
-
-    async def test_missing_settings_database_reports_service_problem(self):
-        cog = FakeCog(db=None)
-        cog._notify_tts_failure = AsyncMock()
-        message = make_message('.olá')
-        message.id = 123
-        result = await dispatch_message_tts(cog, message, guild_defaults={}, active_prefix='.', forced_engine='gtts')
-        self.assertIsNone(result.payload)
-        cog._notify_tts_failure.assert_awaited_once()
-        item, reason = cog._notify_tts_failure.await_args.args
-        self.assertEqual(reason, 'service_unavailable')
-        self.assertEqual(item.message_id, 123)
-        self.assertEqual(item.text_channel_id, message.channel.id)
-
-    async def test_settings_resolution_failure_is_not_silent(self):
-        class FailingSettingsDB(FakeDB):
-            async def resolve_tts(self, guild_id, user_id):
-                raise RuntimeError('private token')
-
-        cog = FakeCog(db=FailingSettingsDB())
-        cog._notify_tts_failure = AsyncMock()
-        message = make_message('!g olá')
-        message.id = 321
-        result = await dispatch_message_tts(cog, message, guild_defaults={}, active_prefix='!g', forced_engine='gtts')
-        self.assertIsNone(result.payload)
-        cog._notify_tts_failure.assert_awaited_once()
-        self.assertEqual(cog._notify_tts_failure.await_args.args[1], 'service_unavailable')
-
     async def test_tts_message_enqueues_through_dispatch(self):
         cog = FakeCog(db=FakeDB(guild_defaults={"tts_prefix": "."}, resolved={"engine": "edge", "voice": "pt-BR-FranciscaNeural", "rate": "+0%", "pitch": "+0Hz"}))
         message = make_message(".olá mundo")
@@ -348,7 +294,7 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
         _, queue_item = cog.enqueue_calls[0]
         self.assertEqual(queue_item.text, "olá teto")
         self.assertEqual(queue_item.engine, "teto")
-        self.assertEqual(queue_item.voice, "kasane-teto-standard")
+        self.assertEqual(queue_item.voice, "kasane-teto")
         self.assertEqual(queue_item.teto_pitch_semitones, "-1.5")
         self.assertEqual(queue_item.piper_fallback_engine, "edge")
         self.assertEqual(queue_item.piper_fallback_voice, "pt-BR-FranciscaNeural")

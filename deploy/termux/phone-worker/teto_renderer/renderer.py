@@ -16,7 +16,8 @@ import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 
 from .cache import FragmentCache
 from .errors import TetoConfigurationError, TetoResourceError, TetoSynthesisError
@@ -33,7 +34,11 @@ class TetoRenderer:
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v4-timeline-pitch"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
 
-    def __init__(self, *, resource_guard: Callable[[], dict[str, Any]] | None = None):
+    def __init__(
+        self, *, resource_guard: Callable[[], dict[str, Any]] | None = None,
+        environment: Mapping[str, str] | None = None, voice_id: str = "kasane-teto",
+    ):
+        self._configure_voice(environment=environment, voice_id=voice_id)
         self._resource_guard = resource_guard
         self._lock = threading.Lock()
         self._reading_context = threading.local()
@@ -46,8 +51,45 @@ class TetoRenderer:
         self._voicebank_fallback_reason = ""
         self._last_status_at = 0.0
         self._last_status: dict[str, Any] = {}
-        cache_root = os.getenv("PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "teto-fragments")
+        cache_root = self._getenv("PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / ("miku-fragments" if self.voice_id == "hatsune-miku" else "teto-fragments"))
         self._cache = FragmentCache(cache_root, max_mb=self._env_int("PHONE_WORKER_TETO_FRAGMENT_CACHE_MB", 256))
+
+    def _configure_voice(self, *, environment: Mapping[str, str] | None, voice_id: str) -> None:
+        if voice_id not in {"kasane-teto", "hatsune-miku"}:
+            raise ValueError("voz TTV desconhecida")
+        if voice_id == "hatsune-miku" and environment is None:
+            raise TetoConfigurationError("Hatsune Miku exige configuração independente da Teto")
+        self.voice_id = voice_id
+        # A per-voice snapshot is authoritative. Falling back to os.environ here
+        # could silently render Teto for an incompletely configured Miku request.
+        self._environment = MappingProxyType(dict(environment)) if environment is not None else None
+
+    def _getenv(self, name: str, default: Any = None) -> Any:
+        return os.getenv(name, default) if self._environment is None else self._environment.get(name, default)
+
+    def _subprocess_environment(self) -> dict[str, str] | None:
+        if self._environment is None:
+            return None
+        # Runtime settings such as PATH and the shared ESPER installation stay
+        # available. Explicit per-instance bridge settings override them, while
+        # unrelated Teto voice settings never leak into a Miku child process.
+        child = {key: value for key, value in os.environ.items()
+                 if not key.startswith(("PHONE_WORKER_TETO_", "PHONE_WORKER_MIKU_"))}
+        child.update(self._environment)
+        return child
+
+    def _alias_suffix(self) -> str:
+        return str(self._getenv("PHONE_WORKER_TETO_ALIAS_SUFFIX") or "").strip()
+
+    def _voice_label(self) -> str:
+        return "Hatsune Miku" if self.voice_id == "hatsune-miku" else "Teto"
+
+    def _status_voice(self) -> str:
+        profile = "english-cvvc" if self._index_profile == "english-cvvc" else "standard"
+        return f"{self.voice_id}-{profile}"
+
+    def _phonemizer_options(self) -> dict[str, str]:
+        return {"inventory_profile": "miku-v4-english"} if self.voice_id == "hatsune-miku" else {}
 
     @property
     def _index_profile(self) -> str:
@@ -72,13 +114,15 @@ class TetoRenderer:
     def _load_english_index(self) -> VoicebankIndex:
         path = Path(self._english_voicebank_dir()).expanduser()
         if not path.is_dir():
-            raise TetoConfigurationError("Inglês exige a voicebank English-CVVC da Teto instalada")
+            raise TetoConfigurationError(f"Inglês exige a voicebank English-CVVC da {self._voice_label()} instalada")
         resolved = str(path.resolve())
         with self._english_index_lock:
             if self._english_index is None or self._english_index_path != resolved:
                 minimum = max(1, self._env_int("PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES", 500))
                 try:
-                    index = VoicebankIndex.load(resolved, minimum_aliases=minimum)
+                    index = VoicebankIndex.load(resolved, minimum_aliases=minimum,
+                                                alias_suffix=self._alias_suffix(),
+                                                case_sensitive=self.voice_id == "hatsune-miku")
                 except Exception as exc:
                     raise TetoConfigurationError(f"voicebank English-CVVC indisponível: {exc}") from exc
                 self._english_index = index
@@ -108,33 +152,35 @@ class TetoRenderer:
         if hasattr(self._reading_context, "profile"):
             del self._reading_context.profile
 
-    @staticmethod
-    def _env_bool(name: str, default: bool = False) -> bool:
-        value = str(os.getenv(name, "") or "").strip().lower()
+    def _env_bool(self, name: str, default: bool = False) -> bool:
+        value = str(self._getenv(name, "") or "").strip().lower()
         if value in {"1", "true", "yes", "on", "sim"}:
             return True
         if value in {"0", "false", "no", "off", "nao", "não"}:
             return False
         return default
 
-    @staticmethod
-    def _env_int(name: str, default: int) -> int:
+    def _env_int(self, name: str, default: int) -> int:
         try:
-            return int(str(os.getenv(name, default)).strip())
+            return int(str(self._getenv(name, default)).strip())
         except (TypeError, ValueError):
             return default
 
     def _voicebank_dir(self) -> str:
-        return str(os.getenv("PHONE_WORKER_TETO_VOICEBANK_DIR") or "").strip()
+        return str(self._getenv("PHONE_WORKER_TETO_VOICEBANK_DIR") or "").strip()
 
     def _english_voicebank_dir(self) -> str:
-        configured = str(os.getenv("PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR") or "").strip()
+        configured = str(self._getenv("PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR") or "").strip()
         if configured:
             return configured
+        if self.voice_id == "hatsune-miku":
+            return self._voicebank_dir()
         return str(Path.home() / "voicebanks" / "kasane-teto-english")
 
     def _voicebank_mode(self) -> str:
-        mode = str(os.getenv("PHONE_WORKER_TETO_VOICEBANK_MODE") or "auto").strip().lower()
+        mode = str(self._getenv("PHONE_WORKER_TETO_VOICEBANK_MODE") or "auto").strip().lower()
+        if self.voice_id == "hatsune-miku":
+            return "english"
         return mode if mode in {"auto", "english", "standard"} else "auto"
 
     def _voicebank_candidates(self) -> list[tuple[str, str, int]]:
@@ -152,7 +198,7 @@ class TetoRenderer:
 
     def _speech_rate(self) -> float:
         try:
-            value = float(os.getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"))
+            value = float(self._getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"))
             return max(0.75, min(1.5, value)) if math.isfinite(value) else 1.0
         except (TypeError, ValueError):
             return 1.0
@@ -177,7 +223,7 @@ class TetoRenderer:
         return max(0, min(100, self._env_int("PHONE_WORKER_TETO_MODULATION", 15)))
 
     def _length_mode(self) -> str:
-        mode = str(os.getenv("PHONE_WORKER_TETO_LENGTH_MODE", "auto")).strip().lower()
+        mode = str(self._getenv("PHONE_WORKER_TETO_LENGTH_MODE", "auto")).strip().lower()
         if mode in {"total", "post-consonant"}:
             return mode
         executable = Path(self._resampler_command()[0]).name.lower()
@@ -194,14 +240,16 @@ class TetoRenderer:
             "voicebank": index.fingerprint,
             "resampler": command,
             "resampler_stamp": [stamp.st_size, stamp.st_mtime_ns],
-            "pitch": os.getenv("PHONE_WORKER_TETO_BASE_PITCH", "C4"),
+            "pitch": self._getenv("PHONE_WORKER_TETO_BASE_PITCH", "C4"),
             "rate": self._speech_rate(),
             "velocity": self._velocity(),
             "modulation": self._modulation(),
-            "flags": os.getenv("PHONE_WORKER_TETO_FLAGS", ""),
+            "flags": self._getenv("PHONE_WORKER_TETO_FLAGS", ""),
             "tempo": max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
             "length_mode": self._length_mode(),
         }
+        if self.voice_id == "hatsune-miku":
+            profile.update(voice_id=self.voice_id, inventory_profile="miku-v4-english")
         return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
     def _render_fingerprint(self, index: VoicebankIndex) -> str:
@@ -226,13 +274,13 @@ class TetoRenderer:
 
     def _request_fingerprint(
         self, index: VoicebankIndex, *, pitch_offset_semitones: float,
-        speech_rate: float, character: str = "kasane-teto", reading_language: str = "pt-BR",
+        speech_rate: float, character: str | None = None, reading_language: str = "pt-BR",
     ) -> str:
         # Status describes the installed renderer. A rendered utterance also
         # depends on the user's controls, captured locally for this request.
         profile = {
             "renderer": self._reading_fingerprint(index, reading_language),
-            "character": character,
+            "character": character if character is not None else self.voice_id,
             "pitch_offset_semitones": pitch_offset_semitones,
             "speech_rate": speech_rate,
         }
@@ -255,13 +303,13 @@ class TetoRenderer:
             "resampler_stamp": [stamp.st_size, stamp.st_mtime_ns],
             "velocity": self._velocity(),
             "modulation": self._modulation(),
-            "flags": os.getenv("PHONE_WORKER_TETO_FLAGS", ""),
+            "flags": self._getenv("PHONE_WORKER_TETO_FLAGS", ""),
             "length_mode": self._length_mode(),
         }
         return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
     def _resampler_command(self) -> list[str]:
-        raw = str(os.getenv("PHONE_WORKER_TETO_RESAMPLER_COMMAND") or "").strip()
+        raw = str(self._getenv("PHONE_WORKER_TETO_RESAMPLER_COMMAND") or "").strip()
         if not raw:
             raise TetoConfigurationError("PHONE_WORKER_TETO_RESAMPLER_COMMAND não configurado")
         command = shlex.split(raw)
@@ -292,7 +340,9 @@ class TetoRenderer:
                 self._voicebank_fallback_reason = "; ".join(errors)[:420]
                 return self._index
             try:
-                index = VoicebankIndex.load(resolved, minimum_aliases=minimum_aliases)
+                index = VoicebankIndex.load(resolved, minimum_aliases=minimum_aliases,
+                                            alias_suffix=self._alias_suffix(),
+                                            case_sensitive=self.voice_id == "hatsune-miku")
             except Exception as exc:
                 errors.append(f"{profile}: {type(exc).__name__}: {exc}")
                 if self._voicebank_mode() != "auto":
@@ -318,7 +368,8 @@ class TetoRenderer:
             "ready": False,
             "enabled": enabled,
             "engine": "teto",
-            "voice": "kasane-teto-standard",
+            "voice_id": self.voice_id,
+            "voice": f"{self.voice_id}-standard",
             "voicebank_profile": "standard",
         }
         if not enabled:
@@ -331,7 +382,7 @@ class TetoRenderer:
                 index = self._load_index()
                 result.update(index.snapshot())
                 result.update({
-                    "voice": "kasane-teto-english-cvvc" if self._index_profile == "english-cvvc" else "kasane-teto-standard",
+                    "voice": self._status_voice(),
                     "voicebank_profile": self._index_profile,
                     "voicebank_mode": self._voicebank_mode(),
                     "voicebank_fallback": bool(self._voicebank_fallback_reason),
@@ -467,7 +518,7 @@ class TetoRenderer:
             self._format_number(self._english_lead_ms(entry, note)),
             str(self._velocity()),
             str(self._modulation()),
-            str(os.getenv("PHONE_WORKER_TETO_FLAGS") or ""),
+            str(self._getenv("PHONE_WORKER_TETO_FLAGS") or ""),
         ))
 
     def _resample_note(
@@ -505,7 +556,7 @@ class TetoRenderer:
                 str(raw_output),
                 note.pitch,
                 str(self._velocity()),
-                str(os.getenv("PHONE_WORKER_TETO_FLAGS") or ""),
+                str(self._getenv("PHONE_WORKER_TETO_FLAGS") or ""),
                 self._format_number(entry.offset_ms),
                 self._format_number(self._resampler_length(entry, note)),
                 self._format_number(entry.consonant_ms),
@@ -521,6 +572,7 @@ class TetoRenderer:
                 stderr=subprocess.PIPE,
                 timeout=max(0.5, deadline - time.monotonic()),
                 check=False,
+                env=self._subprocess_environment(),
             )
             return proc, command
 
@@ -562,6 +614,7 @@ class TetoRenderer:
             stderr=subprocess.PIPE,
             timeout=max(0.5, remaining),
             check=False,
+            env=self._subprocess_environment(),
         )
         if ffmpeg.returncode != 0 or not normalized_output.is_file() or normalized_output.stat().st_size <= 44:
             error = ffmpeg.stderr.decode("utf-8", errors="replace")[-500:]
@@ -966,6 +1019,7 @@ class TetoRenderer:
                 max_moras=max_moras,
                 resolve_alias=index.resolve,
                 voicebank_profile=self._index_profile,
+                **self._phonemizer_options(),
                 **({"reading_language": language} if reading_language is not None else {}),
             )
             try:
@@ -977,7 +1031,7 @@ class TetoRenderer:
             pitch_offset = max(-4.0, min(4.0, round(pitch_offset * 2.0) / 2.0))
             notes = build_notes(
                 moras,
-                base_pitch=str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4"),
+                base_pitch=str(self._getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4"),
                 speech_rate=effective_rate,
                 tempo=max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
                 pitch_offset_semitones=pitch_offset,
@@ -1129,6 +1183,7 @@ class TetoRenderer:
             )
             return {
                 "audio": raw,
+                "voice_id": self.voice_id,
                 "audio_format": "wav",
                 "voicebank": index.name,
                 "voicebank_fingerprint": index.fingerprint,

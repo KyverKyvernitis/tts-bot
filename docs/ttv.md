@@ -2,14 +2,16 @@
 
 Aplicar este patch pelo updater e abrir um painel novo com `_tts`. A seção
 TTV mantém o prefixo configurado anteriormente para a Teto e permite escolher
-personagem, idioma, tom e velocidade. No catálogo atual aparece somente Kasane Teto.
+personagem, idioma, tom e velocidade. Kasane Teto continua sendo o padrão.
+Hatsune Miku aparece quando sua voicebank English-CVVC está instalada e pronta
+no worker, sem substituir a escolha dos usuários existentes.
 
 O modal **Configurar TTV** usa Labels sem descrições, com um String Select e
 um RadioGroup de idioma e dois RadioGroups de cinco opções, na mesma ordem do Edge:
 
 | Campo | Opções |
 | --- | --- |
-| Escolha sua vocaloid | Kasane Teto |
+| Escolha sua vocaloid | Kasane Teto, Hatsune Miku (quando instalada e pronta) |
 | Idioma | Português adaptado (padrão), Inglês |
 | Velocidade da fala | Bem mais lenta, Mais lenta, Normal, Mais rápida, Bem mais rápida |
 | Tom da voz | Bem mais grave, Mais grave, Normal, Mais agudo, Bem mais agudo |
@@ -38,7 +40,7 @@ texto em inglês, com pronúncias e acentos do CMUdict e aproximações para pal
 fora do dicionário. A seleção não traduz a mensagem. A amostra usa `Olá. Como
 você está?` em português e `Hello. How are you?` em inglês.
 
-O inglês exige a voicebank English-CVVC da própria Teto, já instalada em
+Para a Teto, o inglês exige a voicebank English-CVVC da própria Teto, instalada em
 `~/voicebanks/kasane-teto-english` ou no caminho
 `PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR`. A escolha é feita por pedido e não
 muda o perfil global nem os ajustes de outros usuários. Sem essa bank ou sem
@@ -46,10 +48,18 @@ suporte no worker, a leitura em inglês é recusada. O dicionário funciona offl
 vem embutido no módulo existente e preserva a licença BSD e a identificação da
 fonte. Não requer outro serviço, Box64 ou reinstalação do ESPER.
 
+Hatsune Miku usa uma voicebank English-CVVC separada, configurada em
+`PHONE_WORKER_MIKU_VOICEBANK_DIR` (padrão: `~/voicebanks/hatsune-miku-english`).
+Ela oferece os mesmos dois idiomas de leitura, com ESPER. Cada pedido usa o
+banco da personagem escolhida; o idioma não seleciona outra personagem.
+Instalar esse banco não altera a Teto nem a seleção pessoal. Um banco ausente
+deixa a escolha salva identificada como indisponível e impede mensagens/amostras
+com essa voz. Não há substituição automática pela Teto.
+
 ## Compatibilidade e extensão
 
 `cogs/tts/ttv.py` centraliza o catálogo. Os IDs das personagens são estáveis;
-`kasane-teto` é distinto dos perfis Standard/English da voicebank. Adicionar
+`kasane-teto` e `hatsune-miku` são distintos dos perfis Standard/English da voicebank. Adicionar
 uma personagem exige também um renderer instalado e suporte no worker; uma
 voz anunciada na interface não representa, sozinha, capacidade de síntese.
 
@@ -60,15 +70,18 @@ continuam selecionados até uma edição ou restauração explícita.
 
 O identificador interno `teto`, os comandos existentes e os prefixos são
 preservados. Os controles percorrem mensagem, fila, payload, worker e renderer.
-Os caches incluem personagem, idioma, tom, taxa e fingerprint da implementação/bank.
+Os caches incluem personagem, idioma, tom, taxa e fingerprint da implementação/bank
+anunciada para essa personagem. As impressões digitais e os idiomas legados da
+Teto só podem ser usados como compatibilidade para a própria Teto.
 O áudio de TTV não muda silenciosamente para outra personagem em caso de erro.
 
 ## Atualização e verificação
 
 O patch mantém as pastas originais do repositório e não inclui voicebanks,
 binários dos motores, segredos ou um manifesto de exclusões. A automação
-existente do updater publica o worker **1.11.36**, que aceita a escolha de idioma
-e corrige a confirmação do tom **Normal** nas respostas raw.
+existente do updater publica o worker **1.11.37**, que anuncia as vozes prontas
+separadamente e sintetiza a personagem selecionada por pedido. Ele conserva a
+correção do tom **Normal** nas respostas raw da versão 1.11.36.
 O bootstrap no telefone
 promove a release e reinicia o processo; o ciclo normal de consulta é de cinco
 minutos, podendo ter alguns segundos de variação. Não há necessidade de

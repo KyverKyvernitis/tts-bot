@@ -79,7 +79,10 @@ class VoicebankIndex:
         self.name = name
 
     @classmethod
-    def load(cls, root: str | Path, *, minimum_aliases: int = 10) -> "VoicebankIndex":
+    def load(
+        cls, root: str | Path, *, minimum_aliases: int = 10,
+        alias_suffix: str = "", case_sensitive: bool = False,
+    ) -> "VoicebankIndex":
         base = Path(root).expanduser().resolve()
         if not base.is_dir():
             raise TetoVoicebankError(f"voicebank não encontrada: {base}")
@@ -92,6 +95,11 @@ class VoicebankIndex:
         folded_candidates: dict[str, OtoEntry | None] = {}
         digest = hashlib.sha256()
         digest.update(str(base).encode("utf-8", errors="replace"))
+        suffix = _normalized_alias(alias_suffix)
+        if suffix and not suffix.startswith("_"):
+            suffix = "_" + suffix
+        if suffix or case_sensitive:
+            digest.update(f"alias-map-v1:{suffix}:{int(case_sensitive)}".encode("utf-8"))
 
         for oto_path in oto_files:
             resolved_oto = oto_path.resolve()
@@ -129,6 +137,13 @@ class VoicebankIndex:
                     overlap_ms=max(0.0, _number(values[5])),
                 )
                 entries.setdefault(alias, entry)
+                if suffix and alias.endswith(suffix):
+                    # Keep the actual recorded alias in OtoEntry/cache keys.
+                    # The phonemizer uses canonical phones; prefix.map's pitch
+                    # suffix is a bank setting, never an extra phonetic symbol.
+                    canonical = _normalized_alias(alias[:-len(suffix)])
+                    if canonical:
+                        entries.setdefault(canonical, entry)
                 folded = _normalized_alias(alias).casefold()
                 previous = folded_candidates.get(folded, ...)
                 if previous is ...:
@@ -162,7 +177,9 @@ class VoicebankIndex:
             except OSError:
                 pass
 
-        folded_entries = {key: entry for key, entry in folded_candidates.items() if entry is not None}
+        folded_entries = {} if case_sensitive else {
+            key: entry for key, entry in folded_candidates.items() if entry is not None
+        }
         return cls(base, entries, folded_entries, digest.hexdigest(), name)
 
     @property

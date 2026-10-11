@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 
 import config
-from ..ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, LANGUAGE_CHOICES, VOICE_CATALOG, normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id
+from ..ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, LANGUAGE_CHOICES, VOICE_CATALOG, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id
 from ..utils.embed import human_language_name, human_pitch, human_rate, human_voice_name
 from .catalogos_de_vozes import (
     idioma_edge_da_voz,
@@ -423,10 +423,15 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
         if not rotulo_modal_disponivel():
             return False
         try:
-            voices = [discord.SelectOption(label=voice.name, value=voice.id, default=voice.id == self.current_voice) for voice in VOICE_CATALOG]
-            if self.current_voice not in {voice.id for voice in VOICE_CATALOG}:
+            available_voices = self._vozes_disponiveis()
+            voices = [discord.SelectOption(label=voice.name, value=voice.id, default=voice.id == self.current_voice) for voice in available_voices]
+            if self.current_voice not in {voice.id for voice in available_voices}:
                 # Não substituir um ID salvo sem o usuário escolher outra voz.
-                voices.insert(0, discord.SelectOption(label="Voz atual indisponível", value=self.current_voice, default=True))
+                try:
+                    unavailable_label = f"{get_voice(self.current_voice).name} (indisponível)"
+                except ValueError:
+                    unavailable_label = "Voz atual indisponível"
+                voices.insert(0, discord.SelectOption(label=unavailable_label, value=self.current_voice, default=True))
             voice_select = criar_seletor_modal("ttv_voice_id", placeholder="Escolha sua vocaloid", options=voices)
             ok = adicionar_item_rotulo_modal(self, "ttv_voice_id", text="Escolha sua vocaloid", description="", component=voice_select)
             ok = ok and adicionar_radio_modal(
@@ -460,6 +465,26 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
             print(f"[tts_modal] TTV guiado falhou: {error!r}")
             return False
 
+    def _vozes_disponiveis(self):
+        checker = getattr(self.cog, "_ttv_voice_status", None)
+        if not callable(checker):
+            # Compatibility for callers predating the character catalog.
+            return [get_voice(DEFAULT_VOICE_ID)]
+        available = []
+        for voice in VOICE_CATALOG:
+            try:
+                state = checker(voice.id)
+            except TypeError:
+                if voice.id != DEFAULT_VOICE_ID:
+                    continue
+                # Old status readers have no per-character argument.
+                state = checker()
+            except Exception:
+                continue
+            if state.get("ready") and state.get("available", True):
+                available.append(voice)
+        return available
+
     def _adicionar_radio_ttv(self, attr_name, *, text, current, current_label, options) -> bool:
         is_preset = any(float(value) == float(current) for _, value, _ in options)
         if not is_preset:
@@ -474,7 +499,7 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
         return True
 
     def _build_text_fallback(self) -> None:
-        adicionar_entrada_texto_modal(self, "ttv_voice_id", label="Escolha sua vocaloid", placeholder="Kasane Teto: kasane-teto", current=self.current_voice, max_length=100)
+        adicionar_entrada_texto_modal(self, "ttv_voice_id", label="Escolha sua vocaloid", placeholder="Kasane Teto: kasane-teto · Hatsune Miku: hatsune-miku", current=self.current_voice, max_length=100)
         adicionar_entrada_texto_modal(self, "ttv_language", label="Idioma", placeholder="Português adaptado: pt-BR · Inglês: en-US", current=self.current_language, max_length=16)
         adicionar_entrada_texto_modal(self, "ttv_speech_rate", label="Velocidade da fala", placeholder="0.5 / 0.75 / 1.0 / 1.25 / 1.5", current=str(self.current_rate), max_length=32)
         adicionar_entrada_texto_modal(self, "ttv_pitch_semitones", label="Tom da voz (semitons)", placeholder="0.0 = tom original · passos de 0.5", current=self.current_pitch, max_length=8)
@@ -485,6 +510,8 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
             voice_id = normalize_voice_id(valor_unico_componente(self.ttv_voice_id, self.current_voice) or self.current_voice)
             language = normalize_language(valor_unico_componente(self.ttv_language, self.current_language) or self.current_language)
             rate = normalize_speech_rate(valor_unico_componente(self.ttv_speech_rate, str(self.current_rate)) or str(self.current_rate))
+            if voice_id != DEFAULT_VOICE_ID and voice_id not in {voice.id for voice in self._vozes_disponiveis()}:
+                raise ValueError(f"{get_voice(voice_id).name} está indisponível agora. Confira a instalação dessa voz no worker.")
         except ValueError as error:
             await interaction.response.send_message(embed=self.cog._make_embed("Ajuste inválido", str(error), ok=False), ephemeral=True)
             return

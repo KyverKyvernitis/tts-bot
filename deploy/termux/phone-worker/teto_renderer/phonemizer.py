@@ -347,6 +347,32 @@ _ENGLISH_ROLE_DURATIONS = {
     "nasal": 66,
 }
 
+# The selected Miku V4 port follows VOCALOID's English X-SAMPA spelling,
+# rather than Teto English's Delta vowel inventory. Keep these substitutions
+# opt-in: e.g. changing Teto's distinct e/E aliases would change its voice.
+_MIKU_V4_VOWELS = {
+    "a": "V", "A": "Q", "E": "e", "i": "i:", "u": "u:",
+    "o": "O:", "O": "O:", "oU": "@U", "3": "@r",
+}
+
+
+def _bank_vowel(phone: str, inventory_profile: str) -> str:
+    if inventory_profile == "miku-v4-english":
+        return _MIKU_V4_VOWELS.get(phone, phone)
+    return phone
+
+
+def _bank_cc(left: str, right: str, inventory_profile: str) -> tuple[str, ...]:
+    variants = [f"{left} {right}", f"{left}{right}"]
+    if inventory_profile == "miku-v4-english":
+        # This port separates aspirated stops and lateral allophones. Probe
+        # those recorded variants only after the ordinary CC spelling.
+        for replacement in ({"t": "th", "k": "kh", "p": "ph", "b": "bh",
+                             "d": "dh", "g": "gh", "l": "l0"}.get(right),):
+            if replacement:
+                variants.append(f"{left} {replacement}")
+    return tuple(variants)
+
 
 def _xsampa_phone_sequence(phone: str) -> tuple[str, ...]:
     # PT /nh/, /lh/ and strong /r/ do not exist as dedicated symbols in the
@@ -487,6 +513,7 @@ def _english_mora(
 
 def _english_nucleus_candidates(
     *, onset: tuple[str, ...], vowel: str, previous_vowel: str, word_start: bool,
+    inventory_profile: str = "",
 ) -> list[tuple[str, tuple[str, ...]]]:
     cluster = "".join(onset)
     last = onset[-1] if onset else ""
@@ -498,6 +525,8 @@ def _english_nucleus_candidates(
                 tiers.append(("cvvc-direct", (f"- {cluster[:-1]}4{vowel}",)))
         else:
             tiers.append(("cvvc-direct", (f"- {vowel}",)))
+        if inventory_profile == "miku-v4-english" and not cluster:
+            tiers.append(("cvvc-direct", (f"Sil {vowel}",)))
     elif previous_vowel:
         if cluster:
             tiers.append(("cvvc-direct", (
@@ -520,21 +549,33 @@ def _english_cluster_units(
     onset: tuple[str, ...], *, word_start: bool, previous_vowel: str,
     resolve_alias: Callable[[Iterable[str]], object | None] | None,
     compositional_palatal_cv: bool = False,
+    inventory_profile: str = "",
 ) -> list[Mora]:
     if not onset:
         return []
     units: list[Mora] = []
     cluster = "".join(onset)
     first = onset[0]
+    initial_pairs: tuple[str, ...] = ()
     if word_start and len(onset) > 1:
+        initial_pairs = _bank_cc(onset[0], onset[1], inventory_profile) if inventory_profile == "miku-v4-english" else ()
         units.append(_english_mora(
             [
-                ("cluster-hit", (f"- {cluster}",)),
-                ("cvvc-transition", (f"- {first}", first)),
+                ("cluster-hit", (f"- {cluster}", *initial_pairs)),
+                ("cvvc-transition", (f"- {first}", f"Sil {first}", first))
+                if inventory_profile == "miku-v4-english" else ("cvvc-transition", (f"- {first}", first)),
+                ("approximation", (f"@ {first}", f"e {first}"))
+                if inventory_profile == "miku-v4-english" else ("approximation", ()),
             ],
             duration_ms=_ENGLISH_ROLE_DURATIONS["cluster"], role="cluster",
             source=tuple(onset), deaccented=True, resolve_alias=resolve_alias,
         ))
+        if inventory_profile == "miku-v4-english" and units[0].candidates:
+            chosen = units[0].candidates[0]
+            if any(chosen == alias or chosen.startswith(alias + "_") for alias in initial_pairs):
+                units[0] = replace(units[0], source_phonemes=onset[:2])
+            elif cluster not in chosen.replace(" ", ""):
+                units[0] = replace(units[0], source_phonemes=(first,))
     elif word_start:
         units.append(_english_mora(
             [("cvvc-transition", (f"- {first}", first))],
@@ -579,8 +620,29 @@ def _english_cluster_units(
 
     if len(onset) > 1 and not cluster_already_covered:
         # Each CC alias bridges the cluster without an epenthetic vowel.
-        for left, right in zip(onset, onset[1:]):
-            cc_aliases = (f"{left} {right}", f"{left}{right}")
+        for pair_number, (left, right) in enumerate(zip(onset, onset[1:])):
+            cc_aliases = _bank_cc(left, right, inventory_profile)
+            cc_kind = "cluster-hit"
+            cc_source = (left, right)
+            if inventory_profile == "miku-v4-english" and word_start and pair_number == 0 and units:
+                # The first CC recording already supplies both consonants.
+                # Scheduling it again would duplicate the initial attack.
+                selected = units[0].candidates[0] if units[0].candidates else ""
+                if any(selected == alias or selected.startswith(alias + "_") for alias in initial_pairs):
+                    continue
+            if inventory_profile == "miku-v4-english" and resolve_alias is not None:
+                try:
+                    cc_missing = resolve_alias(cc_aliases) is None
+                except Exception:
+                    cc_missing = True
+                if cc_missing:
+                    if pair_number == 0 and units and resolve_alias(units[0].candidates) is not None:
+                        # The initial helper owns left, and the following CC or
+                        # nucleus owns right; a missing bridge adds no phone.
+                        continue
+                    cc_aliases = (f"@ {left}", f"e {left}")
+                    cc_kind = "approximation"
+                    cc_source = (left,)
             if (
                 compositional_palatal_cv and not word_start and previous_vowel
                 and onset in {("n", "j"), ("l", "j")}
@@ -599,11 +661,11 @@ def _english_cluster_units(
                     continue
             units.append(_english_mora(
                 [
-                    ("cluster-hit", cc_aliases),
+                    (cc_kind, cc_aliases),
                     ("approximation", (left, right)),
                 ],
                 duration_ms=_ENGLISH_ROLE_DURATIONS["cluster"], role="cluster",
-                source=(left, right), deaccented=True, resolve_alias=resolve_alias,
+                source=cc_source, deaccented=True, resolve_alias=resolve_alias,
             ))
     return units
 
@@ -611,6 +673,7 @@ def _english_cluster_units(
 def _english_coda_units(
     *, vowel: str, coda: tuple[str, ...], nasal: bool,
     resolve_alias: Callable[[Iterable[str]], object | None] | None,
+    inventory_profile: str = "",
 ) -> list[Mora]:
     units: list[Mora] = []
     previous = vowel
@@ -620,9 +683,9 @@ def _english_coda_units(
     for phone in coda:
         phones.extend(_xsampa_phone_sequence(phone))
     for raw in phones:
-        phone = "4" if raw == "r" else raw
+        phone = "4" if raw == "r" and inventory_profile != "miku-v4-english" else raw
         role = "nasal" if raw == "N" else "glide" if raw in {"j", "w"} else "coda"
-        contextual = [f"{previous} {phone}", f"{previous}{phone}"]
+        contextual = list(_bank_cc(previous, phone, inventory_profile))
         if raw == "r":
             # Teto English has vowel+r exits, but no isolated r/4. A bank
             # without tap recordings must retain this contextual rhotic.
@@ -676,6 +739,7 @@ def _english_nucleus_duration(
 def _english_word_to_moras(
     word: PhoneticWord, *, deaccented: bool,
     resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+    inventory_profile: str = "",
 ) -> list[Mora]:
     moras: list[Mora] = []
     previous_vowel = ""
@@ -683,7 +747,8 @@ def _english_word_to_moras(
     for syllable_index, syllable in enumerate(word.syllables):
         fallback_onset = _xsampa_onset(syllable.onset)
         dedicated_onset = _xsampa_onset(syllable.onset, dedicated_palatal=True)
-        base_vowel = _xsampa_vowel(syllable.vowel)
+        canonical_vowel = _xsampa_vowel(syllable.vowel)
+        base_vowel = _bank_vowel(canonical_vowel, inventory_profile)
         coda_source = list(syllable.coda)
         glide = coda_source[0] if coda_source and coda_source[0] in {"j", "w"} else ""
         nasal = syllable.vowel.endswith("~")
@@ -701,9 +766,9 @@ def _english_word_to_moras(
                 vowel_options.append((syllable.vowel + glide, True, False))
             vowel_options.append((syllable.vowel, False, False))
         elif glide:
-            diphthong_alias = _XSAMPA_DIPHTHONGS.get((base_vowel, glide))
+            diphthong_alias = _XSAMPA_DIPHTHONGS.get((canonical_vowel, glide))
             if diphthong_alias:
-                vowel_options.append((diphthong_alias, True, False))
+                vowel_options.append((_bank_vowel(diphthong_alias, inventory_profile), True, False))
         vowel_options.append((base_vowel, False, nasal))
         onset_options = [dedicated_onset] if dedicated_onset != fallback_onset else []
         onset_options.append(fallback_onset)
@@ -715,6 +780,7 @@ def _english_word_to_moras(
                     tiers = _english_nucleus_candidates(
                         onset=candidate_onset, vowel=candidate_vowel,
                         previous_vowel=previous_vowel, word_start=word_start,
+                        inventory_profile=inventory_profile,
                     )
                     resolved = _english_resolve(tiers, resolve_alias)
                     candidates = resolved[0]
@@ -734,6 +800,7 @@ def _english_word_to_moras(
             tiers = _english_nucleus_candidates(
                 onset=fallback_onset, vowel=base_vowel,
                 previous_vowel=previous_vowel, word_start=word_start,
+                inventory_profile=inventory_profile,
             )
             selected = (fallback_onset, base_vowel, False, nasal, _english_resolve(tiers, resolve_alias))
         onset, vowel, absorbs_glide, nasal, resolved = selected
@@ -741,6 +808,12 @@ def _english_word_to_moras(
         if nasal or (dedicated_onset != fallback_onset and onset == fallback_onset):
             # A valid English recording still approximates a PT-only phone.
             # Alias availability must not report that pronunciation as exact.
+            nucleus_coverage = "approximation"
+        if (
+            inventory_profile == "miku-v4-english" and vowel == base_vowel
+            and canonical_vowel in {"a", "A", "o", "O", "E"}
+            and canonical_vowel != base_vowel
+        ):
             nucleus_coverage = "approximation"
         if absorbs_glide:
             coda_source = coda_source[1:]
@@ -766,6 +839,7 @@ def _english_word_to_moras(
                     and onset == fallback_onset
                     and compact_alias.endswith(f"{onset[-1]}{vowel}")
                 ),
+                inventory_profile=inventory_profile,
             ))
 
         syllable_moras.append(Mora(
@@ -788,6 +862,7 @@ def _english_word_to_moras(
 
         syllable_moras.extend(_english_coda_units(
             vowel=vowel, coda=tuple(coda_source), nasal=nasal, resolve_alias=resolve_alias,
+            inventory_profile=inventory_profile,
         ))
         for mora in syllable_moras:
             moras.append(replace(
@@ -827,6 +902,7 @@ def phonemize(
     resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
     voicebank_profile: str = "standard",
     reading_language: str = "pt-BR",
+    inventory_profile: str = "",
 ) -> list[Mora]:
     language = str(reading_language or "pt-BR").strip().lower()
     if language not in {"pt-br", "pt", "en-us", "en"}:
@@ -862,7 +938,8 @@ def phonemize(
             phonetic = (g2p_english_word if english_reading else g2p_word)(token, deaccented=deaccented)
             if str(voicebank_profile).lower().startswith("english"):
                 word_moras = _english_word_to_moras(
-                    phonetic, deaccented=deaccented, resolve_alias=resolve_alias
+                    phonetic, deaccented=deaccented, resolve_alias=resolve_alias,
+                    inventory_profile=inventory_profile,
                 )
             else:
                 word_moras = _phonetic_word_to_moras(

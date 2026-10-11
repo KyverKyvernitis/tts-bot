@@ -24,7 +24,7 @@ import wave
 from bisect import bisect_right
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .errors import TetoConfigurationError, TetoResourceError, TetoSynthesisError
 from .phonemizer import phonemize
@@ -46,7 +46,11 @@ class WorldlineRenderer(TetoRenderer):
     MAX_DECODED_BYTES = 64 * 1024 * 1024
     MAX_SOURCE_SECONDS = 20
 
-    def __init__(self, *, resource_guard: Callable[[], dict[str, Any]] | None = None):
+    def __init__(
+        self, *, resource_guard: Callable[[], dict[str, Any]] | None = None,
+        environment: Mapping[str, str] | None = None, voice_id: str = "kasane-teto",
+    ):
+        self._configure_voice(environment=environment, voice_id=voice_id)
         # No fragment cache: the native phrase API shares one F0 envelope and
         # spectral timeline across all requests in the utterance.
         self._resource_guard = resource_guard
@@ -63,15 +67,15 @@ class WorldlineRenderer(TetoRenderer):
         self._last_status: dict[str, Any] = {}
 
     def _container(self) -> str:
-        container = str(os.getenv("PHONE_WORKER_WORLDLINE_CONTAINER") or
-                        os.getenv("PHONE_WORKER_TETO_WORLDLINE_CONTAINER") or "voicepeak-arm64").strip()
+        container = str(self._getenv("PHONE_WORKER_WORLDLINE_CONTAINER") or
+                        self._getenv("PHONE_WORKER_TETO_WORLDLINE_CONTAINER") or "voicepeak-arm64").strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", container):
             raise TetoConfigurationError("container WORLDLINE-R inválido")
         return container
 
     def _library(self) -> Path:
-        return Path(os.getenv("PHONE_WORKER_WORLDLINE_LIBRARY") or
-                    os.getenv("PHONE_WORKER_TETO_WORLDLINE_LIBRARY") or
+        return Path(self._getenv("PHONE_WORKER_WORLDLINE_LIBRARY") or
+                    self._getenv("PHONE_WORKER_TETO_WORLDLINE_LIBRARY") or
                     str(Path.home() / ".worldline-r" / "lib" / "libworldline.so")).expanduser().resolve()
 
     def _library_metadata(self) -> dict[str, Any]:
@@ -106,10 +110,12 @@ class WorldlineRenderer(TetoRenderer):
             "source_commit": SOURCE_COMMIT, "adapter_sha256": self._adapter_hash(),
             "voicebank": index.fingerprint, "voicebank_profile": self._index_profile,
             "voicebank_mode": self._voicebank_mode(),
-            "pitch": os.getenv("PHONE_WORKER_TETO_BASE_PITCH", "C4"),
+            "pitch": self._getenv("PHONE_WORKER_TETO_BASE_PITCH", "C4"),
             "rate": self._speech_rate(), "velocity": self._velocity(),
             "modulation": self._modulation(), "tempo": self._tempo(),
         }
+        if self.voice_id == "hatsune-miku":
+            profile.update(voice_id=self.voice_id, inventory_profile="miku-v4-english")
         return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
     def _tempo(self) -> int:
@@ -135,7 +141,9 @@ class WorldlineRenderer(TetoRenderer):
         return command + ["--job", "/opt/worldline-job/job.json", "--output", "/opt/worldline-job/output.wav"]
 
     @staticmethod
-    def _run(command: list[str], *, deadline: float) -> tuple[str, str]:
+    def _run(
+        command: list[str], *, deadline: float, environment: Mapping[str, str] | None = None,
+    ) -> tuple[str, str]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("tempo WORLDLINE-R esgotado")
@@ -143,7 +151,7 @@ class WorldlineRenderer(TetoRenderer):
         # the host's memory. A new session lets a timeout stop the full tree.
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
-                                       start_new_session=True)
+                                       start_new_session=True, env=environment)
             try:
                 process.wait(timeout=remaining)
             except BaseException:
@@ -160,6 +168,11 @@ class WorldlineRenderer(TetoRenderer):
         if process.returncode or re.search(r"terminated with signal|segmentation fault|uncaught target signal", output + error, re.I):
             raise TetoSynthesisError(f"WORLDLINE-R falhou ({process.returncode}): {error[-500:]}")
         return output, error
+
+    def _run_voice_command(self, command: list[str], *, deadline: float) -> tuple[str, str]:
+        if self._environment is None:
+            return self._run(command, deadline=deadline)
+        return self._run(command, deadline=deadline, environment=self._subprocess_environment())
 
     @staticmethod
     def _proof(output: str) -> dict[str, Any]:
@@ -179,7 +192,8 @@ class WorldlineRenderer(TetoRenderer):
         enabled = self._env_bool("PHONE_WORKER_TETO_ENABLED", False)
         result: dict[str, Any] = {
             "ok": False, "available": False, "ready": False, "enabled": enabled,
-            "engine": "teto", "backend": "worldline-r", "voice": "kasane-teto-standard",
+            "engine": "teto", "backend": "worldline-r", "voice": f"{self.voice_id}-standard",
+            "voice_id": self.voice_id,
             "voicebank_profile": "standard", "renderer_version": self.RENDER_VERSION,
             "phrase_adapter_available": True, "box64_required": False, "voicepeak_required": False,
             "envelope_mode": self.ENVELOPE_MODE,
@@ -193,7 +207,7 @@ class WorldlineRenderer(TetoRenderer):
             metadata = self._library_metadata()
             fingerprint = self._adapter_hash()
             index = self._load_index()
-            output, _ = self._run(self._guest_command(self._library()), deadline=now + 8.0)
+            output, _ = self._run_voice_command(self._guest_command(self._library()), deadline=now + 8.0)
             probe = self._proof(output)
             if not (probe.get("api_verified") is True and probe.get("abi_verified") is True
                     and probe.get("library_hash_verified") is True
@@ -206,7 +220,7 @@ class WorldlineRenderer(TetoRenderer):
             result.update(metadata)
             result.update({
                 "ok": True, "available": True, "ready": True,
-                "voice": "kasane-teto-english-cvvc" if self._index_profile == "english-cvvc" else "kasane-teto-standard",
+                "voice": self._status_voice(),
                 "voicebank_profile": self._index_profile, "voicebank_mode": self._voicebank_mode(),
                 "voicebank_fallback": bool(self._voicebank_fallback_reason),
                 "voicebank_fallback_reason": self._voicebank_fallback_reason,
@@ -322,7 +336,7 @@ class WorldlineRenderer(TetoRenderer):
             else:
                 # One extra millisecond lets the length check reject, rather
                 # than silently truncate, an oversized source recording.
-                self._run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                self._run_voice_command(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
                            "-i", str(source), "-t", str(self.MAX_SOURCE_SECONDS + 0.001),
                            "-ac", "1", "-ar", str(self.SAMPLE_RATE), "-c:a", "pcm_s16le", str(target)],
                           deadline=min(deadline, time.monotonic() + 30.0))
@@ -478,6 +492,7 @@ class WorldlineRenderer(TetoRenderer):
             max_moras = max(8, min(256, self._env_int("PHONE_WORKER_TETO_MAX_PHONEMES", 240)))
             moras = phonemize(clean_text, max_moras=max_moras + 1, resolve_alias=index.resolve,
                              voicebank_profile=self._index_profile,
+                             **self._phonemizer_options(),
                              **({"reading_language": language} if reading_language is not None else {}))
             if len(moras) > max_moras:
                 raise ValueError(f"texto gerou mais de {max_moras} fonemas para Teto")
@@ -490,7 +505,7 @@ class WorldlineRenderer(TetoRenderer):
                 index, pitch_offset_semitones=offset, speech_rate=effective_rate,
                 reading_language=language,
             )
-            notes = build_notes(moras, base_pitch=os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4",
+            notes = build_notes(moras, base_pitch=self._getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4",
                                 speech_rate=effective_rate, tempo=self._tempo(), pitch_offset_semitones=offset)
             if not notes:
                 raise TetoSynthesisError("texto não gerou fonemas compatíveis")
@@ -518,7 +533,7 @@ class WorldlineRenderer(TetoRenderer):
                 self._check_resources()
                 command = self._guest_command(self._library(), workdir)
                 command += ["--timeout", str(max(0.01, deadline - time.monotonic()))]
-                output, _ = self._run(command, deadline=deadline)
+                output, _ = self._run_voice_command(command, deadline=deadline)
                 proof = self._proof(output)
                 if (proof.get("phrase_render_verified") is not True or
                         proof.get("library_sha256") != metadata["library_sha256"] or
@@ -536,6 +551,7 @@ class WorldlineRenderer(TetoRenderer):
             mean = sum(nuclei) / max(1, len(nuclei))
             return {
                 "audio": raw, "audio_format": "wav", "backend": "worldline-r", "voicebank": index.name,
+                "voice_id": self.voice_id,
                 "voicebank_fingerprint": index.fingerprint, "renderer_fingerprint": fingerprint,
                 "renderer_version": self.RENDER_VERSION,
                 "phonemizer_version": self.ENGLISH_PHONEMIZER_VERSION if language == "en-US" else self.PHONEMIZER_VERSION,

@@ -60,7 +60,7 @@ def test_legacy_request_uses_global_rate_and_old_pitch_then_personal_request_doe
     assert new["ttv_speech_rate"] == 1.0 and new["cache_key"] != old["cache_key"]
 
 
-@pytest.mark.parametrize("voice", ["hatsune-miku", "", None, "kasane-teto-english-cvvc"])
+@pytest.mark.parametrize("voice", ["future-uninstalled-character", "", None, "kasane-teto-english-cvvc"])
 @pytest.mark.parametrize("cache_mode", ["prefer", "bypass"])
 def test_unknown_character_fails_before_discovery_cache_or_any_provider(tts, monkeypatch, voice, cache_mode):
     monkeypatch.setattr(tts.worker, "_teto_dependency_snapshot_fast", lambda: pytest.fail("voice was probed"))
@@ -106,15 +106,24 @@ def test_normalized_controls_share_cache_and_voice_implementation_separates_it(t
 @pytest.mark.parametrize("state", ["ready", "disabled", "broken", "resource-blocked"])
 def test_catalog_health_reports_actual_renderer_and_resource_readiness(tts, monkeypatch, state):
     monkeypatch.setenv("PHONE_WORKER_TETO_ENABLED", "false" if state == "disabled" else "true")
+    monkeypatch.setenv("PHONE_WORKER_MIKU_ENABLED", "false")
     monkeypatch.setattr(tts.worker, "_get_teto_renderer", lambda: SimpleNamespace(
         status=lambda **kw: {"ready": state != "broken", "available": state != "broken"}))
     monkeypatch.setattr(tts.worker, "_teto_resource_snapshot", lambda: {"ok": state != "resource-blocked"})
     status = tts.teto_status(force=True)
     assert status["ttv_personal_settings"] is True
-    assert status["ttv_voices"] == [{"id": "kasane-teto", "name": "Kasane Teto",
-                                    "ready": state == "ready",
-                                    "available": state in {"ready", "resource-blocked"},
-                                    "supports_personal_rate": True, "languages": []}]
+    assert status["ttv_voices"] == [
+        {"id": "kasane-teto", "name": "Kasane Teto", "ready": state == "ready",
+         "available": state in {"ready", "resource-blocked"}, "enabled": state != "disabled",
+         "supports_personal_rate": True, "languages": [], "fingerprint": "",
+         "language_fingerprints": {}, "ttv_language_fingerprints": {}, "backend": "utau",
+         "renderer_version": "", "voicebank_profile": "",
+         "last_error": "PHONE_WORKER_TETO_ENABLED=false" if state == "disabled" else ""},
+        {"id": "hatsune-miku", "name": "Hatsune Miku", "ready": False, "available": False,
+         "enabled": False, "supports_personal_rate": True, "languages": [], "fingerprint": "",
+         "language_fingerprints": {}, "ttv_language_fingerprints": {}, "backend": "utau",
+         "renderer_version": "", "voicebank_profile": "", "last_error": "PHONE_WORKER_MIKU_ENABLED=false"},
+    ]
 
 
 def test_raw_transport_preserves_effective_control_headers(tts):
@@ -136,5 +145,5 @@ def test_prebuilt_direct_audio_cannot_bypass_character_validation(tts, monkeypat
     monkeypatch.setattr(tts.worker, "_voice_agent_set_connection", lambda *a, **kw: pytest.fail("voice lease changed"))
     monkeypatch.setattr(tts.handler, "_task_music_agent_proxy", lambda body: pytest.fail("unknown character played"))
     with pytest.raises(ValueError, match="vocaloid TTV desconhecida"):
-        tts.handler._task_voice_agent_play_tts({"engine": "teto", "ttv_voice_id": "hatsune-miku",
+        tts.handler._task_voice_agent_play_tts({"engine": "teto", "ttv_voice_id": "future-uninstalled-character",
                                               "audio_b64": "d2F2ZQ==", "guild_id": 1, "channel_id": 2})

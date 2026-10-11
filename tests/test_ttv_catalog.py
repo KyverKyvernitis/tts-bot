@@ -5,9 +5,10 @@ import pytest
 from cogs.tts import ttv
 
 
-def test_catalog_has_only_the_real_teto_route_and_is_immutable():
+def test_catalog_has_teto_and_miku_routes_and_is_immutable():
     assert [(voice.id, voice.name, voice.engine) for voice in ttv.VOICE_CATALOG] == [
-        ("kasane-teto", "Kasane Teto", "teto")
+        ("kasane-teto", "Kasane Teto", "teto"),
+        ("hatsune-miku", "Hatsune Miku", "teto"),
     ]
     with pytest.raises(FrozenInstanceError):
         ttv.get_voice().name = "Outra voz"
@@ -19,7 +20,7 @@ def test_legacy_bank_profiles_resolve_to_one_character(value):
     assert ttv.voice_label(value) == "Kasane Teto"
 
 
-@pytest.mark.parametrize("value", ["hatsune-miku", "voicepeak", "utau", "../../teto"])
+@pytest.mark.parametrize("value", ["another-character", "voicepeak", "utau", "../../teto"])
 def test_unknown_explicit_voice_never_becomes_another_character(value):
     with pytest.raises(ValueError):
         ttv.normalize_voice_id(value)

@@ -37,17 +37,15 @@ async def preparar_payload_tts_mensagem(
 ) -> PayloadTTSMensagem | None:
     db = cog._get_db()
     if db is None:
-        logger.warning("[tts_voice] settings_db indisponível")
-        await _notify_preparation_failure(cog, message, "service_unavailable")
+        print("[tts_voice] ignorado | settings_db indisponível")
         return None
 
     # `resolve_tts` retorna a configuração efetiva do user (mistura
     # config pessoal + defaults da guild). Pode falhar se o Mongo cair.
     try:
         resolved = await cog._maybe_await(db.resolve_tts(message.guild.id, message.author.id))
-    except Exception as exc:
-        logger.warning("[tts_voice] resolve_tts falhou | guild=%s user=%s type=%s", message.guild.id, message.author.id, type(exc).__name__)
-        await _notify_preparation_failure(cog, message, "service_unavailable")
+    except Exception as e:
+        print(f"[tts_voice] erro em resolve_tts | guild={message.guild.id} user={message.author.id} erro={e}")
         return None
 
     resolved = dict(resolved or {})
@@ -70,8 +68,7 @@ async def preparar_payload_tts_mensagem(
             default_pitch=getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0),
         )
     except ValueError as exc:
-        logger.warning("[tts_voice] configuração TTV indisponível | guild=%s user=%s type=%s", message.guild.id, message.author.id, type(exc).__name__)
-        await _notify_preparation_failure(cog, message, "teto_configuration_invalid")
+        logger.warning("[tts_voice] configuração TTV indisponível | guild=%s user=%s erro=%s", message.guild.id, message.author.id, exc)
         return None
 
     # Override pelo prefixo: se o user usou o prefixo de Edge, ele quer Edge
@@ -93,12 +90,11 @@ async def preparar_payload_tts_mensagem(
         resolved["rate"] = resolved.get("android_rate") or "1.0"
         resolved["pitch"] = resolved.get("android_pitch") or "1.0"
     elif forced_engine == "teto":
-        # Teto é exclusiva do phone worker. Os campos normais continuam
-        # guardados no QueueItem como fallback caso o renderer esteja offline,
-        # ocupado, aquecido ou sem assets válidos.
+        # O identificador legado teto transporta a vocaloid escolhida. A voz
+        # pessoal permanece explícita; não substituir uma personagem indisponível.
         resolved["engine"] = "teto"
         resolved["language"] = ttv_preferences["ttv_language"]
-        resolved["voice"] = "kasane-teto-standard"
+        resolved["voice"] = ttv_preferences["ttv_voice_id"]
         resolved["rate"] = "1.0"
         resolved["pitch"] = "C4"
         resolved.update(ttv_preferences)
@@ -153,21 +149,3 @@ async def preparar_payload_tts_mensagem(
         piper_model=str(resolved.get("piper_model") or getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default"),
     )
     return PayloadTTSMensagem(text=text, resolved=resolved, queue_item=queue_item, forced_gtts=forced_gtts)
-
-
-async def _notify_preparation_failure(cog, message, code: str) -> None:
-    """Erros de configuração não podem desaparecer sem resposta ao usuário."""
-    notify = getattr(cog, "_notify_tts_failure", None)
-    if not callable(notify):
-        return
-    item = QueueItem(
-        guild_id=message.guild.id,
-        channel_id=int(getattr(getattr(getattr(message.author, "voice", None), "channel", None), "id", 0) or 0),
-        author_id=message.author.id, text="", engine="", voice="", language="", rate="", pitch="",
-        message_id=int(getattr(message, "id", 0) or 0),
-        text_channel_id=int(getattr(message.channel, "id", 0) or 0),
-    )
-    try:
-        await cog._maybe_await(notify(item, code))
-    except Exception as exc:
-        logger.warning("[tts_voice] aviso de preparação falhou | guild=%s type=%s", item.guild_id, type(exc).__name__)

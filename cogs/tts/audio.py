@@ -58,7 +58,7 @@ from cogs.musica.integracoes.tts import (
 )
 
 from .helpers import validate_voice
-from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences
+from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences, worker_voice_details
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
 from .streaming import SharedSynthesisMixin
 from .routing import RouteMeasurements
@@ -1749,17 +1749,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
 
     def _ttv_voice_status(self, voice_id: str = DEFAULT_VOICE_ID) -> dict[str, Any]:
         """Read readiness advertised by the worker without doing network I/O."""
-        voice = get_voice(voice_id)
-        state = self._tts_agent_route_state()
+        result = worker_voice_details(self._tts_agent_route_state(), voice_id)
         online = self._tts_phone_worker_online_for_ui()
-        personal = bool(state.get("ttv_personal_settings"))
-        advertised = next((entry for entry in (state.get("ttv_voices") or [])
-                           if isinstance(entry, dict) and entry.get("id") == voice.id), {})
-        ready = bool(online and self._tts_agent_route_available() and advertised.get("ready"))
-        return {"id": voice.id, "name": voice.name, "online": online, "ready": ready,
-                "available": bool(advertised.get("available")),
-                "languages": list(advertised.get("languages") or state.get("ttv_languages") or [DEFAULT_LANGUAGE]),
-                "supports_personal_rate": bool(personal and advertised.get("supports_personal_rate"))}
+        result.update(online=online, ready=bool(online and self._tts_agent_route_available()
+                                               and result["ready"] and result["available"]))
+        return result
 
     async def _ttv_preview_mp3(self, guild_id: int, user_id: int, settings: dict | None = None) -> bytes:
         """Generate a private sample without joining voice or queuing a message."""
@@ -1771,12 +1765,12 @@ class TTSAudioMixin(SharedSynthesisMixin):
         preferences = resolve_preferences(settings, default_pitch=TTS_TETO_DEFAULT_PITCH_SEMITONES)
         status = self._ttv_voice_status(preferences["ttv_voice_id"])
         if not status["online"] or not status["ready"]:
-            raise RuntimeError("A voz está indisponível agora. Seus ajustes continuam salvos.")
+            raise RuntimeError(f"{status['name']} está indisponível agora. Seus ajustes continuam salvos.")
         if not status["supports_personal_rate"]:
             raise RuntimeError("Atualize o worker para usar os ajustes pessoais de TTV.")
         language = preferences["ttv_language"]
         if language not in status["languages"]:
-            raise RuntimeError("Inglês está indisponível. Atualize o worker e confira a voicebank English da Teto.")
+            raise RuntimeError(f"{get_voice(preferences['ttv_voice_id']).name} não está disponível em {language}. Confira a voicebank dessa voz no worker.")
         item = QueueItem(guild_id=int(guild_id), channel_id=0, author_id=int(user_id),
                          text="Hello. How are you?" if language == "en-US" else "Olá. Como você está?",
                          engine="teto", voice=preferences["ttv_voice_id"],
@@ -3202,10 +3196,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
             model = str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME).strip() or TTS_PIPER_MODEL_NAME
             payload = f"piper|worker|{model}|{text}"
         elif engine == "teto":
-            teto_state = self._tts_agent_route_state()
-            fingerprint = teto_state.get('teto_fingerprint') or 'unavailable'
             preferences = _ttv_item_preferences(item)
-            fingerprint = (teto_state.get("ttv_language_fingerprints") or {}).get(preferences["ttv_language"], fingerprint)
+            voice_state = worker_voice_details(self._tts_agent_route_state(), preferences["ttv_voice_id"])
+            fingerprint = voice_state["language_fingerprints"].get(preferences["ttv_language"], voice_state["fingerprint"])
             payload = f"ttv-v2|worker|{fingerprint}|{preferences['ttv_voice_id']}|{preferences['ttv_pitch_semitones']}|{preferences['ttv_speech_rate']!r}|{preferences['ttv_language']}|{text}"
         elif engine == "android_native":
             language = (item.language or "pt-BR").strip().lower().replace('_', '-')
@@ -5487,8 +5480,13 @@ class TTSAudioMixin(SharedSynthesisMixin):
             raise RuntimeError("Atualize o worker para usar os ajustes pessoais de TTV.")
         if engine == "teto":
             preferences = _ttv_item_preferences(item)
-            if preferences["ttv_language"] == "en-US" and "en-US" not in (route.get("ttv_languages") or []):
-                raise RuntimeError("Inglês está indisponível. Atualize o worker e confira a voicebank English da Teto.")
+            voice_state = worker_voice_details(route, preferences["ttv_voice_id"])
+            if ((voice_state["advertised"] and not voice_state["ready"])
+                    or (preferences["ttv_voice_id"] != DEFAULT_VOICE_ID
+                        and (not voice_state["advertised"] or not voice_state["available"]))):
+                raise RuntimeError(f"{voice_state['name']} está indisponível agora. Seus ajustes continuam salvos.")
+            if preferences["ttv_language"] not in voice_state["languages"]:
+                raise RuntimeError(f"Inglês está indisponível para {voice_state['name']}. Confira a voicebank dessa voz no worker.")
         max_text_length = TTS_TETO_MAX_TEXT_LENGTH if engine == "teto" else TTS_WORKER_AGENT_MAX_TEXT_LENGTH
         if len(text) > max_text_length:
             raise RuntimeError(f"texto grande demais para TTS Agent: {len(text)} > {max_text_length}")
@@ -5525,7 +5523,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                                 or str(data.get("ttv_voice_id") or "") != preferences["ttv_voice_id"]
                                 or normalize_pitch(data.get("ttv_pitch_semitones")) != preferences["ttv_pitch_semitones"]
                                 or abs(normalize_speech_rate(data.get("ttv_speech_rate")) - preferences["ttv_speech_rate"]) > 1e-8
-                                or (bool(route.get("ttv_languages")) and data.get("ttv_language") in (None, ""))
+                                or ((bool(route.get("ttv_languages")) or preferences["ttv_voice_id"] != DEFAULT_VOICE_ID) and data.get("ttv_language") in (None, ""))
                                 or normalize_language(data.get("ttv_language")) != preferences["ttv_language"]):
                             raise RuntimeError("O worker retornou áudio com ajustes de TTV diferentes dos solicitados.")
                 write_ms = 0.0

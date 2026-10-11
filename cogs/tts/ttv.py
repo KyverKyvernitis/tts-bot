@@ -37,6 +37,12 @@ VOICE_CATALOG = (
         engine="teto",
         description="A voz da Kasane Teto, com síntese no phone worker.",
     ),
+    TTVVoice(
+        id="hatsune-miku",
+        name="Hatsune Miku",
+        engine="teto",
+        description="A voz da Hatsune Miku, com síntese no phone worker.",
+    ),
 )
 VOICES = VOICE_CATALOG
 _VOICES_BY_ID = {voice.id: voice for voice in VOICE_CATALOG}
@@ -63,6 +69,39 @@ def get_voice(value: object = DEFAULT_VOICE_ID) -> TTVVoice:
 
 def voice_label(value: object = DEFAULT_VOICE_ID) -> str:
     return get_voice(value).name
+
+
+def worker_voice_details(state: Mapping[str, Any], voice_id: object = DEFAULT_VOICE_ID) -> dict[str, Any]:
+    """Resolve a character's advertised bank without borrowing another voice.
+
+    Older workers advertise Teto fingerprints/languages at the top level.
+    That compatibility path applies only to Teto; a missing Miku row always
+    stays unavailable, even when the worker can synthesize Teto.
+    """
+    voice = get_voice(voice_id)
+    entry = next((row for row in (state.get("ttv_voices") or [])
+                  if isinstance(row, dict) and row.get("id") == voice.id), {})
+    legacy = voice.id == DEFAULT_VOICE_ID
+    languages = entry.get("languages")
+    if languages is None:
+        languages = (state.get("ttv_languages") or [DEFAULT_LANGUAGE]) if legacy else []
+    fingerprints = entry.get("language_fingerprints", entry.get("ttv_language_fingerprints"))
+    if not isinstance(fingerprints, dict):
+        fingerprints = state.get("ttv_language_fingerprints") if legacy else {}
+    return {
+        "id": voice.id,
+        "name": voice.name,
+        "advertised": bool(entry),
+        "ready": bool(entry.get("ready")),
+        "available": bool(entry.get("available")),
+        "supports_personal_rate": bool(state.get("ttv_personal_settings") and entry.get("supports_personal_rate")),
+        "languages": [code for code in languages if code in _LANGUAGE_LABELS] if isinstance(languages, (list, tuple)) else [],
+        "fingerprint": str(entry.get("fingerprint") or (state.get("teto_fingerprint") if legacy else "") or "unavailable"),
+        "language_fingerprints": {
+            code: value for code, value in (fingerprints or {}).items()
+            if code in _LANGUAGE_LABELS and isinstance(value, str) and value
+        } if isinstance(fingerprints, dict) else {},
+    }
 
 
 def normalize_language(value: object) -> str:

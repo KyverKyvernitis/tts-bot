@@ -35,7 +35,7 @@ def normalize_teto_pitch_semitones(raw: Any, *, default: float = 0.0) -> float:
 
 def normalize_ttv_voice_id(raw: Any = "kasane-teto") -> str:
     voice_id = str(raw).strip().lower()
-    if voice_id != "kasane-teto":
+    if voice_id not in {"kasane-teto", "hatsune-miku"}:
         raise ValueError("vocaloid TTV desconhecida ou indisponível")
     return voice_id
 

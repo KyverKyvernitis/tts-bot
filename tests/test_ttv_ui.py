@@ -69,7 +69,7 @@ def interaction(*, actor=10, guild=20, admin=False):
 def test_real_modal_has_language_below_voice_and_keeps_edge_style_controls_without_descriptions():
     async def run():
         module, _, _ = modules()
-        cog = cog_for({"teto_pitch_semitones": "-2.0", "pitch": "+25Hz", "rate": "+25%"})
+        cog = cog_for({"teto_pitch_semitones": "-2.0", "pitch": "+25Hz", "rate": "+25%"}, ready=True)
         modal = module.ModalConfiguracaoTeto(cog, SimpleNamespace(id=77, guild=SimpleNamespace(id=20)), target_user_id=10)
         payload = modal.to_components()
         assert modal.title == "Configurar TTV"
