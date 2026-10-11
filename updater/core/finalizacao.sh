@@ -64,12 +64,11 @@ else
   ALERT_SUMMARY="A atualização terminou com um alerta. Verifique os pontos abaixo."
 fi
 
-# Só anunciar recuperação se o bot realmente estiver saudável.
-if (( OVERALL_FATAL == 0 )) && [[ "${BOT_HEALTHCHECK_STATUS:-}" == OK* ]]; then
-  voice_notices_finish success || true
-else
-  voice_notices_finish failure || true
-fi
+# Este módulo só é alcançado após a aplicação validada/confirmada.
+# O status público pode ser sucesso ou sucesso com avisos; um health transitório
+# não transforma um deploy comprometido em uma atualização rejeitada.
+# Falhas reais são concluídas pelos caminhos de rejeição/rollback.
+voice_notices_finish success || true
 
 APPLY_MODE="reinício completo"
 if [[ "$FAST_RELOAD_STATUS" == OK* ]]; then

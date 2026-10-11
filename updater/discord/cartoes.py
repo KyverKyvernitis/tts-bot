@@ -53,10 +53,10 @@ class CartoesUpdaterMixin:
             except (TypeError, ValueError):
                 completed_macro = -1
             try:
-                current = max(0, min(9, int(presentation.get("macro_index") or 0)))
+                current = max(0, min(10, int(presentation.get("macro_index") or 0)))
             except (TypeError, ValueError):
                 current = 0
-            macros = ("Pacote", "Segurança", "Preparação", "Isolamento", "Validação", "Release", "Promoção", "Aplicação", "Verificação", "GitHub")
+            macros = ("Pacote", "Avisando servidores", "Segurança", "Preparação", "Isolamento", "Validação", "Release", "Promoção", "Aplicação", "Verificação", "GitHub")
             lines = [f"# {UPDATE_EMOJI_PROGRESS_TITLE} {headline}"]
             meta = " · ".join(piece for piece in (f"`{identifier}`" if identifier else "", elapsed) if piece)
             if meta:

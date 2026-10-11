@@ -40,7 +40,7 @@ def test_progress_card_reveals_macro_stages_only_when_reached() -> None:
     source = ler_fonte_discord()
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     block = renderer[renderer.index('if kind == "progress":'):renderer.index('if kind == "recovery":')]
-    assert '("Pacote", "Segurança", "Preparação", "Isolamento", "Validação", "Release", "Promoção", "Aplicação", "Verificação", "GitHub")' in block
+    assert '("Pacote", "Avisando servidores", "Segurança", "Preparação", "Isolamento", "Validação", "Release", "Promoção", "Aplicação", "Verificação", "GitHub")' in block
     assert 'lines = [f"# {UPDATE_EMOJI_PROGRESS_TITLE} {headline}"]' in block
     assert 'enumerate(macros[: current + 1])' in block
     assert 'lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}{duration_suffix}**")' in block
@@ -239,22 +239,26 @@ def test_details_prettify_internal_timing_names() -> None:
     assert '"total": "Total desde envio"' in block
     assert '"```text\\n"' in block
 
-def test_macro_classifier_matches_the_visible_ten_stage_timeline() -> None:
+def test_macro_classifier_matches_the_visible_eleven_stage_timeline() -> None:
     source = UPDATER.read_text(encoding="utf-8")
     block = _block(source, "zip_progress_macro_index() {", "\nzip_progress_status() {")
     cases = {
         "Conferindo ZIP": "0",
-        "Analisando segurança": "1",
-        "Validando permissões": "1",
-        "Validando estado local": "2",
-        "Aplicando em área isolada": "3",
-        "Validando runtime em isolamento": "4",
-        "TypeScript frontend": "4",
-        "Candidato READY em isolamento": "5",
-        "Promovendo para a VPS": "6",
-        "Reiniciando processo: bot": "7",
-        "Verificando comandos": "8",
-        "Publicando no GitHub...": "9",
+        "Conferindo commit do GitHub": "0",
+        "Avisando servidores": "1",
+        "Servidores avisados": "1",
+        "Analisando segurança": "2",
+        "Validando commit do GitHub": "2",
+        "Validando permissões": "2",
+        "Validando estado local": "3",
+        "Aplicando em área isolada": "4",
+        "Validando runtime em isolamento": "5",
+        "TypeScript frontend": "5",
+        "Candidato READY em isolamento": "6",
+        "Promovendo para a VPS": "7",
+        "Reiniciando processo: bot": "8",
+        "Verificando comandos": "9",
+        "Publicando no GitHub...": "10",
     }
     for label, expected in cases.items():
         completed = subprocess.run(
@@ -402,7 +406,7 @@ def test_macro_transition_auto_closes_active_stage_duration() -> None:
             add_duration,
             duration_pairs,
             close_active,
-            "ZIP_PROGRESS_MACRO_MAX_INDEX=9",
+            "ZIP_PROGRESS_MACRO_MAX_INDEX=10",
             "ZIP_PROGRESS_STAGE_LABEL='Validando candidato'",
             "ZIP_PROGRESS_STAGE_STARTED_MS=1000",
             "ZIP_PROGRESS_LAST_DONE_LABEL=''",
@@ -415,8 +419,8 @@ def test_macro_transition_auto_closes_active_stage_duration() -> None:
     )
     result = subprocess.run(["bash", "-u", "-c", harness], cwd=ROOT, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
-    assert "PAIRS=4=2500ms" in result.stdout
-    assert "LAST=Validando candidato|2500ms|4" in result.stdout
+    assert "PAIRS=5=2500ms" in result.stdout
+    assert "LAST=Validando candidato|2500ms|5" in result.stdout
 
 
 def test_local_candidate_exposes_real_validation_release_and_application_phases() -> None:

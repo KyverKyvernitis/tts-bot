@@ -365,11 +365,10 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     archive_rollback_request "done" || true
   fi
 
-  if refresh_bot_health_status >/dev/null 2>&1 && [[ "${BOT_HEALTHCHECK_STATUS:-}" == OK* ]]; then
-    voice_notices_finish success || true
-  else
-    voice_notices_finish failure || true
-  fi
+  # Erro somente na entrega da confirmação, após o limite transacional:
+  # a atualização foi preservada. O reconciliador avisará no Discord quando
+  # o bot voltar; health temporário não deve produzir um falso fracasso.
+  voice_notices_finish success || true
   logger -t "$LOG_TAG" "deploy preservado apesar de falha pós-deploy: $display_id" 2>/dev/null || true
   exit 0
 }

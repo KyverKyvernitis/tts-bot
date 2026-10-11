@@ -488,25 +488,28 @@ zip_progress_title() {
 zip_progress_macro_index() {
   local stage_label="${1:-Processando atualização}"
   local lowered="${stage_label,,}"
+  # 11 etapas principais: a notificação dos servidores é independente de Segurança.
+  # Conferência/validação de commit acontece ANTES da publicação no GitHub;
+  # não pode antecipar a última etapa apenas por conter a palavra "GitHub".
   case "$lowered" in
-    *github*|*push*|*sincronizando*) printf '9' ;;
-    *health*|*saúde*|*saude*|*comandos*|*estabilidade*|*finalizando*|*estado\ publicado*|*recuperando\ confirmação*|"validando"|*validando\ arquivos*) printf '8' ;;
-    *publicando\ interface*|*publicando\ servidor*|*reiniciando*|*recarregando*|*reload*|*ativando*|*validando\ aplicação*|*validando\ aplicacao*) printf '7' ;;
-    *promov*|*aplicando\ na\ vps*) printf '6' ;;
-    *ready*|*release*|*preservando\ runtime*|*fazendo\ commit*|*commit\ criado*|*registrando*) printf '5' ;;
-    *validando\ runtime*|*verificando\ comandos*|*test*|*typescript*|*compilando*|*build*|*dependências*|*dependencias*) printf '4' ;;
-    *aplicando\ em\ área*|*worktree*|*staging*|*isolamento*) printf '3' ;;
-    *validando\ estado*|*preparando\ arquivos*) printf '2' ;;
-    *integridade*|*segurança*|*seguranca*|*avisando\ servidores*|*servidores\ avisados*|*validando\ permissões*|*analisando*) printf '1' ;;
-    *conferindo\ zip*|*pacote*|*conferindo\ commit*) printf '0' ;;
-    *validando*) printf '4' ;;
-    *) printf '2' ;;
+    *conferindo\ commit*|*conferindo\ zip*|*pacote*) printf '0' ;;
+    *avisando\ servidores*|*servidores\ avisados*) printf '1' ;;
+    *integridade*|*segurança*|*seguranca*|*validando\ commit*|*validando\ permissões*|*analisando*) printf '2' ;;
+    *validando\ estado*|*preparando\ arquivos*) printf '3' ;;
+    *validando\ runtime*|*test*|*typescript*|*compilando*|*build*|*dependências*|*dependencias*) printf '5' ;;
+    *ready*|*release*|*preservando\ runtime*|*fazendo\ commit*|*commit\ criado*|*registrando*) printf '6' ;;
+    *aplicando\ em\ área*|*worktree*|*staging*|*isolamento*) printf '4' ;;
+    *promov*|*aplicando\ na\ vps*) printf '7' ;;
+    *publicando\ interface*|*publicando\ servidor*|*reiniciando*|*recarregando*|*reload*|*ativando*|*validando\ aplicação*|*validando\ aplicacao*) printf '8' ;;
+    *health*|*saúde*|*saude*|*comandos*|*estabilidade*|*finalizando*|*estado\ publicado*|*recuperando\ confirmação*|"validando"|*validando\ arquivos*) printf '9' ;;
+    *github*|*push*|*sincronizando*) printf '10' ;;
+    *validando*) printf '5' ;;
+    *) printf '3' ;;
   esac
 }
-
 zip_progress_advance_macro_index() {
   local candidate="${1:-0}" current="${ZIP_PROGRESS_CURRENT_MACRO_INDEX:--1}"
-  local max_index="${ZIP_PROGRESS_MACRO_MAX_INDEX:-9}"
+  local max_index="${ZIP_PROGRESS_MACRO_MAX_INDEX:-10}"
   [[ "$candidate" =~ ^[0-9]+$ ]] || candidate=0
   [[ "$current" =~ ^-?[0-9]+$ ]] || current=-1
   (( candidate > max_index )) && candidate="$max_index"
@@ -521,7 +524,7 @@ zip_progress_advance_macro_index() {
 zip_progress_add_macro_duration() {
   local macro_index="${1:-}" elapsed_ms="${2:-0}" var current
   [[ "$macro_index" =~ ^[0-9]+$ ]] || return 0
-  (( macro_index <= ${ZIP_PROGRESS_MACRO_MAX_INDEX:-9} )) || return 0
+  (( macro_index <= ${ZIP_PROGRESS_MACRO_MAX_INDEX:-10} )) || return 0
   [[ "$elapsed_ms" =~ ^[0-9]+$ ]] || elapsed_ms=0
   var="ZIP_PROGRESS_MACRO_DURATION_MS_${macro_index}"
   current="${!var:-0}"
@@ -531,7 +534,7 @@ zip_progress_add_macro_duration() {
 
 zip_progress_macro_duration_pairs() {
   local index var elapsed_ms duration output=""
-  for ((index=0; index<=${ZIP_PROGRESS_MACRO_MAX_INDEX:-9}; index++)); do
+  for ((index=0; index<=${ZIP_PROGRESS_MACRO_MAX_INDEX:-10}; index++)); do
     var="ZIP_PROGRESS_MACRO_DURATION_MS_${index}"
     elapsed_ms="${!var:-0}"
     [[ "$elapsed_ms" =~ ^[0-9]+$ ]] || elapsed_ms=0

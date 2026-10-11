@@ -233,3 +233,25 @@ def test_reconciliacao_inativa_dispensa_varredura(monkeypatch, tmp_path):
         await bot._server_notice_reconcile_once()
         assert not (root / 'newrun.json').exists()
     asyncio.run(run())
+
+
+def test_update_notices_follow_terminal_deployment_not_transient_health():
+    final_script = (ROOT / 'updater' / 'core' / 'finalizacao.sh').read_text()
+    recovery_script = (ROOT / 'updater' / 'core' / 'recuperacao.sh').read_text()
+    assert 'voice_notices_finish success || true' in final_script
+    assert 'voice_notices_finish failure' not in final_script
+    post_failure = recovery_script.split('handle_post_deploy_failure() {', 1)[1].split('\non_error() {', 1)[0]
+    assert 'voice_notices_finish success || true' in post_failure
+    assert 'voice_notices_finish failure' not in post_failure
+    # Before deployment is committed, real failures must still alert users.
+    assert 'voice_notices_finish failure' in recovery_script.split('\non_error() {', 1)[1]
+
+
+def test_notices_are_independent_main_stage():
+    progress = (ROOT / 'updater' / 'core' / 'progresso.sh').read_text()
+    card = (ROOT / 'updater' / 'discord' / 'cartoes.py').read_text()
+    core = (ROOT / 'updater' / 'core' / 'atualizar.sh').read_text()
+    assert 'ZIP_PROGRESS_MACRO_MAX_INDEX=10' in core
+    assert '"Pacote", "Avisando servidores", "Segurança"' in card
+    assert 'min(10, int(presentation.get("macro_index")' in card
+    assert 'avisando\\ servidores' in progress and 'servidores\\ avisados' in progress
