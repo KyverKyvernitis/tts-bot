@@ -1,0 +1,1799 @@
+[
+  {
+    "id": "world-is-mine",
+    "name": "World Is Mine",
+    "artist": "ryo (supercell)",
+    "excerpt": "Abertura da melodia vocal",
+    "source_url": "https://www.aregan.net/2021/12/world-is-mine.html",
+    "source_sha256": "5e8cc82328bd05b2f7675ad4e1bd91ea0795829e7ebaa0f8f777b384139f0318",
+    "bpm": 165,
+    "notes": [
+      {
+        "midi_note": 65,
+        "start_ms": 200,
+        "duration_ms": 386,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 586,
+        "duration_ms": 1114,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 1700,
+        "duration_ms": 182,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 1882,
+        "duration_ms": 204,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 2086,
+        "duration_ms": 341,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 2609,
+        "duration_ms": 182,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 2791,
+        "duration_ms": 364,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 3155,
+        "duration_ms": 204,
+        "velocity": 100
+      },
+      {
+        "midi_note": 68,
+        "start_ms": 3541,
+        "duration_ms": 364,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 3905,
+        "duration_ms": 363,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 4268,
+        "duration_ms": 364,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 4632,
+        "duration_ms": 363,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 4995,
+        "duration_ms": 387,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 5700,
+        "duration_ms": 360,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 6060,
+        "duration_ms": 390,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 6450,
+        "duration_ms": 708,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 7358,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "midi",
+    "source_download_url": "https://drive.google.com/uc?id=1PHls6_hk_erUYC4rXFEcr7bKzuXVYYod&export=download",
+    "source_track": 4,
+    "source_track_name": "VOCAL",
+    "transposition_semitones": 0,
+    "transcription_author": "Aregan",
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": [
+        {
+          "note_index": 0,
+          "extension_ms": 22
+        }
+      ]
+    },
+    "source_file": "world-aregan.mid"
+  },
+  {
+    "id": "senbonzakura",
+    "name": "Senbonzakura",
+    "artist": "KurousaP",
+    "excerpt": "Melodia do refrão no arranjo para piano",
+    "source_url": "https://bitmidi.com/hatsune-miku-senbonzakura-mid",
+    "source_sha256": "f1ad301a139b4b4baf4eb6438acac1829dc999f00682b649f8c5c5c06479b25c",
+    "bpm": 154,
+    "notes": [
+      {
+        "midi_note": 67,
+        "start_ms": 200,
+        "duration_ms": 292,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 492,
+        "duration_ms": 292,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 784,
+        "duration_ms": 195,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 979,
+        "duration_ms": 585,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 1564,
+        "duration_ms": 194,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 1758,
+        "duration_ms": 195,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1953,
+        "duration_ms": 195,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 2148,
+        "duration_ms": 195,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 2343,
+        "duration_ms": 195,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 2538,
+        "duration_ms": 389,
+        "velocity": 100
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 2927,
+        "duration_ms": 195,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 3122,
+        "duration_ms": 195,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 3317,
+        "duration_ms": 292,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 3609,
+        "duration_ms": 292,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 3901,
+        "duration_ms": 195,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 4096,
+        "duration_ms": 585,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 4681,
+        "duration_ms": 175,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 5056,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "midi",
+    "source_download_url": "https://bitmidi.com/uploads/55291.mid",
+    "source_track": 1,
+    "source_start_ticks": 71040,
+    "source_end_ticks": 76800,
+    "transposition_semitones": 0,
+    "extraction": "highest onset voice; chord accompaniment omitted",
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": [
+        {
+          "note_index": 0,
+          "extension_ms": 29
+        },
+        {
+          "note_index": 1,
+          "extension_ms": 29
+        },
+        {
+          "note_index": 2,
+          "extension_ms": 19
+        },
+        {
+          "note_index": 3,
+          "extension_ms": 59
+        },
+        {
+          "note_index": 4,
+          "extension_ms": 19
+        },
+        {
+          "note_index": 5,
+          "extension_ms": 19
+        },
+        {
+          "note_index": 6,
+          "extension_ms": 19
+        },
+        {
+          "note_index": 7,
+          "extension_ms": 20
+        },
+        {
+          "note_index": 8,
+          "extension_ms": 20
+        },
+        {
+          "note_index": 9,
+          "extension_ms": 39
+        },
+        {
+          "note_index": 10,
+          "extension_ms": 19
+        },
+        {
+          "note_index": 11,
+          "extension_ms": 20
+        },
+        {
+          "note_index": 12,
+          "extension_ms": 29
+        },
+        {
+          "note_index": 13,
+          "extension_ms": 29
+        },
+        {
+          "note_index": 14,
+          "extension_ms": 19
+        },
+        {
+          "note_index": 15,
+          "extension_ms": 59
+        }
+      ]
+    },
+    "source_file": "senbonzakura.mid"
+  },
+  {
+    "id": "melt",
+    "name": "Melt",
+    "artist": "ryo (supercell)",
+    "excerpt": "Introdução do arranjo para piano",
+    "source_url": "https://bitmidi.com/vocaloid-melt-mid",
+    "source_sha256": "fec73eb6f00c014ef4417c3015005b123f98949adb850dc1b6e29d85b5c710dc",
+    "bpm": 170,
+    "notes": [
+      {
+        "midi_note": 78,
+        "start_ms": 200,
+        "duration_ms": 534,
+        "velocity": 100
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 734,
+        "duration_ms": 176,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 910,
+        "duration_ms": 350,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1260,
+        "duration_ms": 350,
+        "velocity": 100
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 1610,
+        "duration_ms": 362,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1972,
+        "duration_ms": 350,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 2322,
+        "duration_ms": 707,
+        "velocity": 100
+      },
+      {
+        "midi_note": 78,
+        "start_ms": 3029,
+        "duration_ms": 536,
+        "velocity": 100
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 3565,
+        "duration_ms": 176,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 3741,
+        "duration_ms": 350,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 4091,
+        "duration_ms": 350,
+        "velocity": 100
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 4441,
+        "duration_ms": 362,
+        "velocity": 100
+      },
+      {
+        "midi_note": 81,
+        "start_ms": 4803,
+        "duration_ms": 350,
+        "velocity": 100
+      },
+      {
+        "midi_note": 78,
+        "start_ms": 5153,
+        "duration_ms": 698,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 6051,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "midi",
+    "source_download_url": "https://bitmidi.com/uploads/108293.mid",
+    "source_track": 1,
+    "transposition_semitones": 0,
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": [
+        {
+          "note_index": 0,
+          "extension_ms": 11
+        },
+        {
+          "note_index": 1,
+          "extension_ms": 11
+        },
+        {
+          "note_index": 2,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 3,
+          "extension_ms": 2
+        },
+        {
+          "note_index": 4,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 5,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 6,
+          "extension_ms": 2
+        },
+        {
+          "note_index": 7,
+          "extension_ms": 10
+        },
+        {
+          "note_index": 8,
+          "extension_ms": 11
+        },
+        {
+          "note_index": 10,
+          "extension_ms": 2
+        }
+      ]
+    },
+    "source_file": "melt.mid"
+  },
+  {
+    "id": "tell-your-world",
+    "name": "Tell Your World",
+    "artist": "kz (livetune)",
+    "excerpt": "Início da melodia vocal",
+    "source_url": "https://bitmidi.com/hatsune-miku-tell-your-world-mid",
+    "source_sha256": "023608630cfc251231a602722e595c8e297c022ed56047b9fe4d1c4335671dcb",
+    "bpm": 150,
+    "notes": [
+      {
+        "midi_note": 58,
+        "start_ms": 200,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 400,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 600,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 800,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 68,
+        "start_ms": 1000,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 1200,
+        "duration_ms": 600,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 1800,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 2000,
+        "duration_ms": 600,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 2600,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 2800,
+        "duration_ms": 600,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 3400,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 3600,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 3800,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 4000,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 4200,
+        "duration_ms": 400,
+        "velocity": 100
+      },
+      {
+        "midi_note": 58,
+        "start_ms": 4600,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 58,
+        "start_ms": 4800,
+        "duration_ms": 1199,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 6199,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "midi",
+    "source_download_url": "https://bitmidi.com/uploads/55292.mid",
+    "source_track": 0,
+    "transposition_semitones": 0,
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": [
+        {
+          "note_index": 0,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 1,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 2,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 3,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 4,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 5,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 6,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 7,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 8,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 9,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 10,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 11,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 12,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 13,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 14,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 15,
+          "extension_ms": 1
+        }
+      ]
+    },
+    "source_file": "tell-your-world.mid"
+  },
+  {
+    "id": "popipo",
+    "name": "PoPiPo",
+    "artist": "LamazeP",
+    "excerpt": "Introdução da melodia",
+    "source_url": "https://onlinesequencer.net/3254147",
+    "source_sha256": "f5b6b24844f1d89481fd74f75d25f74287b43e86ff4ad4184eeaa9f5bff6d09a",
+    "bpm": 150,
+    "notes": [
+      {
+        "midi_note": 72,
+        "start_ms": 200,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 400,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 500,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 700,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 800,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1000,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 79,
+        "start_ms": 1200,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1400,
+        "duration_ms": 300,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 1800,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 2000,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 2100,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 2300,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 2400,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 2600,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 79,
+        "start_ms": 2800,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 3000,
+        "duration_ms": 300,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 3400,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 3600,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 3700,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 3900,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 4000,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 4200,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 79,
+        "start_ms": 4400,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 4600,
+        "duration_ms": 300,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 5100,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "online-sequencer-protobuf",
+    "source_download_url": "https://onlinesequencer.net/app/api/get_proto.php?v=2&id=3254147&r=1",
+    "source_instrument": 0,
+    "source_start_units": 0,
+    "source_end_units": 48,
+    "transposition_semitones": 0,
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": []
+    },
+    "source_file": "popipo.proto"
+  },
+  {
+    "id": "mesmerizer",
+    "name": "Mesmerizer",
+    "artist": "32ki (Satsuki)",
+    "excerpt": "Primeiro trecho vocal",
+    "source_url": "https://onlinesequencer.net/5149070",
+    "source_sha256": "d255406ba995335313b4848abed550540ced72fa23bbf7c5d2894316af5e0aa4",
+    "bpm": 185,
+    "notes": [
+      {
+        "midi_note": 70,
+        "start_ms": 200,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 524,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 686,
+        "duration_ms": 82,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 768,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 930,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 1092,
+        "duration_ms": 81,
+        "velocity": 100
+      },
+      {
+        "midi_note": 66,
+        "start_ms": 1173,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 1335,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 1659,
+        "duration_ms": 163,
+        "velocity": 100
+      },
+      {
+        "midi_note": 66,
+        "start_ms": 1822,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 1984,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 66,
+        "start_ms": 2146,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 2308,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 2470,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 2632,
+        "duration_ms": 163,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 2957,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 3281,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 3443,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 3605,
+        "duration_ms": 163,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 3768,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 3930,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 65,
+        "start_ms": 4092,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 4254,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 4416,
+        "duration_ms": 162,
+        "velocity": 100
+      },
+      {
+        "midi_note": 60,
+        "start_ms": 4578,
+        "duration_ms": 163,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 4941,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "online-sequencer-protobuf",
+    "source_download_url": "https://onlinesequencer.net/app/api/get_proto.php?v=2&id=5149070&r=1",
+    "source_instrument": 20055,
+    "source_start_units": 160,
+    "source_end_units": 216,
+    "transposition_semitones": 0,
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": []
+    },
+    "source_file": "mesmerizer.proto"
+  },
+  {
+    "id": "ochame-kinou",
+    "name": "Ochame Kinou / Fukkireta",
+    "artist": "GojimajiP",
+    "excerpt": "Início da melodia do arranjo",
+    "source_url": "https://files.nils.moe/MIDI/Ochame%20Kinou/",
+    "source_sha256": "c26d3cdcc0417edbc41b10599e37386014505e9b86823ed1f0fa2fcd7912fef2",
+    "bpm": 150,
+    "notes": [
+      {
+        "midi_note": 64,
+        "start_ms": 200,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 400,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 600,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 800,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 900,
+        "duration_ms": 94,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 1100,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 1200,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 68,
+        "start_ms": 1400,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 1600,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 1800,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 2000,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 2200,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 2400,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 2500,
+        "duration_ms": 94,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 2700,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 2800,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 68,
+        "start_ms": 3000,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 3200,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 3400,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 3600,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 3800,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 4000,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 4100,
+        "duration_ms": 94,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 4300,
+        "duration_ms": 100,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 4400,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 68,
+        "start_ms": 4600,
+        "duration_ms": 200,
+        "velocity": 100
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 4800,
+        "duration_ms": 189,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 5189,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "midi",
+    "source_download_url": "https://files.nils.moe/MIDI/Ochame%20Kinou/Fukkireta.mid",
+    "source_track": 0,
+    "transposition_semitones": -12,
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": [
+        {
+          "note_index": 0,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 1,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 2,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 3,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 5,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 6,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 7,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 8,
+          "extension_ms": 11
+        },
+        {
+          "note_index": 9,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 10,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 11,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 12,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 14,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 15,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 16,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 17,
+          "extension_ms": 11
+        },
+        {
+          "note_index": 18,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 19,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 20,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 21,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 23,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 24,
+          "extension_ms": 1
+        },
+        {
+          "note_index": 25,
+          "extension_ms": 1
+        }
+      ]
+    },
+    "source_file": "ochame-kinou.mid"
+  },
+  {
+    "id": "override",
+    "name": "Override",
+    "artist": "Yoshida Yasei",
+    "excerpt": "Primeiro trecho vocal",
+    "source_url": "https://onlinesequencer.net/4782906",
+    "source_sha256": "8cf644650a1db42af49aa08a4d173217ba873af27ecaa7bbde20fc38488f23b7",
+    "bpm": 204,
+    "notes": [
+      {
+        "midi_note": 61,
+        "start_ms": 200,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 494,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 641,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 935,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 1082,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 1229,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 1376,
+        "duration_ms": 148,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 1524,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 1671,
+        "duration_ms": 294,
+        "velocity": 100
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 2112,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 63,
+        "start_ms": 2259,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 2406,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 2553,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 2847,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 2994,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 3288,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 3435,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 3582,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 3729,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 3876,
+        "duration_ms": 148,
+        "velocity": 100
+      },
+      {
+        "midi_note": 68,
+        "start_ms": 4024,
+        "duration_ms": 294,
+        "velocity": 100
+      },
+      {
+        "midi_note": 68,
+        "start_ms": 4465,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 66,
+        "start_ms": 4612,
+        "duration_ms": 147,
+        "velocity": 100
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 4759,
+        "duration_ms": 147,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 5106,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "online-sequencer-protobuf",
+    "source_download_url": "https://onlinesequencer.net/app/api/get_proto.php?v=2&id=4782906&r=1",
+    "source_instrument": 61,
+    "source_start_units": 160,
+    "source_end_units": 224,
+    "transposition_semitones": 0,
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": []
+    },
+    "source_file": "override.proto"
+  },
+  {
+    "id": "teto-territory",
+    "name": "Teto Territory",
+    "artist": "oxi / Silver Forest (tema de ZUN)",
+    "excerpt": "Início da melodia vocal",
+    "source_url": "https://onlinesequencer.net/3135053",
+    "source_sha256": "b4537e1f0c6aaa9d4dadd737d69b437afc380da92f8077ba2ae6174e88bc4ce6",
+    "bpm": 160,
+    "notes": [
+      {
+        "midi_note": 72,
+        "start_ms": 200,
+        "duration_ms": 375,
+        "velocity": 100
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 575,
+        "duration_ms": 375,
+        "velocity": 100
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 1138,
+        "duration_ms": 187,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 1325,
+        "duration_ms": 187,
+        "velocity": 100
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 1512,
+        "duration_ms": 188,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 1700,
+        "duration_ms": 188,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 1888,
+        "duration_ms": 187,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 2075,
+        "duration_ms": 375,
+        "velocity": 100
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 3012,
+        "duration_ms": 188,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 3200,
+        "duration_ms": 188,
+        "velocity": 100
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 3388,
+        "duration_ms": 187,
+        "velocity": 100
+      },
+      {
+        "midi_note": 81,
+        "start_ms": 3575,
+        "duration_ms": 375,
+        "velocity": 100
+      },
+      {
+        "midi_note": 81,
+        "start_ms": 4138,
+        "duration_ms": 187,
+        "velocity": 100
+      },
+      {
+        "midi_note": 79,
+        "start_ms": 4325,
+        "duration_ms": 187,
+        "velocity": 100
+      },
+      {
+        "midi_note": 81,
+        "start_ms": 4512,
+        "duration_ms": 188,
+        "velocity": 100
+      },
+      {
+        "midi_note": 79,
+        "start_ms": 4700,
+        "duration_ms": 188,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 4888,
+        "duration_ms": 187,
+        "velocity": 100
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 5075,
+        "duration_ms": 375,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 5650,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "online-sequencer-protobuf",
+    "source_download_url": "https://onlinesequencer.net/app/api/get_proto.php?v=2&id=3135053&r=1",
+    "source_instrument": 0,
+    "source_start_units": 124,
+    "source_end_units": 188,
+    "transposition_semitones": 0,
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": []
+    },
+    "source_file": "teto-territory.proto"
+  },
+  {
+    "id": "triple-baka",
+    "name": "Triple Baka",
+    "artist": "LamazeP",
+    "excerpt": "Motivo da introdução",
+    "source_url": "https://onlinesequencer.net/953146",
+    "source_sha256": "d88365653de12d7d9f516b18333adfb39bd64e5e0a68910b04ee176b61b8357b",
+    "bpm": 180,
+    "notes": [
+      {
+        "midi_note": 79,
+        "start_ms": 200,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 283,
+        "duration_ms": 84,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 367,
+        "duration_ms": 166,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 533,
+        "duration_ms": 167,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 700,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 867,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 950,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1033,
+        "duration_ms": 167,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1200,
+        "duration_ms": 167,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 1367,
+        "duration_ms": 166,
+        "velocity": 100
+      },
+      {
+        "midi_note": 79,
+        "start_ms": 1533,
+        "duration_ms": 84,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1617,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1700,
+        "duration_ms": 167,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1867,
+        "duration_ms": 166,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 2033,
+        "duration_ms": 84,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 2200,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 2283,
+        "duration_ms": 84,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 2367,
+        "duration_ms": 166,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 2533,
+        "duration_ms": 167,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 2700,
+        "duration_ms": 167,
+        "velocity": 100
+      },
+      {
+        "midi_note": 79,
+        "start_ms": 2867,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 2950,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 3033,
+        "duration_ms": 167,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 3200,
+        "duration_ms": 167,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 3367,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 3533,
+        "duration_ms": 84,
+        "velocity": 100
+      },
+      {
+        "midi_note": 72,
+        "start_ms": 3617,
+        "duration_ms": 83,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 3700,
+        "duration_ms": 167,
+        "velocity": 100
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 3867,
+        "duration_ms": 166,
+        "velocity": 100
+      },
+      {
+        "midi_note": 67,
+        "start_ms": 4033,
+        "duration_ms": 167,
+        "velocity": 100
+      }
+    ],
+    "duration_ms": 4400,
+    "revision": 1,
+    "lyrics_source": "message",
+    "source_kind": "online-sequencer-protobuf",
+    "source_download_url": "https://onlinesequencer.net/app/api/get_proto.php?v=2&id=953146&r=1",
+    "source_instrument": 0,
+    "source_start_units": 0,
+    "source_end_units": 48,
+    "transposition_semitones": -12,
+    "extraction": "upper melody voice; exact duplicated notes and accompaniment omitted",
+    "normalization": {
+      "preroll_ms": 200,
+      "tail_ms": 200,
+      "articulation_gaps_extended": []
+    },
+    "source_file": "triple-baka.proto"
+  }
+]

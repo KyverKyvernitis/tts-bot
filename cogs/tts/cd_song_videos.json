@@ -1,0 +1,272 @@
+{
+  "version": 1,
+  "checked_at": "2026-10-12",
+  "selection_note": "Vídeos originais/republicações com a voz original. Contagens indexadas podem ser antigas. Só World Is Mine teve dois candidatos com contagens comparáveis; as demais escolhas precisam da comparação opcional no Termux. Não afirma o maior vídeo de todo o YouTube.",
+  "songs": {
+    "world-is-mine": {
+      "title": "World Is Mine",
+      "video_id": "EuJ6UR_pD5s",
+      "thumbnail_url": "https://i.ytimg.com/vi/EuJ6UR_pD5s/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=EuJ6UR_pD5s",
+      "search_query": "World is Mine Hatsune Miku ryo",
+      "title_aliases": [
+        "world is mine",
+        "ワールドイズマイン"
+      ],
+      "view_count": 33263244,
+      "view_count_source": "https://socialcounts.org/youtube-video-live-view-count/EuJ6UR_pD5s",
+      "source_url": "https://socialcounts.org/youtube-video-live-view-count/EuJ6UR_pD5s",
+      "checked_at": "2026-10-12",
+      "selection_basis": "highest-indexed-view-count-among-two-inspected-original-vocal-uploads",
+      "candidates": [
+        {
+          "video_id": "EuJ6UR_pD5s",
+          "title": "World Is Mine",
+          "view_count": 33263244,
+          "source_url": "https://socialcounts.org/youtube-video-live-view-count/EuJ6UR_pD5s"
+        },
+        {
+          "video_id": "jhl5afLEKdo",
+          "title": "Hatsune Miku World is Mine / ryo supercell",
+          "view_count": 24313953,
+          "source_url": "https://digitalcreators.jp/channel/ja/UCJwGWV914kBlV4dKRn7AEFA/popular-videos/"
+        }
+      ],
+      "excluded_title_terms": [
+        "showtek",
+        "shermanology",
+        "david guetta",
+        "dj antoine"
+      ]
+    },
+    "senbonzakura": {
+      "title": "Senbonzakura",
+      "video_id": "shs0rAiwsGQ",
+      "thumbnail_url": "https://i.ytimg.com/vi/shs0rAiwsGQ/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=shs0rAiwsGQ",
+      "search_query": "Senbonzakura WhiteFlame Hatsune Miku",
+      "title_aliases": [
+        "senbonzakura",
+        "千本桜"
+      ],
+      "view_count": null,
+      "view_count_source": null,
+      "source_url": "https://www.aregan.net/2021/03/senbonzakura.html",
+      "checked_at": "2026-10-12",
+      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "candidates": [
+        {
+          "video_id": "shs0rAiwsGQ",
+          "title": "Senbonzakura",
+          "view_count": null,
+          "source_url": "https://www.aregan.net/2021/03/senbonzakura.html"
+        }
+      ]
+    },
+    "melt": {
+      "title": "Melt",
+      "video_id": "cZbcjYiFRGA",
+      "thumbnail_url": "https://i.ytimg.com/vi/cZbcjYiFRGA/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=cZbcjYiFRGA",
+      "search_query": "Melt ryo Hatsune Miku original",
+      "title_aliases": [
+        "melt",
+        "メルト"
+      ],
+      "view_count": null,
+      "view_count_source": null,
+      "source_url": "https://www.youtube.com/watch?v=cZbcjYiFRGA",
+      "checked_at": "2026-10-12",
+      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "candidates": [
+        {
+          "video_id": "cZbcjYiFRGA",
+          "title": "Melt",
+          "view_count": null,
+          "source_url": "https://www.youtube.com/watch?v=cZbcjYiFRGA"
+        }
+      ],
+      "excluded_title_terms": [
+        "ice cream",
+        "CPK",
+        "remix"
+      ]
+    },
+    "tell-your-world": {
+      "title": "Tell Your World",
+      "video_id": "PqJNc9KVIZE",
+      "thumbnail_url": "https://i.ytimg.com/vi/PqJNc9KVIZE/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=PqJNc9KVIZE",
+      "search_query": "Tell Your World livetune Hatsune Miku",
+      "title_aliases": [
+        "tell your world"
+      ],
+      "view_count": null,
+      "view_count_source": null,
+      "source_url": "https://project-diva.fandom.com/it/wiki/Tell_Your_World",
+      "checked_at": "2026-10-12",
+      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "candidates": [
+        {
+          "video_id": "PqJNc9KVIZE",
+          "title": "Tell Your World",
+          "view_count": null,
+          "source_url": "https://project-diva.fandom.com/it/wiki/Tell_Your_World"
+        }
+      ]
+    },
+    "popipo": {
+      "title": "PoPiPo",
+      "video_id": "mco3UX9SqDA",
+      "thumbnail_url": "https://i.ytimg.com/vi/mco3UX9SqDA/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=mco3UX9SqDA",
+      "search_query": "PoPiPo Hatsune Miku LamazeP",
+      "title_aliases": [
+        "popipo",
+        "po pi po",
+        "ぽっぴっぽー"
+      ],
+      "view_count": null,
+      "view_count_source": null,
+      "source_url": "https://strawberrystation.bandcamp.com/track/popipo-tetos-version",
+      "checked_at": "2026-10-12",
+      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "candidates": [
+        {
+          "video_id": "mco3UX9SqDA",
+          "title": "PoPiPo",
+          "view_count": null,
+          "source_url": "https://strawberrystation.bandcamp.com/track/popipo-tetos-version"
+        }
+      ]
+    },
+    "mesmerizer": {
+      "title": "Mesmerizer",
+      "video_id": "19y8YTbvri8",
+      "thumbnail_url": "https://i.ytimg.com/vi/19y8YTbvri8/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=19y8YTbvri8",
+      "search_query": "Mesmerizer Satsuki Hatsune Miku Kasane Teto",
+      "title_aliases": [
+        "mesmerizer",
+        "メズマライザー"
+      ],
+      "view_count": 224589458,
+      "view_count_source": "https://socialcounts.org/youtube-video-live-view-count/19y8YTbvri8",
+      "source_url": "https://socialcounts.org/youtube-video-live-view-count/19y8YTbvri8",
+      "checked_at": "2026-10-12",
+      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "candidates": [
+        {
+          "video_id": "19y8YTbvri8",
+          "title": "Mesmerizer",
+          "view_count": 224589458,
+          "source_url": "https://socialcounts.org/youtube-video-live-view-count/19y8YTbvri8"
+        }
+      ]
+    },
+    "ochame-kinou": {
+      "title": "Ochame Kinou / Fukkireta",
+      "video_id": "4eq6rfCjKlw",
+      "thumbnail_url": "https://i.ytimg.com/vi/4eq6rfCjKlw/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=4eq6rfCjKlw",
+      "search_query": "Ochame Kinou Fukkireta Kasane Teto original",
+      "title_aliases": [
+        "ochame kinou",
+        "fukkireta",
+        "おちゃめ機能",
+        "吹っ切れた"
+      ],
+      "view_count": null,
+      "view_count_source": null,
+      "source_url": "https://www.youtube.com/watch?v=4eq6rfCjKlw",
+      "checked_at": "2026-10-12",
+      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "candidates": [
+        {
+          "video_id": "4eq6rfCjKlw",
+          "title": "Ochame Kinou / Fukkireta",
+          "view_count": null,
+          "source_url": "https://www.youtube.com/watch?v=4eq6rfCjKlw"
+        },
+        {
+          "video_id": "rkf1pLv25VU",
+          "title": "Kasane Teto - Ochame Kinou",
+          "view_count": 659724,
+          "source_url": "https://socialcounts.org/youtube-video-live-view-count/rkf1pLv25VU"
+        }
+      ]
+    },
+    "override": {
+      "title": "Override",
+      "video_id": "LLjfal8jCYI",
+      "thumbnail_url": "https://i.ytimg.com/vi/LLjfal8jCYI/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=LLjfal8jCYI",
+      "search_query": "Override Yoshida Yasei Kasane Teto",
+      "title_aliases": [
+        "override",
+        "オーバーライド"
+      ],
+      "view_count": null,
+      "view_count_source": null,
+      "source_url": "https://www.nicolog.jp/watch/sm43083649",
+      "checked_at": "2026-10-12",
+      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "candidates": [
+        {
+          "video_id": "LLjfal8jCYI",
+          "title": "Override",
+          "view_count": null,
+          "source_url": "https://www.nicolog.jp/watch/sm43083649"
+        }
+      ]
+    },
+    "teto-territory": {
+      "title": "Teto Territory",
+      "video_id": "JALbemLw3G4",
+      "thumbnail_url": "https://i.ytimg.com/vi/JALbemLw3G4/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=JALbemLw3G4",
+      "search_query": "Teto Territory CegooK",
+      "title_aliases": [
+        "teto territory",
+        "重音territory"
+      ],
+      "view_count": null,
+      "view_count_source": null,
+      "source_url": "https://www.bilibili.com/video/BV1p6421g7hd/",
+      "checked_at": "2026-10-12",
+      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "candidates": [
+        {
+          "video_id": "JALbemLw3G4",
+          "title": "Teto Territory",
+          "view_count": null,
+          "source_url": "https://www.bilibili.com/video/BV1p6421g7hd/"
+        }
+      ]
+    },
+    "triple-baka": {
+      "title": "Triple Baka",
+      "video_id": "duPJqfKiA78",
+      "thumbnail_url": "https://i.ytimg.com/vi/duPJqfKiA78/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=duPJqfKiA78",
+      "search_query": "Triple Baka Hatsune Miku LamazeP",
+      "title_aliases": [
+        "triple baka",
+        "とりぷるばか"
+      ],
+      "view_count": 24818640,
+      "view_count_source": "https://socialcounts.org/youtube-video-live-view-count/duPJqfKiA78",
+      "source_url": "https://socialcounts.org/youtube-video-live-view-count/duPJqfKiA78",
+      "checked_at": "2026-10-12",
+      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "candidates": [
+        {
+          "video_id": "duPJqfKiA78",
+          "title": "Triple Baka",
+          "view_count": 24818640,
+          "source_url": "https://socialcounts.org/youtube-video-live-view-count/duPJqfKiA78"
+        }
+      ]
+    }
+  }
+}

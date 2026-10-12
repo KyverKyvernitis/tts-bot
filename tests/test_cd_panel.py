@@ -17,7 +17,7 @@ def cog_for(settings=None, *, online=True, ready=True, status=None):
     values = dict(settings or {})
     db = SimpleNamespace(resolve_tts=lambda guild, user: dict(values))
     state = dict(online=online, ready=ready, available=ready, singing_available=True,
-                 performance_protocol=2, languages=["pt-BR", "en-US"])
+                 performance_protocol=1, languages=["pt-BR", "en-US"])
     state.update(status or {})
 
     async def save(guild, user, **updates):
@@ -92,9 +92,11 @@ def test_panel_serializes_real_discord_v2_without_content_embed_or_fake_songs():
         assert not any(item["type"] in (9, 11, 12) for item in parts)
         selects = [item for item in parts if item["type"] == 3]
         assert len(selects) == 1
-        assert [(item["label"], item["value"], item["default"]) for item in selects[0]["options"]] == [
-            ("Padrão", DEFAULT_MELODY_ID, True),
-        ]
+        options = selects[0]["options"]
+        assert len(options) == 11 and options[0]["label"] == "Padrão"
+        assert options[0]["value"] == DEFAULT_MELODY_ID and options[0]["default"]
+        assert sum(bool(option.get("default")) for option in options) == 1
+        assert {option["value"] for option in options} == {item.id for item in panel.list_melodies()}
         buttons = [item for item in parts if item["type"] == 2]
         assert [item["label"] for item in buttons] == ["Ouvir amostra", "Melodia em uso"]
         assert buttons[0]["disabled"] is False and buttons[1]["disabled"] is True
@@ -278,7 +280,7 @@ def test_removed_saved_melody_can_be_restored_without_silent_change():
 
 @pytest.mark.parametrize("online,ready,status", (
     (False, True, {}), (True, False, {}), (True, True, {"available": False}),
-    (True, True, {"singing_available": False}), (True, True, {"performance_protocol": 1}),
+    (True, True, {"singing_available": False}), (True, True, {"performance_protocol": 0}),
     (True, True, {"languages": ["en-US"]}),
 ))
 def test_preview_rechecks_local_availability_before_audio(online, ready, status):

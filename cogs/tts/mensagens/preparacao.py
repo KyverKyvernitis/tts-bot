@@ -17,9 +17,10 @@ import config
 
 from ..audio import QueueItem, _has_speakable_tts_text
 from ..ttv import resolve_preferences
-from ..performance import parse_performance_text, performance_hash, singing_request
-from ..melodies import score_for_melody
+from ..performance import parse_performance_text, performance_hash
 from ..score import MAX_MIDI_BYTES, ScoreError, parse_midi
+from ..melodies import score_for_melody
+import re
 
 
 logger = logging.getLogger(__name__)
@@ -258,21 +259,23 @@ async def preparar_payload_tts_mensagem(
     is_ttv = resolved.get("engine") == "teto"
     midi_attachments = [attachment for attachment in (getattr(message, "attachments", None) or [])
                         if str(getattr(attachment, "filename", "")).lower().endswith((".mid", ".midi"))]
-    default_requested = False
-    if is_ttv and forced_engine == "teto":
-        raw_text, default_requested = singing_request(raw_text)
-    singing = is_ttv and forced_engine == "teto" and bool(midi_attachments or midi_data is not None or default_requested)
+    catalog_singing = bool(is_ttv and forced_engine == "teto" and not midi_attachments and midi_data is None
+                           and (re.match(r"^/cantar(?:\s|$)", raw_text, re.IGNORECASE)
+                                or re.search(r"(?<!\S)~(?!\S)", raw_text)))
+    if catalog_singing:
+        raw_text = re.sub(r"^/cantar(?=\s|$)\s*", "", raw_text, count=1, flags=re.IGNORECASE)
+    singing = is_ttv and forced_engine == "teto" and bool(midi_attachments or midi_data is not None or catalog_singing)
     try:
-        if singing:
+        if singing and not catalog_singing:
             if len(midi_attachments) > 1:
                 raise ValueError("Envie um único MIDI por mensagem.")
-            if midi_data is None and midi_attachments:
+            if midi_data is None:
                 attachment = midi_attachments[0]
                 declared_size = int(getattr(attachment, "size", 0) or 0)
                 if declared_size <= 0 or declared_size > MAX_MIDI_BYTES:
                     raise ValueError("O MIDI deve ter no máximo 512 KiB.")
                 midi_data = await asyncio.wait_for(attachment.read(), timeout=20)
-            if midi_data is not None and (not isinstance(midi_data, bytes) or not (0 < len(midi_data) <= MAX_MIDI_BYTES)):
+            if not isinstance(midi_data, bytes) or not (0 < len(midi_data) <= MAX_MIDI_BYTES):
                 raise ValueError("O MIDI baixado está vazio ou ultrapassa 512 KiB.")
             clean_text, segments = parse_performance_text(raw_text, singing=True)
             # Lyrics are never prefixed with the author or attachment descriptions.
@@ -281,12 +284,21 @@ async def preparar_payload_tts_mensagem(
                     segment["text"] = cog._render_tts_text(_WithoutAttachments(message), segment["text"]).strip()
             # Standalone ~ and | belong to the score's lyric alignment.
             text = cog._render_tts_text(_WithoutAttachments(message), clean_text).strip()
-            if midi_data is not None:
-                score = parse_midi(midi_data, lyrics=text, track_index=midi_track_index)
-            else:
-                if not text.strip():
-                    raise ValueError("Escreva a letra depois de /cantar.")
+            score = parse_midi(midi_data, lyrics=text, track_index=midi_track_index)
+            ttv_preferences.update(ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
+            resolved.update(ttv_preferences)
+            resolved["teto_pitch_semitones"] = "+0.0"
+        elif catalog_singing:
+            clean_text, segments = parse_performance_text(raw_text, singing=True)
+            if segments:
+                for segment in segments:
+                    if segment.get("text") not in ("~", "|"):
+                        segment["text"] = cog._render_tts_text(_WithoutAttachments(message), segment["text"]).strip()
+            text = cog._render_tts_text(_WithoutAttachments(message), clean_text).strip()
+            try:
                 score = score_for_melody(resolved.get("ttv_melody_id"))
+            except ValueError as exc:
+                raise ValueError("A melodia salva ficou indisponível. Escolha outra em seu painel de canto.") from exc
             ttv_preferences.update(ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
             resolved.update(ttv_preferences)
             resolved["teto_pitch_semitones"] = "+0.0"

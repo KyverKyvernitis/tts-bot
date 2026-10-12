@@ -14,6 +14,7 @@ import discord
 import config
 
 from ..failure_notices import _public_notice, failure_code
+from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url
 from ..melodies import DEFAULT_MELODY_ID, get_melody, list_melodies
 from ..ttv import DEFAULT_VOICE_ID, language_label, resolve_preferences, voice_label
 from .visoes_layout import VisaoLayoutBaseTTS
@@ -103,8 +104,8 @@ class CDPanelView(VisaoLayoutBaseTTS):
                 self._availability_note = "O canto precisa do banco English-CVVC dessa voz."
                 return
             protocol = status.get("performance_protocol")
-            if protocol is not None and (type(protocol) is not int or protocol < 2):
-                self._availability_note = "Atualize o worker para ouvir a melodia padrão."
+            if protocol is not None and (type(protocol) is not int or protocol < 1):
+                self._availability_note = "Atualize o worker para ouvir amostras cantadas."
                 return
             languages = status.get("languages")
             if isinstance(languages, (tuple, list)) and self._preferences["ttv_language"] not in languages:
@@ -133,13 +134,14 @@ class CDPanelView(VisaoLayoutBaseTTS):
             discord.ui.TextDisplay("## 🎼 Melodias de canto\nEscolha a melodia para cantar suas mensagens."),
             accent_color=discord.Color.blurple(),
         )
-        cover = str(getattr(melody, "thumbnail_url", "") or "")
+        cover = (cover_attachment_url(melody.id) or remote_thumbnail_url(melody.id)
+                 or str(getattr(melody, "thumbnail_url", "") or ""))
         cover_description = melody.name
         if not cover and melody.id == DEFAULT_MELODY_ID:
             bot_user = getattr(getattr(self.cog, "bot", None), "user", None)
             cover = str(getattr(getattr(bot_user, "display_avatar", None), "url", "") or "")
             cover_description = "Painel de canto"
-        if cover.startswith("https://"):
+        if cover.startswith(("https://", "attachment://")):
             container.add_item(discord.ui.Section(card, accessory=discord.ui.Thumbnail(cover, description=cover_description)))
         else:
             container.add_item(card)
@@ -180,6 +182,11 @@ class CDPanelView(VisaoLayoutBaseTTS):
         container.add_item(discord.ui.TextDisplay(footer))
         self.add_item(container)
 
+    def panel_files(self) -> list[discord.File]:
+        """Local cached attachments; selecting songs never queries YouTube."""
+        cover = cached_cover_file(self.selected_melody_id)
+        return [cover] if cover is not None else []
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         guild = getattr(interaction, "guild", None)
         if guild is None or int(guild.id) != int(self.guild_id):
@@ -198,16 +205,23 @@ class CDPanelView(VisaoLayoutBaseTTS):
 
     async def _edit_panel(self, interaction: discord.Interaction | None = None) -> None:
         self._rebuild()
-        if interaction is not None and not interaction.response.is_done():
-            await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
-            return
         message = self.message or getattr(interaction, "message", None)
-        if message is not None:
-            try:
-                await message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
-            except discord.HTTPException:
-                # Excluir a mensagem não cancela uma síntese nem desfaz ajustes.
-                pass
+        if message is None and (interaction is None or interaction.response.is_done()):
+            return
+        files = self.panel_files()
+        try:
+            if interaction is not None and not interaction.response.is_done():
+                await interaction.response.edit_message(view=self, attachments=files,
+                                                        allowed_mentions=discord.AllowedMentions.none())
+            elif message is not None:
+                try:
+                    await message.edit(view=self, attachments=files, allowed_mentions=discord.AllowedMentions.none())
+                except discord.HTTPException:
+                    # Excluir a mensagem não cancela uma síntese nem desfaz ajustes.
+                    pass
+        finally:
+            for file in files:
+                file.close()
 
     async def select_melody(self, interaction: discord.Interaction) -> None:
         if not await self.interaction_check(interaction):
@@ -248,7 +262,6 @@ class CDPanelView(VisaoLayoutBaseTTS):
             self.active_melody_id = melody_id
             self._saved = True
             await self.refresh()
-            await self._edit_panel(interaction)
         except Exception:
             await _reply(interaction, "Não consegui salvar a melodia agora. Tente novamente.")
         finally:

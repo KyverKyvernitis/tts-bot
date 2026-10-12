@@ -4899,10 +4899,16 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
 
             view = CDPanelView(self, message.author.id, message.guild.id, timeout=300)
             await view.refresh()
-            sent = await message.channel.send(
-                view=view,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            files = view.panel_files()
+            try:
+                sent = await message.channel.send(
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    **({"files": files} if files else {}),
+                )
+            finally:
+                for file in files:
+                    file.close()
         except asyncio.CancelledError:
             if view is not None:
                 view.stop()

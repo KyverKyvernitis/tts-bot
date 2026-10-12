@@ -60,7 +60,7 @@ from cogs.musica.integracoes.tts import (
 from .edge_endpoint import configure_edge_endpoint
 from .helpers import validate_voice
 from .performance import performance_hash
-from .melodies import DEFAULT_MELODY_ID, score_for_melody
+from .melodies import DEFAULT_MELODY_ID, score_for_melody, preview_text_for_melody
 from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences, worker_voice_details
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
 from .streaming import SharedSynthesisMixin
@@ -1882,7 +1882,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if language not in status["languages"]:
             raise TTVSingingError("O idioma selecionado está indisponível para essa vocaloid.")
         score = score_for_melody(melody_id)
-        text = "My dad has bread" if language == "en-US" else "Meu pai tem pão"
+        text = preview_text_for_melody(melody_id, language)
         item = QueueItem(guild_id=int(guild_id), channel_id=0, author_id=int(user_id),
             text=text, engine="teto", voice=preferences["ttv_voice_id"], language=language,
             rate="1.0", pitch="+0Hz", teto_pitch_semitones="+0.0", **preferences,

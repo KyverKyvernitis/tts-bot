@@ -4,10 +4,8 @@ import asyncio
 
 from datetime import datetime, timezone, timedelta
 from copy import deepcopy
-from functools import wraps
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Optional
-from weakref import WeakValueDictionary
 
 import time
 import uuid
@@ -15,7 +13,6 @@ import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
 
 import config
-from cogs.tts.melodies import normalize_melody_id
 from cogs.tts.ttv import normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id, resolve_preferences
 
 
@@ -24,26 +21,6 @@ def _tts_effect_level(value: object) -> int:
         return max(0, min(3, int(value or 0)))
     except (TypeError, ValueError):
         return 0
-
-
-def _serialize_user_tts(method):
-    @wraps(method)
-    async def serialized(self, guild_id: int, user_id: int, *args, **kwargs):
-        # Keep read/write/cache publication together. Two panels saving a voice
-        # and a melody concurrently must not overwrite each other's edits.
-        locks = getattr(self, "_user_tts_locks", None)
-        if locks is None:
-            locks = self._user_tts_locks = WeakValueDictionary()
-        key = (guild_id, user_id)
-        lock = locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[key] = lock
-        # The local reference also retains the lock for tasks waiting on it;
-        # idle users disappear from the weak map without a growing registry.
-        async with lock:
-            return await method(self, guild_id, user_id, *args, **kwargs)
-    return serialized
 
 
 class SettingsDB:
@@ -55,7 +32,6 @@ class SettingsDB:
         self.guild_cache: Dict[int, Dict[str, Any]] = {}
         self.user_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
         self._resolved_tts_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
-        self._user_tts_locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
         self._truco_history_lock = asyncio.Lock()
         self._chip_change_listeners: list[Any] = []
 
@@ -1040,8 +1016,8 @@ class SettingsDB:
                 tts.get("teto_pitch_semitones", "") if tts.get("teto_pitch_semitones") is not None else ""
             ),
             "ttv_voice_id": str(tts.get("ttv_voice_id", "") or ""),
-            "ttv_language": str(tts.get("ttv_language", "") or ""),
             "ttv_melody_id": str(tts.get("ttv_melody_id", "") or ""),
+            "ttv_language": str(tts.get("ttv_language", "") or ""),
             "ttv_pitch_semitones": str(
                 tts.get("ttv_pitch_semitones", "") if tts.get("ttv_pitch_semitones") is not None else ""
             ),
@@ -1054,7 +1030,6 @@ class SettingsDB:
             "speaker_name": str(tts.get("speaker_name", "") or ""),
         }
 
-    @_serialize_user_tts
     async def set_user_tts(
         self,
         guild_id: int,
@@ -1071,8 +1046,8 @@ class SettingsDB:
         android_pitch: Optional[str] = None,
         teto_pitch_semitones: Optional[str] = None,
         ttv_voice_id: Optional[str] = None,
-        ttv_language: Optional[str] = None,
         ttv_melody_id: Optional[str] = None,
+        ttv_language: Optional[str] = None,
         ttv_pitch_semitones: Optional[str] = None,
         ttv_speech_rate: Optional[float] = None,
         advanced_nightcore_level: Optional[int] = None,
@@ -1083,12 +1058,13 @@ class SettingsDB:
         # Validate the complete TTV edit before mutating caches or calling Mongo.
         # The legacy argument remains accepted during the gradual UI migration.
         ttv_updates: Dict[str, Any] = {}
+        if ttv_melody_id is not None:
+            from cogs.tts.melodies import normalize_melody_id
+            ttv_updates["ttv_melody_id"] = normalize_melody_id(ttv_melody_id)
         if ttv_voice_id is not None:
             ttv_updates["ttv_voice_id"] = normalize_voice_id(ttv_voice_id)
         if ttv_language is not None:
             ttv_updates["ttv_language"] = normalize_language(ttv_language)
-        if ttv_melody_id is not None:
-            ttv_updates["ttv_melody_id"] = normalize_melody_id(ttv_melody_id)
         pitch_update = ttv_pitch_semitones if ttv_pitch_semitones is not None else teto_pitch_semitones
         if pitch_update is not None:
             normalized_pitch = normalize_pitch(pitch_update) if str(pitch_update).strip() else ""
@@ -1138,14 +1114,13 @@ class SettingsDB:
         doc["guild_id"] = guild_id
         doc["user_id"] = user_id
         doc["tts"] = tts
+        self.user_cache[key] = doc
+        self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
         await self.coll.update_one(
             {"type": "user", "guild_id": guild_id, "user_id": user_id},
             {"$set": doc},
             upsert=True,
         )
-        # A failed write must not appear saved in the panel or later requests.
-        self.user_cache[key] = doc
-        self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
 
     async def reset_user_tts(self, guild_id: int, user_id: int) -> bool:
         key = (guild_id, user_id)
@@ -1249,11 +1224,10 @@ class SettingsDB:
             ttv_preferences["ttv_language"] = normalize_language(ttv_values.get("ttv_language"))
         except ValueError:
             ttv_preferences["ttv_language"] = str(ttv_values["ttv_language"]).strip()
-        try:
-            ttv_preferences["ttv_melody_id"] = normalize_melody_id(ttv_values.get("ttv_melody_id"))
-        except ValueError:
-            ttv_preferences["ttv_melody_id"] = str(ttv_values["ttv_melody_id"]).strip()
         resolved.update(ttv_preferences)
+        # Keep a removed or retired melody value observable to the panel.
+        # Message preparation handles unknown values without changing speech.
+        resolved["ttv_melody_id"] = str(user.get("ttv_melody_id") or "").strip()
         # Both contracts report the same effective pitch during migration.
         resolved["teto_pitch_semitones"] = ttv_preferences["ttv_pitch_semitones"]
         self._resolved_tts_cache[cache_key] = dict(resolved)

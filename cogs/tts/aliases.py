@@ -15,6 +15,11 @@ _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
         "display": ("help",),
         "accepts_argument": True,
     },
+    "cd": {
+        "aliases": ("cd",),
+        "display": ("cd",),
+        "accepts_argument": False,
+    },
     "advanced": {
         "aliases": ("advanced",),
         "display": ("advanced",),
@@ -73,11 +78,6 @@ _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
             "tp",
         ),
         "display": ("toggle_panel", "tp"),
-        "accepts_argument": False,
-    },
-    "panel_canto": {
-        "aliases": ("cd",),
-        "display": ("cd",),
         "accepts_argument": False,
     },
 }

@@ -15,17 +15,33 @@ import pytest
 
 from test_tts_helpers import tts_audio
 from test_ttv_audio import Probe
-from test_ttv_live_midi_regression import LiveRenderCog, FakeDB, make_message, DEMO_MIDI
+from test_tts_message_flow import FakeCog as LiveRenderCog, FakeDB, make_message as _base_message
+
+def make_message(content):
+    message = _base_message(content)
+    message.attachments = []
+    message.reply = AsyncMock()
+    return message
+from test_ttv_performance_bot import midi as demo_midi
+DEMO_MIDI = demo_midi()
 from cogs.tts.melodies import DEFAULT_MELODY_ID, Melody, list_melodies, score_for_melody
 from cogs.tts.performance import performance_hash
 from cogs.tts.mensagens.preparacao import preparar_payload_tts_mensagem
 
 
-def test_catalog_starts_with_only_actual_melody_and_each_request_owns_its_score():
-    assert [melody.id for melody in list_melodies()] == [DEFAULT_MELODY_ID]
+def test_catalog_keeps_default_and_each_request_owns_its_score():
+    entries = list_melodies()
+    assert entries[0].id == DEFAULT_MELODY_ID and len(entries) == 11
+    assert len({entry.id for entry in entries}) == 11
     first = score_for_melody()
     first["preset"] = "changed"
-    assert score_for_melody() == {"version": 1, "preset": DEFAULT_MELODY_ID}
+    assert score_for_melody() == {
+        "version": 1, "track_index": 0, "duration_ms": 4000, "lyrics_source": "message",
+        "notes": [
+            {"midi_note": pitch, "start_ms": index * 1000, "duration_ms": 1000, "velocity": 100}
+            for index, pitch in enumerate((60, 64, 67, 64))
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -56,7 +72,7 @@ async def test_user_midi_overrides_missing_saved_melody_for_that_message_only():
                                           read=AsyncMock(return_value=DEMO_MIDI))]
     payload = await preparar_payload_tts_mensagem(cog, message,
         guild_defaults={}, active_prefix="'", forced_engine="teto")
-    assert payload.queue_item.ttv_score["duration_ms"] == 5500
+    assert payload.queue_item.ttv_score["duration_ms"] == 1500
 
 
 @pytest.mark.asyncio
