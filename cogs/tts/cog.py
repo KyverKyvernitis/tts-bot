@@ -3027,10 +3027,38 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
     def _music_player_is_active(self, guild_id: int) -> bool:
         return musica_ativa(getattr(self, "bot", None), guild_id)
 
-    def _music_should_own_voice(self, guild: discord.Guild | None) -> bool:
+    def _music_should_own_voice(
+        self,
+        guild: discord.Guild | None,
+        *,
+        confirmed_agent_offline: bool = False,
+    ) -> bool:
         if guild is None:
             return False
-        return deve_bloquear_voz_tts_local(self.bot, guild.id)
+        blocked = deve_bloquear_voz_tts_local(self.bot, guild.id)
+        if not blocked or not confirmed_agent_offline:
+            return blocked
+        # The music router may keep an obsolete 'agent owns voice' flag after
+        # its worker explicitly reported no available device. Only bypass that
+        # precise stale claim for this TTS request; never bypass Lavalink or a
+        # real music-owned VoiceClient.
+        vc = self._get_voice_client_for_guild(guild)
+        if cliente_voz_pertence_musica(vc):
+            return True
+        router = getattr(self.bot, "audio_router", None)
+        get_state = getattr(router, "get_state", None)
+        if callable(get_state):
+            try:
+                music_state = get_state(guild.id)
+                if str(getattr(music_state, "current_backend", "") or "").lower() == "agent":
+                    logger.info(
+                        "[tts_voice] ignorando posse remota obsoleta; TTS local liberado | guild=%s",
+                        guild.id,
+                    )
+                    return False
+            except Exception:
+                pass
+        return blocked
 
     async def _disconnect_and_clear(self, guild: discord.Guild):
         self._mark_manual_voice_disconnect(guild.id, seconds=60.0)
@@ -3137,6 +3165,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         notify_owner_on_failure: bool | None = None,
         failure_context: str = "entrada na call",
         defer_post_connect: bool = False,
+        tts_music_worker_unavailable: bool = False,
         chatbot_target_user_id: int | None = None,
         chatbot_before_effect: Callable[[], Awaitable[None]] | None = None,
     ) -> Optional[discord.VoiceClient]:
@@ -3170,7 +3199,9 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 )
             return None
 
-        if self._music_should_own_voice(guild):
+        if self._music_should_own_voice(
+            guild, confirmed_agent_offline=tts_music_worker_unavailable
+        ):
             print(f"[tts_voice] conexão local do TTS ignorada | player de música controlando voz | guild={guild.id}")
             return None
 
@@ -3246,7 +3277,9 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 await self._recover_stale_voice_client(guild, reason="ensure_connected")
                 vc = self._get_voice_client_for_guild(guild)
             if self._voice_client_owned_by_music(vc):
-                if self._music_should_own_voice(guild):
+                if self._music_should_own_voice(
+                    guild, confirmed_agent_offline=tts_music_worker_unavailable
+                ):
                     print(f"[tts_voice] conexão TTS ignorada | player de música ativo | guild={guild.id}")
                     return None
                 # Cliente musical parado/órfão: force a limpeza para o TTS local não ficar
@@ -3254,7 +3287,9 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 with contextlib.suppress(Exception):
                     await vc.disconnect(force=True)
                 vc = None
-            if self._music_should_own_voice(guild):
+            if self._music_should_own_voice(
+                guild, confirmed_agent_offline=tts_music_worker_unavailable
+            ):
                 print(f"[tts_voice] conexão local do TTS ignorada | música aguardando conexão | guild={guild.id}")
                 return None
 
