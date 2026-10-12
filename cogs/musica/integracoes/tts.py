@@ -148,11 +148,6 @@ async def tocar_tts_via_agente(bot: Any, **kwargs):
 
 def erro_agente_permite_fallback_local(bot: Any, guild_id: int, exc: Exception | str) -> bool:
     texto = str(exc or "").lower()
-    # Confirmed worker absence invalidates the remote ownership claim. Local
-    # Edge/gTTS can continue; an actual local music player remains protected
-    # by the voice-client ownership checks in preparar_cliente_voz_tts.
-    if type(exc).__name__ == "MusicWorkerUnavailable" or "nenhum worker online" in texto or "no worker online" in texto:
-        return True
     if not musica_ativa(bot, guild_id):
         return True
     return any(
@@ -260,6 +255,16 @@ async def rotear_item_tts_para_musica(
     if not route_music:
         return False, audio_task
 
+    # Singing/effects must reach the musical session as verified rendered audio.
+    # Its text-only synthesis endpoint does not understand the performance score.
+    if (getattr(item, "ttv_score", None) is not None
+            or getattr(item, "ttv_segments", None) is not None):
+        if not suporta_cache_tts_agente(bot):
+            raise RuntimeError(
+                "O worker de música precisa aceitar áudio pronto para reproduzir "
+                "canto e efeitos de TTV. Atualize o worker e tente novamente."
+            )
+
     if audio_task is not None and not audio_task.done():
         audio_task.cancel()
         with contextlib.suppress(BaseException):
@@ -366,8 +371,6 @@ async def rotear_item_tts_para_musica(
         item._tts_remote_active = False
         safe_to_fallback = erro_agente_permite_fallback_local(bot, guild_id, exc)
         if safe_to_fallback:
-            if type(exc).__name__ == "MusicWorkerUnavailable" or "nenhum worker online" in str(exc).lower() or "no worker online" in str(exc).lower():
-                setattr(item, "_tts_music_worker_unavailable", True)
             setattr(item, "_skip_music_agent_tts_route", True)
             logger.warning(
                 "[tts_voice] TTS do worker musical falhou; seguindo fallback seguro | guild=%s channel=%s erro=%s",
@@ -464,13 +467,8 @@ async def preparar_cliente_voz_tts(owner: Any, guild: Any, item: Any, state: Any
     # local, dê ao estado autoritativo uma chance curta de confirmar a posse da
     # sessão musical. Isso fecha a janela em que o TTS roubava a call e perdia
     # o overlay/ducking enquanto painel/status também estavam congelados.
-    worker_confirmed_unavailable = bool(getattr(item, "_tts_music_worker_unavailable", False))
     block_local = deve_bloquear_voz_tts_local(bot, guild_id)
-    if worker_confirmed_unavailable and not cliente_voz_pertence_musica(vc):
-        # The remote music route already returned 'no worker online' for this
-        # utterance. Do not wait for another HTTP check of the same worker.
-        block_local = False
-    elif not block_local:
+    if not block_local:
         block_local = await revalidar_rota_tts_agente(bot, guild_id, item_channel_id)
 
     if cliente_voz_pertence_musica(vc):

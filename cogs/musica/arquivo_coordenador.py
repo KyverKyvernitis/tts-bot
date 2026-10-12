@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from .agente_telefone.comandos import music_agent_command, music_agent_status
-from .agente_telefone.modelos import MusicWorkerUnavailable
 from .busca import arquivo
 
 log = logging.getLogger(__name__)
@@ -50,7 +49,6 @@ class ArchiveCoordinator:
         self._cleanup_streak = 0
         self._revision = ""
         self._revision_checked_at = 0.0
-        self._worker_offline_last_logged_at = 0.0
 
     def start(self) -> None:
         if self.task is None or self.task.done():
@@ -289,14 +287,6 @@ class ArchiveCoordinator:
                         break
             except asyncio.CancelledError:
                 raise
-            except MusicWorkerUnavailable:
-                # Offline is normal for an Android worker. Keep pending jobs;
-                # avoid a full traceback every 20 seconds in the VPS journal.
-                now = time.monotonic()
-                if now - self._worker_offline_last_logged_at >= 120.0:
-                    self._worker_offline_last_logged_at = now
-                    log.info("[music/archive] worker offline; arquivamento aguardando")
-                await asyncio.sleep(20)
             except Exception:
-                log.warning("[music/archive] erro ao executar arquivamento; tentativa posterior", exc_info=True)
+                log.warning("[music/archive] agente indisponível; tentativa posterior", exc_info=True)
                 await asyncio.sleep(20)
