@@ -79,7 +79,7 @@ O áudio de TTV não muda silenciosamente para outra personagem em caso de erro.
 
 O patch mantém as pastas originais do repositório e não inclui voicebanks,
 binários dos motores, segredos ou um manifesto de exclusões. A automação
-existente do updater publica o worker **1.11.40**, que anuncia as vozes prontas
+existente do updater publica o worker **1.11.41**, que anuncia as vozes prontas
 separadamente e sintetiza a personagem selecionada por pedido. Ele conserva a
 correção do tom **Normal** nas respostas raw da versão 1.11.36.
 O bootstrap no telefone
@@ -103,19 +103,28 @@ amostras; gerar um WAV válido não mede a naturalidade da fala.
 
 ## Canto MIDI e comandos no texto
 
-O worker 1.11.40 acrescenta a execução de partituras e efeitos de texto. Use
+O worker 1.11.41 oferece canto com melodia padrão, partituras e efeitos de texto. Use
 `<` antes de uma palavra para entrada suave, `>` depois para saída suave,
 `|` entre palavras para pausa curta e `~` no final para sustentar a vogal.
 Exemplo: `'<aaa aaa>`. Esses comandos pertencem ao TTV; a fala comum sem
 comandos conserva seus controles atuais.
 
-Para cantar, envie o MIDI anexado à mensagem de TTV junto da letra. A voz e o
+Para cantar sem anexo, envie `'/cantar Meu pai tem pão`. A melodia padrão é
+C4, E4, G4 e E4, com os mesmos tempos das duas amostras publicadas. O ciclo
+se repete para acomodar letras maiores. `'a ~ ~ ~ a` também ativa essa melodia;
+`aaa~` junto à palavra permanece uma sustentação na fala. No canto padrão,
+`|` insere uma pausa de 180 ms.
+
+Para usar outra melodia, envie o MIDI anexado à mensagem de TTV junto da letra.
+O arquivo tem prioridade sobre a melodia padrão. A voz e o
 idioma selecionados continuam valendo; notas e andamento vêm do MIDI,
 independentes do tom e velocidade salvos para a fala. No canto, `a ~ ~ mor`
 mantém a vogal “a” durante três notas e começa “mor” na quarta. Um `|` separa
 frases preservando o relógio musical.
 
-O canto usa ESPER com uma voicebank English-CVVC instalada. O leitor aceita
+O canto usa ESPER com a voicebank English-CVVC da personagem, mesmo quando
+a fala da Teto usa o banco Standard. A geração tem orçamento de 120 segundos;
+o orçamento da fala comum permanece igual. O leitor aceita
 uma melodia monofônica, até 128 notas, 60 segundos e 512 KiB, com letra enviada
 na mensagem ou incorporada ao MIDI. Sem letra, canta “a”. Quando várias faixas
 podem ser a melodia, um menu restrito ao autor permite escolher. A letra pode

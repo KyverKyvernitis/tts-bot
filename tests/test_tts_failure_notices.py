@@ -15,7 +15,7 @@ import requests
 from edge_tts.exceptions import NoAudioReceived
 from gtts.tts import gTTSError
 
-from cogs.tts.audio import QueueItem, TTSPlaybackError
+from cogs.tts.audio import QueueItem, TTSPlaybackError, TTVSingingError
 from cogs.tts.cog import TTSVoice
 from cogs.tts.failure_notices import failure_code, internal_failure_details, notify_tts_failure
 from cogs.tts.mensagens.despacho import despachar_mensagem_tts
@@ -196,11 +196,43 @@ class FailureNoticeTests(unittest.IsolatedAsyncioTestCase):
                 elif scenario == "cannot_send":
                     fixture.bot_permissions.send_messages_in_threads = False
                 await notify_tts_failure(fixture.cog, fixture.item, "playback_failed")
-                fixture.channel.fetch_member.assert_awaited_once_with(2)
+                if scenario == "cannot_send":
+                    # Permission rejection happens before any membership fetch.
+                    fixture.channel.fetch_member.assert_not_awaited()
+                else:
+                    fixture.channel.fetch_member.assert_awaited_once_with(2)
                 if scenario == "allowed":
                     fixture.channel.send.assert_awaited_once()
                 else:
                     fixture.channel.send.assert_not_awaited()
+
+    async def test_known_singing_notices_keep_static_diagnosis_and_private_errors_hidden(self):
+        cases = (
+            ("ttv_worker_outdated", "worker atualizado", "1.11.41"),
+            ("ttv_singing_bank_missing", "English-CVVC", "instalado"),
+            ("ttv_singing_failed", "gerar esse canto", "worker"),
+            ("ttv_singing_timeout", "demorou demais", "letra menor"),
+        )
+        for code, first_detail, second_detail in cases:
+            with self.subTest(code=code):
+                fixture = _Fixture()
+                fixture.item.engine = "teto"
+                error = TTVSingingError(
+                    "secret-api-key https://private.example/token <@999> fala privada",
+                    code=code,
+                )
+                error.__cause__ = TimeoutError("secret network diagnosis")
+                self.assertEqual(failure_code("synthesis_failed", error), code)
+                await notify_tts_failure(fixture.cog, fixture.item, "synthesis_failed", error)
+                content = fixture.channel.send.await_args.args[0]
+                self.assertIn(first_detail, content)
+                self.assertIn(second_detail, content)
+                for private in ("secret", "https://", "<@999>", "fala privada"):
+                    self.assertNotIn(private, content)
+                mentions = fixture.channel.send.await_args.kwargs["allowed_mentions"]
+                self.assertFalse(mentions.users)
+                self.assertFalse(mentions.roles)
+                self.assertFalse(mentions.everyone)
 
     async def test_member_cache_miss_fetches_current_member_before_notice(self):
         fixture = _Fixture()

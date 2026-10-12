@@ -1,7 +1,7 @@
 # Canto MIDI e efeitos de TTV
 
 Este pacote usa a base `repo-20261011-161817.zip` e acrescenta um fluxo de
-execução musical ao worker 1.11.40. A fala sem comandos mantém seus controles
+execução musical ao worker 1.11.41. A fala sem comandos mantém seus controles
 e seu renderer atual. O canto usa ESPER e os bancos English-CVVC já instalados
 da Miku e da Teto.
 
@@ -22,12 +22,29 @@ interpretados como efeitos. Os efeitos valem somente no TTV. Mensagens com
 efeitos têm limite de 180 caracteres e são renderizadas como uma apresentação
 única, sem divisão em blocos que perderia as transições.
 
+## Cantar sem anexar MIDI
+
+Use `'/cantar Meu pai tem pão`. A melodia padrão é a mesma dos dois MP3s de
+demonstração: C4, E4, G4 e E4. As notas duram 850, 850, 850 e 1050 ms, com
+200 ms antes e depois. O ciclo se repete quando a letra precisa de mais notas;
+letras curtas prolongam a última vogal até completar as quatro notas.
+
+`'a ~ ~ ~ a` também ativa o canto sem anexo: cada `~` separado continua a
+vogal anterior na próxima nota. `aaa~` junto à palavra permanece um efeito
+de sustentação na fala. `/cantar` permite cantar uma letra sem esses símbolos.
+No canto padrão, `|` insere uma pausa de 180 ms e começa uma nova frase.
+
+O idioma e a personagem seguem **Configurar TTV**. O canto sempre usa o banco
+English-CVVC da personagem, inclusive se a fala da Teto usa o banco padrão.
+Os ajustes de tom e velocidade da fala não alteram as notas do canto.
+
 ## Cantar um MIDI
 
 Anexe um arquivo `.mid` ou `.midi` à mensagem de TTV e escreva a letra depois
 do prefixo. Exemplo: `'abacate com manteiga`. A voz e o idioma continuam sendo
 os selecionados em **Configurar TTV**. O canto preserva o andamento e as notas
-do arquivo, separado dos ajustes de tom e velocidade da fala.
+do arquivo, separado dos ajustes de tom e velocidade da fala. Um MIDI anexado
+tem prioridade sobre a melodia padrão, mesmo usando `/cantar`.
 
 A letra da mensagem tem prioridade. Sem texto, o bot usa a letra temporizada
 do MIDI; sem letra no arquivo, canta a vogal “a”. O leitor prefere uma melodia
@@ -60,8 +77,8 @@ python "$HOME/ttv-canto-termux-kit/deploy/ttv-performance/termux/render-demo.py"
   --container voicepeak-arm64 --esper-root "$HOME/.esper-utau"
 ```
 
-Sem MIDI, o script cria uma melodia curta para as duas vozes. Os WAVs, MP3s,
-MIDI e relatório ficam em uma pasta nova dentro de `Download/ttv-canto`; o
+Sem MIDI, o script canta “Meu pai tem pão” com a melodia padrão nas duas vozes.
+Os WAVs, MP3s e relatório ficam em uma pasta nova dentro de `Download/ttv-canto`; o
 resultado mostra o caminho completo. Para uma melodia sua:
 
 ```bash
@@ -77,10 +94,13 @@ os bancos, a instalação do ESPER e os caches de produção; usa caches tempor�
 
 ## Atualização
 
-Aplique o patch pelo updater do bot e confirme **1.11.40** no status do worker
+Aplique o patch pelo updater do bot e confirme **1.11.41** no status do worker
 antes de testar. Um worker anterior recebe pedidos de fala comum; pedidos de
 canto e efeitos exigem suporte específico e são recusados com uma mensagem de
-atualização. Nenhum banco de voz ou binário do ESPER está incluído no patch.
+atualização. O canto padrão exige protocolo 2. Pedidos musicais e efeitos têm
+até 120 segundos para gerar o áudio; o orçamento da fala comum permanece igual.
+As falhas de canto agora recebem uma mensagem específica em vez do erro genérico.
+Nenhum banco de voz ou binário do ESPER está incluído no patch.
 
 O teste local com ESPER Linux x64 confirma execução e características medidas
 do áudio. O teste do kit no telefone valida a instalação ARM64 existente.

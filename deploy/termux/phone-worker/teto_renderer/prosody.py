@@ -9,6 +9,34 @@ from dataclasses import dataclass, replace
 
 from .phonemizer import Mora
 
+DEFAULT_MELODY_PRESET = "ttv-demo-v1"
+
+
+def is_default_score(score) -> bool:
+    return (isinstance(score, dict) and set(score) == {"version", "preset"}
+            and type(score.get("version")) is int and score["version"] == 1
+            and score.get("preset") == DEFAULT_MELODY_PRESET)
+
+
+def default_melody_score(count: int, *, boundaries=()) -> dict:
+    """The exact C4/E4/G4/E4 melody of the two published singing samples."""
+    if type(count) is not int or not 1 <= count <= 128:
+        raise ValueError("a letra deve ocupar entre 1 e 128 notas")
+    notes, cursor = [], 200
+    pattern = ((60, 850), (64, 850), (67, 850), (64, 1050))
+    boundaries = set(boundaries)
+    for number in range(count):
+        if number in boundaries:
+            cursor += 180
+        pitch, duration = pattern[number % len(pattern)]
+        notes.append({"midi_note": pitch, "start_ms": cursor,
+                      "duration_ms": duration, "velocity": 100})
+        cursor += duration
+    if cursor + 200 > 60000:
+        raise ValueError("a letra passa de 60 segundos com a melodia padrão; divida o canto em duas mensagens")
+    return {"version": 1, "track_index": 0, "duration_ms": cursor + 200,
+            "lyrics_source": "message", "notes": notes}
+
 
 def validate_performance(text: str, *, score=None, segments=None) -> None:
     """Bound untrusted musical/effect requests before caches or native processes."""
@@ -16,7 +44,10 @@ def validate_performance(text: str, *, score=None, segments=None) -> None:
         raise ValueError("texto TTV grande demais para esta apresentação")
     if score is None and segments is None:
         raise ValueError("apresentação TTV exige MIDI ou efeitos no texto")
-    if score is not None:
+    if is_default_score(score):
+        if not text.strip():
+            raise ValueError("escreva a letra depois de /cantar")
+    elif score is not None:
         if not isinstance(score, dict) or set(score) - {"version", "track_index", "duration_ms", "lyrics_source", "notes"}:
             raise ValueError("partitura TTV inválida")
         if type(score.get("version")) is not int or score["version"] != 1:
