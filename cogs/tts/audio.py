@@ -531,6 +531,7 @@ class QueueItem:
     ttv_pitch_semitones: str | None = field(default=None, repr=False, compare=False)
     ttv_speech_rate: float | None = field(default=None, repr=False, compare=False)
     ttv_language: str = field(default=DEFAULT_LANGUAGE, repr=False, compare=False)
+    ttv_score: object = field(default=None, repr=False, compare=False)
     enqueued_at_monotonic: float = field(default_factory=time.monotonic, repr=False, compare=False)
     received_at_monotonic: float = field(default=0.0, repr=False, compare=False)
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
