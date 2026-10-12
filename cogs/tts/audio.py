@@ -57,6 +57,7 @@ from cogs.musica.integracoes.tts import (
     rotear_item_tts_para_musica,
 )
 
+from .edge_endpoint import configure_edge_endpoint
 from .helpers import validate_voice
 from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences, worker_voice_details
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
@@ -262,14 +263,22 @@ _TTS_CACHE_SUFFIXES = (".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw
 
 logger = logging.getLogger(__name__)
 
+# The file-based and progressive Edge paths share edge_tts.communicate.WSS_URL.
+if configure_edge_endpoint():
+    logger.info("[tts_edge_endpoint] WebSocket de sintese: api.msedgeservices.com")
+
 
 def _tts_safe_exception_detail(exc: BaseException | None) -> str:
     """Bounded diagnostic for journal logs; never include request bodies or URLs."""
     if exc is None:
         return "none"
     detail = str(exc).replace("\n", " ").replace("\r", " ")
-    detail = re.sub(r"https?://\S+", "[url]", detail, flags=re.IGNORECASE)
-    detail = re.sub(r"(?i)\b(?:authorization|bearer|token|api[_-]?key|password)\s*[:= ]\s*\S+", "[credencial]", detail)
+    detail = re.sub(r"(?:https?|wss?)://[^\s\'\"<>]+", "[url]", detail, flags=re.IGNORECASE)
+    detail = re.sub(
+        r"(?i)\b(?:authorization|bearer|token|api[_-]?key|password|"
+        r"trustedclienttoken|ocp-apim-subscription-key|sec-ms-gec)\s*[:= ]\s*\S+",
+        "[credencial]", detail,
+    )
     return f"{type(exc).__name__}: {detail[:200]}"
 
 # Marcador dedicado para acordar o escritor no fim da síntese. Sem ele, um
@@ -2641,7 +2650,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         engine_metrics = self._get_engine_metrics(engine)
         engine_metrics["synth_failures"] = int(engine_metrics.get("synth_failures", 0) or 0) + 1
         engine_metrics["consecutive_failures"] = int(engine_metrics.get("consecutive_failures", 0) or 0) + 1
-        engine_metrics["last_error"] = str(error)
+        engine_metrics["last_error"] = _tts_safe_exception_detail(error)
         engine_metrics["last_error_at"] = time.time()
         if duration_ms is not None:
             engine_metrics["last_synth_ms"] = round(float(duration_ms), 2)
@@ -2651,7 +2660,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             body = (
                 f"Engine: {engine}\n"
                 f"Falhas consecutivas: {engine_metrics['consecutive_failures']}\n"
-                f"Último erro: {error}"
+                f"Último erro: {engine_metrics['last_error']}"
             )
             if duration_ms is not None:
                 body += f"\nDuração até falhar: {round(float(duration_ms), 2)} ms"
@@ -4852,7 +4861,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 logger.warning(
                     "[tts_fallback] Edge fallback falhou; usando gTTS | guild=%s erro=%s",
                     item.guild_id,
-                    exc,
+                    _tts_safe_exception_detail(exc),
                 )
                 fallback = replace(
                     fallback,
@@ -5745,7 +5754,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     guild_id=item.guild_id,
                 )
             except Exception as e:
-                logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
+                logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, _tts_safe_exception_detail(e))
                 item._tts_actual_engine = "gtts"
                 return await self._run_timed_generation(
                     "gtts",
@@ -5914,7 +5923,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     "[tts_edge_stream] falha antes do primeiro áudio; usando gTTS | guild=%s rota=%s erro=%s",
                     item.guild_id,
                     stream_reason,
-                    exc,
+                    _tts_safe_exception_detail(exc),
                 )
                 return await self._resolve_edge_gtts_fallback(
                     state,
