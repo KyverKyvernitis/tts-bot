@@ -58,6 +58,7 @@ from cogs.musica.integracoes.tts import (
 )
 
 from .helpers import validate_voice
+from .performance import performance_hash
 from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences, worker_voice_details
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
 from .streaming import SharedSynthesisMixin
@@ -261,16 +262,6 @@ _TTS_REQUIRED_DIRS = (TTS_TEMP_DIR, _RUNTIME_DIR, _CACHE_DIR)
 _TTS_CACHE_SUFFIXES = (".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw")
 
 logger = logging.getLogger(__name__)
-
-
-def _tts_safe_exception_detail(exc: BaseException | None) -> str:
-    """Bounded diagnostic for journal logs; never include request bodies or URLs."""
-    if exc is None:
-        return "none"
-    detail = str(exc).replace("\n", " ").replace("\r", " ")
-    detail = re.sub(r"https?://\S+", "[url]", detail, flags=re.IGNORECASE)
-    detail = re.sub(r"(?i)\b(?:authorization|bearer|token|api[_-]?key|password)\s*[:= ]\s*\S+", "[credencial]", detail)
-    return f"{type(exc).__name__}: {detail[:200]}"
 
 # Marcador dedicado para acordar o escritor no fim da síntese. Sem ele, um
 # FIFO vazio podia pagar até 250 ms extras aguardando o próximo polling.
@@ -503,13 +494,34 @@ def _validate_tts_playback_result(result: Any) -> dict[str, Any]:
 
 
 def _ttv_item_preferences(item) -> dict[str, Any]:
-    return resolve_preferences({
+    values = {
         "ttv_voice_id": getattr(item, "ttv_voice_id", None),
         "ttv_pitch_semitones": getattr(item, "ttv_pitch_semitones", None),
         "ttv_speech_rate": getattr(item, "ttv_speech_rate", None),
         "ttv_language": getattr(item, "ttv_language", None),
         "teto_pitch_semitones": getattr(item, "teto_pitch_semitones", None),
-    }, default_pitch=TTS_TETO_DEFAULT_PITCH_SEMITONES)
+    }
+    if getattr(item, "ttv_score", None) is not None:
+        # Imported music keeps its key and tempo independently of speech settings.
+        values.update(ttv_pitch_semitones="+0.0", teto_pitch_semitones="+0.0", ttv_speech_rate=1.0)
+    return resolve_preferences(values, default_pitch=TTS_TETO_DEFAULT_PITCH_SEMITONES)
+
+
+def _ttv_performance_payload(item) -> dict[str, Any]:
+    score = getattr(item, "ttv_score", None)
+    segments = getattr(item, "ttv_segments", None)
+    digest = getattr(item, "ttv_performance_hash", None)
+    if score is None and segments is None:
+        if digest:
+            raise ValueError("TTV: identidade musical sem notas ou efeitos.")
+        return {}
+    if str(getattr(item, "engine", "")).lower() != "teto":
+        raise ValueError("Notas e efeitos de texto são exclusivos do TTV.")
+    expected = performance_hash(text=str(item.text or ""), score=score, segments=segments)
+    if digest and digest != expected:
+        raise ValueError("TTV: notas ou efeitos mudaram depois da preparação.")
+    item.ttv_performance_hash = expected
+    return {"ttv_score": score, "ttv_segments": segments, "ttv_performance_hash": expected}
 
 
 @dataclass
@@ -531,6 +543,9 @@ class QueueItem:
     ttv_pitch_semitones: str | None = field(default=None, repr=False, compare=False)
     ttv_speech_rate: float | None = field(default=None, repr=False, compare=False)
     ttv_language: str = field(default=DEFAULT_LANGUAGE, repr=False, compare=False)
+    ttv_score: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    ttv_segments: list[dict[str, Any]] | None = field(default=None, repr=False, compare=False)
+    ttv_performance_hash: str = field(default="", repr=False, compare=False)
     enqueued_at_monotonic: float = field(default_factory=time.monotonic, repr=False, compare=False)
     received_at_monotonic: float = field(default=0.0, repr=False, compare=False)
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
@@ -756,7 +771,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         return await self._enqueue_tts_items(guild_id, [item])
 
     async def _enqueue_tts_items(self, guild_id: int, items: list[QueueItem]) -> tuple[bool, int, bool]:
-        items = [item for item in items if _has_speakable_tts_text(item.text)]
+        items = [item for item in items if getattr(item, "ttv_score", None) is not None or _has_speakable_tts_text(item.text)]
         if not items:
             return False, 0, False
         state = self._get_state(guild_id)
@@ -860,6 +875,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
             # A cópia não carrega a transcrição privada no item da fila. Use
             # o teto já existente, em vez do tamanho do rótulo do anexo.
             return TTS_PLAYBACK_TIMEOUT_MAX_SECONDS
+        if getattr(item, "ttv_score", None) is not None:
+            duration = float(item.ttv_score.get("duration_ms", 0)) / 1000.0
+            return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, duration + TTS_PLAYBACK_TIMEOUT_BASE_SECONDS))
         text_len = len((getattr(item, "text", "") or "").strip()) if item is not None else 0
         speech_seconds = min(text_len, 1600) * TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS
         timeout = TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + speech_seconds
@@ -1618,6 +1636,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             "teto_backend": str(state.get("teto_backend") or ""),
             "teto_reading_mode": str(state.get("teto_reading_mode") or ""),
             "ttv_personal_settings": bool(state.get("ttv_personal_settings")),
+            "ttv_performance_protocol": int(state.get("ttv_performance_protocol") or 0),
             "ttv_voices": list(state.get("ttv_voices") or [])[:25],
             "ttv_languages": list(state.get("ttv_languages") or [])[:2],
             "last_ok_age_seconds": round(now - last_ok, 1) if last_ok else None,
@@ -1946,6 +1965,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             route["teto_reading_mode"] = str(teto_state.get("reading_mode") or "")
             route["teto_fingerprint"] = str(teto_state.get("fingerprint") or "")
             route["ttv_personal_settings"] = bool(teto_state.get("ttv_personal_settings"))
+            route["ttv_performance_protocol"] = int(teto_state.get("ttv_performance_protocol") or agent.get("ttv_performance_protocol") or 0)
             route["ttv_languages"] = [code for code in (teto_state.get("ttv_languages") or [])
                                       if code in {"pt-BR", "en-US"}]
             route["ttv_language_fingerprints"] = {
@@ -2027,6 +2047,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
                           max_parts=TTS_LONG_TEXT_CHUNK_MAX_PARTS)
 
     def _expand_tts_queue_item(self, item: QueueItem) -> list[QueueItem]:
+        if _ttv_performance_payload(item):
+            return [item]
         chunks = self._split_tts_text_chunks(item.text, engine=item.engine)
         if len(chunks) <= 1:
             return [item]
@@ -3157,6 +3179,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
 
     def _snapshot_tts_item(self, item: QueueItem) -> None:
         if getattr(item, "_tts_settings_frozen", False):
+            _ttv_performance_payload(item)
             return
         item.engine = str(item.engine or "gtts").strip().lower().replace("-", "_")
         if item.engine == "edge":
@@ -3175,6 +3198,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             item.ttv_language = preferences["ttv_language"]
             item.language = item.ttv_language
             item.teto_pitch_semitones = item.ttv_pitch_semitones
+        _ttv_performance_payload(item)
         if item.engine in TTS_EFFECT_ENGINES:
             (
                 item.advanced_nightcore_level,
@@ -3210,6 +3234,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
             voice_state = worker_voice_details(self._tts_agent_route_state(), preferences["ttv_voice_id"])
             fingerprint = voice_state["language_fingerprints"].get(preferences["ttv_language"], voice_state["fingerprint"])
             payload = f"ttv-v2|worker|{fingerprint}|{preferences['ttv_voice_id']}|{preferences['ttv_pitch_semitones']}|{preferences['ttv_speech_rate']!r}|{preferences['ttv_language']}|{text}"
+            if item.ttv_performance_hash:
+                payload += f"|performance-v1:{item.ttv_performance_hash}"
         elif engine == "android_native":
             language = (item.language or "pt-BR").strip().lower().replace('_', '-')
             voice = str(item.voice or "auto").strip() or "auto"
@@ -3718,6 +3744,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 "_vps_worker_response_bytes": audio_size,
                 "audio_bytes_len": audio_size,
             }
+            data["ttv_performance_hash"] = self._worker_header_value(response.headers, "X-Core-Worker-TTV-Performance-Hash")
             voice_id = self._worker_header_value(response.headers, "X-Core-Worker-TTV-Voice-Id")
             if voice_id:
                 data["ttv_voice_id"] = voice_id
@@ -4236,6 +4263,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             "bot_user_id": int(getattr(me, "id", 0) or 0),
             "source": "tts_worker_voice_direct",
             "tts_request_id": item.request_id,
+            **_ttv_performance_payload(item),
             "tld": item.tld,
             "text": str(item.text or ""),
             "engine": str(item.engine or "gtts"),
@@ -4250,7 +4278,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             ),
             "cache_key": self._cache_key(item),
             "cache_mode": "prefer",
-            "timeout_seconds": max(3.0, min(WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS, self._estimate_playback_timeout(item))),
+            "timeout_seconds": self._estimate_playback_timeout(item) if getattr(item, "ttv_score", None) is not None else max(3.0, min(WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS, self._estimate_playback_timeout(item))),
             "confirm_transfer": True,
             "direct_tts": True,
             "release_after": False,
@@ -4273,6 +4301,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         prebuild compressed audio through the normal TTS pipeline if the cache
         is cold instead of making the Music Agent require those providers.
         """
+        performance = _ttv_performance_payload(item)
         state = self._get_state(item.guild_id)
         path = self._try_get_cached_path(state, item)
         cleanup = False
@@ -4295,6 +4324,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 )
                 return None
         if path is None:
+            if performance:
+                raise RuntimeError("TTV: não foi possível preparar o canto ou os efeitos para reprodução.")
             return None
         try:
             max_bytes = WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB * 1024 * 1024
@@ -4311,6 +4342,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 payload['cache_key'] = self._cache_key(item)
                 payload['prebuilt_audio'] = True
                 payload['prebuilt_audio_source'] = 'vps-prebuilt'
+                payload.update(performance)
                 return None
         except OSError:
             pass
@@ -4625,7 +4657,12 @@ class TTSAudioMixin(SharedSynthesisMixin):
         ), "ffmpeg_pcm"
 
     async def _try_get_worker_turbo_cache_path(self, item: QueueItem) -> str | None:
-        if not TTS_TURBO_WORKER_CACHE_ENABLED or getattr(item, "_tts_music_worker_unavailable", False):
+        # The generic cache endpoint does not confirm score/effect identity.
+        # Performance requests use the synthesis endpoint's verified cache.
+        if _ttv_performance_payload(item):
+            self._record_worker_cache_lookup("skip")
+            return None
+        if not TTS_TURBO_WORKER_CACHE_ENABLED:
             return None
         if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
             return None
@@ -5428,10 +5465,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if engine in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"}:
             engine = "gtts"
         is_teto = engine == "teto"
+        performance = _ttv_performance_payload(item)
         preferences = _ttv_item_preferences(item) if is_teto else {}
-        max_text_length = TTS_TETO_MAX_TEXT_LENGTH if is_teto else TTS_WORKER_AGENT_MAX_TEXT_LENGTH
+        max_text_length = 2048 if getattr(item, "ttv_score", None) is not None else TTS_TETO_MAX_TEXT_LENGTH if is_teto else TTS_WORKER_AGENT_MAX_TEXT_LENGTH
         timeout_seconds = TTS_TETO_WORKER_TIMEOUT_SECONDS if is_teto else TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS
-        max_audio_mb = TTS_TETO_MAX_AUDIO_MB if is_teto else TTS_WORKER_AGENT_MAX_AUDIO_MB
+        max_audio_mb = max(8, TTS_TETO_MAX_AUDIO_MB) if getattr(item, "ttv_score", None) is not None else TTS_TETO_MAX_AUDIO_MB if is_teto else TTS_WORKER_AGENT_MAX_AUDIO_MB
         fallback_engine = str(getattr(item, "piper_fallback_engine", "") or "gtts").strip().lower().replace("-", "_") or "gtts"
         if fallback_engine in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"}:
             fallback_engine = "gtts"
@@ -5445,6 +5483,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             "pitch": str(item.pitch or "+0Hz"),
             "teto_pitch_semitones": preferences.get("ttv_pitch_semitones", ""),
             **preferences,
+            **performance,
             # Uma requisição explícita da Teto não pode ser desviada pela engine
             # global preferida do worker; o fallback continua separado abaixo.
             "preferred_engine": "teto" if is_teto else TTS_WORKER_AGENT_PREFERRED_ENGINE,
@@ -5481,11 +5520,14 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if not self._tts_agent_route_available():
             raise RuntimeError("TTS Agent indisponível pela rota cacheada")
         text = str(item.text or "").strip()
-        if not text:
+        performance = _ttv_performance_payload(item)
+        if not text and getattr(item, "ttv_score", None) is None:
             raise RuntimeError("texto vazio para TTS Agent")
         engine = str(item.engine or "gtts").strip().lower().replace("-", "_") or "gtts"
         route_reader = getattr(self, "_tts_agent_route_state", None)
         route = route_reader() if callable(route_reader) else {}
+        if performance and int(route.get("ttv_performance_protocol") or 0) < 1:
+            raise RuntimeError("Atualize o worker para usar canto MIDI e efeitos no texto do TTV.")
         if engine == "teto" and route.get("ttv_personal_settings") is False:
             raise RuntimeError("Atualize o worker para usar os ajustes pessoais de TTV.")
         if engine == "teto":
@@ -5497,7 +5539,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 raise RuntimeError(f"{voice_state['name']} está indisponível agora. Seus ajustes continuam salvos.")
             if preferences["ttv_language"] not in voice_state["languages"]:
                 raise RuntimeError(f"Inglês está indisponível para {voice_state['name']}. Confira a voicebank dessa voz no worker.")
-        max_text_length = TTS_TETO_MAX_TEXT_LENGTH if engine == "teto" else TTS_WORKER_AGENT_MAX_TEXT_LENGTH
+        max_text_length = 2048 if getattr(item, "ttv_score", None) is not None else TTS_TETO_MAX_TEXT_LENGTH if engine == "teto" else TTS_WORKER_AGENT_MAX_TEXT_LENGTH
         if len(text) > max_text_length:
             raise RuntimeError(f"texto grande demais para TTS Agent: {len(text)} > {max_text_length}")
 
@@ -5514,7 +5556,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     task="tts_agent_synthesize",
                     payload=self._tts_agent_payload_for_item(item),
                     timeout_seconds=TTS_TETO_WORKER_TIMEOUT_SECONDS + 4.0 if engine == "teto" else TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
-                    max_audio_mb=TTS_TETO_MAX_AUDIO_MB if engine == "teto" else TTS_WORKER_AGENT_MAX_AUDIO_MB,
+                    max_audio_mb=max(8, TTS_TETO_MAX_AUDIO_MB) if getattr(item, "ttv_score", None) is not None else TTS_TETO_MAX_AUDIO_MB if engine == "teto" else TTS_WORKER_AGENT_MAX_AUDIO_MB,
                     stream_to_file=True,
                 )
                 request_ms = (time.monotonic() - request_started) * 1000.0
@@ -5522,11 +5564,13 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 fmt = self._normalize_worker_audio_format(data.get("audio_format"))
                 data["audio_format"] = fmt
                 path = str(data.get("audio_path") or "")
+                if performance and data.get("ttv_performance_hash") != performance["ttv_performance_hash"]:
+                    raise RuntimeError("O worker retornou áudio com notas ou efeitos de TTV diferentes dos solicitados.")
                 if engine == "teto":
                     selected = str(data.get("selected_engine") or data.get("engine") or "teto").lower()
                     if selected != "teto":
                         raise RuntimeError("O worker não sintetizou a vocaloid selecionada.")
-                    if route.get("ttv_personal_settings") or data.get("ttv_voice_id"):
+                    if performance or route.get("ttv_personal_settings") or data.get("ttv_voice_id"):
                         preferences = _ttv_item_preferences(item)
                         control_keys = ("ttv_voice_id", "ttv_pitch_semitones", "ttv_speech_rate")
                         if (any(data.get(key) in (None, "") for key in control_keys)
@@ -5641,8 +5685,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
         return history
 
     def _tts_agent_should_try_worker(self, item: QueueItem) -> tuple[bool, str]:
-        if getattr(item, "_tts_music_worker_unavailable", False):
-            return False, "music_worker_confirmed_offline"
         if not self._tts_agent_route_available():
             return False, 'worker_offline_or_not_ready'
         state = self._tts_agent_route_state()
@@ -5675,10 +5717,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
         return decision
 
     async def _generate_audio_file(self, item: QueueItem) -> str:
-        if not _has_speakable_tts_text(getattr(item, "text", "")):
+        if getattr(item, "ttv_score", None) is None and not _has_speakable_tts_text(getattr(item, "text", "")):
             raise ValueError("texto TTS sem caracteres faláveis")
 
-        agent_available = self._tts_agent_route_available() and not bool(getattr(item, "_tts_music_worker_unavailable", False))
+        agent_available = self._tts_agent_route_available()
         use_agent, agent_decision = self._tts_agent_should_try_worker(item) if agent_available else (False, "worker_offline_or_not_ready")
         self._record_tts_agent_route_sample(use_agent)
         if agent_available and not use_agent:
@@ -5696,6 +5738,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 )
             except Exception as e:
                 if item.engine == "teto":
+                    if _ttv_performance_payload(item):
+                        raise RuntimeError(f"TTV: {e}") from e
                     raise RuntimeError("Kasane Teto indisponível no worker de síntese") from e
                 logger.warning("[tts_agent] TTS no worker falhou; usando fallback local/VPS | guild=%s engine=%s erro=%s", item.guild_id, item.engine, e)
 
@@ -6111,16 +6155,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     await asyncio.wait_for(read_task, timeout=0.5)
             if edge_stream is not None:
                 await self._finalize_edge_stream(edge_stream, cancel=True)
-                if not self._is_music_active_for_guild(item.guild_id) or bool(getattr(item, "_tts_music_worker_unavailable", False)):
-                    logger.warning(
-                        "[tts_voice] stream falhou no prime; sintetizando arquivo na VPS | guild=%s request=%s engine=%s erro=%s",
-                        item.guild_id, item.request_id, edge_stream.engine,
-                        _tts_safe_exception_detail(exc),
-                    )
-                    # No PCM was sent to Discord: a full-file retry cannot
-                    # duplicate audible speech. No Phone Worker dependency.
-                    recovery_path = await self._tts_local_complete_file_after_stream_failure(item)
-                    return recovery_path, True, None
                 raise RuntimeError("preparação antecipada do stream falhou") from exc
             if TTS_DEBUG_LOGS:
                 self._log_debug(
@@ -6205,7 +6239,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 # a bounded, nonblocking PCM reader. Remote routers still need
                 # complete files, and all voice ownership checks stay in place.
                 local_stream_overlay = edge_stream is not None and permite_streaming_tts_mixer_local(self.bot, guild_id, vc)
-                if (edge_stream is None or local_stream_overlay) and not bool(getattr(item, "chatbot_no_auto_connect", False)) and not bool(getattr(item, "_tts_music_worker_unavailable", False)) and roteador_suporta_tts(self.bot) and guild is not None:
+                if (edge_stream is None or local_stream_overlay) and not bool(getattr(item, "chatbot_no_auto_connect", False)) and roteador_suporta_tts(self.bot) and guild is not None:
                     if local_stream_overlay:
                         await self._activate_edge_stream(edge_stream)
                     if item is not None:
@@ -6358,12 +6392,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         )
                     stream_playback_ok = True
                 return result
-            except Exception as exc:
-                if edge_stream is not None:
-                    # Never replay an utterance after PCM frames may have gone
-                    # out to Discord. A FIFO is single-use after an attempt.
-                    exc._tts_first_frame_observed = bool(first_frame.done() and not first_frame.cancelled())
-                raise
             except asyncio.CancelledError:
                 if item is not None and getattr(item, "chatbot_no_auto_connect", False) and source_handed_to_player:
                     with contextlib.suppress(Exception):
@@ -6461,37 +6489,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
         async with lock:
             await _do_reset()
 
-    async def _tts_local_complete_file_after_stream_failure(self, item: QueueItem) -> str:
-        """Generate a new local file, bypassing the worker and the consumed FIFO."""
-        foreground = True
-        if str(item.engine or "").lower() == "edge":
-            if not self._edge_circuit_is_open():
-                try:
-                    path = await self._generate_edge_file(
-                        item.text, item.voice, item.rate, item.pitch, foreground=foreground,
-                    )
-                    if os.path.getsize(path) > 0:
-                        return path
-                    with contextlib.suppress(OSError):
-                        os.remove(path)
-                    raise RuntimeError("arquivo Edge vazio")
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "[tts_voice] retry local Edge indisponível; tentando gTTS | guild=%s erro=%s",
-                        item.guild_id, _tts_safe_exception_detail(exc),
-                    )
-            item._tts_actual_engine = "gtts"
-        path = await self._generate_gtts_file_with_priority(
-            item.text, item.language, foreground=foreground,
-        )
-        if os.path.getsize(path) <= 0:
-            with contextlib.suppress(OSError):
-                os.remove(path)
-            raise RuntimeError("arquivo local gTTS vazio")
-        return path
-
     async def _play_file_with_recovery(
         self,
         guild: discord.Guild,
@@ -6503,29 +6500,13 @@ class TTSAudioMixin(SharedSynthesisMixin):
     ) -> dict[str, float]:
         if getattr(item, "chatbot_no_auto_connect", False):
             return await self._play_file(vc, path, item=item, prepared=prepared)
-        stream_handle = self._edge_stream_handle_for_path(path)
-        if stream_handle is not None:
-            # FIFO is single-use. Retry only if playback failed before any PCM
-            # frame reached the Discord voice sender; otherwise a replay would
-            # repeat an audible fragment.
-            try:
-                return await self._play_file(vc, path, item=item, prepared=prepared)
-            except Exception as exc:
-                if (
-                    bool(getattr(exc, "_tts_first_frame_observed", True))
-                    or self._is_music_active_for_guild(guild.id) and not getattr(item, "_tts_music_worker_unavailable", False)
-                ):
-                    raise
-                logger.warning(
-                    "[tts_voice] stream não iniciou; retry local com arquivo completo | guild=%s request=%s engine=%s erro=%s",
-                    guild.id, item.request_id, stream_handle.engine, _tts_safe_exception_detail(exc),
-                )
-                recovery_path = await self._tts_local_complete_file_after_stream_failure(item)
-                try:
-                    return await self._play_file_with_recovery(guild, item, vc, recovery_path)
-                finally:
-                    with contextlib.suppress(OSError):
-                        os.remove(recovery_path)
+        if self._edge_stream_handle_for_path(path) is not None:
+            # FIFO não pode ser reaberto para repetir o mesmo áudio: os bytes já
+            # foram consumidos. A recuperação normal continua valendo para
+            # arquivos completos e cacheados.
+            if prepared is None:
+                return await self._play_file(vc, path, item=item)
+            return await self._play_file(vc, path, item=item, prepared=prepared)
 
         current_vc = vc
         last_error: Exception | None = None
@@ -6547,7 +6528,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     # Arquivo, codec, EOF e falha lógica do roteador são
                     # problemas da fala; reconectar só repetiria a mesma falha.
                     raise
-                music_active = self._is_music_active_for_guild(guild.id) and not bool(getattr(item, "_tts_music_worker_unavailable", False))
+                music_active = self._is_music_active_for_guild(guild.id)
                 if music_active:
                     logger.warning(
                         "[tts_voice] Falha no playback do TTS com música ativa; descartando só este TTS sem resetar a call | guild=%s channel=%s erro_tipo=%s erro=%r",
@@ -6753,9 +6734,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         # A fala do chatbot usa esta mesma trava enquanto toca;
                         # uma nova fala normal pode mover a voz quando ela acabar.
                         vc = self._get_voice_client_for_guild(guild)
-                        if vc is None or self._voice_client_owned_by_music(vc) or self._music_should_own_voice(
-                            guild, confirmed_agent_offline=bool(getattr(item, "_tts_music_worker_unavailable", False))
-                        ):
+                        if vc is None or self._voice_client_owned_by_music(vc) or deve_bloquear_voz_tts_local(self.bot, guild.id):
                             return None
                         await vc.move_to(target_channel)
                     await self._ensure_self_deaf_fast(guild, target_channel)
@@ -6771,7 +6750,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
             report_failure=True,
             failure_context=f"entrada automática do TTS para reproduzir mensagem de {item.author_id}",
             defer_post_connect=True,
-            tts_music_worker_unavailable=bool(getattr(item, "_tts_music_worker_unavailable", False)),
         ))
         if vc is None:
             current = self._get_voice_client_for_guild(guild)
@@ -6890,8 +6868,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 resolved_audio_task = None
                 active_audio_task = None
                 prepared_playback = None
-                current_path = None
-                source_kind_for_failure = "pending"
                 failure_stage = "tts_failed"
 
                 if not state.dashboard_enabled:
@@ -7050,7 +7026,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     if state.generation != generation or not state.accepting:
                         continue
                     edge_stream = self._edge_stream_handle_for_path(current_path)
-                    source_kind_for_failure = "fifo" if edge_stream is not None else "arquivo"
                     valid_stream = bool(edge_stream is not None and os.path.exists(current_path))
                     valid_file = bool(
                         current_path
@@ -7137,23 +7112,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         state.warmed_until = time.monotonic() + TTS_WARM_HOLD_SECONDS
 
                 except Exception as e:
-                    cause = e.__cause__
-                    voice_connected = False
-                    music_active_at_failure = False
-                    with contextlib.suppress(Exception):
-                        voice_connected = bool(vc is not None and self._voice_client_is_connected(vc))
-                    with contextlib.suppress(Exception):
-                        music_active_at_failure = bool(self._is_music_active_for_guild(guild_id))
-                    # Keep the original exception and safe diagnostic context
-                    # in journal; the Discord notice stays generic.
                     logger.warning(
-                        "[tts_voice] fala falhou | guild=%s request=%s etapa=%s erro_tipo=%s "
-                        "erro=%s causa=%s fonte=%s voice_connected=%s music_active=%s",
+                        "[tts_voice] fala falhou | guild=%s request=%s etapa=%s erro_tipo=%s",
                         guild_id, item.request_id, failure_stage, type(e).__name__,
-                        _tts_safe_exception_detail(e), _tts_safe_exception_detail(cause),
-                        source_kind_for_failure,
-                        voice_connected,
-                        music_active_at_failure,
                     )
                     await _report_failure(item, failure_stage, e)
                 finally:
