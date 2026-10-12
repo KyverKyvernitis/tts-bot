@@ -4,32 +4,170 @@
   "selection_note": "Vídeos originais/republicações com a voz original. Contagens indexadas podem ser antigas. Só World Is Mine teve dois candidatos com contagens comparáveis; as demais escolhas precisam da comparação opcional no Termux. Não afirma o maior vídeo de todo o YouTube.",
   "songs": {
     "world-is-mine": {
-      "title": "World Is Mine",
-      "video_id": "EuJ6UR_pD5s",
-      "thumbnail_url": "https://i.ytimg.com/vi/EuJ6UR_pD5s/hqdefault.jpg",
-      "webpage_url": "https://www.youtube.com/watch?v=EuJ6UR_pD5s",
+      "title": "【Hatsune Miku】 World is Mine / ryo（supercell）【初音ミク】",
+      "video_id": "jhl5afLEKdo",
+      "thumbnail_url": "https://i.ytimg.com/vi/jhl5afLEKdo/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=jhl5afLEKdo",
       "search_query": "World is Mine Hatsune Miku ryo",
       "title_aliases": [
         "world is mine",
         "ワールドイズマイン"
       ],
-      "view_count": 33263244,
-      "view_count_source": "https://socialcounts.org/youtube-video-live-view-count/EuJ6UR_pD5s",
-      "source_url": "https://socialcounts.org/youtube-video-live-view-count/EuJ6UR_pD5s",
-      "checked_at": "2026-10-12",
-      "selection_basis": "highest-indexed-view-count-among-two-inspected-original-vocal-uploads",
+      "view_count": 24393736,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=jhl5afLEKdo",
+      "checked_at": "2026-10-12T23:40:38.083349+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
-          "video_id": "EuJ6UR_pD5s",
-          "title": "World Is Mine",
-          "view_count": 33263244,
-          "source_url": "https://socialcounts.org/youtube-video-live-view-count/EuJ6UR_pD5s"
+          "video_id": "jhl5afLEKdo",
+          "title": "【Hatsune Miku】 World is Mine / ryo（supercell）【初音ミク】",
+          "channel": "Hatsune Miku",
+          "view_count": 24393736
         },
         {
-          "video_id": "jhl5afLEKdo",
-          "title": "Hatsune Miku World is Mine / ryo supercell",
-          "view_count": 24313953,
-          "source_url": "https://digitalcreators.jp/channel/ja/UCJwGWV914kBlV4dKRn7AEFA/popular-videos/"
+          "video_id": "SZcilh-cZXE",
+          "title": "ワールドイズマイン-初音ミク「マジカルミライ 2021」Live- (feat. 初音ミク)",
+          "channel": "ryo (supercell)",
+          "view_count": 1589162
+        },
+        {
+          "video_id": "OG8iL8UEksM",
+          "title": "Supercell - The World Is Mine",
+          "channel": "Soraryu92",
+          "view_count": 292925
+        },
+        {
+          "video_id": "YYhppd4a1Yc",
+          "title": "Hatsune Miku - World Is Mine (Audio)",
+          "channel": "HatsuneMikuVEVO",
+          "view_count": 349508
+        },
+        {
+          "video_id": "QL9eHrNpz6E",
+          "title": "ryo feat. Hatsune Miku – ワールドイズマイン(World is Mine)",
+          "channel": "Space Ninja Eleven",
+          "view_count": 1661
+        },
+        {
+          "video_id": "TlnNaf-4ypY",
+          "title": "“World Is Mine” by ryo (supercell) ft. Hatsune Miku in Fortnite Festival",
+          "channel": "Really.fortnite",
+          "view_count": 19
+        },
+        {
+          "video_id": "uM-ACHqlmeo",
+          "title": "World is Mine (ワールドイズマイン) Lyrics in KAN/ROM/ENG - Ryo feat. Hatsune Miku",
+          "channel": "Kikoloid",
+          "view_count": 2081
+        },
+        {
+          "video_id": "4kEPbLbPvV4",
+          "title": "60fps Full風 World is Mine ワールドイズマイン Hatsune Miku 初音ミク Project DIVA Dreamy theater English Romaji",
+          "channel": "Hatsune Miku",
+          "view_count": 268459
+        },
+        {
+          "video_id": "tQDP0Aw6jns",
+          "title": "Supercell - The World is Mine (feat. Hatsune Miku)",
+          "channel": "Noshiro",
+          "view_count": 13791
+        },
+        {
+          "video_id": "g6yAXqs7GpQ",
+          "title": "【Official MV】ワールドイズマイン CPK! Remix (かぐや&月見ヤチヨ ver.) – ryo (supercell) / from 超かぐや姫！",
+          "channel": "‘Cosmic Princess Kaguya!’ OFFICIAL and ryo (supercell)",
+          "view_count": 7869978
+        },
+        {
+          "video_id": "JV11oSbWW70",
+          "title": "【手描き】 Hatsune Miku - World is Mine【PV】with English Lyrics",
+          "channel": "Alyss .Yukina",
+          "view_count": 831228
+        },
+        {
+          "video_id": "vBgaQ4u2JlA",
+          "title": "Hatsune Miku ワールドイズマイン World is Mine (Magical Mirai 2015)",
+          "channel": "Shumi17",
+          "view_count": 41036
+        },
+        {
+          "video_id": "wcE7BJ64u4U",
+          "title": "ワールドイズマイン (CPK! Remix)",
+          "channel": "ryo (supercell)",
+          "view_count": 922779
+        },
+        {
+          "video_id": "Ut-vNvGlvLA",
+          "title": "Hatsune Miku: Project DIVA Future Tone - [PV] \"The World is Mine\" (Supreme ver.) (Rom/Eng/Esp Subs)",
+          "channel": "Karin's Channel",
+          "view_count": 395707
+        },
+        {
+          "video_id": "lnLLMUZMLZ0",
+          "title": "The World Is Mine – supercell (Romaji Karaoke with guide)",
+          "channel": "KARAOKE UtaCchaO",
+          "view_count": 10746
+        },
+        {
+          "video_id": "c2EWAaz3Xxo",
+          "title": "【VOCALOID BRASIL】 WORLD IS MINE - PORTUGUÊS - HATSUNE MIKU V4X 初音ミク - ワールドイズマイン +VSQX",
+          "channel": "Im G Felipe",
+          "view_count": 165308
+        },
+        {
+          "video_id": "xSbRGXUk5Gg",
+          "title": "Ryo [Supercell] - World Is Mine [feat. Hatsune Miku] ",
+          "channel": "DuelSick RL",
+          "view_count": 3609
+        },
+        {
+          "video_id": "Ajv_S3ENN3E",
+          "title": "Bajiru sings World Is Mine - VOCALOID Hatsune Miku (ryo)",
+          "channel": "ImaBeastOP",
+          "view_count": 31
+        },
+        {
+          "video_id": "3QifH857qVY",
+          "title": "ryo (supercell) - World is Mine (feat. Hatsune Miku) [Geoxor Remix] | Future Bounce | NCS - Fanmade",
+          "channel": "NoCopyrightFanmade",
+          "view_count": 502
+        },
+        {
+          "video_id": "Xbb9IaqTk9c",
+          "title": "\"World is Mine CPK! Remix\" Sing Along | Cosmic Princess Kaguya! | Netflix Anime",
+          "channel": "Netflix Anime and ‘Cosmic Princess Kaguya!’ OFFICIAL",
+          "view_count": 3009057
+        },
+        {
+          "video_id": "_lS0_skTmt8",
+          "title": "YENA(최예나) - 'World is Mine' (원곡 : Hatsune Miku) | [So Near Yet So Far, Another Wo2ld!] In Tokyo",
+          "channel": "YENA(최예나)",
+          "view_count": 646680
+        },
+        {
+          "video_id": "mv04ZBU8U0g",
+          "title": "WORLD IS MINE (ワールドイズマイン) // Eurobeat Remix - supercell & Hatsune Miku",
+          "channel": "IMOJIST",
+          "view_count": 119529
+        },
+        {
+          "video_id": "UCkdFC-JqfA",
+          "title": "Supercell FT Hatsune Miku  World Is Mine (Audio)",
+          "channel": "Kristopher Mendes",
+          "view_count": 39617
+        },
+        {
+          "video_id": "Ri3yvrAPwIo",
+          "title": "Ryo (Supercell) x Hatsune Miku - World Is Mine",
+          "channel": "Voyager II",
+          "view_count": 20
+        },
+        {
+          "video_id": "n48MtOkimls",
+          "title": "ryo (supercell) - World is Mine feat. Hatsune Miku [fefy | beat saber]",
+          "channel": "De Pelos",
+          "view_count": 507
         }
       ],
       "excluded_title_terms": [
@@ -37,10 +175,14 @@
         "shermanology",
         "david guetta",
         "dj antoine"
-      ]
+      ],
+      "channel": "Hatsune Miku",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "469af4cb6b7ef552f74dc9654bac9e0047e922238bd1e0bf6ed43484787fd9e1",
+      "thumbnail_bytes": 32203
     },
     "senbonzakura": {
-      "title": "Senbonzakura",
+      "title": "「ＭＶ」　千本桜　WhiteFlame feat 初音ミク",
       "video_id": "shs0rAiwsGQ",
       "thumbnail_url": "https://i.ytimg.com/vi/shs0rAiwsGQ/hqdefault.jpg",
       "webpage_url": "https://www.youtube.com/watch?v=shs0rAiwsGQ",
@@ -49,51 +191,347 @@
         "senbonzakura",
         "千本桜"
       ],
-      "view_count": null,
-      "view_count_source": null,
-      "source_url": "https://www.aregan.net/2021/03/senbonzakura.html",
-      "checked_at": "2026-10-12",
-      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "view_count": 86219869,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=shs0rAiwsGQ",
+      "checked_at": "2026-10-12T23:40:40.646904+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
           "video_id": "shs0rAiwsGQ",
-          "title": "Senbonzakura",
-          "view_count": null,
-          "source_url": "https://www.aregan.net/2021/03/senbonzakura.html"
+          "title": "「ＭＶ」　千本桜　WhiteFlame feat 初音ミク",
+          "channel": "WhiteFlame official",
+          "view_count": 86219869
+        },
+        {
+          "video_id": "Mqps4anhz0Q",
+          "title": "[1080P Full風] 千本桜 Senbonzakura \"One Thousand Cherry Trees\"- 初音ミク Hatsune Miku DIVA English Romaji",
+          "channel": "googoo888",
+          "view_count": 59647089
+        },
+        {
+          "video_id": "U0gAwCFHdEA",
+          "title": "【初音ミク】 千本桜 Hatsune Miku Senbonzakura English Sub",
+          "channel": "KiokuSubsII",
+          "view_count": 2107007
+        },
+        {
+          "video_id": "9bKvobdj8cY",
+          "title": "【千本桜 (Senbonzakura) - WhiteFlame feat 初音ミク (Hatsune Miku) Lời Việt】Nghìn Gốc Anh Đào - Aika",
+          "channel": "𝕄𝕠𝕠𝕟'𝕤 𝕍𝕠𝕚𝕔𝕖 / midaoli",
+          "view_count": 196883
+        },
+        {
+          "video_id": "F1tWiEPc5yg",
+          "title": "Hatsune Miku (prod. Kurousa-P / WhiteFlame) - Senbonzakura - Lyrics (Kan/Rom/Eng)",
+          "channel": "Hina히나",
+          "view_count": 680219
+        },
+        {
+          "video_id": "QDfol71Lc-U",
+          "title": "Hatsune Miku - Senbonzakura",
+          "channel": "HatsuneMikuVEVO",
+          "view_count": 4025
+        },
+        {
+          "video_id": "zTRA0C3IHY4",
+          "title": "【重音テト VCV】Senbonzakura【UTAUカバー】【Kasane Teto VCV】【Future Tone Mod】",
+          "channel": "SirVillager",
+          "view_count": 453301
+        },
+        {
+          "video_id": "-OdY_DH3HVo",
+          "title": "Senbonzakura 「千本桜」 - Hatsune Miku -  Magical Mirai 2017",
+          "channel": "Zero Star",
+          "view_count": 112458
+        },
+        {
+          "video_id": "BpvIQQIgtAk",
+          "title": "Hatsune Miku: Project Mirai DX (Demo) - Senbonzakura (Hard) [Perfect]",
+          "channel": "justonegamr",
+          "view_count": 132863
+        },
+        {
+          "video_id": "AHlEQYpcdps",
+          "title": "Senbonzakura/WhiteFlame feat. Hatsune Miku [Music Box]",
+          "channel": "R3 Music Box",
+          "view_count": 216638
+        },
+        {
+          "video_id": "TGO2bJrPv7Y",
+          "title": "初音ミク - 千本桜 | Hatsune Miku - Senbonzakura (Frontliner Remix)",
+          "channel": "Frontliner",
+          "view_count": 323385
+        },
+        {
+          "video_id": "DTRxHV5vC78",
+          "title": "Senbonzakura (千本桜) Thousand Cherry Trees (Instrumental Version) - Hatsune Miku [HeathenHacks Remix]",
+          "channel": "HeathenHacks",
+          "view_count": 8357
+        },
+        {
+          "video_id": "6-wEAeNcA_A",
+          "title": "Lindsey Stirling - Senbonzakura (Kurousa Cover)",
+          "channel": "Lindsey Stirling",
+          "view_count": 31636166
+        },
+        {
+          "video_id": "0zOLSHCO4FY",
+          "title": "【Hatsune Miku】「Senbonzakura」千本桜 ONI Full combo 【 Taiko No Tasujin Drum Session PS4 】",
+          "channel": "hisokeee",
+          "view_count": 514412
+        },
+        {
+          "video_id": "cXuFB_XPJio",
+          "title": "° senbonzakura ° 🍣 ° speed up °",
+          "channel": "strawberries",
+          "view_count": 43221
+        },
+        {
+          "video_id": "c63sgnsUQ4k",
+          "title": "[Project DIVA Full] Senbonzakura - Kagamine Len version [English, Spanish & Romaji subs]",
+          "channel": "Luna",
+          "view_count": 71568
+        },
+        {
+          "video_id": "cdYKj2PvnZE",
+          "title": "\"Senbonzakura\" 🍓 English Cover by Lizz Robinett",
+          "channel": "Lizz Robinett",
+          "view_count": 15466085
+        },
+        {
+          "video_id": "8EJQ4aMFC2Y",
+          "title": "[ Hatsune Miku Symphony 2017 ] Senbonzakura.",
+          "channel": "nana chi",
+          "view_count": 4024
+        },
+        {
+          "video_id": "VIm2TTu0oNo",
+          "title": "Senbonzakura (English Cover) 【JubyPhonic】千本桜",
+          "channel": "JubyPhonic",
+          "view_count": 1599166
+        },
+        {
+          "video_id": "dICL4grlycY",
+          "title": "Senbonzakura (千本桜) \"Thousand Cherry Trees\" - Hatsune Miku [HeathenHacks Remix]",
+          "channel": "HeathenHacks",
+          "view_count": 7553
+        },
+        {
+          "video_id": "uTi1FSf7rsw",
+          "title": "Senbonzakura【MIKU V6】Cover & Instrumental Arrangement",
+          "channel": "Bagus Eleven VOCANORU",
+          "view_count": 42658
+        },
+        {
+          "video_id": "8mECSjpQIoo",
+          "title": "Hatsune Miku: Project DIVA F - Senbonzakura (千本桜) [EXTREME PERFECT]",
+          "channel": "TX2015",
+          "view_count": 860
+        },
+        {
+          "video_id": "s2vJR_iUCyc",
+          "title": "||Daycore|| Senbonzakura - White Flame (ft. Hatsune Miku) //Slowed&Reveb//",
+          "channel": "Zenni :D",
+          "view_count": 435
+        },
+        {
+          "video_id": "3FL_rkrHtXw",
+          "title": "[Hatsune Miku] - Senbonzakura (feat Hatsune Miku) by WhiteFlame",
+          "channel": "Finn The Humanz",
+          "view_count": 338
+        },
+        {
+          "video_id": "TjCkC2EoAzI",
+          "title": "WhiteFlame - Senbonzakura (Lofi Hiphop Remix)",
+          "channel": "9 Tales Music",
+          "view_count": 51177
         }
-      ]
+      ],
+      "channel": "WhiteFlame official",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "926c6de0854071a91520f489c40a0f9733e346fe118ffedb200ef5d465dc4995",
+      "thumbnail_bytes": 90403
     },
     "melt": {
-      "title": "Melt",
-      "video_id": "cZbcjYiFRGA",
-      "thumbnail_url": "https://i.ytimg.com/vi/cZbcjYiFRGA/hqdefault.jpg",
-      "webpage_url": "https://www.youtube.com/watch?v=cZbcjYiFRGA",
+      "title": "初音ミク「メルト」",
+      "video_id": "o1jAMSQyVPc",
+      "thumbnail_url": "https://i.ytimg.com/vi/o1jAMSQyVPc/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=o1jAMSQyVPc",
       "search_query": "Melt ryo Hatsune Miku original",
       "title_aliases": [
         "melt",
         "メルト"
       ],
-      "view_count": null,
-      "view_count_source": null,
-      "source_url": "https://www.youtube.com/watch?v=cZbcjYiFRGA",
-      "checked_at": "2026-10-12",
-      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "view_count": 33833385,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=o1jAMSQyVPc",
+      "checked_at": "2026-10-12T23:40:43.073623+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
-          "video_id": "cZbcjYiFRGA",
-          "title": "Melt",
-          "view_count": null,
-          "source_url": "https://www.youtube.com/watch?v=cZbcjYiFRGA"
+          "video_id": "5rFBkHb8CL8",
+          "title": "Melt 【メルト】 PV . Hatsune Miku",
+          "channel": "bluubeary",
+          "view_count": 4353702
+        },
+        {
+          "video_id": "FoTd918zhZc",
+          "title": "Hatsune Miku - MELT [Live] 1080HD",
+          "channel": "RCracer777",
+          "view_count": 2749507
+        },
+        {
+          "video_id": "4u7FTSfCcmg",
+          "title": "Supercell - Melt",
+          "channel": "Soraryu92",
+          "view_count": 890852
+        },
+        {
+          "video_id": "o1jAMSQyVPc",
+          "title": "初音ミク「メルト」",
+          "channel": "singtur",
+          "view_count": 33833385
+        },
+        {
+          "video_id": "XRymkHlMB-k",
+          "title": "ryo (supercell) / Melt CPK! Remix (Hatsune Miku ver.)",
+          "channel": "ryo (supercell) and ‘Cosmic Princess Kaguya!’ OFFICIAL",
+          "view_count": 37361330
+        },
+        {
+          "video_id": "X4kvCdxelO8",
+          "title": "[VOCALOID] Hatsune Miku Melt [Japanese Romanji English Lyrics]",
+          "channel": "Voca-Lyrics",
+          "view_count": 82395
+        },
+        {
+          "video_id": "Qo2fm0oqxW0",
+          "title": "Hatsune Miku: Project DIVA Future Tone - [PV] \"Melt\" (Romaji/English/Español Subs)",
+          "channel": "Karin's Channel",
+          "view_count": 791991
+        },
+        {
+          "video_id": "59nWNuOlBq0",
+          "title": "【 Melt メルト】Hatsune Miku Magical Mirai 2017 初音ミク「マジカルミライ 2017」",
+          "channel": "First sound of the future",
+          "view_count": 85204
+        },
+        {
+          "video_id": "bBSLAotXkhA",
+          "title": "Hatsune Miku - Melt~",
+          "channel": "Lunethex",
+          "view_count": 6247
+        },
+        {
+          "video_id": "vRmI3e5kJy0",
+          "title": "Melt with Miku V3 (from Cillia)",
+          "channel": "Eji Warp",
+          "view_count": 223389
+        },
+        {
+          "video_id": "n9J5Wb8y4fc",
+          "title": "Hatsune Miku: Project DIVA F 2nd - [PV] \"Melt\" (English Subs/Sub. Español)",
+          "channel": "Karin's Channel",
+          "view_count": 181982
+        },
+        {
+          "video_id": "u0NIIZWrpmc",
+          "title": "Hatsune Miku 【初音ミク】 Melt 【メルト】 Gazelle ( Nagi ) ver 3M mix【English/Romaji】",
+          "channel": "cirb",
+          "view_count": 430267
+        },
+        {
+          "video_id": "MvBxqHYLvZM",
+          "title": "ryo - メルト Melt (10th Anniversary Version) ft. Hatsune Miku (Using Original Stems)",
+          "channel": "Syazwan133",
+          "view_count": 2509
+        },
+        {
+          "video_id": "S_EWAw7Eg7w",
+          "title": "【Otomachi Una】Melt【Cover】",
+          "channel": "kyaami",
+          "view_count": 4326315
+        },
+        {
+          "video_id": "D3D97AWALQI",
+          "title": "【Karaoke】Melt - Original version【on vocal】 supercell",
+          "channel": "rediakaikai",
+          "view_count": 152906
+        },
+        {
+          "video_id": "NA0y8wY8YiY",
+          "title": "【Melt】Nagi Yanagi/Gazelle【PV】",
+          "channel": "Majister",
+          "view_count": 94573
+        },
+        {
+          "video_id": "bjkiliEJe4g",
+          "title": "【Hatsune Miku 15th Anniversary】 Melt / メルト【Hatsune Miku NT】",
+          "channel": "cucumber",
+          "view_count": 1575
+        },
+        {
+          "video_id": "digQ0PyeIZE",
+          "title": "Miku's original \"メルト\" with English lyric",
+          "channel": "soundares",
+          "view_count": 102388
+        },
+        {
+          "video_id": "CfPPVt8LrpQ",
+          "title": "Melt - ft. Hatsune Miku by ryo(supercell) w/ ENG subs",
+          "channel": "mikuwithalobotomy",
+          "view_count": 45
+        },
+        {
+          "video_id": "g4jbNfxJhAg",
+          "title": "【Hatsune Miku NT Demo】 Melt / メルト",
+          "channel": "EKCT AY",
+          "view_count": 36998
+        },
+        {
+          "video_id": "BaMztLZv3bE",
+          "title": "Masa (feat. Hatsune Miku) - Melt",
+          "channel": "UCttreL0wz5XU2EaP5ondrsw",
+          "view_count": 7477
+        },
+        {
+          "video_id": "4GCFT6HnKCQ",
+          "title": "Cosmic Princess Kaguya! Full Ending Lyrics | MELT | ryo (supercell) · Kaguya(cv.Yuko Natsuyoshi)",
+          "channel": "LyricSlayer",
+          "view_count": 108968
+        },
+        {
+          "video_id": "_9WJUmIEtAQ",
+          "title": "【Karaoke】Melt - Original version【off vocal】 supercell",
+          "channel": "rediakaikai",
+          "view_count": 321645
+        },
+        {
+          "video_id": "Y9BB6hAkjNg",
+          "title": "Melt [Mirrored]",
+          "channel": "Kiseki Mirrored Dances",
+          "view_count": 32376
+        },
+        {
+          "video_id": "agw1Bdsqrfg",
+          "title": "MELT (2017 ғʟɪp) (ryo feat. 初音ミク 『メルト』Remix)",
+          "channel": "coral422",
+          "view_count": 24337
         }
       ],
       "excluded_title_terms": [
         "ice cream",
         "CPK",
         "remix"
-      ]
+      ],
+      "channel": "singtur",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "a2071c14edd2894924304209c7e2333bfde08baedd1f5f283e568d6eacbc4b80",
+      "thumbnail_bytes": 87667
     },
     "tell-your-world": {
-      "title": "Tell Your World",
+      "title": "livetune feat. 初音ミク 『Tell Your World』Music Video",
       "video_id": "PqJNc9KVIZE",
       "thumbnail_url": "https://i.ytimg.com/vi/PqJNc9KVIZE/hqdefault.jpg",
       "webpage_url": "https://www.youtube.com/watch?v=PqJNc9KVIZE",
@@ -101,47 +539,343 @@
       "title_aliases": [
         "tell your world"
       ],
-      "view_count": null,
-      "view_count_source": null,
-      "source_url": "https://project-diva.fandom.com/it/wiki/Tell_Your_World",
-      "checked_at": "2026-10-12",
-      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "view_count": 30301817,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=PqJNc9KVIZE",
+      "checked_at": "2026-10-12T23:40:47.624882+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
           "video_id": "PqJNc9KVIZE",
-          "title": "Tell Your World",
-          "view_count": null,
-          "source_url": "https://project-diva.fandom.com/it/wiki/Tell_Your_World"
+          "title": "livetune feat. 初音ミク 『Tell Your World』Music Video",
+          "channel": "kz-livetune",
+          "view_count": 30301817
+        },
+        {
+          "video_id": "cOr-TUxo8Kw",
+          "title": "\"Summeretto Medley: Tell Your World x Only by Chasing the Wind\" / Hatsune Miku & Robin",
+          "channel": "Hatsune Miku",
+          "view_count": 3355179
+        },
+        {
+          "video_id": "fmrA-gxJxgQ",
+          "title": "[1080P Full風] Tell Your World -Hatsune Miku 初音ミク Project DIVA Arcade English lyrics Romaji subtitles",
+          "channel": "googoo888",
+          "view_count": 11759064
+        },
+        {
+          "video_id": "vKs0wc0h_HY",
+          "title": "VOCALOID2: Hatsune Miku - \"Tell Your World\" [HD & MP3]",
+          "channel": "V-Breeze",
+          "view_count": 413091
+        },
+        {
+          "video_id": "B2fRMQUxnyw",
+          "title": "HATSUNE MIKU: COLORFUL STAGE! - Tell Your World by livetune 3D Music Video - Virtual Singer",
+          "channel": "HATSUNE MIKU: COLORFUL STAGE!",
+          "view_count": 770038
+        },
+        {
+          "video_id": "rlfrgoPwrFo",
+          "title": "[VOCALOID] Hatsune Miku Tell Your World [Japanese Romanji English Lyrics]",
+          "channel": "Voca-Lyrics",
+          "view_count": 91991
+        },
+        {
+          "video_id": "KHriNNUPYhA",
+          "title": "[Hatsune Miku] Tell Your World Google Chrome PV - English Sub",
+          "channel": "redlegsfan21",
+          "view_count": 179735
+        },
+        {
+          "video_id": "7u81FbaX1HE",
+          "title": "【MMD】 Tell Your World (by kz/livetune)【YYB初音ミク】 100K SUBS SPECIAL",
+          "channel": "The Soda Wave",
+          "view_count": 135526
+        },
+        {
+          "video_id": "YASA4WoKKXM",
+          "title": "【VOCALOID BRASIL】 TELL YOUR WORLD - (PORTUGUÊS BRASIL) 初音ミク + VSQx",
+          "channel": "Im G Felipe",
+          "view_count": 69978
+        },
+        {
+          "video_id": "xI9CRInOtDI",
+          "title": "【Hatsune Miku V4 English】Tell Your World 【Cover】",
+          "channel": "kyaami",
+          "view_count": 1092034
+        },
+        {
+          "video_id": "G_KA0l1bwqM",
+          "title": "Tell Your World - Livetune Ft. Hatsune Miku | Just Dance Wii U",
+          "channel": "VLTN",
+          "view_count": 125200
+        },
+        {
+          "video_id": "rNuMNyVInlY",
+          "title": "Hatsune Miku - Tell Your World (Magical Mirai 2015)",
+          "channel": "Shumi17",
+          "view_count": 194368
+        },
+        {
+          "video_id": "3oE-hD-hM7g",
+          "title": "Tell Your World-初音ミク「マジカルミライ 2021」Live- (feat. 初音ミク)",
+          "channel": "livetune - Topic",
+          "view_count": 14477
+        },
+        {
+          "video_id": "D9M8zaqfwS8",
+          "title": "「 ES!! 」Tell Your World - Switch & 2wink with Hatsune Miku & Kagamine Rin • Len [KAN/ROM/ENG]",
+          "channel": "lucidstars",
+          "view_count": 399324
+        },
+        {
+          "video_id": "qMDSI4hfPIg",
+          "title": "『中文字幕』　【初音ミク】Tell Your World MADフル をつくってみた",
+          "channel": "Yu-hsuan Hsiao",
+          "view_count": 2368804
+        },
+        {
+          "video_id": "SraBeyqZVZc",
+          "title": "[Project Sekai] Hatsune Miku- Tell Your World (Expert 23)",
+          "channel": "oiishiipan",
+          "view_count": 16898
+        },
+        {
+          "video_id": "7n1fUlBusD4",
+          "title": "Tell Your World (English Version)",
+          "channel": "kz-livetune",
+          "view_count": 61488
+        },
+        {
+          "video_id": "gkZlPXEkk6U",
+          "title": "[Final Request 2023 S2] Tell Your World -ft Kasane Teto AI [SYNTH V カバー]",
+          "channel": "Urabe No Sekai",
+          "view_count": 10002
+        },
+        {
+          "video_id": "Y0cue-rLs9I",
+          "title": "Hatsune Miku - Tell Your World (Legendado)",
+          "channel": "Cristieko",
+          "view_count": 23967
+        },
+        {
+          "video_id": "cqBFxppx2HE",
+          "title": "Tell Your World v2.0 - Hatsune Miku V4X 初音ミク(full ver.) [HD/HQ]",
+          "channel": "Nyanaid",
+          "view_count": 123779
+        },
+        {
+          "video_id": "9D5qExKD8Ys",
+          "title": "【コラボ】Tell Your World【YuNi×初音ミク】",
+          "channel": "YuNi - official channel -",
+          "view_count": 412941
+        },
+        {
+          "video_id": "MGt25mv4-2Q",
+          "title": "Google Chrome : Hatsune Miku (初音ミク)",
+          "channel": "GoogleChromeJapan",
+          "view_count": 7017963
+        },
+        {
+          "video_id": "_Z9C-1K1IHo",
+          "title": "Just Dance Hits: Tell Your World by livetune ft. 初音ミク [11.5k]",
+          "channel": "maryposah",
+          "view_count": 14155
+        },
+        {
+          "video_id": "KBu86fdz-fw",
+          "title": "Project SEKAI JP - Tell Your World (Append [24] | All Perfect)",
+          "channel": "TheWindSpring",
+          "view_count": 46208
+        },
+        {
+          "video_id": "iu4PL7iRFQM",
+          "title": "Hatsune Miku: Project DIVA Future Tone - [PV] \"Tell Your World\" (Romaji/English/Español Subs)",
+          "channel": "Karin's Channel",
+          "view_count": 51847
         }
-      ]
+      ],
+      "channel": "kz-livetune",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "a1e82ee3b194e380de25e348c371f61b565b7c91fb243d1f394813a2e7a78aed",
+      "thumbnail_bytes": 63959
     },
     "popipo": {
-      "title": "PoPiPo",
-      "video_id": "mco3UX9SqDA",
-      "thumbnail_url": "https://i.ytimg.com/vi/mco3UX9SqDA/hqdefault.jpg",
-      "webpage_url": "https://www.youtube.com/watch?v=mco3UX9SqDA",
+      "title": "[60fps Full] PoPiPo ぽっぴっぽー - Hatsune Miku 初音ミク DIVA Dreamy theater ドリーミーシアター English Romaji",
+      "video_id": "TNf3GPizM58",
+      "thumbnail_url": "https://i.ytimg.com/vi/TNf3GPizM58/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=TNf3GPizM58",
       "search_query": "PoPiPo Hatsune Miku LamazeP",
       "title_aliases": [
         "popipo",
         "po pi po",
         "ぽっぴっぽー"
       ],
-      "view_count": null,
-      "view_count_source": null,
-      "source_url": "https://strawberrystation.bandcamp.com/track/popipo-tetos-version",
-      "checked_at": "2026-10-12",
-      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "view_count": 50722770,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=TNf3GPizM58",
+      "checked_at": "2026-10-12T23:40:50.711942+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
-          "video_id": "mco3UX9SqDA",
-          "title": "PoPiPo",
-          "view_count": null,
-          "source_url": "https://strawberrystation.bandcamp.com/track/popipo-tetos-version"
+          "video_id": "TNf3GPizM58",
+          "title": "[60fps Full] PoPiPo ぽっぴっぽー - Hatsune Miku 初音ミク DIVA Dreamy theater ドリーミーシアター English Romaji",
+          "channel": "googoo888",
+          "view_count": 50722770
+        },
+        {
+          "video_id": "ikgQhG4AlVk",
+          "title": "ぽっぴっぽー（V3Edition）-初音ミク for LamazeP",
+          "channel": "LamazeP",
+          "view_count": 5198432
+        },
+        {
+          "video_id": "Zl_cNIHTl4A",
+          "title": "lamaze-P- popipo ft. hatsune miku (slowed down)",
+          "channel": "kairo",
+          "view_count": 3188055
+        },
+        {
+          "video_id": "z2G1ZtufBGQ",
+          "title": "VOCALOID COVER| Lamaze-P - Popipo [HATSUNE MIKU V6]",
+          "channel": "EViKA",
+          "view_count": 3139
+        },
+        {
+          "video_id": "-cxUoN-HRw0",
+          "title": "popipo - hatsune miku/lamazep (slowed)",
+          "channel": "HyperTunes",
+          "view_count": 390142
+        },
+        {
+          "video_id": "m7k2dvwoTD8",
+          "title": "【MMD】ぽっぴっぽー / PoPiPo【UTAU + RoadRunner】 MEEP MEEP",
+          "channel": "pali",
+          "view_count": 105705
+        },
+        {
+          "video_id": "8Gu7Mtq4Hvw",
+          "title": "Hatsune Miku - Vegetable Juice (Po Pi Po) with English lyrics",
+          "channel": "Lamartian",
+          "view_count": 12731680
+        },
+        {
+          "video_id": "pf7bdnt1r-Q",
+          "title": "LamazeP ft. Hatsune Miku - Popipo [Mirrored Dance] (READ DESCRIPTION!!)",
+          "channel": "Reposting Vocaloid Dances",
+          "view_count": 539888
+        },
+        {
+          "video_id": "2wVVvd9mk94",
+          "title": "LamazeP Ft Hatsune Miku Popipo (Audio)",
+          "channel": "Kristopher Mendes",
+          "view_count": 27204
+        },
+        {
+          "video_id": "_Sp2ir7oFYc",
+          "title": "PoPiPo (ぽっぴっぽー / Lamaze-P ft. Hatsune Miku) - Rhythm Heaven Custom Remix",
+          "channel": "Suwa-ko",
+          "view_count": 296072
+        },
+        {
+          "video_id": "dNnUaJ4HWMo",
+          "title": "lamaze-P- popipo ft. hatsune miku ( slowed + reverb )",
+          "channel": "wot31iks",
+          "view_count": 66369
+        },
+        {
+          "video_id": "ssKJjPdSHRU",
+          "title": "Miku Hatsune - Po pi po Reversed",
+          "channel": "WeissRose742",
+          "view_count": 55106
+        },
+        {
+          "video_id": "XqqOM2SOq5w",
+          "title": "Po Pi Po \"ぽっぴっぽー\" (Ryu☆ Remix)【VOCALOID】 + mp3♫",
+          "channel": "reddevils500a",
+          "view_count": 1515113
+        },
+        {
+          "video_id": "37TJ3OS5hWM",
+          "title": "◣MMD LIVE◥ PoPiPo - 39's Giving Day 2012 》Hatsune Miku ◣HOLOGRAM READY◥",
+          "channel": "Vinca",
+          "view_count": 15064
+        },
+        {
+          "video_id": "OyeSoXaBxmA",
+          "title": "LamazeP ft. Hatsune Miku - PoPiPo but it's a Mashup of 16 Versions",
+          "channel": "Jared-KunYT",
+          "view_count": 1271
+        },
+        {
+          "video_id": "m-CDZtk5px8",
+          "title": "popipo—hatsune miku/lamazep (slowed)",
+          "channel": "campbellsoup",
+          "view_count": 442981
+        },
+        {
+          "video_id": "di-EALDvnPo",
+          "title": "Popipo but with scream / lamazep",
+          "channel": "☆Prinseskitty100☆",
+          "view_count": 175571
+        },
+        {
+          "video_id": "DaeR4KzuLDo",
+          "title": "Hatsune Miku - PoPiPo by LamazeP (HQ)",
+          "channel": "HarperMeows",
+          "view_count": 1282
+        },
+        {
+          "video_id": "smKVL0GWYk0",
+          "title": "【HATSUNE MIKU 11th ANNIVERSARY !!】POPIPO REMIX (Vegetable Juice)【Vocaloid5】+VPR/MP3",
+          "channel": "Kaitsuko-P",
+          "view_count": 47072
+        },
+        {
+          "video_id": "B6L1eZE93nI",
+          "title": "𝐋𝐚𝐦𝐚𝐳𝐞𝐏- 𝐏𝐨𝐩𝐢𝐩𝐨 𝐟𝐭. 𝐇𝐚𝐭𝐬𝐮𝐧𝐞 𝐌𝐢𝐤𝐮 (𝐬𝐥𝐨𝐰𝐞𝐝 𝐝𝐨𝐰𝐧 + 𝐫𝐞𝐯𝐞𝐫𝐛)",
+          "channel": "underrated",
+          "view_count": 999536
+        },
+        {
+          "video_id": "9sxEAuozHrk",
+          "title": "「Yakuza」PoPiPo【龍が如く】ぽっぴっぽー",
+          "channel": "MelkwedSage",
+          "view_count": 3447185
+        },
+        {
+          "video_id": "3lrV5txZPho",
+          "title": "「4K 60 fps」 Love Song / Ai no uta (愛の詩) / Lamaze-P | Project DIVA Arcade Future Tone",
+          "channel": "RADART Inc",
+          "view_count": 1814638
+        },
+        {
+          "video_id": "Bi_AA_BrRVc",
+          "title": "Popipo (Vegetable Juice) - Hatsune Miku (Subtitles cc) - Vocaloid Live Concert",
+          "channel": "VIV - Vocaloid Live Concert",
+          "view_count": 647866
+        },
+        {
+          "video_id": "KplWOcvmwjg",
+          "title": "Project Diva F - ぽっぴっぽー (PoPiPo) (Toro and Kuro special edition) PV feat. Kagamine Len",
+          "channel": "Casenpai",
+          "view_count": 16102
+        },
+        {
+          "video_id": "yIdRBJHuPzI",
+          "title": "Lamaze-P ft. Hatsune Miku - PoPiPo (but it's a jingle)",
+          "channel": "Every Song is a Jingle!",
+          "view_count": 1448
         }
-      ]
+      ],
+      "channel": "googoo888",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "e1d91f259eaab2505779f0b13caedafd5816c6d2c86359f0bbff815c618e00a8",
+      "thumbnail_bytes": 69903
     },
     "mesmerizer": {
-      "title": "Mesmerizer",
+      "title": "Mesmerizer / Hatsune Miku＆Kasane Teto",
       "video_id": "19y8YTbvri8",
       "thumbnail_url": "https://i.ytimg.com/vi/19y8YTbvri8/hqdefault.jpg",
       "webpage_url": "https://www.youtube.com/watch?v=19y8YTbvri8",
@@ -150,25 +884,173 @@
         "mesmerizer",
         "メズマライザー"
       ],
-      "view_count": 224589458,
-      "view_count_source": "https://socialcounts.org/youtube-video-live-view-count/19y8YTbvri8",
-      "source_url": "https://socialcounts.org/youtube-video-live-view-count/19y8YTbvri8",
-      "checked_at": "2026-10-12",
-      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "view_count": 226575336,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=19y8YTbvri8",
+      "checked_at": "2026-10-12T23:40:53.066787+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
           "video_id": "19y8YTbvri8",
-          "title": "Mesmerizer",
-          "view_count": 224589458,
-          "source_url": "https://socialcounts.org/youtube-video-live-view-count/19y8YTbvri8"
+          "title": "Mesmerizer / Hatsune Miku＆Kasane Teto",
+          "channel": "32ki",
+          "view_count": 226575336
+        },
+        {
+          "video_id": "UiSPiIwnWoY",
+          "title": "【LIVE】メズマライザー / サツキ ＜初音ミク・重音テト＞【初音ミク JAPAN LIVE TOUR 2025 ～BLOOMING～】",
+          "channel": "Hatsune Miku",
+          "view_count": 11462988
+        },
+        {
+          "video_id": "aeEodB5JBG0",
+          "title": "【Kasane Teto • Hatsune Miku/重音テト • 初音ミク】メズマライザー/Mesmerizer - ROLE SWAP【UTAU...only UTAUカバー】",
+          "channel": "Teto Kasane-Chan",
+          "view_count": 2800905
+        },
+        {
+          "video_id": "U-GDnhjl2Ws",
+          "title": "[코믹월드 325 수원] 하츠네 미쿠 & 카사네 테토 - T씨의 이야기를 믿지 마, Mesmerizerㅣ初音ミク & 重音テト - T氏の話を信じるな, メズマライザー [JPN/KOR]",
+          "channel": "코믹월드",
+          "view_count": 250642
+        },
+        {
+          "video_id": "oQkPJWwaFDg",
+          "title": "‘Mesmerizer’ by 32ki feat. Hatsune Miku & Kasane Teto (MMD)",
+          "channel": "ironmouse",
+          "view_count": 68048
+        },
+        {
+          "video_id": "UCZvVeRFdCY",
+          "title": "Mesmerizer by 32ki but Akita Neru/The yellow one is actually there",
+          "channel": "Osakaflower",
+          "view_count": 285726
+        },
+        {
+          "video_id": "AVRUD9KQEfk",
+          "title": "[Heaven Studio Custom Remix] Mesmerizer - Satsuki / Hatsune Miku & Kasane Teto",
+          "channel": "HypoConductor",
+          "view_count": 187730
+        },
+        {
+          "video_id": "2c9FqIF600A",
+          "title": "Mesmerizer (Official English Version)「Will Stetson x @rachie  」",
+          "channel": "Will Stetson",
+          "view_count": 14844183
+        },
+        {
+          "video_id": "_TWfNsfLwzI",
+          "title": "Satsuki - Mesmerizer feat. Hatsune Miku & Kasane Teto (Touhou Style Arrangement)",
+          "channel": "Soundfont Arranger",
+          "view_count": 28846
+        },
+        {
+          "video_id": "djr7J41hmLU",
+          "title": "[FULLY FOUND] Satsuki:Mesmerizer. Ft.Kasane Teto And Hatsune Miku. MY TAKE",
+          "channel": "quit ",
+          "view_count": 9188
+        },
+        {
+          "video_id": "L3VdIliOeoQ",
+          "title": "MESMERIZER LOST MEDIA (feat. Hatsune Miku & Kasane Teto)",
+          "channel": "Release - Topic",
+          "view_count": 455643
+        },
+        {
+          "video_id": "5-1m0AMNlTA",
+          "title": "【MMD Hologram】 Mesmerizer 【Hatsune Miku & Kasane Teto】",
+          "channel": "Telekinetic_MMD",
+          "view_count": 1356473
+        },
+        {
+          "video_id": "RTDONogZax8",
+          "title": "［Mashup］Mesmerizer × M@GICAL☆CURE LOVE ♥ SHOT! - 32ki/SAWTOWNE",
+          "channel": "Ciao",
+          "view_count": 1530668
+        },
+        {
+          "video_id": "c5iuezl5aGQ",
+          "title": "Mesmerizer/Satsuki feat. Hatsune Miku & Kasane Teto [Music Box]",
+          "channel": "R3 Music Box",
+          "view_count": 94163
+        },
+        {
+          "video_id": "mBx-uCxanVw",
+          "title": "【MASHUP】Mesmerizer × oddloop × Candy Cookie Chocolate (with Hatsune Miku & Kasane Teto)",
+          "channel": "MARi556",
+          "view_count": 4378
+        },
+        {
+          "video_id": "bmrFsUuS-gk",
+          "title": "Mesmerizer (Hatsune Miku & Kasane Teto) English 60's Version - Jazz Cover Lyric Video",
+          "channel": "Matt Dusk",
+          "view_count": 1044156
+        },
+        {
+          "video_id": "8urjE6yYU6o",
+          "title": "Mesmerizer remade in a different style in Blender!",
+          "channel": "nyanii",
+          "view_count": 46567
+        },
+        {
+          "video_id": "Tf_r7wltPQc",
+          "title": "『Mesmerizer』Color Coded ROM Lyrics | Hatsune Miku x Kasane Teto",
+          "channel": "_kaoruu",
+          "view_count": 518
+        },
+        {
+          "video_id": "WfSa3FutJgg",
+          "title": "Mesmerizer - Hatsune Miku x Kasane Teto [Rom/Eng Color Coded Lyrics] (Check Desc)",
+          "channel": "- 🌺 Hanabatake 🖊 -",
+          "view_count": 27389
+        },
+        {
+          "video_id": "zim1BkPvSQI",
+          "title": "Hatsune Miku & Kasane Teto - Mesmerizer | lofi version",
+          "channel": "Deathzack",
+          "view_count": 171098
+        },
+        {
+          "video_id": "elVEFUMLMn0",
+          "title": "MESMERIZER LOST MEDIA",
+          "channel": "BonBon",
+          "view_count": 4007713
+        },
+        {
+          "video_id": "88Z9c0liqHs",
+          "title": "Into The Mesmerizer! | Miku Mayhem [Official Anime Announcement Trailer]",
+          "channel": "Miku Mayhem - Official Channel",
+          "view_count": 1138728
+        },
+        {
+          "video_id": "e4kHAdXke_Q",
+          "title": "[VOCALOID NES-Style] Mesmerizer [Chiptune Remix]",
+          "channel": "Sudo Goji VGM",
+          "view_count": 2849617
+        },
+        {
+          "video_id": "SXR8UjbqB-s",
+          "title": "[ENG/ROM/KAN Colourcoded] Mesmerizer ft. Hatsune Miku and Kasane Teto [32ki]",
+          "channel": "Rubidium_consumer",
+          "view_count": 234861
+        },
+        {
+          "video_id": "FjrGR1dfXlg",
+          "title": "メズマライザー (Mesmerizer) (Rock Cover) - 32ki - Feat. Hatsune Miku (初音ミク) & Kasane Teto (重音テト)",
+          "channel": "EverRen",
+          "view_count": 22184
         }
-      ]
+      ],
+      "channel": "32ki",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "a05adac019232c76d300568cc06f304fc993c5b3bf0064cd0548979f3e7eacc8",
+      "thumbnail_bytes": 102509
     },
     "ochame-kinou": {
-      "title": "Ochame Kinou / Fukkireta",
-      "video_id": "4eq6rfCjKlw",
-      "thumbnail_url": "https://i.ytimg.com/vi/4eq6rfCjKlw/hqdefault.jpg",
-      "webpage_url": "https://www.youtube.com/watch?v=4eq6rfCjKlw",
+      "title": "ろん -「おちゃめ機能」FUKKIRETA 【HD.256k.Kara】",
+      "video_id": "kuNixp-wvWM",
+      "thumbnail_url": "https://i.ytimg.com/vi/kuNixp-wvWM/hqdefault.jpg",
+      "webpage_url": "https://www.youtube.com/watch?v=kuNixp-wvWM",
       "search_query": "Ochame Kinou Fukkireta Kasane Teto original",
       "title_aliases": [
         "ochame kinou",
@@ -176,28 +1058,170 @@
         "おちゃめ機能",
         "吹っ切れた"
       ],
-      "view_count": null,
-      "view_count_source": null,
-      "source_url": "https://www.youtube.com/watch?v=4eq6rfCjKlw",
-      "checked_at": "2026-10-12",
-      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "view_count": 21625784,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=kuNixp-wvWM",
+      "checked_at": "2026-10-12T23:40:55.676335+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
-          "video_id": "4eq6rfCjKlw",
-          "title": "Ochame Kinou / Fukkireta",
-          "view_count": null,
-          "source_url": "https://www.youtube.com/watch?v=4eq6rfCjKlw"
+          "video_id": "kuNixp-wvWM",
+          "title": "ろん -「おちゃめ機能」FUKKIRETA 【HD.256k.Kara】",
+          "channel": "tripflag",
+          "view_count": 21625784
         },
         {
-          "video_id": "rkf1pLv25VU",
-          "title": "Kasane Teto - Ochame Kinou",
-          "view_count": 659724,
-          "source_url": "https://socialcounts.org/youtube-video-live-view-count/rkf1pLv25VU"
+          "video_id": "-AlX2dCrZAU",
+          "title": "Ochame Kinou \"Fukkireta\" -Full ver.- gojimajiP ft.Kasane Teto",
+          "channel": "DheikoGW",
+          "view_count": 139555
+        },
+        {
+          "video_id": "4eq6rfCjKlw",
+          "title": "Kasane Teto - Fukkireta Original ver.",
+          "channel": "julioyoshi101~",
+          "view_count": 662272
+        },
+        {
+          "video_id": "IlWsgtsWwY4",
+          "title": "Ochame Kinou (Mischievous Function) -Full ver- by Gojimaji-P feat. Kasane Teto",
+          "channel": "tokoharumaki",
+          "view_count": 796167
+        },
+        {
+          "video_id": "uvxoNlMqilg",
+          "title": "おちゃめ機能 -Full ver.- / 重音テトSV【SynthesizerVカバー】",
+          "channel": "にす",
+          "view_count": 12434662
+        },
+        {
+          "video_id": "bN2r9B6LXRM",
+          "title": "おちゃめ機能ーFull verー",
+          "channel": "あの金さん/ANOKINSAN",
+          "view_count": 4706989
+        },
+        {
+          "video_id": "5BEY8JQ1AfI",
+          "title": "Fukkireta - Kasane Teto",
+          "channel": "Yowane Ryuu",
+          "view_count": 9345
+        },
+        {
+          "video_id": "DYLPqdprLfo",
+          "title": "おちゃめ機能 / covered by 重音テトSV【SynthesizerV AI】Ochame Kinou （Fukkireta） / Kasane Teto",
+          "channel": "takaokamizuki",
+          "view_count": 4436531
+        },
+        {
+          "video_id": "GUvn37HJ7Hc",
+          "title": "Ochame Kinou SV / おちゃめ機能 SV -にす Feat. Kasane Teto | Sub Esp, Eng, Romaji",
+          "channel": "Daniel-Sanツ",
+          "view_count": 57475
+        },
+        {
+          "video_id": "41329s5h5x0",
+          "title": "【Utau Adaptação PT-BR】FUKKIRETA (Mischievous Function) おちゃめ機能 - Gojimaji-P【Kasane Teto】",
+          "channel": "Sorte Grande Play",
+          "view_count": 6987
+        },
+        {
+          "video_id": "vg6pnvn1u10",
+          "title": "Ochame Kinou / Kasane Teto SV【SynthV cover】 [yasai31]",
+          "channel": "yasai31",
+          "view_count": 3313611
+        },
+        {
+          "video_id": "0VyTqHDoyzc",
+          "title": "Fukkireta, but it's new video every few seconds",
+          "channel": "BCanary",
+          "view_count": 337036
+        },
+        {
+          "video_id": "d64kQpJXw34",
+          "title": "[UTAU] Kasane Teto Ochame Kinou [Japanese Romanji English Lyrics]",
+          "channel": "Voca-Lyrics",
+          "view_count": 68607
+        },
+        {
+          "video_id": "29-q7YnyUmY",
+          "title": "ろん -「おちゃめ機能」FUKKIRETA　Ｘ９",
+          "channel": "tripflag",
+          "view_count": 6800530
+        },
+        {
+          "video_id": "XU-TiekdXKs",
+          "title": "【Kasane Teto】 Hololive's Ochame Kinou, but it s the original singer - FUKKIRETA【UTAU】Tanjiro Taidana",
+          "channel": "Kasane Teto",
+          "view_count": 352
+        },
+        {
+          "video_id": "6SviXq0yFE8",
+          "title": "(Kasane Teto) Fukkireta Full ver (Romaji + Sub español) 1440p",
+          "channel": "Dark_Kudoh",
+          "view_count": 722721
+        },
+        {
+          "video_id": "g_DeRBIPF-8",
+          "title": "Kasane Teto - Ochame Kinou/Fukkireta (English Subs.)",
+          "channel": "Miguel León Muñoz",
+          "view_count": 724
+        },
+        {
+          "video_id": "wDdrO9W188U",
+          "title": "【deltarune||Ralsei】Ochame Kinou /おちゃめ機能【UTAUカバー】",
+          "channel": "Samuton9574",
+          "view_count": 787237
+        },
+        {
+          "video_id": "EsZKJD-6S4k",
+          "title": "【UTAU】Kasane Teto ~ Song of robot 's ear",
+          "channel": "Th3SilentOn3",
+          "view_count": 1133731
+        },
+        {
+          "video_id": "uFJHdT_ie9U",
+          "title": "Ochame Kinou - hololive English Cover",
+          "channel": "hololive English",
+          "view_count": 17797014
+        },
+        {
+          "video_id": "LrB_7uWx_kk",
+          "title": "Kasane Teto - Fukkireta HNNNNNNNN!!! ver.",
+          "channel": "GreenMoriyama",
+          "view_count": 6985
+        },
+        {
+          "video_id": "6qjs2GHfwps",
+          "title": "Kasane Teto  Fukkireta[Original Version]",
+          "channel": "MariMangaGirl",
+          "view_count": 13009
+        },
+        {
+          "video_id": "_OjknTMttUE",
+          "title": "fukkireta - teto  {slowed + reverbed}",
+          "channel": "Cornbread",
+          "view_count": 49049
+        },
+        {
+          "video_id": "fbuVW1QbX1k",
+          "title": "ろん -「おちゃめ機能」FUKKIRETA　Ｘ９ (Preserved Annotations)",
+          "channel": "朝寝坊",
+          "view_count": 133501
+        },
+        {
+          "video_id": "pybJoWj-y7k",
+          "title": "Teto Kasane-Fukiretta",
+          "channel": "Cheke249",
+          "view_count": 46
         }
-      ]
+      ],
+      "channel": "tripflag",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "33a7abeebda147276f76621b02aae26561a8d7ce007e9788fa8da6903a400a1e",
+      "thumbnail_bytes": 94977
     },
     "override": {
-      "title": "Override",
+      "title": "オーバーライド - 重音テトSV[吉田夜世]",
       "video_id": "LLjfal8jCYI",
       "thumbnail_url": "https://i.ytimg.com/vi/LLjfal8jCYI/hqdefault.jpg",
       "webpage_url": "https://www.youtube.com/watch?v=LLjfal8jCYI",
@@ -206,22 +1230,170 @@
         "override",
         "オーバーライド"
       ],
-      "view_count": null,
-      "view_count_source": null,
-      "source_url": "https://www.nicolog.jp/watch/sm43083649",
-      "checked_at": "2026-10-12",
-      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "view_count": 112803650,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=LLjfal8jCYI",
+      "checked_at": "2026-10-12T23:40:58.284905+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
           "video_id": "LLjfal8jCYI",
-          "title": "Override",
-          "view_count": null,
-          "source_url": "https://www.nicolog.jp/watch/sm43083649"
+          "title": "オーバーライド - 重音テトSV[吉田夜世]",
+          "channel": "吉田夜世",
+          "view_count": 112803650
+        },
+        {
+          "video_id": "7-AdCectfVc",
+          "title": "HATSUNE MIKU: COLORFUL STAGE! - Override by Yoshida Yasei 3DMV - MORE MORE JUMP!",
+          "channel": "HATSUNE MIKU: COLORFUL STAGE!",
+          "view_count": 114752
+        },
+        {
+          "video_id": "WAAdtP1F-t0",
+          "title": "【MV】Override - KASANE Teto English Cover「オーバーライド - 重音テト 英語 ver」吉田夜世【耳コピ】SynthV",
+          "channel": "メロトス ch. 【Melotos】",
+          "view_count": 279558
+        },
+        {
+          "video_id": "Isw4oQETr3w",
+          "title": "The8BitDrummer covers Override by Yoshida Yasei on drums...",
+          "channel": "JustAHoloFan",
+          "view_count": 36075
+        },
+        {
+          "video_id": "gQHjj8wyOts",
+          "title": "【COVER】オーバーライド (Override) / Kasane Teto【OpenUTAU】",
+          "channel": "Kyan",
+          "view_count": 70
+        },
+        {
+          "video_id": "oqPeNDaUSmI",
+          "title": "[Fanmade Full Version mix] Override (Kasane Teto × Momoi Airi) Color Coded Lyrics",
+          "channel": "BukitHijau",
+          "view_count": 271
+        },
+        {
+          "video_id": "shyRW65dvn0",
+          "title": "Override (English Cover)「オーバーライド」【Will Stetson】",
+          "channel": "Will Stetson",
+          "view_count": 3425528
+        },
+        {
+          "video_id": "JaFCn2POOAw",
+          "title": "Override by yoshida yasei vocaloid:Kasane teto",
+          "channel": "Kasane_teto958",
+          "view_count": 403
+        },
+        {
+          "video_id": "xAa9bi1_UYU",
+          "title": "✰𝕆𝕧𝕖𝕣𝕣𝕚𝕕𝕖,𝕐𝕠𝕤𝕙𝕚𝕕𝕒 𝕐𝕒𝕤𝕖𝕚《𝔻𝕒𝕟𝕔𝕖 𝕄𝕚𝕣𝕣𝕠𝕣,𝕌𝕥𝕒𝕦,𝕋𝕖𝕥𝕠 𝕂𝕒𝕤𝕒𝕟𝕖,ℙ𝕖𝕟𝕥𝕒》✰",
+          "channel": "𝕐𝕦𝕞𝕂𝕪𝕦𝕦",
+          "view_count": 2794
+        },
+        {
+          "video_id": "P6Kct1PTFAI",
+          "title": "Override - Yoshida Yasei",
+          "channel": "Kasane Teto",
+          "view_count": 559
+        },
+        {
+          "video_id": "ICEhUJ-NTUU",
+          "title": "❀ᴇʟɪɪ. Override - Yoshida Yasei『オーバーライド』(Cover en Español Latino)",
+          "channel": "Elii-Elyne!",
+          "view_count": 195259
+        },
+        {
+          "video_id": "PhIc8XM57c0",
+          "title": "Override - Yoshida Yasei feat. Kasane Teto SV - Hard Piano Tutorial【Arranjo de piano】",
+          "channel": "Dさん【ピアノ楽譜】",
+          "view_count": 307286
+        },
+        {
+          "video_id": "KDvKaTQ9r64",
+          "title": "Kasane Teto - override (slowed down)",
+          "channel": " • SevenTime •",
+          "view_count": 25841
+        },
+        {
+          "video_id": "77vMBEHg-F4",
+          "title": "Override - Kasane Teto [Yoshida Yasei] (Super Mario Paint)",
+          "channel": "KeripiK",
+          "view_count": 3154
+        },
+        {
+          "video_id": "-YvGfZS1-Zo",
+          "title": "［Mashup］Override × Matryoshka - Yoshida Yasei/HACHI",
+          "channel": "Ciao",
+          "view_count": 15667
+        },
+        {
+          "video_id": "HRC-EdnN3ls",
+          "title": "MONTAGEM OVERRIDE (ft. Kasane Teto)",
+          "channel": "TRXSHY",
+          "view_count": 4368
+        },
+        {
+          "video_id": "LXV7qC06AiY",
+          "title": "【MMD x Magical Mirai】オーバーライド / Override【Teto】【Hologram Ready】",
+          "channel": "Mekaio",
+          "view_count": 97791
+        },
+        {
+          "video_id": "Odzr84irzNA",
+          "title": "【Heaven Studio】Override - Kasane Teto SV[Yoshida Yasei]",
+          "channel": "RusK",
+          "view_count": 2612
+        },
+        {
+          "video_id": "KbJIgo2Z6PM",
+          "title": "バグ - 重音テトSV[吉田夜世's Override Remix]",
+          "channel": "吉田夜世",
+          "view_count": 1968789
+        },
+        {
+          "video_id": "qf2jzmjw2eA",
+          "title": "Override - Yoshida Yasei ft. Kasane Teto SV SLOWED !! || #teto #synthesizerv ||",
+          "channel": "Sano-chan!! (Kyu-Kurarin fan)",
+          "view_count": 1610
+        },
+        {
+          "video_id": "VSOKR4PjuF0",
+          "title": "[Beat Saber] Override / Kasane Teto SV [Yoshida Yasei]",
+          "channel": "Kumoe Zeta。【クモエゼター。】",
+          "view_count": 8900
+        },
+        {
+          "video_id": "MqbtVhjESWo",
+          "title": "オーバーライド x バグ [吉田夜世's Override Remix] 【MASHUP】",
+          "channel": "Kiko ",
+          "view_count": 16576
+        },
+        {
+          "video_id": "JPqBanldhhg",
+          "title": "Override - Yoshida Yasei feat. Kasane Teto SV - Medium Piano Tutorial + Sheets【Piano Arrangement】",
+          "channel": "Dさん【楽譜専用】",
+          "view_count": 11439
+        },
+        {
+          "video_id": "1NwAByOT42I",
+          "title": "【Muse Dash Custom】Override - Kasane Teto SV [Yoshida Yasei] (Custom 10★)",
+          "channel": "Stormberry",
+          "view_count": 9068
+        },
+        {
+          "video_id": "vvoalp8MNHo",
+          "title": "オーバーライド - 重音テトSV[吉田夜世] (RiraN Remix)",
+          "channel": "RiraN",
+          "view_count": 774502
         }
-      ]
+      ],
+      "channel": "吉田夜世",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "8951b262fde7fbb900e624bda07880ec71161060528b634c344bccfe0daf89cf",
+      "thumbnail_bytes": 58599
     },
     "teto-territory": {
-      "title": "Teto Territory",
+      "title": "Kasane Teto - Teto territory",
       "video_id": "JALbemLw3G4",
       "thumbnail_url": "https://i.ytimg.com/vi/JALbemLw3G4/hqdefault.jpg",
       "webpage_url": "https://www.youtube.com/watch?v=JALbemLw3G4",
@@ -230,22 +1402,170 @@
         "teto territory",
         "重音territory"
       ],
-      "view_count": null,
-      "view_count_source": null,
-      "source_url": "https://www.bilibili.com/video/BV1p6421g7hd/",
-      "checked_at": "2026-10-12",
-      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "view_count": 43631728,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=JALbemLw3G4",
+      "checked_at": "2026-10-12T23:41:00.757346+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
           "video_id": "JALbemLw3G4",
-          "title": "Teto Territory",
-          "view_count": null,
-          "source_url": "https://www.bilibili.com/video/BV1p6421g7hd/"
+          "title": "Kasane Teto - Teto territory",
+          "channel": "CegooK",
+          "view_count": 43631728
+        },
+        {
+          "video_id": "xdGP5EKrp7s",
+          "title": "Teto Territory but utau and synthv Teto are singing /English sub/",
+          "channel": "KawaiiGirl ",
+          "view_count": 19
+        },
+        {
+          "video_id": "nxh6exuF2Tg",
+          "title": "Teto territory meme ft. Toki pow Leon (from canimals) cegooK",
+          "channel": "kawaii the dog (KTD) 🇯🇵 (do not terminated)",
+          "view_count": 78
+        },
+        {
+          "video_id": "3p3Sl7pF9Ug",
+          "title": "Teto territory but sped up credits to @CegooK ",
+          "channel": "Teto Plushie maker ",
+          "view_count": 82
+        },
+        {
+          "video_id": "WhyHSnr6eW4",
+          "title": "Teto Territory! {Ft: Me, Avery, Bailey} ~ Credits to @CegooK !!",
+          "channel": ":Av3ry_LOL:",
+          "view_count": 118
+        },
+        {
+          "video_id": "j9vv15iymTQ",
+          "title": "Kasane Teto - Teto territory ",
+          "channel": "𝔂𝓸𝓾𝓻 𝓸𝓷𝓲𝓸𝓷",
+          "view_count": 160
+        },
+        {
+          "video_id": "qtI1-zmxR44",
+          "title": "Kasane Territory (Vyond Version) 🥖❤️🎤",
+          "channel": "Princess Aria Christina Allan the Vyonder™💖",
+          "view_count": 2057
+        },
+        {
+          "video_id": "iVyB7OXF0NM",
+          "title": "teto? foxy? FOXY´S TERRITORY :D",
+          "channel": "froakie8900 ",
+          "view_count": 26
+        },
+        {
+          "video_id": "RjBAdPNNSC4",
+          "title": "Beeie territory (teto territory)",
+          "channel": "PrimoSon81",
+          "view_count": 25
+        },
+        {
+          "video_id": "D0yR6fQzav8",
+          "title": "Teto territory - Arabic (UTAU)  غزو تيتو",
+          "channel": "Mazeet-P",
+          "view_count": 555
+        },
+        {
+          "video_id": "dv_R9iw-ukY",
+          "title": "[Showcase] Teto Territory by FabricioFZ || Geometry Dash",
+          "channel": "ItzMapleX",
+          "view_count": 26
+        },
+        {
+          "video_id": "XyRPruZRFHw",
+          "title": "KASANE TERRITORY! (please read description)",
+          "channel": "Skylar Lark",
+          "view_count": 66
+        },
+        {
+          "video_id": "LNa_c9X6JTA",
+          "title": "\"Kasane Teto - Teto Territory remix\" by CegooK Live Improv Guitar Jam-along | Jam & Shred",
+          "channel": "JamesRBasterd",
+          "view_count": 149
+        },
+        {
+          "video_id": "JtB1wELMXN0",
+          "title": "1 hour of Teto Territory! Credits go to @CegooK and Kasane Teto!",
+          "channel": "1HourVocaloid",
+          "view_count": 1172
+        },
+        {
+          "video_id": "oXH7Ohrzapg",
+          "title": "teto territory (ruko cover)",
+          "channel": "Omaro",
+          "view_count": 67
+        },
+        {
+          "video_id": "aeGvx9qwmJ8",
+          "title": "Teto territory meme",
+          "channel": "MoonestLight",
+          "view_count": 38
+        },
+        {
+          "video_id": "9VeOKkDm6QA",
+          "title": "DISCOVERING KASANE TETO! | (Tetoris, Override, Teto Territory, Liar Dance) REACTION & ANALYSIS",
+          "channel": "DRK Discovers",
+          "view_count": 182668
+        },
+        {
+          "video_id": "sqg0TpU4e6A",
+          "title": "Teto territory vocals only. Feat: Teto",
+          "channel": "F1OWER",
+          "view_count": 1940
+        },
+        {
+          "video_id": "3nwLgpF7KiU",
+          "title": "TETO TERRITORY(reanimated)| 20 subscriber special! 🥳|⭕️ !NOT FULL SONG!⭕️",
+          "channel": "Avemation Studios",
+          "view_count": 255
+        },
+        {
+          "video_id": "AINRtocoL-Q",
+          "title": "Kasane territory // HAPPY BIRTHDAY SCREAM! :D🎈🎈🎈🎁🎁🎁🎉🎉✨🎈",
+          "channel": "Rubyyy_",
+          "view_count": 507
+        },
+        {
+          "video_id": "nUfOU_obJy0",
+          "title": "Kasane Teto performance",
+          "channel": "Hito :p",
+          "view_count": 201
+        },
+        {
+          "video_id": "tPuPqT7pb3Q",
+          "title": "Jesse Territory | Breaking Bad animation",
+          "channel": "northernfire",
+          "view_count": 60256
+        },
+        {
+          "video_id": "jS55gsJUBwQ",
+          "title": "Kasane Teto - Popipo [Eng sub]",
+          "channel": "CegooK",
+          "view_count": 3059311
+        },
+        {
+          "video_id": "aYDKXKiAGrI",
+          "title": "[MMD] Kasane Teto  - Hibikaze  [4KUHD]",
+          "channel": "CegooK",
+          "view_count": 4121
+        },
+        {
+          "video_id": "NgAGwFu6M8k",
+          "title": "≡MMD≡ Kasane Teto - Dynamite [4KUHD60FPS][Happy Birthday!!]",
+          "channel": "CegooK",
+          "view_count": 4505
         }
-      ]
+      ],
+      "channel": "CegooK",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "a19c00051697e243e76802ae2b4fef46f79109c3c3eb667d0ccb823d8bbabc8f",
+      "thumbnail_bytes": 64884
     },
     "triple-baka": {
-      "title": "Triple Baka",
+      "title": "Hatsune Miku ~ Triple Baka - Full Song (English Subtitles v2) [LamazeP - REUPLOAD w/subtitles added]",
       "video_id": "duPJqfKiA78",
       "thumbnail_url": "https://i.ytimg.com/vi/duPJqfKiA78/hqdefault.jpg",
       "webpage_url": "https://www.youtube.com/watch?v=duPJqfKiA78",
@@ -254,19 +1574,167 @@
         "triple baka",
         "とりぷるばか"
       ],
-      "view_count": 24818640,
-      "view_count_source": "https://socialcounts.org/youtube-video-live-view-count/duPJqfKiA78",
-      "source_url": "https://socialcounts.org/youtube-video-live-view-count/duPJqfKiA78",
-      "checked_at": "2026-10-12",
-      "selection_basis": "curated-original-vocal-video; most-viewed-comparison-pending",
+      "view_count": 24817962,
+      "view_count_source": "yt-dlp-public-metadata",
+      "source_url": "https://www.youtube.com/watch?v=duPJqfKiA78",
+      "checked_at": "2026-10-12T23:41:05.556904+00:00",
+      "selection_basis": "highest-view-count-among-inspected-original-vocal-matches",
       "candidates": [
         {
+          "video_id": "HhN4wdpbPrg",
+          "title": "LamazeP - Triple Baka ft. Hatsune Miku (HQ)",
+          "channel": "Fox",
+          "view_count": 5974024
+        },
+        {
+          "video_id": "gO2VavL0s3g",
+          "title": "\"Triple Baka\" - LamazeP |Ft. Miku & Teto (Tradução pt-br)",
+          "channel": "HoneyB",
+          "view_count": 13201
+        },
+        {
           "video_id": "duPJqfKiA78",
+          "title": "Hatsune Miku ~ Triple Baka - Full Song (English Subtitles v2) [LamazeP - REUPLOAD w/subtitles added]",
+          "channel": "Seisatsu",
+          "view_count": 24817962
+        },
+        {
+          "video_id": "Q7o7wz_Q5zY",
+          "title": "Hatsune Miku Triple Baka (HQ)",
+          "channel": "Raelynn Weiss",
+          "view_count": 523870
+        },
+        {
+          "video_id": "seeYAI5KgIo",
+          "title": "Evil Neuro x Neuro-Sama V3 sings Triple Baka by LamazeP [Karaoke Cover Version] w/subtitle",
+          "channel": "NeuroClips",
+          "view_count": 118992
+        },
+        {
+          "video_id": "ZBpuBQ0VRfM",
+          "title": "Hatsune Miku & Kasane Teto - Triple Baka by LamazeP (HQ)",
+          "channel": "HarperMeows",
+          "view_count": 7668
+        },
+        {
+          "video_id": "qruy8estikk",
+          "title": "Triple Baka [REUPLOAD]",
+          "channel": "Archive Central - YouTube",
+          "view_count": 810
+        },
+        {
+          "video_id": "CZKTbHrl3Y8",
+          "title": "LAMAZE-P - Triple Baka (Budots Remix)",
+          "channel": "ItsMeMG",
+          "view_count": 58924
+        },
+        {
+          "video_id": "wvSZ0Q4AJuQ",
+          "title": "【MIKU, TETO, NERU】 TRIPLE BAKA (Versão Curta) 【ADAPTAÇÃO PT-BR】 (VOCALOID BRASIL) 驫麤～とりぷるばか～",
+          "channel": "pauly421",
+          "view_count": 26677
+        },
+        {
+          "video_id": "079oUn-DiL4",
+          "title": "𝑻𝒓𝒊𝒑𝒍𝒆 𝑩𝒂𝒌𝒂 - 𝑳𝒂𝒎𝒂𝒛𝒆𝑷 ~ (𝕊𝕡𝕖𝕖𝕕 𝕌𝕡/ℕ𝕚𝕘𝕙𝕥𝕔𝕠𝕣𝕖 + ℝ𝕖𝕧𝕖𝕣𝕓)",
+          "channel": "KirbySlow",
+          "view_count": 2028
+        },
+        {
+          "video_id": "pilMOVH2qNc",
+          "title": "【MMD】驫麤～とりぷるばか～ / Triple Baka【Tda式改変亞北ネル/重音テト/げのげ式初音ミク】",
+          "channel": "Genshou Ryo",
+          "view_count": 163559
+        },
+        {
+          "video_id": "9vgCVYu-MW8",
+          "title": "[+DL] MMD HOLOGRAM READY HD 60FPS - 驫麤～とりぷるばか～ / Triple Baka - Magical Mirai 2026 / マジカルミライ 2026",
+          "channel": "Nabix",
+          "view_count": 2159433
+        },
+        {
+          "video_id": "z5IbQcoB_wo",
           "title": "Triple Baka",
-          "view_count": 24818640,
-          "source_url": "https://socialcounts.org/youtube-video-live-view-count/duPJqfKiA78"
+          "channel": "decaying - Topic",
+          "view_count": 284696
+        },
+        {
+          "video_id": "m_poTAkH4II",
+          "title": "Triple Baka MISHEARD LYRICS part 1!!",
+          "channel": "GlitchedSunflowerCosplayz",
+          "view_count": 293591
+        },
+        {
+          "video_id": "Z761JSA0zic",
+          "title": "MMD ～ Triple Baka ～ Full.ver 3DPV",
+          "channel": "majin_kz",
+          "view_count": 847622
+        },
+        {
+          "video_id": "JnZ7arKDobY",
+          "title": "Triple Baka/LamazeP feat. Hatsune Miku, Akita Neru, Kasane Teto [Music Box]",
+          "channel": "R3 Music Box",
+          "view_count": 26541
+        },
+        {
+          "video_id": "8saV6WQclYk",
+          "title": "Triple Triple Baka",
+          "channel": "Mothballz / trainz99",
+          "view_count": 1398765
+        },
+        {
+          "video_id": "N6aH9zSsIRc",
+          "title": "TRIPLE BAKA - Adaptação em Português BR 【VOCALOID BRASIL】",
+          "channel": "P-Origui",
+          "view_count": 4648
+        },
+        {
+          "video_id": "I6fRBQx4ELs",
+          "title": "Hatsune Miku (prod. LamazeP) - Triple Baka - Lyrics (Kan/Rom/Eng)",
+          "channel": "Hina히나",
+          "view_count": 330181
+        },
+        {
+          "video_id": "rWX5iXF6bNA",
+          "title": "Hatsune Miku - Triple Baka Extended [Official]",
+          "channel": "Kaede Gasai",
+          "view_count": 1240
+        },
+        {
+          "video_id": "Wp9yXDR31oo",
+          "title": "LamazeP - Triple baka на русском (cover) #hatsunemiku #kasaneteto #AkitaNeru #triplebaka ",
+          "channel": "кею(ФωФ)шка",
+          "view_count": 2426
+        },
+        {
+          "video_id": "cb2n-f0OJsk",
+          "title": "[KAITO Straight, Hatsune Miku] Triple Baka [Vocaloid cover]",
+          "channel": "Eaver",
+          "view_count": 41130
+        },
+        {
+          "video_id": "Q__JF8HIdbc",
+          "title": "★[MASHUP] Mesmerizer x Triple Baka — 32ki/LamazeP",
+          "channel": "LiamDoesMashup★",
+          "view_count": 3442
+        },
+        {
+          "video_id": "1AhVCFIHwHo",
+          "title": "𝐓𝐫𝐢𝐩𝐥𝐞 𝐁𝐚𝐤𝐚 (𝕊𝕝𝕠𝕨𝕖𝕕 + ℝ𝕖𝕧𝕖𝕣𝕓) • LamazeP Ft. Hatsune Miku",
+          "channel": "KirbySlow",
+          "view_count": 81896
+        },
+        {
+          "video_id": "8112U0Zp8YY",
+          "title": "Triple Baka Comparison",
+          "channel": "majin_kz",
+          "view_count": 333636
         }
-      ]
+      ],
+      "channel": "Seisatsu",
+      "inspected_candidates": 25,
+      "thumbnail_sha256": "850c31d7f2f96f1899269bc89fc2458c70a812c9bc706b98de29a777320b9435",
+      "thumbnail_bytes": 60074
     }
   }
 }
