@@ -118,6 +118,8 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
         return PrefixControlCommand("panel_server")
     if matches_prefixed_command(raw, bot_prefix, kind="panel_toggle"):
         return PrefixControlCommand("panel_toggle")
+    if matches_prefixed_command(raw, bot_prefix, kind="panel_canto"):
+        return PrefixControlCommand("panel_canto")
     return None
 
 
@@ -233,5 +235,8 @@ async def dispatch_prefix_control_command(cog: Any, message: Any, command: Prefi
         return True
     if kind == "panel_toggle":
         await cog._send_prefix_panel(message, panel_type="toggle")
+        return True
+    if kind == "panel_canto":
+        await cog._send_cd_panel(message)
         return True
     return False

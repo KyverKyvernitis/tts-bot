@@ -17,7 +17,8 @@ import config
 
 from ..audio import QueueItem, _has_speakable_tts_text
 from ..ttv import resolve_preferences
-from ..performance import parse_performance_text, performance_hash, singing_request, DEFAULT_MELODY_PRESET
+from ..performance import parse_performance_text, performance_hash, singing_request
+from ..melodies import score_for_melody
 from ..score import MAX_MIDI_BYTES, ScoreError, parse_midi
 
 
@@ -285,7 +286,7 @@ async def preparar_payload_tts_mensagem(
             else:
                 if not text.strip():
                     raise ValueError("Escreva a letra depois de /cantar.")
-                score = {"version": 1, "preset": DEFAULT_MELODY_PRESET}
+                score = score_for_melody(resolved.get("ttv_melody_id"))
             ttv_preferences.update(ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
             resolved.update(ttv_preferences)
             resolved["teto_pitch_semitones"] = "+0.0"

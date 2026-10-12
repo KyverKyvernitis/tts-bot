@@ -3930,6 +3930,9 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
 
 
     async def _get_panel_command_mention(self, guild_id: int, panel_kind: str) -> str:
+        if panel_kind == "cd":
+            # O painel de canto é um comando de prefixo, sem slash equivalente.
+            return await self._get_panel_prefix_hint(guild_id, panel_kind)
         command_path = {
             "user": "tts menu",
             "server": "tts server menu",
@@ -3948,6 +3951,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             "user": "tts",
             "server": "panel_server",
             "toggle": "toggle_panel",
+            "cd": "cd",
         }.get(panel_kind, "tts")
         bot_prefix = getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_"))
 
@@ -4869,6 +4873,42 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
 
         embed = self._make_embed("Entrei na call com sucesso", f"Entrei na call `{author_voice.channel.name}`", ok=True)
         await message.channel.send(embed=embed)
+
+    async def _send_cd_panel(self, message: discord.Message) -> bool:
+        if not message.guild:
+            return False
+
+        if self._get_db() is None:
+            await message.channel.send(
+                embed=self._make_embed(
+                    "Configuração indisponível",
+                    "Não consegui carregar suas configurações agora. Tente novamente em instantes.",
+                    ok=False,
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+
+        panel_kind = "cd"
+        if await self._check_prefix_panel_cooldown(message, panel_kind):
+            return True
+
+        from .interface.painel_canto import CDPanelView
+
+        view = CDPanelView(self, message.author.id, message.guild.id, timeout=300)
+        await view.refresh()
+        await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
+        sent = await message.channel.send(
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        view.message = sent
+        self._public_panel_states[sent.id] = {
+            "panel_kind": panel_kind,
+            "owner_id": message.author.id,
+        }
+        self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
+        return True
 
     async def _send_prefix_panel(
         self,

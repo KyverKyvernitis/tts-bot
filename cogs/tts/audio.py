@@ -60,6 +60,7 @@ from cogs.musica.integracoes.tts import (
 from .edge_endpoint import configure_edge_endpoint
 from .helpers import validate_voice
 from .performance import performance_hash
+from .melodies import DEFAULT_MELODY_ID, score_for_melody
 from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences, worker_voice_details
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
 from .streaming import SharedSynthesisMixin
@@ -1852,6 +1853,54 @@ class TTSAudioMixin(SharedSynthesisMixin):
             data, _error = await asyncio.wait_for(process.communicate(), timeout=20)
             if process.returncode != 0 or not data or len(data) > 1024 * 1024:
                 raise RuntimeError("Não consegui converter a amostra para MP3.")
+            return data
+        finally:
+            if process is not None and process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
+            if path:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(path)
+
+    async def _cd_preview_mp3(self, guild_id: int, user_id: int, *, melody_id: str = DEFAULT_MELODY_ID,
+                              settings: dict | None = None) -> bytes:
+        """Sing the selected melody privately through the verified worker route."""
+        if settings is None:
+            db = self._get_db()
+            if db is None:
+                raise TTVSingingError("Não consegui carregar seus ajustes de canto.")
+            settings = await self._maybe_await(db.resolve_tts(guild_id, user_id))
+        preferences = resolve_preferences(settings, default_pitch=TTS_TETO_DEFAULT_PITCH_SEMITONES)
+        preferences.update(ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
+        status = self._ttv_voice_status(preferences["ttv_voice_id"])
+        if not status["online"] or not status["ready"]:
+            raise TTVSingingError("A vocaloid está indisponível para gerar a amostra.")
+        if status.get("singing_available") is False:
+            raise TTVSingingError("O banco de canto está indisponível.", code="ttv_singing_bank_missing")
+        language = preferences["ttv_language"]
+        if language not in status["languages"]:
+            raise TTVSingingError("O idioma selecionado está indisponível para essa vocaloid.")
+        score = score_for_melody(melody_id)
+        text = "My dad has bread" if language == "en-US" else "Meu pai tem pão"
+        item = QueueItem(guild_id=int(guild_id), channel_id=0, author_id=int(user_id),
+            text=text, engine="teto", voice=preferences["ttv_voice_id"], language=language,
+            rate="1.0", pitch="+0Hz", teto_pitch_semitones="+0.0", **preferences,
+            ttv_score=score, ttv_performance_hash=performance_hash(text=text, score=score))
+        path, process = "", None
+        try:
+            path = await self._generate_tts_agent_worker_file(item)
+            if not os.path.isfile(path) or not 0 < os.path.getsize(path) <= 8 * 1024 * 1024:
+                raise TTVSingingError("A amostra retornou um arquivo de áudio inválido.")
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", path,
+                "-t", "15", "-vn", "-ac", "1", "-ar", "44100", "-codec:a", "libmp3lame",
+                "-b:a", "192k", "-f", "mp3", "pipe:1",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            data, _ = await asyncio.wait_for(process.communicate(), timeout=20)
+            if process.returncode != 0 or not data or len(data) > 1024 * 1024:
+                raise TTVSingingError("Não consegui converter a amostra de canto para MP3.")
             return data
         finally:
             if process is not None and process.returncode is None:

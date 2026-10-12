@@ -75,6 +75,11 @@ _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
         "display": ("toggle_panel", "tp"),
         "accepts_argument": False,
     },
+    "panel_canto": {
+        "aliases": ("cd",),
+        "display": ("cd",),
+        "accepts_argument": False,
+    },
 }
 
 
