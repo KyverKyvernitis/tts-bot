@@ -167,7 +167,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
         already_active = self.selected_melody_id == self.active_melody_id
         self.apply_button = discord.ui.Button(
             custom_id="ttv:cd:apply", label="Melodia em uso" if already_active else "Usar melodia",
-            emoji="✓", style=discord.ButtonStyle.primary,
+            emoji="✅", style=discord.ButtonStyle.primary,
             disabled=already_active or not self._settings_available or self._saving or self._is_expired(),
         )
         self.apply_button.callback = self.apply_melody

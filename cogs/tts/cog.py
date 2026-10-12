@@ -4893,15 +4893,51 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         if await self._check_prefix_panel_cooldown(message, panel_kind):
             return True
 
-        from .interface.painel_canto import CDPanelView
+        view = None
+        try:
+            from .interface.painel_canto import CDPanelView
 
-        view = CDPanelView(self, message.author.id, message.guild.id, timeout=300)
-        await view.refresh()
+            view = CDPanelView(self, message.author.id, message.guild.id, timeout=300)
+            await view.refresh()
+            sent = await message.channel.send(
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except asyncio.CancelledError:
+            if view is not None:
+                view.stop()
+            self._prefix_panel_cooldowns.pop(
+                self._prefix_panel_key(message.guild.id, message.author.id, panel_kind), None,
+            )
+            raise
+        except Exception as error:
+            if view is not None:
+                view.stop()
+            self._prefix_panel_cooldowns.pop(
+                self._prefix_panel_key(message.guild.id, message.author.id, panel_kind), None,
+            )
+            logger.warning(
+                "[cd_panel] não foi possível abrir o painel | guild=%s channel=%s type=%s status=%s code=%s",
+                message.guild.id, getattr(message.channel, "id", 0), type(error).__name__,
+                getattr(error, "status", 0), getattr(error, "code", 0),
+            )
+            try:
+                retry_hint = await self._get_panel_prefix_hint(message.guild.id, panel_kind)
+            except Exception:
+                retry_hint = "`_cd`"
+            try:
+                await message.channel.send(
+                    f"Não consegui abrir o painel de canto agora. Tente {retry_hint} novamente.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException as notice_error:
+                logger.warning(
+                    "[cd_panel] não foi possível enviar o aviso | guild=%s channel=%s status=%s code=%s",
+                    message.guild.id, getattr(message.channel, "id", 0), notice_error.status, notice_error.code,
+                )
+            return True
+        # Keep the previous usable panel until Discord confirms its replacement.
         await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
-        sent = await message.channel.send(
-            view=view,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
         view.message = sent
         self._public_panel_states[sent.id] = {
             "panel_kind": panel_kind,
