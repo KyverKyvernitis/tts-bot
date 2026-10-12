@@ -532,6 +532,8 @@ class QueueItem:
     ttv_speech_rate: float | None = field(default=None, repr=False, compare=False)
     ttv_language: str = field(default=DEFAULT_LANGUAGE, repr=False, compare=False)
     ttv_score: object = field(default=None, repr=False, compare=False)
+    ttv_segments: list[dict[str, Any]] | None = field(default=None, repr=False, compare=False)
+    ttv_performance_hash: str = field(default="", repr=False, compare=False)
     enqueued_at_monotonic: float = field(default_factory=time.monotonic, repr=False, compare=False)
     received_at_monotonic: float = field(default=0.0, repr=False, compare=False)
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
