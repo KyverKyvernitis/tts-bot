@@ -79,7 +79,7 @@ O áudio de TTV não muda silenciosamente para outra personagem em caso de erro.
 
 O patch mantém as pastas originais do repositório e não inclui voicebanks,
 binários dos motores, segredos ou um manifesto de exclusões. A automação
-existente do updater publica o worker **1.11.38**, que anuncia as vozes prontas
+existente do updater publica o worker **1.11.40**, que anuncia as vozes prontas
 separadamente e sintetiza a personagem selecionada por pedido. Ele conserva a
 correção do tom **Normal** nas respostas raw da versão 1.11.36.
 O bootstrap no telefone
@@ -100,3 +100,30 @@ real do bot, cobrindo tom zero nos dois idiomas, cache e conversão da amostra e
 A execução local dos testes não confirma a implantação no Discord ou no Poco.
 A inteligibilidade e o timbre em português devem ser avaliados ouvindo as
 amostras; gerar um WAV válido não mede a naturalidade da fala.
+
+## Canto MIDI e comandos no texto
+
+O worker 1.11.40 acrescenta a execução de partituras e efeitos de texto. Use
+`<` antes de uma palavra para entrada suave, `>` depois para saída suave,
+`|` entre palavras para pausa curta e `~` no final para sustentar a vogal.
+Exemplo: `'<aaa aaa>`. Esses comandos pertencem ao TTV; a fala comum sem
+comandos conserva seus controles atuais.
+
+Para cantar, envie o MIDI anexado à mensagem de TTV junto da letra. A voz e o
+idioma selecionados continuam valendo; notas e andamento vêm do MIDI,
+independentes do tom e velocidade salvos para a fala. No canto, `a ~ ~ mor`
+mantém a vogal “a” durante três notas e começa “mor” na quarta. Um `|` separa
+frases preservando o relógio musical.
+
+O canto usa ESPER com uma voicebank English-CVVC instalada. O leitor aceita
+uma melodia monofônica, até 128 notas, 60 segundos e 512 KiB, com letra enviada
+na mensagem ou incorporada ao MIDI. Sem letra, canta “a”. Quando várias faixas
+podem ser a melodia, um menu restrito ao autor permite escolher. A letra pode
+ter até 2048 caracteres; o limite para fala com efeitos é 180. Cada vogal
+sustentada pode ocupar até 18 segundos, respeitando o limite de fragmento da
+ponte ESPER existente; a apresentação completa pode durar até 60 segundos.
+
+A identidade da apresentação percorre fila, cache, payload e resposta HTTP.
+Um worker anterior ou uma resposta com notas/efeitos diferentes é recusada.
+Os detalhes de uso e o teste independente em WAV/MP3 estão em
+[Canto MIDI e efeitos](../deploy/ttv-performance/README.md).

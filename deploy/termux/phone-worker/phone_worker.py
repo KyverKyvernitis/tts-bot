@@ -164,7 +164,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.39"
+PHONE_WORKER_VERSION = "1.11.40"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2103,9 +2103,10 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
         ("ttv_pitch_semitones", "X-Core-Worker-TTV-Pitch-Semitones"),
         ("ttv_speech_rate", "X-Core-Worker-TTV-Speech-Rate"),
         ("ttv_language", "X-Core-Worker-TTV-Language"),
+        ("ttv_performance_hash", "X-Core-Worker-TTV-Performance-Hash"),
     ):
         if meta.get(key) not in (None, ""):
-            handler.send_header(header, _header_ascii(meta.get(key), limit=40))
+            handler.send_header(header, _header_ascii(meta.get(key), limit=64 if key == "ttv_performance_hash" else 40))
     if meta.get("teto_alias_path_cost") not in (None, ""):
         handler.send_header("X-Core-Worker-Teto-Path-Cost", _header_ascii(meta.get("teto_alias_path_cost"), limit=20))
     if meta.get("teto_pitch_boundary_max_cents") not in (None, ""):
@@ -2521,6 +2522,9 @@ def _ttv_voice_state(status: dict[str, Any], voice_id: str) -> dict[str, Any]:
         for row in voices:
             if isinstance(row, dict) and row.get("id") == voice_id:
                 selected = dict(status) if voice_id == "kasane-teto" else {}
+                # Aggregate protocol support does not grant it to a legacy
+                # character renderer that has no performance method.
+                selected.pop("ttv_performance_protocol", None)
                 selected.update(row)
                 if "language_fingerprints" in row:
                     selected["ttv_language_fingerprints"] = dict(row["language_fingerprints"] or {})
@@ -2554,6 +2558,10 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
             return result
         renderer = _get_ttv_renderer(voice_id)
         result.update(renderer.status(force=force))
+        if callable(getattr(renderer, "synthesize_performance", None)):
+            result["ttv_performance_protocol"] = 1
+        else:
+            result.pop("ttv_performance_protocol", None)
         if callable(getattr(renderer, "fingerprint", None)):
             result["ttv_language_fingerprints"] = {
                 language: renderer.fingerprint(reading_language=language)
@@ -2578,6 +2586,7 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
         except Exception as exc:
             resources = {"ok": False, "reason": _short_text(exc, limit=180)}
     result["resources"] = resources
+    result["ttv_performance_protocol"] = 1
     result["ttv_voices"] = []
     for voice_id, state in states.items():
         result["ttv_voices"].append({
@@ -2590,6 +2599,7 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
             "ttv_language_fingerprints": dict(state.get("ttv_language_fingerprints") or {}),
             "backend": state.get("backend", "utau"), "renderer_version": state.get("renderer_version", ""),
             "voicebank_profile": state.get("voicebank_profile", ""), "last_error": state.get("last_error", ""),
+            **({"ttv_performance_protocol": 1} if state.get("ttv_performance_protocol") == 1 else {}),
         })
     result.update({name: any(state.get(name) for state in states.values())
                    for name in ("ok", "available", "ready", "enabled")})
@@ -2691,6 +2701,7 @@ def _phone_worker_tts_policy_module() -> Any:
                         "normalize_edge_rate", "normalize_edge_pitch", "normalize_gtts_language",
                         "sanitize_cache_key", "normalize_cache_format", "standard_cache_key",
                         "effective_ttv_settings", "normalize_ttv_voice_id", "normalize_ttv_speech_rate", "normalize_ttv_language",
+                        "performance_request",
                         "cache_mode_allows_read", "cache_mode_allows_store")
             if not all(callable(getattr(module, name, None)) for name in required):
                 raise RuntimeError("tts_policy.py incompleto")
@@ -2807,6 +2818,7 @@ def _tts_agent_snapshot() -> dict[str, Any]:
         "active": active,
         "concurrency_limit": _tts_agent_queue_limit(),
         "stream_protocol": 2 if _tts_transport_module() is not None else 0,
+        "ttv_performance_protocol": 1,
         "cache_binary_protocol": 2 if _tts_transport_module() is not None else 0,
         "total": total,
         "failed": failed,
@@ -4799,6 +4811,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise RuntimeError("Worker Voice Agent desativado")
         if not _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True):
             raise RuntimeError("TTS direto do Worker Voice Agent desativado")
+        performance = _phone_worker_tts_policy_module().performance_request(body)
         if _tts_agent_normalize_engine(body.get("engine")) == "teto":
             # Validate even a prebuilt request before changing a voice lease.
             _ttv_request_settings(body)
@@ -4807,7 +4820,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if guild_id <= 0 or channel_id <= 0:
             raise RuntimeError("guild_id/channel_id obrigatórios para TTS direto")
         text = _voice_agent_clean_text(body.get("text") or body.get("content"), limit=_env_int("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS", 600))
-        if not text and not (body.get("audio_b64") or body.get("audio_url") or body.get("url")):
+        if performance:
+            text = str(body.get("text") or "").strip()
+        if not text and performance.get("score") is None and not (body.get("audio_b64") or body.get("audio_url") or body.get("url")):
             raise RuntimeError("texto/audio obrigatório para TTS direto")
         now_ms = _voice_agent_now_ms()
         transfer: dict[str, Any] = {}
@@ -4857,9 +4872,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
         proxy_body["voice_channel_id"] = channel_id
         proxy_body["channel_id"] = channel_id
         proxy_body["text"] = text or str(body.get("text") or body.get("content") or "")
-        proxy_body["timeout_seconds"] = max(3.0, min(90.0, float(body.get("timeout_seconds") or _env_float("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS", 30.0))))
+        proxy_body["timeout_seconds"] = max(3.0, min(120.0 if performance else 90.0, float(body.get("timeout_seconds") or
+            (120.0 if performance else _env_float("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS", 30.0)))))
         if (
-            proxy_body.get("text")
+            (proxy_body.get("text") or performance)
             and not (proxy_body.get("audio_b64") or proxy_body.get("audio_url") or proxy_body.get("url"))
             and _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_WITH_TTS_AGENT", True)
         ):
@@ -4867,7 +4883,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 synth_body = dict(proxy_body)
                 synth_body["task"] = "tts_agent_synthesize"
                 synth_body.setdefault("cache_mode", "prefer")
-                synth_body["timeout_seconds"] = max(3, min(int(proxy_body["timeout_seconds"]), _env_int("PHONE_WORKER_TTS_AGENT_DIRECT_PREBUILD_TIMEOUT_SECONDS", 18)))
+                synth_body["timeout_seconds"] = max(3, min(int(proxy_body["timeout_seconds"]),
+                    120 if performance else _env_int("PHONE_WORKER_TTS_AGENT_DIRECT_PREBUILD_TIMEOUT_SECONDS", 18)))
                 synth_body["max_audio_bytes"] = max(1024, min(self.max_output_bytes, _env_int("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_BYTES", 12 * 1024 * 1024)))
                 synth_result = self._task_tts_agent_synthesize(synth_body)
                 if isinstance(synth_result, dict) and synth_result.get("ok") and synth_result.get("data_b64"):
@@ -4881,6 +4898,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     proxy_body["tts_agent_synth_ms"] = synth_result.get("worker_synth_ms")
                     proxy_body["tts_agent_total_ms"] = synth_result.get("worker_total_ms") or synth_result.get("total_ms")
             except Exception as exc:
+                if performance:
+                    raise RuntimeError(f"não foi possível gerar o canto/efeitos TTV: {_short_text(exc, limit=180)}") from exc
                 # A falha de prebuild não deve quebrar o TTS direto: o Music Agent ainda
                 # pode sintetizar no caminho antigo. Guardamos o motivo só para diagnóstico.
                 proxy_body["tts_agent_prebuild_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=140)}"
@@ -5094,9 +5113,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
         normalized = str(engine or "gtts").strip().lower().replace("-", "_") or "gtts"
         engine = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto"}.get(normalized, normalized)
         text = str(body.get("text") or "").strip()
-        if not text:
+        performance = _phone_worker_tts_policy_module().performance_request(body, engine=engine)
+        if not text and performance.get("score") is None:
             raise ValueError("texto vazio")
         ttv_settings = _ttv_request_settings(body) if engine == "teto" else {}
+        if performance:
+            ttv_settings.update({"ttv_performance_hash": performance["hash"],
+                                 "ttv_performance_protocol": 1,
+                                 "ttv_mode": "singing" if performance["score"] is not None else "effects"})
         stage_ms: dict[str, float] = {}
         cache_key = ""
         cache_enabled = self._tts_agent_standard_cache_enabled(roles, capabilities)
@@ -5145,8 +5169,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 get_renderer=lambda: _get_ttv_renderer(ttv_settings["ttv_voice_id"]),
                 monotonic=time.monotonic, normalize_format=self._normalize_tts_cache_format,
                 pitch_offset_semitones=ttv_settings["ttv_pitch_semitones"],
-                speech_rate=ttv_settings["ttv_speech_rate"] if "ttv_speech_rate" in body else None,
-                **({"reading_language": ttv_settings["ttv_language"]} if "ttv_language" in body else {}))
+                speech_rate=ttv_settings["ttv_speech_rate"] if "ttv_speech_rate" in body or performance else None,
+                **({"reading_language": ttv_settings["ttv_language"]} if "ttv_language" in body or performance else {}),
+                **({"score": performance["score"], "segments": performance["segments"],
+                    "performance_hash": performance["hash"]} if performance else {}))
         elif engine == "android_native":
             data, audio_format, response = _phone_worker_tts_android_module().synthesize(
                 body, text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
@@ -5174,8 +5200,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise RuntimeError("engine não gerou áudio")
         if engine == "teto":
             source_voice = teto_meta.get("voice_id", teto_meta.get("ttv_voice_id"))
-            if source_voice is not None and source_voice != ttv_settings["ttv_voice_id"]:
+            if (performance or source_voice is not None) and source_voice != ttv_settings["ttv_voice_id"]:
                 raise RuntimeError("renderer retornou áudio de outra vocaloid TTV")
+            if performance and (
+                teto_meta.get("pitch_offset_semitones") != ttv_settings["ttv_pitch_semitones"] or
+                teto_meta.get("speech_rate") != ttv_settings["ttv_speech_rate"] or
+                teto_meta.get("reading_language") != ttv_settings["ttv_language"]
+            ):
+                raise RuntimeError("renderer retornou performance com ajustes TTV diferentes")
         if len(data) > max_audio_bytes:
             raise RuntimeError(f"áudio grande demais: {len(data)} bytes")
         if engine == "teto" and stage_ms.get("teto_render") is not None:
@@ -5257,19 +5289,24 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if not _env_bool("PHONE_WORKER_TTS_AGENT_ENABLED", True):
             raise RuntimeError("PHONE_WORKER_TTS_AGENT_ENABLED=false")
         text = str(body.get("text") or "").strip()
-        if not text:
+        requested_engine = _tts_agent_normalize_engine(body.get("engine"))
+        performance = _phone_worker_tts_policy_module().performance_request(body, engine=requested_engine)
+        if not text and performance.get("score") is None:
             raise ValueError("texto vazio")
-        max_chars = max(64, _env_int("PHONE_WORKER_TTS_AGENT_MAX_TEXT_LENGTH", 1200))
+        max_chars = 2048 if performance.get("score") is not None else max(64, _env_int("PHONE_WORKER_TTS_AGENT_MAX_TEXT_LENGTH", 1200))
         if len(text) > max_chars:
             raise ValueError(f"texto grande demais para TTS Agent ({len(text)} > {max_chars})")
-        requested_engine = _tts_agent_normalize_engine(body.get("engine"))
         if requested_engine == "teto":
             controls = _ttv_request_settings(body)
+            if performance.get("score") is not None and controls["ttv_voice_id"] == "kasane-teto" and _teto_backend() == "worldline-r":
+                raise ValueError("canto MIDI exige ESPER; selecione o backend utau/ESPER da Teto")
             prefix = "MIKU" if controls["ttv_voice_id"] == "hatsune-miku" else "TETO"
-            teto_max_chars = max(16, _env_int(f"PHONE_WORKER_{prefix}_MAX_CHARACTERS", 180))
+            teto_max_chars = 2048 if performance.get("score") is not None else max(16, _env_int(f"PHONE_WORKER_{prefix}_MAX_CHARACTERS", 180))
             if len(text) > teto_max_chars:
                 raise ValueError(f"texto grande demais para Teto ({len(text)} > {teto_max_chars})")
-        timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or os.getenv("PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS") or self.job_timeout))))
+        timeout_limit = 120 if performance else self.job_timeout
+        timeout = max(2, min(timeout_limit, int(float(body.get("timeout_seconds") or
+            (120 if performance else os.getenv("PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS") or self.job_timeout)))))
         max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
         teto_request = requested_engine == "teto"
         dependency_started = time.monotonic()
@@ -5283,6 +5320,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 reason = teto_state.get("last_error") or (teto_state.get("resources") or {}).get("reason") or "voicebank ou resampler indisponível"
                 name = "Miku" if controls["ttv_voice_id"] == "hatsune-miku" else "Teto"
                 raise RuntimeError(f"{name} indisponível: {_short_text(reason, limit=180)}")
+            if performance and isinstance((deps.get("teto") or {}).get("ttv_voices"), list) and teto_state.get("ttv_performance_protocol") != 1:
+                raise RuntimeError("vocaloid sem suporte MIDI/efeitos TTV; use ESPER e atualize o runtime")
         if teto_request and not deps.get("teto_tts"):
             reason = teto_state.get("last_error") or (teto_state.get("resources") or {}).get("reason") or "voicebank ou resampler indisponível"
             raise RuntimeError(f"Teto indisponível: {_short_text(reason, limit=180)}")

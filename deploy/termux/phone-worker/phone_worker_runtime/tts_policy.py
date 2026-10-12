@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib
 import math
+from pathlib import Path
 import re
+import sys
 from typing import Any
 
 
@@ -71,6 +74,9 @@ def effective_ttv_settings(body: dict[str, Any], *, default_speech_rate: Any = 1
     except (TypeError, ValueError, OverflowError):
         global_rate = 1.0
     global_rate = max(0.75, min(1.5, global_rate)) if math.isfinite(global_rate) else 1.0
+    # Imported music keeps its key and tempo independently of speech preferences.
+    if body.get("ttv_score") is not None:
+        body = {**body, "ttv_pitch_semitones": 0.0, "ttv_speech_rate": 1.0}
     return {
         "ttv_voice_id": normalize_ttv_voice_id(body.get("ttv_voice_id", "kasane-teto")),
         "ttv_pitch_semitones": normalize_teto_pitch_semitones(
@@ -79,6 +85,34 @@ def effective_ttv_settings(body: dict[str, Any], *, default_speech_rate: Any = 1
         if "ttv_speech_rate" in body else global_rate,
         "ttv_language": normalize_ttv_language(body.get("ttv_language", "pt-BR")),
     }
+
+
+def performance_request(body: dict[str, Any], *, engine: str | None = None) -> dict[str, Any]:
+    """Validate the bounded performance before provider discovery or cache IO."""
+    score, segments = body.get("ttv_score"), body.get("ttv_segments")
+    supplied_hash = body.get("ttv_performance_hash")
+    if score is None and segments is None:
+        if supplied_hash is not None:
+            raise ValueError("identidade TTV recebida sem MIDI ou efeitos")
+        return {}
+    if normalize_engine(engine or body.get("engine")) != "teto":
+        raise ValueError("MIDI e efeitos de TTV exigem a engine teto")
+    worker_root = str(Path(__file__).resolve().parents[1])
+    if worker_root not in sys.path:
+        sys.path.insert(0, worker_root)
+    try:
+        prosody = importlib.import_module("teto_renderer.prosody")
+        validate, identity = prosody.validate_performance, prosody.performance_hash
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError("suporte MIDI/efeitos TTV incompleto; atualize o runtime do worker") from exc
+    text = str(body.get("text") or "").strip()
+    validate(text, score=score, segments=segments)
+    digest = identity(text, score=score, segments=segments)
+    if supplied_hash is not None and (
+        not isinstance(supplied_hash, str) or supplied_hash != digest
+    ):
+        raise ValueError("identidade da performance TTV difere do texto, MIDI ou efeitos")
+    return {"score": score, "segments": segments, "hash": digest}
 
 def available_engines(deps: dict[str, Any]) -> list[str]:
     engines: list[str] = []
@@ -191,21 +225,26 @@ def standard_cache_key(body: dict[str, Any], *, engine: str, sanitize_key, norma
             return sanitize_key(provided)
     text = str(body.get("text") or "").strip()
     if normalized_engine == "teto":
+        performance = performance_request(body, engine=normalized_engine)
+        if performance:
+            text = " ".join(text.split())
         fingerprint = str(teto_fingerprint or "unavailable")
         voice = str(body.get("voice") or "kasane-teto-standard").strip() or "kasane-teto-standard"
         language = str(body.get("language") or "pt-BR").strip() or "pt-BR"
         base_pitch = str(teto_base_pitch or "C4")
         pitch_part = ""
         controls = effective_ttv_settings(body, default_speech_rate=teto_speech_rate)
-        if "ttv_pitch_semitones" in body or "teto_pitch_semitones" in body:
+        if performance or "ttv_pitch_semitones" in body or "teto_pitch_semitones" in body:
             pitch_offset = controls["ttv_pitch_semitones"]
             pitch_part = f"|pitch={pitch_offset:+.1f}"
         payload = f"teto|{fingerprint}|{voice}|{language}|{base_pitch}{pitch_part}|{text}"
-        if any(name in body for name in ("ttv_voice_id", "ttv_pitch_semitones", "ttv_speech_rate", "ttv_language")):
+        if performance or any(name in body for name in ("ttv_voice_id", "ttv_pitch_semitones", "ttv_speech_rate", "ttv_language")):
             payload = (f"ttv-v1|voice={controls['ttv_voice_id']}|pitch={controls['ttv_pitch_semitones']:+.1f}"
                        f"|rate={controls['ttv_speech_rate']!r}|" + payload)
-            if "ttv_language" in body:
+            if performance or "ttv_language" in body:
                 payload = f"reading={controls['ttv_language']}|" + payload
+        if performance:
+            payload = f"ttv-performance-v1|{performance['hash']}|" + payload
     elif normalized_engine == "android_native":
         language = str(body.get("language") or body.get("fallback_language") or "pt-BR").strip().replace("_", "-") or "pt-BR"
         voice = str(body.get("voice") or "auto").strip() or "auto"

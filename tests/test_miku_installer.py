@@ -62,7 +62,14 @@ def prepared(tmp_path, monkeypatch):
         monkeypatch.setattr(module, name, value)
     wrapper = tmp_path / "esper/bin/resampler.py"
     wrapper.parent.mkdir(parents=True)
-    wrapper.write_text("# fixture installed ESPER bridge; never executed by installation\n")
+    # Installation inspects the parser without executing it. Model a modern
+    # bridge's actual supported options instead of an empty placeholder script.
+    wrapper.write_text(
+        "import argparse\nparser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--root')\nparser.add_argument('--cache-dir')\n"
+        "parser.add_argument('--container')\nparser.add_argument('--timeout')\n"
+        "parser.add_argument('--implementation-id')\n"
+    )
     environment = tmp_path / ".phone-worker.env"
     command = shlex.join([sys.executable, str(wrapper), "--container", "voicepeak-arm64"])
     original = ("# user configuration\nTOKEN=fixture-private-value\n"

@@ -7,7 +7,8 @@ Admission, cache, output envelopes and the shared transport keep their owners.
 
 def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
                     heavy_lock, get_renderer, monotonic, normalize_format,
-                    pitch_offset_semitones=0.0, speech_rate=None, reading_language=None):
+                    pitch_offset_semitones=0.0, speech_rate=None, reading_language=None,
+                    score=None, segments=None, performance_hash=None):
     if not heavy_lock.acquire(blocking=False):
         raise RuntimeError("recurso pesado ocupado por build ou manutenção")
     teto_started = monotonic()
@@ -17,13 +18,22 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
             controls["speech_rate"] = float(speech_rate)
         if reading_language is not None:
             controls["reading_language"] = reading_language
-        rendered = get_renderer().synthesize(
-            text,
-            timeout_seconds=float(timeout),
-            max_audio_bytes=max_audio_bytes,
-            pitch_offset_semitones=float(pitch_offset_semitones),
-            **controls,
-        )
+        renderer = get_renderer()
+        if score is not None or segments is not None:
+            perform = getattr(renderer, "synthesize_performance", None)
+            if not callable(perform):
+                raise RuntimeError("motor sem suporte MIDI/efeitos TTV; use ESPER e atualize o runtime")
+            data, metadata = perform(
+                text, score=score, segments=segments,
+                timeout_seconds=float(timeout), max_audio_bytes=max_audio_bytes,
+                pitch_offset_semitones=float(pitch_offset_semitones), **controls)
+            rendered = {**metadata, "audio": data, "audio_format": "wav"}
+            if rendered.get("ttv_performance_hash") != performance_hash:
+                raise RuntimeError("renderer retornou áudio de outra performance TTV")
+        else:
+            rendered = renderer.synthesize(
+                text, timeout_seconds=float(timeout), max_audio_bytes=max_audio_bytes,
+                pitch_offset_semitones=float(pitch_offset_semitones), **controls)
     finally:
         heavy_lock.release()
     data = bytes(rendered.pop("audio", b"") or b"")

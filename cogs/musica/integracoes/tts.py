@@ -255,6 +255,16 @@ async def rotear_item_tts_para_musica(
     if not route_music:
         return False, audio_task
 
+    # Singing/effects must reach the musical session as verified rendered audio.
+    # Its text-only synthesis endpoint does not understand the performance score.
+    if (getattr(item, "ttv_score", None) is not None
+            or getattr(item, "ttv_segments", None) is not None):
+        if not suporta_cache_tts_agente(bot):
+            raise RuntimeError(
+                "O worker de música precisa aceitar áudio pronto para reproduzir "
+                "canto e efeitos de TTV. Atualize o worker e tente novamente."
+            )
+
     if audio_task is not None and not audio_task.done():
         audio_task.cancel()
         with contextlib.suppress(BaseException):

@@ -2,10 +2,187 @@ from __future__ import annotations
 
 import math
 import re
+import hashlib
+import json
 from bisect import bisect_right
 from dataclasses import dataclass, replace
 
 from .phonemizer import Mora
+
+
+def validate_performance(text: str, *, score=None, segments=None) -> None:
+    """Bound untrusted musical/effect requests before caches or native processes."""
+    if not isinstance(text, str) or len(text) > (2048 if score is not None else 180):
+        raise ValueError("texto TTV grande demais para esta apresentação")
+    if score is None and segments is None:
+        raise ValueError("apresentação TTV exige MIDI ou efeitos no texto")
+    if score is not None:
+        if not isinstance(score, dict) or set(score) - {"version", "track_index", "duration_ms", "lyrics_source", "notes"}:
+            raise ValueError("partitura TTV inválida")
+        if type(score.get("version")) is not int or score["version"] != 1:
+            raise ValueError("versão da partitura TTV não suportada")
+        if type(score.get("track_index")) is not int or not 0 <= score["track_index"] < 64:
+            raise ValueError("faixa MIDI inválida")
+        if score.get("lyrics_source") not in {"message", "midi", "vowel"}:
+            raise ValueError("origem da letra MIDI inválida")
+        duration = score.get("duration_ms")
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or not 40 <= duration <= 60000:
+            raise ValueError("MIDI deve durar até 60 segundos")
+        notes = score.get("notes")
+        if not isinstance(notes, list) or not 1 <= len(notes) <= 128:
+            raise ValueError("MIDI deve conter entre 1 e 128 notas")
+        previous_end = 0.0
+        for item in notes:
+            if not isinstance(item, dict) or set(item) - {"midi_note", "start_ms", "duration_ms", "velocity", "lyric"}:
+                raise ValueError("nota MIDI inválida")
+            if type(item.get("midi_note")) is not int or not 36 <= item["midi_note"] <= 96:
+                raise ValueError("notas MIDI devem estar entre C2 e C7")
+            if type(item.get("velocity")) is not int or not 1 <= item["velocity"] <= 127:
+                raise ValueError("intensidade MIDI inválida")
+            start, length = item.get("start_ms"), item.get("duration_ms")
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in (start, length)):
+                raise ValueError("tempo da nota MIDI inválido")
+            if start < previous_end - 0.001 or length < 40 or start + length > duration + 0.001:
+                raise ValueError("MIDI exige uma melodia sem notas sobrepostas e notas de pelo menos 40 ms")
+            previous_end = start + length
+            if "lyric" in item and (not isinstance(item["lyric"], str) or len(item["lyric"]) > 128):
+                raise ValueError("letra incorporada ao MIDI inválida")
+    if segments is not None:
+        if not isinstance(segments, list) or not 1 <= len(segments) <= 128:
+            raise ValueError("efeitos TTV devem conter entre 1 e 128 trechos")
+        for segment in segments:
+            if not isinstance(segment, dict) or set(segment) != {"text", "fade_in", "fade_out", "hold", "pause_after_ms"}:
+                raise ValueError("trecho de efeitos TTV inválido")
+            if not isinstance(segment["text"], str) or not segment["text"].strip() or len(segment["text"]) > 2048:
+                raise ValueError("texto do trecho TTV inválido")
+            if any(type(segment[name]) is not bool for name in ("fade_in", "fade_out", "hold")):
+                raise ValueError("efeito TTV inválido")
+            if type(segment["pause_after_ms"]) is not int or segment["pause_after_ms"] not in {0, 180}:
+                raise ValueError("pausa TTV inválida")
+            if segment["text"].strip() == "~" and segment["hold"] and score is None:
+                raise ValueError("~ separado exige uma nota MIDI; na fala use aaa~")
+        joined = " ".join(" ".join(segment["text"].split()) for segment in segments)
+        if joined != " ".join(text.split()):
+            raise ValueError("trechos de efeitos TTV não correspondem ao texto")
+    if not text.strip() and score is None:
+        raise ValueError("texto TTV vazio")
+
+
+def performance_hash(text: str, *, score=None, segments=None) -> str:
+    payload = {"version": 1, "text": " ".join(text.split()), "score": score, "segments": segments}
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def align_singing_syllables(moras: list[Mora], score: dict, *, slots=None) -> list[list[int]]:
+    """Choose vowel spans; a span may cover tied notes, never a musical rest."""
+    nuclei = [mora for mora in moras if mora.role == "nucleus"]
+    events = score["notes"]
+    if any(event["duration_ms"] > 18000 for event in events):
+        raise ValueError("uma vogal contínua pode durar até 18 segundos no ESPER; divida a nota com outra sílaba ou uma pausa MIDI")
+    if not nuclei:
+        raise ValueError("a letra não contém vogais que a voz possa cantar")
+    if len(nuclei) > len(events):
+        raise ValueError(f"letra contém {len(nuclei)} sílabas para {len(events)} notas; encurte a letra ou acrescente notas")
+    if slots is not None:
+        if len(slots) != len(events):
+            raise ValueError(f"letra com ~ ocupa {len(slots)} notas; o MIDI contém {len(events)}")
+        groups = [[] for _ in nuclei]
+        active = None
+        for index, slot in enumerate(slots):
+            if slot is not None:
+                active = slot
+            if active is None or not 0 <= active < len(groups):
+                raise ValueError("~ precisa vir depois de uma sílaba")
+            groups[active].append(index)
+        if any(not group for group in groups):
+            raise ValueError("cada sílaba precisa de uma nota MIDI")
+    else:
+        # Balanced phrase alignment gives tonic syllables a little more room.
+        # Dynamic programming respects rest boundaries rather than spreading
+        # one vowel across silence or arbitrarily discarding surplus notes.
+        count, total = len(nuclei), len(events)
+        weights = [1.15 if mora.stressed else 1.0 for mora in nuclei]
+        voiced_ms = sum(float(event["duration_ms"]) for event in events)
+        desired = [voiced_ms * weight / sum(weights) for weight in weights]
+        costs = {(0, 0): (0.0, [])}
+        for syllable in range(count):
+            for used in range(total + 1):
+                previous = costs.get((syllable, used))
+                if previous is None:
+                    continue
+                end_limit = total - (count - syllable - 1)
+                duration = 0.0
+                pitches = []
+                for end in range(used + 1, end_limit + 1):
+                    if end > used + 1:
+                        left, right = events[end - 2], events[end - 1]
+                        if right["start_ms"] - left["start_ms"] - left["duration_ms"] > 20:
+                            break
+                    duration += float(events[end - 1]["duration_ms"])
+                    if events[end - 1]["start_ms"] + events[end - 1]["duration_ms"] - events[used]["start_ms"] > 18000:
+                        break
+                    pitches.append(events[end - 1]["midi_note"])
+                    if max(pitches) - min(pitches) > 40:
+                        break
+                    cost = previous[0] + ((duration - desired[syllable]) / max(40, desired[syllable])) ** 2
+                    key = (syllable + 1, end)
+                    if key not in costs or cost < costs[key][0]:
+                        costs[key] = (cost, previous[1] + [list(range(used, end))])
+        result = costs.get((count, total))
+        if result is None:
+            raise ValueError("a letra não encaixa nas frases do MIDI; acrescente sílabas nas pausas ou divida vogais acima de 18 segundos; use ~ para indicar notas ligadas")
+        groups = result[1]
+    for group in groups:
+        if events[group[-1]]["start_ms"] + events[group[-1]]["duration_ms"] - events[group[0]]["start_ms"] > 18000:
+            raise ValueError("uma vogal contínua pode durar até 18 segundos no ESPER; divida a letra com outra sílaba ou uma pausa MIDI")
+        for left_index, right_index in zip(group, group[1:]):
+            left, right = events[left_index], events[right_index]
+            if right["start_ms"] - left["start_ms"] - left["duration_ms"] > 20:
+                raise ValueError("~ não pode prolongar uma vogal através de uma pausa MIDI")
+        pitches = [events[i]["midi_note"] for i in group]
+        if max(pitches) - min(pitches) > 40:
+            raise ValueError("melisma abrange mais de 40 semitons; divida a vogal em outro ataque")
+    return groups
+
+
+def singing_pitch_at(score: dict, time_ms: float) -> float:
+    """Absolute cents, with short legato transitions and delayed mild vibrato."""
+    events = score["notes"]
+    starts = [float(event["start_ms"]) for event in events]
+    index = max(0, min(len(events) - 1, bisect_right(starts, time_ms) - 1))
+    event = events[index]
+    pitch = float(event["midi_note"] * 100)
+    elapsed = time_ms - float(event["start_ms"])
+    if index and 0 <= elapsed < 12:
+        previous = events[index - 1]
+        gap = event["start_ms"] - previous["start_ms"] - previous["duration_ms"]
+        if gap <= 20:
+            pitch = previous["midi_note"] * 100 + (pitch - previous["midi_note"] * 100) * _smoothstep(elapsed / 12.0)
+    if event["duration_ms"] >= 700 and elapsed >= 550:
+        ramp = _smoothstep((elapsed - 550) / 180.0)
+        tail = _smoothstep((event["duration_ms"] - elapsed) / 100.0)
+        pitch += 12.0 * ramp * tail * math.sin(2 * math.pi * 5.0 * (elapsed - 550) / 1000.0)
+    return pitch
+
+
+def align_singing_pitch(notes: list[RenderNote], placements: list[dict], score: dict, *, preroll_ms: float, tempo: int) -> list[RenderNote]:
+    interval = 60000.0 / (_tempo(tempo) * 96.0)
+    aligned = []
+    for note, placement in zip(notes, placements):
+        base = _pitch_midi(note.pitch) * 100
+        start = placement["start_ms"] - preroll_ms
+        duration = note.duration_ms + placement["lead_ms"]
+        points = max(2, math.ceil(duration / interval) + 1)
+        scope = placement.get("score_group")
+        local_score = {"notes": [score["notes"][number] for number in scope]} if scope is not None else score
+        values = [round(singing_pitch_at(local_score, start + point * interval) - base) for point in range(points)]
+        # The UTAU wire encoding is signed 12-bit cents. Fail rather than
+        # silently clamp a wide melisma to the wrong pitch.
+        if min(values) < -2048 or max(values) > 2047:
+            raise ValueError("salto de notas grande demais para um único trecho; divida a sílaba")
+        aligned.append(replace(note, pitchbend=encode_pitchbend(values), pitch_start_cents=values[0], pitch_end_cents=values[-1]))
+    return aligned
 
 
 @dataclass(frozen=True, slots=True)

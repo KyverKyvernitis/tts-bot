@@ -3,9 +3,11 @@ from __future__ import annotations
 import array
 import contextlib
 import hashlib
+import io
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -22,7 +24,10 @@ from typing import Any, Callable, Mapping
 from .cache import FragmentCache
 from .errors import TetoConfigurationError, TetoResourceError, TetoSynthesisError
 from .phonemizer import phonemize
-from .prosody import RenderNote, align_pitch_to_timeline, build_notes
+from .prosody import (
+    RenderNote, align_pitch_to_timeline, build_notes, validate_performance,
+    performance_hash, align_singing_syllables, align_singing_pitch, _relative_pitch,
+)
 from .voicebank import OtoEntry, VoicebankIndex
 
 
@@ -33,6 +38,7 @@ class TetoRenderer:
     ENGLISH_PHONEMIZER_VERSION = "en-us-cmudict-xsampa-cvvc-v2"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v4-timeline-pitch"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
+    PERFORMANCE_VERSION = "ttv-performance-4-steady-vowels"
 
     def __init__(
         self, *, resource_guard: Callable[[], dict[str, Any]] | None = None,
@@ -149,7 +155,7 @@ class TetoRenderer:
         return languages
 
     def _clear_reading_context(self) -> None:
-        for name in ("profile", "render_metrics"):
+        for name in ("profile", "render_metrics", "performance_sources", "performance_singing"):
             if hasattr(self._reading_context, name):
                 delattr(self._reading_context, name)
 
@@ -228,6 +234,10 @@ class TetoRenderer:
         return max(1, min(200, self._env_int("PHONE_WORKER_TETO_VELOCITY", 100)))
 
     def _modulation(self) -> int:
+        if getattr(self._reading_context, "performance_singing", False):
+            # Source F0 modulation can pull a sung note hundreds of cents away
+            # from its score. Musical expression comes from our shared curve.
+            return 0
         return max(0, min(100, self._env_int("PHONE_WORKER_TETO_MODULATION", 15)))
 
     def _length_mode(self) -> str:
@@ -516,6 +526,11 @@ class TetoRenderer:
     def _fragment_cache_payload(
         self, *, fingerprint: str, entry: OtoEntry, note: RenderNote
     ) -> str:
+        if getattr(self._reading_context, "performance_sources", None) is not None:
+            # Existing fragments can contain the old bridge's copied FRQ or
+            # wrapped PCM. Isolate only the new presentation path; ordinary
+            # speech keeps every previous cache identity.
+            fingerprint += "|ttv-performance-native-pitch-v4-volume50"
         return "|".join((
             fingerprint,
             entry.cache_identity(),
@@ -563,8 +578,22 @@ class TetoRenderer:
         normalized_output = workdir / f"{key}.wav"
 
         def run_resampler(pitchbend: str) -> tuple[subprocess.CompletedProcess[bytes], list[str]]:
+            source = entry.wav_path
+            performance_sources = getattr(self._reading_context, "performance_sources", None)
+            if performance_sources is not None:
+                # The legacy bridge discovers FRQ by adjacent filename. Give
+                # it a private WAV without the original FRQ; its own analysis
+                # cache is content-addressed and therefore remains reusable
+                # even though this staging directory is request-scoped.
+                source_key = hashlib.sha256(str(source).encode()).hexdigest()
+                private_source = performance_sources / (source_key + ".wav")
+                if not private_source.exists():
+                    if source.stat().st_size > 64 * 1024 * 1024:
+                        raise TetoSynthesisError("fonte musical grande demais")
+                    shutil.copyfile(source, private_source)
+                source = private_source
             command = self._resampler_command() + [
-                str(entry.wav_path),
+                str(source),
                 str(raw_output),
                 note.pitch,
                 str(self._velocity()),
@@ -573,7 +602,9 @@ class TetoRenderer:
                 self._format_number(self._resampler_length(entry, note)),
                 self._format_number(entry.consonant_ms),
                 self._format_number(entry.cutoff_ms),
-                "100",
+                # ESPER 2.5 can wrap overflowing PCM16 samples internally.
+                # Headroom must be applied before that irreversible writer.
+                "50" if performance_sources is not None else "100",
                 str(self._modulation()),
                 f"!{max(60, min(240, self._env_int('PHONE_WORKER_TETO_TEMPO', 140)))}",
                 pitchbend,
@@ -1075,6 +1106,454 @@ class TetoRenderer:
             "silence_gap_fades": silence_gap_fades,
         }
         return combined, missing, rendered, pitchbend_fallbacks, legacy_fragment_hits, timeline
+
+    @staticmethod
+    def _performance_envelope(samples: array.array, start: int, end: int, *, fade_in=False, fade_out=False) -> None:
+        start, end = max(0, int(start)), min(len(samples), int(end))
+        if end <= start:
+            return
+        # Keep most of a short word fully audible; the first consonant gets
+        # a gradual attack rather than spending its whole lifetime at silence.
+        length = min((end - start) // 3, round(TetoRenderer.SAMPLE_RATE * 0.26))
+        if not length:
+            return
+        for offset in range(length):
+            gain = 0.12 + 0.88 * math.sin(offset / max(1, length - 1) * math.pi / 2.0) ** 2
+            if fade_in:
+                samples[start + offset] = round(samples[start + offset] * gain)
+            if fade_out:
+                samples[end - 1 - offset] = round(samples[end - 1 - offset] * gain)
+
+    def _performance_phonemize(self, text, index, language):
+        return phonemize(text, max_moras=1025, resolve_alias=index.resolve,
+                         voicebank_profile=self._index_profile,
+                         reading_language=language, **self._phonemizer_options())
+
+    def _singing_lyrics(self, text, score, index, language, segments=None):
+        moras, slots = [], []
+        word_offset = 0
+        explicit_holds = False
+        if score['lyrics_source'] == 'message':
+            tokens = []
+            if segments:
+                for segment in segments:
+                    for token in segment['text'].split():
+                        if token == '~' and not segment['hold']:
+                            continue
+                        if token == '|':
+                            continue
+                        tokens.append(token)
+                    if segment['pause_after_ms']:
+                        tokens.append('|')
+            else:
+                tokens = text.split()
+        elif score['lyrics_source'] == 'vowel':
+            # One continuous vowel per voiced phrase, including its note changes.
+            tokens = []
+            for number, event in enumerate(score['notes']):
+                previous = score['notes'][number - 1] if number else None
+                continuation = previous is not None and event['start_ms'] - previous['start_ms'] - previous['duration_ms'] <= 20
+                tokens.append('~' if continuation else 'a')
+        else:
+            tokens = [str(event.get('lyric') or '~').strip() for event in score['notes']]
+        for token_index, token in enumerate(tokens):
+            if token == '|':
+                if moras:
+                    moras[-1] = replace(moras[-1], phrase_end='|', pause_after_ms=0)
+                continue
+            if token in {'~', '-', '_'}:
+                if score['lyrics_source'] == 'midi' and token_index and token_index < len(score['notes']):
+                    previous, event = score['notes'][token_index - 1], score['notes'][token_index]
+                    if event['start_ms'] - previous['start_ms'] - previous['duration_ms'] > 20:
+                        nucleus = next((item for item in reversed(moras) if item.role == 'nucleus'), None)
+                        if nucleus is None:
+                            token = 'a'
+                        else:
+                            # A rest ends the sustain. Restart the same vowel
+                            # from its steady alias, never its old consonant.
+                            candidates = tuple(dict.fromkeys(candidate.split()[-1] for candidate in nucleus.candidates))
+                            if index.resolve(candidates) is None:
+                                raise ValueError('a voicebank não contém a vogal isolada depois da pausa; escreva a sílaba nessa nota MIDI')
+                            first = sum(item.role == 'nucleus' for item in moras)
+                            moras.append(replace(nucleus, candidates=candidates, word_index=word_offset,
+                                                 syllable_index=0, word_moras=1, mora_index=0,
+                                                 word_end=True, pause_after_ms=0, phrase_end='',
+                                                 source_phonemes=nucleus.source_phonemes[-1:]))
+                            word_offset += 1
+                            slots.append(first)
+                            continue
+                if token == 'a':
+                    pass
+                else:
+                    explicit_holds = True
+                    slots.append(None)
+                    continue
+            chunk = self._performance_phonemize(token.strip('-'), index, language)
+            nuclei = [item for item in chunk if item.role == 'nucleus']
+            if score['lyrics_source'] == 'midi' and len(nuclei) != 1:
+                raise ValueError('cada letra MIDI deve conter uma sílaba; envie a letra na mensagem para alinhamento automático')
+            if not nuclei:
+                continue
+            first = sum(item.role == 'nucleus' for item in moras)
+            slots.extend(range(first, first + len(nuclei)))
+            moras.extend(replace(item, word_index=item.word_index + word_offset,
+                                 pause_after_ms=0, phrase_end='') for item in chunk)
+            word_offset += max(item.word_index for item in chunk) + 1
+        if len(moras) > 1024:
+            raise ValueError('letra MIDI contém fonemas demais')
+        groups = align_singing_syllables(moras, score, slots=slots if explicit_holds or score['lyrics_source'] == 'midi' else None)
+        return moras, groups
+
+    def _singing_notes(self, moras, groups, score):
+        nucleus_keys = [(item.word_index, item.syllable_index) for item in moras if item.role == 'nucleus']
+        lookup = {key: number for number, key in enumerate(nucleus_keys)}
+        notes, spans = [], []
+        events = score['notes']
+        for mora in moras:
+            group = groups[lookup[(mora.word_index, mora.syllable_index)]]
+            first, last = events[group[0]], events[group[-1]]
+            start = float(first['start_ms'])
+            end = float(last['start_ms'] + last['duration_ms'])
+            # Centre the coarse UTAU note so a wide melisma stays within the
+            # signed 12-bit bend range; absolute MIDI notes are not transposed.
+            pitches = [events[number]['midi_note'] for number in group]
+            base_midi = round((min(pitches) + max(pitches)) / 2)
+            duration = max(1, round(end - start)) if mora.role == 'nucleus' else max(30, min(70, mora.duration_ms))
+            notes.append(RenderNote(candidates=mora.candidates, pitch=_relative_pitch('C4', base_midi - 60),
+                                    duration_ms=duration, pause_after_ms=0, gain=1.0,
+                                    stressed=mora.stressed, contour='singing', role=mora.role,
+                                    source_phonemes=mora.source_phonemes, coverage=mora.coverage,
+                                    word_index=mora.word_index, mora_index=mora.mora_index,
+                                    word_moras=mora.word_moras, word_end=mora.word_end,
+                                    phrase_end=mora.phrase_end, profile=mora.profile,
+                                    planner_cost=mora.planner_cost, syllable_index=mora.syllable_index,
+                                    word_syllables=mora.word_syllables))
+            spans.append((start, end, group))
+        return notes, spans
+
+    def _singing_placements(self, notes, entries, spans, score):
+        placements = []
+        for note, entry, (start, end, group) in zip(notes, entries, spans):
+            lead = self._english_lead_ms(entry, note) if entry else 0.0
+            nucleus_number = next(number for number, (other, span) in enumerate(zip(notes, spans))
+                                  if other.role == 'nucleus' and span[2] == group)
+            nucleus_entry = entries[nucleus_number]
+            nucleus_lead = self._english_lead_ms(nucleus_entry, notes[nucleus_number]) if nucleus_entry else 0.0
+            if note.role == 'nucleus':
+                anchor = start
+            elif note.role == 'vowel-exit':
+                anchor = start - nucleus_lead
+            elif note.role in {'transition', 'cluster', 'epenthetic'}:
+                anchor = start - nucleus_lead - min(45.0, note.duration_ms * 0.6)
+            else:
+                anchor = end - note.duration_ms
+            placements.append({'anchor_ms': anchor, 'start_ms': anchor - lead,
+                               'lead_ms': lead, 'fade_ms': self._english_fade_ms(entry, lead),
+                               'score_group': group})
+        preroll = max(0.0, -min((placement['start_ms'] for placement in placements), default=0.0))
+        if preroll > 350:
+            raise TetoSynthesisError('ataque consonantal longo demais para o MIDI')
+        for placement in placements:
+            placement['anchor_ms'] += preroll
+            placement['start_ms'] += preroll
+        return placements, preroll
+
+    @staticmethod
+    def _performance_wav(samples, rate):
+        output = io.BytesIO()
+        with wave.open(output, 'wb') as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(rate)
+            data = array.array('h', samples)
+            if os.sys.byteorder != 'little':
+                data.byteswap()
+            wav.writeframes(data.tobytes())
+        return output.getvalue()
+
+    def _worldline_effects(self, text, segments, *, pitch_offset_semitones, speech_rate, reading_language,
+                          timeout_seconds, max_audio_bytes):
+        # WORLDLINE owns a separate phrase API. Plain fades/pauses can use it;
+        # vowel holds need the musical resampler and must not time-stretch PCM.
+        if any(segment['hold'] for segment in segments):
+            raise ValueError('prolongar vogais exige o motor ESPER; WORLDLINE aceita fades e pausas')
+        started = time.monotonic()
+        combined = array.array('h')
+        last = {}
+        for segment in segments:
+            if segment['text'].strip() in {'|', '~'}:
+                continue
+            remaining = timeout_seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                raise TimeoutError('efeitos TTV excederam o timeout')
+            result = self.synthesize(segment['text'], timeout_seconds=remaining, max_audio_bytes=max_audio_bytes,
+                                     pitch_offset_semitones=pitch_offset_semitones, speech_rate=speech_rate,
+                                     reading_language=reading_language)
+            with wave.open(io.BytesIO(result['audio']), 'rb') as wav:
+                fragment = array.array('h', wav.readframes(wav.getnframes()))
+                if os.sys.byteorder != 'little':
+                    fragment.byteswap()
+            self._performance_envelope(fragment, 0, len(fragment), fade_in=segment['fade_in'], fade_out=segment['fade_out'])
+            combined.extend(fragment)
+            combined.extend([0] * round(self.SAMPLE_RATE * segment['pause_after_ms'] / 1000.0))
+            last = {key: value for key, value in result.items() if key != 'audio'}
+            if len(combined) > self.SAMPLE_RATE * 20:
+                raise TetoSynthesisError('efeitos TTV excederam 20 segundos')
+        raw = self._performance_wav(combined, self.SAMPLE_RATE)
+        if len(raw) > max_audio_bytes or not combined:
+            raise TetoSynthesisError('áudio com efeitos TTV inválido ou grande demais')
+        return raw, {**last, 'ttv_performance_hash': performance_hash(text, segments=segments),
+                     'performance_version': self.PERFORMANCE_VERSION, 'performance_mode': 'speech-effects',
+                     'sha256': hashlib.sha256(raw).hexdigest(), 'worker_synth_ms': round((time.monotonic() - started) * 1000, 2)}
+
+    def synthesize_performance(self, text: str, *, score=None, segments=None,
+                               pitch_offset_semitones=0.0, speech_rate=1.0, reading_language='pt-BR',
+                               timeout_seconds=120.0, max_audio_bytes=8 * 1024 * 1024):
+        """Render score vowels on a musical clock, or a phrase with inline effects.
+
+        MIDI uses original pitches/tempo and a consonantal preroll reported in
+        metadata. Every melisma is one nucleus render with multiple F0 targets.
+        """
+        validate_performance(text, score=score, segments=segments)
+        digest = performance_hash(text, score=score, segments=segments)
+        language = self._effective_reading_language(reading_language)
+        rate = self._effective_speech_rate(speech_rate)
+        if not math.isfinite(float(timeout_seconds)) or not 0 < float(timeout_seconds) <= 120:
+            raise ValueError('timeout TTV deve estar entre 0 e 120 segundos')
+        pitch = float(pitch_offset_semitones)
+        if not math.isfinite(pitch) or not -4 <= pitch <= 4:
+            raise ValueError('tom TTV deve estar entre -4 e 4 semitons')
+        if score is not None and (pitch != 0.0 or rate != 1.0):
+            raise ValueError('canto MIDI preserva tom e andamento; use tom 0 e velocidade 1')
+        pitch = round(pitch * 2.0) / 2.0
+        if self.RENDER_VERSION.startswith('worldline'):
+            if score is not None:
+                raise ValueError('canto MIDI exige ESPER; o motor WORLDLINE ainda não aceita partituras')
+            return self._worldline_effects(text, segments, pitch_offset_semitones=pitch,
+                                           speech_rate=rate, reading_language=language,
+                                           timeout_seconds=timeout_seconds, max_audio_bytes=max_audio_bytes)
+        if not self._env_bool('PHONE_WORKER_TETO_ENABLED', False):
+            raise TetoConfigurationError('PHONE_WORKER_TETO_ENABLED=false')
+        self._resampler_command()
+        if not shutil.which('ffmpeg'):
+            raise TetoConfigurationError('ffmpeg não encontrado')
+        self._check_resources()
+        if not self._lock.acquire(blocking=False):
+            raise TetoResourceError('renderer TTV ocupado')
+        started = time.monotonic()
+        deadline = started + float(timeout_seconds)
+        try:
+            self._reading_context.performance_singing = score is not None
+            index = self._load_reading_index(language)
+            tempo = max(60, min(240, self._env_int('PHONE_WORKER_TETO_TEMPO', 140)))
+            effect_ranges = []
+            spans, groups, preroll = None, None, 0.0
+            if score is not None:
+                if self._index_profile != 'english-cvvc':
+                    raise ValueError('canto MIDI exige a voicebank English-CVVC da voz escolhida')
+                moras, groups = self._singing_lyrics(text, score, index, language, segments)
+                notes, spans = self._singing_notes(moras, groups, score)
+            else:
+                spoken = [segment for segment in segments if segment['text'].strip() not in {'|', '~'}]
+                moras = self._performance_phonemize(' '.join(segment['text'] for segment in spoken), index, language)
+                word_offset = 0
+                for segment in spoken:
+                    chunk = self._performance_phonemize(segment['text'], index, language)
+                    count = max((item.word_index for item in chunk), default=-1) + 1
+                    selected = [number for number, mora in enumerate(moras)
+                                if word_offset <= mora.word_index < word_offset + count]
+                    if selected:
+                        first, end = selected[0], selected[-1] + 1
+                        if segment['pause_after_ms']:
+                            moras[end - 1] = replace(moras[end - 1], pause_after_ms=180, phrase_end='|')
+                        effect_ranges.append((first, end, segment))
+                    word_offset += count
+                notes = build_notes(moras, base_pitch=str(self._getenv('PHONE_WORKER_TETO_BASE_PITCH') or 'C4'),
+                                    speech_rate=rate, tempo=tempo, pitch_offset_semitones=pitch)
+                for first, end, segment in effect_ranges:
+                    if segment['hold']:
+                        nucleus = next((number for number in range(end - 1, first - 1, -1) if notes[number].role == 'nucleus'), None)
+                        if nucleus is not None:
+                            notes[nucleus] = replace(notes[nucleus], duration_ms=min(1200, notes[nucleus].duration_ms + round(280 / rate)))
+            if not notes:
+                raise TetoSynthesisError('texto não gerou vogais compatíveis')
+            entries = [index.resolve(note.candidates) for note in notes]
+            if score is not None:
+                for number, (note, entry) in enumerate(zip(notes, entries)):
+                    if entry is None or note.role != 'nucleus':
+                        continue
+                    if len(note.source_phonemes) == 1:
+                        # Attack aliases can contain mostly silence (notably
+                        # Miku Sil V). A long sustain uses the authored steady
+                        # vowel instead of stretching that silent attack.
+                        candidates = tuple(dict.fromkeys(candidate.split()[-1] for candidate in note.candidates))
+                        vowel_entry = index.resolve(candidates)
+                        if vowel_entry is not None:
+                            # ESPER's cut-combine needs a nonempty fixed head,
+                            # even for an OTO vowel authored with consonant=0.
+                            useful_ms = -vowel_entry.cutoff_ms
+                            if vowel_entry.cutoff_ms >= 0:
+                                with wave.open(str(vowel_entry.wav_path), 'rb') as source:
+                                    useful_ms = source.getnframes() * 1000 / source.getframerate() - vowel_entry.offset_ms - vowel_entry.cutoff_ms
+                            # A long authored sustained-vowel region can have
+                            # evolving phase/voicing. Compressing its seconds
+                            # into a short note caused destructive cancellation
+                            # in native ESPER. Keep a stable 250 ms vowel body
+                            # for its sustain model; leave attacks and source
+                            # files intact. Both voices use one nucleus render.
+                            cutoff = -250.0 if useful_ms > 500.0 else vowel_entry.cutoff_ms
+                            entries[number] = replace(vowel_entry, consonant_ms=max(45.0, vowel_entry.consonant_ms), cutoff_ms=cutoff)
+                    elif note.duration_ms >= 400:
+                        # Preserve the recorded consonant and a short stable
+                        # vowel head. The stretch region then starts in voicing
+                        # rather than expanding an unvoiced onset for seconds.
+                        useful_ms = -entry.cutoff_ms if entry.cutoff_ms < 0 else None
+                        fixed_ms = max(entry.consonant_ms, entry.preutterance_ms + 30.0)
+                        if useful_ms is not None:
+                            fixed_ms = min(fixed_ms, max(entry.consonant_ms, useful_ms - 25.0))
+                        entries[number] = replace(entry, consonant_ms=fixed_ms)
+            if any(entry is None and note.role == 'nucleus' for note, entry in zip(notes, entries)):
+                raise TetoSynthesisError('a voicebank não contém uma vogal necessária para esta apresentação')
+            if self._index_profile == 'english-cvvc':
+                entries = [self._english_render_entry(entry, note) if entry else None for note, entry in zip(notes, entries)]
+            if score is not None:
+                placements, preroll = self._singing_placements(notes, entries, spans, score)
+                planned_ms = float(score['duration_ms']) + preroll
+                notes = align_singing_pitch(notes, placements, score, preroll_ms=preroll, tempo=tempo)
+            else:
+                if self._index_profile == 'english-cvvc':
+                    placements, planned_ms = self._english_timeline_placements(notes, entries)
+                    notes = align_pitch_to_timeline(notes, placements, tempo=tempo)
+                else:
+                    placements, cursor = [], 0.0
+                    for note in notes:
+                        placements.append({'anchor_ms': cursor, 'start_ms': cursor, 'lead_ms': 0.0, 'fade_ms': 4.0})
+                        cursor += note.duration_ms + note.pause_after_ms
+                    planned_ms = cursor
+                if planned_ms > 20000:
+                    raise TetoSynthesisError('áudio com efeitos TTV excedeu 20 segundos')
+            metrics = {'fragment_cache_hits': 0, 'fragment_cache_misses': 0, 'resampler_calls': 0}
+            with tempfile.TemporaryDirectory(prefix='phone-worker-ttv-performance-') as temp:
+                workdir = Path(temp)
+                performance_sources = workdir / 'native-sources'
+                performance_sources.mkdir()
+                source_groups = {}
+                for number, (note, entry) in enumerate(zip(notes, entries)):
+                    if entry is not None:
+                        source_groups.setdefault(entry.wav_path, []).append((number, note, entry))
+                request_profile = self._index_profile
+                def render_group(items):
+                    self._reading_context.profile = request_profile
+                    self._reading_context.performance_sources = performance_sources
+                    self._reading_context.performance_singing = score is not None
+                    local = {key: 0 for key in metrics}
+                    self._reading_context.render_metrics = local
+                    try:
+                        fragments = {}
+                        for number, note, entry in items:
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError('apresentação TTV excedeu o timeout')
+                            self._check_resources()
+                            fragments[number] = self._resample_note(index=index, entry=entry, note=note, workdir=workdir, deadline=deadline)
+                        return fragments, local
+                    finally:
+                        self._clear_reading_context()
+                maximum = 4 if self.voice_id == 'hatsune-miku' else 2
+                workers = max(1, min(maximum, len(source_groups), self._env_int('PHONE_WORKER_TETO_RENDER_THREADS', maximum)))
+                fragments = {}
+                resample_start = time.monotonic()
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(render_group, items) for items in source_groups.values()]
+                    try:
+                        for future in as_completed(futures):
+                            result, local = future.result()
+                            fragments.update(result)
+                            for key in metrics:
+                                metrics[key] += local[key]
+                    except BaseException:
+                        for future in futures:
+                            future.cancel()
+                        raise
+                resample_ms = (time.monotonic() - resample_start) * 1000
+                if score is not None and any(fragment[1] for fragment in fragments.values()):
+                    raise TetoSynthesisError('o resampler não aceitou a curva de notas MIDI; atualize o ESPER antes de cantar')
+                combined, missing, rendered, fallback, legacy, timeline = self._compose_english_cvvc(
+                    notes=notes, entries=entries, fragments=fragments, deadline=deadline,
+                    placements=placements, planned_end_ms=planned_ms)
+            target_frames = round(self.SAMPLE_RATE * planned_ms / 1000)
+            if len(combined) < target_frames:
+                combined.extend([0] * (target_frames - len(combined)))
+            elif len(combined) > target_frames:
+                del combined[target_frames:]
+            peak = max((abs(sample) for sample in combined), default=0)
+            if not peak:
+                raise TetoSynthesisError('a apresentação TTV gerou áudio silencioso')
+            scale = min(3.6, 30000.0 / peak)
+            combined = self._apply_gain(combined, scale)
+            if score is not None:
+                # MIDI velocity controls musical intensity, not UTAU consonant
+                # velocity. Apply it after common peak normalization.
+                previous_gain = None
+                previous_end = None
+                for event in score['notes']:
+                    first = max(0, round(self.SAMPLE_RATE * (preroll + event['start_ms']) / 1000))
+                    end = min(len(combined), round(self.SAMPLE_RATE * (preroll + event['start_ms'] + event['duration_ms']) / 1000))
+                    gain = 0.72 + 0.28 * math.sqrt(event['velocity'] / 127.0)
+                    incoming = previous_gain if previous_gain is not None and first - previous_end <= round(self.SAMPLE_RATE * 0.02) else gain
+                    smooth_frames = min(end - first, round(self.SAMPLE_RATE * 0.008))
+                    for number in range(first, end):
+                        offset = number - first
+                        ratio = math.sin(min(1.0, offset / max(1, smooth_frames - 1)) * math.pi / 2.0) ** 2
+                        combined[number] = round(combined[number] * (incoming + (gain - incoming) * ratio))
+                    previous_gain, previous_end = gain, end
+                if segments:
+                    word_index = 0
+                    for segment in segments:
+                        if segment['text'].strip() in {'|', '~'}:
+                            continue
+                        words = self._performance_phonemize(segment['text'], index, language)
+                        count = max((item.word_index for item in words), default=-1) + 1
+                        selected = [number for number, note in enumerate(notes) if word_index <= note.word_index < word_index + count]
+                        if selected:
+                            first = min(placements[number]['start_ms'] for number in selected)
+                            end = max(spans[number][1] + preroll for number in selected)
+                            self._performance_envelope(combined, round(first * self.SAMPLE_RATE / 1000), round(end * self.SAMPLE_RATE / 1000),
+                                                       fade_in=segment['fade_in'], fade_out=segment['fade_out'])
+                        word_index += count
+            else:
+                for first, end, segment in effect_ranges:
+                    first_ms = min(placement['start_ms'] for placement in placements[first:end])
+                    end_ms = max(placements[number]['anchor_ms'] + notes[number].duration_ms for number in range(first, end))
+                    self._performance_envelope(combined, round(first_ms * self.SAMPLE_RATE / 1000), round(end_ms * self.SAMPLE_RATE / 1000),
+                                               fade_in=segment['fade_in'], fade_out=segment['fade_out'])
+            raw = self._performance_wav(combined, self.SAMPLE_RATE)
+            if len(raw) > max_audio_bytes:
+                raise TetoSynthesisError('áudio TTV grande demais')
+            renderer_fingerprint = hashlib.sha256((self._request_fingerprint(index, pitch_offset_semitones=pitch,
+                                                   speech_rate=rate, reading_language=language) + self.PERFORMANCE_VERSION + digest).encode()).hexdigest()
+            metadata = {'voice_id': self.voice_id, 'audio_format': 'wav', 'voicebank': index.name,
+                        'voicebank_fingerprint': index.fingerprint, 'renderer_fingerprint': renderer_fingerprint,
+                        'renderer_version': self.RENDER_VERSION, 'performance_version': self.PERFORMANCE_VERSION,
+                        'performance_mode': 'singing' if score is not None else 'speech-effects',
+                        'phonemizer_version': self.ENGLISH_PHONEMIZER_VERSION if language == 'en-US' else self.PHONEMIZER_VERSION,
+                        'reading_language': language, 'pitch_offset_semitones': pitch, 'speech_rate': rate,
+                        'ttv_performance_hash': digest, 'aliases': index.alias_count, 'voicebank_profile': self._index_profile,
+                        'rendered_phonemes': rendered, 'missing_phonemes': missing, 'pitchbend_fallbacks': fallback,
+                        'legacy_fragment_hits': legacy, 'render_workers': workers, 'source_groups': len(source_groups),
+                        'resample_ms': round(resample_ms, 2), **metrics,
+                        'worker_synth_ms': round((time.monotonic() - started) * 1000, 2),
+                        'timeline_mode': 'midi-vowel-continuous' if score is not None else 'phrase-effects-continuous',
+                        'timeline_planned_ms': round(planned_ms, 3), 'timeline_audio_ms': round(len(combined) * 1000 / self.SAMPLE_RATE, 3),
+                        'midi_preroll_ms': round(preroll, 3), 'midi_notes': len(score['notes']) if score is not None else 0,
+                        'musical_modulation': 0 if score is not None else self._modulation(),
+                        'singing_nuclei': sum(note.role == 'nucleus' for note in notes) if score is not None else 0,
+                        'melisma_notes': sum(max(0, len(group) - 1) for group in groups) if groups is not None else 0,
+                        'duration_seconds': len(combined) / self.SAMPLE_RATE, 'sample_rate': self.SAMPLE_RATE,
+                        'channels': 1, 'sample_width_bytes': 2, 'sha256': hashlib.sha256(raw).hexdigest()}
+            return raw, metadata
+        finally:
+            self._clear_reading_context()
+            self._lock.release()
 
     def synthesize(
         self,

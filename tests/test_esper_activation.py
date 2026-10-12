@@ -311,7 +311,8 @@ def test_wrapper_update_changes_real_phrase_fingerprint_with_same_python_and_fla
     # updates. The implementation ID in its command must invalidate old audio.
     monkeypatch.syspath_prepend(str(helper.WORKER_DIR))
     from teto_renderer import TetoRenderer
-    renderer = TetoRenderer.__new__(TetoRenderer)
+    monkeypatch.setenv("PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR", str(prepared.root / "test-fragments"))
+    renderer = TetoRenderer()
     index = types.SimpleNamespace(fingerprint="same-voicebank")
     first = activate(helper, prepared)
     assert first["ok"]
