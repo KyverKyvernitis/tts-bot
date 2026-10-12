@@ -2,7 +2,7 @@
 
 ## TTV: voz, idioma, tom e velocidade por usuário
 
-O worker `1.11.41` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
+O worker `1.11.40` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
 `ttv_speech_rate` por requisição. As personagens são `kasane-teto` e, quando
 instalada, `hatsune-miku`. A escolha da personagem não altera o perfil global da voicebank instalada. Tom e
 velocidade pessoais funcionam tanto com UTAU/ESPER quanto com WORLDLINE-R,
@@ -38,7 +38,7 @@ inclusive quando o áudio já está no cache.
 Ao aplicar o patch pelo updater do Discord, a automação publica a release
 completa do worker. O bootstrap do Termux consulta a atualização normalmente
 a cada cinco minutos e reinicia o worker após promover a release. Confira a
-versão `1.11.41` no status antes de testar mensagens e amostras. Os arquivos locais
+versão `1.11.40` no status antes de testar mensagens e amostras. Os arquivos locais
 da voicebank, ESPER e a configuração do aparelho continuam em seus caminhos.
 
 ## Hatsune Miku English CVVC

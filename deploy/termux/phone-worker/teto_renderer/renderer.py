@@ -27,7 +27,6 @@ from .phonemizer import phonemize
 from .prosody import (
     RenderNote, align_pitch_to_timeline, build_notes, validate_performance,
     performance_hash, align_singing_syllables, align_singing_pitch, _relative_pitch,
-    is_default_score, default_melody_score,
 )
 from .voicebank import OtoEntry, VoicebankIndex
 
@@ -39,8 +38,7 @@ class TetoRenderer:
     ENGLISH_PHONEMIZER_VERSION = "en-us-cmudict-xsampa-cvvc-v2"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v4-timeline-pitch"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
-    PERFORMANCE_VERSION = "ttv-performance-5-default-melody"
-    PERFORMANCE_PROTOCOL = 2
+    PERFORMANCE_VERSION = "ttv-performance-4-steady-vowels"
 
     def __init__(
         self, *, resource_guard: Callable[[], dict[str, Any]] | None = None,
@@ -155,21 +153,6 @@ class TetoRenderer:
         else:
             languages.append("en-US")
         return languages
-
-    def singing_fingerprint(self, *, reading_language="pt-BR") -> str:
-        """Music depends on the English-CVVC bank even for Portuguese lyrics."""
-        if self.RENDER_VERSION.startswith('worldline'):
-            return 'unavailable'
-        try:
-            index = self._load_english_index()
-            self._reading_context.profile = "english-cvvc"
-            language = self._effective_reading_language(reading_language)
-            return hashlib.sha256((self._reading_fingerprint(index, language)
-                + self.PERFORMANCE_VERSION).encode()).hexdigest()
-        except TetoConfigurationError:
-            return "unavailable"
-        finally:
-            self._clear_reading_context()
 
     def _clear_reading_context(self) -> None:
         for name in ("profile", "render_metrics", "performance_sources", "performance_singing"):
@@ -1146,63 +1129,24 @@ class TetoRenderer:
                          voicebank_profile=self._index_profile,
                          reading_language=language, **self._phonemizer_options())
 
-    @staticmethod
-    def _singing_message_tokens(text, segments=None):
-        if not segments:
-            return text.split()
-        tokens = []
-        for segment in segments:
-            for token in segment['text'].split():
-                if token == '~' and not segment['hold']:
-                    continue
-                if token != '|':
-                    tokens.append(token)
-            if segment['pause_after_ms']:
-                tokens.append('|')
-        return tokens
-
-    def _default_singing_lyrics(self, text, index, language, segments=None):
-        moras, slots, boundaries = [], [], []
-        word_offset, explicit_holds, after_boundary = 0, False, False
-        for token in self._singing_message_tokens(text, segments):
-            if token == '|':
-                if not slots or after_boundary:
-                    raise ValueError('use | entre duas palavras do canto')
-                boundaries.append(len(slots))
-                moras[-1] = replace(moras[-1], phrase_end='|', pause_after_ms=0)
-                after_boundary = True
-                continue
-            if token == '~':
-                if not slots or after_boundary:
-                    raise ValueError('use ~ depois de uma sílaba, sem atravessar uma pausa')
-                slots.append(None)
-                explicit_holds = True
-                continue
-            chunk = self._performance_phonemize(token.strip('-'), index, language)
-            nuclei = [mora for mora in chunk if mora.role == 'nucleus']
-            if not nuclei:
-                continue
-            first = sum(mora.role == 'nucleus' for mora in moras)
-            slots.extend(range(first, first + len(nuclei)))
-            moras.extend(replace(mora, word_index=mora.word_index + word_offset,
-                pause_after_ms=0, phrase_end='') for mora in chunk)
-            word_offset += max(mora.word_index for mora in chunk) + 1
-            after_boundary = False
-        if not slots or after_boundary:
-            raise ValueError('a letra precisa conter uma vogal e terminar em uma sílaba')
-        if len(moras) > 1024:
-            raise ValueError('a letra contém fonemas demais')
-        count = len(slots) if explicit_holds or boundaries else max(4, len(slots))
-        score = default_melody_score(count, boundaries=boundaries)
-        groups = align_singing_syllables(moras, score, slots=slots if explicit_holds else None)
-        return score, moras, groups
-
     def _singing_lyrics(self, text, score, index, language, segments=None):
         moras, slots = [], []
         word_offset = 0
         explicit_holds = False
         if score['lyrics_source'] == 'message':
-            tokens = self._singing_message_tokens(text, segments)
+            tokens = []
+            if segments:
+                for segment in segments:
+                    for token in segment['text'].split():
+                        if token == '~' and not segment['hold']:
+                            continue
+                        if token == '|':
+                            continue
+                        tokens.append(token)
+                    if segment['pause_after_ms']:
+                        tokens.append('|')
+            else:
+                tokens = text.split()
         elif score['lyrics_source'] == 'vowel':
             # One continuous vowel per voiced phrase, including its note changes.
             tokens = []
@@ -1400,21 +1344,14 @@ class TetoRenderer:
         deadline = started + float(timeout_seconds)
         try:
             self._reading_context.performance_singing = score is not None
-            if score is not None:
-                # Singing always uses this character's CVVC bank. Its spoken
-                # Portuguese voicebank may independently remain Standard.
-                index = self._load_english_index()
-                self._reading_context.profile = 'english-cvvc'
-            else:
-                index = self._load_reading_index(language)
+            index = self._load_reading_index(language)
             tempo = max(60, min(240, self._env_int('PHONE_WORKER_TETO_TEMPO', 140)))
             effect_ranges = []
             spans, groups, preroll = None, None, 0.0
             if score is not None:
-                if is_default_score(score):
-                    score, moras, groups = self._default_singing_lyrics(text, index, language, segments)
-                else:
-                    moras, groups = self._singing_lyrics(text, score, index, language, segments)
+                if self._index_profile != 'english-cvvc':
+                    raise ValueError('canto MIDI exige a voicebank English-CVVC da voz escolhida')
+                moras, groups = self._singing_lyrics(text, score, index, language, segments)
                 notes, spans = self._singing_notes(moras, groups, score)
             else:
                 spoken = [segment for segment in segments if segment['text'].strip() not in {'|', '~'}]
@@ -1613,8 +1550,6 @@ class TetoRenderer:
                         'melisma_notes': sum(max(0, len(group) - 1) for group in groups) if groups is not None else 0,
                         'duration_seconds': len(combined) / self.SAMPLE_RATE, 'sample_rate': self.SAMPLE_RATE,
                         'channels': 1, 'sample_width_bytes': 2, 'sha256': hashlib.sha256(raw).hexdigest()}
-            if score is not None:
-                metadata['effective_score'] = score
             return raw, metadata
         finally:
             self._clear_reading_context()

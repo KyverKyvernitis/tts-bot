@@ -18,20 +18,6 @@ from typing import Any
 MAX_EFFECT_SPEECH_CHARACTERS = 180
 MAX_PERFORMANCE_SEGMENTS = 128
 PAUSE_MILLISECONDS = 180
-DEFAULT_MELODY_PRESET = "ttv-demo-v1"
-
-
-def singing_request(text: str) -> tuple[str, bool]:
-    """Explicit /cantar or an unescaped standalone ~ opts into singing."""
-    normalized = _normalize(text)
-    literal_text, mask = _literal_characters(normalized)
-    directive = re.match(r"(?i)^/cantar(?:\s+|$)", literal_text)
-    if directive and not any(mask[:directive.end()]):
-        return normalized[directive.end():].strip(), True
-    for match in re.finditer(r"(?<!\S)~(?!\S)", literal_text):
-        if not mask[match.start()]:
-            return text, True
-    return text, False
 
 _DISCORD_LITERAL = re.compile(
     r"<(?:@!?|@&|#)\d+>|<a?:[A-Za-z0-9_]+:\d+>|<t:\d+(?::[tTdDfFR])?>"

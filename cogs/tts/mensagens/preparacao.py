@@ -17,7 +17,7 @@ import config
 
 from ..audio import QueueItem, _has_speakable_tts_text
 from ..ttv import resolve_preferences
-from ..performance import parse_performance_text, performance_hash, singing_request, DEFAULT_MELODY_PRESET
+from ..performance import parse_performance_text, performance_hash
 from ..score import MAX_MIDI_BYTES, ScoreError, parse_midi
 
 
@@ -257,21 +257,18 @@ async def preparar_payload_tts_mensagem(
     is_ttv = resolved.get("engine") == "teto"
     midi_attachments = [attachment for attachment in (getattr(message, "attachments", None) or [])
                         if str(getattr(attachment, "filename", "")).lower().endswith((".mid", ".midi"))]
-    default_requested = False
-    if is_ttv and forced_engine == "teto":
-        raw_text, default_requested = singing_request(raw_text)
-    singing = is_ttv and forced_engine == "teto" and bool(midi_attachments or midi_data is not None or default_requested)
+    singing = is_ttv and forced_engine == "teto" and bool(midi_attachments or midi_data is not None)
     try:
         if singing:
             if len(midi_attachments) > 1:
                 raise ValueError("Envie um único MIDI por mensagem.")
-            if midi_data is None and midi_attachments:
+            if midi_data is None:
                 attachment = midi_attachments[0]
                 declared_size = int(getattr(attachment, "size", 0) or 0)
                 if declared_size <= 0 or declared_size > MAX_MIDI_BYTES:
                     raise ValueError("O MIDI deve ter no máximo 512 KiB.")
                 midi_data = await asyncio.wait_for(attachment.read(), timeout=20)
-            if midi_data is not None and (not isinstance(midi_data, bytes) or not (0 < len(midi_data) <= MAX_MIDI_BYTES)):
+            if not isinstance(midi_data, bytes) or not (0 < len(midi_data) <= MAX_MIDI_BYTES):
                 raise ValueError("O MIDI baixado está vazio ou ultrapassa 512 KiB.")
             clean_text, segments = parse_performance_text(raw_text, singing=True)
             # Lyrics are never prefixed with the author or attachment descriptions.
@@ -280,12 +277,7 @@ async def preparar_payload_tts_mensagem(
                     segment["text"] = cog._render_tts_text(_WithoutAttachments(message), segment["text"]).strip()
             # Standalone ~ and | belong to the score's lyric alignment.
             text = cog._render_tts_text(_WithoutAttachments(message), clean_text).strip()
-            if midi_data is not None:
-                score = parse_midi(midi_data, lyrics=text, track_index=midi_track_index)
-            else:
-                if not text.strip():
-                    raise ValueError("Escreva a letra depois de /cantar.")
-                score = {"version": 1, "preset": DEFAULT_MELODY_PRESET}
+            score = parse_midi(midi_data, lyrics=text, track_index=midi_track_index)
             ttv_preferences.update(ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
             resolved.update(ttv_preferences)
             resolved["teto_pitch_semitones"] = "+0.0"

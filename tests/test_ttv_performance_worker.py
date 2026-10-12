@@ -227,7 +227,7 @@ def test_real_http_performance_cold_and_warm_and_plain_compatibility(tts, perfor
                 assert result["cache_hit"] is hit and base64.b64decode(result["data_b64"]).startswith(b"RIFF")
         assert len(performer.calls) == 1
         _, status_output = post("/task", {"task": "tts_agent_status"})
-        assert json.loads(status_output)["ttv_performance_protocol"] == 2
+        assert json.loads(status_output)["ttv_performance_protocol"] == 1
         _, plain_output = post("/task", {"task": "tts_agent_synthesize", "engine": "edge", "text": "Olá."})
         assert json.loads(plain_output)["ok"] and "ttv_performance_hash" not in json.loads(plain_output)
     finally:
@@ -242,7 +242,7 @@ def test_status_only_advertises_character_performance_when_renderer_supports_it(
     monkeypatch.setenv("PHONE_WORKER_MIKU_ENABLED", "false")
     monkeypatch.setattr(tts.worker, "_teto_resource_snapshot", lambda: {"ok": True})
     state = tts.teto_status(force=True)
-    assert state["ttv_performance_protocol"] == 2
+    assert state["ttv_performance_protocol"] == 1
     assert state["ttv_voices"][0]["ttv_performance_protocol"] == 1
     assert "ttv_performance_protocol" not in state["ttv_voices"][1]
 

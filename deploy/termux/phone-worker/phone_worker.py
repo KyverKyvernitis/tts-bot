@@ -164,7 +164,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.41"
+PHONE_WORKER_VERSION = "1.11.40"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2559,7 +2559,7 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
         renderer = _get_ttv_renderer(voice_id)
         result.update(renderer.status(force=force))
         if callable(getattr(renderer, "synthesize_performance", None)):
-            result["ttv_performance_protocol"] = max(1, min(2, int(getattr(renderer, "PERFORMANCE_PROTOCOL", 1))))
+            result["ttv_performance_protocol"] = 1
         else:
             result.pop("ttv_performance_protocol", None)
         if callable(getattr(renderer, "fingerprint", None)):
@@ -2568,12 +2568,6 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
                 for language in result.get("ttv_languages", [])
                 if language == "en-US" or is_miku
             }
-        if callable(getattr(renderer, "singing_fingerprint", None)):
-            result["singing_fingerprints"] = {
-                language: renderer.singing_fingerprint(reading_language=language)
-                for language in ("pt-BR", "en-US")
-            }
-            result["singing_available"] = any(value != "unavailable" for value in result["singing_fingerprints"].values())
     except Exception as exc:
         result["last_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=180)}"
     return result
@@ -2592,7 +2586,7 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
         except Exception as exc:
             resources = {"ok": False, "reason": _short_text(exc, limit=180)}
     result["resources"] = resources
-    result["ttv_performance_protocol"] = 2
+    result["ttv_performance_protocol"] = 1
     result["ttv_voices"] = []
     for voice_id, state in states.items():
         result["ttv_voices"].append({
@@ -2605,10 +2599,7 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
             "ttv_language_fingerprints": dict(state.get("ttv_language_fingerprints") or {}),
             "backend": state.get("backend", "utau"), "renderer_version": state.get("renderer_version", ""),
             "voicebank_profile": state.get("voicebank_profile", ""), "last_error": state.get("last_error", ""),
-            **({"ttv_performance_protocol": state["ttv_performance_protocol"]} if state.get("ttv_performance_protocol") else {}),
-            **({"singing_fingerprints": dict(state["singing_fingerprints"]),
-                "singing_available": bool(state.get("singing_available"))}
-               if "singing_fingerprints" in state else {}),
+            **({"ttv_performance_protocol": 1} if state.get("ttv_performance_protocol") == 1 else {}),
         })
     result.update({name: any(state.get(name) for state in states.values())
                    for name in ("ok", "available", "ready", "enabled")})
@@ -2827,7 +2818,7 @@ def _tts_agent_snapshot() -> dict[str, Any]:
         "active": active,
         "concurrency_limit": _tts_agent_queue_limit(),
         "stream_protocol": 2 if _tts_transport_module() is not None else 0,
-        "ttv_performance_protocol": 2,
+        "ttv_performance_protocol": 1,
         "cache_binary_protocol": 2 if _tts_transport_module() is not None else 0,
         "total": total,
         "failed": failed,
@@ -5022,9 +5013,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
             language = controls["ttv_language"]
             if language == "en-US" or controls["ttv_voice_id"] == "hatsune-miku":
                 fingerprint = str((status.get("ttv_language_fingerprints") or {}).get(language) or "unavailable")
-            if body.get("ttv_score") is not None:
-                fingerprint = str((status.get("singing_fingerprints") or {}).get(language) or fingerprint)
-                fingerprint = "singing-v5|" + fingerprint
             if controls["ttv_voice_id"] == "kasane-teto" and _teto_backend() == "worldline-r":
                 # Keep the established UTAU cache contract while isolating the
                 # native phrase renderer, including when no fingerprint exists.
@@ -5100,9 +5088,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             result.update({
                 "teto_backend": status.get("backend") or ("utau" if controls["ttv_voice_id"] == "hatsune-miku" else _teto_backend()),
                 "teto_renderer_version": status.get("renderer_version", ""),
-                "teto_voicebank_profile": "english-cvvc" if (
-                    controls["ttv_language"] == "en-US" or controls.get("ttv_mode") == "singing"
-                ) else status.get("voicebank_profile", ""),
+                "teto_voicebank_profile": "english-cvvc" if controls["ttv_language"] == "en-US" else status.get("voicebank_profile", ""),
                 "teto_pitch_mode": "utau-semitones",
                 "teto_pitch_offset_semitones": controls["ttv_pitch_semitones"],
                 "teto_speech_rate": controls["ttv_speech_rate"],
@@ -5133,7 +5119,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         ttv_settings = _ttv_request_settings(body) if engine == "teto" else {}
         if performance:
             ttv_settings.update({"ttv_performance_hash": performance["hash"],
-                                 "ttv_performance_protocol": 2 if isinstance(performance["score"], dict) and "preset" in performance["score"] else 1,
+                                 "ttv_performance_protocol": 1,
                                  "ttv_mode": "singing" if performance["score"] is not None else "effects"})
         stage_ms: dict[str, float] = {}
         cache_key = ""
@@ -5334,8 +5320,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 reason = teto_state.get("last_error") or (teto_state.get("resources") or {}).get("reason") or "voicebank ou resampler indisponível"
                 name = "Miku" if controls["ttv_voice_id"] == "hatsune-miku" else "Teto"
                 raise RuntimeError(f"{name} indisponível: {_short_text(reason, limit=180)}")
-            required_protocol = 2 if isinstance(performance.get("score"), dict) and "preset" in performance["score"] else 1
-            if performance and isinstance((deps.get("teto") or {}).get("ttv_voices"), list) and int(teto_state.get("ttv_performance_protocol") or 0) < required_protocol:
+            if performance and isinstance((deps.get("teto") or {}).get("ttv_voices"), list) and teto_state.get("ttv_performance_protocol") != 1:
                 raise RuntimeError("vocaloid sem suporte MIDI/efeitos TTV; use ESPER e atualize o runtime")
         if teto_request and not deps.get("teto_tts"):
             reason = teto_state.get("last_error") or (teto_state.get("resources") or {}).get("reason") or "voicebank ou resampler indisponível"

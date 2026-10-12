@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gere amostras de canto padrão, MIDI e efeitos sem alterar o worker instalado."""
+"""Gere amostras de canto MIDI e efeitos de TTV sem alterar o worker instalado."""
 from __future__ import annotations
 
 import argparse
@@ -177,8 +177,6 @@ def main(argv=None) -> int:
             raise ValueError("nome do container inválido")
         if options.speech and options.midi:
             raise ValueError("Use --speech ou --midi")
-        if options.track is not None and not options.midi:
-            raise ValueError("--track exige --midi")
         settings = quality.read_environment(installer, options.env.expanduser().absolute())
         voices = ("teto", "miku") if options.voice == "both" else (options.voice,)
         banks = {
@@ -193,21 +191,18 @@ def main(argv=None) -> int:
         chosen_root = options.esper_root.expanduser().resolve() if options.esper_root else None
         output = quality.safe_output(installer, options.output_dir, env=options.env,
             banks=[banks[voice] for voice in voices], values=settings, esper_root=chosen_root)
-        source_text = options.text if options.text is not None else ("<aaa aaa>" if options.speech else "Meu pai tem pão")
+        source_text = options.text if options.text is not None else ("<aaa aaa>" if options.speech else "a ~ ~ ~ a")
         text, segments = text_helper().parse_performance_text(source_text, singing=not options.speech)
         score = None
         if not options.speech:
-            if options.midi:
-                data = installer.regular_bytes(options.midi.expanduser().absolute(), score_helper().MAX_MIDI_BYTES)
-                score = score_helper().parse_midi(data, lyrics=text if options.text is not None else "",
-                    track_index=options.track)
-                # Let timed MIDI lyrics or vowel fallback drive the renderer
-                # when the user supplied no text for their own score.
-                if options.text is None:
-                    text, segments = "", None
-                installer.atomic_write(output / "melodia.mid", data)
-            else:
-                score = {"version": 1, "preset": text_helper().DEFAULT_MELODY_PRESET}
+            data = installer.regular_bytes(options.midi.expanduser().absolute(), score_helper().MAX_MIDI_BYTES) if options.midi else demo_midi()
+            score = score_helper().parse_midi(data, lyrics=text if options.text is not None or not options.midi else "",
+                track_index=options.track)
+            # Let timed MIDI lyrics or vowel fallback drive the renderer when
+            # the user supplied no text for their own score.
+            if options.midi and options.text is None:
+                text, segments = "", None
+            installer.atomic_write(output / "melodia.mid", data)
         with tempfile.TemporaryDirectory(prefix="ttv-performance-caches-") as temporary:
             cache = Path(temporary)
             for voice in voices:
