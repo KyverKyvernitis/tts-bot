@@ -101,6 +101,13 @@ def worker_voice_details(state: Mapping[str, Any], voice_id: object = DEFAULT_VO
             code: value for code, value in (fingerprints or {}).items()
             if code in _LANGUAGE_LABELS and isinstance(value, str) and value
         } if isinstance(fingerprints, dict) else {},
+        "singing_fingerprints": {
+            code: value for code, value in (entry.get("singing_fingerprints") or {}).items()
+            if code in _LANGUAGE_LABELS and isinstance(value, str) and value
+        } if isinstance(entry.get("singing_fingerprints"), dict) else {},
+        "singing_available": entry.get("singing_available"),
+        "performance_protocol": (int(entry.get("ttv_performance_protocol") or 0)
+            if "ttv_performance_protocol" in entry else None),
     }
 
 

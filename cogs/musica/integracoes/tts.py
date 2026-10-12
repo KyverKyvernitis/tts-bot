@@ -9,6 +9,12 @@ from ..runtime_telefone.agente.efeitos import payload_efeitos_tts
 _VOICE_LOG_THROTTLE: dict[tuple[int, str], float] = {}
 
 
+class _TTVPerformancePlaybackError(RuntimeError):
+    """Report a performance failure without substituting a text-only voice."""
+
+    code = "ttv_singing_failed"
+
+
 def _permitir_log_voz(guild_id: int, motivo: str, *, agora: float, intervalo: float = 20.0) -> bool:
     chave = (int(guild_id), str(motivo))
     proximo = float(_VOICE_LOG_THROTTLE.get(chave, 0.0) or 0.0)
@@ -260,6 +266,17 @@ async def rotear_item_tts_para_musica(
     if not route_music:
         return False, audio_task
 
+    # Singing/effects must reach the musical session as verified rendered audio.
+    # Its text-only synthesis endpoint does not understand the performance score.
+    performance = (getattr(item, "ttv_score", None) is not None
+                   or getattr(item, "ttv_segments", None) is not None)
+    if performance:
+        if not suporta_cache_tts_agente(bot):
+            raise RuntimeError(
+                "O worker de música precisa aceitar áudio pronto para reproduzir "
+                "canto e efeitos de TTV. Atualize o worker e tente novamente."
+            )
+
     if audio_task is not None and not audio_task.done():
         audio_task.cancel()
         with contextlib.suppress(BaseException):
@@ -284,6 +301,22 @@ async def rotear_item_tts_para_musica(
             cached_payload["tld"] = getattr(item, "tld", None)
             cached_payload["tts_request_id"] = getattr(item, "request_id", None)
             item._tts_remote_active = True
+
+        if performance:
+            import base64
+            import binascii
+
+            encoded = cached_payload.get("audio_b64")
+            try:
+                audio_ready = isinstance(encoded, str) and bool(base64.b64decode(encoded, validate=True))
+            except (ValueError, binascii.Error):
+                audio_ready = False
+            digest = str(getattr(item, "ttv_performance_hash", "") or "")
+            if (not audio_ready or cached_payload.get("prebuilt_audio") is not True
+                    or not digest or cached_payload.get("ttv_performance_hash") != digest):
+                raise _TTVPerformancePlaybackError(
+                    "Não foi possível preparar o áudio do canto ou dos efeitos de TTV."
+                )
 
         playback_result = await tocar_tts_via_agente(
             bot,
@@ -364,10 +397,25 @@ async def rotear_item_tts_para_musica(
         raise
     except Exception as exc:
         item._tts_remote_active = False
+        worker_unavailable = (type(exc).__name__ == "MusicWorkerUnavailable"
+                              or "nenhum worker online" in str(exc).lower()
+                              or "no worker online" in str(exc).lower())
+        if worker_unavailable:
+            setattr(item, "_tts_music_worker_unavailable", True)
+        if performance:
+            # Singing and text effects cannot use the Music Agent's text-only
+            # fallback. Let the caller show a failure instead of consuming the
+            # item silently or playing an ordinary spoken version of the lyrics.
+            if getattr(exc, "code", None) in {
+                "ttv_worker_outdated", "ttv_singing_bank_missing",
+                "ttv_singing_failed", "ttv_singing_timeout",
+            }:
+                raise
+            raise _TTVPerformancePlaybackError(
+                "Não foi possível reproduzir o canto ou os efeitos de TTV."
+            ) from exc
         safe_to_fallback = erro_agente_permite_fallback_local(bot, guild_id, exc)
         if safe_to_fallback:
-            if type(exc).__name__ == "MusicWorkerUnavailable" or "nenhum worker online" in str(exc).lower() or "no worker online" in str(exc).lower():
-                setattr(item, "_tts_music_worker_unavailable", True)
             setattr(item, "_skip_music_agent_tts_route", True)
             logger.warning(
                 "[tts_voice] TTS do worker musical falhou; seguindo fallback seguro | guild=%s channel=%s erro=%s",

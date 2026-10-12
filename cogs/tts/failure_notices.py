@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 # Todos os textos públicos são constantes; nunca incluir traceback, URLs ou
 # conteúdo da fala no chat. Preservar a redação aprovada dos seis avisos base.
 _MESSAGES = {
+    "ttv_worker_outdated": "O canto precisa do worker atualizado. Confira a versão 1.11.41 e tente novamente.",
+    "ttv_singing_bank_missing": "Para cantar com essa voz, o banco English-CVVC precisa estar instalado no worker.",
+    "ttv_singing_failed": "Não consegui gerar esse canto. Confira se o worker está online e tente uma letra menor.",
+    "ttv_singing_timeout": "O canto demorou demais para ser gerado. Tente uma letra menor.",
     "author_not_in_voice": "C tem que estar em call pra poder usar isso <:vish:1533479762230775898>",
     "voice_channel_mismatch": "C tem que estar na mesma call q eu <:speed:1534287805424074772>",
     "tts_disabled": "Texto pra fala tá desativado nesse sv chefe <:vish:1533479762230775898>",
@@ -187,6 +191,10 @@ def failure_code(reason_code: str, error: Exception | None = None) -> str:
     # Somente categorias conhecidas chegam ao chat; mensagens de exceção podem
     # conter texto de fala, caminhos, URLs de provedores ou credenciais.
     chain = _exception_chain(error)
+    for cause in chain:
+        code = getattr(cause, "code", None)
+        if isinstance(code, str) and code.startswith("ttv_") and code in _MESSAGES:
+            return code
     observed = set()
     for cause in chain:
         if type(cause).__module__ == "discord.opus" and type(cause).__name__ == "OpusNotLoaded":
