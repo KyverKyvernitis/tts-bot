@@ -14,15 +14,18 @@ DEFAULT_COLOR = 0x747474
 
 def _extract(source: bytes) -> int:
     from PIL import Image, ImageOps
-    with Image.open(io.BytesIO(source)) as picture:
-        if not (0 < picture.width <= 2048 and 0 < picture.height <= 2048):
-            raise ValueError("invalid_cd_cover_dimensions")
-        pixels = list(ImageOps.fit(picture.convert("RGBA"), (32, 32)).getdata())
-        samples = [(r, g, b) for r, g, b, a in pixels if a >= 90]
+    try:
+        with Image.open(io.BytesIO(source)) as picture:
+            if not (0 < picture.width <= 2048 and 0 < picture.height <= 2048):
+                raise ValueError("invalid_cd_cover_dimensions")
+            pixels = list(ImageOps.fit(picture.convert("RGBA"), (32, 32)).getdata())
+            samples = [(r, g, b) for r, g, b, a in pixels if a >= 90]
+    except Image.DecompressionBombError as exc:
+        raise ValueError("invalid_cd_cover_dimensions") from exc
     if not samples:
         return DEFAULT_COLOR
     # White background is common on art; preserve monochrome when color is absent.
-    chromatic = [p for p in samples if max(p) - min(p) >= 18 and 32 <= max(p) <= 244]
+    chromatic = [p for p in samples if max(p) - min(p) >= 18 and max(p) >= 32]
     if chromatic:
         # Favor the most common saturated colored region rather than a stray pixel.
         buckets: dict[tuple[int, int, int], list[tuple[int, int, int]]] = {}

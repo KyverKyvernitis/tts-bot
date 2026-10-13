@@ -12,6 +12,9 @@ import discord
 
 class ProgressoUpdaterMixin:
     def handle_internal_update_action(self, action: str, payload: dict[str, object]) -> dict[str, object]:
+        if action == "publish_cd":
+            future = asyncio.run_coroutine_threadsafe(self._publish_cd_package(payload), self.loop)
+            return future.result(timeout=300)
         if action == "voice_notices":
             future = asyncio.run_coroutine_threadsafe(self._server_notice_action(payload), self.loop)
             return future.result(timeout=7)

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 import config
+from updater.utilitarios.cd_packages import contract, prepare_cd_overlay
 from updater.utilitarios.seguranca import (
     UPDATE_CONTROL_MANIFEST_NAME, UpdateSecurityError, build_file_integrity,
     candidate_confirmation_reasons, canonical_path_key, inspect_zip_archive, is_forbidden_update_path,
@@ -36,6 +37,26 @@ def _cfg(*names: str, default=None):
 
 
 class PreparacaoUpdaterMixin:
+    async def _publish_cd_package(self, payload: dict[str, object]) -> dict[str, object]:
+        path = Path(str(payload.get("zip_path") or ""))
+        if (path.name != "cd-artifacts.zip" or not path.parent.name.startswith("osaka-cd-publish-")
+                or path.parent.parent != Path(tempfile.gettempdir()) or path.is_symlink()):
+            raise RuntimeError("origem de pacote CD inválida")
+        async with self._zip_update_lock:
+            module = contract()
+            await asyncio.to_thread(module.validate_package, path, self._repo_root,
+                                    audio_probe=True, require_cd_only=True)
+            if sha256_file(path) != payload.get("zip_sha256"):
+                raise RuntimeError("hash do pacote CD divergente")
+            result = await asyncio.to_thread(self._process_zip_update_sync, path)
+            if result.get("confirmation_required"):
+                return {"ok": False, "error": "candidate requires updater review", "candidate_id": result.get("candidate_id")}
+            triggered, detail = await asyncio.to_thread(self._trigger_updater_service_sync)
+            return {"ok": True, "state": "queued" if result.get("candidate_id") else "unchanged",
+                    "installed": False, "candidate_id": result.get("candidate_id"),
+                    "zip_sha256": payload.get("zip_sha256"), "dispatch_triggered": triggered,
+                    "dispatch_detail": detail}
+
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
         env.setdefault("HOME", "/home/ubuntu")
@@ -994,6 +1015,8 @@ class PreparacaoUpdaterMixin:
             clone_dir = self._prepare_update_staging_clone(origin_url, branch_name, env)
             elapsed = mark("staging_prepare_ms")
             publish_progress("Comparando arquivos", "Base de comparação preparada", elapsed)
+
+            extracted_files = prepare_cd_overlay(extracted_files, clone_dir)
 
             tree_operations = self._apply_declarative_operations_to_clone(requested_operations, clone_dir, env)
             content_operations = self._apply_patch_to_clone(extracted_files, clone_dir)

@@ -229,6 +229,19 @@ prepare_local_candidate_commit_in_worktree() {
 
   local op_started_ms commit_body
   STAGE="preflight do candidato em worktree"
+  if [[ -f "$LOCAL_CANDIDATE_WORKTREE_DIR/updater/utilitarios/cd_packages.py" ]] \
+    && printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^cogs/tts/(cd/|cd_song_(scores|videos)\.json$)'; then
+    local cd_validation_output
+    local -a cd_validation_paths=()
+    mapfile -t cd_validation_paths < <(printf '%s\n' "$CHANGED_FILES_RAW")
+    if ! cd_validation_output="$(sudo -u ubuntu -H python3 \
+      "$LOCAL_CANDIDATE_WORKTREE_DIR/updater/utilitarios/cd_packages.py" \
+      "$LOCAL_CANDIDATE_WORKTREE_DIR" "${cd_validation_paths[@]}" 2>&1)"; then
+      LAST_ERROR_STDERR="$cd_validation_output"
+      LAST_ERROR_CODE="CD_PACKAGE_VALIDATION_FAILED"
+      return 1
+    fi
+  fi
   op_started_ms="$(update_now_ms)"
   if ! run_preflight_checks_in_dir "$LOCAL_CANDIDATE_WORKTREE_DIR"; then
     log_update_operation_timing_ms "preparation.static_preflight" "$op_started_ms"

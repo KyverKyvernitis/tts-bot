@@ -22,6 +22,7 @@ from utility.apk_identity import ApkIdentityError, assert_expected_apk_identity,
 from utility.storage_maintenance import prune_core_worker_releases
 from utility.openai_compat import register_openai_compat_routes
 from cogs.musica.integracoes.webserver import registrar_rotas_musica
+from updater.api_cd import register_cd_publish_route
 
 app = Flask(__name__)
 registrar_rotas_musica(app)
@@ -29,6 +30,7 @@ register_openai_compat_routes(app)
 
 _health_provider = None
 _update_action_provider = None
+register_cd_publish_route(app, lambda: _update_action_provider)
 _core_worker_notification_lock = threading.RLock()
 _core_worker_fcm_tokens_lock = threading.RLock()
 _core_worker_app_heartbeat_lock = threading.RLock()

@@ -30,7 +30,7 @@ def emoji_name(namespace: str, asset_id: str) -> str:
 def square_emoji(image: bytes, *, allow_avatar_formats: bool = False) -> bytes:
     """Fit local, prevalidated thumbnail to a small application emoji JPEG."""
     from PIL import Image, ImageOps
-    if len(image) > (2 * 1024 * 1024 if allow_avatar_formats else 512 * 1024):
+    if len(image) > 2 * 1024 * 1024:
         raise ValueError("image_too_large")
     with Image.open(io.BytesIO(image)) as source:
         formats = {"JPEG", "PNG", "WEBP", "GIF"} if allow_avatar_formats else {"JPEG"}
@@ -79,12 +79,13 @@ class ApplicationSelectEmojis:
     def emoji(self, asset_id: str | None):
         if not isinstance(asset_id, str) or not asset_id:
             return None
-        emoji_id = self._known.get(self._name(asset_id))
+        name = self._name(asset_id)
+        emoji_id = self._known.get(name)
         if not emoji_id:
             return None
         # import locally so the module can be tested without a Discord connection
         import discord
-        return discord.PartialEmoji(name=self._name(asset_id), id=emoji_id)
+        return discord.PartialEmoji(name=name, id=emoji_id)
 
     def schedule(self, bot, view=None) -> None:
         if (bot is None or not callable(getattr(bot, "fetch_application_emojis", None))
@@ -114,8 +115,11 @@ class ApplicationSelectEmojis:
         self._task = asyncio.create_task(self._synchronize(bot))
 
     async def _synchronize(self, bot) -> None:
+        requested = self._requested_ids
         try:
             remote = await bot.fetch_application_emojis()
+            if bot is not self._bot:
+                return
             known = {str(e.name): int(e.id) for e in remote
                      if isinstance(getattr(e, "name", None), str) and type(getattr(e, "id", None)) is int}
             changed = False
@@ -138,6 +142,10 @@ class ApplicationSelectEmojis:
                         log.debug("[cd_emoji] imagem remota indisponível | type=%s", type(exc).__name__)
                         continue
                 if not cover:
+                    continue
+                # A thumbnail can be replaced while Discord metadata is fetched.
+                # Bind its generated emoji to the name of the bytes actually read.
+                if name != self._name(asset_id):
                     continue
                 try:
                     created = await bot.create_application_emoji(
@@ -172,3 +180,10 @@ class ApplicationSelectEmojis:
             raise
         except Exception as exc:
             log.warning("[cd_emoji] consulta indisponível | type=%s", type(exc).__name__)
+        finally:
+            if bot is self._bot and requested != self._requested_ids:
+                # Another cover revision arrived during this singleflight task.
+                # It should not inherit the failed/old revision's five-minute wait.
+                self._task = None
+                self._next_sync_at = float("-inf")
+                self.schedule(bot)

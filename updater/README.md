@@ -139,6 +139,38 @@ O caminho primário é orientado a evento:
 dispatch/reconciliação para compatibilidade e observabilidade, mas não depende do timer
 de um minuto para o caminho normal.
 
+## Publicação de CDs pelo Termux
+
+A rota opcional `POST /api/osaka/cd/publish` recebe um ZIP de artefatos CD como
+`Content-Type: application/zip`, com `Authorization: Bearer <token>` e o SHA-256 do
+ZIP em `X-CD-Package-SHA256`. Configure `OSAKA_CD_PUBLISH_ENABLED=1` e
+`OSAKA_CD_PUBLISH_TOKEN` no ambiente privado existente da VPS. Sem ativação e token
+obrigatório, a rota fica fechada. Use o HTTPS já configurado da VPS; o token nunca
+pertence ao ZIP ou ao catálogo público.
+
+A rota permite somente os dois catálogos CD, `previews/index.json`, MP3s por id,
+JPEGs por video id e manifestos em `cd/packages/{id}.json`. Código Python e pacotes
+do worker devem continuar pelo fluxo normal do updater. O retorno HTTP 202 informa
+`state: queued`, `candidate_id` e `installed: false`: recebimento não comprova
+instalação, que depende dos checks e do rollback da transação.
+
+O validador compartilhado `deploy/ttv-cd/package_validation.py` confere partituras,
+SHA-256 musical canônico, hashes dos bytes de capa/MP3, manifesto de amostra v2 e
+decodificação completa do MP3 com ffmpeg antes da aplicação. Catálogos recebidos
+são mesclados por id em staging. Uma alteração musical exige nova `revision` e
+invalida apenas seu índice de amostra; a troca da capa mantém o áudio. Outros CDs
+continuam no catálogo. Manifestos legados de amostra que usavam o hash do MIDI
+precisam de migração explícita, pois esse hash não identifica a partitura cantada.
+Dois candidatos preparados sobre a mesma base podem conflitar na aplicação Git
+em três vias. Nesse caso o updater rejeita o candidato sem alterar a VPS; importe
+novamente depois da conclusão do candidato anterior para preparar a nova base.
+
+Validação local do mesmo contrato:
+
+```bash
+python deploy/ttv-cd/package_validation.py pacote.zip --base /caminho/do/repo --audio-probe
+```
+
 ## Compatibilidade
 
 As fachadas antigas em `scripts/`, `utility/`, `deploy/systemd/` e `deploy/sudoers.d/`

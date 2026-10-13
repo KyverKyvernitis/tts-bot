@@ -13,17 +13,44 @@ import discord
 _DATA = Path(__file__).parent
 _VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 _MELODY_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_BYTES = 2 * 1024 * 1024
+_VIDEO_SNAPSHOTS: dict[Path, tuple[tuple[int, ...], dict[str, dict]]] = {}
+_VIDEO_FAILED_SIGNATURES: dict[Path, tuple[int, ...]] = {}
 
 
 def video_catalog() -> dict[str, dict]:
-    """Read public provenance, independent of the singing score catalogue."""
+    """Keep the last complete metadata snapshot during interrupted publication."""
+    path = _DATA / "cd_song_videos.json"
+    previous = _VIDEO_SNAPSHOTS.get(path)
+    signature = (0, 0, 0, 0)
     try:
-        raw = json.loads((_DATA / "cd_song_videos.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    songs = raw.get("songs") if isinstance(raw, dict) else None
-    return songs if isinstance(songs, dict) else {}
+        stat = path.stat()
+        signature = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
+        if previous is not None and previous[0] == signature:
+            return previous[1]
+        if _VIDEO_FAILED_SIGNATURES.get(path) == signature:
+            return previous[1] if previous is not None else {}
+        if not 0 < stat.st_size <= 8 * 1024 * 1024:
+            raise ValueError("invalid_cd_video_catalog_size")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        songs = raw.get("songs") if isinstance(raw, dict) else None
+        if not isinstance(songs, dict) or len(songs) > 500:
+            raise ValueError("invalid_cd_video_catalog")
+        for identity, item in songs.items():
+            if (not isinstance(identity, str) or len(identity) > 90 or not _MELODY_ID.fullmatch(identity)
+                    or not isinstance(item, dict) or not isinstance(item.get("video_id"), str)
+                    or not _VIDEO_ID.fullmatch(item["video_id"])):
+                raise ValueError("invalid_cd_video_entry")
+            digest = item.get("thumbnail_sha256")
+            if digest is not None and (not isinstance(digest, str) or not _SHA256.fullmatch(digest)):
+                raise ValueError("invalid_cd_thumbnail_hash")
+        _VIDEO_SNAPSHOTS[path] = (signature, songs)
+        _VIDEO_FAILED_SIGNATURES.pop(path, None)
+        return songs
+    except (OSError, ValueError, TypeError):
+        _VIDEO_FAILED_SIGNATURES[path] = signature
+        return previous[1] if previous is not None else {}
 
 
 def _cover_bytes(melody_id: str) -> bytes | None:
@@ -40,6 +67,10 @@ def _cover_bytes(melody_id: str) -> bytes | None:
     if configured:
         roots.insert(0, Path(configured).expanduser())
     expected = item.get("thumbnail_sha256")
+    # Remote provenance can exist before a local cover. Unbound JPEGs do not
+    # supply a color or emoji until their exact bytes are in the manifest.
+    if not isinstance(expected, str) or not _SHA256.fullmatch(expected):
+        return None
     for root in roots:
         path = root / f"{video_id}.jpg"
         try:
@@ -51,7 +82,7 @@ def _cover_bytes(melody_id: str) -> bytes | None:
             continue
         if not data.startswith(b"\xff\xd8\xff") or not data.endswith(b"\xff\xd9"):
             continue
-        if expected and (not isinstance(expected, str) or hashlib.sha256(data).hexdigest() != expected):
+        if hashlib.sha256(data).hexdigest() != expected:
             continue
         try:
             # Pillow is already a bot dependency. Only bounded JPEGs reach it.

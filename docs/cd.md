@@ -82,28 +82,37 @@ A falta de acesso à imagem ou o limite de emojis não bloqueia o painel.
 
 ## Importação incremental de CDs (VPS + Termux)
 
-Use o kit Termux `import-midi.py` com MIDIs **locais**, nunca anexos Discord.
-Ele reutiliza o parser de partituras de `cogs/tts/score.py` e uma cópia
-sincronizada da normalização de metadados de `cogs/musica/metadados/normalizacao.py`.
-Procura até 25 candidatos no YouTube e só aceita contagens verificáveis dos
-vídeos correspondentes; a maior contagem *entre os vídeos inspecionados* é
-selecionada. Vídeos distintos, covers e remixes são rejeitados sem adivinhar.
+Use o Termux Kit v8 com MIDIs locais. O novo extrator aceita arranjos polifônicos,
+seleciona faixa/canal e um trecho de até 60 segundos/128 notas, conservando
+onsets, pausas e andamento. Extrações heurísticas registram ambiguidade vocal;
+o arquivo original não é alterado. Nenhum MIDI é recebido pelo Discord.
 
-O Termux gera ZIPs com os catálogos completos e a nova capa, que devem ser
-aplicados pelo updater da VPS. A publicação automática remota, com autenticação,
-ainda não foi implementada. A atualização do catálogo e dos painéis **já abertos**
-é detectada até 15 s após a aplicação (com bot em execução). O menu tem
-paginação a cada 25 opções, respeitando os limites do Discord.
+O mecanismo de metadados reutiliza as fontes do player, procura aliases em
+múltiplas consultas limitadas e confere título, artista, versão e visualizações.
+O relatório explica os candidatos rejeitados e a origem/data das contagens.
+A escolha é a maior entre os candidatos identificados inspecionados.
 
-O emoji é versionado pelo SHA-256 da capa e reaproveitado entre servidores.
-A borda do painel acompanha a cor predominante local da capa (ou do avatar do
-bot no Padrão); a extração mantém imagens em preto e branco sem matiz falsa.
-O cache de cores é limitado a 96 números RGB, sem guardar os JPEGs em RAM.
+Cada ZIP exporta somente um CD, seus índices e artefatos concluídos. O updater
+mescla registros por ID e valida a mesma estrutura usada pelo kit, incluindo
+SHA-256, JPEG e decodificação do MP3, novamente antes de promover o worktree.
+Partitura e MIDI têm hashes separados. Mudanças musicais exigem nova revisão e
+invalidam a amostra; trocar a capa preserva o canto e invalida emoji/cor.
+Os artefatos pendentes ficam no manifesto e os prontos são conservados.
 
-O Termux prepara uma amostra UTAU em `pt-BR` para as preferências padrão quando
-as condições de bateria permitem. O bot verifica o SHA da amostra, a versão
-da partitura e as preferências antes de reutilizar o MP3. Em outras
-configurações, usa a síntese de amostras normal do Phone Worker.
-Se a geração estiver bloqueada, o kit conserva a pendência para nova tentativa
-quando for executado novamente. O preview pronto pode ser reproduzido com o
-worker temporariamente offline.
+O importador carrega o arquivo confiável `~/.phone-worker.env` em um processo
+separado. Usa o renderizador UTAU da release instalada 1.11.41, sem atualizar,
+reiniciar ou escrever no runtime. Só configura o cache isolado do importador.
+Respeita bateria/temperatura; falhas transitórias recebem backoff e entradas
+inválidas aguardam mudança. `--retry` permite nova tentativa manual imediata.
+
+Após instalar o patch de código da VPS, aplique o ZIP da música pelo updater.
+A publicação HTTP opcional está em `/api/osaka/cd/publish`, desativada por
+padrão e autenticada com token separado. Aceitar/enfileirar o pacote não
+comprova instalação. Consulte `deploy/ttv-cd/INSTRUCOES-IMPORTACAO.md` e
+`updater/README.md` para a configuração e a verificação da aplicação.
+
+O catálogo e painéis ativos detectam a atualização em até 15 segundos. O menu
+pagina a cada 25 opções; painéis expirados/encerrados não são reativados. O
+emoji usa o hash da capa, e a cor vem do JPEG local validado. Amostras Teto
+pt-BR prontas podem tocar offline com tom musical 0 e velocidade 1, mesmo
+quando as preferências de fala são diferentes.

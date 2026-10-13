@@ -65,7 +65,7 @@ def read_catalog(path: Path) -> dict:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or raw.get("version") != 1 or not isinstance(raw.get("songs"), dict):
         raise ValueError("catálogo de capas inválido")
-    if not 1 <= len(raw["songs"]) <= 20:
+    if not 1 <= len(raw["songs"]) <= 500:
         raise ValueError("quantidade de capas inválida")
     for slug, item in raw["songs"].items():
         if not SLUG.fullmatch(slug) or not isinstance(item, dict) or not VIDEO_ID.fullmatch(str(item.get("video_id", ""))):

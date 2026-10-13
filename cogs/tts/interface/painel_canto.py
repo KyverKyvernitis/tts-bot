@@ -21,7 +21,7 @@ from ..failure_notices import _public_notice
 from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url, _cover_bytes, cover_revision
 from ..cd_colors import cover_accent, DEFAULT_COLOR
 from ..cd_previews import prepared_sample
-from ..melodies import DEFAULT_MELODY_ID, catalog_signature, format_score_notes, get_melody, list_melodies
+from ..melodies import DEFAULT_MELODY_ID, catalog_signature, format_score_notes, format_score_rhythm, get_melody, list_melodies
 from .application_emojis import ApplicationSelectEmojis
 from ..ttv import DEFAULT_VOICE_ID, language_label, resolve_preferences, voice_label
 from .visoes_layout import VisaoLayoutBaseTTS
@@ -107,6 +107,9 @@ async def _watch_catalog():
             signature = current
             for panel in active:
                 try:
+                    # DB/Discord calls for earlier panels may outlive this one.
+                    if panel._is_expired() or panel.is_finished():
+                        continue
                     if not any(item.id == panel.selected_melody_id for item in list_melodies()):
                         panel.selected_melody_id = DEFAULT_MELODY_ID
                         panel._page = 0
@@ -141,13 +144,14 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self._initialized = False
         self._page = 0
         self._page_locked = False
+        self._activity_timeout = max(1.0, float(timeout or 86400))
         _ACTIVE_PANELS.add(self)
         self._rebuild()
 
     async def refresh(self) -> None:
         """Carrega ajustes e status já disponíveis, antes de enviar a mensagem."""
         global _CATALOG_TASK
-        if _CATALOG_TASK is None or _CATALOG_TASK.done():
+        if not self._is_expired() and not self.is_finished() and (_CATALOG_TASK is None or _CATALOG_TASK.done()):
             _CATALOG_TASK = asyncio.create_task(_watch_catalog())
         self._settings_available = False
         try:
@@ -177,7 +181,8 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self._rebuild()
         # A capa vira emoji de aplicação uma única vez, reutilizável em qualquer
         # servidor. A sincronização em segundo plano não retarda o painel.
-        _CD_EMOJIS.schedule(getattr(self.cog, "bot", None), self)
+        if not self._is_expired() and not self.is_finished():
+            _CD_EMOJIS.schedule(getattr(self.cog, "bot", None), self)
 
     async def _refresh_availability(self) -> None:
         # Prepared UTAU samples are playable even if the phone is currently offline.
@@ -231,7 +236,8 @@ class CDPanelView(VisaoLayoutBaseTTS):
         duration = f"{melody.duration_ms / 1000:g}".replace(".", ",")
         card = discord.ui.TextDisplay(
             f"**{melody.name}**\n-# {melody.note_count} notas · {duration} s\n"
-            f"{format_score_notes(melody)}"
+            f"{format_score_notes(melody)}\n"
+            f"-# Duração de cada nota (𝄽 = pausa): {format_score_rhythm(melody)}"
         )
         container = discord.ui.Container(
             discord.ui.TextDisplay(
@@ -274,10 +280,10 @@ class CDPanelView(VisaoLayoutBaseTTS):
         if pages > 1:
             self.previous_button = discord.ui.Button(
                 custom_id="ttv:cd:previous", label="Anterior", emoji="◀️",
-                style=discord.ButtonStyle.secondary, disabled=self._page == 0 or self._is_expired())
+                style=discord.ButtonStyle.secondary, disabled=self._page == 0 or self._is_expired() or self._preview_running or self._saving)
             self.next_button = discord.ui.Button(
                 custom_id="ttv:cd:next", label="Próxima", emoji="▶️",
-                style=discord.ButtonStyle.secondary, disabled=self._page >= pages - 1 or self._is_expired())
+                style=discord.ButtonStyle.secondary, disabled=self._page >= pages - 1 or self._is_expired() or self._preview_running or self._saving)
             self.previous_button.callback = self.previous_page
             self.next_button.callback = self.next_page
             container.add_item(discord.ui.ActionRow(self.previous_button, self.next_button))
@@ -300,7 +306,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
         # Avisos de indisponibilidade continuam visíveis quando relevantes.
         note = self._availability_note
         if self.active_melody_id not in {item.id for item in list_melodies()}:
-            note = "Melodia anteriormente salva indisponível. Escolha outra."
+            note = "Melodia indisponível: a escolha anteriormente salva saiu do catálogo. Escolha outra."
         if note:
             container.add_item(discord.ui.TextDisplay(f"-# {note}"))
         self.add_item(container)
@@ -327,7 +333,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
         allowed = await super().interaction_check(interaction)
         if allowed:
             # LayoutView extends its own timeout on interaction; keep logical expiry in sync.
-            self.expires_at_monotonic = time.monotonic() + 86400
+            self.expires_at_monotonic = time.monotonic() + self._activity_timeout
         return allowed
 
     async def _edit_panel(self, interaction: discord.Interaction | None = None) -> None:
@@ -373,12 +379,18 @@ class CDPanelView(VisaoLayoutBaseTTS):
     async def previous_page(self, interaction: discord.Interaction) -> None:
         if not await self.interaction_check(interaction):
             return
+        if self._preview_running or self._saving:
+            await _reply(interaction, "Espere a operação atual terminar para trocar a página.")
+            return
         self._page = max(0, self._page - 1)
         self._page_locked = True
         await self._edit_panel(interaction)
 
     async def next_page(self, interaction: discord.Interaction) -> None:
         if not await self.interaction_check(interaction):
+            return
+        if self._preview_running or self._saving:
+            await _reply(interaction, "Espere a operação atual terminar para trocar a página.")
             return
         self._page = min((len(list_melodies()) - 1) // 25, self._page + 1)
         self._page_locked = True
@@ -424,6 +436,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
             await _reply(interaction, self._availability_note or "Não consegui gerar a amostra agora.")
             return
         melody_id = self.selected_melody_id
+        melody_name = get_melody(melody_id).name
         preview_voice = voice_label(self._preferences["ttv_voice_id"])
         preview_language = language_label(self._preferences["ttv_language"])
         preview_settings = dict(self._preferences)
@@ -440,7 +453,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
                 raise ValueError("empty_audio")
             await _reply(
                 interaction,
-                f"**{get_melody(melody_id).name} · {preview_voice}**\n{preview_language}",
+                f"**{melody_name} · {preview_voice}**\n{preview_language}",
                 file=discord.File(io.BytesIO(mp3), filename="cd-amostra.mp3"),
             )
         except asyncio.TimeoutError:
@@ -459,3 +472,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self.expires_at_monotonic = 0
         _ACTIVE_PANELS.discard(self)
         await self._edit_panel()
+
+    def stop(self) -> None:
+        _ACTIVE_PANELS.discard(self)
+        super().stop()
