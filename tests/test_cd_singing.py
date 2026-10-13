@@ -65,14 +65,16 @@ async def test_message_freezes_selected_catalog_score_before_later_edits(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_user_midi_overrides_missing_saved_melody_for_that_message_only():
+async def test_user_midi_never_overrides_missing_saved_melody():
     cog = LiveRenderCog(db=FakeDB(resolved={"ttv_melody_id": "removed-melody"}))
     message = make_message("'a ~ ~ ~ a")
-    message.attachments = [SimpleNamespace(filename="melodia.mid", size=len(DEMO_MIDI),
-                                          read=AsyncMock(return_value=DEMO_MIDI))]
+    source = SimpleNamespace(filename="melodia.mid", size=len(DEMO_MIDI),
+                             read=AsyncMock(return_value=DEMO_MIDI))
+    message.attachments = [source]
     payload = await preparar_payload_tts_mensagem(cog, message,
         guild_defaults={}, active_prefix="'", forced_engine="teto")
-    assert payload.queue_item.ttv_score["duration_ms"] == 1500
+    assert payload is None
+    source.read.assert_not_awaited()
 
 
 @pytest.mark.asyncio

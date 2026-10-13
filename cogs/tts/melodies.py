@@ -79,6 +79,44 @@ def score_for_melody(value: object = None) -> dict:
     return json.loads(get_melody(value).score_json)
 
 
+def fit_catalog_lyrics_to_score(text: str, segments: list[dict] | None, score: dict
+                                ) -> tuple[str, list[dict] | None]:
+    """Keep the lyric singable when shorthand '~' counts differ from a catalog score.
+
+    A curated catalog score can receive freeform short lyrics: excess
+    continuation marks are dropped from the right; when
+    underspecified, automatic syllable alignment decides where to sustain.
+    """
+    if not segments or not any(part.get("text") == "~" and part.get("hold") for part in segments):
+        return text, segments
+    count = len(score["notes"])
+    slots = sum(part.get("text") != "|" for part in segments)
+    if slots == count:
+        return text, segments
+    result = [dict(part) for part in segments]
+    if slots > count:
+        excess = slots - count
+        for index in range(len(result) - 1, -1, -1):
+            if excess <= 0:
+                break
+            part = result[index]
+            if part.get("text") == "~" and part.get("hold"):
+                result.pop(index)
+                excess -= 1
+        if excess:
+            # A lyric has more syllables than notes. Do not silently erase text.
+            raise ValueError("A letra tem mais sílabas que notas nesta melodia.")
+        slots = count
+    if slots < count:
+        # A shorter lyric can use the renderer's balanced automatic alignment.
+        result = [part for part in result if not (part.get("text") == "~" and part.get("hold"))]
+    clean = " ".join(part["text"] for part in result)
+    if not any(part.get("hold") or part.get("fade_in") or part.get("fade_out")
+               or part.get("pause_after_ms") or part["text"] == "|" for part in result):
+        return clean, None
+    return clean, result
+
+
 def preview_text_for_melody(value: object = None, language: str = "pt-BR") -> str:
     """Keep one fresh vowel attack per note, including after musical rests."""
     melody = get_melody(value)

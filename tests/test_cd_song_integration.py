@@ -77,7 +77,7 @@ async def test_all_catalog_selections_freeze_explicit_score_in_discord_worker_pa
 
 
 @pytest.mark.asyncio
-async def test_catalog_song_does_not_rewrite_speech_and_attachment_still_wins():
+async def test_catalog_song_does_not_rewrite_speech_or_read_user_midi():
     entry = songs()[0]
     settings = {"ttv_melody_id": entry.id, "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.25}
     cog = LiveRenderCog(db=FakeDB(resolved=settings))
@@ -87,12 +87,13 @@ async def test_catalog_song_does_not_rewrite_speech_and_attachment_still_wins():
     assert speech.queue_item.ttv_pitch_semitones == "-2.0"
     assert speech.queue_item.ttv_speech_rate == 1.25
     attached = make_message("'a ~ ~ ~ a")
-    attached.attachments = [SimpleNamespace(filename="melodia.mid", size=len(DEMO_MIDI),
-        read=AsyncMock(return_value=DEMO_MIDI))]
+    user_midi = SimpleNamespace(filename="melodia.mid", size=len(DEMO_MIDI),
+        read=AsyncMock(return_value=DEMO_MIDI))
+    attached.attachments = [user_midi]
     musical = await preparar_payload_tts_mensagem(cog, attached,
         guild_defaults={}, active_prefix="'", forced_engine="teto")
-    assert musical.queue_item.ttv_score["duration_ms"] == 1500
-    assert musical.queue_item.ttv_score != catalog.score_for_melody(entry.id)
+    assert musical.queue_item.ttv_score == catalog.score_for_melody(entry.id)
+    user_midi.read.assert_not_awaited()
     assert settings["ttv_melody_id"] == entry.id
 
 
@@ -128,7 +129,7 @@ async def test_each_private_song_preview_uses_selected_score_and_snapshot(tmp_pa
 def test_too_many_lyric_syllables_fail_before_fragment_rendering(renderer, monkeypatch):
     for entry in songs():
         text = " ".join(["a"] * (entry.note_count + 1))
-        monkeypatch.setattr(renderer, "_render_phrase_timeline", lambda *args, **kwargs:
+        monkeypatch.setattr(renderer, "_compose_english_cvvc", lambda *args, **kwargs:
             pytest.fail("invalid lyric alignment must not start fragment rendering"))
         with pytest.raises(ValueError, match=rf"{entry.note_count + 1} sílabas para {entry.note_count} notas"):
             renderer.synthesize_performance(text, score=catalog.score_for_melody(entry.id))
@@ -141,7 +142,7 @@ def test_selected_song_uses_actual_note_clock_and_cached_pcm(renderer):
     text = " ".join(["a"] * entry.note_count)
     raw, metadata = renderer.synthesize_performance(text, score=score)
     samples, rate = pcm(raw)
-    assert score == unchanged and metadata["effective_score"] == score
+    assert score == unchanged and metadata["midi_notes"] == len(score["notes"])
     assert metadata["singing_nuclei"] == entry.note_count
     assert metadata["ttv_performance_hash"] == performance_hash(text=text, score=score)
     assert len(samples) / rate == pytest.approx((score["duration_ms"] + metadata["midi_preroll_ms"]) / 1000, abs=1/rate)

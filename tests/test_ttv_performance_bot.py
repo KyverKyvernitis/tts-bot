@@ -18,7 +18,7 @@ import discord  # Real modal/view classes before older tests install optional st
 import pytest
 
 from test_tts_helpers import tts_audio as audio
-from cogs.tts.mensagens.preparacao import preparar_payload_tts_mensagem, _MidiTrackView
+from cogs.tts.mensagens.preparacao import preparar_payload_tts_mensagem
 from cogs.tts.performance import parse_performance_text, performance_hash
 from test_tts_message_flow import FakeCog, FakeDB, make_message
 from test_ttv_audio import Probe, item
@@ -67,77 +67,52 @@ def music_item(**changes):
 
 
 @pytest.mark.asyncio
-async def test_midi_message_retains_selected_voice_and_language_without_speech_preferences():
+async def test_catalog_message_retains_voice_language_and_neutralizes_speech_controls():
+    from cogs.tts.melodies import score_for_melody
     cog = FakeCog(db=FakeDB(resolved={"ttv_voice_id": "hatsune-miku", "ttv_language": "en-US",
                                      "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.25}))
-    cog._render_tts_text = lambda msg, text: text + (" arquivo melodia.mid" if msg.attachments else "")
-    msg = message("'hello Miku", [attachment()])
+    msg = message("'/cantar hello Miku", [attachment()])
     payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={"announce_author": True},
                                                  active_prefix="'", forced_engine="teto")
     queued = payload.queue_item
     assert queued.text == "hello Miku"
     assert queued.ttv_voice_id == "hatsune-miku" and queued.ttv_language == "en-US"
     assert queued.ttv_pitch_semitones == "+0.0" and queued.ttv_speech_rate == 1.0
-    assert queued.ttv_score["duration_ms"] == 1500
+    assert queued.ttv_score == score_for_melody()
     assert queued.ttv_performance_hash == performance_hash(text=queued.text, score=queued.ttv_score)
-    msg.attachments[0].read.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_prefix_only_midi_is_vowel_score_and_is_not_empty_speech():
-    cog = FakeCog(db=FakeDB())
-    payload = await preparar_payload_tts_mensagem(cog, message("'", [attachment()]), guild_defaults={},
-                                                 active_prefix="'", forced_engine="teto")
-    assert payload.text == ""
-    assert payload.queue_item.ttv_score["lyrics_source"] == "vowel"
-    assert all(note["lyric"] == "a" for note in payload.queue_item.ttv_score["notes"])
-    probe = Probe()
-    assert probe._tts_agent_payload_for_item(payload.queue_item)["text"] == ""
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("data,size", [(midi(), 512 * 1024 + 1), (b"x" * (512 * 1024 + 1), 100), (b"bad midi", 8)])
-async def test_invalid_attachment_has_useful_error_and_is_never_queued(data, size):
-    cog = FakeCog(db=FakeDB())
-    source = attachment(data, size=size)
-    msg = message("'a", [source])
-    payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={}, active_prefix="'", forced_engine="teto")
-    assert payload is None and not cog.enqueue_calls
-    msg.reply.assert_awaited_once()
-    if size > 512 * 1024:
-        source.read.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_midi_read_is_skipped_when_author_has_no_call_or_other_engine_prefix():
-    cog = FakeCog(db=FakeDB())
-    msg = message("'a", [attachment()])
-    msg.author.voice = None
-    assert await preparar_payload_tts_mensagem(cog, msg, guild_defaults={}, active_prefix="'", forced_engine="teto") is None
     msg.attachments[0].read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_midi_only_message_does_not_trigger_singing_or_download():
+    cog = FakeCog(db=FakeDB())
+    msg = message("'", [attachment()])
+    payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={},
+                                                 active_prefix="'", forced_engine="teto")
+    assert payload is None or payload.queue_item.ttv_score is None
+    msg.attachments[0].read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_attached_midi_does_not_override_saved_catalog_song():
+    from cogs.tts.melodies import score_for_melody
+    cog = FakeCog(db=FakeDB(resolved={"ttv_melody_id": "senbonzakura"}))
+    msg = message("'/cantar a ~ ~ a", [attachment(midi(2))])
+    payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={},
+                                                 active_prefix="'", forced_engine="teto")
+    assert payload is not None
+    assert payload.queue_item.ttv_score == score_for_melody("senbonzakura")
+    msg.attachments[0].read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_midi_attachment_keeps_other_engines_independent():
+    cog = FakeCog(db=FakeDB())
     msg = message(",hello", [attachment()])
-    payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={}, active_prefix=",", forced_engine="edge")
+    payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={},
+                                                 active_prefix=",", forced_engine="edge")
     assert payload.queue_item.ttv_score is None
     msg.attachments[0].read.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_ambiguous_midi_offers_author_only_track_choice_and_dispatches_once():
-    cog = FakeCog(db=FakeDB())
-    msg = message("'a a a", [attachment(midi(2))])
-    assert await preparar_payload_tts_mensagem(cog, msg, guild_defaults={}, active_prefix="'", forced_engine="teto") is None
-    view = msg.reply.await_args.kwargs["view"]
-    assert isinstance(view, _MidiTrackView) and len(view.select.options) == 2
-    outsider = SimpleNamespace(user=SimpleNamespace(id=987), response=SimpleNamespace(send_message=AsyncMock()))
-    assert not await view.interaction_check(outsider)
-    assert not cog.enqueue_calls
-    view.select._values = ["1"]
-    author = SimpleNamespace(user=msg.author, response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock()),
-                             followup=SimpleNamespace(send=AsyncMock()))
-    await view.choose(author)
-    assert len(cog.enqueue_calls) == 1 and cog.enqueue_calls[0][1].ttv_score["track_index"] == 1
-    await view.choose(author)
-    assert len(cog.enqueue_calls) == 1 and not view.data
 
 
 @pytest.mark.asyncio
@@ -306,23 +281,6 @@ def test_midi_lyrics_are_not_truncated_by_speech_payload_limit():
     queued = music_item()
     queued.text = "a " * 1000
     assert probe._tts_agent_payload_for_item(queued)["text"] == queued.text
-
-
-@pytest.mark.asyncio
-async def test_track_selector_paginates_all_melodies_and_clears_data_when_expired():
-    msg = message("'a", [attachment()])
-    view = _MidiTrackView(cog=FakeCog(db=FakeDB()), message=msg, data=midi(),
-                          tracks=[{"index": index, "name": f"Melodia {index}", "note_count": 3, "monophonic": True} for index in range(32)],
-                          guild_defaults={}, active_prefix="'", forced_engine="teto")
-    interaction = SimpleNamespace(user=msg.author, response=SimpleNamespace(edit_message=AsyncMock()))
-    assert len(view.select.options) == 25
-    await view.next_page(interaction)
-    assert len(view.select.options) == 7 and view.select.options[-1].value == "31"
-    assert view.next.disabled and not view.previous.disabled
-    await view.previous_page(interaction)
-    assert view.select.options[0].value == "0"
-    await view.on_timeout()
-    assert not view.data and all(child.disabled for child in view.children)
 
 
 def test_sung_playback_timeout_tracks_midi_duration_and_audio_budget(tmp_path, monkeypatch):

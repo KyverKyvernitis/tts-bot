@@ -88,6 +88,9 @@ def worker_voice_details(state: Mapping[str, Any], voice_id: object = DEFAULT_VO
     fingerprints = entry.get("language_fingerprints", entry.get("ttv_language_fingerprints"))
     if not isinstance(fingerprints, dict):
         fingerprints = state.get("ttv_language_fingerprints") if legacy else {}
+    singing_fingerprints = entry.get("singing_fingerprints")
+    if not isinstance(singing_fingerprints, dict):
+        singing_fingerprints = state.get("ttv_singing_fingerprints") if legacy else {}
     return {
         "id": voice.id,
         "name": voice.name,
@@ -95,19 +98,18 @@ def worker_voice_details(state: Mapping[str, Any], voice_id: object = DEFAULT_VO
         "ready": bool(entry.get("ready")),
         "available": bool(entry.get("available")),
         "supports_personal_rate": bool(state.get("ttv_personal_settings") and entry.get("supports_personal_rate")),
+        "singing_available": entry.get("singing_available") if type(entry.get("singing_available")) is bool else None,
+        "performance_protocol": entry.get("ttv_performance_protocol") if type(entry.get("ttv_performance_protocol")) is int else None,
         "languages": [code for code in languages if code in _LANGUAGE_LABELS] if isinstance(languages, (list, tuple)) else [],
         "fingerprint": str(entry.get("fingerprint") or (state.get("teto_fingerprint") if legacy else "") or "unavailable"),
+        "singing_fingerprints": {
+            code: value for code, value in (singing_fingerprints or {}).items()
+            if code in _LANGUAGE_LABELS and isinstance(value, str) and value
+        } if isinstance(singing_fingerprints, dict) else {},
         "language_fingerprints": {
             code: value for code, value in (fingerprints or {}).items()
             if code in _LANGUAGE_LABELS and isinstance(value, str) and value
         } if isinstance(fingerprints, dict) else {},
-        "singing_fingerprints": {
-            code: value for code, value in (entry.get("singing_fingerprints") or {}).items()
-            if code in _LANGUAGE_LABELS and isinstance(value, str) and value
-        } if isinstance(entry.get("singing_fingerprints"), dict) else {},
-        "singing_available": entry.get("singing_available"),
-        "performance_protocol": (int(entry.get("ttv_performance_protocol") or 0)
-            if "ttv_performance_protocol" in entry else None),
     }
 
 

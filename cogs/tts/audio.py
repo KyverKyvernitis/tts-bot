@@ -3310,7 +3310,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             voice_state = worker_voice_details(self._tts_agent_route_state(), preferences["ttv_voice_id"])
             fingerprint = voice_state["language_fingerprints"].get(preferences["ttv_language"], voice_state["fingerprint"])
             if item.ttv_score is not None:
-                fingerprint = "singing-v5|" + voice_state["singing_fingerprints"].get(preferences["ttv_language"], fingerprint)
+                fingerprint = "singing-v5|" + (voice_state.get("singing_fingerprints") or {}).get(preferences["ttv_language"], fingerprint)
             payload = f"ttv-v2|worker|{fingerprint}|{preferences['ttv_voice_id']}|{preferences['ttv_pitch_semitones']}|{preferences['ttv_speech_rate']!r}|{preferences['ttv_language']}|{text}"
             if item.ttv_performance_hash:
                 payload += f"|performance-v1:{item.ttv_performance_hash}"

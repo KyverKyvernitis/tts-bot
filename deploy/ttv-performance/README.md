@@ -1,9 +1,9 @@
 # Canto MIDI e efeitos de TTV
 
 Este pacote usa a base `repo-20261011-161817.zip` e acrescenta um fluxo de
-execução musical ao worker 1.11.41. A fala sem comandos mantém seus controles
-e seu renderer atual. O canto usa ESPER e os bancos English-CVVC já instalados
-da Miku e da Teto.
+execução musical ao worker 1.11.40. A fala sem comandos mantém seus controles
+e seu renderer atual. O canto utiliza o renderizador UTAU do Phone Worker com o resampler configurado
+e o banco English-CVVC instalado para a voz selecionada.
 
 ## Fala com efeitos
 
@@ -22,51 +22,28 @@ interpretados como efeitos. Os efeitos valem somente no TTV. Mensagens com
 efeitos têm limite de 180 caracteres e são renderizadas como uma apresentação
 única, sem divisão em blocos que perderia as transições.
 
-## Cantar sem anexar MIDI
+## Cantar pelo catálogo `_cd`
 
-Use `'/cantar Meu pai tem pão`. A melodia padrão é a mesma dos dois MP3s de
-demonstração: C4, E4, G4 e E4. As notas duram 850, 850, 850 e 1050 ms, com
-200 ms antes e depois. O ciclo se repete quando a letra precisa de mais notas;
-letras curtas prolongam a última vogal até completar as quatro notas.
+No Discord, escolha a música no painel `_cd` e use `/cantar` junto ao texto
+TTV. O bot usa a partitura cadastrada e os ajustes da voz selecionada.
+Exemplo com prefixo `'`: `'/cantar a ~ ~ mor`.
 
-`'a ~ ~ ~ a` também ativa o canto sem anexo: cada `~` separado continua a
-vogal anterior na próxima nota. `aaa~` junto à palavra permanece um efeito
-de sustentação na fala. `/cantar` permite cantar uma letra sem esses símbolos.
-No canto padrão, `|` insere uma pausa de 180 ms e começa uma nova frase.
+O bot ignora anexos `.mid`/`.midi` enviados pelos usuários para fins de canto:
+não lê o arquivo, não oferece seleção de faixas e não altera a melodia do
+catálogo. MIDI permanece disponível **somente** nas ferramentas locais de
+análise e teste descritas abaixo.
 
-O idioma e a personagem seguem **Configurar TTV**. O canto sempre usa o banco
-English-CVVC da personagem, inclusive se a fala da Teto usa o banco padrão.
-Os ajustes de tom e velocidade da fala não alteram as notas do canto.
+O sintetizador mantém o backend UTAU configurado no Phone Worker; canto usa a
+voicebank English-CVVC, inclusive para letras em português. O resampler não é
+trocado automaticamente. Os limites de duração e notas vêm do contrato atual
+de partitura, que é compartilhado por catálogo e ferramentas offline.
 
-## Cantar um MIDI
+## Atualização do Phone Worker
 
-Anexe um arquivo `.mid` ou `.midi` à mensagem de TTV e escreva a letra depois
-do prefixo. Exemplo: `'abacate com manteiga`. A voz e o idioma continuam sendo
-os selecionados em **Configurar TTV**. O canto preserva o andamento e as notas
-do arquivo, separado dos ajustes de tom e velocidade da fala. Um MIDI anexado
-tem prioridade sobre a melodia padrão, mesmo usando `/cantar`.
-
-A letra da mensagem tem prioridade. Sem texto, o bot usa a letra temporizada
-do MIDI; sem letra no arquivo, canta a vogal “a”. O leitor prefere uma melodia
-monofônica com letra ou uma faixa identificada como vocal/melody/lead. Faixas
-de bateria não são usadas. Quando há várias candidatas, escolha a melodia no
-menu oferecido pelo bot.
-
-As sílabas são alinhadas às notas; notas conectadas podem prolongar uma vogal.
-Quando a letra não cabe, a resposta informa o problema para ajustar o trecho.
-O exemplo `a ~ ~ mor` mantém o “a” durante três notas e começa “mor” na quarta.
-O `|` separa frases no canto e conserva o andamento e as pausas do MIDI.
-Entrada e saída suaves também podem ser aplicadas às palavras da letra.
-
-O limite inicial é uma melodia, 128 notas, 60 segundos e arquivo de 512 KiB.
-Uma vogal contínua pode ocupar até 18 segundos nesta versão; para sustentações
-maiores, divida a letra em outro ataque ou acrescente uma pausa no MIDI. Esse
-limite mantém cada fragmento dentro do orçamento aceito pela ponte ESPER
-instalada no Termux. A duração total do canto continua podendo chegar a 60 segundos.
-São aceitos MIDI tipo 0/1 com divisão PPQ e mudanças de andamento. Acordes na
-faixa escolhida, MIDI tipo 2 e divisão SMPTE precisam ser exportados como uma
-melodia compatível antes de enviar. O arquivo fornece a melodia da voz; o bot
-não toca automaticamente um acompanhamento instrumental.
+O ZIP do updater contém somente os arquivos da VPS. As correções do renderizador
+e do processo Android são distribuídas no **kit Termux separado**, que deve ser
+instalado no telefone. Atualizar o bot na VPS não atualiza automaticamente
+este kit.
 
 ## Teste independente no Termux
 
@@ -77,8 +54,8 @@ python "$HOME/ttv-canto-termux-kit/deploy/ttv-performance/termux/render-demo.py"
   --container voicepeak-arm64 --esper-root "$HOME/.esper-utau"
 ```
 
-Sem MIDI, o script canta “Meu pai tem pão” com a melodia padrão nas duas vozes.
-Os WAVs, MP3s e relatório ficam em uma pasta nova dentro de `Download/ttv-canto`; o
+Sem MIDI, o script cria uma melodia curta para as duas vozes. Os WAVs, MP3s,
+MIDI e relatório ficam em uma pasta nova dentro de `Download/ttv-canto`; o
 resultado mostra o caminho completo. Para uma melodia sua:
 
 ```bash
@@ -94,14 +71,10 @@ os bancos, a instalação do ESPER e os caches de produção; usa caches tempor�
 
 ## Atualização
 
-Aplique o patch pelo updater do bot e confirme **1.11.41** no status do worker
-antes de testar. Um worker anterior recebe pedidos de fala comum; pedidos de
-canto e efeitos exigem suporte específico e são recusados com uma mensagem de
-atualização. O canto padrão exige protocolo 2. Pedidos musicais e efeitos têm
-até 120 segundos para gerar o áudio; o orçamento da fala comum permanece igual.
-As falhas de canto agora recebem uma mensagem específica em vez do erro genérico.
-Nenhum banco de voz ou binário do ESPER está incluído no patch.
+Aplique o ZIP da VPS somente pelo updater do bot. O kit Termux atualiza
+separadamente os arquivos de síntese do Phone Worker no Android; seu instalador
+confere hashes e cria backup antes de alterar a release ativa. As voicebanks,
+resampler e configuração de voz locais não são modificados pelo kit.
 
-O teste local com ESPER Linux x64 confirma execução e características medidas
-do áudio. O teste do kit no telefone valida a instalação ARM64 existente.
-Pronúncia percebida e sonoridade devem ser avaliadas ouvindo as amostras.
+A síntese real precisa ser validada no telefone; testes automatizados com
+resampler de teste não demonstram qualidade de voz da instalação ARM64.
