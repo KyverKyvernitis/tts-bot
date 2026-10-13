@@ -1795,5 +1795,1269 @@
       "articulation_gaps_extended": []
     },
     "source_file": "triple-baka.proto"
+  },
+  {
+    "id": "rolling-girl",
+    "name": "Rolling Girl",
+    "artist": "wowaka",
+    "excerpt": "Adaptação instrumental para teste; transcrição vocal não confirmada",
+    "source_url": "https://www.youtube.com/watch?v=vnw8zURAxkU",
+    "source_file": "wowaka - Rolling Girl.mid",
+    "source_sha256": "bceafe9c4bb75955e91113b76e971021cae6e1d5d08745283e48934a1f437f46",
+    "duration_ms": 13413,
+    "notes": [
+      {
+        "midi_note": 74,
+        "start_ms": 0,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 288,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 577,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 721,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 865,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 78,
+        "start_ms": 1010,
+        "duration_ms": 287,
+        "velocity": 80
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 1298,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1442,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 1587,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1731,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 1875,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 2019,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 2163,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 2308,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 2596,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 2885,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 3029,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 3173,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 78,
+        "start_ms": 3317,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 3606,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 3750,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 3894,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 4038,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 81,
+        "start_ms": 4183,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 81,
+        "start_ms": 4327,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 83,
+        "start_ms": 4615,
+        "duration_ms": 432,
+        "velocity": 80
+      },
+      {
+        "midi_note": 78,
+        "start_ms": 5048,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 5192,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 5337,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 5481,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 78,
+        "start_ms": 5625,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 5913,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 6058,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 6202,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 6346,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 6490,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 71,
+        "start_ms": 6635,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 6779,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 6923,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 7212,
+        "duration_ms": 287,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 7500,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 7644,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 69,
+        "start_ms": 7788,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 78,
+        "start_ms": 7933,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 76,
+        "start_ms": 8221,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 8365,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 73,
+        "start_ms": 8510,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 8654,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 74,
+        "start_ms": 9087,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 9231,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 9519,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 9808,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 9952,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 10096,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 66,
+        "start_ms": 10240,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 10529,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 10673,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 10817,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 10962,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 11106,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 59,
+        "start_ms": 11250,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 11394,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 11538,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 11827,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 12115,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 12260,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 57,
+        "start_ms": 12404,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 66,
+        "start_ms": 12548,
+        "duration_ms": 288,
+        "velocity": 80
+      },
+      {
+        "midi_note": 64,
+        "start_ms": 12837,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 12981,
+        "duration_ms": 143,
+        "velocity": 80
+      },
+      {
+        "midi_note": 61,
+        "start_ms": 13125,
+        "duration_ms": 144,
+        "velocity": 80
+      },
+      {
+        "midi_note": 62,
+        "start_ms": 13269,
+        "duration_ms": 144,
+        "velocity": 80
+      }
+    ],
+    "revision": 1,
+    "extraction": {
+      "version": 1,
+      "algorithm": "upper-voice-v1",
+      "source_sha256": "bceafe9c4bb75955e91113b76e971021cae6e1d5d08745283e48934a1f437f46",
+      "score_sha256": "ecb0a351f73a9051e548ab160c1b6fe590893aa0807df9ed37f23dd4434de35d",
+      "track_index": 0,
+      "track_name": "Rolling Girl lead excerpt",
+      "channel": 0,
+      "program": null,
+      "program_scope": "last_program_in_source_stream",
+      "selection": "automatic",
+      "selection_ambiguous": false,
+      "selection_criteria": [
+        "aligned_lyrics",
+        "vocal_name",
+        "melody_name",
+        "monophony",
+        "usable_note_count",
+        "median_pitch"
+      ],
+      "vocal_status": "ambiguous",
+      "vocal_transcription_confirmed": false,
+      "source_duration_ms": 13413,
+      "source_note_count": 72,
+      "selected_stream_note_count": 72,
+      "selected_stream_monophonic": true,
+      "selected_stream_duration_ms": 13413,
+      "excerpt_start_ms": 0,
+      "excerpt_end_ms": 13413,
+      "is_excerpt": false,
+      "excerpt_reasons": [],
+      "tempo_conductor_track": 0,
+      "timing": "global_ppq_tempo_map",
+      "tempo_changed": false,
+      "warnings": [
+        "vocal_line_ambiguous"
+      ],
+      "parser_conditions": {},
+      "reduction": {
+        "out_of_range_notes_dropped": 0,
+        "short_notes_dropped": 0,
+        "voice_crossings_clipped": 0,
+        "selected_line_note_count": 72,
+        "polyphonic_notes_dropped": 0
+      },
+      "note_names": [
+        {
+          "index": 0,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 0,
+          "source_end_ms": 288,
+          "retained_end_ms": 288
+        },
+        {
+          "index": 1,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 288,
+          "source_end_ms": 576,
+          "retained_end_ms": 576
+        },
+        {
+          "index": 2,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 577,
+          "source_end_ms": 721,
+          "retained_end_ms": 721
+        },
+        {
+          "index": 3,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 721,
+          "source_end_ms": 865,
+          "retained_end_ms": 865
+        },
+        {
+          "index": 4,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 865,
+          "source_end_ms": 1009,
+          "retained_end_ms": 1009
+        },
+        {
+          "index": 5,
+          "note": "F#",
+          "octave": 5,
+          "source_start_ms": 1010,
+          "source_end_ms": 1297,
+          "retained_end_ms": 1297
+        },
+        {
+          "index": 6,
+          "note": "E",
+          "octave": 5,
+          "source_start_ms": 1298,
+          "source_end_ms": 1442,
+          "retained_end_ms": 1442
+        },
+        {
+          "index": 7,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 1442,
+          "source_end_ms": 1586,
+          "retained_end_ms": 1586
+        },
+        {
+          "index": 8,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 1587,
+          "source_end_ms": 1730,
+          "retained_end_ms": 1730
+        },
+        {
+          "index": 9,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 1731,
+          "source_end_ms": 1874,
+          "retained_end_ms": 1874
+        },
+        {
+          "index": 10,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 1875,
+          "source_end_ms": 2019,
+          "retained_end_ms": 2019
+        },
+        {
+          "index": 11,
+          "note": "B",
+          "octave": 4,
+          "source_start_ms": 2019,
+          "source_end_ms": 2163,
+          "retained_end_ms": 2163
+        },
+        {
+          "index": 12,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 2163,
+          "source_end_ms": 2307,
+          "retained_end_ms": 2307
+        },
+        {
+          "index": 13,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 2308,
+          "source_end_ms": 2596,
+          "retained_end_ms": 2596
+        },
+        {
+          "index": 14,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 2596,
+          "source_end_ms": 2884,
+          "retained_end_ms": 2884
+        },
+        {
+          "index": 15,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 2885,
+          "source_end_ms": 3028,
+          "retained_end_ms": 3028
+        },
+        {
+          "index": 16,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 3029,
+          "source_end_ms": 3172,
+          "retained_end_ms": 3172
+        },
+        {
+          "index": 17,
+          "note": "A",
+          "octave": 4,
+          "source_start_ms": 3173,
+          "source_end_ms": 3317,
+          "retained_end_ms": 3317
+        },
+        {
+          "index": 18,
+          "note": "F#",
+          "octave": 5,
+          "source_start_ms": 3317,
+          "source_end_ms": 3605,
+          "retained_end_ms": 3605
+        },
+        {
+          "index": 19,
+          "note": "E",
+          "octave": 5,
+          "source_start_ms": 3606,
+          "source_end_ms": 3749,
+          "retained_end_ms": 3749
+        },
+        {
+          "index": 20,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 3750,
+          "source_end_ms": 3894,
+          "retained_end_ms": 3894
+        },
+        {
+          "index": 21,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 3894,
+          "source_end_ms": 4038,
+          "retained_end_ms": 4038
+        },
+        {
+          "index": 22,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 4038,
+          "source_end_ms": 4182,
+          "retained_end_ms": 4182
+        },
+        {
+          "index": 23,
+          "note": "A",
+          "octave": 5,
+          "source_start_ms": 4183,
+          "source_end_ms": 4326,
+          "retained_end_ms": 4326
+        },
+        {
+          "index": 24,
+          "note": "A",
+          "octave": 5,
+          "source_start_ms": 4327,
+          "source_end_ms": 4615,
+          "retained_end_ms": 4615
+        },
+        {
+          "index": 25,
+          "note": "B",
+          "octave": 5,
+          "source_start_ms": 4615,
+          "source_end_ms": 5047,
+          "retained_end_ms": 5047
+        },
+        {
+          "index": 26,
+          "note": "F#",
+          "octave": 5,
+          "source_start_ms": 5048,
+          "source_end_ms": 5192,
+          "retained_end_ms": 5192
+        },
+        {
+          "index": 27,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 5192,
+          "source_end_ms": 5336,
+          "retained_end_ms": 5336
+        },
+        {
+          "index": 28,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 5337,
+          "source_end_ms": 5480,
+          "retained_end_ms": 5480
+        },
+        {
+          "index": 29,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 5481,
+          "source_end_ms": 5624,
+          "retained_end_ms": 5624
+        },
+        {
+          "index": 30,
+          "note": "F#",
+          "octave": 5,
+          "source_start_ms": 5625,
+          "source_end_ms": 5913,
+          "retained_end_ms": 5913
+        },
+        {
+          "index": 31,
+          "note": "E",
+          "octave": 5,
+          "source_start_ms": 5913,
+          "source_end_ms": 6057,
+          "retained_end_ms": 6057
+        },
+        {
+          "index": 32,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 6058,
+          "source_end_ms": 6201,
+          "retained_end_ms": 6201
+        },
+        {
+          "index": 33,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 6202,
+          "source_end_ms": 6346,
+          "retained_end_ms": 6346
+        },
+        {
+          "index": 34,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 6346,
+          "source_end_ms": 6490,
+          "retained_end_ms": 6490
+        },
+        {
+          "index": 35,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 6490,
+          "source_end_ms": 6634,
+          "retained_end_ms": 6634
+        },
+        {
+          "index": 36,
+          "note": "B",
+          "octave": 4,
+          "source_start_ms": 6635,
+          "source_end_ms": 6778,
+          "retained_end_ms": 6778
+        },
+        {
+          "index": 37,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 6779,
+          "source_end_ms": 6922,
+          "retained_end_ms": 6922
+        },
+        {
+          "index": 38,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 6923,
+          "source_end_ms": 7211,
+          "retained_end_ms": 7211
+        },
+        {
+          "index": 39,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 7212,
+          "source_end_ms": 7499,
+          "retained_end_ms": 7499
+        },
+        {
+          "index": 40,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 7500,
+          "source_end_ms": 7644,
+          "retained_end_ms": 7644
+        },
+        {
+          "index": 41,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 7644,
+          "source_end_ms": 7788,
+          "retained_end_ms": 7788
+        },
+        {
+          "index": 42,
+          "note": "A",
+          "octave": 4,
+          "source_start_ms": 7788,
+          "source_end_ms": 7932,
+          "retained_end_ms": 7932
+        },
+        {
+          "index": 43,
+          "note": "F#",
+          "octave": 5,
+          "source_start_ms": 7933,
+          "source_end_ms": 8221,
+          "retained_end_ms": 8221
+        },
+        {
+          "index": 44,
+          "note": "E",
+          "octave": 5,
+          "source_start_ms": 8221,
+          "source_end_ms": 8365,
+          "retained_end_ms": 8365
+        },
+        {
+          "index": 45,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 8365,
+          "source_end_ms": 8509,
+          "retained_end_ms": 8509
+        },
+        {
+          "index": 46,
+          "note": "C#",
+          "octave": 5,
+          "source_start_ms": 8510,
+          "source_end_ms": 8653,
+          "retained_end_ms": 8653
+        },
+        {
+          "index": 47,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 8654,
+          "source_end_ms": 8942,
+          "retained_end_ms": 8942
+        },
+        {
+          "index": 48,
+          "note": "D",
+          "octave": 5,
+          "source_start_ms": 9087,
+          "source_end_ms": 9230,
+          "retained_end_ms": 9230
+        },
+        {
+          "index": 49,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 9231,
+          "source_end_ms": 9519,
+          "retained_end_ms": 9519
+        },
+        {
+          "index": 50,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 9519,
+          "source_end_ms": 9807,
+          "retained_end_ms": 9807
+        },
+        {
+          "index": 51,
+          "note": "C#",
+          "octave": 4,
+          "source_start_ms": 9808,
+          "source_end_ms": 9951,
+          "retained_end_ms": 9951
+        },
+        {
+          "index": 52,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 9952,
+          "source_end_ms": 10096,
+          "retained_end_ms": 10096
+        },
+        {
+          "index": 53,
+          "note": "C#",
+          "octave": 4,
+          "source_start_ms": 10096,
+          "source_end_ms": 10240,
+          "retained_end_ms": 10240
+        },
+        {
+          "index": 54,
+          "note": "F#",
+          "octave": 4,
+          "source_start_ms": 10240,
+          "source_end_ms": 10528,
+          "retained_end_ms": 10528
+        },
+        {
+          "index": 55,
+          "note": "E",
+          "octave": 4,
+          "source_start_ms": 10529,
+          "source_end_ms": 10672,
+          "retained_end_ms": 10672
+        },
+        {
+          "index": 56,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 10673,
+          "source_end_ms": 10817,
+          "retained_end_ms": 10817
+        },
+        {
+          "index": 57,
+          "note": "C#",
+          "octave": 4,
+          "source_start_ms": 10817,
+          "source_end_ms": 10961,
+          "retained_end_ms": 10961
+        },
+        {
+          "index": 58,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 10962,
+          "source_end_ms": 11105,
+          "retained_end_ms": 11105
+        },
+        {
+          "index": 59,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 11106,
+          "source_end_ms": 11249,
+          "retained_end_ms": 11249
+        },
+        {
+          "index": 60,
+          "note": "B",
+          "octave": 3,
+          "source_start_ms": 11250,
+          "source_end_ms": 11394,
+          "retained_end_ms": 11394
+        },
+        {
+          "index": 61,
+          "note": "C#",
+          "octave": 4,
+          "source_start_ms": 11394,
+          "source_end_ms": 11538,
+          "retained_end_ms": 11538
+        },
+        {
+          "index": 62,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 11538,
+          "source_end_ms": 11826,
+          "retained_end_ms": 11826
+        },
+        {
+          "index": 63,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 11827,
+          "source_end_ms": 12115,
+          "retained_end_ms": 12115
+        },
+        {
+          "index": 64,
+          "note": "C#",
+          "octave": 4,
+          "source_start_ms": 12115,
+          "source_end_ms": 12259,
+          "retained_end_ms": 12259
+        },
+        {
+          "index": 65,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 12260,
+          "source_end_ms": 12403,
+          "retained_end_ms": 12403
+        },
+        {
+          "index": 66,
+          "note": "A",
+          "octave": 3,
+          "source_start_ms": 12404,
+          "source_end_ms": 12547,
+          "retained_end_ms": 12547
+        },
+        {
+          "index": 67,
+          "note": "F#",
+          "octave": 4,
+          "source_start_ms": 12548,
+          "source_end_ms": 12836,
+          "retained_end_ms": 12836
+        },
+        {
+          "index": 68,
+          "note": "E",
+          "octave": 4,
+          "source_start_ms": 12837,
+          "source_end_ms": 12980,
+          "retained_end_ms": 12980
+        },
+        {
+          "index": 69,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 12981,
+          "source_end_ms": 13124,
+          "retained_end_ms": 13124
+        },
+        {
+          "index": 70,
+          "note": "C#",
+          "octave": 4,
+          "source_start_ms": 13125,
+          "source_end_ms": 13269,
+          "retained_end_ms": 13269
+        },
+        {
+          "index": 71,
+          "note": "D",
+          "octave": 4,
+          "source_start_ms": 13269,
+          "source_end_ms": 13413,
+          "retained_end_ms": 13413
+        }
+      ],
+      "rests": [
+        {
+          "start_ms": 576,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 1009,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 1297,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 1586,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 1730,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 1874,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 2307,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 2884,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 3028,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 3172,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 3605,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 3749,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 4182,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 4326,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 5047,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 5336,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 5480,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 5624,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 6057,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 6201,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 6634,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 6778,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 6922,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 7211,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 7499,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 7932,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 8509,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 8653,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 8942,
+          "duration_ms": 145
+        },
+        {
+          "start_ms": 9230,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 9807,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 9951,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 10528,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 10672,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 10961,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 11105,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 11249,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 11826,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 12259,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 12403,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 12547,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 12836,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 12980,
+          "duration_ms": 1
+        },
+        {
+          "start_ms": 13124,
+          "duration_ms": 1
+        }
+      ],
+      "candidates": [
+        {
+          "track_index": 0,
+          "track_name": "Rolling Girl lead excerpt",
+          "channel": 0,
+          "note_count": 72,
+          "line_note_count": 72,
+          "monophonic": true,
+          "lyric_matches": 0,
+          "vocal_name": false,
+          "melody_name": true
+        }
+      ],
+      "parser_score_sha256": "cccd93fb0087f7cb19ee003368ef1dbceb8b4921571fb51ab9358dd252ec2a86",
+      "catalog_lyrics_source": "message"
+    },
+    "score_sha256": "ecb0a351f73a9051e548ab160c1b6fe590893aa0807df9ed37f23dd4434de35d",
+    "source_provenance": "User-supplied simplified instrumental MIDI; original download URL unverified"
   }
 ]

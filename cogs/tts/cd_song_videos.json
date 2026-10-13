@@ -1735,6 +1735,72 @@
       "inspected_candidates": 25,
       "thumbnail_sha256": "850c31d7f2f96f1899269bc89fc2458c70a812c9bc706b98de29a777320b9435",
       "thumbnail_bytes": 60074
+    },
+    "rolling-girl": {
+      "video_id": "vnw8zURAxkU",
+      "title": "wowaka 『ローリンガール』feat. 初音ミク / wowaka - Rollin Girl (Official Video) ft. Hatsune Miku",
+      "channel": "ヒトリエ / wowaka",
+      "artist": "wowaka",
+      "title_aliases": [
+        "Rolling Girl",
+        "Rollin Girl",
+        "ローリンガール"
+      ],
+      "search_query": "wowaka Rolling Girl Rollin Girl ローリンガール",
+      "webpage_url": "https://www.youtube.com/watch?v=vnw8zURAxkU",
+      "thumbnail_url": "https://i.ytimg.com/vi/vnw8zURAxkU/hqdefault.jpg",
+      "view_count": 44107888,
+      "view_count_source": "YouTube web-search index snapshot; not a live statistics API response",
+      "checked_at": "2026-10-13T11:28:28.139966+00:00",
+      "inspected_candidates": 2,
+      "selection_basis": "highest-view-count-among-inspected-matching-candidates; indexed-snapshot-not-live",
+      "metadata_status": "identity_verified; live_view_count_refresh_pending",
+      "selection_audit": {
+        "checked_at": "2026-10-13T11:28:28.139966+00:00",
+        "method": "public-web-search-and-public-youtube-pages",
+        "cookies_used": false,
+        "primary_source": "https://www.youtube.com/watch?v=vnw8zURAxkU",
+        "official": {
+          "video_id": "vnw8zURAxkU",
+          "title": "wowaka 『ローリンガール』feat. 初音ミク / wowaka - Rollin Girl (Official Video) ft. Hatsune Miku",
+          "channel": "ヒトリエ / wowaka",
+          "channel_classification": "Official Artist Channel",
+          "publication_date_from_youtube_search": "2017-09-04",
+          "view_count": 44107888,
+          "view_count_observed_at": "2026-10-13T11:28:28.139966+00:00",
+          "view_count_source": "YouTube web-search index snapshot; not a live statistics API response",
+          "underlying_count_timestamp": null,
+          "identity_confirmed": true
+        },
+        "previous_selection": {
+          "video_id": "xPhPHO-sKlY",
+          "source": "https://youtu.be/xPhPHO-sKlY",
+          "title": "[Rolling girl ローリンガール] Wowaka Tribute - Hatsune Miku Magical Mirai 2019 初音ミク「マジカルミライ 2019」",
+          "classification": "live-event tribute; different recording/version",
+          "identity_confirmed": true,
+          "view_count_live_verified": false,
+          "rejected_by_new_matching": [
+            "unrequested_version_live",
+            "unrequested_version_tribute"
+          ]
+        },
+        "independent_snapshot": {
+          "url": "https://yutura.net/channel/149191/popular/",
+          "view_count": 44725329,
+          "snapshot_label": "10/11 21:50; year not printed in returned page text",
+          "checked_at": "2026-10-13T11:28:28.139966+00:00",
+          "role": "corroboration only; not used as a live YouTube counter"
+        },
+        "aliases_required": [
+          "Rollin Girl",
+          "ローリンガール"
+        ],
+        "conclusion": "Official recording was absent from v7 literal-title match. The previous chosen video is a live tribute. Highest popularity is stated only among inspected identified candidates, never globally.",
+        "limitations": [
+          "Direct public oEmbed and thumbnail downloads unavailable in current execution sandbox/network tool. No YouTube API credentials used.",
+          "Official video identity verified from public YouTube search; exact latest view count requires live videos.statistics API or yt-dlp metadata at import time."
+        ]
+      }
     }
   }
 }

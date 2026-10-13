@@ -1,0 +1,21 @@
+{
+  "manifest_version": 1,
+  "id": "rolling-girl",
+  "revision": 1,
+  "source_sha256": "bceafe9c4bb75955e91113b76e971021cae6e1d5d08745283e48934a1f437f46",
+  "score_sha256": "ecb0a351f73a9051e548ab160c1b6fe590893aa0807df9ed37f23dd4434de35d",
+  "artifacts": {
+    "score": {
+      "status": "ready",
+      "sha256": "ecb0a351f73a9051e548ab160c1b6fe590893aa0807df9ed37f23dd4434de35d"
+    },
+    "thumbnail": {
+      "status": "pending"
+    },
+    "sample": {
+      "status": "ready",
+      "path": "cogs/tts/cd/previews/rolling-girl.mp3",
+      "sha256": "6c5b39a5db5160cc17867b94bd351535a08063e191563c58465a7ae32d7024e0"
+    }
+  }
+}
