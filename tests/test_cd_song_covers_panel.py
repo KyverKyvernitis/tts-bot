@@ -98,7 +98,7 @@ def test_selecting_songs_replaces_cover_and_returning_to_default_clears_attachme
                 assert len(raw) == 1 and len(payload["attachments"]) == 1
                 names.append(payload["attachments"][0]["filename"])
 
-            inter.response.edit_message = AsyncMock(side_effect=consume)
+            inter.message.edit = AsyncMock(side_effect=consume)
             view.melody_select._values = [song.id]
             await view.select_melody(inter)
             assert view.selected_melody_id == song.id and not view.apply_button.disabled
@@ -106,7 +106,7 @@ def test_selecting_songs_replaces_cover_and_returning_to_default_clears_attachme
         default = interaction()
         view.melody_select._values = [DEFAULT_MELODY_ID]
         await view.select_melody(default)
-        assert default.response.edit_message.await_args.kwargs["attachments"] == []
+        assert default.message.edit.await_args.kwargs["attachments"] == []
         assert view.apply_button.disabled
         cog._cd_preview_mp3.assert_not_awaited()
         cog._set_user_tts_and_refresh.assert_not_awaited()

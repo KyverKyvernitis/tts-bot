@@ -48,6 +48,7 @@ def interaction(*, actor=10, guild=20, done=False):
         state["done"] = True
 
     message = SimpleNamespace(edit=AsyncMock())
+    message.edit.return_value = message
     return SimpleNamespace(
         user=SimpleNamespace(id=actor), guild=SimpleNamespace(id=guild) if guild else None,
         response=SimpleNamespace(
@@ -177,7 +178,8 @@ def test_offline_selection_is_temporary_and_apply_saves_only_melody():
             selected = interaction()
             await view.select_melody(selected)
             assert view.selected_melody_id == other.id and view.active_melody_id == DEFAULT_MELODY_ID
-            selected.response.edit_message.assert_awaited_once()
+            selected.response.defer.assert_awaited_once()
+            selected.message.edit.assert_awaited_once()
             cog._set_user_tts_and_refresh.assert_not_awaited()
             assert not view.apply_button.disabled
             applied = interaction()

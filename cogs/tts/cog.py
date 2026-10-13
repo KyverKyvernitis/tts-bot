@@ -4886,101 +4886,158 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         if not message.guild:
             return False
 
-        if self._get_db() is None:
-            await message.channel.send(
-                embed=self._make_embed(
-                    "Configuração indisponível",
-                    "Não consegui carregar suas configurações agora. Tente novamente em instantes.",
-                    ok=False,
-                ),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return True
-
         panel_kind = "cd"
-        if await self._check_prefix_panel_cooldown(message, panel_kind):
+        key = self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)
+        openings = getattr(self, '_cd_panel_opening', None)
+        if openings is None:
+            openings = self._cd_panel_opening = set()
+        busy_notices = getattr(self, '_cd_panel_busy_notices', None)
+        if busy_notices is None:
+            busy_notices = self._cd_panel_busy_notices = {}
+        if key in openings:
+            # An edit may be waiting on Discord's rate limiter after the normal
+            # five-second command cooldown. Never start a second competing open.
+            now = time.monotonic()
+            if busy_notices.get(key, 0.0) > now:
+                return True
+            # Reserve before awaiting Discord so a burst shares one notice.
+            busy_notices[key] = now + 3.0
+            try:
+                await asyncio.wait_for(message.channel.send(
+                    "Seu painel de CDs já está sendo aberto. Aguarde alguns instantes.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                ), timeout=3.0)
+            except Exception as error:
+                logger.warning(
+                    "[cd_panel] aviso de abertura pendente falhou | guild=%s channel=%s type=%s status=%s code=%s",
+                    message.guild.id, getattr(message.channel, 'id', 0), type(error).__name__,
+                    getattr(error, 'status', 0), getattr(error, 'code', 0),
+                )
             return True
 
+        openings.add(key)
         view = None
+        sent = None
+        stage = 'settings'
+        deadline = time.monotonic() + 20.0
+
+        async def bounded(awaitable, phase, seconds=10.0):
+            nonlocal stage
+            stage = phase
+            remaining = max(0.001, deadline - time.monotonic())
+            return await asyncio.wait_for(awaitable, timeout=min(seconds, remaining))
+
         try:
+            if self._get_db() is None:
+                await bounded(message.channel.send(
+                    embed=self._make_embed(
+                        "Configuração indisponível",
+                        "Não consegui carregar suas configurações agora. Tente novamente em instantes.",
+                        ok=False,
+                    ),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                ), 'missing_settings_notice')
+                return True
+            if await bounded(self._check_prefix_panel_cooldown(message, panel_kind), 'cooldown', 3.0):
+                return True
+
             from .interface.painel_canto import CDPanelView
 
             views = getattr(self, '_cd_panel_views', None)
             if views is None:
                 views = self._cd_panel_views = weakref.WeakValueDictionary()
-            key = self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)
             previous = views.get(key)
             previous_message = getattr(previous, 'message', None)
             if (previous is not None and not previous._is_expired() and not previous.is_finished()
                     and getattr(getattr(previous_message, 'channel', None), 'id', None) == getattr(message.channel, 'id', -1)):
-                await previous.refresh(force=True, rebuild=False)
+                await bounded(previous.refresh(force=True, rebuild=False), 'reuse_settings', 5.0)
                 if not previous._is_expired() and not previous.is_finished():
-                    previous.expires_at_monotonic = time.monotonic() + previous._activity_timeout
-                    if await previous._edit_panel():
-                        self._active_prefix_panels[key] = previous.message
-                        return True
+                    if await bounded(previous._edit_panel(), 'reuse_edit'):
+                        # A failed or delayed edit must not reactivate a panel
+                        # that expired while this command was waiting.
+                        if previous._is_expired() or previous.is_finished():
+                            previous.expires_at_monotonic = 0
+                        else:
+                            previous.expires_at_monotonic = time.monotonic() + previous._activity_timeout
+                            self._active_prefix_panels[key] = previous.message
+                            return True
 
             view = CDPanelView(self, message.author.id, message.guild.id, timeout=300)
-            await view.refresh()
+            await bounded(view.refresh(), 'new_settings', 5.0)
             files = view.panel_files()
             emoji_generation = view.emoji_generation
             try:
-                sent = await message.channel.send(
+                sent = await bounded(message.channel.send(
                     view=view,
                     allowed_mentions=discord.AllowedMentions.none(),
                     **({"files": files} if files else {}),
-                )
+                ), 'new_send', 12.0)
             finally:
                 for file in files:
                     file.close()
+
+            # Register an accepted replacement even if deleting the old message
+            # times out or the calling listener is cancelled during cleanup.
+            try:
+                await bounded(self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind),
+                              'old_delete', 3.0)
+            except Exception as error:
+                logger.warning(
+                    "[cd_panel] limpeza do painel anterior falhou | guild=%s channel=%s type=%s status=%s code=%s",
+                    message.guild.id, getattr(message.channel, 'id', 0), type(error).__name__,
+                    getattr(error, 'status', 0), getattr(error, 'code', 0),
+                )
+            finally:
+                view.message = sent
+                view.remember_cover()
+                self._cd_panel_views[key] = view
+                self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "owner_id": message.author.id}
+                self._active_prefix_panels[key] = sent
+            if view.emoji_generation != emoji_generation:
+                # Best-effort enrichment cannot turn an accepted panel into a
+                # failed command if a second HTTP edit waits on a rate limit.
+                try:
+                    await bounded(view._edit_panel(), 'emoji_edit', 3.0)
+                except Exception as error:
+                    logger.warning(
+                        "[cd_panel] atualização de emojis adiada | guild=%s channel=%s type=%s status=%s code=%s",
+                        message.guild.id, getattr(message.channel, 'id', 0), type(error).__name__,
+                        getattr(error, 'status', 0), getattr(error, 'code', 0),
+                    )
+            return True
         except asyncio.CancelledError:
-            if view is not None:
+            if view is not None and sent is None:
                 view.stop()
-            self._prefix_panel_cooldowns.pop(
-                self._prefix_panel_key(message.guild.id, message.author.id, panel_kind), None,
-            )
+            self._prefix_panel_cooldowns.pop(key, None)
             raise
         except Exception as error:
-            if view is not None:
+            if view is not None and sent is None:
                 view.stop()
-            self._prefix_panel_cooldowns.pop(
-                self._prefix_panel_key(message.guild.id, message.author.id, panel_kind), None,
-            )
+            self._prefix_panel_cooldowns.pop(key, None)
             logger.warning(
-                "[cd_panel] não foi possível abrir o painel | guild=%s channel=%s type=%s status=%s code=%s",
-                message.guild.id, getattr(message.channel, "id", 0), type(error).__name__,
+                "[cd_panel] não foi possível abrir o painel | guild=%s channel=%s stage=%s type=%s status=%s code=%s",
+                message.guild.id, getattr(message.channel, "id", 0), stage, type(error).__name__,
                 getattr(error, "status", 0), getattr(error, "code", 0),
             )
             try:
-                retry_hint = await self._get_panel_prefix_hint(message.guild.id, panel_kind)
+                retry_hint = await asyncio.wait_for(self._get_panel_prefix_hint(message.guild.id, panel_kind), timeout=2.0)
             except Exception:
                 retry_hint = "`_cd`"
             try:
-                await message.channel.send(
+                await asyncio.wait_for(message.channel.send(
                     f"Não consegui abrir o painel de canto agora. Tente {retry_hint} novamente.",
                     allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except discord.HTTPException as notice_error:
+                ), timeout=3.0)
+            except Exception as notice_error:
                 logger.warning(
-                    "[cd_panel] não foi possível enviar o aviso | guild=%s channel=%s status=%s code=%s",
-                    message.guild.id, getattr(message.channel, "id", 0), notice_error.status, notice_error.code,
+                    "[cd_panel] não foi possível enviar o aviso | guild=%s channel=%s type=%s status=%s code=%s",
+                    message.guild.id, getattr(message.channel, "id", 0), type(notice_error).__name__,
+                    getattr(notice_error, 'status', 0), getattr(notice_error, 'code', 0),
                 )
             return True
-        # Keep the previous usable panel until Discord confirms its replacement.
-        await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
-        view.message = sent
-        view.remember_cover()
-        self._cd_panel_views[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = view
-        self._public_panel_states[sent.id] = {
-            "panel_kind": panel_kind,
-            "owner_id": message.author.id,
-        }
-        self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
-        if view.emoji_generation != emoji_generation:
-            # Emoji synchronization can finish while Discord uploads the panel.
-            # Its early rebuild cannot change an already serialized HTTP payload.
-            await view._edit_panel()
-        return True
+        finally:
+            openings.discard(key)
+            busy_notices.pop(key, None)
 
     async def _send_prefix_panel(
         self,

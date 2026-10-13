@@ -133,7 +133,8 @@ class PanelReuseTests(unittest.IsolatedAsyncioTestCase):
     async def test_unchanged_cover_uses_existing_attachment_without_new_upload(self):
         revision=['abc']
         namespace={'discord':DISCORD,'cover_revision':lambda _:revision[0]}
-        methods=extract('cogs/tts/interface/painel_canto.py',['_edit_panel'],namespace)
+        namespace['asyncio'] = asyncio
+        methods=extract('cogs/tts/interface/painel_canto.py',['_edit_panel','_edit_panel_current'],namespace)
         view=type('ProductionEdit',(),methods)()
         attachment=SimpleNamespace(filename='ttv-cd-rolling-girl.jpg')
         message=SimpleNamespace(attachments=[attachment],edit=AsyncMock())

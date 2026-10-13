@@ -14,6 +14,7 @@ from urllib.error import HTTPError as UrllibHTTPError
 import aiohttp
 import discord
 import requests
+from .melodies import minimum_singing_syllables
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,11 @@ _MESSAGES = {
     "ttv_singing_bank_missing": "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla",
     "ttv_singing_failed": "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla",
     "ttv_singing_timeout": "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla",
+    "ttv_singing_lyrics_mismatch": "A letra não encaixa nas pausas ou notas deste CD. Acrescente sílabas ou escolha outro CD.",
+    "ttv_singing_lyrics_too_long": "A letra tem mais sílabas que as notas deste CD. Encurte a letra ou escolha um CD com mais notas.",
+    "ttv_singing_score_invalid": "A partitura deste CD foi rejeitada pelo worker. Reimporte o MIDI e publique o pacote atualizado.",
+    "ttv_singing_busy": "O worker de canto está ocupado ou sem recursos agora. Aguarde um pouco e tente novamente.",
+    "ttv_singing_backend_unsupported": "O backend atual desta voz não aceita partituras MIDI. Confira a configuração UTAU do worker.",
     "author_not_in_voice": "C tem que estar em call pra poder usar isso <:vish:1533479762230775898>",
     "voice_channel_mismatch": "C tem que estar na mesma call q eu <:speed:1534287805424074772>",
     "tts_disabled": "Texto pra fala tá desativado nesse sv chefe <:vish:1533479762230775898>",
@@ -105,7 +111,15 @@ def _voice_channel_for_item(guild, item):
     return getter(channel_id) if callable(getter) else None
 
 
-def _public_notice(code: str, *, permission: str = "") -> str:
+def _public_notice(code: str, *, permission: str = "", score: dict | None = None) -> str:
+    if code == "ttv_singing_lyrics_mismatch" and score:
+        try:
+            minimum = minimum_singing_syllables(score)
+        except (KeyError, TypeError, ValueError):
+            minimum = 0
+        if 1 <= minimum <= 128:
+            return (f"Esta melodia precisa de pelo menos {minimum} sílabas para respeitar suas pausas e notas. "
+                    "Acrescente sílabas ou escolha outro CD.")
     if code == "voice_permission_missing" and permission:
         # Somente rótulos constantes, nunca strings vindas do Discord/usuário.
         if permission in _PERMISSION_ALLOWED_LABELS:
@@ -359,7 +373,7 @@ async def notify_tts_failure(cog, item, reason_code: str, error: Exception | Non
         )
         try:
             await channel.send(
-                "-# " + _public_notice(code, permission=permission), reference=reference,
+                "-# " + _public_notice(code, permission=permission, score=getattr(item, "ttv_score", None)), reference=reference,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:

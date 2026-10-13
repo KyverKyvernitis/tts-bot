@@ -41,7 +41,7 @@ class PanelOptimizationTests(unittest.IsolatedAsyncioTestCase):
                      'DEFAULT_MELODY_ID':'default', 'start_catalog_watch':Mock(),
                      '_CD_EMOJIS':SimpleNamespace(schedule=Mock())}
         extracted = methods('cogs/tts/interface/painel_canto.py',
-                            ['refresh','_refresh_availability'], namespace)
+                            ['refresh','_refresh_current','_refresh_availability'], namespace)
         cls = type('ProductionMethods', (Parent,), extracted)
         view = cls()
         db = SimpleNamespace(resolve_tts=AsyncMock(return_value={}))

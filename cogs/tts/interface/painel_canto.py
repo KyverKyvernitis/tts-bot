@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import io
 import hashlib
+import logging
 import math
 import time
 import weakref
@@ -17,6 +18,7 @@ import discord
 
 
 from ..failure_notices import _public_notice
+from ..singing_errors import singing_failure_code
 from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url, _cover_bytes, cover_revision, cover_identity
 from ..cd_colors import cover_accent, DEFAULT_COLOR
 from ..cd_previews import prepared_sample
@@ -24,6 +26,8 @@ from ..melodies import DEFAULT_MELODY_ID, catalog_signature, format_score_notes,
 from .application_emojis import ApplicationSelectEmojis
 from ..ttv import DEFAULT_VOICE_ID, language_label, resolve_preferences, voice_label
 from .visoes_layout import VisaoLayoutBaseTTS
+
+log = logging.getLogger(__name__)
 
 
 def _avatar_asset_id(bot) -> str | None:
@@ -82,9 +86,9 @@ async def _reply(interaction: discord.Interaction, content: str, *, file=None) -
     if file is not None:
         kwargs["file"] = file
     if interaction.response.is_done():
-        await interaction.followup.send(**kwargs)
+        await asyncio.wait_for(interaction.followup.send(**kwargs), timeout=10.0)
     else:
-        await interaction.response.send_message(**kwargs)
+        await asyncio.wait_for(interaction.response.send_message(**kwargs), timeout=10.0)
 
 
 _ACTIVE_PANELS = weakref.WeakSet()
@@ -184,6 +188,18 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self._rebuild()
 
     async def refresh(self, *, force: bool = False, rebuild: bool = True) -> None:
+        try:
+            await asyncio.wait_for(self._refresh_current(force=force, rebuild=rebuild), timeout=5.0)
+        except asyncio.TimeoutError:
+            self._settings_available = self._preview_available = False
+            self._settings_at = 0.0
+            self._availability_note = 'Seus ajustes estão indisponíveis agora. Tente novamente.'
+            log.warning('[cd_panel] stage=settings_refresh type=TimeoutError guild=%s user=%s',
+                        self.guild_id, self.owner_id)
+            if rebuild:
+                self._rebuild()
+
+    async def _refresh_current(self, *, force: bool = False, rebuild: bool = True) -> None:
         """Reuse recent settings; publication refreshes never extend expiry."""
         if not self._is_expired() and not self.is_finished():
             start_catalog_watch(self.cog)
@@ -372,6 +388,14 @@ class CDPanelView(VisaoLayoutBaseTTS):
         return allowed
 
     async def _edit_panel(self, interaction: discord.Interaction | None = None) -> bool:
+        try:
+            return await asyncio.wait_for(self._edit_panel_current(interaction), timeout=10.0)
+        except asyncio.TimeoutError:
+            log.warning('[cd_panel] stage=panel_edit type=TimeoutError guild=%s user=%s',
+                        self.guild_id, self.owner_id)
+            return False
+
+    async def _edit_panel_current(self, interaction: discord.Interaction | None = None) -> bool:
         self._rebuild()
         message = self.message or getattr(interaction, "message", None)
         if message is None and (interaction is None or interaction.response.is_done()):
@@ -420,6 +444,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
             return
         self.selected_melody_id = melody.id
         self._page_locked = False
+        await asyncio.wait_for(interaction.response.defer(), timeout=3.0)
         await self.refresh(rebuild=False)
         await self._edit_panel(interaction)
 
@@ -458,14 +483,17 @@ class CDPanelView(VisaoLayoutBaseTTS):
         melody_id = get_melody(self.selected_melody_id).id
         self._saving = True
         try:
-            await interaction.response.defer()
-            await self.cog._set_user_tts_and_refresh(self.guild_id, self.owner_id, ttv_melody_id=melody_id)
+            await asyncio.wait_for(interaction.response.defer(), timeout=3.0)
+            await asyncio.wait_for(self.cog._set_user_tts_and_refresh(
+                self.guild_id, self.owner_id, ttv_melody_id=melody_id), timeout=12.0)
             self.active_melody_id = melody_id
-            await self.refresh(force=True, rebuild=False)
+        except asyncio.TimeoutError:
+            await _reply(interaction, "A confirmação demorou. Abra o painel novamente para conferir sua seleção.")
         except Exception:
             await _reply(interaction, "Não consegui salvar a melodia agora. Tente novamente.")
         finally:
             self._saving = False
+            await self.refresh(force=True, rebuild=False)
             await self._edit_panel(interaction)
 
     async def preview_melody(self, interaction: discord.Interaction) -> None:
@@ -474,21 +502,18 @@ class CDPanelView(VisaoLayoutBaseTTS):
         if self._preview_running:
             await _reply(interaction, "A amostra anterior ainda está sendo gerada.")
             return
-        await self.refresh(force=True, rebuild=False)
-        if self._preview_running:
-            await _reply(interaction, "A amostra anterior ainda está sendo gerada.")
-            return
-        if not self._preview_available:
-            await _reply(interaction, self._availability_note or "Não consegui gerar a amostra agora.")
-            return
-        melody_id = self.selected_melody_id
-        melody_name = get_melody(melody_id).name
-        preview_voice = voice_label(self._preferences["ttv_voice_id"])
-        preview_language = language_label(self._preferences["ttv_language"])
-        preview_settings = dict(self._preferences)
         self._preview_running = True
         try:
-            await interaction.response.defer(ephemeral=True, thinking=True)
+            await asyncio.wait_for(interaction.response.defer(ephemeral=True, thinking=True), timeout=3.0)
+            await self.refresh(force=True, rebuild=False)
+            if not self._preview_available:
+                await _reply(interaction, self._availability_note or "Não consegui gerar a amostra agora.")
+                return
+            melody_id = self.selected_melody_id
+            melody_name = get_melody(melody_id).name
+            preview_voice = voice_label(self._preferences["ttv_voice_id"])
+            preview_language = language_label(self._preferences["ttv_language"])
+            preview_settings = dict(self._preferences)
             await self._edit_panel(interaction)
             mp3 = prepared_sample(melody_id, preview_settings)
             if mp3 is None:
@@ -504,8 +529,11 @@ class CDPanelView(VisaoLayoutBaseTTS):
             )
         except asyncio.TimeoutError:
             await _reply(interaction, "-# " + _public_notice("ttv_singing_timeout"))
-        except Exception:
-            await _reply(interaction, "-# " + _public_notice("ttv_singing_failed"))
+        except Exception as error:
+            code = singing_failure_code(error)
+            log.warning('[cd_panel] stage=preview type=%s code=%s guild=%s user=%s',
+                        type(error).__name__, code, self.guild_id, self.owner_id)
+            await _reply(interaction, "-# " + _public_notice(code))
         finally:
             self._preview_running = False
             await self.refresh(rebuild=False)

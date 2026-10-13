@@ -86,6 +86,40 @@ class OfflineCoverTests(unittest.TestCase):
         self.assertFalse(report['discord_api_called'])
         self.assertEqual(report['local_cover_sha256'], hashlib.sha256(self.data).hexdigest())
 
+    def test_diagnostic_without_pillow_distinguishes_valid_bytes_from_missing_file(self):
+        self.path.write_bytes(self.data)
+        spec = importlib.util.spec_from_file_location('diagnose_assets_no_pillow', ROOT / 'scripts/diagnose-cd-assets.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = io.StringIO()
+        with patch('sys.argv', ['diagnose-cd-assets.py', 'rolling-girl']), redirect_stdout(output), \
+             patch.object(module.importlib.util, 'find_spec', return_value=None), \
+             patch.object(cd_covers, '_cover_bytes', return_value=None), \
+             patch.object(cd_covers, 'cover_revision', return_value=''):
+            module.main()
+        report = json.loads(output.getvalue())
+        self.assertIsNone(report['local_cover_ready'])
+        self.assertFalse(report['pillow_available'])
+        self.assertEqual(report['reason_code'], 'pillow_unavailable_in_this_python')
+        self.assertTrue(report['local_cover_candidates'][0]['hash_matches'])
+        self.assertEqual(report['local_cover_candidates'][0]['state'], 'hash_ready_decode_unavailable')
+
+    def test_diagnostic_pinpoints_missing_hash_missing_file_and_changed_bytes(self):
+        spec = importlib.util.spec_from_file_location('diagnose_assets_states', ROOT / 'scripts/diagnose-cd-assets.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        expected = hashlib.sha256(self.data).hexdigest()
+        result = module.inspect_cover(self.path, expected, pillow_available=True)
+        self.assertEqual(result['state'], 'missing_file')
+        self.path.write_bytes(b'changed')
+        result = module.inspect_cover(self.path, expected, pillow_available=True)
+        self.assertEqual(result['state'], 'hash_mismatch')
+        (self.root / 'cd_song_videos.json').write_text(json.dumps({'songs': {'rolling-girl': {'video_id':'vnw8zURAxkU'}}}))
+        output = io.StringIO()
+        with patch('sys.argv', ['diagnose-cd-assets.py', 'rolling-girl']), redirect_stdout(output):
+            module.main()
+        self.assertEqual(json.loads(output.getvalue())['reason_code'], 'thumbnail_hash_missing')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -29,7 +29,10 @@ O canto com `'/cantar sua letra` ou `~` separado usa a melodia pessoal. Anexos M
 seu comportamento, e a melodia do canto que já entrou na fila permanece igual.
 Cada trecho comporta até uma sílaba por nota; com menos sílabas a voz pode
 prolongar as vogais nas notas seguintes, respeitando as pausas. Para uma letra
-maior, escolha um trecho com mais notas ou divida a mensagem.
+maior, escolha um trecho com mais notas ou divida a mensagem. Uma letra curta
+precisa ter ataques vocais suficientes para as frases separadas por pausas:
+uma única vogal não pode atravessar uma pausa MIDI. O bot informa a
+incompatibilidade em vez de tratar esse caso como voz desativada.
 
 O painel aberto pelo comando expira após cinco minutos sem interação autorizada;
 use `_cd` novamente. Reabrir no mesmo canal reutiliza seu painel ainda ativo;
@@ -144,3 +147,21 @@ pagina a cada 25 opções; painéis expirados/encerrados não são reativados. O
 emoji usa o hash da capa, e a cor vem do JPEG local validado. Amostras Teto
 pt-BR prontas podem tocar offline com tom musical 0 e velocidade 1, mesmo
 quando as preferências de fala são diferentes.
+
+## Recuperação do painel e dos erros — v8.3
+
+Aberturas do mesmo usuário são agrupadas; operações de configuração, envio e
+edição têm prazo. Uma exclusão lenta da mensagem anterior não impede o registro
+da mensagem nova já enviada. Falhas liberam o estado de abertura para nova
+tentativa, sem reativar um painel que expirou durante a espera. As interações
+de seleção/amostra são reconhecidas antes de operações que possam demorar.
+
+Rejeições explícitas do worker por letra, partitura, recursos ou configuração
+de uma voz não desativam a rota inteira. Erros de rede/autenticação e falhas
+não identificadas conservam a proteção de disponibilidade. O backend UTAU
+1.11.41, voicebank e resampler permanecem preservados.
+
+Execute o diagnóstico com o Python usado pelo serviço do bot. O script informa
+o executável, a disponibilidade de Pillow e os candidatos de capa com caminho,
+hash e motivo de rejeição. A falta de Pillow nesse processo retorna estado
+indeterminado quando os bytes e o hash conferem, sem declarar a capa ausente.

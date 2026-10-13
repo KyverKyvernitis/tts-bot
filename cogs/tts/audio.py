@@ -60,6 +60,7 @@ from cogs.musica.integracoes.tts import (
 from .edge_endpoint import configure_edge_endpoint
 from .helpers import validate_voice
 from .performance import performance_hash
+from .singing_errors import PhoneWorkerResponseError, request_scoped_worker_rejection, singing_failure_code
 from .melodies import DEFAULT_MELODY_ID, score_for_melody, preview_text_for_melody
 from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences, worker_voice_details
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
@@ -1917,6 +1918,13 @@ class TTSAudioMixin(SharedSynthesisMixin):
         metrics[key] = int(metrics.get(key, 0) or 0) + 1
 
     def _mark_tts_agent_synth_failure(self, exc: Exception | str) -> None:
+        if request_scoped_worker_rejection(exc):
+            metrics = self._get_metrics_store()
+            metrics["tts_agent_request_rejected"] = int(metrics.get("tts_agent_request_rejected", 0) or 0) + 1
+            metrics["tts_agent_last_rejection_code"] = exc.worker_category
+            logger.info("[tts_agent] requisição rejeitada sem suspender worker | code=%s status=%s type=%s",
+                        exc.worker_category, exc.status, exc.worker_exception or type(exc).__name__)
+            return
         state = self._tts_agent_route_state()
         state["failure_count"] = int(state.get("failure_count") or 0) + 1
         state["last_error"] = str(exc)[:220]
@@ -3664,6 +3672,12 @@ class TTSAudioMixin(SharedSynthesisMixin):
             response_text = await response.text()
             response_ms = (time.monotonic() - started) * 1000.0
             if response.status < 200 or response.status >= 300:
+                try:
+                    rejected = json.loads(response_text)
+                except (ValueError, TypeError):
+                    rejected = None
+                if isinstance(rejected, dict) and rejected.get("ok") is False and isinstance(rejected.get("error"), str):
+                    raise PhoneWorkerResponseError(rejected["error"], status=response.status)
                 raise RuntimeError(f"HTTP {response.status}: {response_text[:260]}")
             parse_started = time.monotonic()
             data = json.loads(response_text or "{}")
@@ -3674,7 +3688,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         data["_vps_worker_response_bytes"] = len(response_text.encode("utf-8", errors="ignore"))
         data["audio_format"] = self._normalize_worker_audio_format(data.get("audio_format"))
         if raise_on_worker_error and data.get("ok") is False:
-            raise RuntimeError(str(data.get("error") or "worker retornou ok=false"))
+            raise PhoneWorkerResponseError(str(data.get("error") or "worker retornou ok=false"), status=response.status)
         return data
 
     def _decode_worker_audio_payload(self, data: dict[str, Any], *, max_audio_mb: int) -> dict[str, Any]:
@@ -3734,8 +3748,12 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 try:
                     parsed = json.loads(text or "{}")
                 except Exception:
-                    parsed = {"ok": False, "error": text[:240]}
+                    raise RuntimeError("worker retornou JSON inválido") from None
+                if not isinstance(parsed, dict):
+                    raise RuntimeError("worker retornou JSON sem objeto")
                 if response.status < 200 or response.status >= 300 or parsed.get("ok") is False:
+                    if isinstance(parsed, dict) and parsed.get("ok") is False and isinstance(parsed.get("error"), str):
+                        raise PhoneWorkerResponseError(parsed["error"], status=response.status)
                     raise RuntimeError(str(parsed.get("error") or f"HTTP {response.status}: {text[:180]}"))
                 parsed["_vps_worker_request_ms"] = round((time.monotonic() - started) * 1000.0, 2)
                 return await asyncio.to_thread(
@@ -5827,7 +5845,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     if item.ttv_score is not None:
                         if isinstance(e, TTVSingingError):
                             raise
-                        code = "ttv_singing_timeout" if isinstance(e, (asyncio.TimeoutError, TimeoutError)) else "ttv_singing_failed"
+                        code = singing_failure_code(e)
                         raise TTVSingingError(f"TTV: {e}", code=code) from e
                     if _ttv_performance_payload(item):
                         raise RuntimeError(f"TTV: {e}") from e

@@ -510,8 +510,11 @@ def pending(*, prefer_new: bool = True) -> dict | None:
     with _db() as db:
         row = None
         for new in (prefer_new, not prefer_new):
+            # Uma falha permanente na migração não apaga o post já tocável,
+            # nem o coloca de volta na fila a cada consulta de status.
             clause = ("reference_json='' AND estado NOT IN ('too_large', 'ineligible', 'unavailable', 'paused')"
-                      if new else "reference_json!='' AND apresentacao<?")
+                      if new else "reference_json!='' AND apresentacao<? "
+                      "AND estado NOT IN ('too_large', 'ineligible', 'unavailable', 'paused')")
             args = (time.time(),) if new else (version, time.time())
             row = db.execute("""SELECT chave, track_json, reference_json, estado,
                              fonte_arquivo, fonte_estavel, retry_reference_json

@@ -20,6 +20,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _FAILED_CATALOG_SIGNATURE: tuple[int, ...] | None = None
 _LOOKUP_SNAPSHOT = None
 _LOOKUP = {}
+_SINGLE_VOWELS = frozenset("a á à â ã e é ê i í o ó ô õ u ú".split())
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +221,17 @@ def fit_catalog_lyrics_to_score(text: str, segments: list[dict] | None, score: d
     continuation marks are dropped from the right; when
     underspecified, automatic syllable alignment decides where to sustain.
     """
+    # Single vowels have an exact, bank-independent nucleus count. Detect the
+    # common /cantar a a test before occupying the phone queue. Other words are
+    # left to the character's real phonemizer; spelling is not a syllable count.
+    vowel_tokens = text.split()
+    if vowel_tokens and all(token.casefold() in _SINGLE_VOWELS for token in vowel_tokens):
+        minimum = minimum_singing_syllables(score)
+        if len(vowel_tokens) < minimum:
+            raise ValueError(
+                f"Esta melodia precisa de pelo menos {minimum} sílabas para respeitar suas pausas e notas. "
+                f"Sua letra tem {len(vowel_tokens)}. Acrescente sílabas ou escolha outro CD."
+            )
     if not segments or not any(part.get("text") == "~" and part.get("hold") for part in segments):
         return text, segments
     count = len(score["notes"])
@@ -248,6 +260,35 @@ def fit_catalog_lyrics_to_score(text: str, segments: list[dict] | None, score: d
                or part.get("pause_after_ms") or part["text"] == "|" for part in result):
         return clean, None
     return clean, result
+
+
+def minimum_singing_syllables(score: dict | None) -> int:
+    """Exact lower bound for 1.11.41's allowed contiguous vowel spans.
+
+    The worker permits at most 18 seconds and 40 semitones per vowel, and a
+    pause over 20 ms requires a fresh attack. Greedy maximal spans minimize
+    their count because every constraint is monotonic as notes are appended.
+    This does not estimate the syllables of arbitrary written lyrics.
+    """
+    notes = score.get("notes") if isinstance(score, dict) else None
+    if not isinstance(notes, list) or not notes:
+        return 0
+    count = 1
+    first, previous = notes[0], notes[0]
+    low = high = first["midi_note"]
+    for note in notes[1:]:
+        pitch = note["midi_note"]
+        end = note["start_ms"] + note["duration_ms"]
+        if (note["start_ms"] - previous["start_ms"] - previous["duration_ms"] > 20
+                or end - first["start_ms"] > 18000
+                or max(high, pitch) - min(low, pitch) > 40):
+            count += 1
+            first = note
+            low = high = pitch
+        else:
+            low, high = min(low, pitch), max(high, pitch)
+        previous = note
+    return count
 
 
 _NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
