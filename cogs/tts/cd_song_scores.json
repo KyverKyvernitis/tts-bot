@@ -1800,10 +1800,10 @@
     "id": "rolling-girl",
     "name": "Rolling Girl",
     "artist": "wowaka",
-    "excerpt": "Adaptação instrumental para teste; transcrição vocal não confirmada",
-    "source_url": "https://www.youtube.com/watch?v=vnw8zURAxkU",
-    "source_file": "wowaka - Rolling Girl.mid",
+    "excerpt": "Trecho melódico extraído; linha vocal ambígua",
+    "source_url": "https://www.youtube.com/watch?v=OcZM_Szee44",
     "source_sha256": "bceafe9c4bb75955e91113b76e971021cae6e1d5d08745283e48934a1f437f46",
+    "revision": 1,
     "duration_ms": 13413,
     "notes": [
       {
@@ -2239,7 +2239,6 @@
         "velocity": 80
       }
     ],
-    "revision": 1,
     "extraction": {
       "version": 1,
       "algorithm": "upper-voice-v1",
@@ -3055,9 +3054,8 @@
         }
       ],
       "parser_score_sha256": "cccd93fb0087f7cb19ee003368ef1dbceb8b4921571fb51ab9358dd252ec2a86",
-      "catalog_lyrics_source": "message"
+      "score_normalization": "worker-message-notes-v1"
     },
-    "score_sha256": "ecb0a351f73a9051e548ab160c1b6fe590893aa0807df9ed37f23dd4434de35d",
-    "source_provenance": "User-supplied simplified instrumental MIDI; original download URL unverified"
+    "score_sha256": "ecb0a351f73a9051e548ab160c1b6fe590893aa0807df9ed37f23dd4434de35d"
   }
 ]
