@@ -13,11 +13,18 @@ import discord
 
 import config
 
-from ..failure_notices import _public_notice, failure_code
-from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url
+from ..failure_notices import _public_notice
+from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url, _cover_bytes
 from ..melodies import DEFAULT_MELODY_ID, get_melody, list_melodies
+from .application_emojis import ApplicationSelectEmojis
 from ..ttv import DEFAULT_VOICE_ID, language_label, resolve_preferences, voice_label
 from .visoes_layout import VisaoLayoutBaseTTS
+
+
+_CD_EMOJIS = ApplicationSelectEmojis(
+    "osakacd", _cover_bytes,
+    lambda: (melody.id for melody in list_melodies() if melody.id != DEFAULT_MELODY_ID),
+)
 
 
 async def _maybe_await(value):
@@ -80,6 +87,9 @@ class CDPanelView(VisaoLayoutBaseTTS):
             self.selected_melody_id = DEFAULT_MELODY_ID
         await self._refresh_availability()
         self._rebuild()
+        # A capa vira emoji de aplicação uma única vez, reutilizável em qualquer
+        # servidor. A sincronização em segundo plano não retarda o painel.
+        _CD_EMOJIS.schedule(getattr(self.cog, "bot", None), self)
 
     async def _refresh_availability(self) -> None:
         self._preview_available = False
@@ -119,19 +129,15 @@ class CDPanelView(VisaoLayoutBaseTTS):
     def _rebuild(self) -> None:
         self.clear_items()
         melody = get_melody(self.selected_melody_id)
-        try:
-            active_name = get_melody(self.active_melody_id).name
-        except ValueError:
-            active_name = "Melodia indisponível"
-        voice = voice_label(self._preferences.get("ttv_voice_id", DEFAULT_VOICE_ID))
-        language = language_label(self._preferences.get("ttv_language"))
         duration = f"{melody.duration_ms / 1000:g}".replace(".", ",")
         card = discord.ui.TextDisplay(
-            f"**{melody.name}**\n{melody.description}\n"
-            f"-# {melody.note_count} notas · {duration} s · {voice} · {language}"
+            f"**{melody.name}**\n-# {melody.note_count} notas · {duration} s"
         )
         container = discord.ui.Container(
-            discord.ui.TextDisplay("## 🎼 Melodias de canto\nEscolha a melodia para cantar suas mensagens."),
+            discord.ui.TextDisplay(
+                "## <a:Vinyl_Music_loading:1559374199133315122> Menu de CDs\n"
+                "-# Escolha seu CD, o bot vai ler e no modo de canto vai cantar no ritmo dele."
+            ),
             accent_color=discord.Color.blurple(),
         )
         cover = (cover_attachment_url(melody.id) or remote_thumbnail_url(melody.id)
@@ -148,12 +154,12 @@ class CDPanelView(VisaoLayoutBaseTTS):
         container.add_item(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
         self.melody_select = discord.ui.Select(
             custom_id="ttv:cd:melody",
-            placeholder="Escolha uma melodia",
+            placeholder="Escolha um CD",
             min_values=1,
             max_values=1,
             options=[discord.SelectOption(
                 label=item.name[:100], value=item.id,
-                description=item.description[:100] or None,
+                emoji=_CD_EMOJIS.emoji(item.id),
                 default=item.id == self.selected_melody_id,
             ) for item in list_melodies()],
             disabled=self._preview_running or self._saving or self._is_expired(),
@@ -174,12 +180,13 @@ class CDPanelView(VisaoLayoutBaseTTS):
         )
         self.apply_button.callback = self.apply_melody
         container.add_item(discord.ui.ActionRow(self.preview_button, self.apply_button))
-        footer = f"-# Em uso: {active_name} · Sua escolha neste servidor."
-        if self._saved:
-            footer = f"-# ✓ {active_name} salva · Sua escolha neste servidor."
-        if self._availability_note:
-            footer += f"\n-# {self._availability_note}"
-        container.add_item(discord.ui.TextDisplay(footer))
+        # A linha permanente "Em uso" é redundante com o botão de estado.
+        # Avisos de indisponibilidade continuam visíveis quando relevantes.
+        note = self._availability_note
+        if self.active_melody_id not in {item.id for item in list_melodies()}:
+            note = "Melodia anteriormente salva indisponível. Escolha outra."
+        if note:
+            container.add_item(discord.ui.TextDisplay(f"-# {note}"))
         self.add_item(container)
 
     def panel_files(self) -> list[discord.File]:
@@ -300,9 +307,9 @@ class CDPanelView(VisaoLayoutBaseTTS):
                 file=discord.File(io.BytesIO(mp3), filename="cd-amostra.mp3"),
             )
         except asyncio.TimeoutError:
-            await _reply(interaction, _public_notice("ttv_singing_timeout"))
-        except Exception as error:
-            await _reply(interaction, _public_notice(failure_code("ttv_singing_failed", error)))
+            await _reply(interaction, "-# " + _public_notice("ttv_singing_timeout"))
+        except Exception:
+            await _reply(interaction, "-# " + _public_notice("ttv_singing_failed"))
         finally:
             self._preview_running = False
             await self.refresh()

@@ -96,6 +96,7 @@ def test_panel_serializes_real_discord_v2_without_content_embed_or_fake_songs():
         assert len(options) == 11 and options[0]["label"] == "Padrão"
         assert options[0]["value"] == DEFAULT_MELODY_ID and options[0]["default"]
         assert sum(bool(option.get("default")) for option in options) == 1
+        assert all("description" not in option for option in options)
         assert {option["value"] for option in options} == {item.id for item in panel.list_melodies()}
         buttons = [item for item in parts if item["type"] == 2]
         assert [item["label"] for item in buttons] == ["Ouvir amostra", "Melodia em uso"]
@@ -143,7 +144,11 @@ def test_panel_reads_current_voice_and_language_without_network_or_call():
         view = panel.CDPanelView(cog, 10, 20)
         await view.refresh()
         text = "\n".join(item["content"] for item in walk(view.to_components()) if item["type"] == 10)
-        assert "Hatsune Miku" in text and "Inglês" in text
+        assert "Hatsune Miku" not in text and "Inglês" not in text
+        assert "Menu de CDs" in text
+        assert "Escolha seu CD, o bot vai ler e no modo de canto vai cantar no ritmo dele." in text
+        assert "Em uso:" not in text and "Sua escolha neste servidor" not in text
+        assert "ryo (supercell)" not in text
         cog._ttv_voice_status.assert_called_once_with("hatsune-miku")
         cog._cd_preview_mp3.assert_not_awaited()
         cog._set_user_tts_and_refresh.assert_not_awaited()
@@ -326,7 +331,7 @@ def test_typed_singing_failure_uses_existing_notice_without_exception_text():
         await view.refresh()
         inter = interaction()
         await view.preview_melody(inter)
-        assert "English-CVVC" in content_sent(inter) and "SECRET" not in content_sent(inter)
+        assert "-# Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla" in content_sent(inter) and "SECRET" not in content_sent(inter)
     asyncio.run(run())
 
 

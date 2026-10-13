@@ -1,0 +1,131 @@
+"""Reusable, lazy registry of Discord *application* emojis for select menus.
+
+One emoji per asset is created for the application, never per guild or user.
+Rendering a menu is network-free: missing emojis simply omit the option emoji.
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import io
+import logging
+import re
+import time
+import weakref
+from collections.abc import Callable, Iterable
+
+log = logging.getLogger(__name__)
+_VALID = re.compile(r"[^a-z0-9_]+")
+
+
+def emoji_name(namespace: str, asset_id: str) -> str:
+    """Stable, collision-resistant Discord emoji name (2..32 ASCII chars)."""
+    slug = _VALID.sub("_", asset_id.lower().replace("-", "_")).strip("_") or "item"
+    prefix = _VALID.sub("_", namespace.lower()).strip("_")[:8] or "app"
+    digest = hashlib.sha256(asset_id.encode("utf-8")).hexdigest()[:6]
+    return f"{prefix}_{slug[:32-len(prefix)-8]}_{digest}"
+
+
+def square_emoji(image: bytes) -> bytes:
+    """Fit local, prevalidated thumbnail to a small application emoji JPEG."""
+    from PIL import Image, ImageOps
+    with Image.open(io.BytesIO(image)) as source:
+        if source.format != "JPEG" or not (0 < source.width <= 768 and 0 < source.height <= 768):
+            raise ValueError("invalid_cover")
+        source.load()
+        square = ImageOps.fit(source.convert("RGB"), (128, 128), method=Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        square.save(out, format="JPEG", quality=82, optimize=True)
+    result = out.getvalue()
+    if len(result) >= 256 * 1024:
+        raise ValueError("emoji_too_large")
+    return result
+
+
+class ApplicationSelectEmojis:
+    """Singleflight sync. Existing app emojis are reused after every restart."""
+
+    def __init__(self, namespace: str, assets: Callable[[str], bytes | None], ids: Callable[[], Iterable[str]]):
+        self.namespace = namespace
+        self.assets = assets
+        self.ids = ids
+        self._known: dict[str, int] = {}
+        self._bot = None
+        self._task: asyncio.Task | None = None
+        self._next_sync_at = float("-inf")
+        self._views = weakref.WeakSet()
+
+    def emoji(self, asset_id: str):
+        emoji_id = self._known.get(emoji_name(self.namespace, asset_id))
+        if not emoji_id:
+            return None
+        # import locally so the module can be tested without a Discord connection
+        import discord
+        return discord.PartialEmoji(name=emoji_name(self.namespace, asset_id), id=emoji_id)
+
+    def schedule(self, bot, view=None) -> None:
+        if (bot is None or not callable(getattr(bot, "fetch_application_emojis", None))
+                or not callable(getattr(bot, "create_application_emoji", None))):
+            return
+        if view is not None:
+            try:
+                self._views.add(view)
+            except TypeError:
+                pass
+        if self._task is not None and not self._task.done():
+            return
+        if self._bot is not bot:
+            self._bot = bot
+            self._known.clear()
+            self._next_sync_at = float("-inf")
+        now = time.monotonic()
+        # Do not hammer Discord on failures or when no local images exist.
+        if now < self._next_sync_at:
+            return
+        self._next_sync_at = now + 300
+        self._task = asyncio.create_task(self._synchronize(bot))
+
+    async def _synchronize(self, bot) -> None:
+        try:
+            remote = await bot.fetch_application_emojis()
+            known = {str(e.name): int(e.id) for e in remote
+                     if isinstance(getattr(e, "name", None), str) and type(getattr(e, "id", None)) is int}
+            changed = False
+            for asset_id in self.ids():
+                name = emoji_name(self.namespace, asset_id)
+                if name in known:
+                    continue
+                cover = self.assets(asset_id)
+                if not cover:
+                    continue
+                try:
+                    created = await bot.create_application_emoji(name=name, image=square_emoji(cover))
+                    known[name] = int(created.id)
+                    changed = True
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Keep the panel usable even with quota exhaustion or no API permission.
+                    log.warning("[cd_emoji] criação indisponível | type=%s", type(exc).__name__)
+                    break
+            previous = self._known
+            self._known = known
+            if all(emoji_name(self.namespace, asset_id) in known for asset_id in self.ids()):
+                # All covers registered; do not poll the API every time a user opens CD.
+                self._next_sync_at = time.monotonic() + 24 * 3600
+            if changed or known != previous:
+                for view in tuple(self._views):
+                    if view._is_expired():
+                        continue
+                    try:
+                        view._rebuild()
+                        if getattr(view, "message", None) is not None:
+                            await view._edit_panel()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        log.debug("[cd_emoji] painel não atualizado | type=%s", type(exc).__name__)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("[cd_emoji] consulta indisponível | type=%s", type(exc).__name__)

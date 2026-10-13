@@ -42,7 +42,12 @@ async def _reply_ttv_error(message, error: str, *, view=None):
         sender = getattr(getattr(message, "channel", None), "send", None)
     if callable(sender):
         try:
-            return await sender(f"TTV: {error}", allowed_mentions=discord.AllowedMentions.none(), view=view)
+            content = (
+                "-# No modo de canto, use ~ depois de uma sílaba para continuar sua vogal, com espaçamento"
+                if error == "No canto, use ~ depois de uma sílaba para continuar sua vogal."
+                else f"TTV: {error}"
+            )
+            return await sender(content, allowed_mentions=discord.AllowedMentions.none(), view=view)
         except (discord.HTTPException, AttributeError):
             logger.warning("[ttv] não foi possível apresentar erro ou seleção de faixa")
     return None

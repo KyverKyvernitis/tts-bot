@@ -21,9 +21,9 @@ log = logging.getLogger(__name__)
 # conteúdo da fala no chat. Preservar a redação aprovada dos seis avisos base.
 _MESSAGES = {
     "ttv_worker_outdated": "O canto precisa do worker atualizado. Confira a versão 1.11.41 e tente novamente.",
-    "ttv_singing_bank_missing": "Para cantar com essa voz, o banco English-CVVC precisa estar instalado no worker.",
-    "ttv_singing_failed": "Não consegui gerar esse canto. Confira se o worker está online e tente uma letra menor.",
-    "ttv_singing_timeout": "O canto demorou demais para ser gerado. Tente uma letra menor.",
+    "ttv_singing_bank_missing": "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla",
+    "ttv_singing_failed": "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla",
+    "ttv_singing_timeout": "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla",
     "author_not_in_voice": "C tem que estar em call pra poder usar isso <:vish:1533479762230775898>",
     "voice_channel_mismatch": "C tem que estar na mesma call q eu <:speed:1534287805424074772>",
     "tts_disabled": "Texto pra fala tá desativado nesse sv chefe <:vish:1533479762230775898>",
@@ -313,6 +313,9 @@ async def notify_tts_failure(cog, item, reason_code: str, error: Exception | Non
             diagnosed = diagnose_voice_access(guild, _voice_channel_for_item(guild, item))
             if diagnosed is not None:
                 code, permission = diagnosed
+        if (getattr(item, "engine", None) == "teto" and getattr(item, "ttv_score", None) is not None
+                and code in {"teto_disabled", "teto_configuration_invalid", "synthesis_failed", "tts_failed", "service_unavailable"}):
+            code = "ttv_singing_failed"
         category = _NOTICE_CATEGORY.get(code, code)
         if permission:
             category = f"{category}:{permission}"

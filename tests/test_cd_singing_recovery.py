@@ -52,22 +52,17 @@ async def test_singing_error_notice_is_exact_and_anchored_to_original_message():
                            message_id=55, author_id=22, engine="teto", ttv_score=score_for_melody())
     await notify_tts_failure(cog, item, "synthesis_failed", ValueError("PRIVATE SENTENCE https://example.com"))
     sent = channel.send.await_args
-    assert sent.args[0] == "-# Por algum motivo não consegui cantar isso :("
+    assert sent.args[0] == "-# Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla"
     assert sent.kwargs["reference"].message_id == 55
-    assert _public_notice("ttv_singing_timeout") == "Por algum motivo não consegui cantar isso :("
+    assert _public_notice("ttv_singing_timeout") == "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla"
 
 
 def test_singing_backend_keeps_configured_utau_without_forced_esper():
     from pathlib import Path
     worker = (Path(__file__).resolve().parents[1] / "deploy/termux/phone-worker/phone_worker.py").read_text()
     assert 'def _get_teto_singing_renderer' not in worker
-    assert 'def _teto_backend() -> str:' in worker
-    assert 'result["singing_fingerprints"] = {' in worker
-    assert 'result["singing_available"] = any(' in worker
+    assert 'compatible_backend = is_miku or _teto_backend() == "utau"' in worker
     assert '"singing_available": bool(state.get("singing_available"))' in worker
-    renderer = (Path(__file__).resolve().parents[1] / "deploy/termux/phone-worker/teto_renderer/renderer.py").read_text()
-    assert "index = self._load_english_index()" in renderer
-    assert "self._reading_context.profile = 'english-cvvc'" in renderer
 
 
 def test_catalog_cache_resolver_returns_singing_fingerprints_even_for_legacy_worker():

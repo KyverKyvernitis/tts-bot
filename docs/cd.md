@@ -24,8 +24,7 @@ seletor não salva ajustes. Uma opção já em uso aparece confirmada; a escolha
 permanece após reiniciar o bot. Abrir, selecionar e salvar continuam disponíveis
 com o worker offline. Somente quem abriu o painel pode usar seus controles.
 
-O canto com `'/cantar sua letra` ou `~` separado usa a melodia pessoal. Um MIDI
-anexado substitui a escolha somente naquela mensagem. A fala comum mantém
+O canto com `'/cantar sua letra` ou `~` separado usa a melodia pessoal. Anexos MIDI enviados pelo usuário não alteram a partitura do canto. A fala comum mantém
 seu comportamento, e a melodia do canto que já entrou na fila permanece igual.
 Cada trecho comporta até uma sílaba por nota; com menos sílabas a voz pode
 prolongar as vogais nas notas seguintes, respeitando as pausas. Para uma letra
@@ -44,3 +43,22 @@ música, e mantém o cache fora das releases do worker.
 
 A seleção fica no documento de preferências TTS do usuário (`ttv_melody_id`).
 O roteamento `_cd` usa o prefixo do bot configurado no servidor.
+
+## Menu de CDs: capas no seletor
+
+O painel usa emojis estáticos da própria aplicação Discord. No primeiro acesso,
+o Osaka verifica os emojis existentes e cria os que ainda faltam **somente** se
+as imagens JPEG locais estiverem presentes no pacote de capas. Usa o método
+`create_application_emoji`, disponível em discord.py >= 2.5. Os nomes são
+determinísticos, então a mesma imagem é reutilizada em todos os servidores e
+após reiniciar o bot. Nenhum emoji é criado por usuário/servidor.
+
+A sincronização ocorre em segundo plano e não bloqueia a abertura do menu.
+Se o Discord rejeitar a criação ou a imagem não estiver instalada, o seletor
+continua funcionando apenas com o nome da música. A criação não é repetida
+a cada clique: tentativas são limitadas e emojis já existentes são reaproveitados.
+O painel principal mantém a imagem em tamanho maior; no seletor o tamanho da
+miniatura é limitado pelo tamanho do emoji nativo do Discord.
+
+Não há configuração secreta adicional e nem alterações no Phone Worker.
+O catálogo de 10 músicas e o ZIP de capas existente continuam os mesmos.

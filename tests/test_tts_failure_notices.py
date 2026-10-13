@@ -209,9 +209,9 @@ class FailureNoticeTests(unittest.IsolatedAsyncioTestCase):
     async def test_known_singing_notices_keep_static_diagnosis_and_private_errors_hidden(self):
         cases = (
             ("ttv_worker_outdated", "worker atualizado", "1.11.41"),
-            ("ttv_singing_bank_missing", "English-CVVC", "instalado"),
-            ("ttv_singing_failed", "gerar esse canto", "worker"),
-            ("ttv_singing_timeout", "demorou demais", "letra menor"),
+            ("ttv_singing_bank_missing", "Não consegui cantar isso", "essa voz está desativada"),
+            ("ttv_singing_failed", "Não consegui cantar isso", "essa voz está desativada"),
+            ("ttv_singing_timeout", "Não consegui cantar isso", "essa voz está desativada"),
         )
         for code, first_detail, second_detail in cases:
             with self.subTest(code=code):
