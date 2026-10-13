@@ -4,6 +4,10 @@
   "revision": 1,
   "source_sha256": "bceafe9c4bb75955e91113b76e971021cae6e1d5d08745283e48934a1f437f46",
   "score_sha256": "ecb0a351f73a9051e548ab160c1b6fe590893aa0807df9ed37f23dd4434de35d",
+  "producer": {
+    "name": "osaka-cd-termux-kit",
+    "version": "8.3"
+  },
   "artifacts": {
     "score": {
       "status": "ready",
@@ -11,8 +15,8 @@
     },
     "thumbnail": {
       "status": "ready",
-      "path": "cogs/tts/cd/thumbnails/OcZM_Szee44.jpg",
-      "sha256": "560060df6935f5b623120837df1934083a95aa19f4a33df49bb5abbec959bb97"
+      "path": "cogs/tts/cd/thumbnails/vnw8zURAxkU.jpg",
+      "sha256": "a283247c51cbc89130c96ecc82175d3fc3ac1040c8600c11f3264eaef24ccd6c"
     },
     "sample": {
       "status": "ready",

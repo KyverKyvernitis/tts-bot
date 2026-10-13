@@ -1737,24 +1737,24 @@
       "thumbnail_bytes": 60074
     },
     "rolling-girl": {
-      "video_id": "OcZM_Szee44",
-      "title": "It’s Okay To Not Be Okay | Rolling Girl - Wowaka ft. Hatsune Miku Vocaloid Reaction & Analysis",
+      "video_id": "vnw8zURAxkU",
+      "title": "wowaka 『ローリンガール』feat. 初音ミク / wowaka - Rollin Girl (Official Video) ft. Hatsune Miku",
       "channel": "ヒトリエ / wowaka",
       "artist": "wowaka",
       "title_aliases": [
         "Rolling Girl"
       ],
       "search_query": "Rolling Girl wowaka",
-      "webpage_url": "https://www.youtube.com/watch?v=OcZM_Szee44",
-      "thumbnail_url": "https://i.ytimg.com/vi/OcZM_Szee44/hqdefault.jpg",
-      "view_count": 216547,
+      "webpage_url": "https://www.youtube.com/watch?v=vnw8zURAxkU",
+      "thumbnail_url": "https://i.ytimg.com/vi/vnw8zURAxkU/hqdefault.jpg",
+      "view_count": 44784153,
       "view_count_source": "yt-dlp-public-metadata",
-      "checked_at": "2026-10-13T17:19:36.847952+00:00",
-      "inspected_candidates": 37,
+      "checked_at": "2026-10-13T20:34:54.342499+00:00",
+      "inspected_candidates": 35,
       "selection_basis": "highest-view-count-among-matching-verified-candidates",
       "metadata_status": "identity_verified; live_view_count_refresh_pending",
       "selection_audit": {
-        "checked_at": "2026-10-13T17:19:36.847952+00:00",
+        "checked_at": "2026-10-13T20:34:54.342499+00:00",
         "queries": [
           {
             "query": "Rolling Girl wowaka",
@@ -1781,40 +1781,40 @@
           "unrequested_recording_versions_rejected": true,
           "named_version_labels_must_match": true,
           "ambiguous_performer_attribution_rejected": true,
+          "unrequested_discussion_formats_rejected": true,
+          "title_token_equivalence": "english-final-ing-g-dropping-v1",
           "requested_versions": []
         },
         "provider": "yt-dlp-public-metadata",
-        "inspected_candidates": 37,
-        "accepted_candidates": 4,
-        "rejected_candidates": 33,
+        "inspected_candidates": 35,
+        "accepted_candidates": 3,
+        "rejected_candidates": 32,
         "candidates": [
           {
             "video_id": "vnw8zURAxkU",
             "title": "wowaka 『ローリンガール』feat. 初音ミク / wowaka - Rollin Girl (Official Video) ft. Hatsune Miku",
             "channel": "ヒトリエ / wowaka",
-            "view_count": 44780292,
+            "view_count": 44784153,
             "duration": 197,
             "thumbnail": "https://i.ytimg.com/vi/vnw8zURAxkU/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "title_mismatch"
-            ]
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": true,
+            "rejection_reasons": []
           },
           {
             "video_id": "vPlFkyXY6L0",
             "title": "Rolling Girl (ローリンガール) feat. Hatsune Miku | Project DIVA Arcade Future Tone",
             "channel": "RADART Inc",
-            "view_count": 12560292,
+            "view_count": 12562899,
             "duration": 190,
             "thumbnail": "https://i.ytimg.com/vi/vPlFkyXY6L0/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch"
@@ -1824,47 +1824,29 @@
             "video_id": "NIqm73xsias",
             "title": "Hatsune Miku - Rolling Girl PV (English Subs)",
             "channel": "ghostsubs",
-            "view_count": 11449954,
+            "view_count": 11450356,
             "duration": 200,
             "thumbnail": "https://i.ytimg.com/vi/NIqm73xsias/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch"
             ]
           },
           {
-            "video_id": "2uhFdKPes9k",
-            "title": "ローリンガール (Rollin Girl)┃Raon cover",
-            "channel": "Raon",
-            "view_count": 517013,
-            "duration": 195,
-            "thumbnail": "https://i.ytimg.com/vi/2uhFdKPes9k/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "title_mismatch",
-              "artist_mismatch",
-              "unrequested_version_cover"
-            ]
-          },
-          {
             "video_id": "DuTdmMsPa1o",
             "title": "ヒトリエ/HITORIE - Rolling Girl (LIVE) [Sub. Español]",
             "channel": "KuroShiro",
-            "view_count": 734092,
+            "view_count": 734195,
             "duration": 241,
             "thumbnail": "https://i.ytimg.com/vi/DuTdmMsPa1o/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch",
@@ -1872,16 +1854,30 @@
             ]
           },
           {
+            "video_id": "Mhfo7AK2-Bc",
+            "title": "02. Rolling Girl ft. Hatsune Miku - Wowaka",
+            "channel": "Lucy -senpai",
+            "view_count": 124922,
+            "duration": 190,
+            "thumbnail": "https://i.ytimg.com/vi/Mhfo7AK2-Bc/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "Rolling Girl wowaka",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": true,
+            "rejection_reasons": []
+          },
+          {
             "video_id": "dtNirx14Aik",
             "title": "Rolling Girl (Wowaka) English Cover by Lollia feat. RichaadEB",
             "channel": "Lollia",
-            "view_count": 7043141,
+            "view_count": 7043708,
             "duration": 220,
             "thumbnail": "https://i.ytimg.com/vi/dtNirx14Aik/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch",
@@ -1890,32 +1886,16 @@
             ]
           },
           {
-            "video_id": "vId1r-9ydSw",
-            "title": "ROLLING GIRL (ローリンガール) (feat. Evil Neuro)",
-            "channel": "OBKATIEKAT - Topic",
-            "view_count": 756111,
-            "duration": 188,
-            "thumbnail": "https://i.ytimg.com/vi/vId1r-9ydSw/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "artist_mismatch"
-            ]
-          },
-          {
             "video_id": "xPhPHO-sKlY",
             "title": "【Rolling girl ローリンガール】Wowaka Tribute - Hatsune Miku Magical Mirai 2019 初音ミク「マジカルミライ 2019」",
             "channel": "First sound of the future",
-            "view_count": 142202,
+            "view_count": 142248,
             "duration": 263,
             "thumbnail": "https://i.ytimg.com/vi/xPhPHO-sKlY/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "unrequested_version_live",
@@ -1923,16 +1903,34 @@
             ]
           },
           {
+            "video_id": "2uhFdKPes9k",
+            "title": "ローリンガール (Rollin Girl)┃Raon cover",
+            "channel": "Raon",
+            "view_count": 517484,
+            "duration": 195,
+            "thumbnail": "https://i.ytimg.com/vi/2uhFdKPes9k/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "Rolling Girl wowaka",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "title_mismatch",
+              "artist_mismatch",
+              "unrequested_version_cover"
+            ]
+          },
+          {
             "video_id": "8e3EuFaQc7E",
             "title": "Rolling Girl (English Cover)【Will Stetson】「ローリンガール」",
             "channel": "Will Stetson",
-            "view_count": 1252213,
+            "view_count": 1252291,
             "duration": 200,
             "thumbnail": "https://i.ytimg.com/vi/8e3EuFaQc7E/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch",
@@ -1940,200 +1938,19 @@
             ]
           },
           {
-            "video_id": "Mhfo7AK2-Bc",
-            "title": "02. Rolling Girl ft. Hatsune Miku - Wowaka",
-            "channel": "Lucy -senpai",
-            "view_count": 124886,
-            "duration": 190,
-            "thumbnail": "https://i.ytimg.com/vi/Mhfo7AK2-Bc/hqdefault.jpg",
+            "video_id": "lPvbewhBD5g",
+            "title": "〈ミクの日〉 ローリンガール Rolling Girl",
+            "channel": "那比 NABI",
+            "view_count": 1054184,
+            "duration": 40,
+            "thumbnail": "https://i.ytimg.com/vi/lPvbewhBD5g/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": true,
-            "rejection_reasons": []
-          },
-          {
-            "video_id": "MtrQokmWupo",
-            "title": "Rollin Girl - Wowaka feat. Hatsune Miku (Cover by ZUMA)",
-            "channel": "NIJIIRO ZAMURAI",
-            "view_count": 3186545,
-            "duration": 189,
-            "thumbnail": "https://i.ytimg.com/vi/MtrQokmWupo/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "title_mismatch",
-              "unrequested_version_cover",
-              "unrequested_version_performer_variant"
-            ]
-          },
-          {
-            "video_id": "ULq7yS6dBDU",
-            "title": "ローリンガール / rolling girl || wowaka || daycore / slowed",
-            "channel": "cloudgender_",
-            "view_count": 37663,
-            "duration": 222,
-            "thumbnail": "https://i.ytimg.com/vi/ULq7yS6dBDU/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "unrequested_version_slowed"
-            ]
-          },
-          {
-            "video_id": "9Ct3iDST4vw",
-            "title": "【MIKU V4X】 Rolling Girl 【jychee】",
-            "channel": "jychee",
-            "view_count": 40220,
-            "duration": 191,
-            "thumbnail": "https://i.ytimg.com/vi/9Ct3iDST4vw/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch"
-            ]
-          },
-          {
-            "video_id": "Y9Xd9n6H-e0",
-            "title": "【VOCALOID BRASIL】 ROLLING GIRL - PORTUGUÊS BRASIL - HATSUNE MIKU - ローリンガール - 初音ミク",
-            "channel": "Im G Felipe",
-            "view_count": 371432,
-            "duration": 195,
-            "thumbnail": "https://i.ytimg.com/vi/Y9Xd9n6H-e0/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "artist_mismatch"
-            ]
-          },
-          {
-            "video_id": "gv73K9_2Jfc",
-            "title": "【Hitorie】Rolling Girl (Wowaka Tribute)【English Sub】",
-            "channel": "kisu_odd",
-            "view_count": 114480,
-            "duration": 446,
-            "thumbnail": "https://i.ytimg.com/vi/gv73K9_2Jfc/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "artist_mismatch",
-              "unrequested_version_tribute"
-            ]
-          },
-          {
-            "video_id": "snkF6k2h91I",
-            "title": "Utsu-P - Rolling Girl [wowaka cover] feat.初音ミク",
-            "channel": "鬱P / Utsu-P",
-            "view_count": 748431,
-            "duration": 191,
-            "thumbnail": "https://i.ytimg.com/vi/snkF6k2h91I/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "artist_mismatch",
-              "unrequested_version_cover"
-            ]
-          },
-          {
-            "video_id": "I8cK3G5O3rE",
-            "title": "Rolling Girl    By: Hatsune Miku(Wowaka)",
-            "channel": "Latchezar Ivanov Dimitrov",
-            "view_count": 85685,
-            "duration": 228,
-            "thumbnail": "https://i.ytimg.com/vi/I8cK3G5O3rE/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "artist_mismatch"
-            ]
-          },
-          {
-            "video_id": "k_YJDyVqdN4",
-            "title": "Rolling Girl (English Cover)【Kasane Teto】ローリンガール",
-            "channel": "KimaroArt",
-            "view_count": 464786,
-            "duration": 194,
-            "thumbnail": "https://i.ytimg.com/vi/k_YJDyVqdN4/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "artist_mismatch",
-              "unrequested_version_cover"
-            ]
-          },
-          {
-            "video_id": "Bv8d-XFfL4A",
-            "title": "Rollin' Girl (2016.2.18 at Shimokitazawa Garden)",
-            "channel": "ヒトリエ / wowaka",
-            "view_count": 49200,
-            "duration": 253,
-            "thumbnail": "https://i.ytimg.com/vi/Bv8d-XFfL4A/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "title_mismatch"
-            ]
-          },
-          {
-            "video_id": "iOtp-GQMpXg",
-            "title": "TETO's GROWL (ROLLING GIRL)【 HARD ROCK VER 】",
-            "channel": "Teto Chan!",
-            "view_count": 2869991,
-            "duration": 205,
-            "thumbnail": "https://i.ytimg.com/vi/iOtp-GQMpXg/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "title_mismatch",
-              "artist_mismatch",
-              "unrequested_version_version_variant"
-            ]
-          },
-          {
-            "video_id": "HRMumWO9eb0",
-            "title": "【Karaoke】Rolling Girl【off vocal】 wowaka",
-            "channel": "rediakaikai",
-            "view_count": 1199060,
-            "duration": 200,
-            "thumbnail": "https://i.ytimg.com/vi/HRMumWO9eb0/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "unrequested_version_karaoke"
             ]
           },
           {
@@ -2146,37 +1963,37 @@
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": true,
             "rejection_reasons": []
           },
           {
-            "video_id": "FK0q0ynIMcw",
-            "title": "Rolling Girl - Miku Rolling",
-            "channel": "cini smile",
-            "view_count": 1184015,
-            "duration": 110,
-            "thumbnail": "https://i.ytimg.com/vi/FK0q0ynIMcw/hqdefault.jpg",
+            "video_id": "Y9Xd9n6H-e0",
+            "title": "【VOCALOID BRASIL】 ROLLING GIRL - PORTUGUÊS BRASIL - HATSUNE MIKU - ローリンガール - 初音ミク",
+            "channel": "Im G Felipe",
+            "view_count": 371434,
+            "duration": 195,
+            "thumbnail": "https://i.ytimg.com/vi/Y9Xd9n6H-e0/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch"
             ]
           },
           {
-            "video_id": "XolAj3fyz1E",
-            "title": "Rolling Girl (Metal Cover)",
-            "channel": "Project Epsilon - Topic",
-            "view_count": 56624,
-            "duration": 190,
-            "thumbnail": "https://i.ytimg.com/vi/XolAj3fyz1E/hqdefault.jpg",
+            "video_id": "snkF6k2h91I",
+            "title": "Utsu-P - Rolling Girl [wowaka cover] feat.初音ミク",
+            "channel": "鬱P / Utsu-P",
+            "view_count": 748520,
+            "duration": 191,
+            "thumbnail": "https://i.ytimg.com/vi/snkF6k2h91I/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch",
@@ -2184,118 +2001,102 @@
             ]
           },
           {
-            "video_id": "bDOQqafPh-k",
-            "title": "【2人 Duet 】Rolling Girl 「ローリンガール」[Wowaka] (Metal Cover) ft. @MamieMegu & @rachie",
-            "channel": "Project Epsilon and rachie 🎀💌",
-            "view_count": 51938,
-            "duration": 192,
-            "thumbnail": "https://i.ytimg.com/vi/bDOQqafPh-k/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "Rolling Girl wowaka",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "artist_mismatch",
-              "unrequested_version_cover"
-            ]
-          },
-          {
-            "video_id": "yK3BqKXf568",
-            "title": "【Wowaka】Rolling Girl (Supernova Ver)【English Sub】",
+            "video_id": "gv73K9_2Jfc",
+            "title": "【Hitorie】Rolling Girl (Wowaka Tribute)【English Sub】",
             "channel": "kisu_odd",
-            "view_count": 6895,
-            "duration": 193,
-            "thumbnail": "https://i.ytimg.com/vi/yK3BqKXf568/hqdefault.jpg",
+            "view_count": 114480,
+            "duration": 446,
+            "thumbnail": "https://i.ytimg.com/vi/gv73K9_2Jfc/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
-            "query": "wowaka Rolling Girl",
+            "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
-              "unrequested_version_version_variant"
+              "artist_mismatch",
+              "unrequested_version_tribute"
             ]
           },
           {
-            "video_id": "wC1iW6hBfuI",
-            "title": "[VOCALOID] Hatsune Miku Rolling Girl [Japanese Romanji English Lyrics]",
-            "channel": "Voca-Lyrics",
-            "view_count": 189952,
-            "duration": 211,
-            "thumbnail": "https://i.ytimg.com/vi/wC1iW6hBfuI/hqdefault.jpg",
+            "video_id": "Bv8d-XFfL4A",
+            "title": "Rollin' Girl (2016.2.18 at Shimokitazawa Garden)",
+            "channel": "ヒトリエ / wowaka",
+            "view_count": 49210,
+            "duration": 253,
+            "thumbnail": "https://i.ytimg.com/vi/Bv8d-XFfL4A/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
-            "query": "wowaka Rolling Girl",
+            "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
-              "artist_mismatch"
+              "unrequested_version_live"
+            ]
+          },
+          {
+            "video_id": "MtrQokmWupo",
+            "title": "Rollin Girl - Wowaka feat. Hatsune Miku (Cover by ZUMA)",
+            "channel": "NIJIIRO ZAMURAI",
+            "view_count": 3186855,
+            "duration": 189,
+            "thumbnail": "https://i.ytimg.com/vi/MtrQokmWupo/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "Rolling Girl wowaka",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "unrequested_version_cover",
+              "unrequested_version_performer_variant"
             ]
           },
           {
             "video_id": "x2eNWxQ20wY",
             "title": "Hatsune Miku: Project DIVA F 2nd - [PV] \"Rolling Girl\" (DLC) (English Subs/Sub. Español)",
             "channel": "Karin's Channel",
-            "view_count": 225103,
+            "view_count": 225111,
             "duration": 199,
             "thumbnail": "https://i.ytimg.com/vi/x2eNWxQ20wY/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
-            "query": "wowaka Rolling Girl",
+            "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch"
             ]
           },
           {
-            "video_id": "q247Rpa32ao",
-            "title": "[Eng Sub] Rolling Girl - Vocaloid - Hatsune Miku (Live in Sapporo, Japan)",
-            "channel": "Jonny M",
-            "view_count": 410095,
+            "video_id": "wC1iW6hBfuI",
+            "title": "[VOCALOID] Hatsune Miku Rolling Girl [Japanese Romanji English Lyrics]",
+            "channel": "Voca-Lyrics",
+            "view_count": 189974,
+            "duration": 211,
+            "thumbnail": "https://i.ytimg.com/vi/wC1iW6hBfuI/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "Rolling Girl wowaka",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "artist_mismatch"
+            ]
+          },
+          {
+            "video_id": "9RXWHjC9pvM",
+            "title": "【VOCALOID BRASIL】 ROLLING GIRL - HATSUNE MIKU, MEGURINE LUKA, KAGAMINE RIN & LEN, KAITO E MEIKO",
+            "channel": "Im G Felipe",
+            "view_count": 215177,
             "duration": 191,
-            "thumbnail": "https://i.ytimg.com/vi/q247Rpa32ao/hqdefault.jpg",
+            "thumbnail": "https://i.ytimg.com/vi/9RXWHjC9pvM/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
-            "query": "wowaka Rolling Girl",
+            "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
-              "artist_mismatch",
-              "unrequested_version_live"
+              "artist_mismatch"
             ]
-          },
-          {
-            "video_id": "-iZVhJ6NTvA",
-            "title": "ローリンガール / wowaka - Covered by しほ",
-            "channel": "しほ / shiho",
-            "view_count": 2224716,
-            "duration": 192,
-            "thumbnail": "https://i.ytimg.com/vi/-iZVhJ6NTvA/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "wowaka Rolling Girl",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": false,
-            "rejection_reasons": [
-              "title_mismatch",
-              "unrequested_version_cover",
-              "unrequested_version_performer_variant"
-            ]
-          },
-          {
-            "video_id": "OcZM_Szee44",
-            "title": "It’s Okay To Not Be Okay | Rolling Girl - Wowaka ft. Hatsune Miku Vocaloid Reaction & Analysis",
-            "channel": "shooshiMooshi",
-            "view_count": 216547,
-            "duration": 1223,
-            "thumbnail": "https://i.ytimg.com/vi/OcZM_Szee44/hqdefault.jpg",
-            "source": "yt-dlp-public-metadata",
-            "query": "wowaka Rolling Girl",
-            "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": true,
-            "rejection_reasons": []
           },
           {
             "video_id": "mdeg4an_5V8",
@@ -2305,23 +2106,58 @@
             "duration": 197,
             "thumbnail": "https://i.ytimg.com/vi/mdeg4an_5V8/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
-            "query": "wowaka Rolling Girl",
+            "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
-            "matching": true,
-            "rejection_reasons": []
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "unrequested_version_cover",
+              "unrequested_version_performer_variant"
+            ]
+          },
+          {
+            "video_id": "ULq7yS6dBDU",
+            "title": "ローリンガール / rolling girl || wowaka || daycore / slowed",
+            "channel": "cloudgender_",
+            "view_count": 37671,
+            "duration": 222,
+            "thumbnail": "https://i.ytimg.com/vi/ULq7yS6dBDU/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "Rolling Girl wowaka",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "unrequested_version_slowed"
+            ]
+          },
+          {
+            "video_id": "FK0q0ynIMcw",
+            "title": "Rolling Girl - Miku Rolling",
+            "channel": "cini smile",
+            "view_count": 1184119,
+            "duration": 110,
+            "thumbnail": "https://i.ytimg.com/vi/FK0q0ynIMcw/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "Rolling Girl wowaka",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "artist_mismatch"
+            ]
           },
           {
             "video_id": "4EzAaStLZco",
             "title": "Rolling Girl -𝗥𝗲𝘃𝗲𝗻𝗴𝗲 𝗩𝗲𝗿-  (English Cover)【JubyPhonic】ローリンガール",
             "channel": "JubyPhonic",
-            "view_count": 259865,
+            "view_count": 260107,
             "duration": 192,
             "thumbnail": "https://i.ytimg.com/vi/4EzAaStLZco/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
-            "query": "wowaka Rolling Girl",
+            "query": "Rolling Girl wowaka",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch",
@@ -2330,16 +2166,100 @@
             ]
           },
           {
+            "video_id": "I8cK3G5O3rE",
+            "title": "Rolling Girl    By: Hatsune Miku(Wowaka)",
+            "channel": "Latchezar Ivanov Dimitrov",
+            "view_count": 85690,
+            "duration": 228,
+            "thumbnail": "https://i.ytimg.com/vi/I8cK3G5O3rE/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "Rolling Girl wowaka",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "artist_mismatch"
+            ]
+          },
+          {
+            "video_id": "q247Rpa32ao",
+            "title": "[Eng Sub] Rolling Girl - Vocaloid - Hatsune Miku (Live in Sapporo, Japan)",
+            "channel": "Jonny M",
+            "view_count": 410105,
+            "duration": 191,
+            "thumbnail": "https://i.ytimg.com/vi/q247Rpa32ao/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "Rolling Girl wowaka",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "artist_mismatch",
+              "unrequested_version_live"
+            ]
+          },
+          {
+            "video_id": "fEqUb8e66R4",
+            "title": "【 #⁠音乃瀬奏生誕祭2025 】ローリンガール（cover）【音乃瀬奏】",
+            "channel": "Kanade Ch. 音乃瀬奏 ‐ ReGLOSS",
+            "view_count": 1088362,
+            "duration": 204,
+            "thumbnail": "https://i.ytimg.com/vi/fEqUb8e66R4/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "wowaka Rolling Girl",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "title_mismatch",
+              "artist_mismatch",
+              "unrequested_version_cover"
+            ]
+          },
+          {
+            "video_id": "GG5MLl7ax8c",
+            "title": "Wowaka tribute + Rolling Girl Hatsune Miku // Magical Mirai 2019",
+            "channel": "Extrawhale17",
+            "view_count": 129152,
+            "duration": 259,
+            "thumbnail": "https://i.ytimg.com/vi/GG5MLl7ax8c/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "wowaka Rolling Girl",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "unrequested_version_live",
+              "unrequested_version_tribute"
+            ]
+          },
+          {
+            "video_id": "lAGh6AWzei8",
+            "title": "OMORI || rolling girl",
+            "channel": "ysther",
+            "view_count": 1934063,
+            "duration": 192,
+            "thumbnail": "https://i.ytimg.com/vi/lAGh6AWzei8/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "wowaka Rolling Girl",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "artist_mismatch"
+            ]
+          },
+          {
             "video_id": "Oup1Iioj_6g",
             "title": "ローリンガール/wowaka【Covered by七海うらら】",
             "channel": "Nanami Urara",
-            "view_count": 3407031,
+            "view_count": 3407268,
             "duration": 193,
             "thumbnail": "https://i.ytimg.com/vi/Oup1Iioj_6g/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "wowaka Rolling Girl",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "title_mismatch",
@@ -2347,64 +2267,115 @@
             ]
           },
           {
-            "video_id": "P-Qg-O-3gG4",
-            "title": "【ナノ】Nano - Rolling Girl",
-            "channel": "Mana",
-            "view_count": 1266605,
-            "duration": 201,
-            "thumbnail": "https://i.ytimg.com/vi/P-Qg-O-3gG4/hqdefault.jpg",
+            "video_id": "9Ct3iDST4vw",
+            "title": "【MIKU V4X】 Rolling Girl 【jychee】",
+            "channel": "jychee",
+            "view_count": 40266,
+            "duration": 191,
+            "thumbnail": "https://i.ytimg.com/vi/9Ct3iDST4vw/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "wowaka Rolling Girl",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
               "artist_mismatch"
             ]
           },
           {
-            "video_id": "efMtEYKxK2c",
-            "title": "Rolling girl lollia old ver",
-            "channel": "puruglys",
-            "view_count": 190345,
-            "duration": 232,
-            "thumbnail": "https://i.ytimg.com/vi/efMtEYKxK2c/hqdefault.jpg",
+            "video_id": "b9kHuqmuofA",
+            "title": "Rolling Girl in the style of other vocaloid producers 【Miku V4x】",
+            "channel": "Rishie-P",
+            "view_count": 997684,
+            "duration": 191,
+            "thumbnail": "https://i.ytimg.com/vi/b9kHuqmuofA/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "wowaka Rolling Girl",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
-              "artist_mismatch",
+              "artist_mismatch"
+            ]
+          },
+          {
+            "video_id": "DPEHp52_2ok",
+            "title": "【Underverse】Rolling Girl",
+            "channel": "SuiEi 末 (SuiEi末)",
+            "view_count": 2107779,
+            "duration": 209,
+            "thumbnail": "https://i.ytimg.com/vi/DPEHp52_2ok/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "wowaka Rolling Girl",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "artist_mismatch"
+            ]
+          },
+          {
+            "video_id": "yK3BqKXf568",
+            "title": "【Wowaka】Rolling Girl (Supernova Ver)【English Sub】",
+            "channel": "kisu_odd",
+            "view_count": 6898,
+            "duration": 193,
+            "thumbnail": "https://i.ytimg.com/vi/yK3BqKXf568/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "wowaka Rolling Girl",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
               "unrequested_version_version_variant"
             ]
           },
           {
-            "video_id": "-F2VcAPRnSc",
-            "title": "wowaka - Rolling Girl (by acane_madder)",
-            "channel": "SlatorXVertigo",
-            "view_count": 146755,
-            "duration": 180,
-            "thumbnail": "https://i.ytimg.com/vi/-F2VcAPRnSc/hqdefault.jpg",
+            "video_id": "-iZVhJ6NTvA",
+            "title": "ローリンガール / wowaka - Covered by しほ",
+            "channel": "しほ / shiho",
+            "view_count": 2225004,
+            "duration": 192,
+            "thumbnail": "https://i.ytimg.com/vi/-iZVhJ6NTvA/hqdefault.jpg",
             "source": "yt-dlp-public-metadata",
             "query": "wowaka Rolling Girl",
             "is_live": false,
-            "view_count_observed_at": "2026-10-13T17:19:36.847952+00:00",
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
             "matching": false,
             "rejection_reasons": [
+              "title_mismatch",
+              "unrequested_version_cover",
               "unrequested_version_performer_variant"
+            ]
+          },
+          {
+            "video_id": "Sx919GkI584",
+            "title": "DOCTOR MEGALO-ROLLING GIRL",
+            "channel": "ArtsyRean",
+            "view_count": 184889,
+            "duration": 216,
+            "thumbnail": "https://i.ytimg.com/vi/Sx919GkI584/hqdefault.jpg",
+            "source": "yt-dlp-public-metadata",
+            "query": "wowaka Rolling Girl",
+            "is_live": false,
+            "view_count_observed_at": "2026-10-13T20:34:54.342499+00:00",
+            "matching": false,
+            "rejection_reasons": [
+              "artist_mismatch"
             ]
           }
         ],
-        "selected_video_id": "OcZM_Szee44",
+        "selected_video_id": "vnw8zURAxkU",
         "partial_provider_failure": false
       },
-      "source_url": "https://www.youtube.com/watch?v=OcZM_Szee44",
+      "source_url": "https://www.youtube.com/watch?v=vnw8zURAxkU",
       "id": "rolling-girl",
       "revision": 1,
       "source_sha256": "bceafe9c4bb75955e91113b76e971021cae6e1d5d08745283e48934a1f437f46",
       "score_sha256": "ecb0a351f73a9051e548ab160c1b6fe590893aa0807df9ed37f23dd4434de35d",
-      "thumbnail_sha256": "560060df6935f5b623120837df1934083a95aa19f4a33df49bb5abbec959bb97"
+      "artist_aliases": [],
+      "duration": 197,
+      "thumbnail_sha256": "a283247c51cbc89130c96ecc82175d3fc3ac1040c8600c11f3264eaef24ccd6c"
     }
   }
 }
