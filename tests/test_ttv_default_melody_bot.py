@@ -11,6 +11,7 @@ from cogs.tts.performance import singing_request
 from cogs.tts.mensagens.preparacao import preparar_payload_tts_mensagem
 from cogs.tts.failure_notices import failure_code, _public_notice
 from test_ttv_live_midi_regression import LiveRenderCog, FakeDB, make_message, DEMO_MIDI
+from cogs.tts.melodies import score_for_melody
 from test_ttv_audio import Probe, item
 
 
@@ -38,7 +39,7 @@ async def test_actual_text_renderer_prepares_singing_without_downloads(voice, te
     msg.reply = AsyncMock()
     payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={"announce_author": True},
         active_prefix="'", forced_engine="teto")
-    assert payload.queue_item.ttv_score == {"version": 1, "preset": "ttv-demo-v1"}
+    assert payload.queue_item.ttv_score == score_for_melody()
     assert "Dilma" not in payload.text and "/cantar" not in payload.text
     assert payload.queue_item.ttv_voice_id == voice
     assert payload.queue_item.ttv_pitch_semitones == "+0.0" and payload.queue_item.ttv_speech_rate == 1.0
@@ -46,17 +47,19 @@ async def test_actual_text_renderer_prepares_singing_without_downloads(voice, te
 
 
 @pytest.mark.asyncio
-async def test_attached_midi_keeps_priority_over_default_command():
+async def test_attached_midi_is_ignored_and_catalog_keeps_priority():
     cog = LiveRenderCog(db=FakeDB())
     msg = make_message("'/cantar a ~ ~ ~ a")
-    msg.attachments = [SimpleNamespace(filename="melodia.mid", size=len(DEMO_MIDI), read=AsyncMock(return_value=DEMO_MIDI))]
+    attachment = SimpleNamespace(filename="melodia.mid", size=len(DEMO_MIDI), read=AsyncMock(return_value=DEMO_MIDI))
+    msg.attachments = [attachment]
     payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={}, active_prefix="'", forced_engine="teto")
-    assert "preset" not in payload.queue_item.ttv_score
-    assert payload.queue_item.ttv_score["duration_ms"] == 5500
+    assert payload.queue_item.ttv_score == score_for_melody()
+    assert payload.queue_item.ttv_score["duration_ms"] == 4000
+    attachment.read.assert_not_awaited()
 
 
 def music_item():
-    return item(ttv_score={"version": 1, "preset": "ttv-demo-v1"})
+    return item(ttv_score=score_for_melody())
 
 
 def test_performance_budget_does_not_inherit_twenty_five_second_speech_limit(monkeypatch):
@@ -71,7 +74,7 @@ def test_performance_budget_does_not_inherit_twenty_five_second_speech_limit(mon
 async def test_previous_worker_is_refused_before_synthesis_with_specific_notice():
     probe = Probe()
     probe._tts_agent_route_available = lambda: True
-    probe._tts_agent_route_state = lambda: {"ttv_performance_protocol": 1}
+    probe._tts_agent_route_state = lambda: {"ttv_performance_protocol": 0}
     with pytest.raises(audio.TTVSingingError) as error:
         await probe._generate_tts_agent_worker_file(music_item())
     assert failure_code("synthesis_failed", error.value) == "ttv_worker_outdated"
@@ -89,7 +92,7 @@ def test_singing_notices_do_not_expose_private_provider_errors():
 async def test_selected_voice_protocol_is_checked_even_when_aggregate_is_new():
     probe = Probe()
     probe.route["ttv_performance_protocol"] = 2
-    probe.route["ttv_voices"][0]["ttv_performance_protocol"] = 1
+    probe.route["ttv_voices"][0]["ttv_performance_protocol"] = 0
     with pytest.raises(audio.TTVSingingError) as error:
         await probe._generate_tts_agent_worker_file(music_item())
     assert error.value.code == "ttv_worker_outdated"

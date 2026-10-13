@@ -2,7 +2,7 @@
 
 The existing performance tests replace ``_render_tts_text`` with an identity
 function. This regression follows the real message gate, renderer and queue
-dispatcher for the exact five-note demo that was sent in Discord.
+dispatcher for the current internal four-note catalog melody.
 """
 from __future__ import annotations
 
@@ -71,21 +71,21 @@ async def test_real_discord_render_keeps_demo_holds_and_exact_worker_identity(vo
     )
     assert result.enqueued and len(cog.enqueue_calls) == 1
     queued = cog.enqueue_calls[0][1]
-    assert queued.text == "a ~ ~ ~ a"
-    assert [segment["hold"] for segment in queued.ttv_segments] == [False, True, True, True, False]
+    assert queued.text == "a ~ ~ a"
+    assert [segment["hold"] for segment in queued.ttv_segments] == [False, True, True, False]
     assert [(note["midi_note"], note["start_ms"], note["duration_ms"])
             for note in queued.ttv_score["notes"]] == [
         (60, 0, 1000), (64, 1000, 1000), (67, 2000, 1000),
-        (72, 3000, 1000), (67, 4500, 1000),
+        (64, 3000, 1000),
     ]
     assert queued.ttv_voice_id == voice and queued.ttv_language == language
     assert queued.ttv_pitch_semitones == "+0.0" and queued.ttv_speech_rate == 1.0
     expected = performance_hash(text=queued.text, score=queued.ttv_score, segments=queued.ttv_segments)
     probe = Probe()
     payload = probe._tts_agent_payload_for_item(queued)
-    assert payload["text"] == "a ~ ~ ~ a"
+    assert payload["text"] == "a ~ ~ a"
     assert payload["ttv_performance_hash"] == expected
     assert payload["ttv_score"] == queued.ttv_score and payload["ttv_segments"] == queued.ttv_segments
     assert payload["ttv_voice_id"] == voice and payload["ttv_language"] == language
-    msg.attachments[0].read.assert_awaited_once()
+    msg.attachments[0].read.assert_not_awaited()
     msg.reply.assert_not_awaited()
