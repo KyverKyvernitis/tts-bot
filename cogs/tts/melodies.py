@@ -117,6 +117,20 @@ def fit_catalog_lyrics_to_score(text: str, segments: list[dict] | None, score: d
     return clean, result
 
 
+_NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+
+def format_score_notes(melody: Melody) -> str:
+    """Represent the *actual* MIDI score, in its stored order and octave."""
+    score = json.loads(melody.score_json)
+    sequence = []
+    for note in score["notes"]:
+        midi = note["midi_note"]
+        if type(midi) is not int or not 0 <= midi <= 127:
+            raise ValueError("invalid_score_midi_note")
+        sequence.append(f"{_NOTE_NAMES[midi % 12]}{midi // 12 - 1}")
+    return " · ".join(sequence)
+
 def preview_text_for_melody(value: object = None, language: str = "pt-BR") -> str:
     """Keep one fresh vowel attack per note, including after musical rests."""
     melody = get_melody(value)

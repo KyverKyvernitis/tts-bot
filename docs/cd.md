@@ -19,7 +19,7 @@ incluem a letra original. A amostra usa as notas e o andamento da melodia, sem
 alterar os ajustes de tom e velocidade da fala. Ela não entra na fila nem
 conecta o bot à call. O worker de síntese precisa estar disponível para ouvir.
 
-**Usar melodia** confirma a seleção pessoal neste servidor. A navegação pelo
+**Usar esse CD** confirma a seleção pessoal neste servidor. A navegação pelo
 seletor não salva ajustes. Uma opção já em uso aparece confirmada; a escolha
 permanece após reiniciar o bot. Abrir, selecionar e salvar continuam disponíveis
 com o worker offline. Somente quem abriu o painel pode usar seus controles.
@@ -62,3 +62,20 @@ miniatura é limitado pelo tamanho do emoji nativo do Discord.
 
 Não há configuração secreta adicional e nem alterações no Phone Worker.
 O catálogo de 10 músicas e o ZIP de capas existente continuam os mesmos.
+
+## Informações das partituras e botão de estado
+
+A linha de detalhes mostra a quantidade de notas e a duração; **logo abaixo**
+mostra as notas da partitura na sequência original, incluindo sustenidos e
+as oitavas (exemplo do Padrão: `C4 · E4 · G4 · E4`). A conversão parte dos
+valores MIDI do catálogo, sem criar ou alterar notas de síntese.
+
+O botão ativo utiliza o emoji `circulando` e o texto **Usar esse CD**.
+Quando a melodia já está selecionada para o usuário e servidor, aparece
+**CD já em uso** com o emoji `Vinyl_Music_loading` e o botão fica desativado.
+
+A opção **Padrão** ganha como emoji a foto de perfil atual do bot. O mesmo
+registro de emojis da aplicação é reutilizado nos servidores. O hash da
+foto identifica cada versão e permite atualizar o emoji quando ela mudar;
+a imagem é obtida somente no processo assíncrono de sincronização.
+A falta de acesso à imagem ou o limite de emojis não bloqueia o painel.

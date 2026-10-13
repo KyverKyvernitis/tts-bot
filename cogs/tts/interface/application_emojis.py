@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import inspect
 import logging
 import re
 import time
@@ -26,11 +27,15 @@ def emoji_name(namespace: str, asset_id: str) -> str:
     return f"{prefix}_{slug[:32-len(prefix)-8]}_{digest}"
 
 
-def square_emoji(image: bytes) -> bytes:
+def square_emoji(image: bytes, *, allow_avatar_formats: bool = False) -> bytes:
     """Fit local, prevalidated thumbnail to a small application emoji JPEG."""
     from PIL import Image, ImageOps
+    if len(image) > (2 * 1024 * 1024 if allow_avatar_formats else 512 * 1024):
+        raise ValueError("image_too_large")
     with Image.open(io.BytesIO(image)) as source:
-        if source.format != "JPEG" or not (0 < source.width <= 768 and 0 < source.height <= 768):
+        formats = {"JPEG", "PNG", "WEBP", "GIF"} if allow_avatar_formats else {"JPEG"}
+        max_dimension = 2048 if allow_avatar_formats else 768
+        if source.format not in formats or not (0 < source.width <= max_dimension and 0 < source.height <= max_dimension):
             raise ValueError("invalid_cover")
         source.load()
         square = ImageOps.fit(source.convert("RGB"), (128, 128), method=Image.Resampling.LANCZOS)
@@ -45,17 +50,29 @@ def square_emoji(image: bytes) -> bytes:
 class ApplicationSelectEmojis:
     """Singleflight sync. Existing app emojis are reused after every restart."""
 
-    def __init__(self, namespace: str, assets: Callable[[str], bytes | None], ids: Callable[[], Iterable[str]]):
+    def __init__(self, namespace: str, assets: Callable[[str], bytes | None], ids: Callable[[], Iterable[str]],
+                 *, dynamic_ids: Callable[[object], Iterable[str]] | None = None,
+                 remote_assets: Callable[[object, str], object] | None = None):
         self.namespace = namespace
         self.assets = assets
         self.ids = ids
+        self.dynamic_ids = dynamic_ids
+        self.remote_assets = remote_assets
         self._known: dict[str, int] = {}
         self._bot = None
         self._task: asyncio.Task | None = None
         self._next_sync_at = float("-inf")
         self._views = weakref.WeakSet()
+        self._requested_ids: tuple[str, ...] = ()
 
-    def emoji(self, asset_id: str):
+    def _asset_ids(self, bot) -> tuple[str, ...]:
+        base = list(self.dynamic_ids(bot)) if self.dynamic_ids is not None else []
+        base.extend(self.ids())
+        return tuple(dict.fromkeys(base))
+
+    def emoji(self, asset_id: str | None):
+        if not isinstance(asset_id, str) or not asset_id:
+            return None
         emoji_id = self._known.get(emoji_name(self.namespace, asset_id))
         if not emoji_id:
             return None
@@ -72,12 +89,17 @@ class ApplicationSelectEmojis:
                 self._views.add(view)
             except TypeError:
                 pass
-        if self._task is not None and not self._task.done():
-            return
         if self._bot is not bot:
             self._bot = bot
             self._known.clear()
+            self._requested_ids = ()
             self._next_sync_at = float("-inf")
+        requested = self._asset_ids(bot)
+        if requested != self._requested_ids:
+            self._requested_ids = requested
+            self._next_sync_at = float("-inf")
+        if self._task is not None and not self._task.done():
+            return
         now = time.monotonic()
         # Do not hammer Discord on failures or when no local images exist.
         if now < self._next_sync_at:
@@ -91,15 +113,30 @@ class ApplicationSelectEmojis:
             known = {str(e.name): int(e.id) for e in remote
                      if isinstance(getattr(e, "name", None), str) and type(getattr(e, "id", None)) is int}
             changed = False
-            for asset_id in self.ids():
+            asset_ids = self._asset_ids(bot)
+            for asset_id in asset_ids:
                 name = emoji_name(self.namespace, asset_id)
                 if name in known:
                     continue
                 cover = self.assets(asset_id)
+                is_remote_asset = False
+                if not cover and self.remote_assets is not None:
+                    try:
+                        cover = self.remote_assets(bot, asset_id)
+                        if inspect.isawaitable(cover):
+                            cover = await cover
+                        is_remote_asset = bool(cover)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        log.debug("[cd_emoji] imagem remota indisponível | type=%s", type(exc).__name__)
+                        continue
                 if not cover:
                     continue
                 try:
-                    created = await bot.create_application_emoji(name=name, image=square_emoji(cover))
+                    created = await bot.create_application_emoji(
+                        name=name, image=square_emoji(cover, allow_avatar_formats=is_remote_asset)
+                    )
                     known[name] = int(created.id)
                     changed = True
                 except asyncio.CancelledError:
@@ -110,7 +147,7 @@ class ApplicationSelectEmojis:
                     break
             previous = self._known
             self._known = known
-            if all(emoji_name(self.namespace, asset_id) in known for asset_id in self.ids()):
+            if all(emoji_name(self.namespace, asset_id) in known for asset_id in asset_ids):
                 # All covers registered; do not poll the API every time a user opens CD.
                 self._next_sync_at = time.monotonic() + 24 * 3600
             if changed or known != previous:

@@ -102,3 +102,95 @@ def test_app_emojis_without_cover_or_permission_fail_open():
         bot.create_application_emoji.assert_not_awaited()
         assert manager.emoji("world-is-mine") is None
     asyncio.run(run())
+
+
+def test_cd_notes_rendered_below_count_in_real_midi_order():
+    from cogs.tts.melodies import format_score_notes, get_melody, list_melodies
+
+    default = get_melody()
+    assert format_score_notes(default) == "C4 · E4 · G4 · E4"
+    for melody in list_melodies():
+        score = __import__("json").loads(melody.score_json)
+        note_names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+        expected = " · ".join(
+            f"{note_names[entry['midi_note'] % 12]}{entry['midi_note'] // 12 - 1}"
+            for entry in score["notes"]
+        )
+        assert format_score_notes(melody) == expected
+        assert len(score["notes"]) == melody.note_count
+
+    cog = SimpleNamespace(_get_db=lambda: None)
+    view = CDPanelView(cog, 1, 2)
+    content = "\n".join(c["content"] for c in view.to_components()[0]["components"] if "content" in c)
+    assert "4 notas · 4 s\nC4 · E4 · G4 · E4" in content
+
+
+def test_cd_button_states_and_custom_animated_emojis():
+    cog = SimpleNamespace(_get_db=lambda: None)
+    view = CDPanelView(cog, 1, 2)
+    components = list(view.to_components()[0]["components"])
+    buttons = next(c["components"] for c in components if c["type"] == 1 and c["components"][0]["type"] == 2)
+    apply = next(b for b in buttons if b["custom_id"] == "ttv:cd:apply")
+    assert apply["label"] == "CD já em uso"
+    assert apply["disabled"] is True
+    assert str(apply["emoji"]["id"]) == "1559374199133315122"
+    assert apply["emoji"]["animated"] is True
+
+    view.active_melody_id = "world-is-mine"
+    view._settings_available = True
+    view._rebuild()
+    components = list(view.to_components()[0]["components"])
+    buttons = next(c["components"] for c in components if c["type"] == 1 and c["components"][0]["type"] == 2)
+    apply = next(b for b in buttons if b["custom_id"] == "ttv:cd:apply")
+    assert apply["label"] == "Usar esse CD"
+    assert apply["disabled"] is False
+    assert str(apply["emoji"]["id"]) == "1551635281738858670"
+    assert apply["emoji"]["animated"] is True
+
+
+def test_avatar_app_emoji_cached_and_rotates_when_avatar_changes():
+    from cogs.tts.interface.painel_canto import _avatar_asset_id, _avatar_png
+
+    async def run():
+        stream = io.BytesIO()
+        Image.new("RGBA", (256, 256), (40, 80, 255, 255)).save(stream, "PNG")
+        image = stream.getvalue()
+        avatar = SimpleNamespace(key="avatar-a", read=AsyncMock(return_value=image))
+        bot = SimpleNamespace(user=SimpleNamespace(display_avatar=avatar))
+        entries = []
+        async def fetch():
+            return list(entries)
+        async def create(*, name, image):
+            with Image.open(io.BytesIO(image)) as im:
+                assert im.format == "JPEG" and im.size == (128, 128)
+            entry = SimpleNamespace(name=name, id=100000000000000000 + len(entries))
+            entries.append(entry)
+            return entry
+        bot.fetch_application_emojis = AsyncMock(side_effect=fetch)
+        bot.create_application_emoji = AsyncMock(side_effect=create)
+        manager = ApplicationSelectEmojis(
+            "osakacd", lambda key: None, lambda: (),
+            dynamic_ids=lambda b: (_avatar_asset_id(b),), remote_assets=_avatar_png,
+        )
+        manager.schedule(bot)
+        await manager._task
+        assert len(entries) == 1
+        assert manager.emoji(_avatar_asset_id(bot)).id == entries[0].id
+        manager.schedule(bot)
+        assert len(entries) == 1
+        avatar.key = "avatar-b"
+        manager.schedule(bot)
+        await manager._task
+        assert len(entries) == 2
+        assert manager.emoji(_avatar_asset_id(bot)).id == entries[1].id
+        assert avatar.read.await_count == 2
+
+        fresh = ApplicationSelectEmojis(
+            "osakacd", lambda key: None, lambda: (),
+            dynamic_ids=lambda b: (_avatar_asset_id(b),), remote_assets=_avatar_png,
+        )
+        fresh.schedule(bot)
+        await fresh._task
+        assert len(entries) == 2
+        assert fresh.emoji(_avatar_asset_id(bot)).id == entries[1].id
+    asyncio.run(run())

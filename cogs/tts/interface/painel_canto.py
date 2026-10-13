@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import io
+import hashlib
 
 import discord
 
@@ -15,16 +16,51 @@ import config
 
 from ..failure_notices import _public_notice
 from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url, _cover_bytes
-from ..melodies import DEFAULT_MELODY_ID, get_melody, list_melodies
+from ..melodies import DEFAULT_MELODY_ID, format_score_notes, get_melody, list_melodies
 from .application_emojis import ApplicationSelectEmojis
 from ..ttv import DEFAULT_VOICE_ID, language_label, resolve_preferences, voice_label
 from .visoes_layout import VisaoLayoutBaseTTS
 
 
+def _avatar_asset_id(bot) -> str | None:
+    """The bot avatar's revision key, not a per-guild or per-user image."""
+    user = getattr(bot, "user", None)
+    avatar = getattr(user, "display_avatar", None)
+    if avatar is None:
+        return None
+    key = getattr(avatar, "key", None)
+    # A default Discord avatar also has a stable URL even without a custom key.
+    identity = str(key or getattr(avatar, "url", "") or "")
+    if not identity:
+        return None
+    return "bot_avatar_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+async def _avatar_png(bot, asset_id: str) -> bytes | None:
+    if asset_id != _avatar_asset_id(bot):
+        return None
+    avatar = getattr(getattr(bot, "user", None), "display_avatar", None)
+    reader = getattr(avatar, "read", None)
+    if not callable(reader):
+        return None
+    return await reader()
+
+
+def _all_emoji_ids(bot):
+    avatar_id = _avatar_asset_id(bot)
+    return (avatar_id,) if avatar_id is not None else ()
+
+
 _CD_EMOJIS = ApplicationSelectEmojis(
     "osakacd", _cover_bytes,
     lambda: (melody.id for melody in list_melodies() if melody.id != DEFAULT_MELODY_ID),
+    dynamic_ids=_all_emoji_ids,
+    remote_assets=_avatar_png,
 )
+
+
+_APPLY_EMOJI = discord.PartialEmoji.from_str("<a:circulando:1551635281738858670>")
+_ACTIVE_EMOJI = discord.PartialEmoji.from_str("<a:Vinyl_Music_loading:1559374199133315122>")
 
 
 async def _maybe_await(value):
@@ -131,7 +167,8 @@ class CDPanelView(VisaoLayoutBaseTTS):
         melody = get_melody(self.selected_melody_id)
         duration = f"{melody.duration_ms / 1000:g}".replace(".", ",")
         card = discord.ui.TextDisplay(
-            f"**{melody.name}**\n-# {melody.note_count} notas · {duration} s"
+            f"**{melody.name}**\n-# {melody.note_count} notas · {duration} s\n"
+            f"{format_score_notes(melody)}"
         )
         container = discord.ui.Container(
             discord.ui.TextDisplay(
@@ -159,7 +196,9 @@ class CDPanelView(VisaoLayoutBaseTTS):
             max_values=1,
             options=[discord.SelectOption(
                 label=item.name[:100], value=item.id,
-                emoji=_CD_EMOJIS.emoji(item.id),
+                emoji=_CD_EMOJIS.emoji(
+                    _avatar_asset_id(getattr(self.cog, "bot", None)) if item.id == DEFAULT_MELODY_ID else item.id
+                ),
                 default=item.id == self.selected_melody_id,
             ) for item in list_melodies()],
             disabled=self._preview_running or self._saving or self._is_expired(),
@@ -174,8 +213,9 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self.preview_button.callback = self.preview_melody
         already_active = self.selected_melody_id == self.active_melody_id
         self.apply_button = discord.ui.Button(
-            custom_id="ttv:cd:apply", label="Melodia em uso" if already_active else "Usar melodia",
-            emoji="✅", style=discord.ButtonStyle.primary,
+            custom_id="ttv:cd:apply", label="CD já em uso" if already_active else "Usar esse CD",
+            emoji=_ACTIVE_EMOJI if already_active else _APPLY_EMOJI,
+            style=discord.ButtonStyle.primary,
             disabled=already_active or not self._settings_available or self._saving or self._is_expired(),
         )
         self.apply_button.callback = self.apply_melody

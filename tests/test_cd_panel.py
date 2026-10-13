@@ -99,7 +99,7 @@ def test_panel_serializes_real_discord_v2_without_content_embed_or_fake_songs():
         assert all("description" not in option for option in options)
         assert {option["value"] for option in options} == {item.id for item in panel.list_melodies()}
         buttons = [item for item in parts if item["type"] == 2]
-        assert [item["label"] for item in buttons] == ["Ouvir amostra", "Melodia em uso"]
+        assert [item["label"] for item in buttons] == ["Ouvir amostra", "CD já em uso"]
         assert buttons[0]["disabled"] is False and buttons[1]["disabled"] is True
         with handle_message_parameters(view=view, allowed_mentions=discord.AllowedMentions.none()) as params:
             assert params.payload["flags"] & 32768
