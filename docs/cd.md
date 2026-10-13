@@ -3,7 +3,7 @@
 Use `_cd` para abrir suas melodias. O comando usa o prefixo do bot configurado
 no servidor: com prefixo `!`, por exemplo, o comando é `!cd`.
 
-O painel usa Components V2 e oferece **Padrão** e dez trechos de músicas:
+O painel usa Components V2 e começa com **Padrão** e dez trechos de músicas:
 World Is Mine, Senbonzakura, Melt, Tell Your World, PoPiPo, Mesmerizer,
 Ochame Kinou (Fukkireta), Override, Teto Territory e Triple Baka.
 
@@ -30,7 +30,7 @@ Cada trecho comporta até uma sílaba por nota; com menos sílabas a voz pode
 prolongar as vogais nas notas seguintes, respeitando as pausas. Para uma letra
 maior, escolha um trecho com mais notas ou divida a mensagem.
 
-O painel expira após cinco minutos; use `_cd` novamente. Reabrir substitui
+O painel expira após 24 horas sem interação; use `_cd` novamente. Reabrir substitui
 somente o seu próprio painel de canto nesse servidor. Esta mudança mantém o
 runtime do worker 1.11.41. As partituras são enviadas pelo bot ao worker, sem
 precisar anexar um MIDI nem trocar o motor instalado.
@@ -61,7 +61,7 @@ O painel principal mantém a imagem em tamanho maior; no seletor o tamanho da
 miniatura é limitado pelo tamanho do emoji nativo do Discord.
 
 Não há configuração secreta adicional e nem alterações no Phone Worker.
-O catálogo de 10 músicas e o ZIP de capas existente continuam os mesmos.
+O catálogo inicial permanece disponível. Novos CDs são incorporados por ZIPs versionados do kit Termux.
 
 ## Informações das partituras e botão de estado
 
@@ -79,3 +79,31 @@ registro de emojis da aplicação é reutilizado nos servidores. O hash da
 foto identifica cada versão e permite atualizar o emoji quando ela mudar;
 a imagem é obtida somente no processo assíncrono de sincronização.
 A falta de acesso à imagem ou o limite de emojis não bloqueia o painel.
+
+## Importação incremental de CDs (VPS + Termux)
+
+Use o kit Termux `import-midi.py` com MIDIs **locais**, nunca anexos Discord.
+Ele reutiliza o parser de partituras de `cogs/tts/score.py` e uma cópia
+sincronizada da normalização de metadados de `cogs/musica/metadados/normalizacao.py`.
+Procura até 25 candidatos no YouTube e só aceita contagens verificáveis dos
+vídeos correspondentes; a maior contagem *entre os vídeos inspecionados* é
+selecionada. Vídeos distintos, covers e remixes são rejeitados sem adivinhar.
+
+O Termux gera ZIPs com os catálogos completos e a nova capa, que devem ser
+aplicados pelo updater da VPS. A publicação automática remota, com autenticação,
+ainda não foi implementada. A atualização do catálogo e dos painéis **já abertos**
+é detectada até 15 s após a aplicação (com bot em execução). O menu tem
+paginação a cada 25 opções, respeitando os limites do Discord.
+
+O emoji é versionado pelo SHA-256 da capa e reaproveitado entre servidores.
+A borda do painel acompanha a cor predominante local da capa (ou do avatar do
+bot no Padrão); a extração mantém imagens em preto e branco sem matiz falsa.
+O cache de cores é limitado a 96 números RGB, sem guardar os JPEGs em RAM.
+
+O Termux prepara uma amostra UTAU em `pt-BR` para as preferências padrão quando
+as condições de bateria permitem. O bot verifica o SHA da amostra, a versão
+da partitura e as preferências antes de reutilizar o MP3. Em outras
+configurações, usa a síntese de amostras normal do Phone Worker.
+Se a geração estiver bloqueada, o kit conserva a pendência para nova tentativa
+quando for executado novamente. O preview pronto pode ser reproduzido com o
+worker temporariamente offline.

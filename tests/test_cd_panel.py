@@ -86,7 +86,7 @@ def test_panel_serializes_real_discord_v2_without_content_embed_or_fake_songs():
         assert isinstance(view, discord.ui.LayoutView)
         components = view.to_components()
         assert len(components) == 1 and components[0]["type"] == 17
-        assert components[0]["accent_color"] == discord.Color.blurple().value
+        assert components[0]["accent_color"] == panel.DEFAULT_COLOR
         parts = list(walk(components))
         assert len(parts) <= 12
         assert not any(item["type"] in (9, 11, 12) for item in parts)

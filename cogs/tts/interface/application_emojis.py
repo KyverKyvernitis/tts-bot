@@ -52,12 +52,14 @@ class ApplicationSelectEmojis:
 
     def __init__(self, namespace: str, assets: Callable[[str], bytes | None], ids: Callable[[], Iterable[str]],
                  *, dynamic_ids: Callable[[object], Iterable[str]] | None = None,
-                 remote_assets: Callable[[object, str], object] | None = None):
+                 remote_assets: Callable[[object, str], object] | None = None,
+                 version_for_id: Callable[[str], str] | None = None):
         self.namespace = namespace
         self.assets = assets
         self.ids = ids
         self.dynamic_ids = dynamic_ids
         self.remote_assets = remote_assets
+        self.version_for_id = version_for_id
         self._known: dict[str, int] = {}
         self._bot = None
         self._task: asyncio.Task | None = None
@@ -70,15 +72,19 @@ class ApplicationSelectEmojis:
         base.extend(self.ids())
         return tuple(dict.fromkeys(base))
 
+    def _name(self, asset_id: str) -> str:
+        version = self.version_for_id(asset_id) if self.version_for_id else ""
+        return emoji_name(self.namespace, f"{asset_id}:{version}" if version else asset_id)
+
     def emoji(self, asset_id: str | None):
         if not isinstance(asset_id, str) or not asset_id:
             return None
-        emoji_id = self._known.get(emoji_name(self.namespace, asset_id))
+        emoji_id = self._known.get(self._name(asset_id))
         if not emoji_id:
             return None
         # import locally so the module can be tested without a Discord connection
         import discord
-        return discord.PartialEmoji(name=emoji_name(self.namespace, asset_id), id=emoji_id)
+        return discord.PartialEmoji(name=self._name(asset_id), id=emoji_id)
 
     def schedule(self, bot, view=None) -> None:
         if (bot is None or not callable(getattr(bot, "fetch_application_emojis", None))
@@ -94,7 +100,7 @@ class ApplicationSelectEmojis:
             self._known.clear()
             self._requested_ids = ()
             self._next_sync_at = float("-inf")
-        requested = self._asset_ids(bot)
+        requested = tuple(self._name(asset_id) for asset_id in self._asset_ids(bot))
         if requested != self._requested_ids:
             self._requested_ids = requested
             self._next_sync_at = float("-inf")
@@ -115,7 +121,7 @@ class ApplicationSelectEmojis:
             changed = False
             asset_ids = self._asset_ids(bot)
             for asset_id in asset_ids:
-                name = emoji_name(self.namespace, asset_id)
+                name = self._name(asset_id)
                 if name in known:
                     continue
                 cover = self.assets(asset_id)
@@ -147,7 +153,7 @@ class ApplicationSelectEmojis:
                     break
             previous = self._known
             self._known = known
-            if all(emoji_name(self.namespace, asset_id) in known for asset_id in asset_ids):
+            if all(self._name(asset_id) in known for asset_id in asset_ids):
                 # All covers registered; do not poll the API every time a user opens CD.
                 self._next_sync_at = time.monotonic() + 24 * 3600
             if changed or known != previous:

@@ -9,14 +9,19 @@ import asyncio
 import inspect
 import io
 import hashlib
+import math
+import time
+import weakref
 
 import discord
 
 import config
 
 from ..failure_notices import _public_notice
-from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url, _cover_bytes
-from ..melodies import DEFAULT_MELODY_ID, format_score_notes, get_melody, list_melodies
+from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url, _cover_bytes, cover_revision
+from ..cd_colors import cover_accent, DEFAULT_COLOR
+from ..cd_previews import prepared_sample
+from ..melodies import DEFAULT_MELODY_ID, catalog_signature, format_score_notes, get_melody, list_melodies
 from .application_emojis import ApplicationSelectEmojis
 from ..ttv import DEFAULT_VOICE_ID, language_label, resolve_preferences, voice_label
 from .visoes_layout import VisaoLayoutBaseTTS
@@ -36,6 +41,9 @@ def _avatar_asset_id(bot) -> str | None:
     return "bot_avatar_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
 
 
+_AVATAR_COLORS: dict[str, int] = {}
+
+
 async def _avatar_png(bot, asset_id: str) -> bytes | None:
     if asset_id != _avatar_asset_id(bot):
         return None
@@ -43,7 +51,9 @@ async def _avatar_png(bot, asset_id: str) -> bytes | None:
     reader = getattr(avatar, "read", None)
     if not callable(reader):
         return None
-    return await reader()
+    data = await reader()
+    _AVATAR_COLORS[asset_id] = cover_accent(data)
+    return data
 
 
 def _all_emoji_ids(bot):
@@ -56,6 +66,7 @@ _CD_EMOJIS = ApplicationSelectEmojis(
     lambda: (melody.id for melody in list_melodies() if melody.id != DEFAULT_MELODY_ID),
     dynamic_ids=_all_emoji_ids,
     remote_assets=_avatar_png,
+    version_for_id=lambda asset_id: "" if asset_id.startswith("bot_avatar_") else cover_revision(asset_id),
 )
 
 
@@ -77,10 +88,45 @@ async def _reply(interaction: discord.Interaction, content: str, *, file=None) -
         await interaction.response.send_message(**kwargs)
 
 
+_ACTIVE_PANELS = weakref.WeakSet()
+_CATALOG_TASK: asyncio.Task | None = None
+
+
+async def _watch_catalog():
+    """Refresh open panels only when a published catalog revision changes."""
+    signature = catalog_signature()
+    try:
+        while True:
+            await asyncio.sleep(15)
+            active = [panel for panel in _ACTIVE_PANELS if not panel._is_expired()]
+            if not active:
+                return
+            current = catalog_signature()
+            if current == signature:
+                continue
+            signature = current
+            for panel in active:
+                try:
+                    if not any(item.id == panel.selected_melody_id for item in list_melodies()):
+                        panel.selected_melody_id = DEFAULT_MELODY_ID
+                        panel._page = 0
+                    await panel.refresh()
+                    if panel.message is not None:
+                        await panel._edit_panel()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Failed edits do not abort other panels or the watcher.
+                    pass
+    finally:
+        global _CATALOG_TASK
+        _CATALOG_TASK = None
+
+
 class CDPanelView(VisaoLayoutBaseTTS):
     """Um painel de canto por usuário e servidor, sem consultas ao YouTube."""
 
-    def __init__(self, cog, owner_id: int, guild_id: int, *, timeout: float = 300):
+    def __init__(self, cog, owner_id: int, guild_id: int, *, timeout: float = 86400):
         super().__init__(cog, owner_id, guild_id, timeout=timeout)
         self.panel_kind = "cd"
         self.active_melody_id = DEFAULT_MELODY_ID
@@ -93,10 +139,16 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self._saving = False
         self._saved = False
         self._initialized = False
+        self._page = 0
+        self._page_locked = False
+        _ACTIVE_PANELS.add(self)
         self._rebuild()
 
     async def refresh(self) -> None:
         """Carrega ajustes e status já disponíveis, antes de enviar a mensagem."""
+        global _CATALOG_TASK
+        if _CATALOG_TASK is None or _CATALOG_TASK.done():
+            _CATALOG_TASK = asyncio.create_task(_watch_catalog())
         self._settings_available = False
         try:
             db = self.cog._get_db()
@@ -128,7 +180,8 @@ class CDPanelView(VisaoLayoutBaseTTS):
         _CD_EMOJIS.schedule(getattr(self.cog, "bot", None), self)
 
     async def _refresh_availability(self) -> None:
-        self._preview_available = False
+        # Prepared UTAU samples are playable even if the phone is currently offline.
+        self._preview_available = prepared_sample(self.selected_melody_id, self._preferences) is not None
         if not self._settings_available:
             self._availability_note = "Seus ajustes estão indisponíveis agora."
             return
@@ -141,7 +194,8 @@ class CDPanelView(VisaoLayoutBaseTTS):
             if online is None:
                 online = bool(status.get("online"))
             if not online:
-                self._availability_note = "Worker offline · você pode escolher e salvar."
+                self._availability_note = ("Worker offline · amostra pronta disponível." if self._preview_available
+                                           else "Worker offline · você pode escolher e salvar.")
                 return
             if not status.get("ready") or status.get("available") is False:
                 self._availability_note = "A voz está indisponível para gerar amostras agora."
@@ -164,7 +218,16 @@ class CDPanelView(VisaoLayoutBaseTTS):
 
     def _rebuild(self) -> None:
         self.clear_items()
+        catalog = list_melodies()
+        if self.selected_melody_id not in {entry.id for entry in catalog}:
+            self.selected_melody_id = DEFAULT_MELODY_ID
         melody = get_melody(self.selected_melody_id)
+        selected_index = next(i for i, entry in enumerate(catalog) if entry.id == melody.id)
+        pages = math.ceil(len(catalog) / 25)
+        if pages > 1 and (selected_index // 25 != self._page and not self._page_locked):
+            self._page = selected_index // 25
+        self._page = min(max(0, self._page), pages - 1)
+        visible_catalog = catalog[self._page * 25:(self._page + 1) * 25]
         duration = f"{melody.duration_ms / 1000:g}".replace(".", ",")
         card = discord.ui.TextDisplay(
             f"**{melody.name}**\n-# {melody.note_count} notas · {duration} s\n"
@@ -175,7 +238,10 @@ class CDPanelView(VisaoLayoutBaseTTS):
                 "## <a:Vinyl_Music_loading:1559374199133315122> Menu de CDs\n"
                 "-# Escolha seu CD, o bot vai ler e no modo de canto vai cantar no ritmo dele."
             ),
-            accent_color=discord.Color.blurple(),
+            accent_color=discord.Color(cover_accent(
+                _cover_bytes(melody.id),
+                fallback=_AVATAR_COLORS.get(_avatar_asset_id(getattr(self.cog, 'bot', None)) or '', DEFAULT_COLOR)
+                if melody.id == DEFAULT_MELODY_ID else DEFAULT_COLOR)),
         )
         cover = (cover_attachment_url(melody.id) or remote_thumbnail_url(melody.id)
                  or str(getattr(melody, "thumbnail_url", "") or ""))
@@ -200,11 +266,21 @@ class CDPanelView(VisaoLayoutBaseTTS):
                     _avatar_asset_id(getattr(self.cog, "bot", None)) if item.id == DEFAULT_MELODY_ID else item.id
                 ),
                 default=item.id == self.selected_melody_id,
-            ) for item in list_melodies()],
+            ) for item in visible_catalog],
             disabled=self._preview_running or self._saving or self._is_expired(),
         )
         self.melody_select.callback = self.select_melody
         container.add_item(discord.ui.ActionRow(self.melody_select))
+        if pages > 1:
+            self.previous_button = discord.ui.Button(
+                custom_id="ttv:cd:previous", label="Anterior", emoji="◀️",
+                style=discord.ButtonStyle.secondary, disabled=self._page == 0 or self._is_expired())
+            self.next_button = discord.ui.Button(
+                custom_id="ttv:cd:next", label="Próxima", emoji="▶️",
+                style=discord.ButtonStyle.secondary, disabled=self._page >= pages - 1 or self._is_expired())
+            self.previous_button.callback = self.previous_page
+            self.next_button.callback = self.next_page
+            container.add_item(discord.ui.ActionRow(self.previous_button, self.next_button))
         self.preview_button = discord.ui.Button(
             custom_id="ttv:cd:preview", label="Gerando amostra…" if self._preview_running else "Ouvir amostra",
             emoji="▶️", style=discord.ButtonStyle.secondary,
@@ -248,7 +324,11 @@ class CDPanelView(VisaoLayoutBaseTTS):
                 pass
             await _reply(interaction, f"Essa interação expirou. Use {hint} novamente para abrir suas melodias.")
             return False
-        return await super().interaction_check(interaction)
+        allowed = await super().interaction_check(interaction)
+        if allowed:
+            # LayoutView extends its own timeout on interaction; keep logical expiry in sync.
+            self.expires_at_monotonic = time.monotonic() + 86400
+        return allowed
 
     async def _edit_panel(self, interaction: discord.Interaction | None = None) -> None:
         self._rebuild()
@@ -285,8 +365,23 @@ class CDPanelView(VisaoLayoutBaseTTS):
             await _reply(interaction, "Essa melodia não está disponível. Abra o painel novamente.")
             return
         self.selected_melody_id = melody.id
+        self._page_locked = False
         self._saved = False
         await self.refresh()
+        await self._edit_panel(interaction)
+
+    async def previous_page(self, interaction: discord.Interaction) -> None:
+        if not await self.interaction_check(interaction):
+            return
+        self._page = max(0, self._page - 1)
+        self._page_locked = True
+        await self._edit_panel(interaction)
+
+    async def next_page(self, interaction: discord.Interaction) -> None:
+        if not await self.interaction_check(interaction):
+            return
+        self._page = min((len(list_melodies()) - 1) // 25, self._page + 1)
+        self._page_locked = True
         await self._edit_panel(interaction)
 
     async def apply_melody(self, interaction: discord.Interaction) -> None:
@@ -336,9 +431,11 @@ class CDPanelView(VisaoLayoutBaseTTS):
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
             await self._edit_panel(interaction)
-            mp3 = await asyncio.wait_for(
-                self.cog._cd_preview_mp3(self.guild_id, self.owner_id, melody_id=melody_id, settings=preview_settings), timeout=130,
-            )
+            mp3 = prepared_sample(melody_id, preview_settings)
+            if mp3 is None:
+                mp3 = await asyncio.wait_for(
+                    self.cog._cd_preview_mp3(self.guild_id, self.owner_id, melody_id=melody_id, settings=preview_settings), timeout=130,
+                )
             if not isinstance(mp3, bytes) or not mp3:
                 raise ValueError("empty_audio")
             await _reply(
@@ -360,4 +457,5 @@ class CDPanelView(VisaoLayoutBaseTTS):
 
     async def on_timeout(self) -> None:
         self.expires_at_monotonic = 0
+        _ACTIVE_PANELS.discard(self)
         await self._edit_panel()

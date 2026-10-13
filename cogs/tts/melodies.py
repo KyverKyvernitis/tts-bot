@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path
 
 
 
 DEFAULT_MELODY_ID = "ttv-demo-v1"
+_LOG = logging.getLogger(__name__)
+_SCORE_FILE = Path(__file__).with_name("cd_song_scores.json")
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,10 +34,23 @@ class Melody:
 
 
 def _song_melodies() -> tuple[Melody, ...]:
-    entries = json.loads((Path(__file__).parent / "cd_song_scores.json").read_text(encoding="utf-8"))
+    entries = json.loads(_SCORE_FILE.read_text(encoding="utf-8"))
+    if not isinstance(entries, list) or len(entries) > 500:
+        raise ValueError("invalid_cd_catalog_size")
+    seen = set()
     songs = []
     for entry in entries:
+        identity = entry["id"]
+        if (not isinstance(identity, str) or not identity or len(identity) > 90
+                or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789-" for ch in identity)
+                or identity in seen or identity == DEFAULT_MELODY_ID):
+            raise ValueError("invalid_cd_catalog_id")
+        seen.add(identity)
         notes = entry["notes"]
+        if not isinstance(notes, list) or not 1 <= len(notes) <= 128:
+            raise ValueError("invalid_cd_score_notes")
+        if not 1 <= entry["duration_ms"] <= 60_000:
+            raise ValueError("invalid_cd_score_duration")
         score = {"version": 1, "track_index": 0, "duration_ms": entry["duration_ms"],
                  "lyrics_source": "message", "notes": notes}
         songs.append(Melody(
@@ -56,22 +72,51 @@ _MELODIES = (Melody(
 ), *_song_melodies())
 
 
+try:
+    _STAT = _SCORE_FILE.stat()
+    _CATALOG_SIGNATURE = (_STAT.st_mtime_ns, _STAT.st_size)
+except OSError:
+    _CATALOG_SIGNATURE = (0, 0)
+
 def list_melodies() -> tuple[Melody, ...]:
+    global _MELODIES, _CATALOG_SIGNATURE
+    try:
+        stat = _SCORE_FILE.stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+        if signature != _CATALOG_SIGNATURE:
+            updated = (_MELODIES[0], *_song_melodies())
+            _MELODIES = updated
+            _CATALOG_SIGNATURE = signature
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        # Continue serving the previous complete catalog during an interrupted
+        # publication. Never replace a valid snapshot with half-written data.
+        _LOG.warning("[cd_catalog] recarga recusada: %s", type(exc).__name__)
     return _MELODIES
+
+
+def catalog_signature() -> tuple[int, ...]:
+    result = []
+    for path in (_SCORE_FILE, _SCORE_FILE.with_name('cd_song_videos.json')):
+        try:
+            stat = path.stat()
+            result.extend((stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            result.extend((0, 0))
+    return tuple(result)
 
 
 def normalize_melody_id(value: object = None) -> str:
     if value is not None and not isinstance(value, str):
         raise ValueError("Escolha uma melodia disponível no painel de canto.")
     identity = str(value or "").strip() or DEFAULT_MELODY_ID
-    if not any(melody.id == identity for melody in _MELODIES):
+    if not any(melody.id == identity for melody in list_melodies()):
         raise ValueError("Essa melodia está indisponível. Escolha outra no painel de canto.")
     return identity
 
 
 def get_melody(value: object = None) -> Melody:
     identity = normalize_melody_id(value)
-    return next(melody for melody in _MELODIES if melody.id == identity)
+    return next(melody for melody in list_melodies() if melody.id == identity)
 
 
 def score_for_melody(value: object = None) -> dict:

@@ -85,3 +85,9 @@ def cached_cover_file(melody_id: str) -> discord.File | None:
     if data is None:
         return None
     return discord.File(io.BytesIO(data), filename=f"ttv-cd-{melody_id}.jpg")
+
+
+def cover_revision(melody_id: str) -> str:
+    """Version an app emoji by its actual bytes, not just the CD id."""
+    data = _cover_bytes(melody_id)
+    return hashlib.sha256(data).hexdigest()[:12] if data else ""
