@@ -21,7 +21,7 @@ from ..failure_notices import _public_notice
 from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url, _cover_bytes, cover_revision
 from ..cd_colors import cover_accent, DEFAULT_COLOR
 from ..cd_previews import prepared_sample
-from ..melodies import DEFAULT_MELODY_ID, catalog_signature, format_score_notes, format_score_rhythm, get_melody, list_melodies
+from ..melodies import DEFAULT_MELODY_ID, catalog_signature, format_score_notes, get_melody, list_melodies
 from .application_emojis import ApplicationSelectEmojis
 from ..ttv import DEFAULT_VOICE_ID, language_label, resolve_preferences, voice_label
 from .visoes_layout import VisaoLayoutBaseTTS
@@ -236,8 +236,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
         duration = f"{melody.duration_ms / 1000:g}".replace(".", ",")
         card = discord.ui.TextDisplay(
             f"**{melody.name}**\n-# {melody.note_count} notas · {duration} s\n"
-            f"{format_score_notes(melody)}\n"
-            f"-# Duração de cada nota (𝄽 = pausa): {format_score_rhythm(melody)}"
+            f"{format_score_notes(melody)}"
         )
         container = discord.ui.Container(
             discord.ui.TextDisplay(
