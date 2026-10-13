@@ -1,16 +1,23 @@
 """Bounded offline TTV samples; validate synth profile and score before reuse."""
 from __future__ import annotations
 
-import hashlib
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
 
 from .melodies import DEFAULT_MELODY_ID, get_melody, score_sha256
+from .cd_assets import FILES, file_signature
 
 _ROOT = Path(__file__).parent / 'cd' / 'previews'
 _ID = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*\Z')
 _SHA256 = re.compile(r'[0-9a-f]{64}\Z')
+
+
+@lru_cache(maxsize=8)
+def _index(path: str, signature: tuple) -> dict:
+    raw = json.loads(Path(path).read_text(encoding='utf-8'))
+    return raw if isinstance(raw, dict) else {}
 
 
 def _has_mp3_frames(data: bytes) -> bool:
@@ -59,9 +66,11 @@ def prepared_sample(melody_id: str, preferences: dict) -> bytes | None:
         if not (preferences.get('ttv_voice_id') == 'kasane-teto'
                 and preferences.get('ttv_language') == 'pt-BR'):
             return None
-        index = json.loads((_ROOT / 'index.json').read_text(encoding='utf-8'))
-        if not isinstance(index, dict):
+        index_path = _ROOT / 'index.json'
+        signature = file_signature(index_path)
+        if signature is None or not 0 < signature[2] <= 8 * 1024 * 1024:
             return None
+        index = _index(str(index_path), signature)
         metadata = index.get(melody_id)
         melody = get_melody(melody_id)
         if not isinstance(metadata, dict):
@@ -81,11 +90,7 @@ def prepared_sample(melody_id: str, preferences: dict) -> bytes | None:
         if not isinstance(mp3_hash, str) or not _SHA256.fullmatch(mp3_hash):
             return None
         target = _ROOT / f'{melody_id}.mp3'
-        if target.is_symlink() or not target.is_file() or not 256 < target.stat().st_size <= 2_000_000:
-            return None
-        data = target.read_bytes()
-        if hashlib.sha256(data).hexdigest() != mp3_hash or not _has_mp3_frames(data):
-            return None
-        return data
+        return FILES.read(target, mp3_hash, 2_000_000, 'mp3',
+                          lambda data: len(data) > 256 and _has_mp3_frames(data))
     except (OSError, TypeError, ValueError, KeyError):
         return None

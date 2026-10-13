@@ -139,7 +139,7 @@ def test_hash_matched_non_audio_and_unsafe_ids_are_not_playable(isolated_catalog
     install_preview(isolated_catalog, song, b"ID3" + b"x" * 1024)
     assert cd_previews.prepared_sample(song["id"], PREFERENCES) is None
     assert cd_previews.prepared_sample("../new-cd", PREFERENCES) is None
-    assert cd_previews.prepared_sample(song["id"], {**PREFERENCES, "ttv_speech_rate": "invalid"}) is None
+    assert cd_previews.prepared_sample(song["id"], {**PREFERENCES, "ttv_voice_id": "hatsune-miku"}) is None
 
 
 @pytest.mark.parametrize("mutation", ["overlap", "outside_duration", "bad_hash", "boolean_pitch"])

@@ -15,10 +15,9 @@ import weakref
 
 import discord
 
-import config
 
 from ..failure_notices import _public_notice
-from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url, _cover_bytes, cover_revision
+from ..cd_covers import cached_cover_file, cover_attachment_url, remote_thumbnail_url, _cover_bytes, cover_revision, cover_identity
 from ..cd_colors import cover_accent, DEFAULT_COLOR
 from ..cd_previews import prepared_sample
 from ..melodies import DEFAULT_MELODY_ID, catalog_signature, format_score_notes, get_melody, list_melodies
@@ -66,7 +65,7 @@ _CD_EMOJIS = ApplicationSelectEmojis(
     lambda: (melody.id for melody in list_melodies() if melody.id != DEFAULT_MELODY_ID),
     dynamic_ids=_all_emoji_ids,
     remote_assets=_avatar_png,
-    version_for_id=lambda asset_id: "" if asset_id.startswith("bot_avatar_") else cover_revision(asset_id),
+    version_for_id=lambda asset_id: "" if asset_id.startswith("bot_avatar_") else cover_identity(asset_id),
 )
 
 
@@ -90,17 +89,49 @@ async def _reply(interaction: discord.Interaction, content: str, *, file=None) -
 
 _ACTIVE_PANELS = weakref.WeakSet()
 _CATALOG_TASK: asyncio.Task | None = None
+_CATALOG_COG = None
 
 
-async def _watch_catalog():
+def start_catalog_watch(cog):
+    global _CATALOG_TASK, _CATALOG_COG
+    if _CATALOG_COG is not cog and _CATALOG_TASK is not None:
+        _CATALOG_TASK.cancel()
+    if _CATALOG_COG is not cog or _CATALOG_TASK is None or _CATALOG_TASK.done():
+        _CATALOG_COG = cog
+        _CATALOG_TASK = asyncio.create_task(_watch_catalog(cog))
+
+
+def stop_catalog_watch(cog):
+    for panel in tuple(_ACTIVE_PANELS):
+        if panel.cog is cog:
+            panel.expires_at_monotonic = 0
+            panel.stop()
+    if _CATALOG_COG is cog:
+        if _CATALOG_TASK is not None:
+            _CATALOG_TASK.cancel()
+        _CD_EMOJIS.close()
+
+
+async def _watch_catalog(cog=None):
     """Refresh open panels only when a published catalog revision changes."""
     signature = catalog_signature()
+    bot = getattr(cog, 'bot', None)
     try:
+        ready = getattr(bot, 'wait_until_ready', None)
+        if callable(ready):
+            await ready()
+        _CD_EMOJIS.schedule(bot)
         while True:
             await asyncio.sleep(15)
             active = [panel for panel in _ACTIVE_PANELS if not panel._is_expired()]
-            if not active:
+            if not active and bot is None:
                 return
+            closed = getattr(bot, 'is_closed', None)
+            if callable(closed) and closed():
+                return
+            # New catalogue assets and avatars are synchronized even when no
+            # user currently has an open panel.
+            _CD_EMOJIS.schedule(bot)
             current = catalog_signature()
             if current == signature:
                 continue
@@ -113,8 +144,8 @@ async def _watch_catalog():
                     if not any(item.id == panel.selected_melody_id for item in list_melodies()):
                         panel.selected_melody_id = DEFAULT_MELODY_ID
                         panel._page = 0
-                    await panel.refresh()
-                    if panel.message is not None:
+                    await panel.refresh(rebuild=False)
+                    if not panel._is_expired() and not panel.is_finished() and panel.message is not None:
                         await panel._edit_panel()
                 except asyncio.CancelledError:
                     raise
@@ -122,8 +153,10 @@ async def _watch_catalog():
                     # Failed edits do not abort other panels or the watcher.
                     pass
     finally:
-        global _CATALOG_TASK
-        _CATALOG_TASK = None
+        global _CATALOG_TASK, _CATALOG_COG
+        if _CATALOG_TASK is asyncio.current_task():
+            _CATALOG_TASK = None
+            _CATALOG_COG = None
 
 
 class CDPanelView(VisaoLayoutBaseTTS):
@@ -140,49 +173,51 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self._availability_note = ""
         self._preview_running = False
         self._saving = False
-        self._saved = False
         self._initialized = False
+        self._settings_at = 0.0
+        self._settings_lock = asyncio.Lock()
+        self._cover_attachment_key = None
         self._page = 0
         self._page_locked = False
         self._activity_timeout = max(1.0, float(timeout or 86400))
         _ACTIVE_PANELS.add(self)
         self._rebuild()
 
-    async def refresh(self) -> None:
-        """Carrega ajustes e status já disponíveis, antes de enviar a mensagem."""
-        global _CATALOG_TASK
-        if not self._is_expired() and not self.is_finished() and (_CATALOG_TASK is None or _CATALOG_TASK.done()):
-            _CATALOG_TASK = asyncio.create_task(_watch_catalog())
-        self._settings_available = False
-        try:
-            db = self.cog._get_db()
-            if db is not None:
-                settings = await _maybe_await(db.resolve_tts(self.guild_id, self.owner_id))
-                settings = settings if isinstance(settings, dict) else {}
-                self._preferences = resolve_preferences(settings)
-                saved_id = settings.get("ttv_melody_id") or DEFAULT_MELODY_ID
+    async def refresh(self, *, force: bool = False, rebuild: bool = True) -> None:
+        """Reuse recent settings; publication refreshes never extend expiry."""
+        if not self._is_expired() and not self.is_finished():
+            start_catalog_watch(self.cog)
+        async with self._settings_lock:
+            if force or time.monotonic() >= self._settings_at:
+                self._settings_available = False
+                self._settings_at = time.monotonic() + 1
                 try:
-                    self.active_melody_id = get_melody(saved_id).id
-                except ValueError:
-                    # Não afirmar que Padrão está salva quando a escolha antiga
-                    # saiu do catálogo. O usuário pode confirmar a restauração.
-                    self.active_melody_id = saved_id if isinstance(saved_id, str) else "unavailable"
-                self._settings_available = True
-                if not self._initialized:
-                    self.selected_melody_id = self.active_melody_id
-                    self._initialized = True
-        except Exception:
-            self._availability_note = "Seus ajustes estão indisponíveis agora."
+                    db = self.cog._get_db()
+                    if db is not None:
+                        settings = await _maybe_await(db.resolve_tts(self.guild_id, self.owner_id))
+                        settings = settings if isinstance(settings, dict) else {}
+                        self._preferences = resolve_preferences(settings)
+                        saved_id = settings.get('ttv_melody_id') or DEFAULT_MELODY_ID
+                        try:
+                            self.active_melody_id = get_melody(saved_id).id
+                        except ValueError:
+                            self.active_melody_id = saved_id if isinstance(saved_id, str) else 'unavailable'
+                        self._settings_available = True
+                        self._settings_at = time.monotonic() + 3
+                        if not self._initialized:
+                            self.selected_melody_id = self.active_melody_id
+                            self._initialized = True
+                except Exception:
+                    self._availability_note = 'Seus ajustes estão indisponíveis agora.'
         try:
             get_melody(self.selected_melody_id)
         except ValueError:
             self.selected_melody_id = DEFAULT_MELODY_ID
         await self._refresh_availability()
-        self._rebuild()
-        # A capa vira emoji de aplicação uma única vez, reutilizável em qualquer
-        # servidor. A sincronização em segundo plano não retarda o painel.
+        if rebuild:
+            self._rebuild()
         if not self._is_expired() and not self.is_finished():
-            _CD_EMOJIS.schedule(getattr(self.cog, "bot", None), self)
+            _CD_EMOJIS.schedule(getattr(self.cog, 'bot', None), self)
 
     async def _refresh_availability(self) -> None:
         # Prepared UTAU samples are playable even if the phone is currently offline.
@@ -190,17 +225,20 @@ class CDPanelView(VisaoLayoutBaseTTS):
         if not self._settings_available:
             self._availability_note = "Seus ajustes estão indisponíveis agora."
             return
+        if self._preview_available:
+            # A validated installed MP3 needs neither worker discovery nor synthesis.
+            self._availability_note = ""
+            return
         checker = getattr(self.cog, "_ttv_voice_status", None)
         online_checker = getattr(self.cog, "_tts_phone_worker_online_for_ui", None)
         try:
-            online = bool(await _maybe_await(online_checker())) if callable(online_checker) else None
             status = await _maybe_await(checker(self._preferences["ttv_voice_id"])) if callable(checker) else {}
             status = status if isinstance(status, dict) else {}
+            online = status.get('online')
             if online is None:
-                online = bool(status.get("online"))
+                online = bool(await _maybe_await(online_checker())) if callable(online_checker) else False
             if not online:
-                self._availability_note = ("Worker offline · amostra pronta disponível." if self._preview_available
-                                           else "Worker offline · você pode escolher e salvar.")
+                self._availability_note = "Worker offline · você pode escolher e salvar."
                 return
             if not status.get("ready") or status.get("available") is False:
                 self._availability_note = "A voz está indisponível para gerar amostras agora."
@@ -315,19 +353,17 @@ class CDPanelView(VisaoLayoutBaseTTS):
         cover = cached_cover_file(self.selected_melody_id)
         return [cover] if cover is not None else []
 
+    def remember_cover(self) -> None:
+        self._cover_attachment_key = (self.selected_melody_id, cover_revision(self.selected_melody_id))
+
+    @property
+    def emoji_generation(self) -> int:
+        return _CD_EMOJIS.generation
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         guild = getattr(interaction, "guild", None)
         if guild is None or int(guild.id) != int(self.guild_id):
             await _reply(interaction, "Esse painel só pode ser usado no servidor em que foi aberto.")
-            return False
-        if self._is_expired():
-            prefix = str(getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_")) or "_")
-            hint = f"`{prefix}cd`"
-            try:
-                hint = await _maybe_await(self.cog._get_panel_prefix_hint(self.guild_id, "cd"))
-            except Exception:
-                pass
-            await _reply(interaction, f"Essa interação expirou. Use {hint} novamente para abrir suas melodias.")
             return False
         allowed = await super().interaction_check(interaction)
         if allowed:
@@ -335,22 +371,35 @@ class CDPanelView(VisaoLayoutBaseTTS):
             self.expires_at_monotonic = time.monotonic() + self._activity_timeout
         return allowed
 
-    async def _edit_panel(self, interaction: discord.Interaction | None = None) -> None:
+    async def _edit_panel(self, interaction: discord.Interaction | None = None) -> bool:
         self._rebuild()
         message = self.message or getattr(interaction, "message", None)
         if message is None and (interaction is None or interaction.response.is_done()):
-            return
-        files = self.panel_files()
+            return False
+        key = (self.selected_melody_id, cover_revision(self.selected_melody_id))
+        existing = list(getattr(message, 'attachments', ()) or ())
+        filename = f'ttv-cd-{self.selected_melody_id}.jpg'
+        reuse = bool(key[1] and key == self._cover_attachment_key
+                     and any(getattr(attachment, 'filename', None) == filename for attachment in existing))
+        files = [] if reuse else self.panel_files()
+        attachments = existing if reuse else files
         try:
             if interaction is not None and not interaction.response.is_done():
-                await interaction.response.edit_message(view=self, attachments=files,
-                                                        allowed_mentions=discord.AllowedMentions.none())
+                edited = await interaction.response.edit_message(view=self, attachments=attachments,
+                                                                allowed_mentions=discord.AllowedMentions.none())
+                resource = getattr(edited, 'resource', None)
+                if resource is not None and type(getattr(resource, 'id', None)) is int:
+                    self.message = resource
             elif message is not None:
                 try:
-                    await message.edit(view=self, attachments=files, allowed_mentions=discord.AllowedMentions.none())
+                    edited = await message.edit(view=self, attachments=attachments, allowed_mentions=discord.AllowedMentions.none())
+                    if edited is not None:
+                        self.message = edited
                 except discord.HTTPException:
                     # Excluir a mensagem não cancela uma síntese nem desfaz ajustes.
-                    pass
+                    return False
+            self._cover_attachment_key = key
+            return True
         finally:
             for file in files:
                 file.close()
@@ -371,8 +420,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
             return
         self.selected_melody_id = melody.id
         self._page_locked = False
-        self._saved = False
-        await self.refresh()
+        await self.refresh(rebuild=False)
         await self._edit_panel(interaction)
 
     async def previous_page(self, interaction: discord.Interaction) -> None:
@@ -413,8 +461,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
             await interaction.response.defer()
             await self.cog._set_user_tts_and_refresh(self.guild_id, self.owner_id, ttv_melody_id=melody_id)
             self.active_melody_id = melody_id
-            self._saved = True
-            await self.refresh()
+            await self.refresh(force=True, rebuild=False)
         except Exception:
             await _reply(interaction, "Não consegui salvar a melodia agora. Tente novamente.")
         finally:
@@ -427,7 +474,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
         if self._preview_running:
             await _reply(interaction, "A amostra anterior ainda está sendo gerada.")
             return
-        await self.refresh()
+        await self.refresh(force=True, rebuild=False)
         if self._preview_running:
             await _reply(interaction, "A amostra anterior ainda está sendo gerada.")
             return
@@ -461,11 +508,11 @@ class CDPanelView(VisaoLayoutBaseTTS):
             await _reply(interaction, "-# " + _public_notice("ttv_singing_failed"))
         finally:
             self._preview_running = False
-            await self.refresh()
+            await self.refresh(rebuild=False)
             await self._edit_panel(interaction)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
-        await _reply(interaction, "Essa interação falhou. Abra seu painel de melodias novamente.")
+        await super().on_error(interaction, error, item)
 
     async def on_timeout(self) -> None:
         self.expires_at_monotonic = 0

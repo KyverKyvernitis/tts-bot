@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import json
 import logging
@@ -17,6 +18,8 @@ _SCORE_FILE = Path(__file__).with_name("cd_song_scores.json")
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _FAILED_CATALOG_SIGNATURE: tuple[int, ...] | None = None
+_LOOKUP_SNAPSHOT = None
+_LOOKUP = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,17 +189,22 @@ def catalog_signature() -> tuple[int, ...]:
 
 
 def normalize_melody_id(value: object = None) -> str:
-    if value is not None and not isinstance(value, str):
-        raise ValueError("Escolha uma melodia disponível no painel de canto.")
-    identity = str(value or "").strip() or DEFAULT_MELODY_ID
-    if not any(melody.id == identity for melody in list_melodies()):
-        raise ValueError("Essa melodia está indisponível. Escolha outra no painel de canto.")
-    return identity
+    return get_melody(value).id
 
 
 def get_melody(value: object = None) -> Melody:
-    identity = normalize_melody_id(value)
-    return next(melody for melody in list_melodies() if melody.id == identity)
+    global _LOOKUP_SNAPSHOT, _LOOKUP
+    if value is not None and not isinstance(value, str):
+        raise ValueError("Escolha uma melodia disponível no painel de canto.")
+    identity = str(value or "").strip() or DEFAULT_MELODY_ID
+    snapshot = list_melodies()
+    if snapshot is not _LOOKUP_SNAPSHOT:
+        _LOOKUP = {melody.id: melody for melody in snapshot}
+        _LOOKUP_SNAPSHOT = snapshot
+    melody = _LOOKUP.get(identity)
+    if melody is None:
+        raise ValueError("Essa melodia está indisponível. Escolha outra no painel de canto.")
+    return melody
 
 
 def score_for_melody(value: object = None) -> dict:
@@ -247,7 +255,12 @@ _NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 def format_score_notes(melody: Melody) -> str:
     """Represent the *actual* MIDI score, in its stored order and octave."""
-    score = json.loads(melody.score_json)
+    return _score_notes(melody.score_json)
+
+
+@lru_cache(maxsize=256)
+def _score_notes(score_json: str) -> str:
+    score = json.loads(score_json)
     sequence = []
     for note in score["notes"]:
         midi = note["midi_note"]

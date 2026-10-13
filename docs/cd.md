@@ -17,7 +17,8 @@ a letra. As fontes das transcrições estão em `cogs/tts/cd_song_scores.json`.
 selecionados no TTV. As músicas são demonstradas com “lá” em cada nota; não
 incluem a letra original. A amostra usa as notas e o andamento da melodia, sem
 alterar os ajustes de tom e velocidade da fala. Ela não entra na fila nem
-conecta o bot à call. O worker de síntese precisa estar disponível para ouvir.
+conecta o bot à call. Uma amostra pronta e compatível toca mesmo com o worker
+offline; gerar outra amostra exige o worker disponível.
 
 **Usar esse CD** confirma a seleção pessoal neste servidor. A navegação pelo
 seletor não salva ajustes. Uma opção já em uso aparece confirmada; a escolha
@@ -30,8 +31,12 @@ Cada trecho comporta até uma sílaba por nota; com menos sílabas a voz pode
 prolongar as vogais nas notas seguintes, respeitando as pausas. Para uma letra
 maior, escolha um trecho com mais notas ou divida a mensagem.
 
-O painel expira após 24 horas sem interação; use `_cd` novamente. Reabrir substitui
-somente o seu próprio painel de canto nesse servidor. Esta mudança mantém o
+O painel aberto pelo comando expira após cinco minutos sem interação autorizada;
+use `_cd` novamente. Reabrir no mesmo canal reutiliza seu painel ainda ativo;
+um painel expirado é substituído. A atualização automática do catálogo ou dos
+emojis não prolonga a validade. O bot conserva o despacho dos controles por até
+24 horas para responder à interação expirada com o mesmo aviso privado de
+`_tts`, trocando o comando para `_cd`. Esta mudança mantém o
 runtime do worker 1.11.41. As partituras são enviadas pelo bot ao worker, sem
 precisar anexar um MIDI nem trocar o motor instalado.
 
@@ -46,8 +51,8 @@ O roteamento `_cd` usa o prefixo do bot configurado no servidor.
 
 ## Menu de CDs: capas no seletor
 
-O painel usa emojis estáticos da própria aplicação Discord. No primeiro acesso,
-o Osaka verifica os emojis existentes e cria os que ainda faltam **somente** se
+O painel usa emojis estáticos da própria aplicação Discord. Ao iniciar e quando
+o catálogo muda, o Osaka verifica os emojis existentes e cria os que faltam se
 as imagens JPEG locais estiverem presentes no pacote de capas. Usa o método
 `create_application_emoji`, disponível em discord.py >= 2.5. Os nomes são
 determinísticos, então a mesma imagem é reutilizada em todos os servidores e
@@ -57,8 +62,31 @@ A sincronização ocorre em segundo plano e não bloqueia a abertura do menu.
 Se o Discord rejeitar a criação ou a imagem não estiver instalada, o seletor
 continua funcionando apenas com o nome da música. A criação não é repetida
 a cada clique: tentativas são limitadas e emojis já existentes são reaproveitados.
+Cada música recupera suas falhas independentemente: uma imagem inválida ou
+rejeição específica não bloqueia as seguintes. Falhas temporárias recebem
+novas tentativas sem abrir o painel novamente; limites e bloqueios globais
+respeitam cooldown. Uma criação cuja resposta se perdeu verifica o registro
+remoto antes de tentar novamente, evitando duplicatas. Não se apagam emojis
+para contornar a cota da aplicação.
 O painel principal mantém a imagem em tamanho maior; no seletor o tamanho da
 miniatura é limitado pelo tamanho do emoji nativo do Discord.
+
+Arquivos locais aprovados por SHA-256 e formato são reutilizados em cache
+limitado. A troca do arquivo, do hash ou da partitura invalida somente os
+artefatos correspondentes. Editar um painel com a mesma capa reutiliza seu
+anexo, sem novo upload; a criação dos emojis não consulta o YouTube.
+
+Uma thumbnail visível não comprova que o JPEG local está instalado: o painel
+também aceita a URL pública, mas criar o emoji requer os bytes locais validados.
+Para conferir sem credenciais, execute da raiz do projeto:
+
+```bash
+python3 scripts/diagnose-cd-assets.py rolling-girl
+sudo journalctl --since "2 hours ago" --no-pager | grep -F '[cd_emoji]'
+```
+
+O diagnóstico verifica o hash e a conversão real em JPEG 128×128. Os logs
+registram estado, tipo do erro, status HTTP e código Discord, sem tokens.
 
 Não há configuração secreta adicional e nem alterações no Phone Worker.
 O catálogo inicial permanece disponível. Novos CDs são incorporados por ZIPs versionados do kit Termux.

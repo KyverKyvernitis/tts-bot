@@ -227,6 +227,8 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         self._edge_voice_refresh_task = self._schedule_tts_background(self._load_edge_voices())
         self._ensure_tts_agent_health_task()
         self._ensure_voice_incident_report_worker()
+        from .interface.painel_canto import start_catalog_watch
+        start_catalog_watch(self)
         if TTS_BOOT_WARMUP_ENABLED:
             self._schedule_tts_background(self._boot_warmup())
         if self._voice_auto_restore_enabled:
@@ -235,6 +237,8 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             print("[tts_voice] restore automático de call desativado por TTS_VOICE_AUTO_RESTORE_ENABLED=false")
 
     def cog_unload(self):
+        from .interface.painel_canto import stop_catalog_watch
+        stop_catalog_watch(self)
         self._voice_incident_shutdown = True
         self._cancel_tts_agent_health_task()
         self._shutdown_tts_runtime()
@@ -2401,6 +2405,10 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
 
     async def _delete_prefix_panel(self, guild_id: int, user_id: int, panel_kind: str):
         key = self._prefix_panel_key(guild_id, user_id, panel_kind)
+        if panel_kind == 'cd':
+            previous_view = getattr(self, '_cd_panel_views', {}).pop(key, None)
+            if previous_view is not None:
+                previous_view.stop()
         message = self._active_prefix_panels.pop(key, None)
         if not message:
             return
@@ -4897,9 +4905,25 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         try:
             from .interface.painel_canto import CDPanelView
 
+            views = getattr(self, '_cd_panel_views', None)
+            if views is None:
+                views = self._cd_panel_views = weakref.WeakValueDictionary()
+            key = self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)
+            previous = views.get(key)
+            previous_message = getattr(previous, 'message', None)
+            if (previous is not None and not previous._is_expired() and not previous.is_finished()
+                    and getattr(getattr(previous_message, 'channel', None), 'id', None) == getattr(message.channel, 'id', -1)):
+                await previous.refresh(force=True, rebuild=False)
+                if not previous._is_expired() and not previous.is_finished():
+                    previous.expires_at_monotonic = time.monotonic() + previous._activity_timeout
+                    if await previous._edit_panel():
+                        self._active_prefix_panels[key] = previous.message
+                        return True
+
             view = CDPanelView(self, message.author.id, message.guild.id, timeout=300)
             await view.refresh()
             files = view.panel_files()
+            emoji_generation = view.emoji_generation
             try:
                 sent = await message.channel.send(
                     view=view,
@@ -4945,11 +4969,17 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         # Keep the previous usable panel until Discord confirms its replacement.
         await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
         view.message = sent
+        view.remember_cover()
+        self._cd_panel_views[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = view
         self._public_panel_states[sent.id] = {
             "panel_kind": panel_kind,
             "owner_id": message.author.id,
         }
         self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
+        if view.emoji_generation != emoji_generation:
+            # Emoji synchronization can finish while Discord uploads the panel.
+            # Its early rebuild cannot change an already serialized HTTP payload.
+            await view._edit_panel()
         return True
 
     async def _send_prefix_panel(

@@ -33,6 +33,7 @@ def dica_comando_painel_expirado(tipo_painel: str) -> str:
         "user": "tts",
         "server": "panel_server",
         "toggle": "toggle_panel",
+        "cd": "cd",
     }.get(str(tipo_painel or "user"), "tts")
     return f"`{prefixo}{comando}`"
 

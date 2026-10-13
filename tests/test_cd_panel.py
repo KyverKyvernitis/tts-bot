@@ -23,13 +23,20 @@ def cog_for(settings=None, *, online=True, ready=True, status=None):
     async def save(guild, user, **updates):
         values.update(updates)
 
+    prefix_hint = AsyncMock(return_value="`!cd`")
+    async def expired(guild_id, panel_kind):
+        hint = await prefix_hint(guild_id, panel_kind)
+        return ("<:osaka:1539137127852539944>| Essa interação expirou, você terá que usar o comando "
+                f"{hint} novamente para usar esse botão")
+
     return SimpleNamespace(
         _get_db=lambda: db,
         _set_user_tts_and_refresh=AsyncMock(side_effect=save),
         _ttv_voice_status=Mock(return_value=state),
         _tts_phone_worker_online_for_ui=Mock(return_value=online),
         _cd_preview_mp3=AsyncMock(return_value=b"ID3-private-native-canto-contract"),
-        _get_panel_prefix_hint=AsyncMock(return_value="`!cd`"),
+        _get_panel_prefix_hint=prefix_hint,
+        _build_expired_panel_message=AsyncMock(side_effect=expired),
         _test_values=values,
     )
 
