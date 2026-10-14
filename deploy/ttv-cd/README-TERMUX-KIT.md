@@ -1,33 +1,41 @@
-# Termux Kit v9
+# Termux Kit v9.1
 
 O kit importa MIDIs locais, prepara o CD e publica automaticamente na rota
-HTTPS autenticada da VPS. O catálogo é ativado sem reiniciar o bot. O updater
+autenticada da VPS pela VPN Tailscale existente. HTTPS também é suportado.
+O catálogo é ativado sem reiniciar o bot. O updater
 continua responsável pelas atualizações de código; novos CDs usam o serviço
 de dados do catálogo.
 
 ## Instalação
 
-Baixe o kit v9 em Downloads e encerre o importador antigo com Ctrl+C na sua
+Baixe o kit v9.1 em Downloads e encerre o importador antigo com Ctrl+C na sua
 sessão. `pgrep -af import-midi.py` mostra os processos; `kill -INT PID` encerra
 somente o importador escolhido. O Phone Worker continua separado.
 
 ```sh
 pkg install -y python ffmpeg unzip python-pillow openssh
 python -m pip install aiohttp yt-dlp
-unzip -o "$HOME/storage/downloads/osaka-cd-termux-kit-v9.zip" -d "$HOME"
-cd "$HOME/osaka-cd-termux-kit-v9"
+unzip -o "$HOME/storage/downloads/osaka-cd-termux-kit-v9.1.zip" -d "$HOME"
+cd "$HOME/osaka-cd-termux-kit-v9.1"
 ```
 
-A VPS precisa receber a atualização v9 uma vez e executar
+A VPS precisa receber a atualização v9.1 uma vez e executar
 `python3 scripts/configure-cd-server.py` dentro da pasta do bot. Siga
-`docs/cd-v9-entrega.md` da atualização para instalar o arquivo de serviço e
+`docs/cd-v9.1-vpn.md` da atualização para instalar o arquivo de serviço e
 reiniciar o bot nessa configuração inicial. O script gera na VPS o arquivo
 privado `~/osaka-cd-client.json`, já com o endereço e o token correspondentes.
 Novos CDs depois dessa configuração usam a rota de dados e não reiniciam o bot.
 
-No Termux, copie esse arquivo por SSH. Execute `read` e, na linha seguinte,
-digite o IP ou domínio SSH da sua VPS e pressione Enter. Esse endereço SSH
-pode ser diferente do domínio HTTPS da API:
+Sem `--url`, o script consulta o Tailscale ativo na VPS e a porta do serviço
+do bot. Não exige domínio público. No telefone, mantenha o aplicativo Tailscale
+conectado à mesma rede. Para descobrir o endereço já pareado com seu worker:
+
+```sh
+python deploy/ttv-cd/configure-cd.py --discover
+```
+
+No Termux, copie o arquivo por SSH. Execute `read` e, na linha seguinte,
+digite o `vps_host` mostrado pela descoberta e pressione Enter:
 
 ```sh
 mkdir -p "$HOME/.config/osaka-cd"
@@ -43,13 +51,17 @@ chmod 600 "$HOME/.config/osaka-cd/publish.json"
 ```
 
 O SSH poderá solicitar a confirmação da chave da VPS e sua senha. A alternativa
-é executar `python deploy/ttv-cd/configure-cd.py`, informar o endereço HTTPS
-público quando solicitado e preencher o token no segundo campo, com entrada
-oculta. Não envie tokens ou o arquivo privado no Discord.
+é executar `python deploy/ttv-cd/configure-cd.py`: ele reutiliza a URL literal
+do pareamento existente e pede o token de publicação com entrada oculta. O token
+de publicação é próprio do catálogo; o token do Phone Worker não é reutilizado.
+Não envie tokens ou o arquivo privado no Discord.
 
 A configuração fica em `~/.config/osaka-cd/publish.json`, com permissão 600,
 fora do diretório do kit. Instalar versões posteriores preserva a configuração.
 O arquivo privado não entra em relatórios nem nos pacotes de CD.
+O modo `tailscale` permite HTTP somente para IP literal da rede Tailscale,
+com autenticação e sem redirecionamento ou proxy HTTP. O telefone não precisa
+do comando `tailscale`; a conexão é fornecida pelo aplicativo Android.
 
 Verifique a conexão e inicie o importador:
 

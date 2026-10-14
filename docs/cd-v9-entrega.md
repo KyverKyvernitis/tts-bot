@@ -1,4 +1,6 @@
-# Osaka CD v9 — instalação e uso
+# Osaka CD v9.1 — instalação e uso
+
+Para reutilizar a VPN existente, consulte também [cd-v9.1-vpn.md](cd-v9.1-vpn.md).
 
 Esta entrega separa novos CDs das atualizações de código. A VPS recebe pacotes de dados pela rota autenticada, valida e ativa uma geração do catálogo sem reiniciar o bot. O Termux publica e acompanha o estado automaticamente. O ZIP local continua disponível para auditoria e recuperação.
 
@@ -6,7 +8,7 @@ O backend UTAU e os arquivos do Phone Worker 1.11.41 são preservados. O kit usa
 
 ## 1. Instalar a atualização da VPS uma vez
 
-Envie **osaka-cd-vps-v9.zip** ao updater de código que você já utiliza e aguarde a conclusão. O pacote é incremental e inclui as correções anteriores necessárias. Não envie o ZIP do kit Termux ao updater da VPS.
+Envie **osaka-cd-vps-v9.1.zip** ao updater de código que você já utiliza e aguarde a conclusão. O pacote é incremental e inclui as correções anteriores necessárias. Não envie o ZIP do kit Termux ao updater da VPS.
 
 Depois, na VPS:
 
@@ -15,7 +17,7 @@ cd ~/bot
 python3 scripts/configure-cd-server.py
 ```
 
-Quando o script perguntar, informe o endereço HTTPS público já usado para acessar o bot. Ele gera uma credencial privada, conserva a mesma credencial em execuções posteriores e prepara os arquivos abaixo sem mostrar o token no terminal:
+Sem pedir um endereço público, o script descobre o IP da VPN Tailscale ativa na VPS e a porta do serviço do bot. Ele gera uma credencial privada, conserva a mesma credencial em execuções posteriores e prepara os arquivos abaixo sem mostrar o token no terminal:
 
 - `~/.config/osaka-cd/server.env`: configuração privada da VPS.
 - `~/.config/osaka-cd/60-cd-publication.conf`: complemento de configuração do serviço.
@@ -35,7 +37,7 @@ Esse reinício é da instalação inicial. Adicionar CDs depois usa a API de dad
 
 ## 2. Instalar o kit no Termux
 
-Baixe **osaka-cd-termux-kit-v9.zip** em Downloads. Encerre o importador antigo na sessão dele com Ctrl+C. Para localizar outra sessão:
+Baixe **osaka-cd-termux-kit-v9.1.zip** em Downloads. Encerre o importador antigo na sessão dele com Ctrl+C. Para localizar outra sessão:
 
 ```sh
 pgrep -af import-midi.py
@@ -48,8 +50,8 @@ Instale e extraia:
 ```sh
 pkg install -y python ffmpeg unzip python-pillow openssh
 python -m pip install aiohttp yt-dlp
-unzip -o "$HOME/storage/downloads/osaka-cd-termux-kit-v9.zip" -d "$HOME"
-cd "$HOME/osaka-cd-termux-kit-v9"
+unzip -o "$HOME/storage/downloads/osaka-cd-termux-kit-v9.1.zip" -d "$HOME"
+cd "$HOME/osaka-cd-termux-kit-v9.1"
 mkdir -p "$HOME/.config/osaka-cd"
 ```
 
@@ -57,7 +59,7 @@ O acesso a Downloads já funciona no seu Termux. `termux-setup-storage` só é n
 
 ## 3. Parear com a VPS uma vez
 
-Transfira o arquivo privado por SSH. No comando abaixo, substitua `SEU_IP` pelo IP ou hostname que você usa para entrar na VPS:
+Mantenha o aplicativo Tailscale do telefone conectado à mesma rede. `python deploy/ttv-cd/configure-cd.py --discover` mostra o endereço já pareado em `~/.phone-worker.env`. Transfira o arquivo privado por SSH. No comando abaixo, substitua `SEU_IP` pelo IP da VPN encontrado ou pelo endereço que você usa para entrar na VPS:
 
 ```sh
 scp ubuntu@SEU_IP:~/osaka-cd-client.json "$HOME/.config/osaka-cd/publish.json"

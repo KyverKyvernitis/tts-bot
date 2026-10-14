@@ -12,8 +12,9 @@ import stat
 import tempfile
 import time
 from urllib.parse import urlsplit, urljoin
-from urllib.request import Request, build_opener, HTTPRedirectHandler
+from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 from urllib.error import HTTPError
+from osaka_cd.transport import TransportError, validate_publish_url, validate_status_endpoint
 
 CONFIG_PATH = Path.home() / '.config/osaka-cd/publish.json'
 MAX_RESPONSE = 1024 * 1024
@@ -31,15 +32,11 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def validate_url(url):
-    if not isinstance(url, str):
-        raise PublishError('publish_url_requires_https_without_credentials')
-    endpoint = urlsplit(url)
-    if (endpoint.scheme != 'https' or not endpoint.hostname or endpoint.username or endpoint.password
-            or endpoint.query or endpoint.fragment or endpoint.path.rstrip('/') != '/api/osaka/cd/publish'
-            or any(c.isspace() for c in url)):
-        raise PublishError('publish_url_requires_https_without_credentials')
-    return url.rstrip('/')
+def validate_url(url, transport='https'):
+    try:
+        return validate_publish_url(url, transport)
+    except TransportError as exc:
+        raise PublishError(str(exc)) from None
 
 
 def _secret(token):
@@ -66,10 +63,13 @@ def _atomic_private(path, value):
         Path(temporary).unlink(missing_ok=True)
 
 
-def save_configuration(url, token, path=None):
-    value = {'version': 1, 'publish_url': validate_url(url), 'token': _secret(token)}
+def save_configuration(url, token, path=None, *, transport='https'):
+    value = {'version': 1, 'publish_url': validate_url(url, transport), 'token': _secret(token)}
+    if transport != 'https':
+        value['transport'] = transport
     _atomic_private(path or CONFIG_PATH, value)
-    return {'configured': True, 'publish_url': value['publish_url'], 'config_path': str(path or CONFIG_PATH)}
+    return {'configured': True, 'publish_url': value['publish_url'], 'transport': transport,
+            'config_path': str(path or CONFIG_PATH)}
 
 
 def load_configuration(path=None, *, url=None):
@@ -89,31 +89,59 @@ def load_configuration(path=None, *, url=None):
     if not endpoint:
         return None
     token = os.getenv('OSAKA_CD_PUBLISH_TOKEN') or value.get('token')
-    return {'publish_url': validate_url(endpoint), 'token': _secret(token)}
+    transport = os.getenv('OSAKA_CD_PUBLISH_TRANSPORT') or value.get('transport', 'https')
+    result = {'publish_url': validate_url(endpoint, transport), 'token': _secret(token)}
+    if transport != 'https':
+        result['transport'] = transport
+    return result
 
 
-def _status_url(publish_url, supplied, job_id=None):
-    base = urlsplit(validate_url(publish_url))
+def _status_url(publish_url, supplied, job_id=None, *, transport='https'):
+    publish_url = validate_url(publish_url, transport)
+    base = urlsplit(publish_url)
     if supplied:
-        result = urljoin(publish_url, supplied)
+        if not isinstance(supplied, str):
+            raise PublishError('publish_status_url_refused')
+        # urljoin/urlsplit discard some control characters: reject them first.
+        if any(c in supplied for c in ('\\', '?', '#')) or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in supplied):
+            raise PublishError('publish_status_url_refused')
+        try:
+            result = urljoin(publish_url, supplied)
+        except ValueError:
+            raise PublishError('publish_status_url_refused') from None
     elif job_id:
         if not isinstance(job_id, str) or not job_id or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in job_id):
             raise PublishError('publish_invalid_job_id')
         result = urljoin(publish_url, 'jobs/' + job_id)
     else:
         result = urljoin(publish_url, 'status')
-    endpoint = urlsplit(result)
+    try:
+        validate_status_endpoint(result, transport)
+        endpoint = urlsplit(result)
+    except (TransportError, ValueError):
+        raise PublishError('publish_status_url_refused') from None
+    path = endpoint.path
+    job_path = path.removeprefix('/api/osaka/cd/jobs/')
+    valid_path = path == '/api/osaka/cd/status' or (path.startswith('/api/osaka/cd/jobs/') and job_path
+        and all(c in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in job_path))
     if ((endpoint.scheme, endpoint.netloc) != (base.scheme, base.netloc) or endpoint.username
             or endpoint.password or endpoint.query or endpoint.fragment
-            or not endpoint.path.startswith('/api/osaka/cd/')):
+            or not valid_path):
         raise PublishError('publish_status_url_refused')
     return result
 
 
-def _request(url, token, *, data=None, headers=None, method='GET', timeout=15):
+def _request(url, token, *, data=None, headers=None, method='GET', timeout=15, transport='https'):
+    try:
+        validate_status_endpoint(url, transport)
+    except TransportError as exc:
+        raise PublishError(str(exc)) from None
     request = Request(url, data=data, method=method, headers={'Authorization': 'Bearer ' + _secret(token), **(headers or {})})
     try:
-        with build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
+        # Android's Tailscale VPN supplies the route. Never send its plaintext
+        # private HTTP request (and credential) through an inherited proxy.
+        handlers = [ProxyHandler({}), _NoRedirect()] if urlsplit(url).scheme == 'http' else [_NoRedirect()]
+        with build_opener(*handlers).open(request, timeout=timeout) as response:
             raw = response.read(MAX_RESPONSE + 1)
             if response.status not in {200, 202} or len(raw) > MAX_RESPONSE:
                 raise PublishError('publish_unexpected_response')
@@ -136,7 +164,7 @@ def _request(url, token, *, data=None, headers=None, method='GET', timeout=15):
         raise PublishError('publish_failed_' + type(exc).__name__) from None
 
 
-def _receipt(result, url):
+def _receipt(result, url, *, transport='https'):
     state = result.get('state')
     if not isinstance(state, str) or state not in STATES:
         raise PublishError('publish_unknown_job_state')
@@ -147,7 +175,7 @@ def _receipt(result, url):
     # confirms activated data (or an unchanged already-installed revision).
     installed = bool(state == 'activated' and result.get('installed') is True
                      or state == 'unchanged' and result.get('installed') is True)
-    status_url = _status_url(url, result.get('status_url'), job_id) if result.get('job_id') or result.get('status_url') else None
+    status_url = _status_url(url, result.get('status_url'), job_id, transport=transport) if result.get('job_id') or result.get('status_url') else None
     return {'state': state, 'installed': installed, 'applied': bool(result.get('applied') or state in {'applied', 'activated'}),
             'published_to_vps': True, 'job_id': job_id, 'candidate_id': result.get('candidate_id'),
             'generation': result.get('generation'), 'status_url': status_url,
@@ -156,10 +184,10 @@ def _receipt(result, url):
                 else 'publication_failed'} if state == 'failed' else {})}
 
 
-def publish_package(zip_path, url, token=None, *, expected_versions=None, retry_failed=False, timeout=120):
+def publish_package(zip_path, url, token=None, *, expected_versions=None, retry_failed=False, timeout=120, transport='https'):
     from package_validation import validate_package
     validate_package(zip_path, require_cd_only=True, audio_probe=True)
-    url = validate_url(url)
+    url = validate_url(url, transport)
     secret = _secret(token if token is not None else os.getenv('OSAKA_CD_PUBLISH_TOKEN'))
     data = Path(zip_path).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
@@ -168,13 +196,13 @@ def publish_package(zip_path, url, token=None, *, expected_versions=None, retry_
         headers['X-CD-Retry-Failed'] = 'true'
     if expected_versions is not None:
         headers['X-CD-Expected-Versions'] = json.dumps(expected_versions, separators=(',', ':'), allow_nan=False)
-    result = _request(url, secret, data=data, headers=headers, method='POST', timeout=timeout)
-    return {**_receipt(result, url), 'zip_sha256': digest}
+    result = _request(url, secret, data=data, headers=headers, method='POST', timeout=timeout, transport=transport)
+    return {**_receipt(result, url, transport=transport), 'zip_sha256': digest}
 
 
-def publication_status(url, token, *, job_id=None, status_url=None):
-    result = _request(_status_url(url, status_url, job_id), token)
-    return _receipt(result, url) if job_id or status_url else result
+def publication_status(url, token, *, job_id=None, status_url=None, transport='https'):
+    result = _request(_status_url(url, status_url, job_id, transport=transport), token, transport=transport)
+    return _receipt(result, url, transport=transport) if job_id or status_url else result
 
 
 class PublicationOutbox:
@@ -237,6 +265,7 @@ class PublicationOutbox:
             processed += 1
             try:
                 config = self.configuration
+                transport = config.get('transport', 'https')
                 retry_failed = bool(item.get('retry_failed') or force and item.get('state') == 'failed')
                 if force and item.get('state') == 'failed' and not item.get('retry_failed'):
                     item['retry_failed'] = True
@@ -244,7 +273,7 @@ class PublicationOutbox:
                         item.pop(key, None)
                     self.save()
                 if item.get('job_id') and item.get('status_url'):
-                    response = publication_status(config['publish_url'], config['token'], job_id=item['job_id'], status_url=item['status_url'])
+                    response = publication_status(config['publish_url'], config['token'], job_id=item['job_id'], status_url=item['status_url'], transport=transport)
                 elif item.get('published_to_vps'):
                     # The old updater has no install-status contract. Keep its
                     # receipt visible instead of falsely concluding success.
@@ -256,13 +285,13 @@ class PublicationOutbox:
                     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                         raise PublishError('publication_package_missing_or_changed')
                     if 'expected_versions' not in item:
-                        snapshot = publication_status(config['publish_url'], config['token'])
+                        snapshot = publication_status(config['publish_url'], config['token'], transport=transport)
                         versions = snapshot.get('song_versions', snapshot.get('versions', {}))
                         if not isinstance(versions, dict):
                             raise PublishError('publish_invalid_version_snapshot')
                         item['expected_versions'] = {item['id']: versions.get(item['id'])}
                         self.save()
-                    response = publish_package(path, config['publish_url'], config['token'], expected_versions=item['expected_versions'], retry_failed=retry_failed)
+                    response = publish_package(path, config['publish_url'], config['token'], expected_versions=item['expected_versions'], retry_failed=retry_failed, transport=transport)
                 item.update(response, attempt=0, retry_after=now + 2, retry_failed=False)
                 reports.append({'id': item['id'], 'zip_sha256': digest, **response})
                 if response['installed']:
