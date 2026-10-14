@@ -68,7 +68,7 @@ class MessageHarmonyModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_plain_selected_cd_message_keeps_both_harmonic_parts(self):
         item=await self.prepare('olá mundo')
         self.assertEqual(len(item.ttv_arrangement['parts']),2)
-        self.assertEqual(item.ttv_arrangement['message_lyrics_mode'],'automatic-lyrics-v1')
+        self.assertEqual(item.ttv_arrangement['message_lyrics_mode'],'automatic-lyrics-v2')
         self.lookup.assert_called_once_with('test-song',preview=True)
         self.assertEqual(item.text,'olá mundo')
 
@@ -91,7 +91,7 @@ class MessageHarmonyModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_singing_on_default_cd_is_automatically_adapted(self):
         item=await self.prepare('/cantar porra ~ ~ ~ ~',selected=False)
         self.assertIsNotNone(item.ttv_arrangement)
-        self.assertEqual(item.ttv_arrangement['message_lyrics_mode'],'automatic-lyrics-v1')
+        self.assertEqual(item.ttv_arrangement['message_lyrics_mode'],'automatic-lyrics-v2')
 
     async def test_plain_selected_message_generates_verified_full_live_mix(self):
         item=await self.prepare('olá mundo')

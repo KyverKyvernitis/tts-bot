@@ -101,14 +101,14 @@ class AdaptiveLyricsTests(unittest.TestCase):
                 assert_worker_accepts(self,request,self.align,language)
         return prepared,result
 
-    def test_short_word_and_single_vowel_restart_after_all_rest_boundaries(self):
+    def test_short_word_stops_after_its_syllables_without_filling_later_rests(self):
         for text in ('a','porra','amanheceu'):
             with self.subTest(text=text):
                 prepared,plan=self.plan(text,template(rests=True))
                 self.assertEqual(len(prepared['parts']),3)
                 words=[word for chunk in plan['chunks'] for request in chunk['parts']
                        if request['role']=='lead' for word in request['adaptive_text'].split() if word!='~']
-                self.assertEqual(words.count(text),4 if text=='a' else 1)
+                self.assertEqual(words.count(text),1)
 
     def test_screenshot_long_sentence_keeps_all_words_in_order(self):
         text='eu vou dormir agora amor e te ligo mais tarde pra você fazer um sistema para eu te mandar'
@@ -137,9 +137,11 @@ class AdaptiveLyricsTests(unittest.TestCase):
         self.assertTrue(any(segment['fade_out'] for segment in emitted))
         self.assertEqual([segment['text'] for segment in emitted if segment['text']!='~'],['porra','amor'])
 
-    def test_tiny_motif_is_stretched_for_a_word_without_unsafe_note_durations(self):
+    def test_tiny_motif_repeats_without_changing_note_duration_or_tempo(self):
         prepared,plan=self.plan('constitucionalmente',template(duration=40,parts=1))
-        self.assertGreater(prepared['lyrics_adaptation']['tempo_stretch'],1)
+        self.assertEqual(prepared['lyrics_adaptation']['tempo_stretch'],1)
+        self.assertGreater(prepared['lyrics_adaptation']['motif_repeats'],1)
+        self.assertTrue(all(note['duration_ms']==40 for note in prepared['parts'][0]['notes']))
         self.plan('constitucionalmente',template(rests=True,duration=40,parts=1))
 
     def test_dense_and_long_pitch_spans_respect_worker_boundaries(self):

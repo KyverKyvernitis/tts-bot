@@ -1,7 +1,7 @@
 """Adapt free lyrics to a CD while retaining the immutable musical template.
 
-Words stay intact for the existing phonemizer. Extra articulations subdivide
-notes at the same pitch; short lyrics continue on their last vowel after rests.
+Words stay intact for the existing phonemizer. Each syllable and explicit hold
+consumes one musical note. All voices stop together when the utterance ends.
 Physical v1 requests still respect 128 notes and legal continuous vowel spans.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ import math
 from .arrangement import validate_arrangement, arrangement_sha256
 from .phonetics.phonemizer import phonemize
 
-POLICY = 'automatic-lyrics-v1'
+POLICY = 'automatic-lyrics-v2'
 NOTE_FLOOR = 120
 
 
@@ -180,67 +180,64 @@ def _allocate(notes, units, *, build=False):
 
 
 def prepare_message_arrangement(value, text, segments=None, *, language='pt-BR'):
-    """Fit complete words by articulating notes or repeating the CD motif."""
+    """Consume only the requested notes, repeating the motif when necessary."""
     template=validate_arrangement(value)
     units=_units(text,segments,language)
     messages=[part for part in template['parts'] if part.get('lyrics_source')=='message']
     if not messages:
         return template
-    maximum_word=max(unit['nuclei'] for unit in units)
-    stretch=1
-    while True:
-        base=copy.deepcopy(template)
-        base['duration_ms']*=stretch
-        for part in base['parts']:
-            for note in part['notes']:
-                note['start_ms']*=stretch
-                note['duration_ms']*=stretch
-        if base['duration_ms']>600000:
-            raise ValueError('A adaptação musical ultrapassa a duração máxima de execução.')
-        if all(max(_capacity(span) for span in _spans(part['notes']))>=maximum_word
-               for part in base['parts'] if part.get('lyrics_source')=='message'):
-            break
-        stretch+=1
-    period=base['duration_ms']
-    source_hash=template.get('source',{}).get('sha256')
-    base['source']={'sha256':source_hash} if source_hash else {}
-    for part in base['parts']:
-        for name in ('source_note_ids','source_note_indices','continuations'):
-            part.pop(name,None)
-    def repeated(cycles):
-        result=copy.deepcopy(base)
-        result['duration_ms']=period*cycles
-        for part in result['parts']:
-            original=part['notes']
-            part['notes']=[dict(note,start_ms=note['start_ms']+period*cycle)
-                           for cycle in range(cycles) for note in original]
-        return result
-    def fits(result):
-        return all(_allocate(part['notes'],units)[0]==len(units) for part in result['parts']
-                   if part.get('lyrics_source')=='message')
-    maximum_cycles=min(600000//period,24000//sum(len(part['notes']) for part in base['parts']))
-    low,cycles=0,1
-    result=repeated(cycles)
-    while not fits(result):
-        if cycles==maximum_cycles:
-            raise ValueError('A letra ultrapassa a duração máxima de execução do CD.')
-        low=cycles
-        cycles=min(maximum_cycles,cycles*2)
-        result=repeated(cycles)
-    high=cycles
-    while high-low>1:
-        middle=(low+high)//2
-        candidate=repeated(middle)
-        if fits(candidate):
-            high=middle
+    slots=sum(unit['nuclei']+unit['holds'] for unit in units)
+    period=template['duration_ms']
+    selected={}
+    end=0
+    cycles=1
+    for part in messages:
+        original=part['notes']
+        notes=[dict(original[i%len(original)],
+                    start_ms=original[i%len(original)]['start_ms']+period*(i//len(original)))
+               for i in range(slots)]
+        selected[part['id']]=notes
+        end=max(end,notes[-1]['start_ms']+notes[-1]['duration_ms'])
+        cycles=max(cycles,math.ceil(slots/len(original)))
+    if end>600000:
+        raise ValueError('A letra ultrapassa a duração máxima de execução do CD.')
+    result=copy.deepcopy(template)
+    result['duration_ms']=end
+    result['parts']=[]
+    omitted=0
+    for part in template['parts']:
+        if part['id'] in selected:
+            notes=selected[part['id']]
         else:
-            low=middle
-    cycles=high
-    result=repeated(cycles)
+            notes=[]
+            for cycle in range(math.ceil(end/period)):
+                for original in part['notes']:
+                    start=original['start_ms']+period*cycle
+                    if start>=end:
+                        break
+                    length=min(original['duration_ms'],end-start)
+                    if length<40:
+                        omitted+=1
+                        continue
+                    notes.append(dict(original,start_ms=start,duration_ms=length))
+        if not notes:
+            continue
+        chosen=dict(part,notes=notes)
+        for name in ('source_note_ids','source_note_indices','continuations'):
+            chosen.pop(name,None)
+        result['parts'].append(chosen)
+    source_hash=template.get('source',{}).get('sha256')
+    result['source']={'sha256':source_hash} if source_hash else {}
+    if omitted:
+        warnings=list(result.get('warnings',[]))
+        if 'message_boundary_notes_omitted' not in warnings:
+            warnings=warnings[:127]+['message_boundary_notes_omitted']
+        result['warnings']=warnings
     result['message_lyrics_mode']=POLICY
     result['lyrics_adaptation']={'template_sha256':arrangement_sha256(template),
         'words':len(units),'nuclei':sum(unit['nuclei'] for unit in units),
-        'motif_repeats':cycles,'tempo_stretch':stretch,'template_duration_ms':template['duration_ms']}
+        'requested_note_slots':slots,'motif_repeats':cycles,'tempo_stretch':1,
+        'template_duration_ms':template['duration_ms']}
     return validate_arrangement(result)
 
 
@@ -264,6 +261,8 @@ def _tokens(notes, units):
 
 
 def automatic_render_plan(arrangement, text, segments=None, *, language='pt-BR'):
+    if arrangement.get('message_lyrics_mode')==POLICY:
+        return _finite_render_plan(arrangement,text,segments,language=language)
     units=_units(text,segments,language)
     calls=[]
     for part in arrangement['parts']:
@@ -317,6 +316,110 @@ def automatic_render_plan(arrangement, text, segments=None, *, language='pt-BR')
     for chunk in arrangement_render_plan(guides)['chunks']:
         parts=[request for request in chunk['parts']
                if next(part for part in arrangement['parts'] if part['id']==request['id']).get('lyrics_source')!='message']
+        if parts:
+            calls.append(dict(chunk,parts=parts))
+    calls.sort(key=lambda chunk:chunk['start_ms'])
+    return {'chunks':calls,'warnings':['lyrics_automatically_adapted']}
+
+
+def _finite_render_plan(arrangement,text,segments,*,language):
+    """Pack complete words and their finite holds into unchanged v1 requests."""
+    units=_units(text,segments,language)
+    slots=sum(unit['nuclei']+unit['holds'] for unit in units)
+    calls=[]
+    for part in arrangement['parts']:
+        if part.get('lyrics_source')!='message':
+            continue
+        if len(part['notes'])!=slots:
+            raise ValueError('A execução musical não corresponde à quantidade de notas da letra.')
+        pending_notes,pending_segments=[],[]
+        pending_moras=0
+        anchor=None
+        def finish():
+            nonlocal pending_moras,anchor
+            if not pending_notes:
+                return
+            start=pending_notes[0]['start_ms']
+            score={'version':1,'track_index':part.get('track_index',0),'lyrics_source':'message',
+                'duration_ms':pending_notes[-1]['start_ms']+pending_notes[-1]['duration_ms']-start,
+                'notes':[dict(note,start_ms=note['start_ms']-start) for note in pending_notes]}
+            calls.append({'start_ms':start,'parts':[{'id':part['id'],'role':part['role'],
+                'voice_id':part.get('voice_id','kasane-teto'),'score':score,
+                'adaptive_text':' '.join(effect['text'] for effect in pending_segments),
+                'adaptive_segments':copy.deepcopy(pending_segments)}]})
+            pending_notes.clear()
+            pending_segments.clear()
+            pending_moras=0
+            anchor=None
+        def fits(notes,effect,moras):
+            start=pending_notes[0]['start_ms'] if pending_notes else notes[0]['start_ms']
+            return (len(pending_notes)+len(notes)<=128 and pending_moras+moras<=1024
+                and notes[-1]['start_ms']+notes[-1]['duration_ms']-start<=60000
+                and len(' '.join(e['text'] for e in pending_segments+[effect]))<=2048
+                and len(pending_segments)<128)
+        def add(notes,word,moras,*,fade_in=False,fade_out=False,hold=False):
+            nonlocal pending_moras,anchor
+            effect={'text':word,'fade_in':bool(fade_in),'fade_out':bool(fade_out),
+                    'hold':bool(hold),'pause_after_ms':0}
+            if pending_notes and (not fits(notes,effect,moras)
+                or notes[-1]['start_ms']+notes[-1]['duration_ms']-pending_notes[0]['start_ms']>16000):
+                finish()
+                if hold:
+                    return False
+            if not fits(notes,effect,moras):
+                raise ValueError('Uma palavra ultrapassa a capacidade de um trecho musical de canto.')
+            pending_notes.extend(notes)
+            pending_segments.append(effect)
+            pending_moras+=moras
+            if not hold:
+                last=notes[-1]
+                anchor={'start_ms':last['start_ms'],'low':last['midi_note'],'high':last['midi_note']}
+            return True
+        def sustain(note,unit,*,last=False):
+            nonlocal anchor
+            pieces=[item for span in _spans([note]) for item in span]
+            for index,piece in enumerate(pieces):
+                fade_out=unit['fade_out'] and last and index==len(pieces)-1
+                previous=pending_notes[-1] if pending_notes else None
+                legal=(anchor is not None and previous is not None
+                    and piece['start_ms']-previous['start_ms']-previous['duration_ms']<=20
+                    and piece['start_ms']+piece['duration_ms']-anchor['start_ms']<=16000
+                    and max(anchor['high'],piece['midi_note'])-min(anchor['low'],piece['midi_note'])<=40)
+                if legal and add([piece],'~',0,fade_out=fade_out,hold=True):
+                    anchor['low']=min(anchor['low'],piece['midi_note'])
+                    anchor['high']=max(anchor['high'],piece['midi_note'])
+                else:
+                    add([piece],unit['vowel'],unit['vowel_moras'],fade_out=fade_out)
+        cursor=0
+        for unit in units:
+            core=part['notes'][cursor:cursor+unit['nuclei']]
+            cursor+=unit['nuclei']
+            if len(core)==1 and core[0]['duration_ms']>16000:
+                pieces=[item for span in _spans(core) for item in span]
+                add([pieces[0]],unit['text'],unit['moras'],fade_in=unit['fade_in'])
+                for index,piece in enumerate(pieces[1:]):
+                    sustain(piece,unit,last=not unit['holds'] and index==len(pieces)-2)
+            else:
+                if any(note['duration_ms']>18000 for note in core):
+                    raise ValueError('Uma palavra ultrapassa a duração física de um trecho de canto.')
+                add(core,unit['text'],unit['moras'],fade_in=unit['fade_in'],
+                    fade_out=unit['fade_out'] and not unit['holds'])
+            for index in range(unit['holds']):
+                sustain(part['notes'][cursor],unit,last=index==unit['holds']-1)
+                cursor+=1
+            if unit['boundary']:
+                finish()
+        finish()
+    from .arrangement import arrangement_render_plan
+    guides=copy.deepcopy(arrangement)
+    for part in guides['parts']:
+        if part.get('lyrics_source')=='message':
+            part['lyrics_source']='vowel'
+        part['notes']=[note for span in _spans(part['notes']) for note in span]
+        part.pop('source_note_ids',None)
+    for chunk in arrangement_render_plan(guides)['chunks']:
+        parts=[request for request in chunk['parts'] if next(
+            part for part in arrangement['parts'] if part['id']==request['id']).get('lyrics_source')!='message']
         if parts:
             calls.append(dict(chunk,parts=parts))
     calls.sort(key=lambda chunk:chunk['start_ms'])

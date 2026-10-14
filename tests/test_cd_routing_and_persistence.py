@@ -48,7 +48,7 @@ async def test_selected_cd_applies_to_ordinary_messages_and_explicit_singing():
     regular = await preparar_payload_tts_mensagem(cog, make_message("'fala normal"),
        guild_defaults={}, active_prefix="'", forced_engine="teto")
     assert regular.queue_item.ttv_score == score_for_melody(selected)
-    assert regular.queue_item.ttv_arrangement['message_lyrics_mode'] == 'automatic-lyrics-v1'
+    assert regular.queue_item.ttv_arrangement['message_lyrics_mode'] == 'automatic-lyrics-v2'
     sung = await preparar_payload_tts_mensagem(cog, make_message("'/cantar la la la la"),
        guild_defaults={}, active_prefix="'", forced_engine="teto")
     assert sung.queue_item.ttv_score == score_for_melody(selected)
