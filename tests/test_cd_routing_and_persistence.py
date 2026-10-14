@@ -42,14 +42,24 @@ async def test_saved_melody_persists_without_changing_other_fields(settings_fixt
 
 
 @pytest.mark.asyncio
-async def test_message_singing_applies_selected_score_but_plain_speech_unchanged():
+async def test_selected_cd_applies_to_ordinary_messages_and_explicit_singing():
     selected = list_melodies()[1].id
     cog = FakeCog(db=FakeDB(resolved={"ttv_melody_id": selected}))
     regular = await preparar_payload_tts_mensagem(cog, make_message("'fala normal"),
        guild_defaults={}, active_prefix="'", forced_engine="teto")
-    assert regular.queue_item.ttv_score is None
+    assert regular.queue_item.ttv_score == score_for_melody(selected)
+    assert regular.queue_item.ttv_arrangement['message_lyrics_mode'] == 'automatic-lyrics-v1'
     sung = await preparar_payload_tts_mensagem(cog, make_message("'/cantar la la la la"),
        guild_defaults={}, active_prefix="'", forced_engine="teto")
     assert sung.queue_item.ttv_score == score_for_melody(selected)
     assert sung.queue_item.ttv_pitch_semitones == "+0.0"
     assert sung.queue_item.ttv_speech_rate == 1.0
+
+
+@pytest.mark.asyncio
+async def test_default_cd_keeps_ordinary_teto_speech():
+    cog = FakeCog(db=FakeDB(resolved={'ttv_melody_id':DEFAULT_MELODY_ID}))
+    payload = await preparar_payload_tts_mensagem(cog, make_message("'fala normal"),
+       guild_defaults={}, active_prefix="'", forced_engine='teto')
+    assert payload.queue_item.ttv_score is None
+    assert payload.queue_item.ttv_arrangement is None

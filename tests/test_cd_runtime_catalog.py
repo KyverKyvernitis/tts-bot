@@ -259,8 +259,7 @@ class ArrangementLyricsTests(unittest.TestCase):
         arrangement = {'score_schema': 2, 'duration_ms': 20_000,
                        'parts': [{'id': 'lead', 'role': 'lead', 'lyrics_source': 'message', 'notes': notes}]}
         self.assertEqual(melodies.minimum_singing_syllables({'notes': notes}), 2)
-        with self.assertRaisesRegex(ValueError, 'pelo menos 4 sílabas'):
-            melodies.fit_arrangement_lyrics('a a', None, arrangement)
+        self.assertEqual(melodies.fit_arrangement_lyrics('a a', None, arrangement), ('a a',None))
         self.assertEqual(melodies.fit_arrangement_lyrics('a a a a', None, arrangement), ('a a a a', None))
 
     def test_written_words_are_preserved_for_real_phonemizer(self):

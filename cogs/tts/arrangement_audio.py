@@ -53,6 +53,7 @@ def arrangement_cache_identity(item):
     if value is None:
         return ''
     raw = json.dumps({'arrangement': arrangement_performance_sha256(value),
+                      'lyrics_policy': value.get('message_lyrics_mode', 'fixed'),
                       'text': item.text, 'segments': getattr(item, 'ttv_segments', None)},
                      sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()

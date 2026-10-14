@@ -14,7 +14,6 @@ from urllib.error import HTTPError as UrllibHTTPError
 import aiohttp
 import discord
 import requests
-from .melodies import minimum_singing_syllables
 
 log = logging.getLogger(__name__)
 
@@ -25,8 +24,8 @@ _MESSAGES = {
     "ttv_singing_bank_missing": "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla",
     "ttv_singing_failed": "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla",
     "ttv_singing_timeout": "Não consegui cantar isso pois essa voz está desativada, ou só por um erro msm sla",
-    "ttv_singing_lyrics_mismatch": "A letra não encaixa nas pausas ou notas deste CD. Acrescente sílabas ou escolha outro CD.",
-    "ttv_singing_lyrics_too_long": "A letra tem mais sílabas que as notas deste CD. Encurte a letra ou escolha um CD com mais notas.",
+    "ttv_singing_lyrics_mismatch": "Não consegui adaptar esta letra ao CD. Tente novamente.",
+    "ttv_singing_lyrics_too_long": "Não consegui adaptar esta letra ao CD. Tente novamente.",
     "ttv_singing_score_invalid": "A partitura deste CD foi rejeitada pelo worker. Reimporte o MIDI e publique o pacote atualizado.",
     "ttv_singing_busy": "O worker de canto está ocupado ou sem recursos agora. Aguarde um pouco e tente novamente.",
     "ttv_singing_backend_unsupported": "O backend atual desta voz não aceita partituras MIDI. Confira a configuração UTAU do worker.",
@@ -112,14 +111,6 @@ def _voice_channel_for_item(guild, item):
 
 
 def _public_notice(code: str, *, permission: str = "", score: dict | None = None) -> str:
-    if code == "ttv_singing_lyrics_mismatch" and score:
-        try:
-            minimum = minimum_singing_syllables(score)
-        except (KeyError, TypeError, ValueError):
-            minimum = 0
-        if 1 <= minimum <= 128:
-            return (f"Esta melodia precisa de pelo menos {minimum} sílabas para respeitar suas pausas e notas. "
-                    "Acrescente sílabas ou escolha outro CD.")
     if code == "voice_permission_missing" and permission:
         # Somente rótulos constantes, nunca strings vindas do Discord/usuário.
         if permission in _PERMISSION_ALLOWED_LABELS:

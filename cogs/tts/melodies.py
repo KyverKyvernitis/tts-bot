@@ -349,56 +349,17 @@ register_validator(lambda root: _song_melodies(root / "cogs/tts/cd_song_scores.j
 
 def fit_catalog_lyrics_to_score(text: str, segments: list[dict] | None, score: dict
                                 ) -> tuple[str, list[dict] | None]:
-    """Keep the lyric singable when shorthand '~' counts differ from a catalog score.
+    """Keep words and effects intact for the automatic execution-score adapter.
 
-    A curated catalog score can receive freeform short lyrics: excess
-    continuation marks are dropped from the right; when
-    underspecified, automatic syllable alignment decides where to sustain.
+    The fixed catalog remains unchanged. Its note count is no longer a minimum
+    or maximum lyric count; osaka_cd.lyrics produces legal physical requests.
     """
-    # Single vowels have an exact, bank-independent nucleus count. Detect the
-    # common /cantar a a test before occupying the phone queue. Other words are
-    # left to the character's real phonemizer; spelling is not a syllable count.
-    vowel_tokens = text.split()
-    if vowel_tokens and all(token.casefold() in _SINGLE_VOWELS for token in vowel_tokens):
-        minimum = minimum_singing_syllables(score)
-        if len(vowel_tokens) < minimum:
-            raise ValueError(
-                f"Esta melodia precisa de pelo menos {minimum} sílabas para respeitar suas pausas e notas. "
-                f"Sua letra tem {len(vowel_tokens)}. Acrescente sílabas ou escolha outro CD."
-            )
-    if not segments or not any(part.get("text") == "~" and part.get("hold") for part in segments):
-        return text, segments
-    count = len(score["notes"])
-    slots = sum(part.get("text") != "|" for part in segments)
-    if slots == count:
-        return text, segments
-    result = [dict(part) for part in segments]
-    if slots > count:
-        excess = slots - count
-        for index in range(len(result) - 1, -1, -1):
-            if excess <= 0:
-                break
-            part = result[index]
-            if part.get("text") == "~" and part.get("hold"):
-                result.pop(index)
-                excess -= 1
-        if excess:
-            # A lyric has more syllables than notes. Do not silently erase text.
-            raise ValueError("A letra tem mais sílabas que notas nesta melodia.")
-        slots = count
-    if slots < count:
-        # A shorter lyric can use the renderer's balanced automatic alignment.
-        result = [part for part in result if not (part.get("text") == "~" and part.get("hold"))]
-    clean = " ".join(part["text"] for part in result)
-    if not any(part.get("hold") or part.get("fade_in") or part.get("fade_out")
-               or part.get("pause_after_ms") or part["text"] == "|" for part in result):
-        return clean, None
-    return clean, result
+    return text, [dict(part) for part in segments] if segments is not None else None
 
 
 def fit_arrangement_lyrics(text: str, segments: list[dict] | None, arrangement: dict
                            ) -> tuple[str, list[dict] | None]:
-    """Align user lyrics with the complete lead, never with a preview excerpt.
+    """Keep user lyrics intact for the lead of the selected execution template.
 
     Harmony lyrics remain the arrangement's explicit MIDI or vowel guides.
     Written words are left to the real voicebank phonemizer, as in v1.
@@ -407,20 +368,7 @@ def fit_arrangement_lyrics(text: str, segments: list[dict] | None, arrangement: 
     leads = [part for part in parts if isinstance(part, dict) and part.get("role") == "lead"] if isinstance(parts, list) else []
     if len(leads) != 1 or not isinstance(leads[0].get("notes"), list) or not leads[0]["notes"]:
         raise ValueError("O arranjo precisa de uma melodia principal válida.")
-    fitted_text, fitted_segments = fit_catalog_lyrics_to_score(text, segments, {"notes": leads[0]["notes"]})
-    tokens = [part.get('text', '') for part in fitted_segments
-              if part.get('text') != '|' and not (part.get('text') == '~' and part.get('hold'))] if fitted_segments else fitted_text.split()
-    if tokens and all(token.casefold() in _SINGLE_VOWELS for token in tokens):
-        from osaka_cd.arrangement import arrangement_render_plan
-        plan = arrangement_render_plan(arrangement)
-        minimum = sum(request['minimum_syllables'] for chunk in plan['chunks']
-                      for request in chunk['parts'] if request['role'] == 'lead')
-        if len(tokens) < minimum:
-            raise ValueError(
-                f"Este arranjo precisa de pelo menos {minimum} sílabas para respeitar suas pausas e trechos. "
-                f"Sua letra tem {len(tokens)}. Acrescente sílabas ou escolha outro CD."
-            )
-    return fitted_text, fitted_segments
+    return fit_catalog_lyrics_to_score(text, segments, {"notes": leads[0]["notes"]})
 
 
 def minimum_singing_syllables(score: dict | None) -> int:

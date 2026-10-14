@@ -16,22 +16,21 @@ def test_catalog_short_melisma_fits_default_score_without_modifying_original():
     raw, segments = parse_performance_text("a ~ ~ ~ a", singing=True)
     untouched = [part.copy() for part in segments]
     text, aligned = fit_catalog_lyrics_to_score(raw, segments, score_for_melody())
-    assert text == "a ~ ~ a"
-    assert [entry["text"] for entry in aligned] == ["a", "~", "~", "a"]
+    assert text == raw
+    assert aligned == untouched
     assert segments == untouched
 
 
 def test_catalog_melisma_underspecified_uses_automatic_alignment():
     text, segments = parse_performance_text("a ~ a", singing=True)
-    assert fit_catalog_lyrics_to_score(text, segments, score_for_melody()) == ("a a", None)
+    assert fit_catalog_lyrics_to_score(text, segments, score_for_melody()) == (text,segments)
 
 
 def test_catalog_does_not_remove_lyric_words_or_modify_simple_speech():
     score = score_for_melody()
     assert fit_catalog_lyrics_to_score("Olá", None, score) == ("Olá", None)
-    with pytest.raises(ValueError, match="mais sílabas"):
-        text, segments = parse_performance_text("um dois três quatro cinco ~", singing=True)
-        fit_catalog_lyrics_to_score(text, segments, score)
+    text, segments = parse_performance_text("um dois três quatro cinco ~", singing=True)
+    assert fit_catalog_lyrics_to_score(text, segments, score) == (text,segments)
 
 
 @pytest.mark.asyncio

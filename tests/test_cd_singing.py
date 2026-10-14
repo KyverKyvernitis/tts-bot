@@ -78,11 +78,13 @@ async def test_user_midi_never_overrides_missing_saved_melody():
 
 
 @pytest.mark.asyncio
-async def test_unavailable_saved_melody_does_not_change_plain_ttv_speech():
+async def test_unavailable_selected_cd_does_not_silently_fall_back_to_plain_speech():
     cog = LiveRenderCog(db=FakeDB(resolved={"ttv_melody_id": "removed-melody"}))
-    payload = await preparar_payload_tts_mensagem(cog, make_message("'Olá, mundo."),
+    message = make_message("'Olá, mundo.")
+    payload = await preparar_payload_tts_mensagem(cog, message,
         guild_defaults={}, active_prefix="'", forced_engine="teto")
-    assert payload.queue_item.ttv_score is None
+    assert payload is None
+    message.reply.assert_awaited_once()
 
 
 def make_wav(path):

@@ -6,6 +6,7 @@ prefixo de autor se ligado) e devolve o `QueueItem` pronto pro dispatcher.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import logging
 import re
@@ -18,8 +19,9 @@ import config
 from ..audio import QueueItem, _has_speakable_tts_text
 from ..ttv import resolve_preferences
 from ..performance import parse_performance_text, performance_hash
-from ..melodies import score_for_melody, fit_catalog_lyrics_to_score, arrangement_for_melody, fit_arrangement_lyrics
+from ..melodies import DEFAULT_MELODY_ID, score_for_melody, fit_catalog_lyrics_to_score, arrangement_for_melody, fit_arrangement_lyrics
 from ..arrangement_audio import execution_arrangement
+from osaka_cd.lyrics import prepare_message_arrangement
 from osaka_cd.arrangement import arrangement_sha256
 from osaka_cd.runtime import pin_snapshot
 
@@ -184,9 +186,10 @@ async def preparar_payload_tts_mensagem(
     # Attachments .mid/.midi have no special behavior on any TTV request.
     # Keep ordinary attachment handling for other file types unchanged.
     ttv_message = _WithoutUserMidiAttachments(message) if is_ttv else message
-    catalog_singing = bool(is_ttv and forced_engine == "teto"
-                           and (re.match(r"^/cantar(?:\s|$)", raw_text, re.IGNORECASE)
-                                or re.search(r"(?<!\S)~(?!\S)", raw_text)))
+    catalog_singing = bool(is_ttv and (
+        str(resolved.get('ttv_melody_id') or DEFAULT_MELODY_ID) != DEFAULT_MELODY_ID
+        or re.match(r"^/cantar(?:\s|$)", raw_text, re.IGNORECASE)
+        or re.search(r"(?<!\S)~(?!\S)", raw_text)))
     if catalog_singing:
         raw_text = re.sub(r"^/cantar(?=\s|$)\s*", "", raw_text, count=1, flags=re.IGNORECASE)
     try:
@@ -201,7 +204,7 @@ async def preparar_payload_tts_mensagem(
                 with pin_snapshot():
                     score = score_for_melody(resolved.get("ttv_melody_id"))
                     arrangement = execution_arrangement(
-                        arrangement_for_melody(resolved.get('ttv_melody_id')),
+                        arrangement_for_melody(resolved.get('ttv_melody_id'), preview=True),
                         ttv_preferences['ttv_voice_id'])
             except ValueError as exc:
                 raise ValueError("A melodia salva ficou indisponível. Escolha outra em seu painel de canto.") from exc
@@ -209,6 +212,13 @@ async def preparar_payload_tts_mensagem(
                 text, segments = fit_arrangement_lyrics(text, segments, arrangement)
             else:
                 text, segments = fit_catalog_lyrics_to_score(text, segments, score)
+                arrangement = {'score_schema':2, 'duration_ms':score['duration_ms'],
+                    'parts':[{'id':'lead','role':'lead','voice_id':ttv_preferences['ttv_voice_id'],
+                              'lyrics_source':'message','notes':score['notes']}]}
+            if len(text)>2048:
+                raise ValueError('Use até 2048 caracteres de letra por mensagem.')
+            arrangement = await asyncio.to_thread(prepare_message_arrangement, arrangement, text, segments,
+                                                  language=ttv_preferences['ttv_language'])
             ttv_preferences.update(ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
             resolved.update(ttv_preferences)
             resolved["teto_pitch_semitones"] = "+0.0"

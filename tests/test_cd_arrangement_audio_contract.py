@@ -30,7 +30,8 @@ from cogs.tts.arrangement_audio import (
 )
 from cogs.tts.ttv import resolve_preferences, worker_voice_details
 from cogs.tts.performance import performance_hash, parse_performance_text
-from cogs.tts.melodies import fit_arrangement_lyrics, fit_catalog_lyrics_to_score
+from cogs.tts.melodies import DEFAULT_MELODY_ID, fit_arrangement_lyrics, fit_catalog_lyrics_to_score
+from osaka_cd.lyrics import prepare_message_arrangement
 from osaka_cd.arrangement import arrangement_sha256
 from cogs.musica.runtime_telefone.agente.efeitos import (
     TTS_EFFECT_ENGINES, TTS_NIGHTCORE_MULTIPLIERS, TTS_SLOWED_MULTIPLIERS,
@@ -315,7 +316,7 @@ class ProductionFlowTests(unittest.IsolatedAsyncioTestCase):
                   logger=logging.getLogger(__name__), _has_speakable_tts_text=lambda text: bool(text),
                   discord=SimpleNamespace(HTTPException=type('HTTPException', (Exception,), {})),
                   pin_snapshot=contextlib.nullcontext, score_for_melody=lambda _: score,
-                  arrangement_for_melody=lambda _: full)
+                  arrangement_for_melody=lambda _, **kwargs: full)
         names = {'_WithoutAttachments', '_WithoutUserMidiAttachments', '_reply_ttv_error',
                  '_render_effect_segments', 'PayloadTTSMensagem', 'preparar_payload_tts_mensagem'}
         preparation = production_nodes('cogs/tts/mensagens/preparacao.py', names, ns)

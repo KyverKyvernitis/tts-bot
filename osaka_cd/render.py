@@ -19,7 +19,7 @@ import tempfile
 import time
 import wave
 
-RENDER_VERSION = "osaka-multipart-1"
+RENDER_VERSION = "osaka-multipart-2"
 MAX_AUDIO_BYTES = 128 * 1024 * 1024
 MAX_STEM_BYTES = 16 * 1024 * 1024
 SAMPLE_RATE = 48000
@@ -274,6 +274,8 @@ def _composition_result(audio, output_format, mix_key, arrangement, rendered,
                       | {"score_sha256": _digest(item["score"]), "render_sha256": item["sha256"],
                          "start_ms": item["start_ms"]} for item in rendered],
             "metadata": {"renderer_version": RENDER_VERSION,
+                         **({'lyrics_adaptation': arrangement['lyrics_adaptation']}
+                            if 'lyrics_adaptation' in arrangement else {}),
                          "render_profile_fingerprint": profile,
                          "midi_preroll_ms": common_preroll, "sample_rate": SAMPLE_RATE,
                          "channels": 2, "parts": len(arrangement["parts"]), "chunks": chunks,
@@ -360,7 +362,12 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
     # An empty fingerprint deliberately disables cross-request stem reuse:
     # a version number alone cannot identify a changed voicebank/resampler.
     cache = Path(cache_dir) if cache_dir is not None and render_profile_fingerprint else None
-    plan = arrangement_render_plan(arrangement)
+    automatic = arrangement.get('message_lyrics_mode') == 'automatic-lyrics-v1'
+    if automatic:
+        from .lyrics import automatic_render_plan
+        plan = automatic_render_plan(arrangement, text, segments, language=language)
+    else:
+        plan = arrangement_render_plan(arrangement)
     parts = {part["id"]: part for part in arrangement["parts"]}
     controls = {key: _mix_controls(value) for key, value in parts.items()}
     if not any(gain > 0 for gain, _ in controls.values()):
@@ -370,7 +377,7 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
     # own phrase windows. A harmony marked "message" must not silently become
     # a guide vowel; the usual imported harmony remains explicitly "vowel".
     message_words = {}
-    for identity in parts:
+    for identity in parts if not automatic else ():
         requests = [part for chunk in plan["chunks"] for part in chunk["parts"]
                     if part["id"] == identity and part["score"].get("lyrics_source") == "message"]
         if requests:
@@ -381,7 +388,10 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
             score = json.loads(json.dumps(request["score"]))
             effects = None
             if score.get("lyrics_source") == "message":
-                lyrics, effects = next(message_words[request["id"]])
+                if automatic:
+                    lyrics, effects = request['adaptive_text'], request['adaptive_segments']
+                else:
+                    lyrics, effects = next(message_words[request["id"]])
                 if not lyrics:
                     score = vowel_guide_score(score)
                     lyrics = "a"

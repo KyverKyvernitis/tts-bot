@@ -57,8 +57,7 @@ class LyricsContractTests(unittest.TestCase):
                 align_singing_syllables(nuclei, score)
             except ValueError:
                 failures[melody.id] = minimum_singing_syllables(score)
-                with self.assertRaisesRegex(ValueError, f'pelo menos {failures[melody.id]} sílabas'):
-                    fit_catalog_lyrics_to_score('a a', None, score)
+                self.assertEqual(fit_catalog_lyrics_to_score('a a', None, score), ('a a',None))
             else:
                 self.assertEqual(fit_catalog_lyrics_to_score('a a', None, score), ('a a', None))
             self.assertEqual(json.dumps(score, sort_keys=True), before)
@@ -90,7 +89,7 @@ class LyricsContractTests(unittest.TestCase):
             '_MESSAGES':{'ttv_singing_lyrics_mismatch':'fallback'},
             'minimum_singing_syllables':minimum_singing_syllables})
         output=notice('ttv_singing_lyrics_mismatch',score=score_for_melody('popipo'))
-        self.assertIn('18 sílabas',output)
+        self.assertEqual(output,'fallback')
         self.assertNotIn('voz está desativada',output)
 
 
