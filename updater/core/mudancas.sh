@@ -143,8 +143,10 @@ classify_changed_files() {
         ;;
     esac
 
+    # Bibliotecas importadas pelo processo também exigem reinício. Atualizar
+    # só seus arquivos não substitui os módulos já carregados em memória.
     case "$file" in
-      bot.py|webserver.py|config.py|db.py|start.sh|requirements.txt|requirements.lock|cogs/*|utility/*|updater/discord/*|updater/utilitarios/*)
+      bot.py|webserver.py|config.py|db.py|start.sh|requirements.txt|requirements.lock|cogs/*|utility/*|updater/discord/*|updater/utilitarios/*|osaka_cd/*.py|updater/api_cd.py|updater/__init__.py)
         BOT_CHANGED=1
         ;;
       deploy/systemd/tts-bot.service|deploy/systemd/vps/tts-bot.service)
