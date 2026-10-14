@@ -180,7 +180,7 @@ def test_local_consumer_rejects_original_text_checkmark_as_http_400():
 
 
 @pytest.mark.parametrize("prefix", ["_", "!"])
-def test_api_rejection_replies_once_preserves_old_panel_and_allows_immediate_retry(monkeypatch, caplog, prefix):
+def test_api_rejection_replies_once_retires_old_panel_and_allows_immediate_retry(monkeypatch, caplog, prefix):
     monkeypatch.setattr(config, "TTS_ENABLED", True)
 
     async def scenario():
@@ -193,7 +193,7 @@ def test_api_rejection_replies_once_preserves_old_panel_and_allows_immediate_ret
             attempts.append(kwargs)
             if "view" in kwargs:
                 _validate_api_payload(_serialize(kwargs))
-                old.delete.assert_not_awaited()
+                old.delete.assert_awaited_once()
                 if reject:
                     raise _http_failure()
                 return SimpleNamespace(id=991, delete=AsyncMock())
@@ -211,8 +211,8 @@ def test_api_rejection_replies_once_preserves_old_panel_and_allows_immediate_ret
         assert f"`{prefix}cd`" in attempts[1]["content"]
         assert attempts[0]["view"].is_finished()
         assert key not in cog._prefix_panel_cooldowns
-        assert cog._active_prefix_panels[key] is old and old.id in cog._public_panel_states
-        old.delete.assert_not_awaited()
+        assert key not in cog._active_prefix_panels and old.id not in cog._public_panel_states
+        old.delete.assert_awaited_once()
         reject = False
         await _dispatch_both(bot, cog, message(78))
         assert len(attempts) == 3 and "view" in attempts[2]

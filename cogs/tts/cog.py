@@ -2408,6 +2408,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         if panel_kind == 'cd':
             previous_view = getattr(self, '_cd_panel_views', {}).pop(key, None)
             if previous_view is not None:
+                previous_view.expires_at_monotonic = 0
                 previous_view.stop()
         message = self._active_prefix_panels.pop(key, None)
         if not message:
@@ -4901,7 +4902,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         if busy_notices is None:
             busy_notices = self._cd_panel_busy_notices = {}
         if key in openings:
-            # An edit may be waiting on Discord's rate limiter after the normal
+            # An open may be waiting on Discord's rate limiter after the normal
             # five-second command cooldown. Never start a second competing open.
             now = time.monotonic()
             if busy_notices.get(key, 0.0) > now:
@@ -4952,50 +4953,20 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             views = getattr(self, '_cd_panel_views', None)
             if views is None:
                 views = self._cd_panel_views = weakref.WeakValueDictionary()
-            previous = views.get(key)
-            previous_message = getattr(previous, 'message', None)
-            if (previous is not None and not previous._is_expired() and not previous.is_finished()
-                    and getattr(getattr(previous_message, 'channel', None), 'id', None) == getattr(message.channel, 'id', -1)):
-                await bounded(previous.refresh(force=True, rebuild=False), 'reuse_settings', 5.0)
-                if not previous._is_expired() and not previous.is_finished():
-                    if await bounded(previous._edit_panel(), 'reuse_edit'):
-                        # A failed or delayed edit must not reactivate a panel
-                        # that expired while this command was waiting.
-                        if previous._is_expired() or previous.is_finished():
-                            previous.expires_at_monotonic = 0
-                        else:
-                            previous.expires_at_monotonic = time.monotonic() + previous._activity_timeout
-                            self._active_prefix_panels[key] = previous.message
-                            # Updating an older message alone makes a new _cd
-                            # look unanswered when the user is at the bottom of
-                            # the chat. Keep the cached panel and visibly link it
-                            # from this command, without pinging its author.
-                            jump_url = getattr(previous.message, 'jump_url', '')
-                            if isinstance(jump_url, str) and jump_url:
-                                try:
-                                    await bounded(message.channel.send(
-                                        f"Seu painel de CDs está pronto: [Abrir painel]({jump_url}).",
-                                        reference=message,
-                                        mention_author=False,
-                                        allowed_mentions=discord.AllowedMentions.none(),
-                                    ), 'reuse_reply', 3.0)
-                                except Exception as error:
-                                    # The edit succeeded. A failed acknowledgment
-                                    # must not discard it or claim opening failed.
-                                    logger.warning(
-                                        "[cd_panel] stage=reuse_reply guild=%s channel=%s type=%s status=%s code=%s",
-                                        message.guild.id, getattr(message.channel, 'id', 0), type(error).__name__,
-                                        getattr(error, 'status', 0), getattr(error, 'code', 0),
-                                    )
-                            logger.info(
-                                "[cd_panel] stage=reused guild=%s channel=%s user=%s panel_message=%s elapsed_ms=%.1f",
-                                message.guild.id, getattr(message.channel, 'id', 0), message.author.id,
-                                getattr(previous.message, 'id', 0), (time.monotonic() - received_at) * 1000,
-                            )
-                            return True
-
             view = CDPanelView(self, message.author.id, message.guild.id, timeout=300)
             await bounded(view.refresh(), 'new_settings', 5.0)
+            # Match _tts: retire/delete the owner's previous panel before
+            # sending a fresh one at the bottom of the conversation. Artifact
+            # caches remain shared independently of a Discord message/view.
+            try:
+                await bounded(self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind),
+                              'old_delete', 3.0)
+            except Exception as error:
+                logger.warning(
+                    "[cd_panel] limpeza do painel anterior falhou | guild=%s channel=%s type=%s status=%s code=%s",
+                    message.guild.id, getattr(message.channel, 'id', 0), type(error).__name__,
+                    getattr(error, 'status', 0), getattr(error, 'code', 0),
+                )
             files = view.panel_files()
             emoji_generation = view.emoji_generation
             try:
@@ -5008,23 +4979,12 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 for file in files:
                     file.close()
 
-            # Register an accepted replacement even if deleting the old message
-            # times out or the calling listener is cancelled during cleanup.
-            try:
-                await bounded(self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind),
-                              'old_delete', 3.0)
-            except Exception as error:
-                logger.warning(
-                    "[cd_panel] limpeza do painel anterior falhou | guild=%s channel=%s type=%s status=%s code=%s",
-                    message.guild.id, getattr(message.channel, 'id', 0), type(error).__name__,
-                    getattr(error, 'status', 0), getattr(error, 'code', 0),
-                )
-            finally:
-                view.message = sent
-                view.remember_cover()
-                self._cd_panel_views[key] = view
-                self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "owner_id": message.author.id}
-                self._active_prefix_panels[key] = sent
+            # No await between an accepted upload and registering its view.
+            view.message = sent
+            view.remember_cover()
+            self._cd_panel_views[key] = view
+            self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "owner_id": message.author.id}
+            self._active_prefix_panels[key] = sent
             logger.info(
                 "[cd_panel] stage=new_sent guild=%s channel=%s user=%s panel_message=%s elapsed_ms=%.1f",
                 message.guild.id, getattr(message.channel, 'id', 0), message.author.id,

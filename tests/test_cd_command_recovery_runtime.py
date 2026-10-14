@@ -87,7 +87,7 @@ class CDCommandRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertIs(self.cog._active_prefix_panels[self.key], self.sent[0])
 
-    async def test_stalled_send_closes_upload_preserves_old_panel_and_clears_busy_state(self):
+    async def test_stalled_send_closes_upload_keeps_old_panel_retired_and_clears_busy_state(self):
         old = SimpleNamespace(id=99, delete=AsyncMock())
         self.cog._active_prefix_panels[self.key] = old
         self.cog._public_panel_states[old.id] = {'panel_kind': 'cd', 'owner_id': 10}
@@ -101,9 +101,9 @@ class CDCommandRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.channel.send.side_effect = stalled
         self.assertTrue(await self.cog._send_cd_panel(self.message))
         self.upload.close.assert_called_once()
-        self.assertIs(self.cog._active_prefix_panels[self.key], old)
-        old.delete.assert_not_awaited()
-        self.assertIn(old.id, self.cog._public_panel_states)
+        self.assertNotIn(self.key, self.cog._active_prefix_panels)
+        old.delete.assert_awaited_once()
+        self.assertNotIn(old.id, self.cog._public_panel_states)
         self.assertTrue(self.views[0].finished)
         self.assertFalse(self.cog._cd_panel_opening)
 
@@ -118,35 +118,33 @@ class CDCommandRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(old.id, self.cog._public_panel_states)
         self.assertFalse(self.notices)
 
-    async def test_stalled_reuse_edit_keeps_previous_panel_and_receives_recovery_notice(self):
+    async def test_old_panel_stalled_edit_is_never_awaited_during_replacement(self):
         await self.cog._send_cd_panel(self.message)
         view = self.views[0]
-        previous_expiry = view.expires_at_monotonic
         view._edit_panel.side_effect = self.never
         self.assertTrue(await self.cog._send_cd_panel(self.message))
-        self.assertEqual(len(self.sent), 1)
-        self.assertFalse(view.finished)
-        self.assertIs(self.cog._active_prefix_panels[self.key], self.sent[0])
-        self.assertEqual(view.expires_at_monotonic, previous_expiry)
-        self.assertIn('`!cd`', self.notices[-1])
+        self.assertEqual(len(self.sent), 2)
+        self.assertTrue(view.finished)
+        self.assertIs(self.cog._active_prefix_panels[self.key], self.sent[1])
+        self.assertEqual(view.expires_at_monotonic, 0)
+        view._edit_panel.assert_not_awaited()
+        self.assertFalse(self.notices)
         self.assertFalse(self.cog._cd_panel_opening)
 
-    async def test_panel_expiring_during_edit_is_replaced_without_reactivation(self):
+    async def test_expired_panel_is_replaced_without_editing_or_reactivation(self):
         await self.cog._send_cd_panel(self.message)
         view = self.views[0]
 
-        async def expire_during_edit():
-            view.expires_at_monotonic = 0
-            return True
-
-        view._edit_panel.side_effect = expire_during_edit
+        view.expires_at_monotonic = 0
+        view._edit_panel.side_effect = AssertionError('Expired panels must not be edited on reopen')
         self.assertTrue(await self.cog._send_cd_panel(self.message))
         self.assertEqual(len(self.sent), 2)
         self.assertTrue(view.finished)
         self.assertEqual(view.expires_at_monotonic, 0)
         self.assertIs(self.cog._cd_panel_views[self.key], self.views[1])
+        view._edit_panel.assert_not_awaited()
 
-    async def test_cancellation_during_old_delete_preserves_confirmed_new_panel(self):
+    async def test_cancellation_during_old_delete_does_not_send_or_register_new_panel(self):
         entered = asyncio.Event()
 
         async def pending_delete():
@@ -161,10 +159,13 @@ class CDCommandRecoveryTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
-        self.assertIs(self.cog._active_prefix_panels[self.key], self.sent[0])
-        self.assertIs(self.cog._cd_panel_views[self.key], self.views[0])
-        self.assertFalse(self.views[0].finished)
+        self.assertFalse(self.sent)
+        self.assertNotIn(self.key, self.cog._active_prefix_panels)
+        self.assertNotIn(self.key, self.cog._cd_panel_views)
+        self.assertNotIn(old.id, self.cog._public_panel_states)
+        self.assertTrue(self.views[0].finished)
         self.assertFalse(self.cog._cd_panel_opening)
+        self.assertNotIn(self.key, self.cog._prefix_panel_cooldowns)
 
     async def test_concurrent_same_user_gets_busy_reply_without_duplicate_open(self):
         entered = asyncio.Event()

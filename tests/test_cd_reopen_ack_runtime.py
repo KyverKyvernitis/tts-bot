@@ -1,7 +1,8 @@
-"""A prefix reopen must visibly answer while preserving its existing CD panel.
+"""A CD reopen retires its old panel and visibly sends a fresh panel.
 
-Production command methods are executed with explicit Discord transport doubles;
-this checks reply intent and lifecycle, without claiming Discord API validation.
+Production command methods execute with explicit Discord transport doubles.
+This exercises lifecycle and failure handling without claiming API validation.
+The filename replaces the obsolete v9.2 acknowledgment tests on installed bots.
 """
 import asyncio
 import logging
@@ -18,12 +19,11 @@ except ModuleNotFoundError:
     from tests.test_cd_panel_reuse_runtime import extract, DISCORD, View
 
 
-class CDReopenAcknowledgmentTests(unittest.IsolatedAsyncioTestCase):
+class CDReopenReplacementTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         namespace = {'__package__': 'cogs.tts', 'asyncio': asyncio, 'time': time,
                      'weakref': weakref, 'discord': DISCORD,
-                     'logger': logging.getLogger('test-cd-reopen-ack')}
-        self.namespace = namespace
+                     'logger': logging.getLogger('test-cd-reopen-replacement')}
         methods = extract('cogs/tts/cog.py',
                           ['_send_cd_panel', '_delete_prefix_panel', '_prefix_panel_key'],
                           namespace)
@@ -34,98 +34,121 @@ class CDReopenAcknowledgmentTests(unittest.IsolatedAsyncioTestCase):
         self.cog._active_prefix_panels = {}
         self.cog._public_panel_states = {}
         self.cog._prefix_panel_cooldowns = {}
-        self.sent_panels, self.replies = [], []
+        self.sent_panels, self.notices, self.views, self.events = [], [], [], []
         self.channel = SimpleNamespace(id=30, send=AsyncMock(side_effect=self.send))
         self.message = SimpleNamespace(id=90, guild=SimpleNamespace(id=20),
                                        author=SimpleNamespace(id=10), channel=self.channel)
         self.key = (20, 10, 'cd')
+        View.generation = 0
         module = ModuleType('cogs.tts.interface.painel_canto')
-        module.CDPanelView = View
+        module.CDPanelView = self.construct
         replacement = patch.dict(sys.modules, {'cogs.tts.interface.painel_canto': module})
         replacement.start()
         self.addCleanup(replacement.stop)
-        self.reply_effect = None
+        self.refresh_error = None
+
+    def construct(self, *args, **kwargs):
+        view = View(*args, **kwargs)
+        if self.refresh_error is not None:
+            view.refresh.side_effect = self.refresh_error
+        self.views.append(view)
+        return view
 
     async def send(self, *args, **kwargs):
         if 'view' not in kwargs:
-            self.replies.append((args, kwargs))
-            if self.reply_effect is not None:
-                await self.reply_effect()
+            self.notices.append((args, kwargs))
             return SimpleNamespace(id=901)
-        panel = SimpleNamespace(id=100 + len(self.sent_panels), channel=self.channel,
-                                delete=AsyncMock(), view=kwargs['view'],
-                                jump_url='https://discord.com/channels/20/30/100')
+        self.events.append('send')
+        panel = SimpleNamespace(id=100 + len(self.sent_panels), channel=self.message.channel,
+                                delete=AsyncMock(), view=kwargs['view'])
         self.sent_panels.append(panel)
         return panel
 
-    async def test_reopening_visibly_replies_to_new_command_and_links_existing_panel(self):
+    async def test_reopen_stops_and_deletes_old_panel_before_sending_fresh_panel(self):
+        await self.cog._send_cd_panel(self.message)
+        previous_message = self.sent_panels[0]
+        previous = self.views[0]
+
+        async def deleted():
+            self.assertTrue(previous.finished, 'Controls must be retired before Discord deletion')
+            self.assertEqual(previous.expires_at_monotonic, 0)
+            self.assertNotIn(self.key, self.cog._active_prefix_panels)
+            self.assertNotIn(previous_message.id, self.cog._public_panel_states)
+            self.events.append('delete')
+
+        previous_message.delete.side_effect = deleted
+        self.events.clear()
         self.assertTrue(await self.cog._send_cd_panel(self.message))
-        view = self.cog._cd_panel_views[self.key]
-        reopen = SimpleNamespace(id=91, guild=self.message.guild,
-                                 author=self.message.author, channel=self.channel)
-        self.assertTrue(await self.cog._send_cd_panel(reopen))
+        self.assertEqual(self.events, ['delete', 'send'])
+        self.assertEqual(len(self.sent_panels), 2)
+        self.assertFalse(self.notices, 'Reopening must send a panel, never an Abrir painel link')
+        self.assertIs(self.cog._active_prefix_panels[self.key], self.sent_panels[1])
+        self.assertIs(self.cog._cd_panel_views[self.key], self.views[1])
+        previous._edit_panel.assert_not_awaited()
+
+    async def test_already_missing_old_message_does_not_block_replacement(self):
+        await self.cog._send_cd_panel(self.message)
+        previous_message = self.sent_panels[0]
+        previous_message.delete.side_effect = RuntimeError('404 old message already deleted')
+        self.assertTrue(await self.cog._send_cd_panel(self.message))
+        previous_message.delete.assert_awaited_once()
+        self.assertTrue(self.views[0].finished)
+        self.assertEqual(self.views[0].expires_at_monotonic, 0)
+        self.assertEqual(len(self.sent_panels), 2)
+        self.assertNotIn(previous_message.id, self.cog._public_panel_states)
+        self.assertIs(self.cog._active_prefix_panels[self.key], self.sent_panels[1])
+
+    async def test_cooldown_keeps_previous_panel_available_without_creating_replacement(self):
+        await self.cog._send_cd_panel(self.message)
+        previous = self.views[0]
+        self.cog._check_prefix_panel_cooldown.return_value = True
+        self.assertTrue(await self.cog._send_cd_panel(self.message))
+        self.assertEqual(len(self.views), 1)
         self.assertEqual(len(self.sent_panels), 1)
-        self.assertEqual(len(self.replies), 1, 'Editing an old panel is not a visible command reply')
-        content = self.replies[0][0][0]
-        self.assertIn(self.sent_panels[0].jump_url, content)
-        self.assertIs(self.replies[0][1]['reference'], reopen)
-        self.assertFalse(self.replies[0][1]['mention_author'])
-        self.assertIs(self.cog._cd_panel_views[self.key], view)
         self.sent_panels[0].delete.assert_not_awaited()
+        previous.stop.assert_not_called()
+        self.assertIs(self.cog._cd_panel_views[self.key], previous)
 
-    async def test_failed_acknowledgment_does_not_report_successful_reuse_as_failed_panel(self):
+    async def test_reopen_in_another_channel_replaces_same_user_previous_panel(self):
         await self.cog._send_cd_panel(self.message)
-        view = self.cog._cd_panel_views[self.key]
-
-        async def failure():
-            raise RuntimeError('private token must not be included in logs')
-
-        self.reply_effect = failure
-        with self.assertLogs('test-cd-reopen-ack', level='WARNING') as records:
-            self.assertTrue(await self.cog._send_cd_panel(self.message))
-        self.assertEqual(len(self.replies), 1)
-        self.assertIs(self.cog._cd_panel_views[self.key], view)
-        self.assertFalse(self.cog._cd_panel_opening)
-        self.assertNotIn('private token', '\n'.join(records.output))
-        self.assertNotIn('não foi possível abrir', '\n'.join(records.output))
-
-    async def test_reuse_acknowledgment_does_not_reactivate_panel_expiring_during_reply(self):
-        await self.cog._send_cd_panel(self.message)
-        view = self.cog._cd_panel_views[self.key]
-
-        async def expire():
-            view.expires_at_monotonic = 0
-            view.stop()
-
-        self.reply_effect = expire
+        previous_message = self.sent_panels[0]
+        next_channel = SimpleNamespace(id=31, send=AsyncMock(side_effect=self.send))
+        self.message = SimpleNamespace(id=91, guild=self.message.guild,
+                                       author=self.message.author, channel=next_channel)
         self.assertTrue(await self.cog._send_cd_panel(self.message))
-        self.assertEqual(len(self.replies), 1)
-        self.assertTrue(view.finished)
-        self.assertEqual(view.expires_at_monotonic, 0)
-        self.assertFalse(self.cog._cd_panel_opening)
+        previous_message.delete.assert_awaited_once()
+        next_channel.send.assert_awaited_once()
+        self.assertIs(self.cog._active_prefix_panels[self.key].channel, next_channel)
+        self.assertTrue(self.views[0].finished)
 
-    async def test_stalled_acknowledgment_is_bounded_and_keeps_panel_reusable(self):
+    async def test_settings_failure_keeps_previous_panel_live_until_replacement_is_ready(self):
         await self.cog._send_cd_panel(self.message)
-        view = self.cog._cd_panel_views[self.key]
-        received_timeouts = []
-
-        async def accelerated_wait(awaitable, timeout):
-            received_timeouts.append(timeout)
-            return await asyncio.wait_for(awaitable, min(0.05, timeout))
-
-        async def stalled():
-            await asyncio.Event().wait()
-
-        self.namespace['asyncio'] = SimpleNamespace(wait_for=accelerated_wait,
-                                                  CancelledError=asyncio.CancelledError)
-        self.reply_effect = stalled
-        with self.assertLogs('test-cd-reopen-ack', level='WARNING'):
+        previous = self.views[0]
+        self.refresh_error = RuntimeError('private configuration must not be logged')
+        with self.assertLogs('test-cd-reopen-replacement', level='WARNING') as records:
             self.assertTrue(await self.cog._send_cd_panel(self.message))
-        self.assertEqual(received_timeouts[-1], 3.0)
-        self.assertEqual(len(self.replies), 1)
-        self.assertIs(self.cog._cd_panel_views[self.key], view)
-        self.assertFalse(view.finished)
+        self.assertEqual(len(self.sent_panels), 1)
+        self.sent_panels[0].delete.assert_not_awaited()
+        self.assertFalse(previous.finished)
+        self.assertIs(self.cog._cd_panel_views[self.key], previous)
+        self.assertTrue(self.views[1].finished)
+        self.assertEqual(len(self.notices), 1)
+        self.assertNotIn('private configuration', '\n'.join(records.output))
         self.assertFalse(self.cog._cd_panel_opening)
+
+    async def test_other_users_previous_panel_is_preserved_on_reopen(self):
+        await self.cog._send_cd_panel(self.message)
+        previous_message = self.sent_panels[0]
+        other = SimpleNamespace(id=91, guild=self.message.guild,
+                                author=SimpleNamespace(id=11), channel=self.channel)
+        await self.cog._send_cd_panel(other)
+        other_panel = self.sent_panels[1]
+        await self.cog._send_cd_panel(self.message)
+        previous_message.delete.assert_awaited_once()
+        other_panel.delete.assert_not_awaited()
+        self.assertIs(self.cog._active_prefix_panels[(20, 11, 'cd')], other_panel)
+        self.assertFalse(self.views[1].finished)
+        self.assertIs(self.cog._active_prefix_panels[self.key], self.sent_panels[2])
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-"""Production command/edit methods with Discord transport doubles, no SDK claim."""
+"""Production panel replacement/edit methods with transport doubles, no SDK claim."""
 from pathlib import Path
 import asyncio
 import ast
@@ -51,7 +51,7 @@ class View:
     def emoji_generation(self): return type(self).generation
 
 
-class PanelReuseTests(unittest.IsolatedAsyncioTestCase):
+class PanelReplacementTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         namespace={'__package__':'cogs.tts','asyncio':asyncio,'time':time,'weakref':weakref,
                    'discord':DISCORD,'logger':logging.getLogger('test-cd-runtime')}
@@ -79,16 +79,18 @@ class PanelReuseTests(unittest.IsolatedAsyncioTestCase):
         self.sent.append(result)
         return result
 
-    async def test_reopen_reuses_one_active_panel_and_never_deletes_it(self):
+    async def test_reopen_deletes_previous_panel_and_sends_new_without_editing_old(self):
         await self.cog._send_cd_panel(self.message)
         key=(20,10,'cd')
         view=self.cog._cd_panel_views[key]
         await self.cog._send_cd_panel(self.message)
-        self.assertEqual(self.channel.send.await_count,1)
-        self.sent[0].delete.assert_not_called()
-        self.assertIs(self.cog._cd_panel_views[key],view)
-        self.assertEqual(view._edit_panel.await_count,1)
-        self.assertGreater(view.expires_at_monotonic,time.monotonic())
+        self.assertEqual(self.channel.send.await_count,2)
+        self.sent[0].delete.assert_awaited_once()
+        self.assertIsNot(self.cog._cd_panel_views[key],view)
+        view._edit_panel.assert_not_awaited()
+        view.refresh.assert_awaited_once()
+        self.assertTrue(view.finished)
+        self.assertEqual(view.expires_at_monotonic,0)
 
     async def test_expired_panel_is_replaced_and_not_reactivated(self):
         await self.cog._send_cd_panel(self.message)
@@ -109,12 +111,10 @@ class PanelReuseTests(unittest.IsolatedAsyncioTestCase):
         await self.cog._send_cd_panel(self.message)
         self.sent[0].view._edit_panel.assert_awaited_once()
 
-    async def test_panel_expiring_during_settings_refresh_is_replaced(self):
+    async def test_replacement_does_not_refresh_retired_panel(self):
         await self.cog._send_cd_panel(self.message)
         old = self.cog._cd_panel_views[(20,10,'cd')]
-        async def expires(**kwargs):
-            old.expires_at_monotonic = 0
-        old.refresh.side_effect = expires
+        old.refresh.side_effect = AssertionError('An old panel must never be refreshed on reopen')
         await self.cog._send_cd_panel(self.message)
         self.assertEqual(self.channel.send.await_count, 2)
         old._edit_panel.assert_not_called()
