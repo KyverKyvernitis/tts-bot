@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 SCORES = "cogs/tts/cd_song_scores.json"
 VIDEOS = "cogs/tts/cd_song_videos.json"
 PREVIEWS = "cogs/tts/cd/previews/index.json"
+ARRANGEMENTS = "cogs/tts/cd/arrangements"
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _VIDEO = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 _HASH = re.compile(r"[a-f0-9]{64}\Z")
@@ -76,9 +77,9 @@ def _scores(root: Path) -> dict[str, dict]:
         identity = _identity(entry.get("id"))
         if identity in result:
             raise CDPackageError(f"id duplicado: {identity}")
-        for field in ("name", "artist", "excerpt", "source_url"):
+        for field, limit in (("name", 100), ("artist", 200), ("excerpt", 500), ("source_url", 2048)):
             value = entry.get(field)
-            if not isinstance(value, str) or len(value) > 4096 or (field in {"name", "artist"} and not value.strip()):
+            if not isinstance(value, str) or len(value) > limit or (field in {"name", "artist"} and not value.strip()):
                 raise CDPackageError(f"{field} inválido: {identity}")
         if not isinstance(entry.get("source_sha256"), str) or not _HASH.fullmatch(entry["source_sha256"]):
             raise CDPackageError(f"source_sha256 inválido: {identity}")
@@ -185,6 +186,29 @@ def validate_cd_tree(root: Path | str, ids=None, *, require_complete: bool = Fal
         video = videos.get(identity)
         preview = previews.get(identity)
         status = {"score": "ready" if score else "pending", "thumbnail": "pending", "sample": "pending"}
+        arrangement = None
+        preview_arrangement_hash = None
+        if score and score.get('arrangement_path'):
+            from osaka_cd.arrangement import validate_arrangement, arrangement_sha256, preview_arrangement
+            rel = f"{ARRANGEMENTS}/{identity}.json"
+            if score['arrangement_path'] != rel:
+                raise CDPackageError(f"caminho de arranjo divergente: {identity}")
+            arrangement = validate_arrangement(_json(root / rel, {}))
+            if arrangement_sha256(arrangement) != score.get('arrangement_sha256'):
+                raise CDPackageError(f"hash do arranjo divergente: {identity}")
+            if arrangement.get('source', {}).get('sha256') != score.get('source_sha256'):
+                raise CDPackageError(f"arranjo pertence a outro MIDI: {identity}")
+            selected_preview = preview_arrangement(arrangement,
+                start_ms=score.get('arrangement_preview_start_ms'), end_ms=score.get('arrangement_preview_end_ms'))
+            preview_score = selected_preview['arrangement']
+            preview_arrangement_hash = arrangement_sha256(preview_score)
+            if preview_arrangement_hash != score.get('preview_arrangement_sha256'):
+                raise CDPackageError(f"hash do trecho harmonizado divergente: {identity}")
+            lead = next(part for part in preview_score['parts'] if part['role'] == 'lead')
+            lead_notes = [{key: note[key] for key in ('midi_note', 'start_ms', 'duration_ms', 'velocity')} for note in lead['notes']]
+            if score['duration_ms'] != preview_score['duration_ms'] or score['notes'] != lead_notes:
+                raise CDPackageError(f"partitura do painel não corresponde à melodia do arranjo: {identity}")
+            status['arrangement'] = 'ready'
         if video:
             if "id" in video and video["id"] != identity:
                 raise CDPackageError(f"id dos metadados de vídeo divergente: {identity}")
@@ -197,8 +221,29 @@ def validate_cd_tree(root: Path | str, ids=None, *, require_complete: bool = Fal
         if preview:
             if not score:
                 raise CDPackageError(f"amostra sem partitura: {identity}")
-            if preview.get("manifest_version") != 2:
+            if preview.get("manifest_version") not in {2, 3}:
                 raise CDPackageError(f"manifesto de amostra legado; migração explícita necessária: {identity}")
+            if arrangement is not None:
+                if (preview.get('manifest_version') != 3
+                        or preview.get('arrangement_sha256') != preview_arrangement_hash
+                        or preview.get('source_arrangement_sha256') != score.get('arrangement_sha256')
+                        or not isinstance(preview.get('rendering_profile'), dict)
+                        or not preview['rendering_profile'].get('mode')):
+                    raise CDPackageError(f"amostra não corresponde ao arranjo harmonizado: {identity}")
+                if preview['rendering_profile']['mode'] == 'legacy-monophonic-migration' and len(preview_score['parts']) != 1:
+                    raise CDPackageError(f"amostra legada não pode representar múltiplas partes: {identity}")
+                profile = preview['rendering_profile']
+                if profile['mode'] not in {'multipart-utau', 'legacy-monophonic-migration'}:
+                    raise CDPackageError(f"origem de renderização da amostra inválida: {identity}")
+                if profile['mode'] == 'multipart-utau' and any(
+                        not isinstance(profile.get(key), str) or not _HASH.fullmatch(profile[key])
+                        for key in ('configuration_fingerprint', 'render_fingerprint')):
+                    raise CDPackageError(f"identidade do renderizador da amostra ausente: {identity}")
+                from osaka_cd.arrangement import arrangement_performance_sha256
+                if (preview.get('arrangement_performance_sha256') != arrangement_performance_sha256(preview_score)
+                        or score.get('preview_performance_sha256') != arrangement_performance_sha256(preview_score)):
+                    raise CDPackageError(f"identidade musical da amostra divergente: {identity}")
+
             if preview.get("score_sha256") != score_sha256(score):
                 raise CDPackageError(f"amostra pertence a outra partitura: {identity}")
             for key, value in (("id", identity), ("revision", score.get("revision", 1)),
@@ -211,11 +256,21 @@ def validate_cd_tree(root: Path | str, ids=None, *, require_complete: bool = Fal
             rel = f"cogs/tts/cd/previews/{identity}.mp3"
             data = _file(root, rel, preview.get("mp3_sha256"), 20 * 1024 * 1024)
             status["audio"] = _audio(data, root / rel, identity, audio_probe)
+            if audio_probe:
+                expected_seconds = score['duration_ms'] / 1000
+                # Compositions use an exact PCM timeline plus bounded pre-roll
+                # and MP3 encoder padding. Historical monophonic UTAU output
+                # can have a larger attack/tail, so migration is conservative.
+                render_profile = preview.get('rendering_profile')
+                tolerance = .7 if isinstance(render_profile, dict) and render_profile.get('mode') == 'multipart-utau' else 2.0
+                if abs(status['audio']['duration_seconds'] - expected_seconds) > tolerance:
+                    raise CDPackageError(f"duração da amostra não corresponde à partitura: {identity}")
+                status['audio']['expected_duration_seconds'] = expected_seconds
             status["sample"] = "ready"
         package_path = root / f"cogs/tts/cd/packages/{identity}.json"
         if package_path.exists():
             package = _json(package_path, {})
-            if (not isinstance(package, dict) or package.get("manifest_version") != 1
+            if (not isinstance(package, dict) or package.get("manifest_version") not in {1, 2}
                     or package.get("id") != identity or not score
                     or package.get("revision") != score.get("revision", 1)
                     or package.get("score_sha256") != score_sha256(score)
@@ -225,7 +280,7 @@ def validate_cd_tree(root: Path | str, ids=None, *, require_complete: bool = Fal
             if not isinstance(declared, dict):
                 raise CDPackageError(f"artifacts inválido: {identity}")
             for artifact, item in declared.items():
-                if artifact not in {"score", "thumbnail", "sample"}:
+                if artifact not in {"score", "thumbnail", "sample", "arrangement"}:
                     raise CDPackageError(f"tipo de artefato inválido: {identity}/{artifact}")
                 if not isinstance(item, dict) or item.get("status") not in {"ready", "pending"}:
                     raise CDPackageError(f"estado de artefato inválido: {identity}/{artifact}")
@@ -233,6 +288,12 @@ def validate_cd_tree(root: Path | str, ids=None, *, require_complete: bool = Fal
                     if artifact == "score":
                         if item.get("sha256") != score_sha256(score):
                             raise CDPackageError(f"hash da partitura no pacote divergente: {identity}")
+                        continue
+                    if artifact == 'arrangement':
+                        if (arrangement is None or item.get('path') != f"{ARRANGEMENTS}/{identity}.json"
+                                or item.get('sha256') != _digest((root / item['path']).read_bytes())
+                                or package.get('arrangement_sha256') != score.get('arrangement_sha256')):
+                            raise CDPackageError(f"artefato de arranjo divergente: {identity}")
                         continue
                     expected_path = (f"cogs/tts/cd/previews/{identity}.mp3" if artifact == "sample"
                                      else f"cogs/tts/cd/thumbnails/{video['video_id']}.jpg" if video else "")
@@ -245,6 +306,9 @@ def validate_cd_tree(root: Path | str, ids=None, *, require_complete: bool = Fal
                             or ".." in PurePosixPath(rel).parts or not rel.startswith("cogs/tts/")):
                         raise CDPackageError(f"caminho de artefato inválido: {identity}")
                     _file(root, rel, item.get("sha256"), 20 * 1024 * 1024)
+        if score and score.get('arrangement_path'):
+            if not package_path.exists() or package.get('artifacts', {}).get('arrangement', {}).get('status') != 'ready':
+                raise CDPackageError(f"arranjo sem manifesto correspondente: {identity}")
         if require_complete and (not score or not video or any(status[key] != "ready" for key in ("score", "thumbnail", "sample"))):
             raise CDPackageError(f"CD incompleto: {identity}")
         artifacts[identity] = status
@@ -258,6 +322,11 @@ def validate_artifact_references(root: Path | str, paths) -> None:
     _, previews = _map(root, PREVIEWS)
     for rel in paths:
         path = PurePosixPath(rel)
+        if str(path.parent) == ARRANGEMENTS and path.suffix == '.json':
+            scores = _scores(root)
+            entry = scores.get(path.stem)
+            if not entry or entry.get('arrangement_path') != rel:
+                raise CDPackageError(f"arranjo enviado sem partitura correspondente: {path.stem}")
         if str(path.parent) == "cogs/tts/cd/previews" and path.suffix == ".mp3":
             if path.stem not in previews:
                 raise CDPackageError(f"MP3 enviado sem manifesto de amostra: {path.stem}")
@@ -296,7 +365,7 @@ def merge_cd_overlay(overlay_root: Path | str, base_root: Path | str, paths=None
             old_revision, new_revision = previous.get("revision", 1), entry.get("revision", 1)
             if new_revision < old_revision:
                 raise CDPackageError(f"revision anterior à instalada: {identity}")
-            if score_sha256(previous) != score_sha256(entry):
+            if score_sha256(previous) != score_sha256(entry) or previous.get('arrangement_sha256') != entry.get('arrangement_sha256'):
                 if new_revision <= old_revision:
                     raise CDPackageError(f"partitura alterada sem nova revision: {identity}")
                 changed_scores.add(identity)
@@ -328,7 +397,7 @@ def merge_cd_overlay(overlay_root: Path | str, base_root: Path | str, paths=None
         merged = {identity: item for identity, item in previous.items() if identity not in changed_scores}
         for identity in set(incoming_scores) & set(merged):
             retained = dict(merged[identity])
-            if retained.get("manifest_version") == 2:
+            if retained.get("manifest_version") in {2, 3}:
                 retained["source_sha256"] = merged_scores[identity].get("source_sha256")
                 if "revision" in retained:
                     retained["revision"] = merged_scores[identity].get("revision", 1)
@@ -357,7 +426,14 @@ def merge_cd_overlay(overlay_root: Path | str, base_root: Path | str, paths=None
                                else {"status": "pending"})
         artifacts["thumbnail"] = ({"status": "ready", "path": f"cogs/tts/cd/thumbnails/{video['video_id']}.jpg", "sha256": video["thumbnail_sha256"]}
                                   if video.get("video_id") and video.get("thumbnail_sha256") else {"status": "pending"})
-        package.update(manifest_version=1, id=identity, revision=score.get("revision", 1),
+        if score.get('arrangement_path'):
+            arrangement_path = overlay / score['arrangement_path']
+            if not arrangement_path.exists():
+                arrangement_path = base / score['arrangement_path']
+            artifacts['arrangement'] = {'status': 'ready', 'path': score['arrangement_path'],
+                                       'sha256': _digest(arrangement_path.read_bytes())}
+            package['arrangement_sha256'] = score['arrangement_sha256']
+        package.update(manifest_version=2 if score.get('arrangement_path') else 1, id=identity, revision=score.get("revision", 1),
                        score_sha256=score_sha256(score), source_sha256=score.get("source_sha256"), artifacts=artifacts)
         _write(overlay / rel, package)
         affected.append(rel)
@@ -420,7 +496,8 @@ def validate_package(zip_path: Path | str, base_dir: Path | str | None = None, *
                 path = PurePosixPath(rel)
                 return ((str(path.parent) == "cogs/tts/cd/thumbnails" and path.suffix == ".jpg" and _VIDEO.fullmatch(path.stem))
                         or (str(path.parent) == "cogs/tts/cd/previews" and path.suffix == ".mp3" and _ID.fullmatch(path.stem))
-                        or (str(path.parent) == "cogs/tts/cd/packages" and path.suffix == ".json" and _ID.fullmatch(path.stem)))
+                        or (str(path.parent) == "cogs/tts/cd/packages" and path.suffix == ".json" and _ID.fullmatch(path.stem))
+                        or (str(path.parent) == ARRANGEMENTS and path.suffix == ".json" and _ID.fullmatch(path.stem)))
             if require_cd_only and any(not cd_artifact(rel) for rel in paths):
                 raise CDPackageError("rota CD aceita somente artefatos de catálogo CD")
             for info, rel in members:

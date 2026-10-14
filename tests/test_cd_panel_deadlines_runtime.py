@@ -2,7 +2,7 @@
 import asyncio
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import test_cd_panel_optimization as optimization
 from test_cd_panel_reuse_runtime import DISCORD
@@ -105,6 +105,25 @@ class PanelDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('ttv_singing_lyrics_mismatch', ns['_reply'].call_args.args[1])
         self.assertEqual(view._edit_panel.await_count, 2)
 
+    async def test_preview_label_uses_frozen_generation_then_panel_follows_publication(self):
+        from osaka_cd import runtime
+        view, interaction, ns = self.preview()
+        current = {'generation': 'first', 'initialized': False, 'root': ''}
+        observed = []
+        async def refresh(**kwargs):
+            observed.append(runtime.snapshot()['generation'])
+        async def publish_during_audio(*args, **kwargs):
+            current['generation'] = 'second'
+            view._catalog_refresh_pending = True
+            raise PhoneWorkerResponseError('A letra não encaixa nas frases do MIDI', status=400)
+        view.refresh.side_effect = refresh
+        view.cog._cd_preview_mp3.side_effect = publish_during_audio
+        with patch.object(runtime, 'snapshot', side_effect=lambda: runtime._PIN.get() or dict(current)):
+            await view.preview_melody(interaction)
+        self.assertEqual(observed, ['first', 'second'])
+        self.assertFalse(view._preview_running)
+        self.assertFalse(view._catalog_refresh_pending)
+
     async def test_stalled_save_releases_saving_flag_and_refreshes_current_selection(self):
         ns = {'asyncio': self.clock(), '_reply': AsyncMock(),
               'get_melody': lambda value: SimpleNamespace(id=value)}
@@ -112,6 +131,7 @@ class PanelDeadlineTests(unittest.IsolatedAsyncioTestCase):
         view = type('ProductionSave', (), extracted)()
         view.guild_id, view.owner_id = 20, 10
         view._saving = False
+        view._preview_running = False
         view._settings_available = True
         view.active_melody_id, view.selected_melody_id = 'old', 'selected'
         view.interaction_check = AsyncMock(return_value=True)

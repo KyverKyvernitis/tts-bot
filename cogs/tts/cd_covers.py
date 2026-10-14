@@ -5,6 +5,8 @@ import io
 import json
 import os
 import re
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 from typing import TYPE_CHECKING
@@ -12,19 +14,42 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import discord
 from .cd_assets import FILES
+from osaka_cd.runtime import data_root, pin_snapshot, register_validator
 
 _DATA = Path(__file__).parent
 _VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 _MELODY_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_BYTES = 2 * 1024 * 1024
-_VIDEO_SNAPSHOTS: dict[Path, tuple[tuple[int, ...], dict[str, dict]]] = {}
-_VIDEO_FAILED_SIGNATURES: dict[Path, tuple[int, ...]] = {}
+_VIDEO_SNAPSHOTS = OrderedDict()
+_VIDEO_FAILED_SIGNATURES = OrderedDict()
+_VIDEO_LOCK = threading.RLock()
+
+
+def _read_video_catalog(path):
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    songs = raw.get("songs") if isinstance(raw, dict) else None
+    if not isinstance(songs, dict) or len(songs) > 500:
+        raise ValueError("invalid_cd_video_catalog")
+    for identity, item in songs.items():
+        if (not isinstance(identity, str) or len(identity) > 90 or not _MELODY_ID.fullmatch(identity)
+                or not isinstance(item, dict) or not isinstance(item.get("video_id"), str)
+                or not _VIDEO_ID.fullmatch(item["video_id"])):
+            raise ValueError("invalid_cd_video_entry")
+        digest = item.get("thumbnail_sha256")
+        if digest is not None and (not isinstance(digest, str) or not _SHA256.fullmatch(digest)):
+            raise ValueError("invalid_cd_thumbnail_hash")
+    return songs
 
 
 def video_catalog() -> dict[str, dict]:
     """Keep the last complete metadata snapshot during interrupted publication."""
-    path = _DATA / "cd_song_videos.json"
+    path = data_root(_DATA) / "cd_song_videos.json"
+    with _VIDEO_LOCK:
+        return _video_catalog_current(path)
+
+
+def _video_catalog_current(path) -> dict[str, dict]:
     previous = _VIDEO_SNAPSHOTS.get(path)
     signature = (0, 0, 0, 0)
     try:
@@ -36,23 +61,17 @@ def video_catalog() -> dict[str, dict]:
             return previous[1] if previous is not None else {}
         if not 0 < stat.st_size <= 8 * 1024 * 1024:
             raise ValueError("invalid_cd_video_catalog_size")
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        songs = raw.get("songs") if isinstance(raw, dict) else None
-        if not isinstance(songs, dict) or len(songs) > 500:
-            raise ValueError("invalid_cd_video_catalog")
-        for identity, item in songs.items():
-            if (not isinstance(identity, str) or len(identity) > 90 or not _MELODY_ID.fullmatch(identity)
-                    or not isinstance(item, dict) or not isinstance(item.get("video_id"), str)
-                    or not _VIDEO_ID.fullmatch(item["video_id"])):
-                raise ValueError("invalid_cd_video_entry")
-            digest = item.get("thumbnail_sha256")
-            if digest is not None and (not isinstance(digest, str) or not _SHA256.fullmatch(digest)):
-                raise ValueError("invalid_cd_thumbnail_hash")
+        songs = _read_video_catalog(path)
         _VIDEO_SNAPSHOTS[path] = (signature, songs)
+        _VIDEO_SNAPSHOTS.move_to_end(path)
+        while len(_VIDEO_SNAPSHOTS) > 8:
+            _VIDEO_SNAPSHOTS.popitem(last=False)
         _VIDEO_FAILED_SIGNATURES.pop(path, None)
         return songs
     except (OSError, ValueError, TypeError):
         _VIDEO_FAILED_SIGNATURES[path] = signature
+        while len(_VIDEO_FAILED_SIGNATURES) > 8:
+            _VIDEO_FAILED_SIGNATURES.popitem(last=False)
         return previous[1] if previous is not None else {}
 
 
@@ -74,6 +93,11 @@ def _valid_jpeg(data: bytes) -> bool:
 
 
 def _cover_sources(melody_id: str):
+    with pin_snapshot():
+        return _pinned_cover_sources(melody_id)
+
+
+def _pinned_cover_sources(melody_id: str):
     if not isinstance(melody_id, str) or not _MELODY_ID.fullmatch(melody_id):
         return ()
     item = video_catalog().get(melody_id)
@@ -82,7 +106,7 @@ def _cover_sources(melody_id: str):
     video_id = item.get("video_id", "")
     if not isinstance(video_id, str) or not _VIDEO_ID.fullmatch(video_id):
         return ()
-    roots = [_DATA / "cd" / "thumbnails"]
+    roots = [data_root(_DATA) / "cd" / "thumbnails"]
     configured = os.getenv("TTV_CD_THUMBNAIL_CACHE_DIR", "").strip()
     if configured:
         roots.insert(0, Path(configured).expanduser())
@@ -139,3 +163,6 @@ def cover_identity(melody_id: str) -> str:
     """
     sources = _cover_sources(melody_id)
     return sources[0][1][:12] if sources else ""
+
+
+register_validator(lambda root: _read_video_catalog(root / "cogs/tts/cd_song_videos.json"))

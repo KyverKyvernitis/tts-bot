@@ -15,8 +15,9 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections import defaultdict, deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
+from itertools import permutations
 import json
 from pathlib import Path
 import re
@@ -62,6 +63,10 @@ class _Track:
     programs: dict[int, int]
     end: int
     issues: dict[str, int]
+    program_changes: list[tuple[int, int, int]] = field(default_factory=list)
+    sustain_events: list[tuple[int, int, int]] = field(default_factory=list)
+    key_signatures: list[tuple[int, int, int]] = field(default_factory=list)
+    time_signatures: list[tuple[int, int, int, int, int]] = field(default_factory=list)
 
 
 class _Reader:
@@ -110,6 +115,7 @@ def _read_track(data: bytes, index: int, counter: list[int]) -> _Track:
     status = None
     active: dict[tuple[int, int], deque] = defaultdict(deque)
     notes, tempos, lyrics, programs = [], [], {}, {}
+    program_changes, sustain_events, keys, meters = [], [], [], []
     issues: dict[str, int] = defaultdict(int)
     ended = False
 
@@ -144,7 +150,10 @@ def _read_track(data: bytes, index: int, counter: list[int]) -> _Track:
                 raise MidiExtractionError("O MIDI contém dados inválidos em evento de canal.")
             if kind == 0xC0:
                 programs[channel] = values[0]
+                program_changes.append((tick, channel, values[0]))
             elif kind == 0xB0:
+                if values[0] == 64:
+                    sustain_events.append((tick, channel, values[1]))
                 if values[0] == 64 and values[1] >= 64:
                     issues["sustain_pedal_on"] += 1
                 elif values[0] in (120, 123):
@@ -193,6 +202,17 @@ def _read_track(data: bytes, index: int, counter: list[int]) -> _Track:
                         issues["conflicting_lyrics"] += 1
                     else:
                         lyrics[tick] = text
+            elif kind == 0x59 and len(payload) == 2:
+                accidental = payload[0] if payload[0] < 128 else payload[0] - 256
+                if -7 <= accidental <= 7 and payload[1] in (0, 1):
+                    keys.append((tick, accidental, payload[1]))
+                else:
+                    issues["invalid_key_signature_ignored"] += 1
+            elif kind == 0x58 and len(payload) == 4:
+                if payload[0] and payload[1] <= 8:
+                    meters.append((tick, *payload))
+                else:
+                    issues["invalid_time_signature_ignored"] += 1
         elif status_value in (0xF0, 0xF7):
             reader.take(reader.vlq())
         else:
@@ -206,7 +226,8 @@ def _read_track(data: bytes, index: int, counter: list[int]) -> _Track:
             finish(key, tick)
             issues["unclosed_notes_at_track_end"] += 1
     notes.sort(key=lambda n: (n.start, n.pitch, n.end, n.serial))
-    return _Track(index, name, notes, lyrics, tempos, programs, tick, dict(issues))
+    return _Track(index, name, notes, lyrics, tempos, programs, tick, dict(issues),
+                  program_changes, sustain_events, keys, meters)
 
 
 class _Timeline:
@@ -521,3 +542,319 @@ def extract_midi(path: str | Path, *, track: int | None = None, channel: int | N
                                   "lyric_matches": c["lyric_matches"], "vocal_name": c["voice_hint"],
                                   "melody_name": c["melody_hint"]} for c in candidates]}
     return {"score": score, "extraction": extraction}
+
+
+_BASS_NAME = re.compile(r"\b(?:bass|baixo|bajo)\b")
+_HARMONY_NAME = re.compile(r"\b(?:harmony|harmonies|harmonia|backing|choir|chorus)\b")
+ARRANGEMENT_ALGORITHM_VERSION = "continuity-voices-v1"
+
+
+def _simultaneous_notes(first: list[_Note], second: list[_Note]) -> bool:
+    """Require real sounding overlap; bounding song sections include rests."""
+    left = right = 0
+    while left < len(first) and right < len(second):
+        a, b = first[left], second[right]
+        if max(a.start, b.start) < min(a.end, b.end):
+            return True
+        if a.end <= b.end:
+            left += 1
+        else:
+            right += 1
+    return False
+
+
+def _separate_voices(notes: list[_Note], timeline: _Timeline,
+                     max_voices: int = 3) -> tuple[list[list[_Note]], dict]:
+    """Assign actual MIDI notes to bounded monophonic continuity paths.
+
+    The first chord seeds upper/middle/lower registers. Later attacks are chosen
+    jointly by pitch movement, rhythmic gap and articulation; a crossing voice
+    follows its nearest continuation instead of selecting the highest note on
+    every attack. Only short legato overlaps/repeated attacks may clip a prior
+    key duration. Every original note remains in source provenance.
+    """
+    usable = [n for n in notes if MIN_PITCH <= n.pitch <= MAX_PITCH
+              and timeline.ms(n.end) - timeline.ms(n.start) >= MIN_NOTE_MS]
+    grouped = defaultdict(list)
+    for note in usable:
+        grouped[note.start].append(note)
+    voices: list[list[_Note]] = [[] for _ in range(max_voices)]
+    assigned, clips, pruned = set(), 0, 0
+    for onset, original_group in sorted(grouped.items()):
+        group = list(original_group)
+        available = [index for index, voice in enumerate(voices) if not voice or voice[-1].end <= onset]
+        # An exported repeated same-pitch attack belongs to the same voice if
+        # its old key has not closed yet. FIFO source events stay preserved.
+        for index, voice in enumerate(voices):
+            if index in available or not voice:
+                continue
+            previous = voice[-1]
+            if (timeline.ms(onset) - timeline.ms(previous.start) >= MIN_NOTE_MS
+                    and (timeline.ms(previous.end) - timeline.ms(onset) <= 80
+                         or any(n.pitch == previous.pitch for n in group))):
+                available.append(index)
+        available.sort()
+        if not available:
+            continue
+        if len(group) > 12:
+            existing_pitches = [v[-1].pitch for v in voices if v]
+            group.sort(key=lambda n: (min((abs(n.pitch - p) for p in existing_pitches), default=0),
+                                      -n.velocity, -(n.end - n.start), n.serial))
+            pruned += len(group) - 12
+            group = group[:12]
+        count = min(len(available), len(group))
+        # New voices get spread across the chord, avoiding three copies of the
+        # upper register while retaining a potential bass. This is only a seed.
+        pitches = sorted(n.pitch for n in group)
+        seeds = [pitches[-1], pitches[(len(pitches) - 1) // 2], pitches[0]]
+        best, best_assignment = None, None
+        for chosen in permutations(group, count):
+            cost = 0.0
+            for index, note in zip(available, chosen):
+                voice = voices[index]
+                if voice:
+                    previous = voice[-1]
+                    gap = max(0, timeline.ms(onset) - timeline.ms(previous.end))
+                    movement = abs(note.pitch - previous.pitch)
+                    # Musical pitch continuity dominates velocity and duration.
+                    cost += movement * 3 + max(0, movement - 7) * 2
+                    cost += min(gap, 8000) / 1000
+                    old_length = timeline.ms(previous.end) - timeline.ms(previous.start)
+                    new_length = timeline.ms(note.end) - timeline.ms(note.start)
+                    cost += min(abs(new_length - old_length), 1000) / 1000
+                    if previous.end > onset:
+                        cost += 0.3 if note.pitch == previous.pitch else 2.0
+                else:
+                    cost += abs(note.pitch - seeds[index]) * 3
+                cost -= note.velocity / 500
+            # Stable serial tie break makes hashes reproducible across runs.
+            ranking = (round(cost, 8), tuple(n.serial for n in chosen))
+            if best is None or ranking < best:
+                best, best_assignment = ranking, tuple(zip(available, chosen))
+        for index, note in best_assignment or ():
+            voice = voices[index]
+            if voice and voice[-1].end > onset:
+                voice[-1] = replace(voice[-1], end=onset)
+                clips += 1
+            voice.append(note)
+            assigned.add(note.serial)
+    voices = [voice for voice in voices if voice]
+    return voices, {"usable_notes": len(usable), "assigned_notes": len(assigned),
+                    "capacity_notes_omitted": len(usable) - len(assigned),
+                    "out_of_range_notes_omitted": sum(not MIN_PITCH <= n.pitch <= MAX_PITCH for n in notes),
+                    "short_notes_omitted": sum(MIN_PITCH <= n.pitch <= MAX_PITCH
+                                                and timeline.ms(n.end) - timeline.ms(n.start) < MIN_NOTE_MS for n in notes),
+                    "legato_or_repeated_attacks_clipped": clips, "dense_chord_candidates_pruned": pruned}
+
+
+def _arrangement_lyrics(track: _Track, notes: list[_Note], tracks: list[_Track]) -> dict[int, str]:
+    onsets = {n.start for n in notes}
+    sources = [track] + [t for t in tracks if not t.notes and t.lyrics
+                         and set(t.lyrics).issubset(onsets)]
+    result = {}
+    if any(t.issues.get("conflicting_lyrics") for t in sources):
+        return result
+    for source in sources:
+        for tick, lyric in source.lyrics.items():
+            if tick in onsets:
+                if tick in result and result[tick] != lyric:
+                    return {}
+                result[tick] = lyric
+    return result
+
+
+def _source_stream(track: _Track, channel: int, timeline: _Timeline) -> dict:
+    """Keep original key durations and pedal metadata, never add pedal to singing."""
+    notes = [n for n in track.notes if n.channel == channel]
+    program_changes = [p for p in track.program_changes if p[1] == channel]
+    pedal = [p for p in track.sustain_events if p[1] == channel]
+    program_ticks = [p[0] for p in program_changes]
+    pedal_ticks = [p[0] for p in pedal]
+    all_notes = []
+    for note in notes:
+        program_index = bisect_right(program_ticks, note.start) - 1
+        pedal_index = bisect_right(pedal_ticks, note.end) - 1
+        sustain_end = note.end
+        if pedal_index >= 0 and pedal[pedal_index][2] >= 64:
+            sustain_end = next((tick for tick, _, value in pedal[pedal_index + 1:] if value < 64), track.end)
+        all_notes.append({"id": note.serial, "midi_note": note.pitch, "velocity": note.velocity,
+                          "start_tick": note.start, "end_tick": note.end,
+                          "start_ms": timeline.ms(note.start), "key_end_ms": timeline.ms(note.end),
+                          "sustain_end_ms": timeline.ms(sustain_end),
+                          "program": program_changes[program_index][2] if program_index >= 0 else None})
+    return {"track_index": track.index, "track_name": track.name, "channel": channel,
+            "percussion": channel == 9, "notes": all_notes,
+            "lyrics": [{"tick": tick, "start_ms": timeline.ms(tick), "text": text}
+                       for tick, text in sorted(track.lyrics.items())],
+            "program_changes": [{"tick": tick, "start_ms": timeline.ms(tick), "program": program}
+                                for tick, _, program in program_changes],
+            "sustain_events": [{"tick": tick, "start_ms": timeline.ms(tick), "value": value}
+                               for tick, _, value in pedal], "parser_conditions": dict(track.issues)}
+
+
+def extract_arrangement(path: str | Path, *, track: int | None = None,
+                        channel: int | None = None, max_parts: int = 3,
+                        include_bass: bool = True) -> dict:
+    """Preserve a complete source and select up to three actual musical parts.
+
+    Score schema 2 is unrelated to the existing worker performance protocol 2.
+    Its full source duration and notes are stored even when the v1 preview is
+    short. Vocal confidence is evidence of MIDI labels/lyrics only, never a
+    confirmed transcription. No harmony notes are invented.
+    """
+    from osaka_cd.arrangement import MAX_ARRANGEMENT_MS, MAX_SOURCE_NOTES, validate_arrangement, arrangement_sha256
+    for label, value, low, high in (("track", track, 0, MAX_TRACKS - 1), ("channel", channel, 0, 15),
+                                    ("max_parts", max_parts, 1, 3)):
+        if value is None and label in {"track", "channel"}:
+            continue
+        if type(value) is not int or not low <= value <= high:
+            raise MidiExtractionError(f"{label} deve ser inteiro entre {low} e {high}.", code="invalid_selection")
+    if type(include_bass) is not bool:
+        raise MidiExtractionError("include_bass deve ser booleano.", code="invalid_selection")
+    path = Path(path)
+    if path.stat().st_size > MAX_MIDI_BYTES:
+        raise MidiExtractionError("O MIDI ultrapassa 8 MiB.", code="midi_too_large")
+    data = path.read_bytes()
+    tracks, timeline = _read_midi(data)
+    if track is not None and track >= len(tracks):
+        raise MidiExtractionError("A faixa escolhida não existe.", code="invalid_selection")
+    if channel == 9:
+        raise MidiExtractionError("O canal 9 contém percussão e não será cantado.", code="no_melody")
+    duration = max(timeline.ms(t.end) for t in tracks)
+    source_notes = sum(len(t.notes) for t in tracks)
+    if duration > MAX_ARRANGEMENT_MS or source_notes > MAX_SOURCE_NOTES:
+        raise MidiExtractionError("O arranjo original ultrapassa 10 minutos ou 60.000 notas.", code="arrangement_too_large")
+    candidates, reductions = [], []
+    for item in tracks:
+        if track is not None and track != item.index:
+            continue
+        for chan in sorted({n.channel for n in item.notes} - {9}):
+            if channel is not None and chan != channel:
+                continue
+            stream = [n for n in item.notes if n.channel == chan]
+            voices, reduction = _separate_voices(stream, timeline, max_voices=3)
+            reductions.append(dict(reduction, track_index=item.index, channel=chan))
+            voice_hint, melody_hint = _name_hints(item.name)
+            name = unicodedata.normalize("NFKD", item.name.casefold())
+            bass_hint, harmony_hint = bool(_BASS_NAME.search(name)), bool(_HARMONY_NAME.search(name))
+            for index, line in enumerate(voices):
+                lyrics = _arrangement_lyrics(item, line, tracks)
+                lyric_matches = sum(n.start in lyrics for n in line)
+                pitches = sorted(n.pitch for n in line)
+                median = pitches[len(pitches) // 2]
+                moves = [abs(a.pitch - b.pitch) for a, b in zip(line, line[1:])]
+                continuity = sum(moves) / max(1, len(moves))
+                onsets = {n.start for n in line}
+                sounding = sum(timeline.ms(n.end) - timeline.ms(n.start) for n in line)
+                # A sparse chord tone is very smooth but rarely the lead. Use
+                # sounding coverage and melodic activity before smoothness;
+                # register is one statistical clue, never vocal confirmation.
+                salience = (sounding / max(1, duration)
+                            + min(len(line), 256) / 640
+                            + max(0, min(median - 48, 36)) / 60
+                            - min(continuity, 24) / 50)
+                ranking = (bool(lyric_matches), voice_hint and not bass_hint, melody_hint and not bass_hint,
+                           not bass_hint, round(salience, 6), sounding, -round(continuity, 3),
+                           -item.index, -chan, -index)
+                candidates.append({"track": item, "channel": chan, "line_index": index, "line": line,
+                                   "lyrics": lyrics, "lyric_matches": lyric_matches, "median": median,
+                                   "voice_hint": voice_hint, "melody_hint": melody_hint,
+                                   "bass_hint": bass_hint, "harmony_hint": harmony_hint,
+                                   "continuity": continuity, "sounding": sounding, "onsets": onsets,
+                                   "original_monophonic": _monophonic(stream), "ranking": ranking})
+    if not candidates:
+        raise MidiExtractionError("Nenhuma parte musical utilizável para canto.", code="no_melody")
+    lead = max(candidates, key=lambda c: c["ranking"])
+    selected = [lead]
+    # Favor genuine independently simultaneous notes from the same arrangement.
+    # Track labels and shared attacks are evidence; they do not prove vocals.
+    remaining = [c for c in candidates if c is not lead
+                 and (include_bass or not c["bass_hint"])]
+    while remaining and len(selected) < max_parts:
+        def harmony_rank(candidate):
+            shared = len(candidate["onsets"].intersection(lead["onsets"])) / max(1, len(candidate["onsets"]))
+            low_register = candidate["bass_hint"] or candidate["median"] < lead["median"] - 12
+            same_stream = candidate["track"].index == lead["track"].index and candidate["channel"] == lead["channel"]
+            # Prefer one harmony before bass, then complementary lower range.
+            bass_needed = len(selected) > 1 and include_bass
+            return (candidate["harmony_hint"], shared > 0.2,
+                    low_register == bass_needed, same_stream, candidate["sounding"],
+                    min(len(candidate["line"]), 64), -round(candidate["continuity"], 3),
+                    -candidate["track"].index, -candidate["channel"], -candidate["line_index"])
+        chosen = max(remaining, key=harmony_rank)
+        # A section with no simultaneous coverage is not a harmony track.
+        if not _simultaneous_notes(chosen["line"], lead["line"]):
+            remaining.remove(chosen)
+            continue
+        selected.append(chosen)
+        remaining.remove(chosen)
+    parts, warnings = [], []
+    semantic_peers = [c for c in candidates if c["ranking"][:3] == lead["ranking"][:3]]
+    for index, candidate in enumerate(selected):
+        role = "lead" if index == 0 else "bass" if include_bass and (candidate["bass_hint"] or
+                index > 1 and candidate["median"] < lead["median"] - 12) else "harmony"
+        identity = "lead" if index == 0 else "bass" if role == "bass" and not any(p["id"] == "bass" for p in parts) else f"harmony-{index}"
+        notes, lyric_seen = [], False
+        for note in candidate["line"]:
+            lyric = candidate["lyrics"].get(note.start)
+            notes.append({"midi_note": note.pitch, "start_ms": timeline.ms(note.start),
+                          "duration_ms": timeline.ms(note.end) - timeline.ms(note.start),
+                          "velocity": note.velocity, "lyric": lyric if lyric is not None else "~" if lyric_seen else "a"})
+            lyric_seen |= lyric is not None
+        indicated = candidate["original_monophonic"] and (candidate["voice_hint"] or candidate["lyric_matches"] > 0)
+        confidence = 0.75 if indicated else 0.45 if candidate["melody_hint"] else 0.25
+        evidence = ["original_midi_notes", "voice_leading_continuity", "original_rhythm"]
+        if candidate["lyric_matches"]:
+            evidence.append("aligned_embedded_lyrics")
+        if candidate["voice_hint"]:
+            evidence.append("vocal_track_name")
+        parts.append({"id": identity, "role": role, "voice_id": "kasane-teto",
+                      "track_index": candidate["track"].index, "channel": candidate["channel"],
+                      "lyrics_source": "midi" if candidate["lyric_matches"] else "vowel", "notes": notes,
+                      "source_note_ids": [n.serial for n in candidate["line"]],
+                      "confidence": {"score": confidence, "vocal_status": "midi_indicated" if indicated else "ambiguous",
+                                     "vocal_transcription_confirmed": False, "evidence": evidence}})
+        if not indicated:
+            warnings.append(f"{identity}:vocal_line_ambiguous")
+    if any(r["capacity_notes_omitted"] for r in reductions):
+        warnings.append("voice_capacity_limit_original_notes_preserved")
+    if any(r["legato_or_repeated_attacks_clipped"] for r in reductions):
+        warnings.append("legato_or_repeated_attacks_clipped_original_durations_preserved")
+    if any(t.sustain_events for t in tracks):
+        warnings.append("sustain_preserved_in_source_key_durations_used_for_singing")
+    if timeline.conflicting_tracks:
+        warnings.append("conflicting_nonconductor_tempos_ignored")
+    if any(t.issues.get("unclosed_notes_at_track_end") for t in tracks):
+        warnings.append("unclosed_notes_closed_at_track_end")
+    source_streams = [_source_stream(item, chan, timeline) for item in tracks
+                      for chan in sorted({n.channel for n in item.notes})]
+    arrangement = {"score_schema": 2, "duration_ms": duration, "parts": parts,
+                   "source": {"sha256": hashlib.sha256(data).hexdigest(), "duration_ms": duration,
+                              "note_count": source_notes, "division": timeline.division,
+                              "timing": "smpte" if timeline.smpte else "global_ppq_tempo_map",
+                              "tempo_conductor_track": timeline.conductor,
+                              "tempo_map": [{"tick": tick, "start_ms": timeline.ms(tick), "microseconds_per_quarter": tempo}
+                                            for tick, tempo in zip(timeline.ticks, timeline.tempos)],
+                              "tracks": [{"index": t.index, "name": t.name, "end_tick": t.end,
+                                          "end_ms": timeline.ms(t.end),
+                                          "key_signatures": [{"tick": tick, "accidentals": accidental, "minor": bool(minor)}
+                                                             for tick, accidental, minor in t.key_signatures],
+                                          "time_signatures": [{"tick": tick, "numerator": num, "denominator": 2 ** power,
+                                                               "clocks_per_click": clocks, "notes_per_quarter": quarter}
+                                                              for tick, num, power, clocks, quarter in t.time_signatures]}
+                                         for t in tracks], "streams": source_streams},
+                   "selection": {"algorithm": ARRANGEMENT_ALGORITHM_VERSION,
+                                 "selection": "explicit" if track is not None or channel is not None else "automatic",
+                                 "max_parts": max_parts, "selection_ambiguous": len(semantic_peers) > 1,
+                                 "generated_harmonies": False, "vocal_transcription_confirmed": False},
+                   "warnings": warnings}
+    arrangement = validate_arrangement(arrangement)
+    extraction = {"version": 2, "algorithm": ARRANGEMENT_ALGORITHM_VERSION,
+                  "source_sha256": arrangement["source"]["sha256"], "source_duration_ms": duration,
+                  "source_note_count": source_notes, "original_notes_retained": source_notes,
+                  "parts": [{"id": p["id"], "role": p["role"], "track_index": p["track_index"],
+                             "channel": p["channel"], "note_count": len(p["notes"]), "confidence": p["confidence"]}
+                            for p in parts], "reductions": reductions, "warnings": warnings,
+                  "arrangement_sha256": arrangement_sha256(arrangement), "tempo_changed": False,
+                  "vocal_transcription_confirmed": False, "source_is_excerpt": False}
+    return {"arrangement": arrangement, "extraction": extraction}

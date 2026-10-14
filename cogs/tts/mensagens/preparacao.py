@@ -18,7 +18,10 @@ import config
 from ..audio import QueueItem, _has_speakable_tts_text
 from ..ttv import resolve_preferences
 from ..performance import parse_performance_text, performance_hash
-from ..melodies import score_for_melody, fit_catalog_lyrics_to_score
+from ..melodies import score_for_melody, fit_catalog_lyrics_to_score, arrangement_for_melody, fit_arrangement_lyrics
+from ..arrangement_audio import execution_arrangement
+from osaka_cd.arrangement import arrangement_sha256
+from osaka_cd.runtime import pin_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -176,7 +179,7 @@ async def preparar_payload_tts_mensagem(
         return None
 
     raw_text = message.content[len(active_prefix):].strip()
-    score, segments = None, None
+    score, segments, arrangement = None, None, None
     is_ttv = resolved.get("engine") == "teto"
     # Attachments .mid/.midi have no special behavior on any TTV request.
     # Keep ordinary attachment handling for other file types unchanged.
@@ -195,10 +198,17 @@ async def preparar_payload_tts_mensagem(
                         segment["text"] = cog._render_tts_text(_WithoutAttachments(message), segment["text"]).strip()
             text = cog._render_tts_text(_WithoutAttachments(message), clean_text).strip()
             try:
-                score = score_for_melody(resolved.get("ttv_melody_id"))
+                with pin_snapshot():
+                    score = score_for_melody(resolved.get("ttv_melody_id"))
+                    arrangement = execution_arrangement(
+                        arrangement_for_melody(resolved.get('ttv_melody_id')),
+                        ttv_preferences['ttv_voice_id'])
             except ValueError as exc:
                 raise ValueError("A melodia salva ficou indisponível. Escolha outra em seu painel de canto.") from exc
-            text, segments = fit_catalog_lyrics_to_score(text, segments, score)
+            if arrangement is not None:
+                text, segments = fit_arrangement_lyrics(text, segments, arrangement)
+            else:
+                text, segments = fit_catalog_lyrics_to_score(text, segments, score)
             ttv_preferences.update(ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
             resolved.update(ttv_preferences)
             resolved["teto_pitch_semitones"] = "+0.0"
@@ -251,6 +261,8 @@ async def preparar_payload_tts_mensagem(
         advanced_reverb_level=resolved.get("advanced_reverb_level") or 0,
         teto_pitch_semitones=ttv_preferences["ttv_pitch_semitones"],
         ttv_score=score, ttv_segments=segments, ttv_performance_hash=digest,
+        ttv_arrangement=arrangement,
+        ttv_arrangement_hash=arrangement_sha256(arrangement) if arrangement is not None else '',
         **(ttv_preferences if resolved.get("engine") == "teto" else {}),
         piper_fallback_engine=fallback_engine,
         piper_fallback_voice=fallback_voice,

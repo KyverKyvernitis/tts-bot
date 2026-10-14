@@ -1,27 +1,15 @@
-# Importação de CDs — Termux Kit v8
+# Importação de CDs — Termux Kit v9
 
-O kit do telefone e o patch da VPS são entregas separadas. O importador lê o
-Phone Worker 1.11.41 instalado, carrega `~/.phone-worker.env` e usa seu backend
-UTAU. Não instala voicebanks, resamplers ou versões antigas do worker e não
-escreve no runtime ativo. Não envie MIDI pelo Discord.
+Instalação e operação estão em [README-TERMUX-KIT.md](README-TERMUX-KIT.md).
+O kit do telefone e a atualização inicial da VPS são entregas separadas.
+Depois dessa instalação inicial, o watch publica novos CDs automaticamente,
+sem envio manual de pacotes para o updater e sem reiniciar o bot.
 
-1. Descompacte o kit em `~/ttv-cd-kit`, preservando `deploy/ttv-cd`.
-2. Dependências: Python, FFmpeg/FFprobe, yt-dlp, aiohttp e Pillow. Use as
-   instalações existentes; nenhuma atualização do worker é necessária.
-3. Coloque arquivos `.mid`/`.midi` em `~/storage/downloads/osaka-cd-midi/`.
-4. Execute `python ~/ttv-cd-kit/deploy/ttv-cd/import-midi.py`.
-5. Confira o caminho absoluto, tamanho, SHA-256 e `validation` no relatório
-   `~/storage/downloads/osaka-cd-import-relatorio.json`. `ok: true` indica que
-   o pacote passou na validação; `complete` e `pending_artifacts` dizem quais
-   artefatos estão prontos. Um pacote validado pode conter amostra pendente.
-6. Envie os ZIPs `osaka-cd-import-*.zip` ao updater da VPS ou configure a
-   publicação autenticada opcional descrita abaixo. A publicação e a aplicação
-   na VPS são etapas distintas.
+## Sidecar e seleção musical
 
-## Identificação e seleção musical
-
-Use nomes como `wowaka - Rolling Girl.mid` ou um JSON ao lado do MIDI com o
-mesmo nome base. Exemplo:
+Coloque o MIDI em `~/storage/downloads/osaka-cd-midi/`. Nomes no formato
+`Artista - Música.mid` definem artista e título. Um JSON ao lado do MIDI com
+o mesmo nome-base permite declarar informações adicionais:
 
 ```json
 {
@@ -30,92 +18,107 @@ mesmo nome base. Exemplo:
   "artist": "wowaka",
   "aliases": ["Rollin Girl", "ローリンガール"],
   "artist_aliases": ["現実逃避P"],
-  "seed_video_ids": ["vnw8zURAxkU"]
+  "seed_video_ids": ["vnw8zURAxkU"],
+  "max_parts": 3,
+  "include_bass": true
 }
 ```
 
-Os campos opcionais `track_index` e `channel` são índices a partir de zero;
-o canal 9 é percussão. `start_ms` escolhe um deslocamento no MIDI original;
-`max_duration_ms` (até 60000) e `max_notes` (até 128) delimitam o trecho
-compatível com o worker. MIDI de até 8 MiB é aceito. A extração respeita o
-tempo global, pausas e duração das notas. Em arranjos polifônicos, seleciona
-uma faixa/canal e reduz a voz superior, registrando notas descartadas,
-oitavas, pausas e a condição `vocal_line_ambiguous`. Isso não confirma uma
-transcrição vocal. O MIDI original permanece intacto.
+`track_index` e `channel` indicam a melodia principal, com índices a partir de
+zero; o canal 9 é percussão. `start_ms`, `max_duration_ms` (até 60000) e
+`max_notes` (até 128 por parte) delimitam o trecho da amostra. O trecho usa
+um deslocamento comum para todas as partes; sua duração pode ser reduzida
+quando uma parte adicional ultrapassa o orçamento de notas.
+
+O arranjo completo suporta até três partes, dez minutos, 24.000 notas
+cantáveis e 60.000 notas originais. MIDI de até 8 MiB é aceito. Faixas,
+notas originais, ticks, tempo, pedal e critérios de seleção permanecem na
+proveniência. A extração registra ambiguidade vocal e descartes; não confirma
+uma transcrição vocal nem inventa harmonias ausentes no arquivo.
 
 `search_query` complementa a busca do player. `allow_versions` autoriza
 explicitamente variantes como `cover`, `live`, `remix` ou `instrumental`;
 sem esse campo, versões diferentes são rejeitadas. Informe artista e aliases
-adequados para uma identificação verificável. Se o MIDI representa a música
-inteira, `source_is_full_song: true` permite comparar sua duração com a do
-vídeo. Para trechos/adaptações, omita esse campo; opcionalmente declare a
-duração total conhecida em `expected_song_duration_seconds`.
+adequados para identificação. Se o MIDI representa a música inteira,
+`source_is_full_song: true` permite comparar sua duração com a do vídeo.
+Para trechos/adaptações, omita esse campo; a duração total conhecida pode ser
+informada em `expected_song_duration_seconds`.
 
-A escolha registra consultas, candidatos aceitos/rejeitados, motivos e
-contagens verificadas. É o vídeo mais visto entre os candidatos compatíveis
-inspecionados, sem afirmar uma busca exaustiva do YouTube. O campo
-`YOUTUBE_API_KEY`/`GOOGLE_YOUTUBE_API_KEY` pode ser configurado no ambiente do
-importador ou no arquivo confiável `~/.phone-worker.env`; alternativamente a pesquisa pública usa yt-dlp. Não coloque
+A busca compara contagens verificadas entre candidatos compatíveis consultados,
+sem garantia de encontrar todos os vídeos do YouTube. O vídeo anterior é
+verificado novamente para evitar regressão causada por sua posição na busca.
+Contagens antigas não escolhem o vencedor de uma busca nova. Aliases anteriores
+sobrevivem quando a identidade não muda e o sidecar omite esses campos;
+`aliases: []` ou `artist_aliases: []` remove explicitamente os aliases.
+
+A pesquisa pública usa yt-dlp; `YOUTUBE_API_KEY`/`GOOGLE_YOUTUBE_API_KEY` pode
+ser lida do ambiente do telefone ou de `~/.phone-worker.env`. Não coloque
 chaves no sidecar, ZIP, relatório ou linha de comando.
 
-## Recuperação de falhas
+## Configuração UTAU
 
-Use `--watch` para monitorar a pasta e repetir artefatos pendentes. Use
-`--retry` para tentar imediatamente após uma correção ou liberar um
-cooldown temporário; `--force` inclui arquivos já processados. Falhas
-permanentes de MIDI/seleção aguardam mudança de entrada/configuração, sem
-cooldown de uma hora. Arquivo MIDI, sidecar, candidatos/capa de teste,
-configuração e release do worker participam da identidade de tentativa.
+O backend UTAU e o runtime ativo do Phone Worker 1.11.41 são preservados.
+O importador carrega o ambiente real do worker e faz pedidos monofônicos
+compatíveis ao serviço ativo autenticado. Não instala voicebanks, resamplers
+ou kits antigos. As partes compartilham a mesma linha do tempo, são alinhadas
+em WAV/PCM e misturadas antes de gerar o MP3.
 
-Amostras prontas cuja partitura canônica não mudou são reutilizadas,
-inclusive após alteração somente da capa ou falha de rede. Uma nova
-partitura invalida seu manifesto de amostra; os bytes anteriores ficam no
-telefone para recuperação, mas não são publicados como áudio da nova
-partitura. Bateria/temperatura e configuração indisponível produzem amostra
-pendente. O próximo sucesso exporta novamente um CD completo, nunca um
-ZIP contendo apenas MP3 e índice. O `--no-sample` permite preparar demais
-artefatos, mas deixa explícito que o CD ainda não está completo.
+## Artefatos e hashes
 
-## Pacotes e publicação
+Cada pacote contém um incremento por música nos caminhos relativos validados:
 
-Cada ZIP contém somente um CD nos caminhos do updater:
-
-- `cogs/tts/cd_song_scores.json`: incremento por ID, com hash MIDI separado
-  do hash da partitura canônica.
+- `cogs/tts/cd_song_scores.json`: melodia do painel, revisão e referências.
 - `cogs/tts/cd_song_videos.json`: metadados, auditoria de busca e hash da capa.
-- `cogs/tts/cd/previews/index.json`: manifesto v2 da amostra, quando pronta.
-- `cogs/tts/cd/packages/ID.json`: revisão, hashes e artefatos prontos/pendentes.
-- `cogs/tts/cd/thumbnails/VIDEOID.jpg`: capa, quando pronta.
-- `cogs/tts/cd/previews/ID.mp3`: áudio, quando pronto e decodificado.
+- `cogs/tts/cd/arrangements/ID.json`: arranjo completo e proveniência MIDI.
+- `cogs/tts/cd/packages/ID.json`: manifesto v2 e artefatos prontos/pendentes.
+- `cogs/tts/cd/previews/index.json`: manifesto v3 da amostra, quando pronta.
+- `cogs/tts/cd/thumbnails/VIDEOID.jpg`: JPEG validado, quando pronto.
+- `cogs/tts/cd/previews/ID.mp3`: MP3 validado e decodificado, quando pronto.
 
-O updater mescla por ID e preserva os outros CDs. O importador verifica CRC,
-caminhos, JSONs, hashes, JPEG e, para áudio presente, FFprobe e decodificação
-com FFmpeg antes de confirmar o catálogo local e o caminho final do ZIP.
-O catálogo persistente fica em `~/.local/share/osaka-ttv-cd/`; preserve essa
-pasta ao trocar o kit.
+O hash do MIDI, o hash da partitura do painel, o hash do arranjo completo,
+o hash do trecho harmonizado e os hashes binários são distintos. A validação
+confere os vínculos exatos e a origem musical da amostra, os caminhos, CRC,
+JSONs, JPEG, a decodificação completa do MP3 e sua duração antes da publicação.
+Uma composição aceita até 700 ms de diferença para pre-roll e padding MP3;
+amostras monofônicas antigas têm tolerância de dois segundos para preservar
+ataques e caudas históricos. Áudio decodificável de duração incompatível é
+rejeitado mesmo quando todos os hashes binários estão corretos.
 
-Para transferir automaticamente, o patch VPS precisa estar instalado e a
-rota HTTPS existente precisa estar habilitada com
-`OSAKA_CD_PUBLISH_ENABLED=1` e um `OSAKA_CD_PUBLISH_TOKEN` de no mínimo 32
-caracteres. Configure o mesmo token somente no ambiente do telefone e use:
+Uma mudança na harmonia invalida a amostra mesmo quando a melodia principal
+continua igual. Alterações só de capa ou proveniência, sem alteração musical,
+preservam áudio compatível. Amostras v2 só migram explicitamente quando o
+novo arranjo tem uma parte e a mesma partitura; elas nunca representam um
+novo arranjo de duas ou três partes. Bytes anteriores continuam disponíveis
+para recuperação, mas não são publicados como áudio de outra partitura.
+
+O catálogo local fica em `~/.local/share/osaka-ttv-cd/`, fora do kit. Preserve
+essa pasta. A VPS mantém gerações isoladas do catálogo fora do repositório,
+valida e troca a versão ativa atomicamente. A confirmação `activated` informa
+que o bot carregou os dados; `received` ou `applied` é uma etapa anterior.
+
+## Testes isolados e recuperação
+
+`--candidates candidatos.json --cover-file capa.jpg` usa metadados e JPEG
+locais sem pesquisa/download. `--no-sample` permite preparar demais artefatos
+com amostra explicitamente pendente. Um pacote validado pode estar incompleto;
+`complete` e `pending_artifacts` informam isso.
 
 ```sh
-python ~/ttv-cd-kit/deploy/ttv-cd/import-midi.py --publish-url https://SEU_HOST/api/osaka/cd/publish --watch
+python deploy/ttv-cd/package_validation.py CAMINHO_ABSOLUTO.zip --require-complete --audio-probe
 ```
 
-A resposta `state: queued` comprova recebimento, não instalação.
-`installed_on_vps: false` permanece até confirmação independente da
-aplicação pelo updater. Os ZIPs locais continuam disponíveis para o envio
-manual e rollback. Ao alterar a capa, a VPS recalcula cor/emoji pelo hash;
-uma amostra compatível permanece válida. Ao aplicar a atualização, confira
-`_cd`, a opção da música, a borda/capa/emoji e o botão de amostra.
+Falhas permanentes de MIDI/seleção aguardam mudança de entrada/configuração.
+MIDIs, sidecars, arquivos de teste e configuração do worker participam da
+identidade da tentativa. `--retry` ignora cooldown e permite nova tentativa
+manual; `--force` reimporta arquivos já processados. A fila persistente recupera
+falhas temporárias de publicação sem resintetizar artefatos prontos.
+Erros permanentes da amostra aguardam mudança de entrada/configuração ou
+`--retry`. A recuperação sem MIDI mantém cooldown e detecta correções na
+autenticação do worker por uma identidade opaca, sem registrar credenciais.
+Ativar a publicação depois de uma importação offline aproveita o último ZIP
+validado; confirmações `activated` persistem entre reinícios do kit.
 
-Para testes isolados, `--candidates candidatos.json --cover-file capa.jpg`
-usa metadados e JPEG locais sem pesquisa/download. Valide um pacote existente:
-
-```sh
-python ~/ttv-cd-kit/deploy/ttv-cd/package_validation.py CAMINHO_ABSOLUTO.zip --require-complete --audio-probe
-```
-
-O ZIP de amostra v7 usa manifesto legado e precisa de migração explícita
-com sua partitura correspondente; não substitua o índice v2 por esse ZIP.
+Um watch reserva o catálogo até terminar. Encerre com Ctrl+C antes de atualizar
+arquivos Python ou iniciar uma importação manual. Watchers antigos precisam
+ser encerrados antes da primeira instalação v9; use `pgrep -af import-midi.py`
+e `kill -INT PID` somente para o processo do importador desejado.

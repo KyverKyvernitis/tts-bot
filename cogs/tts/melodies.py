@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import OrderedDict
 from functools import lru_cache
 import hashlib
 import json
@@ -9,8 +10,8 @@ import logging
 import os
 from pathlib import Path
 import re
-
-
+import threading
+from osaka_cd.runtime import data_root, pin_snapshot, register_validator
 
 DEFAULT_MELODY_ID = "ttv-demo-v1"
 _LOG = logging.getLogger(__name__)
@@ -21,6 +22,11 @@ _FAILED_CATALOG_SIGNATURE: tuple[int, ...] | None = None
 _LOOKUP_SNAPSHOT = None
 _LOOKUP = {}
 _SINGLE_VOWELS = frozenset("a á à â ã e é ê i í o ó ô õ u ú".split())
+_SCORE_SNAPSHOTS = OrderedDict()
+_SCORE_CACHE_BYTES = 0
+_SCORE_CACHE_LIMIT = 8 * 1024 * 1024
+_CATALOG_MUSIC_LIMIT = 32 * 1024 * 1024
+_MUSIC_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +49,12 @@ class Melody:
     source_url: str = ""
     source_sha256: str = ""
     score_sha256: str = ""
+    arrangement_json: str = ""
+    arrangement_sha256: str = ""
+    arrangement_version: int = 1
+    arrangement_preview_json: str = ""
+    arrangement_preview_sha256: str = ""
+    arrangement_preview_performance_sha256: str = ""
 
 
 def catalog_score(entry: dict) -> dict:
@@ -84,12 +96,18 @@ def _validate_score(entry: dict) -> dict:
     return catalog_score(entry)
 
 
-def _song_melodies() -> tuple[Melody, ...]:
-    entries = json.loads(_SCORE_FILE.read_text(encoding="utf-8"))
+def _score_path() -> Path:
+    root = data_root(_SCORE_FILE.parent)
+    return _SCORE_FILE if root == _SCORE_FILE.parent else root / "cd_song_scores.json"
+
+
+def _read_song_melodies(path) -> tuple[Melody, ...]:
+    entries = json.loads(Path(path or _score_path()).read_text(encoding="utf-8"))
     if not isinstance(entries, list) or len(entries) > 500:
         raise ValueError("invalid_cd_catalog_size")
     seen = set()
     songs = []
+    music_bytes = 0
     for entry in entries:
         if not isinstance(entry, dict):
             raise ValueError("invalid_cd_catalog_entry")
@@ -112,15 +130,109 @@ def _song_melodies() -> tuple[Melody, ...]:
         digest = score_sha256(score)
         if "score_sha256" in entry and entry["score_sha256"] != digest:
             raise ValueError("invalid_cd_score_hash")
-        songs.append(Melody(
+        arrangement = entry.get("arrangement")
+        arrangement_path = entry.get("arrangement_path")
+        if arrangement_path is not None:
+            # Sidecars are data under this same immutable catalog generation.
+            # Resolve without permitting absolute paths, traversal or symlinks.
+            if not isinstance(arrangement_path, str) or arrangement_path != f"cogs/tts/cd/arrangements/{identity}.json":
+                raise ValueError("invalid_cd_arrangement_path")
+            target = Path(path or _score_path()).parent / "cd/arrangements" / f"{identity}.json"
+            if (target.is_symlink() or not target.resolve().is_relative_to(Path(path or _score_path()).parent.resolve())
+                    or not 0 < target.stat().st_size <= 16 * 1024 * 1024):
+                raise ValueError("invalid_cd_arrangement_file")
+            arrangement = json.loads(target.read_text(encoding="utf-8"))
+        arrangement_fields = {}
+        if arrangement is not None:
+            from osaka_cd.arrangement import (validate_arrangement, arrangement_sha256,
+                arrangement_performance_sha256, preview_arrangement)
+            arrangement = validate_arrangement(arrangement)
+            if source_hash and arrangement.get("source", {}).get("sha256") != source_hash:
+                raise ValueError("invalid_cd_arrangement_source_hash")
+            arrangement_digest = arrangement_sha256(arrangement)
+            if entry.get("arrangement_sha256") != arrangement_digest:
+                raise ValueError("invalid_cd_arrangement_hash")
+            preview_start = entry.get("arrangement_preview_start_ms", 0)
+            preview_end = entry.get("arrangement_preview_end_ms", min(arrangement["duration_ms"], entry["duration_ms"]))
+            if type(preview_start) is not int or type(preview_end) is not int:
+                raise ValueError("invalid_cd_arrangement_preview_window")
+            preview = preview_arrangement(arrangement, start_ms=preview_start, end_ms=preview_end)["arrangement"]
+            lead = next(part for part in preview["parts"] if part["role"] == "lead")
+            timing_keys = ("midi_note", "start_ms", "duration_ms", "velocity")
+            lead_notes = [{key: note[key] for key in timing_keys} for note in lead["notes"]]
+            visible_notes = [{key: note[key] for key in timing_keys} for note in score["notes"]]
+            if preview["duration_ms"] != entry["duration_ms"] or lead_notes != visible_notes:
+                raise ValueError("invalid_cd_arrangement_lead_score")
+            preview_digest = arrangement_sha256(preview)
+            if "preview_arrangement_sha256" in entry and entry["preview_arrangement_sha256"] != preview_digest:
+                raise ValueError("invalid_cd_preview_arrangement_hash")
+            preview_performance = arrangement_performance_sha256(preview)
+            if ("preview_performance_sha256" in entry
+                    and entry["preview_performance_sha256"] != preview_performance):
+                raise ValueError("invalid_cd_preview_performance_hash")
+            arrangement_fields = {
+                "arrangement_json": json.dumps(arrangement, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                "arrangement_sha256": arrangement_digest,
+                "arrangement_version": 2,
+                "arrangement_preview_json": json.dumps(preview, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                "arrangement_preview_sha256": preview_digest,
+                "arrangement_preview_performance_sha256": preview_performance,
+            }
+        melody = Melody(
             id=entry["id"], name=entry["name"],
             description=f"{entry['artist']} · {entry['excerpt']}",
             duration_ms=entry["duration_ms"], note_count=len(score["notes"]),
             score_json=json.dumps(score, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
             revision=revision, artist=entry["artist"], source_url=entry["source_url"],
             source_sha256=source_hash, score_sha256=digest,
-        ))
+            **arrangement_fields,
+        )
+        music_bytes += sum(len(payload.encode('utf-8')) for payload in (
+            melody.score_json, melody.arrangement_json, melody.arrangement_preview_json))
+        if music_bytes > _CATALOG_MUSIC_LIMIT:
+            raise ValueError("cd_catalog_music_memory_limit")
+        songs.append(melody)
     return tuple(songs)
+
+
+def _path_signature(path):
+    stat = path.stat()
+    return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino
+
+
+def _song_melodies(path=None) -> tuple[Melody, ...]:
+    """Reuse reader validation without retaining unbounded old generations."""
+    path = Path(path or _score_path())
+    with _MUSIC_LOCK:
+        return _cached_song_melodies(path)
+
+
+def _cached_song_melodies(path) -> tuple[Melody, ...]:
+    global _SCORE_CACHE_BYTES
+    previous = _SCORE_SNAPSHOTS.get(path)
+    if previous is not None:
+        dependencies, songs, size = previous
+        if all(_path_signature(dependency) == signature for dependency, signature in dependencies):
+            _SCORE_SNAPSHOTS.move_to_end(path)
+            return songs
+        _SCORE_SNAPSHOTS.pop(path)
+        _SCORE_CACHE_BYTES -= size
+    songs = _read_song_melodies(path)
+    dependencies = [(path, _path_signature(path))]
+    for melody in songs:
+        if melody.arrangement_json:
+            sidecar = path.parent / 'cd/arrangements' / f'{melody.id}.json'
+            if sidecar.is_file():
+                dependencies.append((sidecar, _path_signature(sidecar)))
+    size = sum(len(payload.encode('utf-8')) for melody in songs for payload in (
+        melody.score_json, melody.arrangement_json, melody.arrangement_preview_json))
+    if size <= _SCORE_CACHE_LIMIT:
+        _SCORE_SNAPSHOTS[path] = (dependencies, songs, size)
+        _SCORE_CACHE_BYTES += size
+        while len(_SCORE_SNAPSHOTS) > 8 or _SCORE_CACHE_BYTES > _SCORE_CACHE_LIMIT:
+            _, (_, _, removed) = _SCORE_SNAPSHOTS.popitem(last=False)
+            _SCORE_CACHE_BYTES -= removed
+    return songs
 
 
 _DEFAULT_MELODY = Melody(
@@ -138,19 +250,25 @@ except (OSError, ValueError, KeyError, TypeError) as exc:
 
 
 try:
-    _STAT = _SCORE_FILE.stat()
-    _CATALOG_SIGNATURE = (_STAT.st_mtime_ns, _STAT.st_ctime_ns, _STAT.st_size, _STAT.st_ino)
+    _STAT = _score_path().stat()
+    _CATALOG_SIGNATURE = (str(_score_path()), _STAT.st_mtime_ns, _STAT.st_ctime_ns, _STAT.st_size, _STAT.st_ino)
 except OSError:
     _CATALOG_SIGNATURE = (0, 0, 0, 0)
 
 def list_melodies() -> tuple[Melody, ...]:
+    path = _score_path()
+    with _MUSIC_LOCK:
+        return _list_melodies_current(path)
+
+
+def _list_melodies_current(path) -> tuple[Melody, ...]:
     global _MELODIES, _CATALOG_SIGNATURE, _FAILED_CATALOG_SIGNATURE
     signature = (0, 0, 0, 0)
     try:
-        stat = _SCORE_FILE.stat()
-        signature = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
+        stat = path.stat()
+        signature = (str(path), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
         if signature != _CATALOG_SIGNATURE and signature != _FAILED_CATALOG_SIGNATURE:
-            updated = (_MELODIES[0], *_song_melodies())
+            updated = (_MELODIES[0], *_song_melodies(path))
             _MELODIES = updated
             _CATALOG_SIGNATURE = signature
             _FAILED_CATALOG_SIGNATURE = None
@@ -166,10 +284,11 @@ def list_melodies() -> tuple[Melody, ...]:
 def catalog_signature() -> tuple[int, ...]:
     """Detect artifacts arriving after their manifests, including cover rewrites."""
     result = []
-    data_root = _SCORE_FILE.parent
-    paths = [_SCORE_FILE, _SCORE_FILE.with_name('cd_song_videos.json'),
-             data_root / 'cd' / 'previews' / 'index.json']
-    roots = [data_root / 'cd' / 'thumbnails', data_root / 'cd' / 'previews']
+    path = _score_path()
+    selected_root = path.parent
+    paths = [path, path.with_name('cd_song_videos.json'),
+             selected_root / 'cd' / 'previews' / 'index.json']
+    roots = [selected_root / 'cd' / 'thumbnails', selected_root / 'cd' / 'previews']
     configured = os.getenv('TTV_CD_THUMBNAIL_CACHE_DIR', '').strip()
     if configured:
         roots.append(Path(configured).expanduser())
@@ -199,10 +318,11 @@ def get_melody(value: object = None) -> Melody:
         raise ValueError("Escolha uma melodia disponível no painel de canto.")
     identity = str(value or "").strip() or DEFAULT_MELODY_ID
     snapshot = list_melodies()
-    if snapshot is not _LOOKUP_SNAPSHOT:
-        _LOOKUP = {melody.id: melody for melody in snapshot}
-        _LOOKUP_SNAPSHOT = snapshot
-    melody = _LOOKUP.get(identity)
+    with _MUSIC_LOCK:
+        if snapshot is not _LOOKUP_SNAPSHOT:
+            _LOOKUP = {melody.id: melody for melody in snapshot}
+            _LOOKUP_SNAPSHOT = snapshot
+        melody = _LOOKUP.get(identity)
     if melody is None:
         raise ValueError("Essa melodia está indisponível. Escolha outra no painel de canto.")
     return melody
@@ -211,6 +331,20 @@ def get_melody(value: object = None) -> Melody:
 def score_for_melody(value: object = None) -> dict:
     # JSON keeps the catalog immutable; each queue request owns its score.
     return json.loads(get_melody(value).score_json)
+
+
+def arrangement_for_melody(value: object = None, *, preview: bool = False) -> dict | None:
+    """Each request owns a fresh composition; legacy CDs remain monophonic."""
+    identity = value.get("ttv_melody_id") if isinstance(value, dict) else value
+    melody = get_melody(identity)
+    payload = melody.arrangement_preview_json if preview else melody.arrangement_json
+    return json.loads(payload) if payload else None
+
+
+build_singing_arrangement = arrangement_for_melody
+
+
+register_validator(lambda root: _song_melodies(root / "cogs/tts/cd_song_scores.json"))
 
 
 def fit_catalog_lyrics_to_score(text: str, segments: list[dict] | None, score: dict
@@ -260,6 +394,33 @@ def fit_catalog_lyrics_to_score(text: str, segments: list[dict] | None, score: d
                or part.get("pause_after_ms") or part["text"] == "|" for part in result):
         return clean, None
     return clean, result
+
+
+def fit_arrangement_lyrics(text: str, segments: list[dict] | None, arrangement: dict
+                           ) -> tuple[str, list[dict] | None]:
+    """Align user lyrics with the complete lead, never with a preview excerpt.
+
+    Harmony lyrics remain the arrangement's explicit MIDI or vowel guides.
+    Written words are left to the real voicebank phonemizer, as in v1.
+    """
+    parts = arrangement.get("parts") if isinstance(arrangement, dict) else None
+    leads = [part for part in parts if isinstance(part, dict) and part.get("role") == "lead"] if isinstance(parts, list) else []
+    if len(leads) != 1 or not isinstance(leads[0].get("notes"), list) or not leads[0]["notes"]:
+        raise ValueError("O arranjo precisa de uma melodia principal válida.")
+    fitted_text, fitted_segments = fit_catalog_lyrics_to_score(text, segments, {"notes": leads[0]["notes"]})
+    tokens = [part.get('text', '') for part in fitted_segments
+              if part.get('text') != '|' and not (part.get('text') == '~' and part.get('hold'))] if fitted_segments else fitted_text.split()
+    if tokens and all(token.casefold() in _SINGLE_VOWELS for token in tokens):
+        from osaka_cd.arrangement import arrangement_render_plan
+        plan = arrangement_render_plan(arrangement)
+        minimum = sum(request['minimum_syllables'] for chunk in plan['chunks']
+                      for request in chunk['parts'] if request['role'] == 'lead')
+        if len(tokens) < minimum:
+            raise ValueError(
+                f"Este arranjo precisa de pelo menos {minimum} sílabas para respeitar suas pausas e trechos. "
+                f"Sua letra tem {len(tokens)}. Acrescente sílabas ou escolha outro CD."
+            )
+    return fitted_text, fitted_segments
 
 
 def minimum_singing_syllables(score: dict | None) -> int:

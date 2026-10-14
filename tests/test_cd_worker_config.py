@@ -62,6 +62,8 @@ class WorkerConfigTests(unittest.TestCase):
         runtime = self.root / 'runtime'
         release = runtime / 'releases' / 'fixture-1.11.41'
         release.mkdir(parents=True)
+        if not (original / 'phone_worker.py').is_file():
+            self.skipTest('Existing worker source is unavailable in the standalone kit')
         shutil.copy2(original / 'phone_worker.py', release / 'phone_worker.py')
         shutil.copytree(original / 'teto_renderer', release / 'teto_renderer', ignore=shutil.ignore_patterns('__pycache__'))
         (runtime / 'current').symlink_to(release)

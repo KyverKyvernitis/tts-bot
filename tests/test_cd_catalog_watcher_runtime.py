@@ -2,6 +2,7 @@
 from pathlib import Path
 import asyncio
 import ast
+from contextlib import nullcontext
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
@@ -97,6 +98,66 @@ class CatalogWatcherTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(task, return_exceptions=True)
         self.assertIs(ns['_CATALOG_TASK'], new_task)
         self.assertIs(ns['_CATALOG_COG'], self.cog)
+
+    async def test_publication_events_refresh_immediately_and_coalesce(self):
+        ns = self.setup_watcher()
+        listeners = []
+        completed = asyncio.Event()
+        loaded = []
+        async def acknowledge_off_thread(callback):
+            # The store's actual SQLite/threads are exercised separately.
+            return callback()
+        ns.update(subscribe_catalog_events=lambda callback: listeners.append(callback) or Mock(),
+                  pin_snapshot=nullcontext, log=Mock(),
+                  acknowledge_catalog=Mock(return_value=True),
+                  asyncio=SimpleNamespace(Event=asyncio.Event, get_running_loop=asyncio.get_running_loop,
+                    wait_for=asyncio.wait_for, TimeoutError=asyncio.TimeoutError,
+                    current_task=asyncio.current_task, to_thread=acknowledge_off_thread))
+        def load():
+            loaded.append(self.version)
+            if self.version == 2:
+                completed.set()
+            return []
+        ns['list_melodies'] = load
+        task = asyncio.create_task(ns['_watch_catalog'](self.cog))
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if loaded:
+                    break
+            self.assertEqual(loaded, [1])
+            self.version = 2
+            for _ in range(100):
+                listeners[0]({'generation': 'new'})
+            await asyncio.wait_for(completed.wait(), timeout=.5)
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.assertEqual(loaded, [1, 2])
+            self.assertEqual(self.manager.schedule.call_count, 2)
+            self.assertEqual(ns['acknowledge_catalog'].call_count, 2)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_busy_panel_refresh_is_coalesced_and_expired_panel_is_skipped(self):
+        source = ast.parse(SOURCE.read_text())
+        node = next(node for node in source.body if isinstance(node, ast.AsyncFunctionDef)
+                    and node.name == '_refresh_catalog_panels')
+        ns = {'asyncio': asyncio, 'log': Mock(), 'DEFAULT_MELODY_ID': 'default',
+              'list_melodies': lambda: [SimpleNamespace(id='song')]}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(SOURCE), 'exec'), ns)
+        def panel(*, busy=False, expired=False):
+            return SimpleNamespace(_is_expired=lambda: expired, is_finished=lambda: False,
+                _preview_running=busy, _saving=False, _catalog_refresh_pending=False,
+                selected_melody_id='song', message=object(), refresh=AsyncMock(), _edit_panel=AsyncMock())
+        active, busy, expired = panel(), panel(busy=True), panel(expired=True)
+        await ns['_refresh_catalog_panels']([active, busy, expired])
+        active.refresh.assert_awaited_once_with(rebuild=False)
+        active._edit_panel.assert_awaited_once()
+        busy.refresh.assert_not_awaited()
+        self.assertTrue(busy._catalog_refresh_pending)
+        expired.refresh.assert_not_awaited()
+        self.assertFalse(expired._catalog_refresh_pending)
 
 
 if __name__ == '__main__':

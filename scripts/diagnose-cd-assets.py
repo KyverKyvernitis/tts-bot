@@ -45,21 +45,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('id', nargs='?', default='rolling-girl')
     args = parser.parse_args()
+    from osaka_cd.runtime import pin_snapshot
+    with pin_snapshot() as selected:
+        diagnose(args.id, selected)
+
+
+def diagnose(identity, selected):
+    from osaka_cd.runtime import data_root
     from cogs.tts import cd_covers
     from cogs.tts.interface.application_emojis import emoji_name, square_emoji
     pillow_available = importlib.util.find_spec('PIL') is not None
-    result = {'id': args.id, 'discord_api_called': False,
+    result = {'id': identity, 'discord_api_called': False,
               'python_executable': sys.executable, 'pillow_available': pillow_available,
-              'catalog_path': str(cd_covers._DATA / 'cd_song_videos.json'),
-              'video': cd_covers.video_catalog().get(args.id, {}).get('video_id'),
-              'manifest_cover_identity': cd_covers.cover_identity(args.id),
-              'local_validated_revision': cd_covers.cover_revision(args.id),
-              'panel_can_use_remote_thumbnail': bool(cd_covers.remote_thumbnail_url(args.id))}
-    identity = args.id + (':' + result['manifest_cover_identity'] if result['manifest_cover_identity'] else '')
-    result['expected_emoji_name'] = emoji_name('osakacd', identity)
+              'catalog_path': str(data_root(cd_covers._DATA) / 'cd_song_videos.json'),
+              'runtime_generation': selected.get('generation'),
+              'video': cd_covers.video_catalog().get(identity, {}).get('video_id'),
+              'manifest_cover_identity': cd_covers.cover_identity(identity),
+              'local_validated_revision': cd_covers.cover_revision(identity),
+              'panel_can_use_remote_thumbnail': bool(cd_covers.remote_thumbnail_url(identity))}
+    emoji_identity = identity + (':' + result['manifest_cover_identity'] if result['manifest_cover_identity'] else '')
+    result['expected_emoji_name'] = emoji_name('osakacd', emoji_identity)
     result['local_cover_candidates'] = [inspect_cover(path, expected, pillow_available=pillow_available)
-                                        for path, expected in cd_covers._cover_sources(args.id)]
-    image = cd_covers._cover_bytes(args.id)
+                                        for path, expected in cd_covers._cover_sources(identity)]
+    image = cd_covers._cover_bytes(identity)
     result['local_cover_ready'] = image is not None
     if image:
         result['local_cover_sha256'] = hashlib.sha256(image).hexdigest()

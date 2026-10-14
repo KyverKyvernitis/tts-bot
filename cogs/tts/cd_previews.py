@@ -8,6 +8,7 @@ import re
 
 from .melodies import DEFAULT_MELODY_ID, get_melody, score_sha256
 from .cd_assets import FILES, file_signature
+from osaka_cd.runtime import data_root, pin_snapshot, register_validator
 
 _ROOT = Path(__file__).parent / 'cd' / 'previews'
 _ID = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*\Z')
@@ -57,6 +58,11 @@ def _has_mp3_frames(data: bytes) -> bool:
 
 
 def prepared_sample(melody_id: str, preferences: dict) -> bytes | None:
+    with pin_snapshot():
+        return _prepared_sample(melody_id, preferences)
+
+
+def _prepared_sample(melody_id: str, preferences: dict) -> bytes | None:
     if (not isinstance(melody_id, str) or not _ID.fullmatch(melody_id)
             or melody_id == DEFAULT_MELODY_ID or not isinstance(preferences, dict)):
         return None
@@ -66,7 +72,12 @@ def prepared_sample(melody_id: str, preferences: dict) -> bytes | None:
         if not (preferences.get('ttv_voice_id') == 'kasane-teto'
                 and preferences.get('ttv_language') == 'pt-BR'):
             return None
-        index_path = _ROOT / 'index.json'
+        selected_root = data_root(_ROOT.parent.parent) / 'cd/previews'
+        # Preserve custom legacy preview roots in tests and existing deployments.
+        from osaka_cd.runtime import snapshot
+        if not snapshot().get('initialized'):
+            selected_root = _ROOT
+        index_path = selected_root / 'index.json'
         signature = file_signature(index_path)
         if signature is None or not 0 < signature[2] <= 8 * 1024 * 1024:
             return None
@@ -77,20 +88,50 @@ def prepared_sample(melody_id: str, preferences: dict) -> bytes | None:
             return None
         # Legacy v1 called the MIDI provenance hash "score_sha256". It can only
         # be migrated when its actual score is known, adding this content key.
-        digest = (metadata.get('score_sha256') if metadata.get('manifest_version') == 2
+        digest = (metadata.get('score_sha256') if metadata.get('manifest_version') in (2, 3)
                   else metadata.get('score_content_sha256'))
         actual = melody.score_sha256 or score_sha256(json.loads(melody.score_json))
         if (not isinstance(digest, str) or not _SHA256.fullmatch(digest) or digest != actual
                 or metadata.get('id', melody_id) != melody_id
+                or ('revision' in metadata and metadata['revision'] != melody.revision)
+                or ('source_sha256' in metadata and metadata['source_sha256'] != melody.source_sha256)
                 or metadata.get('voice_id') != 'kasane-teto' or metadata.get('language') != 'pt-BR'
                 or float(metadata.get('pitch_semitones', float('nan'))) != 0
                 or float(metadata.get('speech_rate', float('nan'))) != 1):
             return None
+        if melody.arrangement_json:
+            profile = metadata.get('rendering_profile')
+            if (metadata.get('manifest_version') != 3
+                    or metadata.get('arrangement_sha256') != melody.arrangement_preview_sha256
+                    or metadata.get('source_arrangement_sha256') != melody.arrangement_sha256
+                    or metadata.get('arrangement_performance_sha256') != melody.arrangement_preview_performance_sha256
+                    or not isinstance(profile, dict)
+                    or profile.get('mode') not in {'multipart-utau', 'legacy-monophonic-migration'}):
+                return None
+            if profile['mode'] == 'legacy-monophonic-migration':
+                if len(json.loads(melody.arrangement_preview_json)['parts']) != 1:
+                    return None
+            elif any(not isinstance(profile.get(key), str) or not _SHA256.fullmatch(profile[key])
+                     for key in ('configuration_fingerprint', 'render_fingerprint')):
+                return None
         mp3_hash = metadata.get('mp3_sha256')
         if not isinstance(mp3_hash, str) or not _SHA256.fullmatch(mp3_hash):
             return None
-        target = _ROOT / f'{melody_id}.mp3'
+        target = selected_root / f'{melody_id}.mp3'
         return FILES.read(target, mp3_hash, 2_000_000, 'mp3',
                           lambda data: len(data) > 256 and _has_mp3_frames(data))
     except (OSError, TypeError, ValueError, KeyError):
         return None
+
+
+def _validate_preview_index(root):
+    path = root / 'cogs/tts/cd/previews/index.json'
+    raw = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(raw, dict) or len(raw) > 500:
+        raise ValueError('invalid_cd_preview_index')
+    for identity, metadata in raw.items():
+        if not isinstance(identity, str) or not _ID.fullmatch(identity) or not isinstance(metadata, dict):
+            raise ValueError('invalid_cd_preview_entry')
+
+
+register_validator(_validate_preview_index)

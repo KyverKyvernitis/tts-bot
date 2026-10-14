@@ -269,12 +269,21 @@ async def rotear_item_tts_para_musica(
     # Singing/effects must reach the musical session as verified rendered audio.
     # Its text-only synthesis endpoint does not understand the performance score.
     performance = (getattr(item, "ttv_score", None) is not None
-                   or getattr(item, "ttv_segments", None) is not None)
+                   or getattr(item, "ttv_segments", None) is not None
+                   or getattr(item, "ttv_arrangement", None) is not None)
+    arrangement = getattr(item, 'ttv_arrangement', None)
     if performance:
         if not suporta_cache_tts_agente(bot):
             raise RuntimeError(
                 "O worker de música precisa aceitar áudio pronto para reproduzir "
                 "canto e efeitos de TTV. Atualize o worker e tente novamente."
+            )
+        if arrangement is not None and owner._estimate_playback_timeout(item) > 90.0:
+            # Both the immutable phone bridge and musical overlay clamp to
+            # 90s. Do not transfer ownership, truncate, or stop active music.
+            raise _TTVPerformancePlaybackError(
+                "Este arranjo ultrapassa o limite de 90 segundos da sessão musical. "
+                "Encerre a música para reproduzir o arranjo completo pela VPS."
             )
 
     if audio_task is not None and not audio_task.done():
@@ -305,18 +314,32 @@ async def rotear_item_tts_para_musica(
         if performance:
             import base64
             import binascii
+            import hashlib
 
             encoded = cached_payload.get("audio_b64")
             try:
-                audio_ready = isinstance(encoded, str) and bool(base64.b64decode(encoded, validate=True))
+                raw_audio = base64.b64decode(encoded, validate=True) if isinstance(encoded, str) else b''
+                audio_ready = bool(raw_audio)
             except (ValueError, binascii.Error):
+                raw_audio = b''
                 audio_ready = False
-            digest = str(getattr(item, "ttv_performance_hash", "") or "")
-            if (not audio_ready or cached_payload.get("prebuilt_audio") is not True
-                    or not digest or cached_payload.get("ttv_performance_hash") != digest):
+            if arrangement is not None:
+                digest = str(getattr(item, 'ttv_arrangement_hash', '') or '')
+                identity_ready = (len(digest) == 64 and cached_payload.get('cd_arrangement_sha256') == digest
+                                  and cached_payload.get('cd_arrangement_audio_sha256')
+                                  == hashlib.sha256(raw_audio).hexdigest())
+            else:
+                digest = str(getattr(item, "ttv_performance_hash", "") or "")
+                identity_ready = bool(digest and cached_payload.get("ttv_performance_hash") == digest)
+            if not audio_ready or cached_payload.get("prebuilt_audio") is not True or not identity_ready:
                 raise _TTVPerformancePlaybackError(
                     "Não foi possível preparar o áudio do canto ou dos efeitos de TTV."
                 )
+            # These identities were checked locally. The Music router's
+            # existing prebuilt API accepts audio, never musical-score kwargs.
+            for key in ('ttv_score', 'ttv_segments', 'ttv_performance_hash',
+                        'cd_arrangement_sha256', 'cd_arrangement_audio_sha256'):
+                cached_payload.pop(key, None)
 
         playback_result = await tocar_tts_via_agente(
             bot,

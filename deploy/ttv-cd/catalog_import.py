@@ -27,7 +27,7 @@ THUMB_ROOT = Path.home() / '.cache/core-worker/ttv/cd/thumbnails'
 SLUG = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*\Z')
 VIDEO = re.compile(r'[A-Za-z0-9_-]{11}\Z')
 MAX_MIDI = MAX_MIDI_BYTES
-IMPORTER_VERSION = 8
+IMPORTER_VERSION = "9.0"
 
 
 def normalize_text(value: str) -> str:
@@ -101,7 +101,7 @@ def _meta_from_path(path: Path) -> dict:
         meta = _read_json(sidecar) if sidecar.is_file() else {}
     except (OSError, ValueError) as exc:
         raise ImportInputError('invalid_midi_sidecar') from exc
-    if not isinstance(meta, dict):
+    if sidecar.is_symlink() or not isinstance(meta, dict):
         raise ImportInputError('invalid_midi_sidecar')
     stem = re.sub(r'[_]+', ' ', path.stem).strip()
     artist, title = stem.split(' - ', 1) if ' - ' in stem else ('', stem)
@@ -128,13 +128,49 @@ def _meta_from_path(path: Path) -> dict:
     expected_duration = meta.get('expected_song_duration_seconds')
     if expected_duration is not None and (type(expected_duration) not in (int, float) or not 1 <= expected_duration <= 3600):
         raise ImportInputError('invalid_expected_song_duration_seconds')
+    max_parts = meta.get('max_parts', 3)
+    include_bass = meta.get('include_bass', True)
+    if type(max_parts) is not int or not 1 <= max_parts <= 3 or type(include_bass) is not bool:
+        raise ImportInputError('invalid_arrangement_selection')
     full_song = meta.get('source_is_full_song', False)
     if type(full_song) is not bool:
         raise ImportInputError('invalid_source_is_full_song')
     return {'id': slug, 'title': title, 'artist': artist, 'search_query': query,
             'aliases': _strings(meta, 'aliases'), 'artist_aliases': _strings(meta, 'artist_aliases'),
             'allow_versions': _strings(meta, 'allow_versions'), 'seed_video_ids': seeds,
-            'expected_song_duration_seconds': expected_duration, 'source_is_full_song': full_song, **selection}
+            'expected_song_duration_seconds': expected_duration, 'source_is_full_song': full_song,
+            'max_parts': max_parts, 'include_bass': include_bass,
+            '_explicit_fields': frozenset(meta), **selection}
+
+
+def _inherit_aliases(meta: dict, original: dict | None, previous_video: dict | None) -> dict:
+    """Keep established names when an unchanged song omits optional sidecar fields.
+
+    An explicit empty array clears inherited aliases. Names never cross a changed
+    song/artist identity, and arbitrary candidate titles are not added as aliases.
+    """
+    from cd_metadata import unicode_key
+    if (not isinstance(original, dict) or not isinstance(previous_video, dict)
+            or unicode_key(original.get('name')) != unicode_key(meta['title'])
+            or not meta['artist']
+            or unicode_key(original.get('artist')) != unicode_key(meta['artist'])):
+        return meta
+    result = dict(meta)
+    explicit = meta.get('_explicit_fields', ())
+    for field, stored_field in [('aliases', 'title_aliases'), ('artist_aliases', 'artist_aliases')]:
+        if field in explicit:
+            continue
+        values = previous_video.get(stored_field)
+        if not isinstance(values, list):
+            continue
+        unique = {}
+        for value in values:
+            if isinstance(value, str) and 1 <= len(value.strip()) <= 160:
+                key = unicode_key(value)
+                if key and (field != 'aliases' or key != unicode_key(meta['title'])):
+                    unique.setdefault(key, value.strip())
+        result[field] = list(unique.values())[:12]
+    return result
 
 
 def most_viewed(meta: dict, candidates: list[dict]) -> dict | None:
@@ -221,6 +257,8 @@ def _sample(melody: dict, target: Path) -> str:
     try:
         from worker_config import render_sample
         result = render_sample(melody, target)
+        if isinstance(result, dict):
+            melody['_render_report'] = result
         return str(result.get('status', 'pending_worker_unknown')) if isinstance(result, dict) else str(result)
     except Exception as exc:
         return 'pending_' + type(exc).__name__
@@ -252,25 +290,79 @@ def _manifest(root: Path) -> dict:
         return {}
 
 
-def preview_manifest(melody: dict, audio: bytes) -> dict:
-    return {'manifest_version': 2, 'id': melody['id'], 'revision': melody.get('revision', 1),
+def arrangement_performance_sha256(arrangement: dict) -> str:
+    from osaka_cd.arrangement import arrangement_performance_sha256 as fingerprint
+    return fingerprint(arrangement)
+
+
+def sample_melody(root: Path, melody: dict) -> dict:
+    """Load the same bounded common preview after a source MIDI was removed."""
+    if not melody.get('arrangement_path'):
+        return dict(melody)
+    from osaka_cd.arrangement import arrangement_sha256, preview_arrangement
+    full = _read_json(Path(root) / 'arrangements' / f"{melody['id']}.json")
+    if arrangement_sha256(full) != melody.get('arrangement_sha256'):
+        raise ImportInputError('local_arrangement_hash_mismatch')
+    selected = preview_arrangement(full, start_ms=melody['arrangement_preview_start_ms'],
+                                   end_ms=melody['arrangement_preview_end_ms'])['arrangement']
+    if arrangement_sha256(selected) != melody.get('preview_arrangement_sha256'):
+        raise ImportInputError('local_preview_arrangement_hash_mismatch')
+    return dict(melody, arrangement=selected)
+
+
+def preview_manifest(melody: dict, audio: bytes, render_report: dict | None = None) -> dict:
+    item = {'manifest_version': 2, 'id': melody['id'], 'revision': melody.get('revision', 1),
             'source_sha256': melody['source_sha256'], 'score_sha256': score_sha256(melody),
             'mp3_sha256': hashlib.sha256(audio).hexdigest(), 'voice_id': 'kasane-teto',
             'language': 'pt-BR', 'pitch_semitones': 0, 'speech_rate': 1.0}
+    if melody.get('arrangement_sha256'):
+        report = render_report or melody.get('_render_report') or {}
+        profile = report.get('rendering_profile') or {
+            'mode': 'multipart-utau', 'configuration_fingerprint': report.get('configuration_fingerprint'),
+            'render_fingerprint': report.get('mix_sha256'), 'renderer_version': report.get('worker_version')}
+        item.update(manifest_version=3, arrangement_sha256=melody['preview_arrangement_sha256'],
+                    source_arrangement_sha256=melody['arrangement_sha256'],
+                    arrangement_performance_sha256=melody['preview_performance_sha256'],
+                    rendering_profile=profile)
+    return item
 
 
 def _matching_preview(root: Path, melody: dict, item: dict | None) -> dict | None:
-    if (not isinstance(item, dict) or item.get('manifest_version') != 2
+    if (not isinstance(item, dict) or item.get('manifest_version') not in {2, 3}
             or item.get('id', melody['id']) != melody['id']
             or item.get('score_sha256') != score_sha256(melody)
             or any(item.get(key) != value for key, value in [('voice_id', 'kasane-teto'), ('language', 'pt-BR'),
                                                           ('pitch_semitones', 0), ('speech_rate', 1.0)])):
         return None
+    profile = item.get('rendering_profile')
+    if melody.get('arrangement_sha256'):
+        fingerprint = melody.get('_configuration_fingerprint')
+        if item.get('manifest_version') == 3:
+            if (item.get('arrangement_performance_sha256') != melody.get('preview_performance_sha256')
+                    or not isinstance(profile, dict)
+                    or profile.get('mode') not in {'multipart-utau', 'legacy-monophonic-migration'}
+                    or profile.get('mode') == 'legacy-monophonic-migration' and melody.get('arrangement_part_count') != 1):
+                return None
+            if (profile.get('mode') != 'legacy-monophonic-migration' and fingerprint
+                    and profile.get('configuration_fingerprint') != fingerprint):
+                return None
+        elif melody.get('arrangement_part_count') == 1:
+            profile = {'mode': 'legacy-monophonic-migration', 'voice_id': 'kasane-teto',
+                       'provenance': 'previous-validated-monophonic-preview'}
+        else:
+            return None
+        if profile.get('mode') == 'legacy-monophonic-migration' and fingerprint:
+            # Record acceptance, not a claim about the historical renderer.
+            # Further configuration changes must invalidate migrated audio.
+            accepted = profile.get('accepted_configuration_fingerprint')
+            if accepted and accepted != fingerprint:
+                return None
+            profile = dict(profile, accepted_configuration_fingerprint=fingerprint)
     audio = root / 'previews' / f"{melody['id']}.mp3"
     if not audio.is_file() or audio.is_symlink() or hashlib.sha256(audio.read_bytes()).hexdigest() != item.get('mp3_sha256'):
         return None
-    # Source files can differ while their canonical singing score stays identical.
-    return {**item, **preview_manifest(melody, audio.read_bytes())}
+    report = {'rendering_profile': profile} if profile else None
+    return {**item, **preview_manifest(melody, audio.read_bytes(), report)}
 
 
 def _package_manifest(melody: dict, video: dict | None, preview: dict | None, sample_status: str) -> dict:
@@ -282,24 +374,35 @@ def _package_manifest(melody: dict, video: dict | None, preview: dict | None, sa
     if preview:
         artifacts['sample'] = {'status': 'ready', 'path': f"cogs/tts/cd/previews/{melody['id']}.mp3",
                                'sha256': preview['mp3_sha256']}
-    return {'manifest_version': 1, 'id': melody['id'], 'revision': melody.get('revision', 1),
+    package = {'manifest_version': 1, 'id': melody['id'], 'revision': melody.get('revision', 1),
             'source_sha256': melody['source_sha256'], 'score_sha256': score_sha256(melody),
+            'producer': {'name': 'osaka-cd-termux-kit', 'version': IMPORTER_VERSION},
             'artifacts': artifacts}
+    if melody.get('arrangement_sha256'):
+        package.update(manifest_version=2, arrangement_sha256=melody['arrangement_sha256'])
+        artifacts['arrangement'] = {'status': 'ready', 'path': melody['arrangement_path'],
+                                   'sha256': melody['_arrangement_file_sha256']}
+    return package
 
 
 def _export(melody: dict, video: dict | None, preview: dict | None, image: bytes | None,
-            audio: bytes | None, destination: Path, *, sample_status: str, audio_probe: bool = True) -> dict:
+            audio: bytes | None, destination: Path, *, sample_status: str, audio_probe: bool = True, arrangement: dict | None = None) -> dict:
     destination = Path(destination).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if arrangement is not None:
+        melody = dict(melody, _arrangement_file_sha256=hashlib.sha256(_json_bytes(arrangement)).hexdigest())
     package = _package_manifest(melody, video, preview, sample_status)
+    public_melody = {key: value for key, value in melody.items() if not key.startswith('_') and key != 'arrangement'}
     with tempfile.NamedTemporaryFile(dir=destination.parent, suffix='.zip', delete=False) as temporary:
         archive_path = Path(temporary.name)
     try:
         with zipfile.ZipFile(archive_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr('cogs/tts/cd_song_scores.json', _json_bytes([melody]))
+            archive.writestr('cogs/tts/cd_song_scores.json', _json_bytes([public_melody]))
             archive.writestr('cogs/tts/cd_song_videos.json', _json_bytes({'version': 1, 'songs': {melody['id']: video} if video else {}}))
             archive.writestr('cogs/tts/cd/previews/index.json', _json_bytes({melody['id']: preview} if preview else {}))
             archive.writestr(f"cogs/tts/cd/packages/{melody['id']}.json", _json_bytes(package))
+            if arrangement is not None:
+                archive.writestr(melody['arrangement_path'], _json_bytes(arrangement))
             if image is not None and video:
                 archive.writestr(f"cogs/tts/cd/thumbnails/{video['video_id']}.jpg", image)
             if audio is not None and preview:
@@ -324,6 +427,11 @@ def export_song_package(root: Path, slug: str, export_zip: Path, *, sample_statu
     melody = next((song for song in songs if song.get('id') == slug), None)
     if melody is None:
         raise ImportInputError('song_not_in_local_catalog')
+    arrangement = None
+    if melody.get('arrangement_path'):
+        path = root / 'arrangements' / f'{slug}.json'
+        arrangement = _read_json(path)
+        melody = dict(melody, _arrangement_file_sha256=hashlib.sha256(_json_bytes(arrangement)).hexdigest())
     video = videos['songs'].get(slug)
     image = None
     if video and video.get('thumbnail_sha256'):
@@ -336,7 +444,7 @@ def export_song_package(root: Path, slug: str, export_zip: Path, *, sample_statu
     preview = _matching_preview(root, melody, _manifest(root).get(slug))
     audio = (root / 'previews' / f'{slug}.mp3').read_bytes() if preview else None
     return _export(melody, video, preview, image, audio, export_zip,
-                   sample_status=sample_status or ('ready' if preview else 'pending_sample'), audio_probe=audio_probe)
+                   sample_status=sample_status or ('ready' if preview else 'pending_sample'), audio_probe=audio_probe, arrangement=arrangement)
 
 
 async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = THUMB_ROOT,
@@ -350,6 +458,22 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
     extracted = extract_midi(path, track=meta['track_index'], channel=meta['channel'], start_ms=meta['start_ms'],
                              max_duration_ms=meta['max_duration_ms'], max_notes=meta['max_notes'])
     score, extraction = extracted['score'], extracted['extraction']
+    from midi_extract import extract_arrangement
+    from osaka_cd.arrangement import arrangement_sha256, preview_arrangement
+    composed = extract_arrangement(path, track=meta['track_index'], channel=meta['channel'],
+                                   max_parts=meta['max_parts'], include_bass=meta['include_bass'])
+    arrangement = composed['arrangement']
+    arrangement_preview = preview_arrangement(arrangement,
+        start_ms=extraction['excerpt_start_ms'], end_ms=extraction['excerpt_end_ms'],
+        max_duration_ms=meta['max_duration_ms'], max_notes=meta['max_notes'])
+    selected_arrangement = arrangement_preview['arrangement']
+    lead = next(part for part in selected_arrangement['parts'] if part['role'] == 'lead')
+    score = dict(score, duration_ms=selected_arrangement['duration_ms'], notes=lead['notes'])
+    extraction.update(arrangement_algorithm=composed.get('extraction', {}).get('algorithm'),
+                      full_duration_ms=arrangement['duration_ms'], parts=len(arrangement['parts']),
+                      excerpt_start_ms=arrangement_preview['start_ms'], excerpt_end_ms=arrangement_preview['end_ms'],
+                      is_excerpt=arrangement_preview['is_excerpt'],
+                      arrangement_warnings=composed.get('extraction', {}).get('warnings', []))
     if score.get('lyrics_source') == 'midi':
         extraction['embedded_lyrics'] = [{'note_index': index, 'lyric': note.get('lyric')}
                                         for index, note in enumerate(score['notes']) if note.get('lyric')]
@@ -365,6 +489,8 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
     _validate_score(score)
     songs, videos = open_catalog(root)
     original = next((entry for entry in songs if entry.get('id') == meta['id']), None)
+    previous_video = videos['songs'].get(meta['id'])
+    meta = _inherit_aliases(meta, original, previous_video)
     if original is None and len(songs) >= 500:
         raise ImportInputError('catalog_full')
     melody = {'id': meta['id'], 'name': meta['title'], 'artist': meta['artist'] or 'Artista não identificado',
@@ -373,11 +499,24 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
               'source_url': '', 'source_sha256': extraction['source_sha256'],
               'revision': original.get('revision', 1) if original else 1,
               'duration_ms': score['duration_ms'], 'notes': score['notes'], 'extraction': extraction}
+    melody.update(arrangement_path=f"cogs/tts/cd/arrangements/{meta['id']}.json",
+                  arrangement_sha256=arrangement_sha256(arrangement),
+                  arrangement_preview_start_ms=arrangement_preview['start_ms'],
+                  arrangement_preview_end_ms=arrangement_preview['end_ms'],
+                  preview_arrangement_sha256=arrangement_sha256(selected_arrangement),
+                  preview_performance_sha256=arrangement_performance_sha256(selected_arrangement),
+                  arrangement_part_count=len(selected_arrangement['parts']))
+    melody['_arrangement_file_sha256'] = hashlib.sha256(_json_bytes(arrangement)).hexdigest()
+    try:
+        from worker_config import configuration_fingerprint
+        melody['_configuration_fingerprint'] = configuration_fingerprint()
+    except Exception:
+        pass
     melody['score_sha256'] = score_sha256(melody)
-    if original and score_sha256(original) != melody['score_sha256']:
+    if original and (score_sha256(original) != melody['score_sha256']
+                     or original.get('arrangement_sha256') != melody['arrangement_sha256']):
         melody['revision'] += 1
     pending, selection_audit = [], None
-    previous_video = videos['songs'].get(meta['id'])
     video = dict(previous_video) if isinstance(previous_video, dict) else None
     if video:
         from cd_metadata import match_candidate
@@ -385,6 +524,10 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
                                          artist_aliases=meta['artist_aliases'], allow_versions=meta['allow_versions'])
         if not compatible:
             video = None
+        elif video['video_id'] not in meta['seed_video_ids']:
+            # Reverify the prior recording directly so a limited query cannot
+            # silently lose it merely because its search rank changed.
+            meta['seed_video_ids'] = [*meta['seed_video_ids'], video['video_id']]
     try:
         expected_duration = meta['expected_song_duration_seconds']
         if expected_duration is None and meta['source_is_full_song']:
@@ -393,6 +536,8 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
         selected, selection_audit = search['selected'], search['audit']
         video = {'video_id': selected['video_id'], 'title': clean_metadata_title(selected['title']),
                  'artist': meta['artist'], 'search_query': meta['search_query'], 'title_aliases': [meta['title'], *meta['aliases']],
+                 'artist_aliases': list(meta['artist_aliases']), 'channel': selected.get('channel', ''),
+                 'duration': selected.get('duration'),
                  'webpage_url': f"https://www.youtube.com/watch?v={selected['video_id']}",
                  'thumbnail_url': selected.get('thumbnail') or f"https://i.ytimg.com/vi/{selected['video_id']}/hqdefault.jpg",
                  'view_count': selected['view_count'], 'view_count_source': selected.get('source', 'verified-candidates'),
@@ -444,7 +589,10 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
     if preview is None and render_sample:
         with tempfile.TemporaryDirectory(prefix='osaka-cd-sample-') as temporary:
             temporary_audio = Path(temporary) / 'preview.mp3'
-            sample_status = await asyncio.to_thread(_sample, melody, temporary_audio)
+            render_input = dict(melody, arrangement=selected_arrangement)
+            sample_status = await asyncio.to_thread(_sample, render_input, temporary_audio)
+            if render_input.get('_render_report'):
+                melody['_render_report'] = render_input['_render_report']
             if sample_status == 'ready':
                 if not temporary_audio.is_file() or temporary_audio.stat().st_size < 256:
                     sample_status = 'pending_empty_audio'
@@ -452,14 +600,19 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
                     audio = temporary_audio.read_bytes()
                     preview = preview_manifest(melody, audio)
     if preview is None:
-        pending.append({'artifact': 'sample', 'reason': sample_status})
+        sample_pending = {'artifact': 'sample', 'reason': sample_status}
+        if melody.get('_render_report', {}).get('retryable') is False:
+            sample_pending['retryable'] = False
+        pending.append(sample_pending)
     destination = export_zip or root / 'exports' / f"{meta['id']}-r{melody['revision']}.zip"
-    verification = _export(melody, video, preview, image, audio, destination, sample_status=sample_status)
+    verification = _export(melody, video, preview, image, audio, destination, sample_status=sample_status, arrangement=arrangement)
     # Only validated artifacts become local truth. Rendering never writes existing audio.
     songs = [entry for entry in songs if entry.get('id') != meta['id']]
     if len(songs) >= 500:
         raise ImportInputError('catalog_full')
-    songs.append(melody)
+    public_melody = {key: value for key, value in melody.items() if not key.startswith('_')}
+    songs.append(public_melody)
+    _atomic(root / 'arrangements' / f"{meta['id']}.json", _json_bytes(arrangement))
     if video:
         videos['songs'][meta['id']] = video
     else:
@@ -474,10 +627,14 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
     _atomic(root / 'cd_song_videos.json', _json_bytes(videos))
     _atomic(root / 'previews/index.json', _json_bytes(manifest))
     _atomic(root / 'packages' / f"{meta['id']}.json", _json_bytes(_package_manifest(melody, video, preview, sample_status)))
-    return {'ok': True, 'complete': not pending, 'id': meta['id'], 'name': meta['title'],
+    return {'ok': True, 'complete': not pending, 'importer_version': IMPORTER_VERSION,
+            'id': meta['id'], 'name': meta['title'],
             'revision': melody['revision'], 'notes': len(score['notes']), 'duration_ms': score['duration_ms'],
+            'full_duration_ms': arrangement['duration_ms'], 'parts': len(arrangement['parts']),
+            'arrangement_sha256': melody['arrangement_sha256'],
             'source_sha256': melody['source_sha256'], 'score_sha256': melody['score_sha256'],
             'video_id': video.get('video_id') if video else None, 'view_count': video.get('view_count') if video else None,
+            'view_count_source': video.get('view_count_source') if video else None,
             'verified_candidates': video.get('inspected_candidates', 0) if video else 0,
             'selection_audit': selection_audit,
             'sample_status': sample_status, 'pending_artifacts': pending, 'extraction': extraction,

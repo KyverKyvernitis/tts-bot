@@ -71,7 +71,7 @@ def unicode_key(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _contains(wanted: str, found: str, normalizer) -> bool:
+def _contains(wanted: str, found: str, normalizer, *, title_contractions=False) -> bool:
     wanted_u, found_u = unicode_key(wanted), unicode_key(found)
     if not wanted_u or not found_u:
         return False
@@ -82,24 +82,144 @@ def _contains(wanted: str, found: str, normalizer) -> bool:
     # Reuse the player's presentation-noise/accent normalization for Latin.
     wanted_tokens = set((normalizer(wanted) or wanted_u).split())
     found_tokens = set((normalizer(found) or found_u).split())
+    if title_contractions:
+        # A dropped final g (``Rolling`` / ``Rollin'``) is a conventional
+        # English spelling, not an arbitrary stem match. Keep every other
+        # token exact, exclude short words such as ``king`` / ``kin`` and
+        # ``thing`` / ``thin``, and
+        # never apply this equivalence to artist/performer identity.
+        def spelling(token):
+            return token[:-1] if re.fullmatch(r"[a-z]{3,}ing", token) else token
+        wanted_tokens = {spelling(token) for token in wanted_tokens}
+        found_tokens = {spelling(token) for token in found_tokens}
     return bool(wanted_tokens) and wanted_tokens <= found_tokens
 
 
 def _extra_versions(title: str) -> set[str]:
     raw = unicodedata.normalize("NFKC", title).casefold()
-    result = set()
-    if re.search(r"\bcover(?:ed|s)?\b|歌ってみた|カバー|翻唱", raw):
+    result = _discussion_versions(title)
+    if re.search(r"\b(?:cover(?:ed|s)?|sings|singing|copy)\b|歌\s*って\s*みた|カバー|翻唱|弹唱|彈唱|open\s*[- ]?\s*utau", raw):
         result.add("cover")
-    if re.search(r"カラオケ|伴奏", raw):
+    if re.search(r"['’]s\s+sing\b", raw):
+        # ``Singer's sing`` is an explicit performance label. The bare word
+        # ``Sing`` may itself be a song title and is not enough to reject it.
+        result.add("cover")
+    if re.search(r"カラオケ|伴奏|ニコカラ|\boff[ -]*vocals?\b", raw):
         result.add("karaoke")
-    if re.search(r"演奏してみた|弾いてみた|ピアノ|piano\s+(?:version|arrangement)", raw):
+    if re.search(r"演奏してみた|弾いてみた|弾き語り|叩いてみた|吹いてみた|楽譜|樂譜|乐谱|"
+                 r"ピアノ|クラリネット|オルゴール|八音盒|音乐盒|音樂盒|钢琴|鋼琴|吉他|"
+                 r"单簧管|單簧管|\b(?:piano|guitar|clarinet|violin|flute|saxophone|drum)\b|"
+                 r"\bmusic\s+box\b|\bdtx(?:hd|mania)?\b", raw):
         result.add("instrumental")
-    if re.search(r"アレンジ|アレンジver|編曲|arrange(?:ment)?\s+(?:ver|version)", raw):
+    if re.search(r"アレンジ|編曲|改编|改編|\barrang(?:e|ed|ement)(?:\s+(?:ver|version))?\b", raw):
         result.add("remix")
-    if re.search(r"ライブ|演唱会|コンサート|マジカルミライ|\b(?:concert|magical mirai)\b", raw):
+    if re.search(r"ライブ|演唱会|演唱會|コンサート|マジカルミライ|"
+                 r"\b(?:\d+d\s*live|concert|magical mirai|livestream)\b", raw):
+        result.add("live")
+    if re.search(r"[\[(【]\s*(?:19|20)\d{2}[./-]\d{1,2}[./-]\d{1,2}\s+at\s+\S", raw):
         result.add("live")
     if re.search(r"\btribute\b|トリビュート", raw):
         result.add("tribute")
+    if re.search(r"\b\d+(?:[.,]\d+)?\s*bpm\b", raw):
+        result.add("tempo_variant")
+    if _named_versions(title):
+        result.add("version_variant")
+    return result
+
+
+def _discussion_versions(title: str) -> set[str]:
+    """Explicit discussion labels identify videos about a recording.
+
+    Producer and song credits also appear in reactions, so title/artist matches
+    do not prove that a candidate plays the requested recording. Keep these
+    labels in the existing version mechanism: a song actually named Reaction
+    or Analysis still matches its own title, and an explicit requested label
+    or ``allow_versions`` entry can opt in to a discussion format.
+    """
+    raw = unicodedata.normalize("NFKC", html.unescape(str(title or ""))).casefold()
+    result = set()
+    if re.search(r"\b(?:reactions?|reacts?|reacting|reacted|réactions?|reaktion(?:en)?|"
+                 r"reazion[ei]|reacci[oó]n(?:es)?|reaccionando|rea[cç](?:[aã]o|[oõ]es)|reagindo|"
+                 r"реакци[яию])\b|\bfirst[ -]+time[ -]+(?:hearing|listening)\b|"
+                 r"リアクション|反応|反[应應]|리액션|반응", raw):
+        result.add("reaction")
+    if re.search(r"\b(?:commentary|commentaries|coment[aá]rios?|comentarios?|"
+                 r"commentaire[s]?|reviews?)\b|解[説说說]|点评|點評|해설", raw):
+        result.add("commentary")
+    if re.search(r"\b(?:analysis|analyses|analy[sz](?:ing|ed)|an[aá]lis[ei]s?|"
+                 r"analisando|analys[ei]|analisi|разбор|анализ)\b|"
+                 r"考察|解析|分析|분석", raw):
+        result.add("analysis")
+    return result
+
+
+def _named_versions(title: str) -> set[str]:
+    """Unknown named versions need explicit input, even with producer credit.
+
+    Presentation words such as ``English Sub Ver`` keep the same recording.
+    Known arrangement labels are handled by the player/extra variant rules.
+    A bare unknown ``Some Ver`` is not evidence of the requested recording.
+    """
+    raw = unicodedata.normalize("NFKC", html.unescape(str(title or ""))).casefold()
+    known = {"original", "official", "audio", "video", "mv", "pv", "lyrics", "lyric",
+             "sub", "subs", "subtitle", "subtitles", "subbed", "字幕", "中文字幕",
+             "cover", "live", "remix", "acoustic", "instrumental", "piano", "guitar",
+             "clarinet", "violin", "flute", "saxophone", "drum", "arrange", "arranged",
+             "arrangement", "karaoke", "slowed", "extended", "remaster", "remastered",
+             "clean", "explicit", "edit", "reverb", "オルゴール", "ピアノ"}
+    labels = set()
+    for match in re.finditer(r"(?P<label>[^\W_]+)\s+(?:ver(?:sion)?|バージョン)\.?\b", raw):
+        label = match.group("label")
+        if label not in known:
+            # Preserve a complete bracketed name, so ``Other Supernova Ver``
+            # cannot satisfy a request for ``Supernova Ver`` merely by sharing
+            # its last word. Unbracketed versions retain the adjacent label.
+            prefix = raw[:match.start()]
+            opening = max((prefix.rfind(char) for char in "([【"), default=-1)
+            closing = max((prefix.rfind(char) for char in ")]】"), default=-1)
+            if opening > closing:
+                label = unicode_key(raw[opening + 1:match.end("label")])
+            labels.add(label)
+    labels.update(re.findall(r"\bver(?:sion)?\.?\s+(\d+)\b", raw))
+    return labels
+
+
+def _explicit_tempos(title: str) -> set[float]:
+    raw = unicodedata.normalize("NFKC", str(title or "")).casefold()
+    return {float(value.replace(",", "."))
+            for value in re.findall(r"\b(\d+(?:[.,]\d+)?)\s*bpm\b", raw)}
+
+
+def _attributed_performers(title: str) -> set[str]:
+    """Separate explicit performance/by credits from producer/author credits.
+
+    Plain ``feat`` is deliberately insufficient: original releases often name
+    a singer distinct from their producer. A title crediting the expected
+    producer cannot, however, make an explicitly different performance match.
+    """
+    raw = unicodedata.normalize("NFKC", html.unescape(str(title or ""))).casefold()
+    result = set()
+    for match in re.finditer(r"\bby\s+([^\[\](){}【】\n]+)", raw):
+        prefix = raw[:match.start()]
+        # These roles identify the work or its presentation, not its singer.
+        if re.search(r"\b(?:lyrics?|written|composed|produced|music|song|original|art|"
+                     r"pv|animation|video|illustration|translation)\s*$", prefix):
+            continue
+        performer = re.split(r"\s+(?:/|\||[-–—])\s+", match.group(1), maxsplit=1)[0]
+        value = unicode_key(performer)
+        if value:
+            result.add(value)
+    for match in re.finditer(r"\b(?:sings|singing)\b", raw):
+        # Credits commonly use ``Singer Sings Song`` rather than ``by``.
+        performer = re.split(r"[\[\](){}【】/|]|\s+[-–—]\s+", raw[:match.start()])[-1]
+        value = unicode_key(performer)
+        if value:
+            result.add(value)
+    for match in re.finditer(r"([^\[\](){}【】/|\n]+?)['’]s\s+sing\b", raw):
+        performer = re.split(r"\s+[-–—]\s+", match.group(1))[-1]
+        value = unicode_key(performer)
+        if value:
+            result.add(value)
     return result
 
 
@@ -108,7 +228,8 @@ def match_candidate(title: str, artist: str, candidate: dict, *, aliases=(),
     normal, attributes, _ = player_modules()
     found_title = normal.clean_metadata_title(str(candidate.get("title") or ""))
     reasons = []
-    if not any(_contains(alias, found_title, normal.normalize_text) for alias in (title, *aliases) if alias):
+    if not any(_contains(alias, found_title, normal.normalize_text, title_contractions=True)
+               for alias in (title, *aliases) if alias):
         reasons.append("title_mismatch")
     combined = found_title + " " + str(candidate.get("channel") or candidate.get("artist") or "")
     if not artist and not artist_aliases:
@@ -117,6 +238,20 @@ def match_candidate(title: str, artist: str, candidate: dict, *, aliases=(),
         reasons.append("artist_mismatch")
     expected = set(attributes.detectar_variantes(title)) | _extra_versions(title) | set(allow_versions)
     actual = set(attributes.detectar_variantes(found_title)) | _extra_versions(found_title)
+    # Requesting one unknown named version must not authorize all other names.
+    if ("version_variant" not in allow_versions
+            and _named_versions(found_title) - _named_versions(title)):
+        expected.discard("version_variant")
+    if "tempo_variant" not in allow_versions:
+        if _explicit_tempos(found_title) - _explicit_tempos(title):
+            expected.discard("tempo_variant")
+    expected_performers = _attributed_performers(title)
+    unexpected_performers = [performer for performer in _attributed_performers(found_title)
+                            if performer not in expected_performers
+                            and not any(_contains(alias, performer, normal.normalize_text)
+                                        for alias in (artist, *artist_aliases) if alias)]
+    if unexpected_performers:
+        actual.add("performer_variant")
     # Lyrics/official audio are presentation formats, not different recordings.
     reasons.extend("unrequested_version_" + version for version in sorted(actual - expected))
     actual_duration = candidate.get("duration")
@@ -278,6 +413,10 @@ def search_metadata(title: str, artist: str, aliases=(), limit: int = 25, *, art
              "criteria": {"title_aliases": alternatives, "artist_aliases": artist_names,
                           "artist_evidence_required": True, "view_count_required": True,
                           "unrequested_recording_versions_rejected": True,
+                          "named_version_labels_must_match": True,
+                          "ambiguous_performer_attribution_rejected": True,
+                          "unrequested_discussion_formats_rejected": True,
+                          "title_token_equivalence": "english-final-ing-g-dropping-v1",
                           "requested_versions": list(allow_versions)}, "provider": "provided-candidates"}
     found = []
     if candidates is not None:

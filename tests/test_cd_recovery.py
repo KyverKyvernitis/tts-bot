@@ -28,6 +28,10 @@ class RollingRecoveryTests(unittest.TestCase):
         workspace = PROJECT.parents[1]
         cls.state = Path(os.environ.get('OSAKA_RECOVERY_STATE', str(workspace / 'rolling-girl-state')))
         cls.midi = Path(os.environ.get('OSAKA_RECOVERY_MIDI', str(workspace / 'recovery/midi/wowaka - Rolling Girl.mid')))
+        if not cls.state.is_dir() and "OSAKA_RECOVERY_STATE" not in os.environ:
+            cls.state = PROJECT / "recovery/state"
+        if not cls.midi.is_file() and "OSAKA_RECOVERY_MIDI" not in os.environ:
+            cls.midi = PROJECT / "examples/rolling-girl/wowaka - Rolling Girl.mid"
         if not cls.state.is_dir() or not cls.midi.is_file():
             raise unittest.SkipTest('Os artefatos reais fornecidos são necessários para este teste de recuperação.')
 

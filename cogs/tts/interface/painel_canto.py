@@ -13,6 +13,7 @@ import logging
 import math
 import time
 import weakref
+from contextlib import nullcontext
 
 import discord
 
@@ -26,6 +27,8 @@ from ..melodies import DEFAULT_MELODY_ID, catalog_signature, format_score_notes,
 from .application_emojis import ApplicationSelectEmojis
 from ..ttv import DEFAULT_VOICE_ID, language_label, resolve_preferences, voice_label
 from .visoes_layout import VisaoLayoutBaseTTS
+from osaka_cd.runtime import pin_snapshot, acknowledge as acknowledge_catalog
+from osaka_cd.events import subscribe as subscribe_catalog_events
 
 log = logging.getLogger(__name__)
 
@@ -97,12 +100,14 @@ _CATALOG_COG = None
 
 
 def start_catalog_watch(cog):
+    from osaka_cd.runtime import unpin_snapshot
     global _CATALOG_TASK, _CATALOG_COG
     if _CATALOG_COG is not cog and _CATALOG_TASK is not None:
         _CATALOG_TASK.cancel()
     if _CATALOG_COG is not cog or _CATALOG_TASK is None or _CATALOG_TASK.done():
         _CATALOG_COG = cog
-        _CATALOG_TASK = asyncio.create_task(_watch_catalog(cog))
+        with unpin_snapshot():
+            _CATALOG_TASK = asyncio.create_task(_watch_catalog(cog))
 
 
 def stop_catalog_watch(cog):
@@ -118,15 +123,42 @@ def stop_catalog_watch(cog):
 
 async def _watch_catalog(cog=None):
     """Refresh open panels only when a published catalog revision changes."""
+    from contextlib import nullcontext
     signature = catalog_signature()
     bot = getattr(cog, 'bot', None)
+    wake = None
+    unsubscribe = None
+    subscribe = globals().get('subscribe_catalog_events')
+    if callable(subscribe):
+        wake = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        def wake_reader(snapshot):
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(wake.set)
+        unsubscribe = subscribe(wake_reader)
     try:
         ready = getattr(bot, 'wait_until_ready', None)
         if callable(ready):
             await ready()
         _CD_EMOJIS.schedule(bot)
+        loader = globals().get('pin_snapshot')
+        with loader() if callable(loader) else nullcontext():
+            list_melodies()
+            acknowledge = globals().get('acknowledge_catalog')
+            if callable(acknowledge):
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(acknowledge), timeout=2)
+                except asyncio.TimeoutError:
+                    log.warning('[cd_catalog] activation acknowledgement delayed')
         while True:
-            await asyncio.sleep(15)
+            if wake is None:
+                await asyncio.sleep(15)
+            else:
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=15)
+                except asyncio.TimeoutError:
+                    pass
+                wake.clear()
             active = [panel for panel in _ACTIVE_PANELS if not panel._is_expired()]
             if not active and bot is None:
                 return
@@ -140,6 +172,18 @@ async def _watch_catalog(cog=None):
             if current == signature:
                 continue
             signature = current
+            with loader() if callable(loader) else nullcontext():
+                list_melodies()
+                acknowledge = globals().get('acknowledge_catalog')
+                if callable(acknowledge):
+                    try:
+                        await asyncio.wait_for(asyncio.to_thread(acknowledge), timeout=2)
+                    except asyncio.TimeoutError:
+                        log.warning('[cd_catalog] activation acknowledgement delayed')
+            refresh_many = globals().get('_refresh_catalog_panels')
+            if callable(refresh_many):
+                await refresh_many(active)
+                continue
             for panel in active:
                 try:
                     # DB/Discord calls for earlier panels may outlive this one.
@@ -157,10 +201,37 @@ async def _watch_catalog(cog=None):
                     # Failed edits do not abort other panels or the watcher.
                     pass
     finally:
+        if callable(unsubscribe):
+            unsubscribe()
         global _CATALOG_TASK, _CATALOG_COG
         if _CATALOG_TASK is asyncio.current_task():
             _CATALOG_TASK = None
             _CATALOG_COG = None
+
+
+async def _refresh_catalog_panels(panels):
+    """Bound parallel edits and coalesce publication while a user is busy."""
+    available = {melody.id for melody in list_melodies()}
+    slots = asyncio.Semaphore(4)
+    async def update(panel):
+        async with slots:
+            if panel._is_expired() or panel.is_finished():
+                return
+            if panel._preview_running or panel._saving:
+                panel._catalog_refresh_pending = True
+                return
+            try:
+                if panel.selected_melody_id not in available:
+                    panel.selected_melody_id = DEFAULT_MELODY_ID
+                    panel._page = 0
+                await panel.refresh(rebuild=False)
+                if not panel._is_expired() and not panel.is_finished() and panel.message is not None:
+                    await panel._edit_panel()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.debug('[cd_panel] publication refresh refused: %s', type(exc).__name__)
+    await asyncio.gather(*(update(panel) for panel in panels))
 
 
 class CDPanelView(VisaoLayoutBaseTTS):
@@ -180,6 +251,9 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self._initialized = False
         self._settings_at = 0.0
         self._settings_lock = asyncio.Lock()
+        self._panel_edit_lock = asyncio.Lock()
+        self._catalog_refresh_pending = False
+        self._catalog_snapshot = None
         self._cover_attachment_key = None
         self._page = 0
         self._page_locked = False
@@ -200,40 +274,43 @@ class CDPanelView(VisaoLayoutBaseTTS):
                 self._rebuild()
 
     async def _refresh_current(self, *, force: bool = False, rebuild: bool = True) -> None:
-        """Reuse recent settings; publication refreshes never extend expiry."""
-        if not self._is_expired() and not self.is_finished():
-            start_catalog_watch(self.cog)
-        async with self._settings_lock:
-            if force or time.monotonic() >= self._settings_at:
-                self._settings_available = False
-                self._settings_at = time.monotonic() + 1
-                try:
-                    db = self.cog._get_db()
-                    if db is not None:
-                        settings = await _maybe_await(db.resolve_tts(self.guild_id, self.owner_id))
-                        settings = settings if isinstance(settings, dict) else {}
-                        self._preferences = resolve_preferences(settings)
-                        saved_id = settings.get('ttv_melody_id') or DEFAULT_MELODY_ID
-                        try:
-                            self.active_melody_id = get_melody(saved_id).id
-                        except ValueError:
-                            self.active_melody_id = saved_id if isinstance(saved_id, str) else 'unavailable'
-                        self._settings_available = True
-                        self._settings_at = time.monotonic() + 3
-                        if not self._initialized:
-                            self.selected_melody_id = self.active_melody_id
-                            self._initialized = True
-                except Exception:
-                    self._availability_note = 'Seus ajustes estão indisponíveis agora.'
-        try:
-            get_melody(self.selected_melody_id)
-        except ValueError:
-            self.selected_melody_id = DEFAULT_MELODY_ID
-        await self._refresh_availability()
-        if rebuild:
-            self._rebuild()
-        if not self._is_expired() and not self.is_finished():
-            _CD_EMOJIS.schedule(getattr(self.cog, 'bot', None), self)
+        from osaka_cd.runtime import pin_snapshot, unpin_snapshot
+        with pin_snapshot():
+            """Reuse recent settings; publication refreshes never extend expiry."""
+            if not self._is_expired() and not self.is_finished():
+                start_catalog_watch(self.cog)
+            async with self._settings_lock:
+                if force or time.monotonic() >= self._settings_at:
+                    self._settings_available = False
+                    self._settings_at = time.monotonic() + 1
+                    try:
+                        db = self.cog._get_db()
+                        if db is not None:
+                            settings = await _maybe_await(db.resolve_tts(self.guild_id, self.owner_id))
+                            settings = settings if isinstance(settings, dict) else {}
+                            self._preferences = resolve_preferences(settings)
+                            saved_id = settings.get('ttv_melody_id') or DEFAULT_MELODY_ID
+                            try:
+                                self.active_melody_id = get_melody(saved_id).id
+                            except ValueError:
+                                self.active_melody_id = saved_id if isinstance(saved_id, str) else 'unavailable'
+                            self._settings_available = True
+                            self._settings_at = time.monotonic() + 3
+                            if not self._initialized:
+                                self.selected_melody_id = self.active_melody_id
+                                self._initialized = True
+                    except Exception:
+                        self._availability_note = 'Seus ajustes estão indisponíveis agora.'
+            try:
+                get_melody(self.selected_melody_id)
+            except ValueError:
+                self.selected_melody_id = DEFAULT_MELODY_ID
+            await self._refresh_availability()
+            if rebuild:
+                self._rebuild()
+            if not self._is_expired() and not self.is_finished():
+                with unpin_snapshot():
+                    _CD_EMOJIS.schedule(getattr(self.cog, 'bot', None), self)
 
     async def _refresh_availability(self) -> None:
         # Prepared UTAU samples are playable even if the phone is currently offline.
@@ -276,6 +353,11 @@ class CDPanelView(VisaoLayoutBaseTTS):
             self._availability_note = "Amostra indisponível no momento · sua seleção pode ser salva."
 
     def _rebuild(self) -> None:
+        with pin_snapshot() as selected:
+            self._catalog_snapshot = dict(selected)
+            self._rebuild_current()
+
+    def _rebuild_current(self) -> None:
         self.clear_items()
         catalog = list_melodies()
         if self.selected_melody_id not in {entry.id for entry in catalog}:
@@ -366,11 +448,13 @@ class CDPanelView(VisaoLayoutBaseTTS):
 
     def panel_files(self) -> list[discord.File]:
         """Local cached attachments; selecting songs never queries YouTube."""
-        cover = cached_cover_file(self.selected_melody_id)
+        with pin_snapshot(self._catalog_snapshot):
+            cover = cached_cover_file(self.selected_melody_id)
         return [cover] if cover is not None else []
 
     def remember_cover(self) -> None:
-        self._cover_attachment_key = (self.selected_melody_id, cover_revision(self.selected_melody_id))
+        with pin_snapshot(self._catalog_snapshot):
+            self._cover_attachment_key = (self.selected_melody_id, cover_revision(self.selected_melody_id))
 
     @property
     def emoji_generation(self) -> int:
@@ -389,44 +473,52 @@ class CDPanelView(VisaoLayoutBaseTTS):
 
     async def _edit_panel(self, interaction: discord.Interaction | None = None) -> bool:
         try:
-            return await asyncio.wait_for(self._edit_panel_current(interaction), timeout=10.0)
+            lock = getattr(self, '_panel_edit_lock', None)
+            operation = self._serialized_edit(interaction) if lock is not None else self._edit_panel_current(interaction)
+            return await asyncio.wait_for(operation, timeout=10.0)
         except asyncio.TimeoutError:
             log.warning('[cd_panel] stage=panel_edit type=TimeoutError guild=%s user=%s',
                         self.guild_id, self.owner_id)
             return False
 
+    async def _serialized_edit(self, interaction):
+        async with self._panel_edit_lock:
+            return await self._edit_panel_current(interaction)
+
     async def _edit_panel_current(self, interaction: discord.Interaction | None = None) -> bool:
-        self._rebuild()
-        message = self.message or getattr(interaction, "message", None)
-        if message is None and (interaction is None or interaction.response.is_done()):
-            return False
-        key = (self.selected_melody_id, cover_revision(self.selected_melody_id))
-        existing = list(getattr(message, 'attachments', ()) or ())
-        filename = f'ttv-cd-{self.selected_melody_id}.jpg'
-        reuse = bool(key[1] and key == self._cover_attachment_key
-                     and any(getattr(attachment, 'filename', None) == filename for attachment in existing))
-        files = [] if reuse else self.panel_files()
-        attachments = existing if reuse else files
-        try:
-            if interaction is not None and not interaction.response.is_done():
-                edited = await interaction.response.edit_message(view=self, attachments=attachments,
-                                                                allowed_mentions=discord.AllowedMentions.none())
-                resource = getattr(edited, 'resource', None)
-                if resource is not None and type(getattr(resource, 'id', None)) is int:
-                    self.message = resource
-            elif message is not None:
-                try:
-                    edited = await message.edit(view=self, attachments=attachments, allowed_mentions=discord.AllowedMentions.none())
-                    if edited is not None:
-                        self.message = edited
-                except discord.HTTPException:
-                    # Excluir a mensagem não cancela uma síntese nem desfaz ajustes.
-                    return False
-            self._cover_attachment_key = key
-            return True
-        finally:
-            for file in files:
-                file.close()
+        from osaka_cd.runtime import pin_snapshot
+        with pin_snapshot():
+            self._rebuild()
+            message = self.message or getattr(interaction, "message", None)
+            if message is None and (interaction is None or interaction.response.is_done()):
+                return False
+            key = (self.selected_melody_id, cover_revision(self.selected_melody_id))
+            existing = list(getattr(message, 'attachments', ()) or ())
+            filename = f'ttv-cd-{self.selected_melody_id}.jpg'
+            reuse = bool(key[1] and key == self._cover_attachment_key
+                         and any(getattr(attachment, 'filename', None) == filename for attachment in existing))
+            files = [] if reuse else self.panel_files()
+            attachments = existing if reuse else files
+            try:
+                if interaction is not None and not interaction.response.is_done():
+                    edited = await interaction.response.edit_message(view=self, attachments=attachments,
+                                                                    allowed_mentions=discord.AllowedMentions.none())
+                    resource = getattr(edited, 'resource', None)
+                    if resource is not None and type(getattr(resource, 'id', None)) is int:
+                        self.message = resource
+                elif message is not None:
+                    try:
+                        edited = await message.edit(view=self, attachments=attachments, allowed_mentions=discord.AllowedMentions.none())
+                        if edited is not None:
+                            self.message = edited
+                    except discord.HTTPException:
+                        # Excluir a mensagem não cancela uma síntese nem desfaz ajustes.
+                        return False
+                self._cover_attachment_key = key
+                return True
+            finally:
+                for file in files:
+                    file.close()
 
     async def select_melody(self, interaction: discord.Interaction) -> None:
         if not await self.interaction_check(interaction):
@@ -474,6 +566,9 @@ class CDPanelView(VisaoLayoutBaseTTS):
         if self._saving:
             await _reply(interaction, "Sua seleção já está sendo salva.")
             return
+        if self._preview_running:
+            await _reply(interaction, "Espere a amostra terminar para salvar a melodia.")
+            return
         if not self._settings_available:
             await _reply(interaction, "Não consegui acessar seus ajustes agora. Tente novamente.")
             return
@@ -495,49 +590,57 @@ class CDPanelView(VisaoLayoutBaseTTS):
             self._saving = False
             await self.refresh(force=True, rebuild=False)
             await self._edit_panel(interaction)
+            self._catalog_refresh_pending = False
 
     async def preview_melody(self, interaction: discord.Interaction) -> None:
-        if not await self.interaction_check(interaction):
-            return
-        if self._preview_running:
-            await _reply(interaction, "A amostra anterior ainda está sendo gerada.")
-            return
-        self._preview_running = True
-        try:
-            await asyncio.wait_for(interaction.response.defer(ephemeral=True, thinking=True), timeout=3.0)
-            await self.refresh(force=True, rebuild=False)
-            if not self._preview_available:
-                await _reply(interaction, self._availability_note or "Não consegui gerar a amostra agora.")
+        from osaka_cd.runtime import pin_snapshot
+        with pin_snapshot():
+            if not await self.interaction_check(interaction):
                 return
-            melody_id = self.selected_melody_id
-            melody_name = get_melody(melody_id).name
-            preview_voice = voice_label(self._preferences["ttv_voice_id"])
-            preview_language = language_label(self._preferences["ttv_language"])
-            preview_settings = dict(self._preferences)
-            await self._edit_panel(interaction)
-            mp3 = prepared_sample(melody_id, preview_settings)
-            if mp3 is None:
-                mp3 = await asyncio.wait_for(
-                    self.cog._cd_preview_mp3(self.guild_id, self.owner_id, melody_id=melody_id, settings=preview_settings), timeout=130,
+            if self._preview_running:
+                await _reply(interaction, "A amostra anterior ainda está sendo gerada.")
+                return
+            self._preview_running = True
+            try:
+                await asyncio.wait_for(interaction.response.defer(ephemeral=True, thinking=True), timeout=3.0)
+                await self.refresh(force=True, rebuild=False)
+                if not self._preview_available:
+                    await _reply(interaction, self._availability_note or "Não consegui gerar a amostra agora.")
+                    return
+                melody_id = self.selected_melody_id
+                melody_name = get_melody(melody_id).name
+                preview_voice = voice_label(self._preferences["ttv_voice_id"])
+                preview_language = language_label(self._preferences["ttv_language"])
+                preview_settings = dict(self._preferences)
+                await self._edit_panel(interaction)
+                mp3 = prepared_sample(melody_id, preview_settings)
+                if mp3 is None:
+                    mp3 = await asyncio.wait_for(
+                        self.cog._cd_preview_mp3(self.guild_id, self.owner_id, melody_id=melody_id, settings=preview_settings), timeout=130,
+                    )
+                if not isinstance(mp3, bytes) or not mp3:
+                    raise ValueError("empty_audio")
+                await _reply(
+                    interaction,
+                    f"**{melody_name} · {preview_voice}**\n{preview_language}",
+                    file=discord.File(io.BytesIO(mp3), filename="cd-amostra.mp3"),
                 )
-            if not isinstance(mp3, bytes) or not mp3:
-                raise ValueError("empty_audio")
-            await _reply(
-                interaction,
-                f"**{melody_name} · {preview_voice}**\n{preview_language}",
-                file=discord.File(io.BytesIO(mp3), filename="cd-amostra.mp3"),
-            )
-        except asyncio.TimeoutError:
-            await _reply(interaction, "-# " + _public_notice("ttv_singing_timeout"))
-        except Exception as error:
-            code = singing_failure_code(error)
-            log.warning('[cd_panel] stage=preview type=%s code=%s guild=%s user=%s',
-                        type(error).__name__, code, self.guild_id, self.owner_id)
-            await _reply(interaction, "-# " + _public_notice(code))
-        finally:
-            self._preview_running = False
-            await self.refresh(rebuild=False)
-            await self._edit_panel(interaction)
+            except asyncio.TimeoutError:
+                await _reply(interaction, "-# " + _public_notice("ttv_singing_timeout"))
+            except Exception as error:
+                code = singing_failure_code(error)
+                log.warning('[cd_panel] stage=preview type=%s code=%s guild=%s user=%s',
+                            type(error).__name__, code, self.guild_id, self.owner_id)
+                await _reply(interaction, "-# " + _public_notice(code))
+            finally:
+                self._preview_running = False
+                # Audio and its label used the request's frozen generation.
+                # The panel now follows any publication coalesced while busy.
+                from osaka_cd.runtime import unpin_snapshot
+                with unpin_snapshot():
+                    await self.refresh(rebuild=False)
+                    await self._edit_panel(interaction)
+                self._catalog_refresh_pending = False
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
         await super().on_error(interaction, error, item)

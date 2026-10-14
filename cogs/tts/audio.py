@@ -20,6 +20,7 @@ import urllib.request
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 import discord
@@ -61,7 +62,8 @@ from .edge_endpoint import configure_edge_endpoint
 from .helpers import validate_voice
 from .performance import performance_hash
 from .singing_errors import PhoneWorkerResponseError, request_scoped_worker_rejection, singing_failure_code
-from .melodies import DEFAULT_MELODY_ID, score_for_melody, preview_text_for_melody
+from .melodies import DEFAULT_MELODY_ID, score_for_melody, preview_text_for_melody, arrangement_for_melody
+from .arrangement_audio import ArrangementAudioMixin, execution_arrangement, frozen_arrangement, arrangement_cache_identity, arrangement_profile_identity
 from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences, worker_voice_details
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
 from .streaming import SharedSynthesisMixin
@@ -573,6 +575,8 @@ class QueueItem:
     ttv_score: object = field(default=None, repr=False, compare=False)
     ttv_segments: list[dict[str, Any]] | None = field(default=None, repr=False, compare=False)
     ttv_performance_hash: str = field(default="", repr=False, compare=False)
+    ttv_arrangement: object = field(default=None, repr=False, compare=False)
+    ttv_arrangement_hash: str = field(default="", repr=False, compare=False)
     enqueued_at_monotonic: float = field(default_factory=time.monotonic, repr=False, compare=False)
     received_at_monotonic: float = field(default=0.0, repr=False, compare=False)
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
@@ -688,7 +692,7 @@ class _PreparedTTSPlayback:
                 cleanup()
 
 
-class TTSAudioMixin(SharedSynthesisMixin):
+class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     def _log_debug(self, text: str) -> None:
         if TTS_DEBUG_LOGS:
             logger.debug(text)
@@ -902,6 +906,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
             # A cópia não carrega a transcrição privada no item da fila. Use
             # o teto já existente, em vez do tamanho do rótulo do anexo.
             return TTS_PLAYBACK_TIMEOUT_MAX_SECONDS
+        if getattr(item, "ttv_arrangement", None) is not None:
+            duration = float(frozen_arrangement(item)['duration_ms']) / 1000
+            return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(650.0, duration + TTS_PLAYBACK_TIMEOUT_BASE_SECONDS))
         if getattr(item, "ttv_score", None) is not None:
             if "preset" in item.ttv_score:
                 return max(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, 70.0)
@@ -1882,25 +1889,37 @@ class TTSAudioMixin(SharedSynthesisMixin):
         language = preferences["ttv_language"]
         if language not in status["languages"]:
             raise TTVSingingError("O idioma selecionado está indisponível para essa vocaloid.")
-        score = score_for_melody(melody_id)
-        text = preview_text_for_melody(melody_id, language)
+        from osaka_cd.runtime import pin_snapshot
+        with pin_snapshot():
+            score = score_for_melody(melody_id)
+            text = preview_text_for_melody(melody_id, language)
+            arrangement = execution_arrangement(arrangement_for_melody(melody_id, preview=True),
+                                                preferences['ttv_voice_id'], message=False)
         item = QueueItem(guild_id=int(guild_id), channel_id=0, author_id=int(user_id),
             text=text, engine="teto", voice=preferences["ttv_voice_id"], language=language,
             rate="1.0", pitch="+0Hz", teto_pitch_semitones="+0.0", **preferences,
-            ttv_score=score, ttv_performance_hash=performance_hash(text=text, score=score))
+            ttv_score=score, ttv_performance_hash=performance_hash(text=text, score=score),
+            ttv_arrangement=arrangement)
         path, process = "", None
         try:
             path = await self._generate_tts_agent_worker_file(item)
             if not os.path.isfile(path) or not 0 < os.path.getsize(path) <= 8 * 1024 * 1024:
                 raise TTVSingingError("A amostra retornou um arquivo de áudio inválido.")
+            if arrangement is not None and os.path.splitext(path)[1].lower() == '.mp3':
+                # The composition renderer already encoded the synchronized
+                # stereo mix. Re-encoding delays delivery and loses quality.
+                data = await asyncio.to_thread(Path(path).read_bytes)
+                if not data or len(data) > 2_000_000:
+                    raise TTVSingingError("A amostra composta excede o limite de áudio.")
+                return data
             process = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", path,
-                "-t", "15", "-vn", "-ac", "1", "-ar", "44100", "-codec:a", "libmp3lame",
-                "-b:a", "192k", "-f", "mp3", "pipe:1",
+                "-vn", "-ac", "2" if arrangement is not None else "1", "-ar", "44100", "-codec:a", "libmp3lame",
+                "-b:a", "128k", "-f", "mp3", "pipe:1",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             data, _ = await asyncio.wait_for(process.communicate(), timeout=20)
-            if process.returncode != 0 or not data or len(data) > 1024 * 1024:
+            if process.returncode != 0 or not data or len(data) > 2_000_000:
                 raise TTVSingingError("Não consegui converter a amostra de canto para MP3.")
             return data
         finally:
@@ -3264,6 +3283,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
     def _snapshot_tts_item(self, item: QueueItem) -> None:
         if getattr(item, "_tts_settings_frozen", False):
             _ttv_performance_payload(item)
+            frozen_arrangement(item)
             return
         item.engine = str(item.engine or "gtts").strip().lower().replace("-", "_")
         if item.engine == "edge":
@@ -3283,6 +3303,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             item.language = item.ttv_language
             item.teto_pitch_semitones = item.ttv_pitch_semitones
         _ttv_performance_payload(item)
+        frozen_arrangement(item)
         if item.engine in TTS_EFFECT_ENGINES:
             (
                 item.advanced_nightcore_level,
@@ -3322,6 +3343,10 @@ class TTSAudioMixin(SharedSynthesisMixin):
             payload = f"ttv-v2|worker|{fingerprint}|{preferences['ttv_voice_id']}|{preferences['ttv_pitch_semitones']}|{preferences['ttv_speech_rate']!r}|{preferences['ttv_language']}|{text}"
             if item.ttv_performance_hash:
                 payload += f"|performance-v1:{item.ttv_performance_hash}"
+            if getattr(item, 'ttv_arrangement', None) is not None:
+                payload += f"|arrangement-v1:{arrangement_cache_identity(item)}"
+                profile = arrangement_profile_identity(item, self._tts_agent_route_state())
+                payload += f"|arrangement-profile:{profile or 'unknown:' + item.request_id}"
         elif engine == "android_native":
             language = (item.language or "pt-BR").strip().lower().replace('_', '-')
             voice = str(item.voice or "auto").strip() or "auto"
@@ -3841,6 +3866,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 "audio_bytes_len": audio_size,
             }
             data["ttv_performance_hash"] = self._worker_header_value(response.headers, "X-Core-Worker-TTV-Performance-Hash")
+            data['teto_timeline_mode'] = self._worker_header_value(response.headers, 'X-Core-Worker-Teto-Timeline')
+            data['renderer_version'] = self._worker_header_value(response.headers, 'X-Core-Worker-Teto-Renderer')
             voice_id = self._worker_header_value(response.headers, "X-Core-Worker-TTV-Voice-Id")
             if voice_id:
                 data["ttv_voice_id"] = voice_id
@@ -4319,6 +4346,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
     def _worker_voice_direct_tts_available_for(self, guild: discord.Guild, item: QueueItem) -> tuple[bool, str]:
         if not (WORKER_VOICE_AGENT_ENABLED and WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED and WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED):
             return False, "direct_tts_disabled"
+        if getattr(item, 'ttv_arrangement', None) is not None and self._estimate_playback_timeout(item) > 90.0:
+            # Immutable 1.11.41 clamps its prebuilt-audio voice proxy to 90s.
+            # Keep the full composition on the local playback path instead of
+            # transferring voice ownership and truncating a long song.
+            return False, "direct_tts_arrangement_exceeds_gateway_window"
         if not str(item.text or "").strip():
             return False, "empty_text"
         if len(str(item.text or "")) > WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS:
@@ -4374,7 +4406,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             ),
             "cache_key": self._cache_key(item),
             "cache_mode": "prefer",
-            "timeout_seconds": self._estimate_playback_timeout(item) if getattr(item, "ttv_score", None) is not None else max(3.0, min(WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS, self._estimate_playback_timeout(item))),
+            "timeout_seconds": self._estimate_playback_timeout(item) if (getattr(item, "ttv_score", None) is not None or getattr(item, 'ttv_arrangement', None) is not None) else max(3.0, min(WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS, self._estimate_playback_timeout(item))),
             "confirm_transfer": True,
             "direct_tts": True,
             "release_after": False,
@@ -4398,6 +4430,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         is cold instead of making the Music Agent require those providers.
         """
         performance = _ttv_performance_payload(item)
+        arrangement = frozen_arrangement(item)
         state = self._get_state(item.guild_id)
         path = self._try_get_cached_path(state, item)
         cleanup = False
@@ -4418,9 +4451,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     item.engine,
                     exc,
                 )
+                if arrangement is not None:
+                    raise
                 return None
         if path is None:
-            if performance:
+            if performance or arrangement is not None:
                 raise RuntimeError("TTV: não foi possível preparar o canto ou os efeitos para reprodução.")
             return None
         try:
@@ -4439,8 +4474,19 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 payload['prebuilt_audio'] = True
                 payload['prebuilt_audio_source'] = 'vps-prebuilt'
                 payload.update(performance)
+                if arrangement is not None:
+                    # The 1.11.41 voice gateway receives the completed mix.
+                    # Its monophonic synth must not replace it with the lead.
+                    for key in ('ttv_score', 'ttv_segments', 'ttv_performance_hash'):
+                        payload.pop(key, None)
+                    payload['cd_arrangement_sha256'] = item.ttv_arrangement_hash
+                    payload['cd_arrangement_audio_sha256'] = hashlib.sha256(raw).hexdigest()
                 return None
+            if arrangement is not None:
+                raise RuntimeError("TTV: a composição pronta está vazia ou excede o limite de reprodução.")
         except OSError:
+            if arrangement is not None:
+                raise RuntimeError("TTV: não consegui ler a composição pronta para reprodução.")
             pass
         finally:
             if cleanup and path:
@@ -5612,6 +5658,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
         ))
 
     async def _generate_tts_agent_worker_file(self, item: QueueItem) -> str:
+        if frozen_arrangement(item) is not None:
+            return await self._generate_arrangement_worker_file(item)
         setattr(item, "_tts_agent_selected_engine", "")
         if not self._tts_agent_route_available():
             raise RuntimeError("TTS Agent indisponível pela rota cacheada")
@@ -5703,6 +5751,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     await asyncio.to_thread(_write_audio, path, bytes(raw))
                     write_ms = (time.monotonic() - write_started) * 1000.0
                 total_ms = (time.monotonic() - started) * 1000.0
+                item._tts_agent_render_metadata = dict(data)
                 self._record_tts_agent_synth_success(total_ms=total_ms, data=data)
                 selected_engine = str(data.get("selected_engine") or data.get("engine") or "").strip().lower()
                 setattr(item, "_tts_agent_selected_engine", selected_engine or str(item.engine or "gtts"))

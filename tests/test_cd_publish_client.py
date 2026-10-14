@@ -69,5 +69,24 @@ class PublishClientTests(unittest.TestCase):
     def test_redirects_do_not_forward_authorization(self):
         self.assertIsNone(cd_publish._NoRedirect().redirect_request(None, None, 302, '', {}, 'https://other.test'))
 
+    def test_failed_durable_job_is_a_valid_status_response_and_hides_server_text(self):
+        failed = {'ok': False, 'state': 'failed', 'job_id': 'a'*64,
+                  'error_code': 'conflict', 'error': self.token}
+        with patch.object(cd_publish, 'build_opener') as build:
+            build.return_value.open.return_value = Response(failed)
+            report = cd_publish.publication_status('https://example.test/api/osaka/cd/publish', self.token, job_id='a'*64)
+        self.assertEqual(report['state'], 'failed')
+        self.assertEqual(report['error'], 'conflict')
+        self.assertFalse(report['installed'])
+        self.assertNotIn(self.token, json.dumps(report))
+        failed['error_code'] = self.token
+        self.assertEqual(cd_publish._receipt(failed, 'https://example.test/api/osaka/cd/publish')['error'], 'publication_failed')
+
+    def test_failed_without_durable_job_is_refused(self):
+        with patch.object(cd_publish, 'build_opener') as build:
+            build.return_value.open.return_value = Response({'ok': False, 'state': 'failed'})
+            with self.assertRaisesRegex(cd_publish.PublishError, 'unexpected_response'):
+                cd_publish.publication_status('https://example.test/api/osaka/cd/publish', self.token, job_id='a'*64)
+
 
 if __name__ == '__main__': unittest.main()
