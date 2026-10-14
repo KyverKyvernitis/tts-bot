@@ -4888,6 +4888,12 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
 
         panel_kind = "cd"
         key = self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)
+        received_at = time.monotonic()
+        logger.info(
+            "[cd_panel] stage=received guild=%s channel=%s user=%s command_message=%s",
+            message.guild.id, getattr(message.channel, 'id', 0), message.author.id,
+            getattr(message, 'id', 0),
+        )
         openings = getattr(self, '_cd_panel_opening', None)
         if openings is None:
             openings = self._cd_panel_opening = set()
@@ -4960,6 +4966,32 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                         else:
                             previous.expires_at_monotonic = time.monotonic() + previous._activity_timeout
                             self._active_prefix_panels[key] = previous.message
+                            # Updating an older message alone makes a new _cd
+                            # look unanswered when the user is at the bottom of
+                            # the chat. Keep the cached panel and visibly link it
+                            # from this command, without pinging its author.
+                            jump_url = getattr(previous.message, 'jump_url', '')
+                            if isinstance(jump_url, str) and jump_url:
+                                try:
+                                    await bounded(message.channel.send(
+                                        f"Seu painel de CDs está pronto: [Abrir painel]({jump_url}).",
+                                        reference=message,
+                                        mention_author=False,
+                                        allowed_mentions=discord.AllowedMentions.none(),
+                                    ), 'reuse_reply', 3.0)
+                                except Exception as error:
+                                    # The edit succeeded. A failed acknowledgment
+                                    # must not discard it or claim opening failed.
+                                    logger.warning(
+                                        "[cd_panel] stage=reuse_reply guild=%s channel=%s type=%s status=%s code=%s",
+                                        message.guild.id, getattr(message.channel, 'id', 0), type(error).__name__,
+                                        getattr(error, 'status', 0), getattr(error, 'code', 0),
+                                    )
+                            logger.info(
+                                "[cd_panel] stage=reused guild=%s channel=%s user=%s panel_message=%s elapsed_ms=%.1f",
+                                message.guild.id, getattr(message.channel, 'id', 0), message.author.id,
+                                getattr(previous.message, 'id', 0), (time.monotonic() - received_at) * 1000,
+                            )
                             return True
 
             view = CDPanelView(self, message.author.id, message.guild.id, timeout=300)
@@ -4993,6 +5025,11 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 self._cd_panel_views[key] = view
                 self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "owner_id": message.author.id}
                 self._active_prefix_panels[key] = sent
+            logger.info(
+                "[cd_panel] stage=new_sent guild=%s channel=%s user=%s panel_message=%s elapsed_ms=%.1f",
+                message.guild.id, getattr(message.channel, 'id', 0), message.author.id,
+                getattr(sent, 'id', 0), (time.monotonic() - received_at) * 1000,
+            )
             if view.emoji_generation != emoji_generation:
                 # Best-effort enrichment cannot turn an accepted panel into a
                 # failed command if a second HTTP edit waits on a rate limit.
