@@ -59,6 +59,7 @@ from cogs.musica.integracoes.tts import (
 )
 
 from .edge_endpoint import configure_edge_endpoint
+from .edge_rate_limit import EdgeRateLimitPolicy
 from .helpers import validate_voice
 from .performance import performance_hash
 from .singing_errors import PhoneWorkerResponseError, request_scoped_worker_rejection, singing_failure_code
@@ -1233,10 +1234,67 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     metrics["edge_prebuffer_lowered"] = int(metrics.get("edge_prebuffer_lowered", 0) or 0) + 1
         profiles.move_to_end(handle.prebuffer_profile_key)
 
+    def _edge_rate_limit_policy(self) -> EdgeRateLimitPolicy:
+        policy = getattr(self, "_tts_edge_rate_limit_policy", None)
+        if policy is None:
+            policy = EdgeRateLimitPolicy(first_delay=TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS)
+            self._tts_edge_rate_limit_policy = policy
+        return policy
+
+    def _notify_edge_rate_limit(self, item: QueueItem) -> None:
+        policy = self._edge_rate_limit_policy()
+        guild_id = int(getattr(item, "guild_id", 0) or 0)
+        channel_id = int(getattr(item, "text_channel_id", 0) or 0)
+        if not guild_id or not channel_id or not policy.level:
+            return
+        now = time.monotonic()
+        notice_kind = policy.reserve_notice(guild_id, now=now)
+        if notice_kind is None:
+            return
+        level = policy.level
+        seconds = max(1, policy.remaining_seconds(now=now))
+        if notice_kind == "initial":
+            content = (
+                "-# Usei outra voz pois os serviços da Microsoft estão limitando as requisições, "
+                "talvez por spam ou uso excessivo. O Edge TTS vai fazer uma pausa de "
+                f"**{seconds} segundos**. Enquanto isso, tente usar outro prefixo."
+            )
+            lifetime = 15
+        else:
+            content = (
+                "-# Usei outra voz pq o Edge TTS tá **rate limitado**. "
+                f"Próxima tentativa em **{seconds} segundos**."
+            )
+            lifetime = 10
+
+        async def send_notice():
+            try:
+                bot = getattr(self, "bot", None)
+                guild = bot.get_guild(guild_id) if bot is not None else None
+                channel = guild.get_channel(channel_id) if guild is not None else None
+                if channel is None and bot is not None:
+                    channel = bot.get_channel(channel_id)
+                if channel is None:
+                    policy.undo_notice(guild_id, reserved_at=now, level=level)
+                    return
+                await channel.send(
+                    content, delete_after=lifetime,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception as exc:
+                policy.undo_notice(guild_id, reserved_at=now, level=level)
+                logger.warning("[tts_edge] aviso de rate limit indisponível | guild=%s erro_tipo=%s", guild_id, type(exc).__name__)
+
+        self._schedule_tts_background(send_notice())
+
+    def _edge_rate_limit_bypass(self, item: QueueItem) -> bool:
+        policy = self._edge_rate_limit_policy()
+        if not policy.should_bypass():
+            return False
+        self._notify_edge_rate_limit(item)
+        return True
+
     def _edge_circuit_is_open(self) -> bool:
-        limited_until = getattr(self, "_tts_edge_rate_limited_until", 0.0)
-        if limited_until and time.monotonic() < limited_until:
-            return True
         if not TTS_EDGE_CIRCUIT_BREAKER_ENABLED:
             return False
         engine_metrics = self._get_engine_metrics("edge")
@@ -2621,6 +2679,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         engine_metrics["synth_total_ms"] = float(engine_metrics.get("synth_total_ms", 0.0) or 0.0) + float(duration_ms)
         engine_metrics["last_synth_ms"] = round(float(duration_ms), 2)
         engine_metrics["consecutive_failures"] = 0
+        if engine == "edge":
+            self._edge_rate_limit_policy().success()
 
         if duration_ms >= TTS_ENGINE_SLOW_WARN_SECONDS * 1000.0:
             engine_metrics["slow_alerts"] = int(engine_metrics.get("slow_alerts", 0) or 0) + 1
@@ -2794,15 +2854,19 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             setattr(self, "_tts_gtts_executor", None)
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _record_engine_failure(self, engine: str, error: Exception, duration_ms: float | None = None) -> None:
-        if engine == "edge" and getattr(error, "status", None) == 429:
-            now = time.monotonic()
-            if now >= getattr(self, "_tts_edge_rate_limited_until", 0.0):
-                logger.warning(
-                    "[tts_edge] HTTP 429; fallback gTTS por %.0fs",
-                    TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS,
-                )
-            self._tts_edge_rate_limited_until = now + TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS
+    def _record_engine_failure(self, engine: str, error: Exception, duration_ms: float | None = None, *, item: QueueItem | None = None) -> None:
+        if engine == "edge":
+            policy = self._edge_rate_limit_policy()
+            if getattr(error, "status", None) == 429:
+                metrics = self._get_metrics_store()
+                metrics["edge_rate_limit_429"] = int(metrics.get("edge_rate_limit_429", 0) or 0) + 1
+                duration, escalated = policy.failed_429()
+                if escalated:
+                    logger.warning("[tts_edge] HTTP 429; cooldown global=%ss nivel=%s", duration, policy.level)
+                if item is not None:
+                    self._notify_edge_rate_limit(item)
+            else:
+                policy.failed_other()
         engine_metrics = self._get_engine_metrics(engine)
         engine_metrics["synth_failures"] = int(engine_metrics.get("synth_failures", 0) or 0) + 1
         engine_metrics["consecutive_failures"] = int(engine_metrics.get("consecutive_failures", 0) or 0) + 1
@@ -2963,6 +3027,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "edge_prebuffer_lowered": int(metrics.get("edge_prebuffer_lowered", 0) or 0),
             "edge_prebuffer_profiles": int(len(self._get_edge_prebuffer_profiles())),
             "edge_circuit_bypasses": int(metrics.get("edge_circuit_bypasses", 0) or 0),
+            "edge_rate_limit_429": int(metrics.get("edge_rate_limit_429", 0) or 0),
+            "edge_rate_limit_level": self._edge_rate_limit_policy().level,
+            "edge_rate_limit_remaining_seconds": self._edge_rate_limit_policy().remaining_seconds(),
             "gtts_stream_started": int(metrics.get("gtts_stream_started", 0) or 0),
             "gtts_stream_completed": int(metrics.get("gtts_stream_completed", 0) or 0),
             "gtts_stream_failures": int(metrics.get("gtts_stream_failures", 0) or 0),
@@ -5626,13 +5693,14 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         *,
         guild_id: int | None = None,
         persistent_engine: Any = None,
+        item: QueueItem | None = None,
     ) -> str:
         started_at = time.monotonic()
         try:
             result = await factory()
         except Exception as exc:
             duration_ms = (time.monotonic() - started_at) * 1000.0
-            self._record_engine_failure(engine, exc, duration_ms=duration_ms)
+            self._record_engine_failure(engine, exc, duration_ms=duration_ms, item=item)
             raise
         duration_ms = (time.monotonic() - started_at) * 1000.0
         self._record_engine_success(engine, duration_ms)
@@ -5967,7 +6035,10 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
 
         if item.engine == "edge":
             foreground = not bool(getattr(item, "_tts_prefetch", False))
-            if self._edge_circuit_is_open():
+            blocked_by_rate_limit = self._edge_rate_limit_bypass(item)
+            if blocked_by_rate_limit or self._edge_circuit_is_open():
+                if not blocked_by_rate_limit and self._edge_rate_limit_policy().level:
+                    self._notify_edge_rate_limit(item)
                 item._tts_actual_engine = "gtts"
                 self._record_edge_circuit_bypass()
                 logger.info(
@@ -5988,6 +6059,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     "edge",
                     lambda: self._generate_edge_file(item.text, item.voice, item.rate, item.pitch, foreground=foreground),
                     guild_id=item.guild_id,
+                    item=item,
                 )
             except Exception as e:
                 logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, _tts_safe_exception_detail(e))
@@ -6127,7 +6199,10 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             if existing is not None:
                 return await self._resolve_or_generate_singleflight_audio(state, item, read_cache=True, store_in_cache=True)
 
-            if self._edge_circuit_is_open():
+            blocked_by_rate_limit = self._edge_rate_limit_bypass(item)
+            if blocked_by_rate_limit or self._edge_circuit_is_open():
+                if not blocked_by_rate_limit and self._edge_rate_limit_policy().level:
+                    self._notify_edge_rate_limit(item)
                 self._record_edge_circuit_bypass()
                 return await self._resolve_edge_gtts_fallback(
                     state,
@@ -6709,10 +6784,12 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         """Generate a new local file, bypassing the worker and the consumed FIFO."""
         foreground = True
         if str(item.engine or "").lower() == "edge":
-            if not self._edge_circuit_is_open():
+            if not self._edge_rate_limit_bypass(item) and not self._edge_circuit_is_open():
                 try:
-                    path = await self._generate_edge_file(
+                    path = await self._run_timed_generation(
+                        "edge", lambda: self._generate_edge_file(
                         item.text, item.voice, item.rate, item.pitch, foreground=foreground,
+                        ), guild_id=item.guild_id, item=item,
                     )
                     if os.path.getsize(path) > 0:
                         return path

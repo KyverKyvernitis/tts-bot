@@ -256,7 +256,7 @@ class SharedSynthesisMixin:
         except Exception as error:
             job.stop.set()
             await job.buffer.finish(error)
-            self._record_engine_failure(engine, error, duration_ms=(time.monotonic() - started) * 1000)
+            self._record_engine_failure(engine, error, duration_ms=(time.monotonic() - started) * 1000, item=job.item)
             metrics = self._get_metrics_store()
             metrics[f'{engine}_stream_failures'] = int(metrics.get(f'{engine}_stream_failures', 0)) + 1
         finally:
