@@ -612,7 +612,18 @@ class ArchiveMixin(ArchivePipelineMixin):
                 self._archive_results[key] = {"status": status, "reason": reason}
                 if int((item.get("pending_ref") or {}).get("attachment_id") or 0) > 0:
                     self._archive_results[key]["reference"] = item["pending_ref"]
-                self.log("archive_failed", key=key, reason=reason, error_type=type(exc).__name__)
+                diagnostic = {}
+                if isinstance(exc, ValueError):
+                    frame = exc.__traceback__
+                    while frame is not None and frame.tb_next is not None:
+                        frame = frame.tb_next
+                    if frame is not None:
+                        diagnostic["error_site"] = f"{Path(frame.tb_frame.f_code.co_filename).name}:{frame.tb_lineno}"
+                    detail = str(exc).split("\n", 1)[0]
+                    detail = re.sub(r"https?://\S+", "<url>", detail)
+                    detail = re.sub(r"(?i)\b(token|secret|authorization|signature|password)\s*[:=]\s*\S+", r"\1=<redacted>", detail)
+                    diagnostic["error_detail"] = detail[:180] or "(sem mensagem)"
+                self.log("archive_failed", key=key, reason=reason, error_type=type(exc).__name__, **diagnostic)
             finally:
                 self._archive_active = ""
                 self._archive_queue.task_done()
