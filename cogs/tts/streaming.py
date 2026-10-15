@@ -167,15 +167,26 @@ class SharedSynthesisMixin:
 
     async def _produce_shared_job(self, job: StreamJob) -> None:
         from . import audio as a
-        semaphore = self._get_synth_semaphore() if job.item.engine == 'edge' else self._get_gtts_semaphore()
+        forced_phone = bool(getattr(job.item, '_edge_phone_recovery', False))
+        if forced_phone:
+            semaphore = getattr(self, '_tts_edge_phone_stream_slots', None)
+            if semaphore is None:
+                semaphore = self._tts_edge_phone_stream_slots = asyncio.Semaphore(2)
+        else:
+            semaphore = self._get_synth_semaphore() if job.item.engine == 'edge' else self._get_gtts_semaphore()
         prefetch = None
         acquired = False
         blocking = None
         engine = job.item.engine
         started = time.monotonic()
         try:
-            prefetch = await self._shared_prefetch_slot(job)
-            await semaphore.acquire(foreground=job.foreground.is_set())
+            if forced_phone:
+                # Reserve phone capacity separately: remote synthesis must not
+                # block the local VPS Edge recovery probe.
+                await asyncio.wait_for(semaphore.acquire(), timeout=0.15)
+            else:
+                prefetch = await self._shared_prefetch_slot(job)
+                await semaphore.acquire(foreground=job.foreground.is_set())
             acquired = True
             if prefetch is not None and job.foreground.is_set():
                 prefetch.release()
@@ -187,14 +198,14 @@ class SharedSynthesisMixin:
             # Protocol v2 is selected only when explicitly advertised. The
             # provider remains local when an older worker is connected.
             worker_stream = getattr(self, '_produce_worker_stream_job', None)
-            use_worker = callable(worker_stream) and self._worker_stream_available_for(job.item)
+            use_worker = callable(worker_stream) and (forced_phone or self._worker_stream_available_for(job.item))
             if use_worker:
                 try:
                     await worker_stream(job)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    if job.buffer.size:
+                    if forced_phone or job.buffer.size:
                         raise
                     job.route = 'local_fallback'
                     use_worker = False
@@ -234,7 +245,7 @@ class SharedSynthesisMixin:
                 raise RuntimeError('engine não enviou áudio')
             await job.buffer.finish()
             duration = (time.monotonic() - job.started_at) * 1000.0
-            self._record_engine_success(engine, duration)
+            self._record_engine_success(engine, duration, route=job.route)
             self._record_latency_sample(f'synthesis:{engine}:{job.route}', duration - job.slot_wait_ms)
             cached = bool(getattr(job.item, '_tts_worker_cache_hit', False))
             history = self._route_measurements()
@@ -256,7 +267,9 @@ class SharedSynthesisMixin:
         except Exception as error:
             job.stop.set()
             await job.buffer.finish(error)
-            self._record_engine_failure(engine, error, duration_ms=(time.monotonic() - started) * 1000, item=job.item)
+            # A remote Edge failure must not trip the VPS's local circuit breaker.
+            if not (engine == 'edge' and job.route == 'worker'):
+                self._record_engine_failure(engine, error, duration_ms=(time.monotonic() - started) * 1000, item=job.item, route=job.route)
             metrics = self._get_metrics_store()
             metrics[f'{engine}_stream_failures'] = int(metrics.get(f'{engine}_stream_failures', 0)) + 1
         finally:
@@ -338,6 +351,8 @@ class SharedSynthesisMixin:
             prebuffer, profile = self._edge_prebuffer_ms(item) if edge else (0, '')
             minimum = max(1024, prebuffer * 6) if edge else 1
             timeout = a.TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS if edge else a.TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS
+            if edge and getattr(item, '_edge_phone_recovery', False):
+                timeout = min(timeout, a.TTS_EDGE_PHONE_FIRST_AUDIO_TIMEOUT_SECONDS)
             path = self._make_edge_stream_fifo()
             handle = a.EdgeStreamHandle(fifo_path=path, part_path='', cache_key=job.key,
                 state=state, item=item, queue=asyncio.Queue(maxsize=a.TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS),
@@ -430,5 +445,9 @@ class SharedSynthesisMixin:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            self._mark_tts_agent_synth_failure(error)
+            if job.item.engine == 'edge' and not getattr(job.item, '_edge_phone_recovery', False):
+                if a.re.search(r"(?<!\d)429(?!\d)", str(error)):
+                    self._edge_phone_policy().failed_429()
+            if not getattr(job.item, '_edge_phone_recovery', False):
+                self._mark_tts_agent_synth_failure(error)
             raise
