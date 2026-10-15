@@ -934,37 +934,35 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, timeout))
 
     def _effective_playback_timeout(self, item: QueueItem | None, stream: EdgeStreamHandle | None) -> float:
-        """A progressive FIFO may still be synthesizing while Discord consumes it.
-
-        The normal timeout estimates speech duration only. Allow the provider's
-        bounded generation window plus playback time for progressive sources.
-        Complete files retain their original, shorter timeout.
-        """
-        normal = self._estimate_playback_timeout(item)
+        timeout = self._estimate_playback_timeout(item)
         if stream is None:
-            return normal
-        synthesis_budget = (
-            TTS_GTTS_TIMEOUT_SECONDS if stream.engine == "gtts"
-            else TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS
+            return timeout
+        job = stream.shared_job
+        if job is not None and job.buffer.ended:
+            return timeout
+        # Only reserve time for synthesis that has not already completed.
+        deadline = getattr(job, "deadline", 0.0) if job is not None else 0.0
+        remaining = max(0.0, deadline - time.monotonic()) if deadline else (
+            TTS_GTTS_TIMEOUT_SECONDS if stream.engine == "gtts" else TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS
         )
-        speech_budget = max(0.0, normal - TTS_PLAYBACK_TIMEOUT_BASE_SECONDS)
-        return min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, max(normal, synthesis_budget + speech_budget + 8.0))
+        return min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, max(
+            timeout, remaining + max(0.0, timeout - TTS_PLAYBACK_TIMEOUT_BASE_SECONDS) + 8.0,
+        ))
 
-    async def _verify_progressive_stream_completed(self, stream: EdgeStreamHandle, *, guild_id: int) -> None:
-        """A Discord EOF is not proof that the upstream audio was complete."""
-        if not stream.producer_done.is_set():
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(stream.producer_done.wait(), timeout=0.5)
+    def _verify_progressive_stream_completed(self, stream: EdgeStreamHandle, *, guild_id: int) -> None:
+        # The reader signals producer_done before closing the FIFO. No grace sleep needed.
         job = stream.shared_job
         failure = stream.error or stream.pipe_error or (job.buffer.error if job is not None else None)
-        if failure is not None or not stream.producer_done.is_set():
-            logger.warning(
-                "[tts_stream] reprodução terminou com síntese incompleta | guild=%s engine=%s "
-                "bytes=%s producer_done=%s erro=%s",
-                guild_id, stream.engine, stream.audio_bytes, stream.producer_done.is_set(),
-                _tts_safe_exception_detail(failure),
-            )
-            raise TTSPlaybackError("stream_incomplete")
+        complete = stream.producer_done.is_set()
+        if complete and failure is None:
+            return
+        logger.warning(
+            "[tts_stream] reprodução terminou com síntese incompleta | guild=%s engine=%s "
+            "bytes=%s producer_done=%s erro=%s",
+            guild_id, stream.engine, stream.audio_bytes, complete,
+            _tts_safe_exception_detail(failure),
+        )
+        raise TTSPlaybackError("stream_incomplete")
 
     def _normalize_cache_text(self, text: str) -> str:
         # Cache identity must describe exactly the text sent to the provider.
@@ -1236,7 +1234,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         profiles.move_to_end(handle.prebuffer_profile_key)
 
     def _edge_circuit_is_open(self) -> bool:
-        if time.monotonic() < float(getattr(self, "_tts_edge_rate_limited_until", 0.0) or 0.0):
+        limited_until = getattr(self, "_tts_edge_rate_limited_until", 0.0)
+        if limited_until and time.monotonic() < limited_until:
             return True
         if not TTS_EDGE_CIRCUIT_BREAKER_ENABLED:
             return False
@@ -2797,12 +2796,13 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
 
     def _record_engine_failure(self, engine: str, error: Exception, duration_ms: float | None = None) -> None:
         if engine == "edge" and getattr(error, "status", None) == 429:
-            previous = float(getattr(self, "_tts_edge_rate_limited_until", 0.0) or 0.0)
-            self._tts_edge_rate_limited_until = max(previous, time.monotonic() + TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS)
-            logger.warning(
-                "[tts_edge] serviço limitou requisições (HTTP 429); fallback gTTS ativado por %.0fs",
-                TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS,
-            )
+            now = time.monotonic()
+            if now >= getattr(self, "_tts_edge_rate_limited_until", 0.0):
+                logger.warning(
+                    "[tts_edge] HTTP 429; fallback gTTS por %.0fs",
+                    TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS,
+                )
+            self._tts_edge_rate_limited_until = now + TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS
         engine_metrics = self._get_engine_metrics(engine)
         engine_metrics["synth_failures"] = int(engine_metrics.get("synth_failures", 0) or 0) + 1
         engine_metrics["consecutive_failures"] = int(engine_metrics.get("consecutive_failures", 0) or 0) + 1
@@ -6476,7 +6476,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     if not (isinstance(router_result, dict) and router_result.get("music_route_failed")):
                         result = _validate_tts_playback_result(router_result)
                         if local_stream_overlay:
-                            await self._verify_progressive_stream_completed(edge_stream, guild_id=guild_id)
+                            self._verify_progressive_stream_completed(edge_stream, guild_id=guild_id)
                             stream_playback_ok = True
                             result["progressive_stream"] = True
                             result[f"{edge_stream.engine}_stream"] = True
@@ -6599,7 +6599,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     result[f"{stream_engine}_stream"] = True
                     result[f"{stream_engine}_first_audio_ms"] = edge_stream.first_audio_ms
                     result[f"{stream_engine}_stream_bytes"] = edge_stream.audio_bytes
-                    await self._verify_progressive_stream_completed(edge_stream, guild_id=guild_id)
+                    self._verify_progressive_stream_completed(edge_stream, guild_id=guild_id)
                     stream_playback_ok = True
                 return result
             except Exception as exc:
