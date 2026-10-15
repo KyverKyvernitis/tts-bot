@@ -88,7 +88,6 @@ classify_changed_files() {
   VPS_SYSTEMD_UNITS_CHANGED=0
   ALERT_CHANGED=0
   PHONE_WORKER_SYNC_REQUIRED=0
-  CORE_WORKER_APK_CHANGED=0
   CORE_WORKER_AUTOMATION_REQUIRED=0
   APP_COMMANDS_MAY_HAVE_CHANGED=0
 
@@ -189,10 +188,6 @@ classify_changed_files() {
       cogs/__init__.py|cogs/musica/__init__.py|cogs/musica/runtime_telefone/__init__.py|cogs/musica/runtime_telefone/agente/*|cogs/musica/runtime_telefone/ponte_worker/*|cogs/musica/runtime_telefone/termux/*)
         CORE_WORKER_AUTOMATION_REQUIRED=1
         ;;
-      android/core-worker-app/*)
-        CORE_WORKER_APK_CHANGED=1
-        CORE_WORKER_AUTOMATION_REQUIRED=1
-        ;;
       scripts/core-worker-automation.py|utility/commands/workers_registry.py|webserver.py)
         CORE_WORKER_AUTOMATION_REQUIRED=1
         ;;
@@ -279,14 +274,8 @@ PYOK
 }
 
 cleanup_known_generated_update_artifacts() {
-  # Estes arquivos/pastas são gerados por build/publicação do Core Worker e
-  # não devem bloquear o auto updater. Não remove código fonte nem registry.
-  sudo -u ubuntu -H rm -rf "$REPO_DIR/android/core-worker-app/app/build" 2>/dev/null || rm -rf "$REPO_DIR/android/core-worker-app/app/build" 2>/dev/null || true
-  sudo -u ubuntu -H rm -rf "$REPO_DIR/android/core-worker-app/.gradle" 2>/dev/null || rm -rf "$REPO_DIR/android/core-worker-app/.gradle" 2>/dev/null || true
-  sudo -u ubuntu -H rm -f "$REPO_DIR/android/core-worker-app/app/build.gradle.bak"* 2>/dev/null || rm -f "$REPO_DIR/android/core-worker-app/app/build.gradle.bak"* 2>/dev/null || true
-  # Não removemos android/core-worker-app/releases aqui: é onde latest.json/APKs
-  # privados ficam publicados para os celulares. O auto updater já ignora essa
-  # pasta ao criar commits e alterações não rastreadas não bloqueiam git pull.
+  # Hook legado mantido para compatibilidade com o updater.
+  return 0
 }
 
 local_changes_fingerprint() {

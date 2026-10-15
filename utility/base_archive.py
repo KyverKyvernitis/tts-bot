@@ -103,11 +103,6 @@ BASE_ARCHIVE_BINARY_EXTENSIONS = {
     ".zst",
 }
 BASE_ARCHIVE_BINARY_DIR_MARKERS = (
-    "android/core-worker-app/app/src/main/jnilibs/",
-    "android/core-worker-app/app/src/main/assets/core-linux/bin/",
-    "android/core-worker-app/app/src/main/assets/core-linux/rootfs/",
-    "android/core-worker-app/releases/",
-    "android/core-worker-app/app/build/",
     "build/",
     "dist/",
 )

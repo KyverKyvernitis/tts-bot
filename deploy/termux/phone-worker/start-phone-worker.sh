@@ -35,7 +35,6 @@ SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
 MAINT_LOCK_DIR="${PHONE_WORKER_MAINT_LOCK_DIR:-$WORKER_DIR/.phone-worker-maintenance.lock}"
 MAINT_LOG_FILE="${PHONE_WORKER_MAINT_LOG_FILE:-$WORKER_DIR/phone-worker-maintenance.log}"
 DEPS_STATE_DIR="${PHONE_WORKER_DEPS_STATE_DIR:-$WORKER_DIR/.dependency-install}"
-APK_BUILDER_ENV_CHANGED=0
 FORCE_RESTART=0
 for arg in "$@"; do
   case "$arg" in
@@ -391,29 +390,6 @@ csv_env_has() {
   local value="${1:-}"
   local item="${2:-}"
   printf '%s' "$value" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$item"
-}
-
-apk_builder_toolchain_ready() {
-  local cmd
-  for cmd in java javac jar gradle aapt2; do
-    command -v "$cmd" >/dev/null 2>&1 || return 1
-  done
-  local sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/android-sdk}}"
-  [[ -s "$sdk/platforms/android-34/android.jar" ]]
-}
-
-ensure_apk_builder_env_if_ready() {
-  truthy "${PHONE_WORKER_APK_BUILD_ENABLED:-true}" || return 0
-  truthy "${PHONE_WORKER_AUTO_APK_BUILDER_CAPABILITY:-true}" || return 0
-  safe_mode_enabled && return 0
-  apk_builder_toolchain_ready || return 0
-  if csv_env_has "${CORE_WORKER_ROLES:-}" apk-builder && csv_env_has "${CORE_WORKER_CAPABILITIES:-}" apk-builder; then
-    return 0
-  fi
-  append_csv_env_value CORE_WORKER_ROLES apk-builder
-  append_csv_env_value CORE_WORKER_CAPABILITIES apk-builder
-  APK_BUILDER_ENV_CHANGED=1
-  log "toolchain Android validado; capacidade apk-builder reparada sem trocar o perfil atual"
 }
 
 is_turbo_profile() {
@@ -779,7 +755,6 @@ run_post_start_maintenance_async() {
 }
 
 musica_ensure_worker_env_if_needed
-ensure_apk_builder_env_if_ready
 cleanup_stale_heavy_dependency_builds
 musica_cleanup_safe_mode
 
@@ -791,10 +766,6 @@ if [[ -n "$existing_pid" && "$count" -le 1 ]] && worker_healthy_for_pid "$existi
   if [[ "$FORCE_RESTART" == "1" ]]; then
     log "restart forçado solicitado; encerrando processo Termux confirmado pid=$existing_pid"
     write_status "restart_forced pid=$existing_pid $(now_iso)"
-    kill_worker_processes
-  elif [[ "$APK_BUILDER_ENV_CHANGED" == "1" ]]; then
-    log "capacidade apk-builder alterada; reiniciando processo Termux confirmado"
-    write_status "restart_for_apk_builder_capability pid=$existing_pid $(now_iso)"
     kill_worker_processes
   elif runtime_source_changed_for_pid "$existing_pid"; then
     log "fonte do worker mudou; reiniciando processo Termux confirmado"

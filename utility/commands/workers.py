@@ -30,7 +30,7 @@ from utility.interaction_safety import (
 
 logger = logging.getLogger(__name__)
 
-CORE_WORKER_APK_REPLACES_TERMUX = str(os.getenv("CORE_WORKER_APK_REPLACES_TERMUX", "true") or "true").strip().lower() not in {"0", "false", "no", "off"}
+CORE_WORKER_APK_REPLACES_TERMUX = False  # Retired Android app: Termux is the sole runtime
 
 WORKERS_COMMAND_GUILD_ID = 927002914449424404
 WORKERS_COMMAND_GUILD = discord.Object(id=WORKERS_COMMAND_GUILD_ID)
@@ -57,7 +57,6 @@ CORE_WORKER_IMPORTANT_WAKE_ROLES = {
     "ffmpeg",
     "ffprobe",
     "tts-convert",
-    "apk-builder",
     "vps-assist",
     "cache-worker",
     "service-control",
@@ -71,8 +70,7 @@ CORE_WORKER_IMPORTANT_WAKE_TASKS = {
     "zip_audit",
     "zip_validate",
     "maintenance_plan",
-    "apk_build_debug",
-    "apk_publish_last",
+    
     "vps_assist_probe",
     "endpoint_probe",
     "service_status",
@@ -84,19 +82,16 @@ CORE_WORKER_IMPORTANT_WAKE_TASKS = {
 }
 
 WORKER_ROLE_PROFILES: dict[str, tuple[str, ...]] = {
-    "leve": ("apk-worker", "diagnostics", "log-summary"),
-    "midia": ("apk-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
-    "completo": ("apk-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
-    # Bootstrap: o primeiro APK self-builder ainda é compilado pelo phone-worker/Termux.
-    "builder": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "apk-builder", "vps-assist", "cache-worker"),
-    # Após o toolchain interno ficar pronto, o próprio APK anuncia apk-builder dinamicamente.
-    "turbo": ("apk-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "vps-assist", "cache-worker"),
-    "bedrock": ("apk-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"),
+    "leve": ("phone-worker", "diagnostics", "log-summary"),
+    "midia": ("phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
+    "completo": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
+    "builder": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "vps-assist", "cache-worker"),
+    "turbo": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "vps-assist", "cache-worker"),
+    "bedrock": ("phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"),
 }
 
 WORKER_ROLE_LABELS: dict[str, str] = {
-    "apk-worker": "Core Worker APK",
-    "phone-worker": "Termux bootstrap",
+    "phone-worker": "Phone Worker Termux",
     "diagnostics": "Diagnósticos",
     "log-summary": "Resumo de logs",
     "maintenance-plan": "Plano de manutenção",
@@ -107,8 +102,7 @@ WORKER_ROLE_LABELS: dict[str, str] = {
     "bedrock": "Minecraft Bedrock",
     "bedrock-logs": "Logs Bedrock",
     "bedrock-backup": "Backup Bedrock",
-    "apk-builder": "Compilar APK",
-    "vps-assist": "Ajudar VPS",
+        "vps-assist": "Ajudar VPS",
     "cache-worker": "Cache auxiliar",
     "hash-worker": "Hashes",
     "endpoint-probe": "Teste de endpoint",
@@ -125,18 +119,16 @@ WORKER_ROLE_PROFILE_DESCRIPTIONS: dict[str, str] = {
     "leve": "economia, diagnósticos e logs",
     "midia": "perfil normal recomendado",
     "completo": "tarefas extras e manutenção segura",
-    "builder": "bootstrap no Termux até o APK assumir o autobuild",
+    "builder": "Phone Worker Termux",
     "turbo": "máximo desempenho para acelerar a VPS",
     "bedrock": "Minecraft Bedrock futuro",
 }
 
 WORKER_EDITABLE_FEATURES: tuple[dict[str, Any], ...] = (
-    {"value": "apk-worker", "label": "Base APK", "description": "Runtime direto sem Termux", "emoji": "📱", "roles": ("apk-worker",), "capabilities": ("apk-worker",), "tasks": ("ping", "status")},
     {"value": "diagnostics", "label": "Diagnóstico", "description": "Saúde e checks básicos", "emoji": "🩺", "roles": ("diagnostics",), "capabilities": ("diagnostics",), "tasks": ("diagnostic_basic", "worker_self_check")},
     {"value": "log-summary", "label": "Logs", "description": "Resumo e leitura de logs", "emoji": "🧾", "roles": ("log-summary",), "capabilities": ("log-summary", "worker-logs"), "tasks": ("log_summary", "log_digest", "worker_logs", "text_stats")},
     {"value": "maintenance-plan", "label": "Manutenção", "description": "Plano seguro de limpeza/cache", "emoji": "🧹", "roles": ("maintenance-plan",), "capabilities": ("maintenance-plan", "cache-worker"), "tasks": ("maintenance_plan",)},
     {"value": "zip-validate", "label": "ZIP / patch", "description": "Validar e auditar ZIP", "emoji": "🧪", "roles": ("zip-validate",), "capabilities": ("zip-validate",), "tasks": ("zip_validate", "zip_audit")},
-    {"value": "apk-builder", "label": "APK builder", "description": "Termux bootstrap ou autobuild interno", "emoji": "🏗️", "roles": ("apk-builder",), "capabilities": ("apk-builder",), "tasks": ("apk_build_debug", "apk_publish_last")},
     {"value": "vps-assist", "label": "Ajudar VPS", "description": "Offload seguro quando disponível", "emoji": "🧠", "roles": ("vps-assist",), "capabilities": ("vps-assist", "hash-worker", "endpoint-probe"), "tasks": ("vps_assist_probe", "hash_batch", "endpoint_probe")},
     {"value": "ffmpeg", "label": "FFmpeg", "description": "Conversão de áudio curta", "emoji": "🎚️", "roles": ("ffmpeg",), "capabilities": ("ffmpeg", "audio-convert"), "tasks": ("ffmpeg_check", "audio_convert")},
     {"value": "ffprobe", "label": "FFprobe", "description": "Analisar mídia", "emoji": "🔎", "roles": ("ffprobe",), "capabilities": ("ffprobe", "media-probe"), "tasks": ("ffprobe_check", "media_probe")},
@@ -182,7 +174,6 @@ WORKER_ACTION_CATEGORIES: tuple[dict[str, str], ...] = (
     {"label": "Monitoramento", "value": "monitor", "description": "Rede, Tailscale, serviços", "emoji": "📊"},
     {"label": "Manutenção", "value": "maintenance", "description": "Reparar, reiniciar e boot", "emoji": "🛠️"},
     {"label": "Ajudar VPS", "value": "assist", "description": "Tarefas auxiliares seguras", "emoji": "🧠"},
-    {"label": "APK interno", "value": "apk", "description": "Jobs seguros sem shell", "emoji": "📲"},
     {"label": "Organizar", "value": "organize", "description": "Nome, funções, pausar/remover", "emoji": "🧩"},
     {"label": "Adicionar celular", "value": "add", "description": "Pareamento e guia simples", "emoji": "📲"},
 )
@@ -191,13 +182,18 @@ WORKER_ACTION_CATEGORIES: tuple[dict[str, str], ...] = (
 # A interface principal dos workers fica propositalmente enxuta.
 # Ações internas/diagnósticas continuam existindo no backend, mas não aparecem
 # no select normal para não lotar o painel com tarefas que raramente são usadas.
+# Hide retired app commands from the Discord worker panel.
+WORKER_EDITABLE_FEATURES = tuple(feature for feature in WORKER_EDITABLE_FEATURES
+    if "apk" not in str(feature.get("value") or "").lower() and feature.get("value") != "retired-builder")
+WORKER_ACTION_SPECS = tuple(spec for spec in WORKER_ACTION_SPECS
+    if "apk" not in str(spec.get("value") or "").lower()
+    and "apk" not in str(spec.get("job_type") or "").lower()
+    and "core-worker-apk" not in str((spec.get("payload") or {}).get("service") or "").lower())
+
 WORKER_PANEL_ACTION_ORDER: tuple[str, ...] = (
     "_worker_details",
     "ping",
     "worker_self_check",
-    "apk_build_debug_quick",
-    "apk_publish_last_quick",
-    "_apk_internal_test",
     "worker_logs",
     "endpoint_probe",
     "_show_last_result",
@@ -1235,12 +1231,12 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     return " · ".join(str(x) for x in parts if x)
 
 def _profile_feature_values(profile: str) -> set[str]:
-    values: set[str] = {"apk-worker"}
+    values: set[str] = {"phone-worker"}
     roles = set(WORKER_ROLE_PROFILES.get(profile, WORKER_ROLE_PROFILES.get("midia", ())))
     for value, feature in _FEATURE_BY_VALUE.items():
         feature_roles = set(str(x) for x in feature.get("roles") or ())
         feature_caps = set(str(x) for x in feature.get("capabilities") or ())
-        if value == "apk-worker" or value in roles or roles.intersection(feature_roles | feature_caps):
+        if value == "phone-worker" or value in roles or roles.intersection(feature_roles | feature_caps):
             values.add(value)
     if profile == "turbo":
         values.update(str(item["value"]) for item in WORKER_EDITABLE_FEATURES if str(item.get("value")) != "bedrock")
@@ -1251,7 +1247,7 @@ def _feature_values_from_worker(worker: dict[str, Any]) -> set[str]:
     raw_roles = [str(x) for x in (worker.get("roles") or []) if x]
     raw_caps = [str(x) for x in (worker.get("capabilities") or []) if x]
     all_tokens = set(_unique_ordered(raw_roles + raw_caps))
-    values: set[str] = {"apk-worker"}
+    values: set[str] = {"phone-worker"}
     for value, feature in _FEATURE_BY_VALUE.items():
         tokens = {value}
         tokens.update(str(x) for x in feature.get("roles") or ())
@@ -1264,7 +1260,7 @@ def _feature_values_from_worker(worker: dict[str, Any]) -> set[str]:
 
 def _roles_caps_tasks_for_features(values: set[str], *, profile: str = "manter") -> tuple[list[str], list[str], list[str]]:
     selected = set(values or set())
-    selected.add("apk-worker")
+    selected.add("phone-worker")
     roles: list[str] = []
     caps: list[str] = []
     tasks: list[str] = []
@@ -2823,7 +2819,7 @@ class WorkerRolesEditorView(discord.ui.LayoutView):
             with contextlib.suppress(Exception):
                 values = list(getattr(interaction, "values", []) or [])
         self.selected_features = {str(value) for value in values if str(value) in _FEATURE_BY_VALUE}
-        self.selected_features.add("apk-worker")
+        self.selected_features.add("phone-worker")
         self._rebuild()
         await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
 
@@ -2951,7 +2947,9 @@ class WorkersPanelView(discord.ui.LayoutView):
     def _registry_workers(self) -> list[dict[str, Any]]:
         registry = self.snapshot.registry_snapshot or {}
         workers = registry.get("workers") if isinstance(registry.get("workers"), list) else []
-        return [worker for worker in workers if isinstance(worker, dict)]
+        return [worker for worker in workers if isinstance(worker, dict)
+                and str(worker.get("runtime_kind") or "").lower() != "apk"
+                and not str(worker.get("source") or "").lower().startswith("core-worker-apk")]
 
     @staticmethod
     def _physical_worker_id(worker: dict[str, Any]) -> str:
@@ -3129,7 +3127,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 apk_caps = {str(item) for item in apk.get("capabilities") or []}
                 details.append("APK pronto" if apk.get("online") and "apk-builder" in apk_caps else ("APK online" if apk.get("online") else "APK offline"))
             if parent is not None:
-                details.append("Termux fallback" if parent.get("online") else "Termux offline")
+                details.append("Termux" if parent.get("online") else "Termux offline")
             model = str((apk or {}).get("name") or "").strip()
             if model and model.lower() != name.lower():
                 details.insert(0, model)
@@ -3287,7 +3285,7 @@ class WorkersPanelView(discord.ui.LayoutView):
 
         def add_if_visible(spec: dict[str, Any]) -> None:
             value = str(spec.get("value") or "")
-            if value not in WORKER_PANEL_ACTION_VALUES:
+            if value not in WORKER_PANEL_ACTION_VALUES or spec.get("apk_job_type") or spec.get("category") == "apk":
                 return
             apk_job_type = _core_worker_app_normalize_job_type(spec.get("apk_job_type")) if spec.get("apk_job_type") else ""
             if apk_job_type and supported is not None and apk_job_type not in supported:
@@ -3470,7 +3468,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 activity = "preparando ambiente"
             return f"**Build:** APK `{version}` · {activity}"
         if status == "running":
-            return f"**Build:** APK `{version}` · usando Termux fallback"
+            return f"**Build:** APK `{version}` · usando Termux"
         return f"**Build:** APK `{version}` · na fila"
 
     def _selected_worker_lines(self, snapshot: WorkerSnapshot) -> list[str]:
@@ -3536,7 +3534,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 lines.append(f"**APK `{apk_version}`** · {apk_state}")
             if parent is not None:
                 parent_version = _agent_version_label(parent.get("version"))
-                parent_state = "Fallback" if parent.get("online") else "Offline"
+                parent_state = "Online" if parent.get("online") else "Offline"
                 lines.append(f"**Termux `{parent_version}`** · {parent_state}")
 
             lines.append(f"**Aparelho:** {_physical_telemetry_text(members)}")
@@ -3630,15 +3628,8 @@ class WorkersPanelView(discord.ui.LayoutView):
         if action == "_worker_details":
             await self._show_worker_details(interaction)
             return
-        if action == "_apk_internal_test":
-            await self._queue_apk_internal_runtime_test(interaction)
-            return
         if action == "_show_last_result":
             await self._show_last_result(interaction)
-            return
-        apk_spec = next((spec for spec in self._panel_action_specs_for_selected() if str(spec.get("value")) == action and spec.get("apk_job_type")), None)
-        if apk_spec is not None:
-            await self._queue_apk_manual_job(interaction, str(apk_spec.get("apk_job_type") or ""), label=str(apk_spec.get("label") or "job APK"))
             return
         if action == "_rename_worker":
             await self._open_rename_modal(interaction)
@@ -3994,7 +3985,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             targets = payload.get("targets")
             if targets == ["auto"] or targets == "auto" or not targets:
                 base = _public_base_url().rstrip("/")
-                payload["targets"] = [base + "/health", base + "/core-worker/app/latest.json"]
+                payload["targets"] = [base + "/health"]
                 payload.setdefault("timeout_seconds", 3)
             return payload
         return payload
@@ -4023,10 +4014,6 @@ class WorkersPanelView(discord.ui.LayoutView):
         try:
             if task == "worker_update":
                 payload = await self.cog._build_worker_update_payload(scripts_only=bool((payload or {}).get("scripts_only")))
-            elif task == "apk_build_debug":
-                payload = await self.cog._build_apk_builder_payload(payload or {})
-            elif task == "apk_publish_last":
-                payload = await self._build_assist_payload(job_type, payload or {})
             else:
                 payload = await self._build_assist_payload(job_type, payload or {})
 
@@ -4318,9 +4305,7 @@ class WorkersCommandMixin:
             "tailscale_status",
             "worker_logs",
             "worker_update",
-            "apk_build_debug",
-            "apk_publish_last",
-            "boot_status",
+                            "boot_status",
             "boot_repair",
             "service_status",
             "service_start",
@@ -4869,8 +4854,6 @@ class WorkersCommandMixin:
             return False
         if not snapshot.enabled or not snapshot.configured:
             return False
-        if _env_bool("CORE_WORKER_AUTO_WAKE_SKIP_WHEN_APK_ONLINE", True) and _core_worker_any_apk_runtime_online():
-            return False
         if _snapshot_has_online_worker(snapshot):
             return False
         offline_important = _offline_important_worker_labels(snapshot)
@@ -4884,21 +4867,9 @@ class WorkersCommandMixin:
     async def _core_worker_auto_wake_loop(self) -> None:
         with contextlib.suppress(Exception):
             await self.bot.wait_until_ready()
-        last_apk_skip_log = 0.0
         while not getattr(self.bot, "is_closed", lambda: False)():
             interval = max(30.0, _env_float("CORE_WORKER_AUTO_WAKE_INTERVAL_SECONDS", CORE_WORKER_AUTO_WAKE_DEFAULT_INTERVAL_SECONDS))
             try:
-                # Caminho rápido: se o APK/Core Linux interno já está online, não
-                # coleta snapshot pesado e não tenta acordar o Termux legado.
-                if _env_bool("CORE_WORKER_AUTO_WAKE_SKIP_WHEN_APK_ONLINE", True) and _core_worker_any_apk_runtime_online():
-                    now = time.monotonic()
-                    log_interval = max(60.0, _env_float("CORE_WORKER_AUTO_WAKE_APK_SKIP_LOG_INTERVAL_SECONDS", CORE_WORKER_AUTO_WAKE_APK_SKIP_LOG_INTERVAL_SECONDS))
-                    if now - last_apk_skip_log >= log_interval:
-                        print("[core-worker-auto-wake] ignorado: APK/Core Linux interno online", flush=True)
-                        last_apk_skip_log = now
-                    await asyncio.sleep(interval)
-                    continue
-
                 snapshot = await self._collect_workers_snapshot()
                 if self._snapshot_needs_auto_wake(snapshot):
                     labels = _offline_important_worker_labels(snapshot)

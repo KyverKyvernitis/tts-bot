@@ -218,9 +218,7 @@ TTS_FFMPEG_BEFORE_OPTIONS = (os.getenv("TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin") 
 TTS_FFMPEG_OPTIONS = (os.getenv("TTS_FFMPEG_OPTIONS", "-vn -loglevel error") or "-vn -loglevel error").strip()
 
 
-# O APK assume o runtime móvel. O Termux pode continuar temporariamente apenas
-# como builder bootstrap do primeiro APK com toolchain interno; nunca buildamos na VPS.
-CORE_WORKER_APK_REPLACES_TERMUX = _parse_bool(os.getenv("CORE_WORKER_APK_REPLACES_TERMUX", "true"), True)
+# Phone Worker operates through Termux; the Android Core Worker app is retired.
 CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED = _parse_bool(
     os.getenv("CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED", "true"), True
 )
@@ -230,12 +228,9 @@ PHONE_WORKER_HOST = (os.getenv("PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = _parse_int(os.getenv("PHONE_WORKER_PORT", "8766"), 8766)
 PHONE_WORKER_SCHEME = (os.getenv("PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
 PHONE_WORKER_TOKEN = (os.getenv("PHONE_WORKER_TOKEN", "") or "").strip()
-# Mantém os consumidores existentes apontando para a API compatível do APK.
-# Uma configuração antiga PHONE_WORKER_ENABLED=false não deve desligar o APK
-# quando host e token diretos já estão presentes.
-PHONE_WORKER_ENABLED = (
-    CORE_WORKER_APK_REPLACES_TERMUX and bool(PHONE_WORKER_HOST and PHONE_WORKER_TOKEN)
-) or _parse_bool(os.getenv("PHONE_WORKER_ENABLED", "false"), False)
+PHONE_WORKER_ENABLED = bool(PHONE_WORKER_HOST and PHONE_WORKER_TOKEN) or _parse_bool(
+    os.getenv("PHONE_WORKER_ENABLED", "false"), False
+)
 PHONE_WORKER_ZIP_VALIDATE_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_ZIP_VALIDATE_ENABLED", "true"), True)
 PHONE_WORKER_ZIP_VALIDATE_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("PHONE_WORKER_ZIP_VALIDATE_TIMEOUT_SECONDS", "5.0"), 5.0))
 PHONE_WORKER_ZIP_VALIDATE_MAX_MB = max(1, _parse_int(os.getenv("PHONE_WORKER_ZIP_VALIDATE_MAX_MB", "24"), 24))
@@ -251,7 +246,7 @@ TTS_TURBO_BENCHMARK_TRIGGER_TEXT = (os.getenv("TTS_TURBO_BENCHMARK_TRIGGER_TEXT"
 TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS = max(1.5, _parse_float(os.getenv("TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS", "12.0"), 12.0))
 TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TURBO_BENCHMARK_MAX_AUDIO_MB", "4"), 4))
 
-# ATTS: Android TTS nativo do APK/phone-worker. O prefixo público oficial é %.
+# ATTS: Android TTS nativo do Phone Worker Termux. O prefixo público oficial é %.
 # Mantemos os nomes antigos TTS_PIPER_EXPERIMENT_* apenas como alias de migração.
 TTS_ATTS_PREFIX = (os.getenv("TTS_ATTS_PREFIX") or os.getenv("TTS_PIPER_EXPERIMENT_PREFIX") or "%").strip() or "%"
 TTS_ATTS_ENABLED = _parse_bool(os.getenv("TTS_ATTS_ENABLED", os.getenv("TTS_PIPER_EXPERIMENT_ENABLED", "true")), True)
@@ -320,7 +315,7 @@ TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS = max(0.0, _parse_float(os.getenv("TTS_
 
 # Worker Voice Agent roadmap: the VPS remains the bot/control plane, while the
 # turbo worker becomes the direct audio/voice plane when this staged path is ready.
-WORKER_VOICE_AGENT_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX) and _parse_bool(os.getenv("WORKER_VOICE_AGENT_ENABLED", "true"), True)
+WORKER_VOICE_AGENT_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_ENABLED", "true"), True)
 WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", "true"), True)
 WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED", "true"), True)
 # gTTS mantém a call na VPS por padrão. O worker adaptativo ainda pode sintetizar

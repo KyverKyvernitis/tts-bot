@@ -1294,6 +1294,8 @@ class CoreWorkersRegistry:
         }
 
     def redeem_pairing(self, payload: Mapping[str, Any], *, remote_addr: str = "") -> dict[str, Any]:
+        if _is_apk_runtime_payload(payload) or str(payload.get("source") or "").lower().startswith("core-worker-apk"):
+            raise CoreWorkerRegistryError("Core Worker APK desativado", status=410)
         code = normalize_pairing_code(payload.get("code"))
         if not code:
             raise CoreWorkerRegistryError("código de pareamento ausente", status=400)
@@ -1824,6 +1826,8 @@ class CoreWorkersRegistry:
         summary: str = "",
     ) -> dict[str, Any]:
         kind = _safe_job_type(job_type)
+        if kind.startswith("apk_") or kind in {"apk_build_debug", "apk_publish_last"}:
+            raise CoreWorkerRegistryError("tarefas do Core Worker APK removidas", status=410)
         self._reject_inline_phone_worker_agent(kind, payload)
         ts = _now()
         ttl = max(30, min(7200, int(ttl_seconds or _env_int("CORE_WORKER_JOB_TTL_SECONDS", DEFAULT_JOB_TTL_SECONDS))))
@@ -1993,6 +1997,10 @@ class CoreWorkersRegistry:
             raise CoreWorkerRegistryError("token inválido", status=403)
         if not bool(record.get("enabled", True)):
             raise CoreWorkerRegistryError("worker desativado", status=403)
+        # Old Android APK identities are no longer authorized to poll or report jobs.
+        if (str(record.get("runtime_kind") or "").lower() == "apk"
+                or str(record.get("source") or "").lower().startswith("core-worker-apk")):
+            raise CoreWorkerRegistryError("Core Worker APK desativado", status=410)
         return safe_id, record
 
     def _job_matches_worker(self, job: Mapping[str, Any], worker_id: str, worker: Mapping[str, Any]) -> bool:

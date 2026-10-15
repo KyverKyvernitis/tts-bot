@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
 
-_APK_IDENTITY_MODULE: Any = None
 _PHONE_WORKER_CONFIG_MODULE: Any = None
 _PHONE_WORKER_CONFIG_LOCK = threading.Lock()
 _PHONE_WORKER_TELEMETRY_MODULE: Any = None
@@ -55,37 +54,6 @@ _PHONE_WORKER_TTS_PROVIDERS_MODULE: Any = None
 _PHONE_WORKER_TTS_PROVIDERS_LOCK = threading.Lock()
 _PHONE_WORKER_PCM_IO_MODULE: Any = None
 _PHONE_WORKER_PCM_IO_LOCK = threading.Lock()
-
-
-def _load_apk_identity_module() -> Any:
-    """Carrega sob demanda para o bootstrap de um arquivo conseguir reiniciar.
-
-    Agents antigos só conhecem ``phone_worker.py`` na allowlist. O restante do
-    runtime chega por ZIP logo após este núcleo novo subir; nenhuma rotina de APK
-    é executada antes disso.
-    """
-    global _APK_IDENTITY_MODULE
-    if _APK_IDENTITY_MODULE is not None:
-        return _APK_IDENTITY_MODULE
-    try:
-        module = importlib.import_module("apk_identity")
-    except ModuleNotFoundError:
-        path = Path(__file__).with_name("apk_identity.py")
-        spec = importlib.util.spec_from_file_location("core_phone_worker_apk_identity", path)
-        if not path.is_file() or spec is None or spec.loader is None:
-            raise RuntimeError("apk_identity.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    _APK_IDENTITY_MODULE = module
-    return module
-
-
-def inspect_apk_identity(*args: Any, **kwargs: Any) -> Any:
-    return _load_apk_identity_module().inspect_apk_identity(*args, **kwargs)
-
-
-def assert_expected_apk_identity(*args: Any, **kwargs: Any) -> Any:
-    return _load_apk_identity_module().assert_expected_apk_identity(*args, **kwargs)
 
 
 def _phone_worker_music_bridge_module(name: str) -> Any:
@@ -147,7 +115,6 @@ _CORE_JOB_LOCK = threading.RLock()
 _CORE_JOB_ACTIVE: dict[str, Any] = {}
 _CORE_JOB_LAST_RESULT: dict[str, Any] = {}
 _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
-_APK_BUILD_THREAD_LOCK = threading.Lock()
 _HEAVY_RESOURCE_LOCK = threading.Lock()
 _TETO_RENDERER_LOCK = threading.RLock()
 _TETO_RENDERER: Any = None
@@ -166,14 +133,10 @@ DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
 PHONE_WORKER_VERSION = "1.11.41"
 CORE_WORKER_RUNTIME_MODE = "termux"
-CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
+CORE_WORKER_INTERNAL_RUNTIME_STATE = "termux"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
-DEFAULT_APK_BUILD_KEEP_ARTIFACTS = 3
-DEFAULT_APK_BUILD_KEEP_LOGS = 12
-DEFAULT_APK_BUILD_KEEP_WORKDIRS = 1
-DEFAULT_APK_BUILD_MIN_BATTERY_PERCENT = 25
 TERMUX_PRIMARY_HTTP_PORT = 8766
 TERMUX_RECOVERY_HTTP_PORT = 8768
 _DIRECT_HTTP_STATE = "starting"
@@ -285,8 +248,6 @@ SUPPORTED_DIRECT_TASKS = (
     "worker_logs",
     "worker_self_check",
     "worker_update",
-    "apk_build_debug",
-    "apk_publish_last",
     "vps_assist_probe",
     "hash_batch",
     "endpoint_probe",
@@ -342,8 +303,6 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "worker_logs",
     "worker_self_check",
     "worker_update",
-    "apk_build_debug",
-    "apk_publish_last",
     "vps_assist_probe",
     "hash_batch",
     "endpoint_probe",
@@ -375,13 +334,13 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "builder": {
         "label": "Builder",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "apk-builder", "zip-validate", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "apk-builder", "zip-validate", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "worker-logs", "network-probe", "tailscale-status", "boot-repair", "service-control"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "worker-logs", "network-probe", "tailscale-status", "boot-repair", "service-control"],
     },
     "turbo": {
         "label": "Turbo",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-gtts", "tts-edge", "tts-android-native", "tts-teto", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "voice-agent", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-gtts", "tts-edge", "tts-android-native", "tts-teto", "voice-agent", "worker-voice", "shared-voice-session", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -389,7 +348,6 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
         "capabilities": ["phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup", "worker-logs", "network-probe", "tailscale-status"],
     },
 }
-
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -533,9 +491,6 @@ def _supported_core_worker_job_types() -> list[str]:
     roles, capabilities = _current_core_worker_roles_and_capabilities()
     caps = set(roles + capabilities)
     allowed = list(SUPPORTED_CORE_WORKER_JOB_TYPES)
-    # Build Android é pesado e só deve aparecer para celular escolhido como builder.
-    if "apk-builder" not in caps:
-        allowed = [item for item in allowed if item != "apk_build_debug"]
     # Funções de assistência só aparecem quando o perfil permite ajudar a VPS.
     if "vps-assist" not in caps:
         allowed = [item for item in allowed if item not in {"vps_assist_probe", "hash_batch", "endpoint_probe", "log_digest", "zip_audit"}]
@@ -644,7 +599,6 @@ def _short_text(value: Any, *, limit: int = 120, default: str = "") -> str:
     return text
 
 
-
 def _music_stream_ttl_seconds() -> float:
     return _phone_worker_music_bridge_module("streams").stream_ttl_seconds()
 
@@ -663,7 +617,6 @@ def _music_stream_lookup(stream_id: str) -> dict[str, Any] | None:
 
 def _safe_ffmpeg_header_lines(headers: Any) -> str:
     return _phone_worker_music_bridge_module("streams").safe_ffmpeg_header_lines(headers)
-
 
 
 def _music_pcm_cache_dir() -> Path:
@@ -957,7 +910,6 @@ def _tailscale_snapshot(*, probe_vps: bool = False) -> dict[str, Any]:
     except Exception as exc:
         return {"connected": False, "state": "telemetry_failed",
                 "error": f"{type(exc).__name__}: {_short_text(exc, limit=100)}"}
-
 
 
 def _vps_tcp_ping_snapshot(*, timeout: float = 2.5, cache_ttl: float = 6.0) -> dict[str, Any]:
@@ -1408,8 +1360,6 @@ def _post_core_worker_json(
         return _post_json_url(f"{base_url}{path}", payload, token=token, timeout=timeout)
 
 
-
-
 def _core_job_runtime_snapshot() -> dict[str, Any]:
     with _CORE_JOB_LOCK:
         active = dict(_CORE_JOB_ACTIVE)
@@ -1581,7 +1531,7 @@ def _probe_direct_http_owner(host: str, port: int, *, timeout: float = 0.8) -> s
     probe_host = "127.0.0.1" if host in {"", "0.0.0.0", "::"} else host
     headers = {"Accept": "application/json", "User-Agent": f"CorePhoneWorkerSupervisorProbe/{PHONE_WORKER_VERSION}"}
     tokens = []
-    for name in ("PHONE_WORKER_TOKEN", "CORE_WORKER_APK_HTTP_TOKEN", "CORE_WORKER_DIRECT_HTTP_TOKEN"):
+    for name in ("PHONE_WORKER_TOKEN", "CORE_WORKER_DIRECT_HTTP_TOKEN"):
         value = str(os.getenv(name) or "").strip()
         if value and value not in tokens:
             tokens.append(value)
@@ -1656,7 +1606,6 @@ def _bind_phone_worker_http_server(host: str, preferred_port: int, *, token: str
         _DIRECT_HTTP_STATE = "port_conflict_control_plane_alive"
     print(f"[phone-worker-http] sem endpoint direto; state={_DIRECT_HTTP_STATE}; heartbeat/jobs continuam ativos", flush=True)
     return None
-
 
 
 def _bootstrap_updater_snapshot() -> dict[str, Any]:
@@ -1936,93 +1885,6 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
     return False
 
 
-def _try_auto_enroll_local_apk_once(*, timeout: float = 4.0) -> dict[str, Any]:
-    """Pareia o APK filho via loopback usando o Termux como raiz de confiança."""
-    base_url, _token, parent_worker_id = _core_worker_auth_parts()
-    if not base_url or not parent_worker_id:
-        return {"ok": False, "state": "parent_not_configured"}
-    local_url = "http://127.0.0.1:8767/core-worker/enrollment"
-    try:
-        status, local = _get_local_json_url(local_url, timeout=timeout, max_bytes=128 * 1024)
-    except Exception as exc:
-        return {"ok": False, "state": "apk_not_listening", "error": _short_text(exc, limit=100)}
-    if status != 200 or not local.get("ok"):
-        return {"ok": False, "state": "apk_probe_failed", "status": status}
-    state = str(local.get("state") or "").strip().lower()
-    if state == "paired":
-        return {"ok": True, "state": "paired", "worker_id": local.get("worker_id")}
-    if state != "waiting_parent":
-        return {"ok": False, "state": state or "apk_not_ready", "error": _short_text(local.get("error"), limit=120)}
-    parent_hint = str(local.get("parent_worker_id") or "").strip()
-    if parent_hint != parent_worker_id:
-        return {"ok": False, "state": "parent_mismatch"}
-    challenge = str(local.get("challenge") or "").strip()
-    install_id = str(local.get("install_id") or "").strip()
-    source_fingerprint = str(local.get("sourceFingerprint") or "").strip().lower()
-    if len(challenge) < 24 or len(install_id) < 8:
-        return {"ok": False, "state": "invalid_local_challenge"}
-    payload = {
-        "parent_worker_id": parent_worker_id,
-        "challenge": challenge,
-        "install_id": install_id,
-        "sourceFingerprint": source_fingerprint,
-        "versionName": str(local.get("versionName") or ""),
-        "versionCode": int(local.get("versionCode") or 0),
-        "runtime_kind": "apk",
-        "protocol": "parent-local-v1",
-    }
-    status, enrolled = _post_core_worker_json("/core-worker/enroll/apk-child", payload, timeout=max(6.0, timeout))
-    if status != 200 or not enrolled.get("ok"):
-        return {"ok": False, "state": "vps_rejected", "status": status, "error": _short_text(enrolled.get("error"), limit=120)}
-    complete_payload = {
-        "challenge": challenge,
-        "worker_id": str(enrolled.get("worker_id") or ""),
-        "parent_worker_id": parent_worker_id,
-        "token": str(enrolled.get("token") or ""),
-        "direct_http_token": str(enrolled.get("direct_http_token") or ""),
-        "server_url": base_url,
-    }
-    complete_status, complete = _post_local_json_url(
-        "http://127.0.0.1:8767/core-worker/enrollment/complete",
-        complete_payload,
-        timeout=timeout,
-    )
-    if complete_status != 200 or not complete.get("ok"):
-        return {"ok": False, "state": "local_delivery_failed", "status": complete_status, "error": _short_text(complete.get("error"), limit=120)}
-    return {"ok": True, "state": "paired", "worker_id": complete.get("worker_id")}
-
-
-def _start_apk_child_auto_enrollment() -> None:
-    if not _heartbeat_configured():
-        return
-    interval = max(5.0, min(120.0, _env_float("CORE_WORKER_APK_ENROLL_INTERVAL_SECONDS", 15.0)))
-
-    def loop() -> None:
-        last_state = ""
-        while True:
-            try:
-                result = _try_auto_enroll_local_apk_once(timeout=4.0)
-                state = str(result.get("state") or "unknown")
-                if state != last_state:
-                    if result.get("ok") and state == "paired":
-                        print(f"[core-worker-apk-enroll] APK filho pareado automaticamente como {result.get('worker_id') or '?'}", flush=True)
-                    elif state not in {"apk_not_listening", "paired"}:
-                        print(f"[core-worker-apk-enroll] estado={state} detalhe={_short_text(result.get('error'), limit=100)}", flush=True)
-                    last_state = state
-                if result.get("ok") and state == "paired":
-                    time.sleep(max(60.0, interval * 4))
-                else:
-                    time.sleep(interval)
-            except Exception as exc:
-                if last_state != "error":
-                    print(f"[core-worker-apk-enroll] falhou: {type(exc).__name__}: {_short_text(exc, limit=100)}", flush=True)
-                    last_state = "error"
-                time.sleep(interval)
-
-    threading.Thread(target=loop, name="core-worker-apk-enrollment", daemon=True).start()
-    print(f"[core-worker-apk-enroll] ativo; intervalo={int(interval)}s; porta_local=8767", flush=True)
-
-
 def _start_core_worker_heartbeat(*, host: str, port: int) -> None:
     if not _heartbeat_configured():
         print("[core-worker-heartbeat] desativado ou incompleto; defina CORE_WORKER_VPS_URL, CORE_WORKER_ID e CORE_WORKER_TOKEN", flush=True)
@@ -2183,12 +2045,6 @@ def _with_tts_audio_payload(payload: dict[str, Any], data: bytes, *, max_bytes: 
     return payload
 
 
-
-
-
-
-
-
 def _android_tts_enabled() -> bool:
     return _env_bool("PHONE_WORKER_ANDROID_TTS_ENABLED", True)
 
@@ -2330,12 +2186,12 @@ def _teto_resource_snapshot() -> dict[str, Any]:
     core_job = _core_job_runtime_snapshot()
     active_type = str(core_job.get("active_type") or "").strip().lower()
     heavy_types = {
-        "apk_build_debug", "apk_build", "worker_update", "self_update",
+        "worker_update", "self_update",
         "boot_repair", "audio_convert", "media_convert", "maintenance_heavy",
     }
     reasons: list[str] = []
-    if _APK_BUILD_THREAD_LOCK.locked() or active_type in heavy_types:
-        reasons.append(f"tarefa pesada ativa: {active_type or 'apk_build'}")
+    if active_type in heavy_types:
+        reasons.append(f"tarefa pesada ativa: {active_type or 'unknown'}")
     if memory_mb is not None and memory_mb < min_memory_mb:
         reasons.append(f"memória disponível baixa: {memory_mb} MB < {min_memory_mb} MB")
     try:
@@ -2693,7 +2549,6 @@ def _teto_dependency_snapshot_fast() -> dict[str, Any]:
     }
 
 
-
 def _phone_worker_tts_policy_module() -> Any:
     global _PHONE_WORKER_TTS_POLICY_MODULE
     if _PHONE_WORKER_TTS_POLICY_MODULE is not None:
@@ -2901,28 +2756,8 @@ def _cache_dir_snapshot(path: Path, *, max_scan_files: int = 20000) -> dict[str,
     return result
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _inactive_music_node_snapshot() -> dict[str, Any]:
     return _phone_worker_music_bridge_module("telemetria").inactive_music_node_snapshot()
-
-
 
 
 def _worker_turbo_cache_snapshot() -> dict[str, Any]:
@@ -3420,7 +3255,6 @@ def _voice_agent_handoff_summary(*, guild_id: int | None = None, limit: int = 5)
         handoffs_dict, now_ms=now_ms, guild_id=guild_id, limit=limit, public_record=_voice_agent_public_handoff)
 
 
-
 def _voice_agent_public_connection(raw: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
     return _phone_worker_voice_state_module().public_connection(
         raw, now_ms=int(_voice_agent_now_ms() if now_ms is None else now_ms), int_value=_voice_agent_int)
@@ -3540,7 +3374,6 @@ def _voice_agent_begin_transfer(body: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "started": True, "state": transfer.get("state"), "transfer": _voice_agent_public_transfer(transfer), **_voice_agent_transfer_summary(guild_id=guild_id, limit=5), **_voice_agent_handoff_summary(guild_id=guild_id, limit=5)}
 
 
-
 def _voice_agent_release_transfer(body: dict[str, Any]) -> dict[str, Any]:
     guild_id = _voice_agent_int(body.get("guild_id"), 0)
     if guild_id <= 0:
@@ -3562,7 +3395,6 @@ def _voice_agent_release_transfer(body: dict[str, Any]) -> dict[str, Any]:
         with _VOICE_AGENT_SESSION_LOCK:
             _voice_agent_revoke_handoff_owner(str(guild_id), now_ms=now_ms, policy="vps_owner_transfer_released")
         return {"ok": True, "released": True, "state": transfer.get("state"), "transfer": _voice_agent_public_transfer(transfer), **_voice_agent_transfer_summary(guild_id=guild_id, limit=5)}
-
 
 
 def _voice_agent_connection_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
@@ -3742,7 +3574,6 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
     return _voice_agent_public_connection(final)
 
 
-
 def _voice_agent_probe_worker(handoff: dict[str, Any], *, timeout_seconds: float) -> None:
     guild_id = _voice_agent_int(handoff.get("guild_id"), 0)
     probe_id = handoff.get("_probe_id")
@@ -3841,7 +3672,6 @@ def _voice_agent_start_connection_probe(body: dict[str, Any]) -> dict[str, Any]:
                 error=f"{type(exc).__name__}: {_short_text(exc, limit=180)}")
         raise
     return {"ok": True, "started": True, "state": "connection_probe_started", **_voice_agent_connection_summary(guild_id=guild_id, limit=5)}
-
 
 
 def _voice_agent_clear_connection(body: dict[str, Any]) -> dict[str, Any]:
@@ -4451,7 +4281,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload.setdefault("summary", "status direto coletado")
             elif task in {"diagnostic_basic", "worker_self_check"}:
                 payload = _execute_core_worker_job({"type": "worker_self_check", "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
-            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "apk_build_debug", "vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
+            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
                 payload = _execute_core_worker_job({"type": task, "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
             elif task == "sha256":
                 payload = self._task_sha256(body)
@@ -4538,8 +4368,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def _normalize_tts_gtts_language(self, raw: Any) -> str:
         return _phone_worker_tts_policy_module().normalize_gtts_language(raw)
-
-
 
 
     def _ensure_tts_cache_allowed(self) -> tuple[list[str], list[str]]:
@@ -4698,8 +4526,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if profile != "turbo" or "tts-synth" not in caps:
             raise RuntimeError("tts_synthesize_piper é restrito ao perfil turbo com tts-synth")
         return roles, capabilities
-
-
 
 
     def _task_voice_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -6244,7 +6070,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return {"ok": True, "items": items, "count": len(items), "errors": errors[:4], "monochrome": monochrome, "summary": f"{len(items)} emoji(s) recolorido(s)"}
 
 
-
     def _task_text_stats(self, body: dict[str, Any]) -> dict[str, Any]:
         text = str(body.get("text") or "")
         if len(text.encode("utf-8")) > self.max_body_bytes:
@@ -6494,7 +6319,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
         }
 
 
-
 def _command_version(command: str) -> dict[str, Any]:
     if not shutil.which(command):
         return {"ok": False, "available": False, "command": command}
@@ -6510,7 +6334,6 @@ def _command_version(command: str) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"ok": False, "available": True, "command": command, "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"}
-
 
 
 def _sanitize_log_text(value: str, *, limit: int = 12000) -> str:
@@ -6784,8 +6607,6 @@ def _termux_boot_script_content() -> str:
         'echo \'[core-worker-boot] watch-phone-worker.sh não encontrado\' >> "$HOME/phone-worker.log"',
         ''
     ])
-
-
 
 
 def _termux_shell_autostart_block() -> str:
@@ -7328,9 +7149,6 @@ def _run_service_action(service: str, action: str) -> dict[str, Any]:
     return status
 
 
-
-
-
 def _sha256_path(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -7342,364 +7160,7 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _safe_extract_zip_file(zip_path: Path, target_dir: Path, *, max_members: int = 6000) -> int:
-    target_root = target_dir.resolve()
-    count = 0
-    with zipfile.ZipFile(zip_path) as zf:
-        for member in zf.infolist():
-            if count >= max_members:
-                raise ValueError("source zip com arquivos demais")
-            name = str(member.filename or "").replace("\\", "/")
-            if not name or name.startswith("/") or ".." in name.split("/"):
-                raise ValueError(f"caminho inseguro no zip: {name[:80]}")
-            destination = (target_root / name).resolve()
-            if destination != target_root and not str(destination).startswith(str(target_root) + os.sep):
-                raise ValueError(f"caminho fora da pasta do build: {name[:80]}")
-            if member.is_dir():
-                destination.mkdir(parents=True, exist_ok=True)
-                continue
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(member) as src, destination.open("wb") as dst:
-                shutil.copyfileobj(src, dst, length=128 * 1024)
-            count += 1
-    return count
-
-
-
-def _is_termux_runtime() -> bool:
-    prefix = os.getenv("PREFIX") or ""
-    return "com.termux" in prefix or Path("/data/data/com.termux/files/usr").exists()
-
-
-def _apk_self_builder_bundle_asset(project_dir: Path) -> Path:
-    return project_dir / "app/src/main/assets/core-linux/android-builder/android-builder-toolchain.zip"
-
-
-def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
-    result: dict[str, Any] = {"ok": False, "path": str(path), "bytes": 0, "sha256": ""}
-    if not path.is_file() or path.stat().st_size < 1024 * 1024:
-        result["error"] = "bundle ausente ou pequeno"
-        return result
-    try:
-        with zipfile.ZipFile(path) as archive:
-            bad = archive.testzip()
-            if bad:
-                raise ValueError(f"entrada corrompida: {bad}")
-            names = set(archive.namelist())
-            if "manifest.json" not in names:
-                raise ValueError("manifest.json ausente")
-            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-            if not isinstance(manifest, dict) or manifest.get("schema") != "core-worker-android-builder-v1":
-                raise ValueError("schema inválido")
-            try:
-                manifest_version = int(manifest.get("version") or 0)
-            except Exception:
-                manifest_version = 0
-            if manifest_version < 7:
-                raise ValueError("bundle antigo: regenere com validação executável v7")
-            runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
-            if runtime_libraries.get("strategy") != "dt-needed-transitive-v1":
-                raise ValueError("estratégia de bibliotecas do autobuilder inválida")
-            gradle_launcher = manifest.get("gradleLauncher") if isinstance(manifest.get("gradleLauncher"), dict) else {}
-            if gradle_launcher.get("strategy") != "android-sh-resolved-app-home-jvm-opts-v2":
-                raise ValueError("launcher Gradle do autobuilder não é compatível com /system/bin/sh")
-            bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
-            if bootstrap_smoke.get("ok") is not True:
-                raise ValueError("smoke bootstrap do autobuilder ausente ou reprovado")
-            validation = manifest.get("validation") if isinstance(manifest.get("validation"), dict) else {}
-            if validation.get("strategy") != "required-executable-smoke-v2":
-                raise ValueError("estratégia de validação executável do autobuilder inválida")
-            smoke_checks = bootstrap_smoke.get("checks") if isinstance(bootstrap_smoke.get("checks"), list) else []
-            smoke_by_name = {str(item.get("name") or ""): item for item in smoke_checks if isinstance(item, dict)}
-            for name in ("java", "javac", "jar", "gradle", "aapt2"):
-                check = smoke_by_name.get(name) or {}
-                if check.get("ok") is not True or check.get("returncode") is None or int(check.get("returncode")) != 0:
-                    raise ValueError(f"smoke obrigatório ausente ou reprovado: {name}")
-            arch = str(manifest.get("arch") or "").strip().lower()
-            if arch not in {"aarch64", "arm64", "arm64-v8a"}:
-                raise ValueError("arquitetura inválida")
-            paths = manifest.get("paths") if isinstance(manifest.get("paths"), dict) else {}
-            jdk = str(paths.get("jdk") or "jdk").strip("/")
-            gradle = str(paths.get("gradle") or "gradle/bin/gradle").strip("/")
-            sdk = str(paths.get("androidSdk") or paths.get("android_sdk") or "android-sdk").strip("/")
-            aapt2 = str(paths.get("aapt2") or "bin/aapt2").strip("/")
-            required = {
-                f"{jdk}/bin/java": 1,
-                f"{jdk}/bin/javac": 1,
-                f"{jdk}/bin/jar": 1,
-                gradle: 1,
-                f"{sdk}/platforms/android-34/android.jar": 1024 * 1024,
-                aapt2: 1,
-            }
-            for name, minimum in required.items():
-                info = archive.getinfo(name) if name in names else None
-                if info is None or info.is_dir() or int(info.file_size or 0) < minimum:
-                    raise ValueError(f"arquivo obrigatório ausente/pequeno: {name}")
-            executable_paths = manifest.get("executablePaths") if isinstance(manifest.get("executablePaths"), list) else []
-            executable_set = {str(item or "").replace("\\", "/").strip("/") for item in executable_paths}
-            mandatory_exec = {f"{jdk}/bin/java", f"{jdk}/bin/javac", f"{jdk}/bin/jar", gradle, aapt2}
-            missing_exec = sorted(name for name in mandatory_exec if name not in executable_set)
-            if missing_exec:
-                raise ValueError("bundle sem modos executáveis obrigatórios: " + ", ".join(missing_exec))
-            jspawn = f"{jdk}/lib/jspawnhelper"
-            if jspawn in names and jspawn not in executable_set:
-                raise ValueError("bundle não preserva execução de jdk/lib/jspawnhelper")
-            for executable in executable_set:
-                if not executable or executable.startswith("/") or ".." in executable.split("/") or executable not in names:
-                    raise ValueError(f"caminho executável inseguro/ausente no bundle: {executable}")
-            for info in archive.infolist():
-                name = str(info.filename or "").replace("\\", "/")
-                if not name or name.startswith("/") or ".." in name.split("/"):
-                    raise ValueError("caminho inseguro no bundle")
-        result.update({
-            "ok": True,
-            "bytes": path.stat().st_size,
-            "sha256": _sha256_path(path),
-            "manifest": manifest,
-        })
-        return result
-    except Exception as exc:
-        result["error"] = f"{type(exc).__name__}: {_short_text(exc, limit=240)}"
-        return result
-
-
-def _copy_tree_dereferenced(source: Path, target: Path) -> None:
-    if not source.is_dir():
-        raise FileNotFoundError(str(source))
-    target.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(
-        source,
-        target,
-        symlinks=False,
-        dirs_exist_ok=True,
-        ignore_dangling_symlinks=True,
-        copy_function=shutil.copy2,
-    )
-
-
 _GRADLE_DEFAULT_JVM_OPTS_RE = re.compile(r"(?m)^(?P<prefix>[ \t]*DEFAULT_JVM_OPTS[ \t]*=)[^\r\n]*$")
-
-
-def _parse_gradle_default_jvm_opts(raw_assignment: str, *, app_home: Path) -> tuple[list[str], bool]:
-    """Decodifica o quoting e permite somente ``$APP_HOME`` em javaagent local."""
-    try:
-        outer = shlex.split(str(raw_assignment or ""), posix=True)
-        values = shlex.split(outer[0], posix=True) if len(outer) == 1 else outer
-    except ValueError as exc:
-        raise ValueError(f"DEFAULT_JVM_OPTS inválido no launcher Gradle: {exc}") from exc
-    if len(values) > 32:
-        raise ValueError("DEFAULT_JVM_OPTS contém opções demais")
-    forbidden = set(" \t\r\n'\"\\`;&|<>(){}[]*?!#~")
-    portable: list[str] = []
-    uses_app_home = False
-    app_home = app_home.resolve()
-    for value in values:
-        if not value.startswith("-") or len(value) > 512:
-            raise ValueError(f"opção JVM inválida no launcher Gradle: {_short_text(value, limit=120)}")
-        agent_match = re.fullmatch(r"-javaagent:\$(?:APP_HOME|\{APP_HOME\})/(?P<relative>[A-Za-z0-9._/+@:=,-]+)", value)
-        if agent_match:
-            relative = str(agent_match.group("relative") or "").strip("/")
-            if not relative or ".." in relative.split("/"):
-                raise ValueError("javaagent do Gradle possui caminho relativo inseguro")
-            agent = (app_home / relative).resolve()
-            if not _is_inside_path(agent, app_home) or not agent.is_file() or agent.stat().st_size <= 0:
-                raise FileNotFoundError(f"javaagent declarado pelo Gradle não foi encontrado: {relative}")
-            portable.append(f"-javaagent:${{APP_HOME}}/{relative}")
-            uses_app_home = True
-            continue
-        if "$" in value or any(char in forbidden for char in value):
-            raise ValueError(f"opção JVM não portátil no launcher Gradle: {_short_text(value, limit=120)}")
-        portable.append(value)
-    return portable, uses_app_home
-
-
-def _patch_gradle_launcher_for_android(path: Path) -> dict[str, Any]:
-    """Remove as aspas aninhadas que o ``/system/bin/sh`` repassa ao Java.
-
-    O launcher Unix distribuído pelo Gradle costuma declarar
-    ``DEFAULT_JVM_OPTS='\"-Xmx64m\" \"-Xms64m\"'``. No shell do Android essas
-    aspas podem sobreviver ao pipeline ``xargs``/``eval`` do launcher e o Java
-    tenta carregar ``\"-Xmx64m\"`` como classe principal. Preservamos todas as
-    opções JVM simples declaradas pela distribuição. O único placeholder aceito
-    é ``$APP_HOME`` em um ``-javaagent`` existente dentro do próprio Gradle; ele
-    é expandido uma vez na atribuição e nunca chega ao ``eval`` como código.
-    """
-    if not path.is_file():
-        raise FileNotFoundError(f"launcher Gradle ausente: {path}")
-    original = path.read_text(encoding="utf-8", errors="strict")
-    matches = list(_GRADLE_DEFAULT_JVM_OPTS_RE.finditer(original))
-    if len(matches) != 1:
-        raise ValueError(
-            "launcher Gradle inesperado: esperado exatamente um DEFAULT_JVM_OPTS, "
-            f"encontrado {len(matches)}"
-        )
-    original_assignment = matches[0].group(0).split("=", 1)[1]
-    app_home = path.parent.parent.resolve()
-    default_jvm_opts, uses_app_home = _parse_gradle_default_jvm_opts(original_assignment, app_home=app_home)
-    if uses_app_home and not re.search(r"(?m)^[ \t]*(?:export[ \t]+)?APP_HOME[ \t]*=", original[:matches[0].start()]):
-        raise ValueError("launcher Gradle usa $APP_HOME antes de inicializá-lo")
-    joined = " ".join(default_jvm_opts)
-    quote = '"' if uses_app_home else "'"
-    replacement = matches[0].group("prefix") + quote + joined + quote
-    patched = _GRADLE_DEFAULT_JVM_OPTS_RE.sub(replacement, original, count=1)
-    path.write_text(patched, encoding="utf-8")
-    if not os.access(path, os.X_OK):
-        raise ValueError("launcher Gradle perdeu permissão de execução após normalização")
-    return {
-        "strategy": "android-sh-resolved-app-home-jvm-opts-v2",
-        "defaultJvmOpts": default_jvm_opts,
-        "resolvedAppHome": uses_app_home,
-        "changed": patched != original,
-        "sha256": _sha256_path(path),
-    }
-
-
-def _java_home_major(candidate: Path, env: dict[str, str]) -> int:
-    java = candidate / "bin/java"
-    if not java.is_file():
-        return 0
-    probe_env = dict(env)
-    probe_env["JAVA_HOME"] = str(candidate)
-    try:
-        completed = subprocess.run(
-            [str(java), "-version"],
-            env=probe_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            timeout=15,
-            check=False,
-        )
-    except Exception:
-        return 0
-    text = str(completed.stdout or "")
-    match = re.search(r'(?:openjdk\s+version|java\s+version|version)\s+["\']?(?P<major>\d+)', text, flags=re.IGNORECASE)
-    return int(match.group("major")) if completed.returncode == 0 and match else 0
-
-
-def _find_termux_java_home(env: dict[str, str]) -> Path:
-    prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
-    candidates: list[Path] = [prefix / "lib/jvm/java-17-openjdk"]
-    if env.get("JAVA_HOME"):
-        candidates.append(Path(env["JAVA_HOME"]).expanduser())
-    java_cmd = shutil.which("java", path=env.get("PATH")) or shutil.which("java")
-    if java_cmd:
-        resolved = Path(java_cmd).resolve()
-        if resolved.parent.name == "bin":
-            candidates.append(resolved.parent.parent)
-    for root in (prefix / "lib/jvm", prefix / "opt"):
-        if root.is_dir():
-            candidates.extend(path for path in sorted(root.glob("*")) if path.is_dir())
-    seen: set[str] = set()
-    detected: list[str] = []
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            resolved = candidate
-        key = str(resolved)
-        if key in seen:
-            continue
-        seen.add(key)
-        if not all((resolved / f"bin/{name}").is_file() for name in ("java", "javac", "jar")):
-            continue
-        major = _java_home_major(resolved, env)
-        detected.append(f"{resolved.name}:{major or '?'}")
-        if major == 17:
-            return resolved
-    detail = ", ".join(detected[:8]) or "nenhum JDK completo"
-    raise RuntimeError(f"JDK 17 completo não encontrado no Termux; detectados: {detail}")
-
-
-def _find_termux_gradle_home(env: dict[str, str]) -> Path:
-    candidates: list[Path] = []
-    if env.get("GRADLE_HOME"):
-        candidates.append(Path(env["GRADLE_HOME"]).expanduser())
-    prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
-    candidates.extend((prefix / "share/gradle", prefix / "opt/gradle"))
-    gradle_cmd = shutil.which("gradle", path=env.get("PATH")) or shutil.which("gradle")
-    if gradle_cmd:
-        resolved = Path(gradle_cmd).resolve()
-        if resolved.parent.name == "bin":
-            candidates.append(resolved.parent.parent)
-    for candidate in candidates:
-        launcher = candidate / "bin/gradle"
-        libs = list((candidate / "lib").glob("gradle-launcher-*.jar")) if (candidate / "lib").is_dir() else []
-        if launcher.is_file() and libs:
-            return candidate.resolve()
-    raise FileNotFoundError("distribuição completa do Gradle não encontrada no Termux")
-
-
-
-def _find_pinned_gradle_89_home(env: dict[str, str]) -> Path:
-    root = Path(env.get("GRADLE_USER_HOME") or os.getenv("PHONE_WORKER_GRADLE_USER_HOME") or (Path.home() / ".core-worker-gradle-home")).expanduser()
-    candidates: list[Path] = []
-    wrapper_dists = root / "wrapper/dists"
-    if wrapper_dists.is_dir():
-        for launcher in wrapper_dists.glob("gradle-8.9-*/**/gradle-8.9/bin/gradle"):
-            candidates.append(launcher.parent.parent)
-    for candidate in candidates:
-        launcher = candidate / "bin/gradle"
-        if launcher.is_file() and list((candidate / "lib").glob("gradle-launcher-8.9*.jar")):
-            return candidate.resolve()
-    raise FileNotFoundError("distribuição Gradle 8.9 do Wrapper não encontrada no GRADLE_USER_HOME controlado")
-
-
-def _find_android_sdk_home(env: dict[str, str]) -> Path:
-    candidates = [
-        Path(str(env.get("ANDROID_HOME") or "")).expanduser(),
-        Path(str(env.get("ANDROID_SDK_ROOT") or "")).expanduser(),
-        Path.home() / "android-sdk",
-    ]
-    for candidate in candidates:
-        if str(candidate) in {"", "."}:
-            continue
-        android_jar = candidate / "platforms/android-34/android.jar"
-        if android_jar.is_file() and android_jar.stat().st_size > 1024 * 1024:
-            return candidate.resolve()
-    raise FileNotFoundError("Android SDK 34 não encontrado no Termux")
-
-
-def _latest_android_build_tools(sdk: Path) -> Path | None:
-    root = sdk / "build-tools"
-    if not root.is_dir():
-        return None
-    candidates = [path for path in root.iterdir() if path.is_dir()]
-    candidates.sort(key=lambda path: tuple(int(part) if part.isdigit() else 0 for part in re.split(r"[.-]", path.name)), reverse=True)
-    return candidates[0] if candidates else None
-
-
-def _zip_directory_deterministic(source: Path, target: Path) -> dict[str, Any]:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp = target.with_suffix(target.suffix + ".tmp")
-    entries = 0
-    expanded = 0
-    with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as archive:
-        for path in sorted(source.rglob("*")):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(source).as_posix()
-            if not rel or rel.startswith("/") or ".." in rel.split("/"):
-                raise ValueError("caminho inseguro ao gerar toolchain")
-            entries += 1
-            expanded += path.stat().st_size
-            if entries > 50_000:
-                raise ValueError("toolchain contém arquivos demais")
-            if expanded > 4 * 1024 * 1024 * 1024:
-                raise ValueError("toolchain expandido excede 4 GiB")
-            already_compressed = path.suffix.lower() in {".zip", ".jar", ".apk", ".so", ".gz", ".xz", ".zst", ".7z", ".jmod"}
-            archive.write(
-                path,
-                rel,
-                compress_type=zipfile.ZIP_STORED if already_compressed else zipfile.ZIP_DEFLATED,
-                compresslevel=None if already_compressed else 6,
-            )
-    if target.exists():
-        target.unlink()
-    temp.replace(target)
-    return {"entries": entries, "expandedBytes": expanded, "bytes": target.stat().st_size, "sha256": _sha256_path(target)}
-
 
 
 _TERMUX_ANDROID_SYSTEM_LIBRARIES = frozenset({
@@ -7724,2186 +7185,6 @@ _ELF_NEEDED_RE = re.compile(r"\(NEEDED\).*?\[([^\]]+)\]")
 _ELF_SONAME_RE = re.compile(r"\(SONAME\).*?\[([^\]]+)\]")
 
 
-def _elf_header(path: Path) -> dict[str, Any]:
-    try:
-        raw = path.read_bytes()[:64]
-    except Exception:
-        return {"ok": False, "aarch64": False}
-    if len(raw) < 20 or raw[:4] != b"\x7fELF":
-        return {"ok": False, "aarch64": False}
-    endian = "little" if raw[5] == 1 else "big"
-    try:
-        machine = int.from_bytes(raw[18:20], endian)
-    except Exception:
-        machine = -1
-    return {
-        "ok": True,
-        "class": int(raw[4]),
-        "machine": machine,
-        "aarch64": int(raw[4]) == 2 and machine == 183,
-    }
-
-
-def _find_elf_inspector(env: dict[str, str]) -> list[str]:
-    configured = str(env.get("PHONE_WORKER_ELF_INSPECTOR") or os.getenv("PHONE_WORKER_ELF_INSPECTOR") or "").strip()
-    candidates: list[list[str]] = []
-    if configured:
-        candidates.append(shlex.split(configured))
-    path_value = env.get("PATH") or os.getenv("PATH")
-    for name in ("readelf", "llvm-readelf"):
-        found = shutil.which(name, path=path_value) or shutil.which(name)
-        if found:
-            candidates.append([found])
-    for candidate in candidates:
-        try:
-            completed = subprocess.run(
-                [*candidate, "--version"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-                check=False,
-            )
-            if completed.returncode == 0:
-                return candidate
-        except Exception:
-            continue
-    # O bootstrap não deve depender de um pacote adicional do Termux. Quando
-    # readelf não estiver instalado, o parser ELF64 abaixo lê DT_NEEDED/SONAME
-    # diretamente com a biblioteca padrão do Python.
-    return []
-
-
-def _read_elf_dynamic_python(path: Path) -> dict[str, Any]:
-    import struct
-
-    header = _elf_header(path)
-    if not header.get("aarch64"):
-        return {"ok": False, "needed": [], "soname": "", "error": "não é ELF64 AArch64"}
-    try:
-        with path.open("rb") as handle:
-            ident = handle.read(16)
-            if len(ident) != 16 or ident[:4] != b"\x7fELF" or ident[4] != 2:
-                raise ValueError("cabeçalho ELF64 inválido")
-            endian = "<" if ident[5] == 1 else ">" if ident[5] == 2 else ""
-            if not endian:
-                raise ValueError("endianness ELF inválida")
-            rest = handle.read(48)
-            if len(rest) != 48:
-                raise ValueError("cabeçalho ELF truncado")
-            values = struct.unpack(endian + "HHIQQQIHHHHHH", rest)
-            phoff = int(values[4])
-            phentsize = int(values[8])
-            phnum = int(values[9])
-            if phentsize < 56 or phnum <= 0 or phnum > 4096:
-                raise ValueError("tabela de program headers inválida")
-
-            loads: list[tuple[int, int, int, int]] = []
-            dynamic: tuple[int, int] | None = None
-            for index in range(phnum):
-                handle.seek(phoff + index * phentsize)
-                raw = handle.read(56)
-                if len(raw) != 56:
-                    raise ValueError("program header truncado")
-                p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz, p_memsz, _align = struct.unpack(
-                    endian + "IIQQQQQQ", raw
-                )
-                if p_type == 1:  # PT_LOAD
-                    loads.append((int(p_vaddr), int(p_memsz), int(p_offset), int(p_filesz)))
-                elif p_type == 2:  # PT_DYNAMIC
-                    dynamic = (int(p_offset), int(p_filesz))
-            if dynamic is None:
-                return {"ok": True, "needed": [], "soname": "", "inspector": "python-elf64-dynamic-v1"}
-
-            dynamic_offset, dynamic_size = dynamic
-            if dynamic_size <= 0 or dynamic_size > 64 * 1024 * 1024:
-                raise ValueError("seção dinâmica ELF inválida")
-            handle.seek(dynamic_offset)
-            raw_dynamic = handle.read(dynamic_size)
-            if len(raw_dynamic) != dynamic_size:
-                raise ValueError("seção dinâmica ELF truncada")
-
-            needed_offsets: list[int] = []
-            soname_offset: int | None = None
-            string_vaddr: int | None = None
-            string_size = 0
-            entry_size = 16
-            for offset in range(0, len(raw_dynamic) - entry_size + 1, entry_size):
-                tag, value = struct.unpack_from(endian + "qQ", raw_dynamic, offset)
-                if tag == 0:  # DT_NULL
-                    break
-                if tag == 1:  # DT_NEEDED
-                    needed_offsets.append(int(value))
-                elif tag == 5:  # DT_STRTAB
-                    string_vaddr = int(value)
-                elif tag == 10:  # DT_STRSZ
-                    string_size = int(value)
-                elif tag == 14:  # DT_SONAME
-                    soname_offset = int(value)
-            if string_vaddr is None:
-                raise ValueError("DT_STRTAB ausente")
-
-            string_file_offset: int | None = None
-            for vaddr, memsz, file_offset, filesz in loads:
-                if vaddr <= string_vaddr < vaddr + memsz:
-                    delta = string_vaddr - vaddr
-                    if delta >= filesz:
-                        continue
-                    string_file_offset = file_offset + delta
-                    break
-            if string_file_offset is None:
-                raise ValueError("DT_STRTAB não pertence a segmento carregável")
-            if string_size <= 0:
-                string_size = 16 * 1024 * 1024
-            string_size = min(string_size, 16 * 1024 * 1024)
-            handle.seek(string_file_offset)
-            string_table = handle.read(string_size)
-            if not string_table:
-                raise ValueError("tabela de strings ELF vazia")
-
-            def read_string(offset: int | None) -> str:
-                if offset is None or offset < 0 or offset >= len(string_table):
-                    return ""
-                end = string_table.find(b"\0", offset)
-                if end < 0:
-                    end = len(string_table)
-                return string_table[offset:end].decode("utf-8", errors="replace").strip()
-
-            needed: list[str] = []
-            for offset in needed_offsets:
-                value = read_string(offset)
-                if value and value not in needed:
-                    needed.append(value)
-            return {
-                "ok": True,
-                "needed": needed,
-                "soname": read_string(soname_offset),
-                "inspector": "python-elf64-dynamic-v1",
-            }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "needed": [],
-            "soname": "",
-            "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}",
-        }
-
-
-def _read_elf_dynamic(path: Path, inspector: list[str]) -> dict[str, Any]:
-    if not inspector:
-        return _read_elf_dynamic_python(path)
-    if not _elf_header(path).get("aarch64"):
-        return {"ok": False, "needed": [], "soname": "", "error": "não é ELF64 AArch64"}
-    last_error = ""
-    for flags in (("-dW",), ("-d",)):
-        try:
-            completed = subprocess.run(
-                [*inspector, *flags, str(path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                errors="replace",
-                timeout=20,
-                check=False,
-            )
-        except Exception as exc:
-            last_error = f"{type(exc).__name__}: {_short_text(exc, limit=180)}"
-            continue
-        output = completed.stdout or ""
-        if completed.returncode != 0:
-            last_error = _short_text(output, limit=240) or f"readelf rc={completed.returncode}"
-            continue
-        needed = []
-        for value in _ELF_NEEDED_RE.findall(output):
-            clean = str(value or "").strip()
-            if clean and clean not in needed:
-                needed.append(clean)
-        soname_match = _ELF_SONAME_RE.search(output)
-        return {
-            "ok": True,
-            "needed": needed,
-            "soname": str(soname_match.group(1) if soname_match else "").strip(),
-            "inspector": " ".join(inspector),
-        }
-    fallback = _read_elf_dynamic_python(path)
-    if fallback.get("ok"):
-        return fallback
-    return {
-        "ok": False,
-        "needed": [],
-        "soname": "",
-        "error": last_error or fallback.get("error") or "falha lendo seção dinâmica ELF",
-    }
-
-
-def _elf_index(roots: list[Path], *, max_files: int = 30_000) -> dict[str, list[Path]]:
-    """Indexa bibliotecas ELF por SONAME esperado sem varrer arquivos irrelevantes.
-
-    O diretório ``$PREFIX/lib`` também contém Python, pkgconfig, fontes e outros
-    milhares de arquivos. Priorizar ``*.so*`` evita atingir o limite antes das
-    bibliotecas de topo que realmente podem aparecer em ``DT_NEEDED``.
-    """
-    index: dict[str, list[Path]] = {}
-    seen_paths: set[str] = set()
-    scanned = 0
-    for root in roots:
-        if not root.is_dir():
-            continue
-        candidates: list[Path] = []
-        try:
-            candidates.extend(sorted(root.glob("*.so*")))
-            candidates.extend(sorted(root.rglob("*.so*")))
-        except Exception:
-            continue
-        for path in candidates:
-            if scanned >= max_files:
-                raise ValueError(f"índice ELF excedeu {max_files} bibliotecas candidatas em {root}")
-            try:
-                if not path.is_file():
-                    continue
-            except OSError:
-                continue
-            key = str(path.absolute())
-            if key in seen_paths:
-                continue
-            seen_paths.add(key)
-            scanned += 1
-            if not _elf_header(path).get("aarch64"):
-                continue
-            index.setdefault(path.name, []).append(path)
-    for values in index.values():
-        values.sort(key=lambda item: (len(item.parts), len(str(item)), str(item)))
-    return index
-
-
-def _required_jdk_elf_seeds(jdk_home: Path) -> list[Path]:
-    """Retorna todos os ELF AArch64 do JDK, com binários essenciais primeiro.
-
-    O JDK carrega algumas bibliotecas por ``dlopen`` somente durante compilação
-    (fontes, ZIP, NIO, instrumentação etc.). Inspecionar apenas ``java`` e
-    ``javac`` passaria no smoke de versão, mas poderia falhar no primeiro
-    ``assembleDebug``. Ainda assim, o escopo permanece mínimo: auditamos apenas
-    arquivos nativos dentro do JDK efetivamente empacotado, nunca todo PREFIX/lib.
-    """
-    required = tuple(jdk_home / f"bin/{name}" for name in ("java", "javac", "jar"))
-    for path in required:
-        if not path.is_file():
-            raise FileNotFoundError(f"arquivo obrigatório ausente no JDK do self-builder: {path}")
-
-    seeds: list[Path] = []
-    seen: set[str] = set()
-
-    def add(candidate: Path) -> None:
-        if not candidate.is_file() or not _elf_header(candidate).get("aarch64"):
-            return
-        try:
-            key = str(candidate.resolve())
-        except Exception:
-            key = str(candidate.absolute())
-        if key in seen:
-            return
-        seen.add(key)
-        seeds.append(candidate)
-
-    for path in required:
-        add(path)
-    scanned = 0
-    for candidate in sorted(jdk_home.rglob("*")):
-        if scanned >= 12_000:
-            raise ValueError("JDK do self-builder contém arquivos demais para auditoria ELF segura")
-        try:
-            if not candidate.is_file():
-                continue
-        except OSError:
-            continue
-        scanned += 1
-        add(candidate)
-
-    if not seeds:
-        raise ValueError("JDK encontrado, mas nenhum executável ELF64 AArch64 foi detectado")
-    return seeds
-
-
-def _collect_minimal_termux_runtime_libraries(
-    *,
-    jdk_home: Path,
-    aapt2_path: Path,
-    prefix: Path,
-    target: Path,
-    env: dict[str, str],
-) -> dict[str, Any]:
-    """Copia apenas dependências DT_NEEDED externas do JDK/aapt2.
-
-    A implementação anterior copiava todo o ``$PREFIX/lib``. Além de incluir LLVM,
-    FFmpeg, Python e bibliotecas de outros pacotes, links simbólicos podiam duplicar
-    o mesmo arquivo. O self-builder precisa somente das dependências transitivas dos
-    executáveis que realmente roda.
-    """
-    inspector = _find_elf_inspector(env)
-    internal_index = _elf_index([jdk_home], max_files=12_000)
-    external_roots = [prefix / "lib", prefix / "lib64"]
-    external_index = _elf_index(external_roots, max_files=30_000)
-    target.mkdir(parents=True, exist_ok=True)
-
-    seeds = _required_jdk_elf_seeds(jdk_home)
-    if not aapt2_path.is_file() or not _elf_header(aapt2_path).get("aarch64"):
-        raise ValueError("aapt2 do bootstrap não é ELF64 AArch64 válido")
-    seeds.append(aapt2_path)
-
-    queue: list[tuple[Path, str]] = [(path, "seed") for path in seeds]
-    visited_files: set[str] = set()
-    copied_names: dict[str, Path] = {}
-    dependency_parents: dict[str, set[str]] = {}
-    system_provided: set[str] = set()
-    inspect_errors: list[str] = []
-
-    while queue:
-        current, origin = queue.pop(0)
-        try:
-            canonical = current.resolve()
-        except Exception:
-            canonical = current.absolute()
-        visit_key = str(canonical)
-        if visit_key in visited_files:
-            continue
-        visited_files.add(visit_key)
-        dynamic = _read_elf_dynamic(current, inspector)
-        if not dynamic.get("ok"):
-            inspect_errors.append(f"{current.name}: {dynamic.get('error') or 'falha ELF'}")
-            continue
-        for needed in dynamic.get("needed") or []:
-            name = str(needed or "").strip()
-            if not name or "/" in name or "\\" in name:
-                continue
-            dependency_parents.setdefault(name, set()).add(current.name)
-            internal_candidates = internal_index.get(name) or []
-            if internal_candidates:
-                queue.append((internal_candidates[0], "jdk"))
-                continue
-            external_candidates = external_index.get(name) or []
-            if external_candidates:
-                source = external_candidates[0]
-                if name not in copied_names:
-                    resolved = source.resolve()
-                    destination = target / name
-                    shutil.copy2(resolved, destination)
-                    destination.chmod(0o644)
-                    copied_names[name] = resolved
-                queue.append((source, "termux-lib"))
-                continue
-            if name in _TERMUX_ANDROID_SYSTEM_LIBRARIES:
-                system_provided.add(name)
-                continue
-
-    unresolved = sorted(
-        name for name in dependency_parents
-        if name not in copied_names
-        and name not in system_provided
-        and not (internal_index.get(name) or [])
-    )
-    if inspect_errors:
-        raise ValueError("não consegui auditar todas as dependências ELF do self-builder: " + "; ".join(inspect_errors[:5]))
-    if unresolved:
-        detail = ", ".join(
-            f"{name} (usada por {', '.join(sorted(dependency_parents.get(name) or []))})"
-            for name in unresolved[:12]
-        )
-        raise FileNotFoundError("bibliotecas necessárias ao self-builder não foram encontradas no Termux: " + detail)
-
-    copied = []
-    total_bytes = 0
-    for name, source in sorted(copied_names.items()):
-        destination = target / name
-        size = destination.stat().st_size
-        total_bytes += size
-        copied.append({"name": name, "bytes": size, "source": str(source)})
-    max_bytes = max(64 * 1024 * 1024, _env_int("PHONE_WORKER_APK_SELF_BUILDER_RUNTIME_LIB_MAX_BYTES", 384 * 1024 * 1024))
-    if total_bytes > max_bytes:
-        largest = ", ".join(f"{item['name']}={item['bytes'] // (1024 * 1024)}MiB" for item in sorted(copied, key=lambda row: row["bytes"], reverse=True)[:8])
-        raise ValueError(
-            f"dependências mínimas do self-builder excedem {max_bytes // (1024 * 1024)} MiB "
-            f"({total_bytes // (1024 * 1024)} MiB); maiores: {largest}"
-        )
-    return {
-        "strategy": "dt-needed-transitive-v1",
-        "inspector": " ".join(inspector) or "python-elf64-dynamic-v1",
-        "count": len(copied),
-        "bytes": total_bytes,
-        "names": [item["name"] for item in copied],
-        "systemProvided": sorted(system_provided),
-        "seeds": [str(path.relative_to(jdk_home)) if _is_inside_path(path, jdk_home) else path.name for path in seeds],
-        "largest": [
-            {"name": item["name"], "bytes": item["bytes"]}
-            for item in sorted(copied, key=lambda row: row["bytes"], reverse=True)[:12]
-        ],
-        "candidateLibraries": sum(len(values) for values in external_index.values()),
-    }
-
-
-def _is_inside_path(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except Exception:
-        return False
-
-
-def _apk_self_builder_executable_paths(bundle_root: Path) -> list[str]:
-    paths: list[str] = []
-    for candidate in sorted(bundle_root.rglob("*")):
-        try:
-            if not candidate.is_file() or not os.access(candidate, os.X_OK):
-                continue
-            rel = candidate.relative_to(bundle_root).as_posix()
-        except Exception:
-            continue
-        if rel and not rel.startswith("/") and ".." not in rel.split("/"):
-            paths.append(rel)
-    mandatory = ["jdk/bin/java", "jdk/bin/javac", "jdk/bin/jar", "gradle/bin/gradle", "bin/aapt2"]
-    missing = [name for name in mandatory if name not in paths]
-    if missing:
-        raise ValueError("toolchain gerado perdeu modos executáveis: " + ", ".join(missing))
-    jspawn = bundle_root / "jdk/lib/jspawnhelper"
-    if jspawn.is_file() and "jdk/lib/jspawnhelper" not in paths:
-        raise ValueError("toolchain gerado perdeu modo executável de jdk/lib/jspawnhelper")
-    return paths
-
-
-def _smoke_apk_self_builder_bundle(bundle_root: Path) -> dict[str, Any]:
-    if not _env_bool("PHONE_WORKER_APK_SELF_BUILDER_SMOKE", True):
-        return {"ok": True, "skipped": True, "reason": "disabled_by_env"}
-    jdk = bundle_root / "jdk"
-    sdk = bundle_root / "android-sdk"
-    gradle = bundle_root / "gradle/bin/gradle"
-    aapt2 = bundle_root / "bin/aapt2"
-    shell = Path("/system/bin/sh") if Path("/system/bin/sh").is_file() else Path("/bin/sh")
-    runtime = bundle_root.parent / "smoke-runtime"
-    shutil.rmtree(runtime, ignore_errors=True)
-    home = runtime / "home"
-    temp = runtime / "tmp"
-    gradle_home = runtime / "gradle-home"
-    for path in (home, temp, gradle_home):
-        path.mkdir(parents=True, exist_ok=True)
-    library_paths = [
-        bundle_root / "runtime-libs",
-        jdk / "lib",
-        jdk / "lib/server",
-        jdk / "lib/jli",
-    ]
-    clean_env = {
-        "HOME": str(home),
-        "TMPDIR": str(temp),
-        "GRADLE_USER_HOME": str(gradle_home),
-        "JAVA_HOME": str(jdk),
-        "ANDROID_HOME": str(sdk),
-        "ANDROID_SDK_ROOT": str(sdk),
-        "PATH": os.pathsep.join((str(jdk / "bin"), str(sdk / "platform-tools"), "/system/bin", "/system/xbin")),
-        "LD_LIBRARY_PATH": os.pathsep.join(str(path) for path in library_paths if path.is_dir()),
-        "LANG": "C",
-        "LC_ALL": "C",
-    }
-    commands = [
-        ("java", [str(jdk / "bin/java"), "-version"], 60),
-        ("javac", [str(jdk / "bin/javac"), "-version"], 60),
-        ("jar", [str(jdk / "bin/jar"), "--version"], 60),
-        ("gradle", [str(shell), str(gradle), "--version", "--no-daemon"], 120),
-        ("aapt2", [str(aapt2), "version"], 60),
-    ]
-    checks: list[dict[str, Any]] = []
-    try:
-        for name, command, timeout in commands:
-            started = time.time()
-            completed = subprocess.run(
-                command,
-                env=clean_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                errors="replace",
-                timeout=timeout,
-                check=False,
-            )
-            output = _short_text(completed.stdout, limit=1800)
-            check = {
-                "name": name,
-                "ok": completed.returncode == 0,
-                "returncode": int(completed.returncode),
-                "durationMs": int((time.time() - started) * 1000),
-                "output": output,
-            }
-            checks.append(check)
-            if not check["ok"]:
-                raise RuntimeError(f"smoke {name} falhou (rc={completed.returncode}): {output}")
-        return {"ok": True, "checks": checks}
-    finally:
-        shutil.rmtree(runtime, ignore_errors=True)
-
-
-def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
-    """Prepara/publica toolchain externo; nunca o copia para assets do APK."""
-    if not _is_termux_runtime():
-        raise RuntimeError("bootstrap inicial do toolchain externo só é permitido no Termux")
-
-    # Limpe apenas o diretório legado conhecido dentro do workspace descartável.
-    legacy_assets = project_dir / "app/src/main/assets/core-linux/android-builder"
-    if legacy_assets.exists():
-        shutil.rmtree(legacy_assets, ignore_errors=True)
-
-    jdk_home = _find_termux_java_home(env)
-    gradle_home = _find_pinned_gradle_89_home(env)
-    sdk_home = _find_android_sdk_home(env)
-    build_tools = sdk_home / "build-tools/34.0.0"
-    if not build_tools.is_dir():
-        raise FileNotFoundError("build-tools 34.0.0 ausente para toolchain externo")
-    aapt2_cmd = shutil.which("aapt2", path=env.get("PATH")) or shutil.which("aapt2")
-    if not aapt2_cmd or not Path(aapt2_cmd).is_file():
-        raise FileNotFoundError("aapt2 Bionic compatível não encontrado")
-
-    cache_root = Path(os.getenv("PHONE_WORKER_TOOLCHAIN_CACHE_DIR") or (Path.home() / ".core-worker-toolchain-cache")).expanduser()
-    cache_root.mkdir(parents=True, exist_ok=True)
-    bundle_root = cache_root / "staging-bundle"
-    bundle_archive = cache_root / "toolchain-v2-arm64.zip"
-    stage_archive = cache_root / ".toolchain-v2-arm64.zip.tmp"
-    shutil.rmtree(bundle_root, ignore_errors=True)
-    with contextlib.suppress(Exception):
-        stage_archive.unlink()
-    bundle_root.mkdir(parents=True, exist_ok=True)
-    try:
-        _copy_tree_dereferenced(jdk_home, bundle_root / "jdk")
-        _copy_tree_dereferenced(gradle_home, bundle_root / "gradle")
-        # O launcher Unix oficial do Gradle 8.9 ainda traz DEFAULT_JVM_OPTS com
-        # aspas aninhadas. Em /system/bin/sh no Android/Termux essas aspas podem
-        # sobreviver ao xargs/eval e o Java tenta carregar "-Xmx64m" como classe.
-        # Normalize a cópia do bundle (nunca a instalação global) ANTES do smoke,
-        # para testar exatamente o launcher que será publicado e usado pelo APK.
-        gradle_launcher = _patch_gradle_launcher_for_android(bundle_root / "gradle/bin/gradle")
-        sdk_target = bundle_root / "android-sdk"
-        _copy_tree_dereferenced(sdk_home / "platforms/android-34", sdk_target / "platforms/android-34")
-        _copy_tree_dereferenced(build_tools, sdk_target / "build-tools/34.0.0")
-        for optional in ("platform-tools", "licenses"):
-            source = sdk_home / optional
-            if source.is_dir():
-                _copy_tree_dereferenced(source, sdk_target / optional)
-
-        bin_dir = bundle_root / "bin"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(Path(aapt2_cmd).resolve(), bin_dir / "aapt2")
-        prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
-        runtime_library_report = _collect_minimal_termux_runtime_libraries(
-            jdk_home=jdk_home,
-            aapt2_path=Path(aapt2_cmd),
-            prefix=prefix,
-            target=bundle_root / "runtime-libs",
-            env=env,
-        )
-        executable_paths = _apk_self_builder_executable_paths(bundle_root)
-        smoke = _smoke_apk_self_builder_bundle(bundle_root)
-        manifest = {
-            "schema": "core-worker-android-builder-v2",
-            "version": 2,
-            "arch": "arm64-v8a",
-            "physicalWorkerId": str(os.getenv("CORE_WORKER_ID") or _default_worker_id()),
-            "generatedBy": f"phone-worker-{PHONE_WORKER_VERSION}",
-            "createdAt": int(time.time()),
-            "versions": {
-                "jdkMajor": 17,
-                "gradle": "8.9",
-                "agp": "8.7.3",
-                "compileSdk": 34,
-                "buildTools": "34.0.0",
-                "chaquopy": "17.0.0",
-                "aapt2": "termux-bionic",
-            },
-            "compatibility": {"arch": "arm64-v8a", "runtime": "android-private-bionic", "targetSdkMax": 28},
-            "paths": {"jdk": "jdk", "gradle": "gradle/bin/gradle", "androidSdk": "android-sdk", "aapt2": "bin/aapt2", "runtimeLibs": "runtime-libs"},
-            "runtimeLibraries": runtime_library_report,
-            "validation": {"strategy": "required-executable-smoke-v2", "requiredSmokeChecks": ["java", "javac", "jar", "gradle", "aapt2"]},
-            "bootstrapSmoke": smoke,
-            "gradleLauncher": gradle_launcher,
-            "executablePaths": executable_paths,
-            "safety": {"generatedOnTermux": True, "vpsBuild": False, "embeddedInApk": False, "noRemoteShell": True},
-        }
-        (bundle_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        generated = _zip_directory_deterministic(bundle_root, stage_archive)
-        os.replace(stage_archive, bundle_archive)
-        publish = _upload_core_worker_toolchain(bundle_archive, manifest=manifest)
-        if not publish.get("ok"):
-            raise RuntimeError("publicação do toolchain externo falhou: " + _short_text(publish.get("error") or publish, limit=240))
-        return {
-            "ok": True,
-            "generated": True,
-            "source": "termux_external_toolchain_v2",
-            "embeddedInApk": False,
-            "archive": str(bundle_archive),
-            "archiveBytes": bundle_archive.stat().st_size,
-            "archiveSha256": _sha256_path(bundle_archive),
-            "toolchainFingerprint": publish.get("toolchainFingerprint"),
-            "publish": publish,
-            "versions": manifest["versions"],
-            "bootstrapSmoke": smoke,
-            "gradleLauncher": gradle_launcher,
-            **generated,
-        }
-    finally:
-        shutil.rmtree(bundle_root, ignore_errors=True)
-        with contextlib.suppress(Exception):
-            stage_archive.unlink()
-
-
-
-def _read_meminfo_bytes() -> dict[str, int]:
-    result: dict[str, int] = {}
-    try:
-        for line in Path("/proc/meminfo").read_text("utf-8", errors="replace").splitlines():
-            if ":" not in line:
-                continue
-            key, rest = line.split(":", 1)
-            match = re.search(r"(\d+)", rest)
-            if match:
-                result[key] = int(match.group(1)) * 1024
-    except Exception:
-        pass
-    return result
-
-
-def _effective_gradle_heap_mb(available_bytes: int) -> int:
-    available_mb = max(0, int(available_bytes // (1024 * 1024)))
-    configured = _env_int("PHONE_WORKER_APK_BUILD_XMX_MB", 0)
-    if configured > 0:
-        return max(192, min(configured, max(192, available_mb - 256)))
-    # Preserve memória para Android, Python, aapt2 e filesystem cache. Em aparelhos
-    # modestos o Gradle recebe pouco; em aparelhos fortes ainda há teto previsível.
-    usable = max(192, available_mb - 384)
-    return max(192, min(1024, int(usable * 0.55)))
-
-
-def _prepare_termux_android_build(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
-    """Preflight reproduzível para Gradle no Termux, sem tocar em ~/.gradle global."""
-    info: dict[str, Any] = {"termux": _is_termux_runtime(), "gradle": "8.9", "jdkMajor": 17, "compileSdk": 34, "buildTools": "34.0.0"}
-    if not info["termux"] or not _env_bool("PHONE_WORKER_APK_BUILD_TERMUX_TWEAKS", True):
-        return info
-
-    default_sdk = Path.home() / "android-sdk"
-    android_home = Path(env.get("ANDROID_HOME") or env.get("ANDROID_SDK_ROOT") or default_sdk).expanduser()
-    android_jar = android_home / "platforms/android-34/android.jar"
-    build_tools = android_home / "build-tools/34.0.0"
-    if not android_jar.is_file() or android_jar.stat().st_size <= 1024 * 1024:
-        raise FileNotFoundError(f"compileSdk 34 ausente: {android_jar}")
-    if not build_tools.is_dir():
-        raise FileNotFoundError(f"build-tools 34.0.0 ausente: {build_tools}")
-    env["ANDROID_HOME"] = str(android_home)
-    env["ANDROID_SDK_ROOT"] = str(android_home)
-    env["PATH"] = f"{android_home}/cmdline-tools/latest/bin:{android_home}/platform-tools:" + env.get("PATH", "")
-    info.update({"android_home": str(android_home), "android_jar": str(android_jar), "android_jar_ok": True, "build_tools_path": str(build_tools)})
-
-    jdk_home = _find_termux_java_home(env)
-    env["JAVA_HOME"] = str(jdk_home)
-    java_probe = subprocess.run([str(jdk_home / "bin/java"), "-version"], env=env, capture_output=True, text=True, timeout=20, check=False)
-    java_text = ((java_probe.stderr or "") + "\n" + (java_probe.stdout or "")).strip()
-    major_match = re.search(r'version\s+"(?P<major>\d+)', java_text)
-    java_major = int(major_match.group("major")) if major_match else 0
-    if java_probe.returncode != 0 or java_major != 17:
-        raise RuntimeError(f"JDK incompatível: esperado major 17, detectado {java_major or 'desconhecido'}")
-    info["java_home"] = str(jdk_home)
-    info["java_major"] = java_major
-
-    aapt2_path = shutil.which("aapt2", path=env.get("PATH")) or shutil.which("aapt2")
-    if not aapt2_path or not Path(aapt2_path).is_file():
-        raise FileNotFoundError("aapt2 Bionic do Termux não encontrado")
-    info["aapt2_override"] = aapt2_path
-
-    gradle_user_home = Path(os.getenv("PHONE_WORKER_GRADLE_USER_HOME") or (Path.home() / ".core-worker-gradle-home")).expanduser()
-    gradle_user_home.mkdir(parents=True, exist_ok=True)
-    env["GRADLE_USER_HOME"] = str(gradle_user_home)
-    mem = _read_meminfo_bytes()
-    available = int(mem.get("MemAvailable") or mem.get("MemFree") or 0)
-    total = int(mem.get("MemTotal") or 0)
-    xmx_mb = _effective_gradle_heap_mb(available)
-    if available and available < max(384 * 1024 * 1024, xmx_mb * 1024 * 1024 + 192 * 1024 * 1024):
-        raise RuntimeError(f"preflight_blocked: memória disponível insuficiente ({available // (1024*1024)} MiB)")
-    props = gradle_user_home / "gradle.properties"
-    props.write_text(
-        "\n".join([
-            f"org.gradle.jvmargs=-Xmx{xmx_mb}m -Xms64m -Dfile.encoding=UTF-8",
-            "org.gradle.parallel=false",
-            "org.gradle.workers.max=1",
-            "org.gradle.daemon=false",
-            "org.gradle.vfs.watch=false",
-            f"android.aapt2FromMavenOverride={aapt2_path}",
-        ]) + "\n",
-        encoding="utf-8",
-    )
-    info.update({
-        "gradle_user_home": str(gradle_user_home),
-        "gradle_properties": str(props),
-        "xmx_mb": xmx_mb,
-        "memory_total_bytes": total,
-        "memory_available_bytes": available,
-    })
-
-    gradlew = project_dir / "gradlew"
-    wrapper_jar = project_dir / "gradle/wrapper/gradle-wrapper.jar"
-    wrapper_props = project_dir / "gradle/wrapper/gradle-wrapper.properties"
-    if not gradlew.is_file() or not wrapper_jar.is_file() or not wrapper_props.is_file():
-        raise FileNotFoundError("Gradle Wrapper completo ausente no projeto; Gradle global não é permitido")
-    gradlew.chmod(0o755)
-    wrapper_text = wrapper_props.read_text("utf-8", errors="replace")
-    if "gradle-8.9-" not in wrapper_text or "distributionSha256Sum=" not in wrapper_text:
-        raise RuntimeError("Gradle Wrapper não está fixado em 8.9 com checksum")
-    probe = subprocess.run([str(gradlew), "--version", "--no-daemon"], cwd=str(project_dir), env=env, capture_output=True, text=True, errors="replace", timeout=300, check=False)
-    probe_text = (probe.stdout or "") + "\n" + (probe.stderr or "")
-    if probe.returncode != 0 or not re.search(r"(?m)^Gradle\s+8\.9\b", probe_text):
-        raise RuntimeError("Gradle Wrapper não executou a versão fixada 8.9: " + _short_text(probe_text, limit=500))
-    info["gradle_version_ok"] = True
-    info["gradle_probe"] = _short_text(probe_text, limit=1200)
-
-    free = shutil.disk_usage(project_dir).free
-    source_bytes = sum(path.stat().st_size for path in project_dir.rglob("*") if path.is_file())
-    min_free = max(768 * 1024 * 1024, source_bytes * 4 + 512 * 1024 * 1024)
-    info.update({"storage_free_bytes": free, "source_tree_bytes": source_bytes, "estimated_required_bytes": min_free})
-    if free < min_free:
-        raise RuntimeError(f"preflight_blocked: espaço insuficiente free={free} required={min_free}")
-    battery = _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot())
-    battery_level = battery.get("level") if isinstance(battery, dict) else None
-    charging = battery.get("charging") if isinstance(battery, dict) else None
-    battery_temperature = battery.get("temperature_c") if isinstance(battery, dict) else None
-    info["battery"] = {
-        "available": bool(battery.get("available")) if isinstance(battery, dict) else False,
-        "level": battery_level,
-        "charging": charging,
-        "status": battery.get("status") if isinstance(battery, dict) else None,
-        "plugged": battery.get("plugged") if isinstance(battery, dict) else None,
-        "temperature_c": battery_temperature,
-    }
-    min_battery = max(0, min(100, _env_int("PHONE_WORKER_APK_BUILD_MIN_BATTERY_PERCENT", DEFAULT_APK_BUILD_MIN_BATTERY_PERCENT)))
-    if battery_level is not None and int(battery_level) < min_battery and charging is not True:
-        raise RuntimeError(f"preflight_blocked: bateria baixa ({int(battery_level)}% < {min_battery}%) e aparelho não está carregando")
-    if battery_temperature is not None and float(battery_temperature) >= 45.0:
-        raise RuntimeError(f"preflight_blocked: temperatura alta ({float(battery_temperature):.1f} °C)")
-    return info
-
-
-def _apk_build_safe_slug(value: Any, *, fallback: str = "apk-build") -> str:
-    clean = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip("-._")
-    return (clean or fallback)[:96]
-
-
-def _apk_build_logs_dir(build_root: Path) -> Path:
-    path = (build_root / "logs").expanduser()
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _tail_text_file(path: Path, *, limit: int = 12000) -> str:
-    try:
-        raw = path.read_bytes()
-    except Exception:
-        return ""
-    if len(raw) > max(1024, limit):
-        raw = raw[-max(1024, limit):]
-    return _sanitize_log_text(raw.decode("utf-8", errors="replace"), limit=limit)
-
-
-def _apk_build_lock_path(build_root: Path) -> Path:
-    build_root.mkdir(parents=True, exist_ok=True)
-    return build_root / ".apk-build.lock"
-
-
-def _try_acquire_apk_build_file_lock(build_root: Path) -> tuple[Any | None, dict[str, Any]]:
-    """Lock cross-process para evitar dois Gradle/NDK ao mesmo tempo no Termux."""
-    lock_path = _apk_build_lock_path(build_root)
-    info: dict[str, Any] = {"lock_path": str(lock_path)}
-    try:
-        fh = lock_path.open("a+", encoding="utf-8")
-    except Exception as exc:
-        info["error"] = f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
-        return None, info
-    try:
-        import fcntl  # Linux/Termux
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            fh.seek(0)
-            info["holder"] = _short_text(fh.read(), limit=240)
-            fh.close()
-            return None, info
-        except OSError as exc:
-            fh.seek(0)
-            info["holder"] = _short_text(fh.read(), limit=240)
-            info["error"] = f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
-            fh.close()
-            return None, info
-        fh.seek(0)
-        fh.truncate()
-        fh.write(json.dumps({"pid": os.getpid(), "started_at": time.time(), "version": PHONE_WORKER_VERSION}, ensure_ascii=False))
-        fh.flush()
-        return fh, info
-    except Exception as exc:
-        # Fallback intra-processo quando fcntl não estiver disponível.
-        info["warning"] = f"file-lock indisponível: {type(exc).__name__}: {_short_text(exc, limit=120)}"
-        return fh, info
-
-
-def _release_apk_build_file_lock(handle: Any | None) -> None:
-    if handle is None:
-        return
-    with contextlib.suppress(Exception):
-        import fcntl
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    with contextlib.suppress(Exception):
-        handle.close()
-
-
-def _cleanup_old_apk_build_logs(build_root: Path, *, keep_logs: int | None = None) -> None:
-    keep = max(3, int(keep_logs if keep_logs is not None else _env_int("PHONE_WORKER_APK_BUILD_KEEP_LOGS", DEFAULT_APK_BUILD_KEEP_LOGS)))
-    log_dir = build_root / "logs"
-    if log_dir.is_dir():
-        logs = sorted(log_dir.glob("*.log"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
-        for path in logs[keep:]:
-            with contextlib.suppress(Exception):
-                path.unlink()
-    max_dirs = max(0, _env_int("PHONE_WORKER_APK_BUILD_KEEP_WORKDIRS", DEFAULT_APK_BUILD_KEEP_WORKDIRS))
-    dirs = sorted([p for p in build_root.glob("build-*") if p.is_dir()], key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
-    for path in dirs[max_dirs:]:
-        marker = path / ".build-active"
-        if marker.exists():
-            age = time.time() - marker.stat().st_mtime
-            if age < 6 * 3600:
-                continue
-        with contextlib.suppress(Exception):
-            shutil.rmtree(path)
-
-
-def _cleanup_old_apk_build_artifacts(build_root: Path, *, keep_apks: int | None = None) -> dict[str, Any]:
-    """Remove APKs antigos do builder sem tocar no latest nem no build atual.
-
-    O diretório de artifacts cresce rápido no celular. A limpeza mantém os N APKs
-    mais recentes e seus JSONs irmãos. O resultado é apenas telemetria; falhas de
-    unlink são ignoradas para nunca quebrar um build publicado.
-    """
-    artifact_dir = build_root / "artifacts"
-    keep = max(3, int(keep_apks if keep_apks is not None else _env_int("PHONE_WORKER_APK_BUILD_KEEP_ARTIFACTS", DEFAULT_APK_BUILD_KEEP_ARTIFACTS)))
-    result: dict[str, Any] = {"enabled": True, "keep": keep, "removed": 0, "removedBytes": 0}
-    if not artifact_dir.is_dir():
-        result["enabled"] = False
-        return result
-    apks = sorted(artifact_dir.glob("*.apk"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
-    keep_set = {p.resolve() for p in apks[:keep] if p.exists()}
-    latest_meta = artifact_dir / "latest-artifact.json"
-
-    # `latest-artifact.json` é a referência autoritativa de republicação. Mesmo
-    # que clocks/mtimes estejam estranhos, nunca remova o APK apontado por ele.
-    latest_payload = _read_json_file(latest_meta) if latest_meta.is_file() else {}
-    latest_path_raw = str(latest_payload.get("artifact_path") or "").strip() if isinstance(latest_payload, dict) else ""
-    if latest_path_raw:
-        with contextlib.suppress(Exception):
-            latest_path = Path(latest_path_raw).expanduser().resolve()
-            latest_path.relative_to(artifact_dir.resolve())
-            if latest_path.is_file():
-                keep_set.add(latest_path)
-
-    for apk in apks:
-        if not apk.exists() or apk.resolve() in keep_set:
-            continue
-        candidates = [apk, apk.with_suffix(apk.suffix + ".json")]
-        for item in candidates:
-            if item == latest_meta or not item.exists():
-                continue
-            try:
-                size = item.stat().st_size
-                item.unlink()
-                result["removed"] += 1
-                result["removedBytes"] += size
-            except Exception:
-                pass
-
-    # Sidecars órfãos também acumulam em builds interrompidos. Remova somente
-    # `<nome>.apk.json` sem o APK correspondente; `latest-artifact.json` fica fora.
-    for sidecar in artifact_dir.glob("*.apk.json"):
-        apk = Path(str(sidecar)[:-5])
-        if apk.exists():
-            continue
-        try:
-            size = sidecar.stat().st_size
-            sidecar.unlink()
-            result["removed"] += 1
-            result["removedBytes"] += size
-        except Exception:
-            pass
-    result["keptApks"] = sum(1 for path in artifact_dir.glob("*.apk") if path.is_file())
-    return result
-
-
-def _classify_apk_failure_text(text: str) -> dict[str, Any]:
-    lowered = str(text or "").lower()
-    transient_patterns = (
-        r"outofmemoryerror", r"java heap space", r"gc overhead limit",
-        r"killed process", r"signal 9", r"exit(?:ed)?(?: with)?(?: code)? 137",
-        r"cannot allocate memory", r"resource temporarily unavailable",
-        r"no space left on device", r"preflight_blocked:.*(?:mem|espaço|bateria|temperatura)",
-        r"battery.*(?:low|baixa)", r"thermal|temperatura alta|overheat",
-        r"timed? out|timeout", r"connection (?:reset|refused|aborted)",
-        r"temporary failure|network is unreachable|name or service not known|http 5\d\d",
-        r"builder.*(?:busy|ocupado)|build lock", r"lease.*(?:expired|perd)",
-        r"falha publicando|upload.*(?:falh|interromp)|broken pipe",
-    )
-    deterministic_patterns = (
-        r"cannot find symbol", r"unclosed string literal", r"';' expected",
-        r"compilation failed|compiledebugjavawithjavac",
-        r"android resource linking failed|resource .* not found|error: resource",
-        r"manifest merger failed|processdebugmainmanifest",
-        r"google-services\.json.*(?:ausente|inválido|incompatível)",
-        r"assinatura.*(?:incompatível|divergente)|keystore.*(?:ausente|inválid|diverg)",
-        r"arquivo obrigatório ausente|source.*(?:fingerprint|sha256).*diverg",
-        r"toolchain.*manifest.*inválid|schema inválido.*toolchain|matriz de versões.*incompatível",
-        r"jdk incompatível|jdk 17 completo não encontrado|gradle wrapper.*(?:ausente|não está fixado)|compileSdk 34 ausente|build-tools 34\.0\.0 ausente",
-        r"could not find or load main class.*-xmx|classnotfoundexception:.*-xmx|default_jvm_opts.*inválid|launcher gradle.*(?:inesperado|inválid|não portátil)",
-        r"syntax error", r"cmake error|ninja:.*(?:error|failed)|clang: error",
-    )
-    for pattern in transient_patterns:
-        if re.search(pattern, lowered, flags=re.IGNORECASE):
-            return {"category": "transient", "retryable": True, "permanent": False}
-    for pattern in deterministic_patterns:
-        if re.search(pattern, lowered, flags=re.IGNORECASE):
-            return {"category": "deterministic", "retryable": False, "permanent": True}
-    return {"category": "unknown", "retryable": True, "permanent": False}
-
-
-def _summarize_gradle_log(path: Path | None) -> dict[str, Any]:
-    if path is None or not path.exists():
-        return {"summary": "erro de Gradle sem log persistente", "category": "unknown", "retryable": True, "permanent": False, "detail": ""}
-    text = _tail_text_file(path, limit=70000)
-    patterns = [
-        r"java\.lang\.outofmemoryerror[^\n]*",
-        r"java heap space[^\n]*",
-        r"no space left[^\n]*",
-        r"cannot find symbol[^\n]*",
-        r"unclosed string literal[^\n]*",
-        r"android resource linking failed[^\n]*",
-        r"manifest merger failed[^\n]*",
-        r"caused by: (?:java\.|org\.|com\.android\.)[^\n]+",
-        r"cmake error[^\n]*",
-        r"ninja:[^\n]+",
-    ]
-    hits: list[str] = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            value = _short_text(match.group(0), limit=220)
-            if value and value not in hits:
-                hits.append(value)
-            if len(hits) >= 4:
-                break
-        if len(hits) >= 4:
-            break
-    task_match = re.search(r"Execution failed for task ['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE)
-    task_detail = f"task {task_match.group(1)}" if task_match else ""
-    classification = _classify_apk_failure_text(text)
-    if hits:
-        summary = "build do APK falhou: " + hits[0]
-    else:
-        summary = "build do APK falhou; veja gradle_log_tail"
-    details = hits[:4]
-    if task_detail and task_detail not in details:
-        details.append(task_detail)
-    return {
-        "summary": _short_text(summary, limit=180),
-        "detail": " | ".join(details),
-        **classification,
-    }
-
-
-def _apk_build_failure_result(
-    *,
-    summary: str,
-    version_name: str,
-    version_code: int,
-    source_fingerprint: str,
-    source_sha256: str,
-    notification_id: str,
-    work_dir: Path,
-    gradle_log: Path | None = None,
-    returncode: int | None = None,
-    error: str = "",
-    builder_environment: dict[str, Any] | None = None,
-    native_environment: dict[str, Any] | None = None,
-    extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "ok": False,
-        "summary": _short_text(summary, limit=180),
-        "versionName": version_name,
-        "versionCode": int(version_code or 0),
-        "sourceFingerprint": source_fingerprint,
-        "sourceSha256": source_sha256,
-        "notificationId": notification_id,
-        "phoneWorkerVersion": PHONE_WORKER_VERSION,
-        "phoneWorkerSourceHash": _phone_worker_source_hash(),
-        "work_dir": str(work_dir),
-    }
-    if returncode is not None:
-        result["returncode"] = int(returncode)
-    if error:
-        result["error"] = _short_text(error, limit=400)
-    if gradle_log is not None:
-        result["gradle_log_path"] = str(gradle_log)
-        tail = _tail_text_file(gradle_log, limit=16000)
-        if tail:
-            result["gradle_log_tail"] = tail[-12000:]
-            result["stdout_tail"] = tail[-9000:]
-    if builder_environment is not None:
-        result["builder_environment"] = builder_environment
-    if native_environment is not None:
-        result["native_build"] = native_environment
-    if extra:
-        result.update(extra)
-    return result
-
-
-def _install_google_services_from_payload(project_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
-    """Grava google-services.json recebido pelo canal autenticado do job.
-
-    O arquivo não vem no ZIP público e não deve ir para GitHub. A VPS envia o
-    conteúdo em base64 no payload do job; o worker grava somente no workspace
-    temporário de build e ele é removido junto com o work_dir ao final.
-    """
-    target = project_dir / "app" / "google-services.json"
-    raw_b64 = str(payload.get("googleServicesJsonB64") or payload.get("google_services_json_b64") or "").strip()
-    expected_sha = str(payload.get("googleServicesSha256") or payload.get("google_services_sha256") or "").strip().lower()
-    expected_package = str(payload.get("googleServicesPackage") or payload.get("google_services_package") or "dev.core.worker").strip() or "dev.core.worker"
-
-    if raw_b64:
-        try:
-            raw = base64.b64decode(raw_b64.encode("ascii"), validate=True)
-        except Exception as exc:
-            raise ValueError(f"google-services payload inválido: {type(exc).__name__}: {_short_text(exc, limit=100)}") from exc
-        if len(raw) > 512 * 1024:
-            raise ValueError("google-services payload grande demais")
-        actual_sha = hashlib.sha256(raw).hexdigest()
-        if expected_sha and expected_sha != actual_sha:
-            raise ValueError("sha256 do google-services.json divergente no payload")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(raw)
-        with contextlib.suppress(Exception):
-            target.chmod(0o600)
-    elif not target.is_file():
-        raise FileNotFoundError(
-            "google-services.json ausente no pacote de build. A VPS deve enviar googleServicesJsonB64 no payload do job; "
-            "não coloque esse arquivo no GitHub."
-        )
-    raw = target.read_bytes()
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        raise ValueError(f"google-services.json inválido no workspace: {type(exc).__name__}: {_short_text(exc, limit=100)}") from exc
-    if not isinstance(data, dict):
-        raise ValueError("google-services.json inválido: raiz não é objeto JSON")
-    project_info = data.get("project_info") if isinstance(data.get("project_info"), dict) else {}
-    project_id = str(project_info.get("project_id") or "").strip()
-    clients = data.get("client") if isinstance(data.get("client"), list) else []
-    matched = False
-    has_app_id = False
-    has_api_key = False
-    for client in clients:
-        if not isinstance(client, dict):
-            continue
-        info = client.get("client_info") if isinstance(client.get("client_info"), dict) else {}
-        android = info.get("android_client_info") if isinstance(info.get("android_client_info"), dict) else {}
-        if str(android.get("package_name") or "").strip() != expected_package:
-            continue
-        matched = True
-        has_app_id = bool(str(info.get("mobilesdk_app_id") or "").strip())
-        keys = client.get("api_key") if isinstance(client.get("api_key"), list) else []
-        has_api_key = any(isinstance(item, dict) and str(item.get("current_key") or "").strip() for item in keys)
-        break
-    if not project_id or not matched or not has_app_id or not has_api_key:
-        raise ValueError(f"google-services.json não contém configuração Firebase completa para {expected_package}")
-    return {
-        "ok": True,
-        "path": "app/google-services.json",
-        "sha256": hashlib.sha256(raw).hexdigest(),
-        "package": expected_package,
-        "project_id": project_id[:80],
-        "source": "job_payload" if raw_b64 else "workspace",
-    }
-
-
-def _install_apk_signing_from_payload(project_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
-    """Instala keystore compatível recebida pelo payload autenticado do job.
-
-    A keystore não vem no ZIP público e não fica no Git. Ela é gravada somente
-    no workspace temporário do build para que o APK novo tenha a mesma assinatura
-    da versão já instalada e possa atualizar sem desinstalar.
-    """
-    raw_b64 = str(payload.get("apkSigningKeystoreB64") or payload.get("apk_signing_keystore_b64") or "").strip()
-    expected_sha = str(payload.get("apkSigningKeystoreSha256") or payload.get("apk_signing_keystore_sha256") or "").strip().lower()
-    alias = str(payload.get("apkSigningKeyAlias") or payload.get("apk_signing_key_alias") or "androiddebugkey").strip() or "androiddebugkey"
-    storepass = str(payload.get("apkSigningStorePassword") or payload.get("apk_signing_store_password") or "").strip()
-    keypass = str(payload.get("apkSigningKeyPassword") or payload.get("apk_signing_key_password") or storepass).strip()
-
-    if not raw_b64:
-        raise FileNotFoundError(
-            "keystore de assinatura compatível ausente no payload. A VPS deve enviar apkSigningKeystoreB64; "
-            "não use a chave debug aleatória do phone worker para atualizar o Core Worker instalado."
-        )
-    if not storepass or not alias:
-        raise ValueError("configuração de assinatura compatível incompleta no payload")
-
-    try:
-        raw = base64.b64decode(raw_b64.encode("ascii"), validate=True)
-    except Exception as exc:
-        raise ValueError(f"payload da keystore inválido: {type(exc).__name__}: {_short_text(exc, limit=100)}") from exc
-    if len(raw) > 1024 * 1024:
-        raise ValueError("keystore de assinatura grande demais")
-    actual_sha = hashlib.sha256(raw).hexdigest()
-    if expected_sha and expected_sha != actual_sha:
-        raise ValueError("sha256 da keystore de assinatura divergente no payload")
-
-    app_dir = project_dir / "app"
-    app_dir.mkdir(parents=True, exist_ok=True)
-    key_path = app_dir / "core-worker-upload.keystore"
-    props_path = app_dir / "core-worker-signing.properties"
-
-    key_path.write_bytes(raw)
-    with contextlib.suppress(Exception):
-        key_path.chmod(0o600)
-
-    # Não registrar senhas em logs/resultados. Este arquivo fica só no workspace temporário.
-    props_path.write_text(
-        "\n".join([
-            "CORE_WORKER_SIGNING_KEYSTORE=core-worker-upload.keystore",
-            f"CORE_WORKER_SIGNING_KEY_ALIAS={alias}",
-            f"CORE_WORKER_SIGNING_STORE_PASSWORD={storepass}",
-            f"CORE_WORKER_SIGNING_KEY_PASSWORD={keypass or storepass}",
-            "",
-        ]),
-        encoding="utf-8",
-    )
-    with contextlib.suppress(Exception):
-        props_path.chmod(0o600)
-
-    return {
-        "ok": True,
-        "mode": str(payload.get("apkSigningMode") or payload.get("apk_signing_mode") or "compat-vps-debug-keystore")[:80],
-        "alias": alias,
-        "keystore_sha256": actual_sha,
-        "source": str(payload.get("apkSigningSource") or payload.get("apk_signing_source") or "job_payload")[:80],
-    }
-
-
-def _read_android_version(project_dir: Path) -> tuple[str, int]:
-    build_gradle = project_dir / "app" / "build.gradle"
-    text = build_gradle.read_text(encoding="utf-8", errors="ignore") if build_gradle.exists() else ""
-    name_match = re.search(r"versionName\s+[\"']([^\"']+)[\"']", text)
-    code_match = re.search(r"versionCode\s+(\d+)", text)
-    version_name = name_match.group(1) if name_match else "0.0.0"
-    version_code = int(code_match.group(1)) if code_match else 0
-    return version_name, version_code
-
-
-def _inspect_android_native_build_environment(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
-    """Diagnóstico leve para builds Android com código nativo.
-
-    Patch 84.2 separa dois modos:
-    - externalNativeBuild/CMake: exige toolchain nativa executável no host;
-    - jniLibs prebuilt: o Gradle apenas empacota .so já pronta e não deve exigir
-      CMake/NDK no Termux.
-
-    O CMakeLists em src/main/cpp pode existir como fonte de auditoria sem obrigar
-    o phone worker a executar CMake.
-    """
-    build_gradle = project_dir / "app" / "build.gradle"
-    cmake_lists = project_dir / "app" / "src" / "main" / "cpp" / "CMakeLists.txt"
-    prebuilt_dir = project_dir / "app" / "src" / "main" / "jniLibs" / "arm64-v8a"
-    prebuilt_executor = prebuilt_dir / "libcoreworker_executor.so"
-    text = build_gradle.read_text(encoding="utf-8", errors="ignore") if build_gradle.exists() else ""
-    # Ignore comentários: o CMakeLists pode existir como auditoria e o build.gradle
-    # pode explicar externalNativeBuild sem ativá-lo de fato. Só exigimos toolchain
-    # quando há bloco Gradle real.
-    gradle_no_line_comments = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
-    external_required = bool(re.search(r"(?m)^\s*externalNativeBuild\s*\{", gradle_no_line_comments))
-    prebuilt_present = bool(prebuilt_executor.is_file() and prebuilt_executor.stat().st_size > 1024)
-    required = external_required
-    info: dict[str, Any] = {
-        "required": required,
-        "externalNativeBuild": external_required,
-        "jniLibsPrebuilt": prebuilt_present,
-        "prebuilt_executor": str(prebuilt_executor),
-        "prebuilt_executor_bytes": prebuilt_executor.stat().st_size if prebuilt_executor.is_file() else 0,
-        "cmake_lists": str(cmake_lists),
-        "cmake_lists_ok": cmake_lists.is_file(),
-        "ok": True,
-        "missing": [],
-    }
-    if prebuilt_present and not external_required:
-        info["summary"] = "executor nativo prebuilt será empacotado via jniLibs; CMake/NDK não exigidos no Termux"
-        return info
-    if not required:
-        info["summary"] = "sem externalNativeBuild ativo"
-        return info
-
-    android_home = Path(env.get("ANDROID_HOME") or env.get("ANDROID_SDK_ROOT") or (Path.home() / "android-sdk")).expanduser()
-    info["android_home"] = str(android_home)
-    if not cmake_lists.is_file():
-        info["ok"] = False
-        info["missing"].append("app/src/main/cpp/CMakeLists.txt")
-
-    ndk_candidates: list[Path] = []
-    for key in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"):
-        value = str(env.get(key) or os.getenv(key) or "").strip()
-        if value:
-            ndk_candidates.append(Path(value).expanduser())
-    ndk_dir = android_home / "ndk"
-    if ndk_dir.is_dir():
-        ndk_candidates.extend(sorted([p for p in ndk_dir.iterdir() if p.is_dir()], reverse=True))
-    ndk_bundle = android_home / "ndk-bundle"
-    if ndk_bundle.is_dir():
-        ndk_candidates.append(ndk_bundle)
-    ndk_found = next((p for p in ndk_candidates if (p / "source.properties").is_file()), None)
-    info["ndk"] = str(ndk_found or "")
-    info["ndk_ok"] = ndk_found is not None
-    if ndk_found is None:
-        info["ok"] = False
-        info["missing"].append("Android NDK")
-
-    cmake_candidates: list[Path] = []
-    cmake_root = android_home / "cmake"
-    if cmake_root.is_dir():
-        cmake_candidates.extend(sorted([p / "bin" / "cmake" for p in cmake_root.iterdir() if p.is_dir()], reverse=True))
-    which_cmake = shutil.which("cmake")
-    if which_cmake:
-        cmake_candidates.append(Path(which_cmake))
-    cmake_found = next((p for p in cmake_candidates if p.is_file()), None)
-    info["cmake"] = str(cmake_found or "")
-    info["cmake_ok"] = cmake_found is not None
-    if cmake_found is None:
-        info["ok"] = False
-        info["missing"].append("CMake")
-
-    info["summary"] = "toolchain nativa pronta" if info["ok"] else "toolchain nativa incompleta: " + ", ".join(info["missing"])
-    return info
-
-
-
-def _upload_core_worker_toolchain(archive: Path, *, manifest: dict[str, Any]) -> dict[str, Any]:
-    base_url, token, worker_id = _core_worker_auth_parts()
-    if not base_url or not token or not worker_id:
-        return {"ok": False, "error": "worker não pareado; não posso publicar toolchain"}
-    if not archive.is_file():
-        return {"ok": False, "error": "toolchain local ausente"}
-    sha = _sha256_path(archive)
-    parsed = urllib.parse.urlparse(base_url.rstrip("/") + "/core-worker/toolchain/publish")
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return {"ok": False, "error": "URL da VPS inválida para toolchain"}
-    boundary = "----CoreWorkerToolchain" + secrets.token_hex(12)
-
-    def field(name: str, value: Any) -> bytes:
-        return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode("utf-8")
-
-    prefix = b"".join([
-        field("worker_id", worker_id),
-        field("physical_worker_id", worker_id),
-        field("sha256", sha),
-        field("manifest", json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))),
-        (f"--{boundary}\r\nContent-Disposition: form-data; name=\"toolchain\"; filename=\"toolchain-{sha[:12]}.zip\"\r\nContent-Type: application/zip\r\n\r\n").encode("utf-8"),
-    ])
-    suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
-    content_length = len(prefix) + archive.stat().st_size + len(suffix)
-    timeout = max(30.0, _env_float("PHONE_WORKER_TOOLCHAIN_PUBLISH_TIMEOUT_SECONDS", 900.0))
-    connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-    connection = connection_cls(parsed.hostname, parsed.port, timeout=timeout)
-    path = parsed.path or "/core-worker/toolchain/publish"
-    if parsed.query:
-        path += "?" + parsed.query
-    try:
-        connection.putrequest("POST", path)
-        connection.putheader("Authorization", f"Bearer {token}")
-        connection.putheader("X-Core-Worker-Id", worker_id)
-        connection.putheader("User-Agent", f"CorePhoneWorker/{PHONE_WORKER_VERSION}")
-        connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
-        connection.putheader("Content-Length", str(content_length))
-        connection.endheaders()
-        connection.send(prefix)
-        with archive.open("rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                connection.send(chunk)
-        connection.send(suffix)
-        response = connection.getresponse()
-        raw = response.read(256 * 1024)
-        try:
-            data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
-        except Exception:
-            data = {"ok": False, "error": "resposta inválida publicando toolchain"}
-        if not (200 <= response.status < 300):
-            return {"ok": False, "status": response.status, "error": _short_text(data.get("error") if isinstance(data, dict) else raw, limit=240)}
-        return data if isinstance(data, dict) else {"ok": False, "error": "resposta inválida"}
-    except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}"}
-    finally:
-        with contextlib.suppress(Exception):
-            connection.close()
-
-
-def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None = None, source_sha256: str = "", source_fingerprint: str = "", notification_id: str = "", apk_signing_mode: str = "", apk_signing_keystore_sha256: str = "") -> dict[str, Any]:
-    identity = inspect_apk_identity(apk_path)
-    assert_expected_apk_identity(
-        identity,
-        expected_package="dev.core.worker",
-        expected_version_name=version_name,
-        expected_version_code=version_code,
-    )
-    version_name = str(identity["versionName"])
-    version_code = int(identity["versionCode"])
-    actual_sha = _sha256_path(apk_path)
-    if sha256 and str(sha256).lower() != actual_sha.lower():
-        raise ValueError("sha256 do artifact APK divergente antes da publicação")
-    sha256 = actual_sha
-    base_url, token, worker_id = _core_worker_auth_parts()
-    if not token or not worker_id:
-        return {"ok": False, "error": "worker não pareado; não posso publicar APK"}
-    publish_url = str(publish_url or "").strip() or f"{base_url}/core-worker/app/publish"
-    boundary = "----CoreWorkerApkBoundary" + hashlib.sha256(f"{time.time()}:{os.getpid()}".encode()).hexdigest()[:24]
-
-    def field(name: str, value: Any) -> bytes:
-        return (
-            f"--{boundary}\r\n"
-            f"Content-Disposition: form-data; name=\"{name}\"\r\n\r\n"
-            f"{value}\r\n"
-        ).encode("utf-8")
-
-    apk_bytes = apk_path.read_bytes()
-    parts = [
-        field("worker_id", worker_id),
-        field("workerName", _default_worker_name()),
-        field("filename", filename),
-        field("versionName", version_name),
-        field("versionCode", int(version_code or 0)),
-        field("sha256", sha256),
-        field("requiredAgentVersion", PHONE_WORKER_VERSION),
-        field("notifyUsers", "true"),
-        field("notificationRequested", "true"),
-        field("sourceSha256", source_sha256),
-        field("sourceFingerprint", source_fingerprint or source_sha256),
-        field("notificationId", notification_id),
-        field("apkSigningMode", apk_signing_mode),
-        field("apkSigningKeystoreSha256", apk_signing_keystore_sha256[:64]),
-        field("changelog", json.dumps(changelog or ["APK compilado por worker builder"], ensure_ascii=False)),
-        (
-            f"--{boundary}\r\n"
-            f"Content-Disposition: form-data; name=\"apk\"; filename=\"{filename}\"\r\n"
-            f"Content-Type: application/vnd.android.package-archive\r\n\r\n"
-        ).encode("utf-8"),
-        apk_bytes,
-        b"\r\n",
-        f"--{boundary}--\r\n".encode("utf-8"),
-    ]
-    body = b"".join(parts)
-    req = urllib.request.Request(
-        publish_url,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "X-Core-Worker-ID": worker_id,
-            "X-Core-Worker-Version": PHONE_WORKER_VERSION,
-            "X-Phone-Worker-Token": token,
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=max(5.0, _env_float("PHONE_WORKER_APK_PUBLISH_TIMEOUT_SECONDS", 60.0))) as resp:
-            raw = resp.read(256 * 1024)
-            _remember_core_worker_network_ok()
-            data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
-            return data if isinstance(data, dict) else {"ok": False, "error": "resposta inválida da VPS"}
-    except urllib.error.HTTPError as exc:
-        _remember_core_worker_network_ok()
-        raw = exc.read(64 * 1024).decode("utf-8", errors="replace")
-        return {"ok": False, "status": int(exc.code), "error": _short_text(raw or exc, limit=240)}
-    except Exception as exc:
-        _remember_core_worker_network_error(exc)
-        return {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
-
-
-
-def _apk_build_log_has_success(log_path: Path | None) -> bool:
-    if log_path is None or not log_path.is_file():
-        return False
-    try:
-        text = log_path.read_text(encoding="utf-8", errors="replace")[-20000:]
-    except Exception:
-        return False
-    lowered = text.lower()
-    if "build successful" not in lowered:
-        return False
-    fatal_markers = ("failure: build failed", "execution failed for task", "compilation failed")
-    return not any(marker in lowered for marker in fatal_markers)
-
-
-def _apk_build_log_value(log_path: Path | None, key: str, default: str = "") -> str:
-    if log_path is None or not log_path.is_file():
-        return default
-    try:
-        text = log_path.read_text(encoding="utf-8", errors="replace")[:12000]
-    except Exception:
-        return default
-    match = re.search(rf"(?m)^\s*{re.escape(key)}\s*=\s*(.+?)\s*$", text)
-    if not match:
-        return default
-    return str(match.group(1) or "").strip()
-
-
-def _find_gradle_log_for_work_dir(build_root: Path, work_dir: Path) -> Path | None:
-    logs_dir = build_root / "logs"
-    if not logs_dir.is_dir():
-        return None
-    wanted = str(work_dir)
-    logs = sorted(logs_dir.glob("*.log"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
-    for log_path in logs[:60]:
-        try:
-            head = log_path.read_text(encoding="utf-8", errors="replace")[:6000]
-        except Exception:
-            continue
-        if wanted in head:
-            return log_path
-    return None
-
-
-def _persist_recovered_apk_artifact(
-    build_root: Path,
-    *,
-    apk_path: Path,
-    project_dir: Path,
-    gradle_log: Path | None,
-    version_name: str = "",
-    version_code: int = 0,
-    source_sha256: str = "",
-    source_fingerprint: str = "",
-    notification_id: str = "",
-    reason: str = "recovered-orphaned-gradle-output",
-) -> dict[str, Any]:
-    if not apk_path.is_file():
-        return {}
-    identity = inspect_apk_identity(apk_path)
-    assert_expected_apk_identity(
-        identity,
-        expected_package="dev.core.worker",
-        expected_version_name=version_name,
-        expected_version_code=version_code,
-    )
-    version_name = str(identity["versionName"])
-    version_code = int(identity["versionCode"])
-    if gradle_log is not None:
-        source_sha256 = source_sha256 or _apk_build_log_value(gradle_log, "source_sha256")
-        source_fingerprint = source_fingerprint or _apk_build_log_value(gradle_log, "source_fingerprint")
-    source_fingerprint = str(source_fingerprint or source_sha256 or "").strip()
-    notification_id = str(notification_id or f"apk-{version_code}-{source_fingerprint[:12] or int(time.time())}").strip()
-    raw = apk_path.read_bytes()
-    apk_sha = hashlib.sha256(raw).hexdigest()
-    filename = f"CoreWorker-v{version_name}-debug.apk"
-    artifact_dir = build_root / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    artifact_path = artifact_dir / filename
-    if artifact_path.exists():
-        try:
-            existing_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-        except Exception:
-            existing_sha = ""
-        if existing_sha != apk_sha:
-            artifact_path = artifact_dir / f"{Path(filename).stem}-{notification_id[:16] or int(time.time())}.apk"
-    try:
-        shutil.copy2(apk_path, artifact_path)
-    except Exception:
-        artifact_path.write_bytes(raw)
-    artifact_meta = {
-        "filename": filename,
-        "versionName": version_name,
-        "versionCode": version_code,
-        "sha256": apk_sha,
-        "bytes": len(raw),
-        "artifact_path": str(artifact_path),
-        "sourceFingerprint": source_fingerprint,
-        "sourceSha256": str(source_sha256 or ""),
-        "notificationId": notification_id,
-        "apkSigningMode": "compat-vps-debug-keystore",
-        "apkSigningKeystoreSha256": "",
-        "gradle_log_path": str(gradle_log) if gradle_log is not None else "",
-        "gradle_log_exists": bool(gradle_log and gradle_log.exists()),
-        "gradle_log_bytes": gradle_log.stat().st_size if gradle_log is not None and gradle_log.exists() else 0,
-        "build_successful": True,
-        "build_result": "success",
-        "phoneWorkerVersion": PHONE_WORKER_VERSION,
-        "phoneWorkerSourceHash": _phone_worker_source_hash(),
-        "created_at": time.time(),
-        "recovered": True,
-        "recoveryReason": reason,
-    }
-    with contextlib.suppress(Exception):
-        _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
-        _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
-    return artifact_meta
-
-
-def _recover_orphaned_apk_build_outputs(
-    build_root: Path,
-    *,
-    version_name: str = "",
-    version_code: int = 0,
-    source_fingerprint: str = "",
-    source_sha256: str = "",
-    notification_id: str = "",
-) -> dict[str, Any]:
-    """Recupera APK gerado quando o processo caiu depois do Gradle.
-
-    Em Android/Termux o processo pode ser morto depois de `assembleDebug` e antes
-    da cópia para artifacts/latest. O Gradle já deixou `app-debug.apk` no workdir;
-    esse helper promove esse APK para artifacts e permite republicar sem rebuild.
-    """
-    if not build_root.is_dir():
-        return {}
-    wanted_fp = str(source_fingerprint or source_sha256 or "").strip()
-    workdirs = sorted([p for p in build_root.glob("build-*") if p.is_dir()], key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
-    for work_dir in workdirs[:40]:
-        project_dir = work_dir / "src" / "android" / "core-worker-app"
-        if not project_dir.is_dir():
-            alt = work_dir / "src" / "core-worker-app"
-            if alt.is_dir():
-                project_dir = alt
-        if not project_dir.is_dir():
-            continue
-        detected_name, detected_code = _read_android_version(project_dir)
-        if version_name and detected_name and str(detected_name) != str(version_name):
-            continue
-        if int(version_code or 0) and int(detected_code or 0) and int(detected_code or 0) != int(version_code or 0):
-            continue
-        gradle_log = _find_gradle_log_for_work_dir(build_root, work_dir)
-        if not _apk_build_log_has_success(gradle_log):
-            continue
-        log_fp = _apk_build_log_value(gradle_log, "source_fingerprint")
-        log_sha = _apk_build_log_value(gradle_log, "source_sha256")
-        if wanted_fp:
-            hay = {str(log_fp or "").strip(), str(log_sha or "").strip()}
-            short = wanted_fp[:12]
-            if wanted_fp not in hay and short and not any(short and short in value for value in hay if value):
-                continue
-        apk_dir = project_dir / "app" / "build" / "outputs" / "apk" / "debug"
-        apk_candidates = sorted(apk_dir.glob("*.apk"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True) if apk_dir.is_dir() else []
-        for apk_path in apk_candidates:
-            if not apk_path.is_file() or apk_path.stat().st_size < 1024 * 1024:
-                continue
-            return _persist_recovered_apk_artifact(
-                build_root,
-                apk_path=apk_path,
-                project_dir=project_dir,
-                gradle_log=gradle_log,
-                version_name=version_name or detected_name,
-                version_code=int(version_code or detected_code or 0),
-                source_sha256=source_sha256 or log_sha,
-                source_fingerprint=source_fingerprint or log_fp or source_sha256,
-                notification_id=notification_id,
-            )
-    return {}
-
-def _latest_apk_artifact_metadata(build_root: Path) -> dict[str, Any]:
-    artifact_dir = build_root / "artifacts"
-    candidates: list[Path] = []
-    latest_meta = artifact_dir / "latest-artifact.json"
-    if latest_meta.is_file():
-        candidates.append(latest_meta)
-    if artifact_dir.is_dir():
-        candidates.extend(sorted(artifact_dir.glob("*.apk.json"), key=lambda path: path.stat().st_mtime, reverse=True))
-    for meta_path in candidates:
-        try:
-            data = json.loads(meta_path.read_text(encoding="utf-8", errors="replace") or "{}")
-        except Exception:
-            continue
-        if not isinstance(data, dict):
-            continue
-        apk_path = Path(str(data.get("artifact_path") or "")).expanduser()
-        if apk_path.is_file():
-            try:
-                identity = inspect_apk_identity(apk_path)
-                assert_expected_apk_identity(identity, expected_package="dev.core.worker")
-            except Exception:
-                continue
-            data["filename"] = apk_path.name
-            data["versionName"] = str(identity["versionName"])
-            data["versionCode"] = int(identity["versionCode"])
-            data["sha256"] = _sha256_path(apk_path)
-            data["bytes"] = apk_path.stat().st_size
-            data["metadata_path"] = str(meta_path)
-            return data
-    if artifact_dir.is_dir():
-        for apk_path in sorted(artifact_dir.glob("*.apk"), key=lambda path: path.stat().st_mtime, reverse=True):
-            try:
-                raw = apk_path.read_bytes()
-            except Exception:
-                continue
-            name = apk_path.name
-            try:
-                identity = inspect_apk_identity(apk_path)
-                assert_expected_apk_identity(identity, expected_package="dev.core.worker")
-            except Exception:
-                continue
-            return {
-                "filename": name,
-                "versionName": identity["versionName"],
-                "versionCode": int(identity["versionCode"]),
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "bytes": len(raw),
-                "artifact_path": str(apk_path),
-                "notificationId": f"apk-republish-{int(apk_path.stat().st_mtime)}",
-            }
-    return {}
-
-
-def _apply_apk_publish_last(payload: dict[str, Any]) -> dict[str, Any]:
-    roles, capabilities = _current_core_worker_roles_and_capabilities()
-    if "apk-builder" not in set(roles + capabilities):
-        raise PermissionError("este worker não tem função apk-builder")
-    build_root = Path(os.getenv("PHONE_WORKER_APK_BUILD_DIR") or (Path.home() / "core-worker-apk-builds")).expanduser()
-    requested = str(payload.get("artifact_path") or payload.get("apk_path") or "").strip()
-    meta: dict[str, Any] = {}
-    if requested:
-        apk_path = Path(requested).expanduser()
-        if apk_path.is_file():
-            raw = apk_path.read_bytes()
-            meta = {
-                "filename": apk_path.name,
-                "versionName": str(payload.get("versionName") or payload.get("version_name") or ""),
-                "versionCode": int(payload.get("versionCode") or payload.get("version_code") or 0),
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "bytes": len(raw),
-                "artifact_path": str(apk_path),
-                "sourceFingerprint": str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or ""),
-                "sourceSha256": str(payload.get("sourceSha256") or payload.get("source_sha256") or ""),
-                "notificationId": str(payload.get("notificationId") or payload.get("notification_id") or f"apk-republish-{int(time.time())}"),
-            }
-    if not meta:
-        meta = _recover_orphaned_apk_build_outputs(
-            build_root,
-            version_name=str(payload.get("versionName") or payload.get("version_name") or ""),
-            version_code=int(payload.get("versionCode") or payload.get("version_code") or 0),
-            source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or ""),
-            source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or ""),
-            notification_id=str(payload.get("notificationId") or payload.get("notification_id") or ""),
-        )
-    if not meta:
-        meta = _latest_apk_artifact_metadata(build_root)
-    if not meta:
-        return {"ok": False, "summary": "nenhum APK persistente encontrado para republicar", "artifact_dir": str(build_root / "artifacts")}
-    apk_path = Path(str(meta.get("artifact_path") or "")).expanduser()
-    if not apk_path.is_file():
-        return {"ok": False, "summary": "artifact APK não existe mais", "artifact_path": str(apk_path)}
-    identity = inspect_apk_identity(apk_path)
-    requested_name = str(payload.get("versionName") or payload.get("version_name") or meta.get("versionName") or "")
-    try:
-        requested_code = int(payload.get("versionCode") or payload.get("version_code") or meta.get("versionCode") or 0)
-    except Exception:
-        requested_code = 0
-    assert_expected_apk_identity(
-        identity,
-        expected_package="dev.core.worker",
-        expected_version_name=requested_name,
-        expected_version_code=requested_code,
-    )
-    version_name = str(identity["versionName"])
-    version_code = int(identity["versionCode"])
-    filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or meta.get("filename") or apk_path.name)).strip("-._")
-    publish_url = str(payload.get("publish_url") or "").strip()
-    base_url, _token, _worker_id = _core_worker_auth_parts()
-    try:
-        publish = _upload_core_worker_apk(
-            apk_path,
-            filename=filename,
-            version_name=version_name,
-            version_code=version_code,
-            sha256=str(meta.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest()),
-            publish_url=publish_url or f"{base_url}/core-worker/app/publish",
-            changelog=list(payload.get("changelog") or ["APK republicado por worker builder"]),
-            source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or meta.get("sourceSha256") or ""),
-            source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or meta.get("sourceFingerprint") or ""),
-            notification_id=str(payload.get("notificationId") or payload.get("notification_id") or meta.get("notificationId") or f"apk-republish-{int(time.time())}"),
-            apk_signing_mode=str(payload.get("apkSigningMode") or meta.get("apkSigningMode") or "compat-vps-debug-keystore"),
-            apk_signing_keystore_sha256=str(payload.get("apkSigningKeystoreSha256") or meta.get("apkSigningKeystoreSha256") or ""),
-        )
-    except Exception as exc:
-        publish = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
-    return {
-        "ok": bool(publish.get("ok")),
-        "summary": "APK republicado na VPS" if publish.get("ok") else "APK persistente encontrado, mas publicação falhou",
-        "publish_ok": bool(publish.get("ok")),
-        "publish": publish,
-        "artifact_found": True,
-        "artifact_path": str(apk_path),
-        "versionName": version_name,
-        "versionCode": version_code,
-        "apk": {"filename": filename, "bytes": apk_path.stat().st_size, "sha256": str(meta.get("sha256") or ""), "artifact_path": str(apk_path)},
-    }
-
-
-def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
-    roles, capabilities = _current_core_worker_roles_and_capabilities()
-    if "apk-builder" not in set(roles + capabilities):
-        raise PermissionError("este worker não tem função apk-builder")
-    if not _env_bool("PHONE_WORKER_APK_BUILD_ENABLED", True):
-        raise PermissionError("build de APK desativado neste worker")
-
-    source_url = str(payload.get("source_zip_url") or os.getenv("PHONE_WORKER_APK_BUILD_SOURCE_URL") or "").strip()
-    if not source_url:
-        raise ValueError("source_zip_url ausente; publique source-core-worker-app.zip na VPS")
-    expected_source_sha = str(payload.get("source_sha256") or "").strip().lower()
-    source_fingerprint = str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or expected_source_sha or "").strip()
-    _auth_base, _auth_token, parent_worker_id = _core_worker_auth_parts()
-    project_subdir = str(payload.get("project_subdir") or "android/core-worker-app").strip().strip("/")
-    if not project_subdir or project_subdir.startswith("/") or ".." in project_subdir.split("/"):
-        raise ValueError("project_subdir inválido")
-
-    build_root = Path(os.getenv("PHONE_WORKER_APK_BUILD_DIR") or (Path.home() / "core-worker-apk-builds")).expanduser()
-    build_root.mkdir(parents=True, exist_ok=True)
-    timeout_seconds = max(60, _env_int("PHONE_WORKER_APK_BUILD_TIMEOUT_SECONDS", 3600))
-    max_source_bytes = max(1024 * 1024, _env_int("PHONE_WORKER_APK_BUILD_SOURCE_MAX_BYTES", 1024 * 1024 * 1024))
-    keep_workdir = _env_bool("PHONE_WORKER_APK_BUILD_KEEP_WORKDIR", False)
-    keep_failed_workdir = _env_bool("PHONE_WORKER_APK_BUILD_KEEP_FAILED_WORKDIR", False)
-    started = time.time()
-    version_name = str(payload.get("versionName") or payload.get("version_name") or "desconhecida")
-    try:
-        version_code = int(payload.get("versionCode") or payload.get("version_code") or 0)
-    except Exception:
-        version_code = 0
-    notification_id = str(payload.get("notificationId") or payload.get("notification_id") or f"apk-{version_code}-{(source_fingerprint or expected_source_sha)[:12]}").strip()
-    job_slug = _apk_build_safe_slug(f"{notification_id or 'apk'}-{int(started)}-{os.getpid()}")
-    work_dir = build_root / f"build-{int(started)}-{os.getpid()}"
-    source_zip = work_dir / "source.zip"
-    gradle_log = _apk_build_logs_dir(build_root) / f"{job_slug}-gradle.log"
-    preserve_workdir = False
-    lock_handle: Any | None = None
-    active_marker = work_dir / ".build-active"
-
-    if not _HEAVY_RESOURCE_LOCK.acquire(blocking=False):
-        return _apk_build_failure_result(
-            summary="recurso pesado ocupado por renderização ou manutenção",
-            version_name=version_name,
-            version_code=version_code,
-            source_fingerprint=source_fingerprint,
-            source_sha256=expected_source_sha,
-            notification_id=notification_id,
-            work_dir=work_dir,
-            gradle_log=gradle_log,
-            extra={"busy": True, "retryable": True},
-        )
-
-    if not _APK_BUILD_THREAD_LOCK.acquire(blocking=False):
-        _HEAVY_RESOURCE_LOCK.release()
-        return _apk_build_failure_result(
-            summary="build APK já está em execução neste processo do phone worker",
-            version_name=version_name,
-            version_code=version_code,
-            source_fingerprint=source_fingerprint,
-            source_sha256=expected_source_sha,
-            notification_id=notification_id,
-            work_dir=work_dir,
-            gradle_log=gradle_log,
-            extra={"busy": True, "retryable": True},
-        )
-
-    try:
-        recovered_meta = _recover_orphaned_apk_build_outputs(
-            build_root,
-            version_name=version_name,
-            version_code=version_code,
-            source_fingerprint=source_fingerprint,
-            source_sha256=expected_source_sha,
-            notification_id=notification_id,
-        )
-        if recovered_meta and bool(payload.get("publish", True)):
-            publish_result = _apply_apk_publish_last({
-                **payload,
-                "artifact_path": recovered_meta.get("artifact_path"),
-                "filename": recovered_meta.get("filename"),
-                "versionName": recovered_meta.get("versionName") or version_name,
-                "versionCode": recovered_meta.get("versionCode") or version_code,
-                "sourceFingerprint": recovered_meta.get("sourceFingerprint") or source_fingerprint,
-                "sourceSha256": recovered_meta.get("sourceSha256") or expected_source_sha,
-                "notificationId": recovered_meta.get("notificationId") or notification_id,
-                "changelog": payload.get("changelog") or ["APK recuperado de build anterior e publicado pelo worker builder"],
-            })
-            publish_result["recovered_from_orphaned_output"] = True
-            publish_result["artifact_meta"] = recovered_meta
-            return publish_result
-        elif recovered_meta:
-            return {
-                "ok": True,
-                "build_gradle_ok": True,
-                "artifact_found": True,
-                "recovered_from_orphaned_output": True,
-                "summary": f"APK {recovered_meta.get('versionName') or version_name} recuperado de build anterior",
-                "versionName": recovered_meta.get("versionName") or version_name,
-                "versionCode": recovered_meta.get("versionCode") or version_code,
-                "artifact_path": recovered_meta.get("artifact_path"),
-                "apk": {"filename": recovered_meta.get("filename"), "bytes": recovered_meta.get("bytes"), "sha256": recovered_meta.get("sha256"), "artifact_path": recovered_meta.get("artifact_path")},
-                "artifact_meta": recovered_meta,
-            }
-
-        lock_handle, lock_info = _try_acquire_apk_build_file_lock(build_root)
-        if lock_handle is None:
-            return _apk_build_failure_result(
-                summary="build APK já está em execução no phone worker; não iniciei outro Gradle",
-                version_name=version_name,
-                version_code=version_code,
-                source_fingerprint=source_fingerprint,
-                source_sha256=expected_source_sha,
-                notification_id=notification_id,
-                work_dir=work_dir,
-                gradle_log=gradle_log,
-                extra={"busy": True, "retryable": True, "lock": lock_info},
-            )
-        _cleanup_old_apk_build_logs(build_root)
-        work_dir.mkdir(parents=True, exist_ok=True)
-        active_marker.write_text(json.dumps({"pid": os.getpid(), "started_at": started, "job": notification_id}, ensure_ascii=False), encoding="utf-8")
-
-        download = _download_url_to_file(source_url, source_zip, timeout=60.0, max_bytes=max_source_bytes)
-        if not download.get("ok"):
-            preserve_workdir = keep_failed_workdir
-            return _apk_build_failure_result(
-                summary="falha baixando fonte do APK",
-                version_name=version_name,
-                version_code=version_code,
-                source_fingerprint=source_fingerprint,
-                source_sha256=expected_source_sha,
-                notification_id=notification_id,
-                work_dir=work_dir,
-                gradle_log=gradle_log,
-                extra={"download": download},
-            )
-        if expected_source_sha and expected_source_sha != str(download.get("sha256") or "").lower():
-            preserve_workdir = keep_failed_workdir
-            return _apk_build_failure_result(
-                summary="sha256 do source zip divergente",
-                version_name=version_name,
-                version_code=version_code,
-                source_fingerprint=source_fingerprint,
-                source_sha256=expected_source_sha,
-                notification_id=notification_id,
-                work_dir=work_dir,
-                gradle_log=gradle_log,
-                extra={"expected": expected_source_sha, "actual": download.get("sha256")},
-            )
-        if not source_fingerprint:
-            source_fingerprint = str(download.get("sha256") or "")
-        source_dir = work_dir / "src"
-        members = _safe_extract_zip_file(source_zip, source_dir)
-        project_dir = (source_dir / project_subdir).resolve()
-        if not project_dir.is_dir():
-            alt = source_dir / "core-worker-app"
-            if alt.is_dir():
-                project_dir = alt.resolve()
-            else:
-                raise FileNotFoundError(f"projeto Android não encontrado: {project_subdir}")
-        google_services = _install_google_services_from_payload(project_dir, payload)
-        apk_signing = _install_apk_signing_from_payload(project_dir, payload)
-        env = os.environ.copy()
-        env["CORE_WORKER_REQUIRE_COMPAT_SIGNING"] = "true"
-        if bool(payload.get("selfBuilderRequired", True)):
-            env["CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN"] = "true"
-        base_url, _token, _worker_id = _core_worker_auth_parts()
-        injected_vps_url = str(payload.get("coreWorkerVpsUrl") or payload.get("core_worker_vps_url") or payload.get("vps_url") or base_url or "").strip().rstrip("/")
-        injected_vps_label = str(payload.get("coreWorkerVpsLabel") or payload.get("core_worker_vps_label") or ("VPS privada configurada" if injected_vps_url else "VPS não configurada no build")).strip()
-        if injected_vps_url:
-            env["CORE_WORKER_VPS_URL"] = injected_vps_url
-            env["CORE_WORKER_VPS_LABEL"] = injected_vps_label
-        builder_environment = _prepare_termux_android_build(project_dir, env)
-        if bool(payload.get("selfBuilderRequired", True)):
-            try:
-                builder_environment["self_builder_toolchain"] = _prepare_apk_self_builder_toolchain(project_dir, env)
-            except Exception as exc:
-                preserve_workdir = keep_failed_workdir
-                detail = f"{type(exc).__name__}: {_short_text(exc, limit=360)}"
-                builder_environment["self_builder_toolchain"] = {
-                    "ok": False,
-                    "stage": "self_builder_toolchain_prepare",
-                    "error": detail,
-                }
-                return _apk_build_failure_result(
-                    summary="preparação do autobuilder do APK falhou: " + _short_text(exc, limit=180),
-                    version_name=version_name,
-                    version_code=version_code,
-                    source_fingerprint=source_fingerprint,
-                    source_sha256=expected_source_sha,
-                    notification_id=notification_id,
-                    work_dir=work_dir,
-                    gradle_log=gradle_log,
-                    builder_environment=builder_environment,
-                    extra={
-                        "stage": "self_builder_toolchain_prepare",
-                        "failure_category": _classify_apk_failure_text(detail).get("category"),
-                        "retryable": _classify_apk_failure_text(detail).get("retryable"),
-                        "permanent_failure": _classify_apk_failure_text(detail).get("permanent"),
-                        "self_builder_error": detail,
-                    },
-                )
-        native_environment = _inspect_android_native_build_environment(project_dir, env)
-        builder_environment["native_build"] = native_environment
-        builder_environment["gradle_log_path"] = str(gradle_log)
-        if native_environment.get("required") and not native_environment.get("ok"):
-            preserve_workdir = keep_failed_workdir
-            return _apk_build_failure_result(
-                summary=native_environment.get("summary") or "toolchain nativa Android incompleta",
-                version_name=version_name,
-                version_code=version_code,
-                source_fingerprint=source_fingerprint,
-                source_sha256=expected_source_sha,
-                notification_id=notification_id,
-                work_dir=work_dir,
-                gradle_log=gradle_log,
-                builder_environment=builder_environment,
-                native_environment=native_environment,
-                extra={"hint": "instale/prepare Android NDK e CMake no phone worker builder; a VPS não deve buildar APK"},
-            )
-        builder_environment["google_services"] = {
-            "ok": bool(google_services.get("ok")),
-            "package": google_services.get("package"),
-            "project_id": google_services.get("project_id"),
-            "source": google_services.get("source"),
-            "sha256": str(google_services.get("sha256") or "")[:12],
-        }
-        builder_environment["apk_signing"] = {
-            "ok": bool(apk_signing.get("ok")),
-            "mode": apk_signing.get("mode"),
-            "alias": apk_signing.get("alias"),
-            "source": apk_signing.get("source"),
-            "keystore_sha256": str(apk_signing.get("keystore_sha256") or "")[:12],
-        }
-        if injected_vps_url:
-            builder_environment["injected_vps_url"] = True
-        detected_version_name, detected_version_code = _read_android_version(project_dir)
-        version_name = str(payload.get("versionName") or payload.get("version_name") or detected_version_name)
-        version_code = int(payload.get("versionCode") or payload.get("version_code") or detected_version_code or 0)
-        notification_id = str(payload.get("notificationId") or payload.get("notification_id") or f"apk-{version_code}-{(source_fingerprint or expected_source_sha)[:12]}").strip()
-        gradlew = project_dir / "gradlew"
-        if not gradlew.is_file():
-            raise FileNotFoundError("Gradle Wrapper ausente; Gradle global do Termux não é permitido")
-        gradlew.chmod(0o755)
-        cmd = [
-            str(gradlew), "assembleDebug", "--no-daemon", "--max-workers=1", "--stacktrace", "--console=plain",
-            f"-PCORE_WORKER_PARENT_WORKER_ID={parent_worker_id}",
-            f"-PCORE_WORKER_SOURCE_FINGERPRINT={source_fingerprint}",
-        ]
-        if not env.get("ANDROID_HOME"):
-            default_sdk = Path.home() / "android-sdk"
-            if default_sdk.exists():
-                env["ANDROID_HOME"] = str(default_sdk)
-                env.setdefault("ANDROID_SDK_ROOT", str(default_sdk))
-                env["PATH"] = f"{default_sdk}/cmdline-tools/latest/bin:{default_sdk}/platform-tools:" + env.get("PATH", "")
-        shutil.rmtree(project_dir / "app/build/outputs/apk/debug", ignore_errors=True)
-        with gradle_log.open("w", encoding="utf-8", errors="replace") as log_fh:
-            log_fh.write("===== Core Worker APK build =====\n")
-            updater_snapshot = _bootstrap_updater_snapshot()
-            log_fh.write(f"phone_worker_version={PHONE_WORKER_VERSION}\n")
-            log_fh.write(f"phone_worker_source_hash={_phone_worker_source_hash()}\n")
-            log_fh.write(f"bootstrap_version={updater_snapshot.get('bootstrap_version') or 'unknown'}\n")
-            log_fh.write(f"runtime_kind=termux runtime_mode=termux direct_http_port={_EFFECTIVE_HTTP_PORT or 0} direct_http_state={_DIRECT_HTTP_STATE}\n")
-            log_fh.write(f"started_at={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(started))}\n")
-            log_fh.write(f"work_dir={work_dir}\n")
-            log_fh.write(f"project_dir={project_dir}\n")
-            log_fh.write(f"versionName={version_name}\nversionCode={version_code}\n")
-            log_fh.write(f"source_sha256={expected_source_sha or download.get('sha256') or ''}\n")
-            log_fh.write(f"source_fingerprint={source_fingerprint}\n")
-            log_fh.write("cmd=" + " ".join(shlex.quote(part) for part in cmd) + "\n")
-            log_fh.write(f"jdk_major={builder_environment.get('java_major', '')} gradle=8.9 agp=8.7.3 compileSdk=34 buildTools=34.0.0 chaquopy=17.0.0\n")
-            log_fh.write(f"aapt2={builder_environment.get('aapt2_override', '')} xmx_mb={builder_environment.get('xmx_mb', '')}\n")
-            log_fh.write(f"memory_available_bytes={builder_environment.get('memory_available_bytes', 0)} storage_free_bytes={builder_environment.get('storage_free_bytes', 0)}\n")
-            tool_info = builder_environment.get("self_builder_toolchain") if isinstance(builder_environment.get("self_builder_toolchain"), dict) else {}
-            log_fh.write(f"toolchain_fingerprint={tool_info.get('toolchainFingerprint') or ''}\n")
-            log_fh.write("===== Gradle output =====\n")
-            log_fh.flush()
-            try:
-                proc = subprocess.run(cmd, cwd=str(project_dir), env=env, stdout=log_fh, stderr=subprocess.STDOUT, text=True, timeout=timeout_seconds)
-                returncode = int(proc.returncode)
-            except subprocess.TimeoutExpired as exc:
-                log_fh.write(f"\n===== TIMEOUT after {timeout_seconds}s =====\n{type(exc).__name__}: {_short_text(exc, limit=300)}\n")
-                returncode = 124
-        if returncode != 0:
-            preserve_workdir = keep_failed_workdir
-            gradle_failure = _summarize_gradle_log(gradle_log)
-            return _apk_build_failure_result(
-                summary=str(gradle_failure.get("summary") or "build do APK falhou; veja gradle_log_tail"),
-                version_name=version_name,
-                version_code=version_code,
-                source_fingerprint=source_fingerprint,
-                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
-                notification_id=notification_id,
-                work_dir=work_dir,
-                gradle_log=gradle_log,
-                returncode=returncode,
-                builder_environment=builder_environment,
-                native_environment=native_environment,
-                extra={
-                    "failure_category": str(gradle_failure.get("category") or "unknown"),
-                    "retryable": bool(gradle_failure.get("retryable", True)),
-                    "permanent_failure": bool(gradle_failure.get("permanent")),
-                    "gradle_error_summary": gradle_failure.get("summary"),
-                    "gradle_error_detail": gradle_failure.get("detail"),
-                },
-            )
-        apk_candidates = sorted((project_dir / "app" / "build" / "outputs" / "apk" / "debug").glob("*.apk"), key=lambda path: path.stat().st_mtime, reverse=True)
-        if not apk_candidates:
-            preserve_workdir = keep_failed_workdir
-            return _apk_build_failure_result(
-                summary="build terminou mas APK não foi encontrado",
-                version_name=version_name,
-                version_code=version_code,
-                source_fingerprint=source_fingerprint,
-                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
-                notification_id=notification_id,
-                work_dir=work_dir,
-                gradle_log=gradle_log,
-                builder_environment=builder_environment,
-                native_environment=native_environment,
-            )
-        apk_path = apk_candidates[0]
-        identity = inspect_apk_identity(apk_path)
-        assert_expected_apk_identity(
-            identity,
-            expected_package="dev.core.worker",
-            expected_version_name=version_name,
-            expected_version_code=version_code,
-        )
-        version_name = str(identity["versionName"])
-        version_code = int(identity["versionCode"])
-        raw = apk_path.read_bytes()
-        apk_sha = hashlib.sha256(raw).hexdigest()
-        filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or f"CoreWorker-v{version_name}-debug.apk")).strip("-._")
-        if not filename.lower().endswith(".apk"):
-            filename += ".apk"
-        artifact_dir = build_root / "artifacts"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        artifact_path = artifact_dir / filename
-        if artifact_path.exists():
-            artifact_path = artifact_dir / f"{Path(filename).stem}-{notification_id[:16] or int(started)}.apk"
-        try:
-            shutil.copy2(apk_path, artifact_path)
-        except Exception:
-            artifact_path.write_bytes(raw)
-        artifact_meta = {
-            "filename": filename,
-            "versionName": version_name,
-            "versionCode": version_code,
-            "sha256": apk_sha,
-            "bytes": len(raw),
-            "artifact_path": str(artifact_path),
-            "sourceFingerprint": source_fingerprint,
-            "sourceSha256": str(download.get("sha256") or expected_source_sha or ""),
-            "notificationId": notification_id,
-            "apkSigningMode": str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
-            "apkSigningKeystoreSha256": str(apk_signing.get("keystore_sha256") or ""),
-            "gradle_log_path": str(gradle_log),
-            "gradle_log_exists": bool(gradle_log.exists()),
-            "gradle_log_bytes": gradle_log.stat().st_size if gradle_log.exists() else 0,
-            "build_successful": True,
-            "build_result": "success",
-            "phoneWorkerVersion": PHONE_WORKER_VERSION,
-            "phoneWorkerSourceHash": _phone_worker_source_hash(),
-            "created_at": time.time(),
-        }
-        # A etapa pós-Gradle é tão importante quanto o build: se o APK foi
-        # gerado, ele precisa virar artifact persistente antes de qualquer publish.
-        # Não esconda falhas aqui, senão o painel mostra build pendente mesmo com
-        # `BUILD SUCCESSFUL` no log.
-        if not artifact_path.is_file():
-            artifact_path.write_bytes(raw)
-        persisted_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-        if persisted_sha != apk_sha:
-            artifact_path.write_bytes(raw)
-            persisted_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-        if persisted_sha != apk_sha:
-            preserve_workdir = True
-            return _apk_build_failure_result(
-                summary="build terminou mas falhou persistindo artifact APK",
-                version_name=version_name,
-                version_code=version_code,
-                source_fingerprint=source_fingerprint,
-                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
-                notification_id=notification_id,
-                work_dir=work_dir,
-                gradle_log=gradle_log,
-                builder_environment=builder_environment,
-                native_environment=native_environment,
-                extra={"artifact_path": str(artifact_path), "expected_sha256": apk_sha, "actual_sha256": persisted_sha},
-            )
-        _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
-        _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
-        artifact_cleanup = _cleanup_old_apk_build_artifacts(build_root)
-        result: dict[str, Any] = {
-            "ok": True,
-            "build_gradle_ok": True,
-            "artifact_found": True,
-            "artifact_path": str(artifact_path),
-            "summary": f"APK {version_name} compilado pelo worker",
-            "versionName": version_name,
-            "versionCode": version_code,
-            "sourceFingerprint": source_fingerprint,
-            "sourceSha256": str(download.get("sha256") or expected_source_sha or ""),
-            "notificationId": notification_id,
-            "gradle_log_path": str(gradle_log),
-            "apk": {
-                "filename": filename,
-                "bytes": len(raw),
-                "sha256": apk_sha,
-                "artifact_path": str(artifact_path),
-                "signed": True,
-                "signed_by": str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
-                "signing_keystore_sha256": str(apk_signing.get("keystore_sha256") or "")[:12],
-            },
-            "source": {"url": source_url, "bytes": download.get("bytes"), "sha256": download.get("sha256"), "files": members},
-            "builder_environment": builder_environment,
-            "artifact_meta": artifact_meta,
-            "artifact_cleanup": artifact_cleanup,
-            "duration_seconds": round(time.time() - started, 3),
-        }
-        if bool(payload.get("publish", True)):
-            publish_url = str(payload.get("publish_url") or "").strip()
-            base_url, _token, _worker_id = _core_worker_auth_parts()
-            try:
-                publish = _upload_core_worker_apk(
-                    artifact_path,
-                    filename=filename,
-                    version_name=version_name,
-                    version_code=version_code,
-                    sha256=apk_sha,
-                    publish_url=publish_url or f"{base_url}/core-worker/app/publish",
-                    changelog=list(payload.get("changelog") or ["APK compilado por worker builder"]),
-                    source_sha256=str(download.get("sha256") or expected_source_sha or ""),
-                    source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or download.get("sha256") or expected_source_sha or ""),
-                    notification_id=notification_id,
-                    apk_signing_mode=str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
-                    apk_signing_keystore_sha256=str(apk_signing.get("keystore_sha256") or ""),
-                )
-            except Exception as exc:
-                publish = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
-            result["publish"] = publish
-            result["publish_ok"] = bool(publish.get("ok", False))
-            if not bool(publish.get("ok", False)):
-                result["ok"] = True
-                result["summary"] = "APK compilado; publicação na VPS ficou pendente"
-                result["publish_pending"] = True
-                if publish.get("error"):
-                    result["publish_error"] = str(publish.get("error"))[:240]
-        else:
-            result["publish_ok"] = False
-        return result
-    finally:
-        with contextlib.suppress(Exception):
-            active_marker.unlink()
-        _release_apk_build_file_lock(lock_handle)
-        _APK_BUILD_THREAD_LOCK.release()
-        _HEAVY_RESOURCE_LOCK.release()
-        if not keep_workdir and not preserve_workdir:
-            with contextlib.suppress(Exception):
-                shutil.rmtree(work_dir)
-
 _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker.py": ("worker", "phone_worker.py", 0o755),
     "phone_worker_runtime/__init__.py": ("worker", "phone_worker_runtime/__init__.py", 0o644),
@@ -9916,7 +7197,6 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker_runtime/tts_android.py": ("worker", "phone_worker_runtime/tts_android.py", 0o644),
     "phone_worker_runtime/tts_providers.py": ("worker", "phone_worker_runtime/tts_providers.py", 0o644),
     "phone_worker_runtime/pcm_io.py": ("worker", "phone_worker_runtime/pcm_io.py", 0o644),
-    "apk_identity.py": ("worker", "apk_identity.py", 0o644),
     "tts_transport.py": ("worker", "tts_transport.py", 0o644),
     "phone_worker_bootstrap.py": ("worker", "phone_worker_bootstrap.py", 0o755),
     "cogs/__init__.py": ("worker", "cogs/__init__.py", 0o644),
@@ -9960,7 +7240,6 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "watch-phone-worker.sh": ("worker", "watch-phone-worker.sh", 0o755),
     "pair-phone-worker.sh": ("worker", "pair-phone-worker.sh", 0o755),
     "repair-phone-worker.sh": ("worker", "repair-phone-worker.sh", 0o755),
-    "accept-core-worker-on-device.sh": ("worker", "accept-core-worker-on-device.sh", 0o755),
     "bootstrap-phone-worker.sh": ("worker", "bootstrap-phone-worker.sh", 0o755),
     "install.sh": ("worker", "install.sh", 0o755),
     "README.md": ("worker", "README.md", 0o644),
@@ -9980,7 +7259,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
 }
 # These installation-only files remain accepted for manual/legacy updates,
 # but are not part of the immutable runtime release or its source hash.
-_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"repair-phone-worker.sh", "install.sh", "accept-core-worker-on-device.sh", "bootstrap-phone-worker.sh", "README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example", "scripts/validate-teto-assets.py", "teto_renderer/OPENUTAU_LICENSE.txt"})
+_PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"repair-phone-worker.sh", "install.sh", "bootstrap-phone-worker.sh", "README.md", "phone-worker.env.example", "cogs/musica/runtime_telefone/termux/musica.env.example", "scripts/validate-teto-assets.py", "teto_renderer/OPENUTAU_LICENSE.txt"})
 _PHONE_WORKER_SOURCE_HASH_CACHE: dict[str, Any] = {"signature": None, "value": ""}
 _PHONE_WORKER_SOURCE_HASH_LOCK = threading.Lock()
 
@@ -10381,7 +7660,6 @@ def _launch_deferred_phone_worker_action(result: dict[str, Any]) -> None:
         print(f"[core-worker-service] falha ao agendar {action}: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
 
 
-
 def _assist_readiness_snapshot(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
     roles, capabilities = _current_core_worker_roles_and_capabilities()
@@ -10417,8 +7695,6 @@ def _assist_readiness_snapshot(payload: dict[str, Any] | None = None) -> dict[st
         recommended.append("media_probe")
     if "ffmpeg" in caps or "tts-convert" in caps:
         recommended.append("audio_convert")
-    if "apk-builder" in caps and heavy_ok:
-        recommended.append("apk_build_debug")
     return {
         "ok": True,
         "summary": "worker auxiliar pronto" if heavy_ok else "worker auxiliar só para tarefas leves",
@@ -10527,12 +7803,6 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
         elif kind == "worker_update":
             result = _apply_worker_update(payload)
             result.setdefault("summary", "arquivos do phone-worker atualizados")
-        elif kind == "apk_build_debug":
-            result = _apply_apk_build_debug(payload)
-            result.setdefault("summary", "APK compilado/publicado pelo worker")
-        elif kind == "apk_publish_last":
-            result = _apply_apk_publish_last(payload)
-            result.setdefault("summary", "último APK republicado pelo worker")
         elif kind == "boot_status":
             result = _termux_boot_status_snapshot()
             result["shell_autostart"] = _termux_shell_autostart_status_snapshot()
@@ -10809,23 +8079,10 @@ def main() -> int:
 
     # Limpeza de housekeeping é feita antes de receber novos jobs. Mantemos
     # apenas os APKs recentes e nunca removemos o artifact atual durante build.
-    try:
-        build_root = Path(os.getenv("PHONE_WORKER_APK_BUILD_DIR") or (Path.home() / "core-worker-apk-builds")).expanduser()
-        artifact_cleanup = _cleanup_old_apk_build_artifacts(build_root)
-        _cleanup_old_apk_build_logs(build_root)
-        if int(artifact_cleanup.get("removed") or 0) > 0:
-            print(
-                f"[core-worker-storage] limpeza segura removeu={artifact_cleanup.get('removed')} bytes={artifact_cleanup.get('removedBytes')}",
-                flush=True,
-            )
-    except Exception as exc:
-        print(f"[core-worker-storage] limpeza ignorada: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
-
     # O control plane é exclusivamente de saída e precisa sobreviver mesmo sem
     # nenhuma porta HTTP local disponível. Inicie-o antes de tentar bind.
     _write_runtime_status(control_plane_alive=True, heartbeat_ok=None, reason="control_plane_starting")
     _start_core_worker_heartbeat(host=args.host, port=args.port)
-    _start_apk_child_auto_enrollment()
     _start_core_worker_jobs(
         host=args.host,
         port=args.port,

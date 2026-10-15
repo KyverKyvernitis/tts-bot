@@ -77,8 +77,6 @@ mkdir -p "$WORKER_DIR"
 cp "$SRC_DIR/phone_worker.py" "$WORKER_DIR/phone_worker.py"
 cp "$SRC_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/phone_worker_bootstrap.py"
 cp "$SRC_DIR/repair-phone-worker.sh" "$WORKER_DIR/repair-phone-worker.sh"
-cp "$SRC_DIR/accept-core-worker-on-device.sh" "$WORKER_DIR/accept-core-worker-on-device.sh"
-cp "$SRC_DIR/apk_identity.py" "$WORKER_DIR/apk_identity.py"
 cp "$SRC_DIR/tts_transport.py" "$WORKER_DIR/tts_transport.py"
 MUSIC_PROJECT_ROOT=""
 if [[ -d "$SRC_DIR/cogs/musica/runtime_telefone" ]]; then
@@ -107,7 +105,7 @@ cp "$SRC_DIR/scripts/validate-teto-assets.py" "$WORKER_DIR/scripts/validate-teto
 chmod +x "$WORKER_DIR/scripts/validate-teto-assets.py" 2>/dev/null || true
 # Compatibilidade com atalhos antigos em ~/ como wrappers pequenos, nunca cópia
 # completa: isso evita script antigo fora de ~/phone-worker disparar pip/clang.
-chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/repair-phone-worker.sh" "$WORKER_DIR/accept-core-worker-on-device.sh" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/pair-phone-worker.sh" "$WORKER_DIR/bootstrap-phone-worker.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true
+chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/repair-phone-worker.sh" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/pair-phone-worker.sh" "$WORKER_DIR/bootstrap-phone-worker.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true
 chmod +x "$WORKER_DIR/cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh" "$WORKER_DIR/cogs/musica/runtime_telefone/termux/integracao-worker.sh" 2>/dev/null || true
 # Remove entrypoints musicais legados; a fonte autoritativa agora fica em cogs/musica.
 rm -f "$WORKER_DIR/music_agent.py" "$WORKER_DIR/start-phone-music-agent.sh" "$HOME/start-phone-music-agent.sh" 2>/dev/null || true

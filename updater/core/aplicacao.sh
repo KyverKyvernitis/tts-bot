@@ -406,7 +406,7 @@ deploy_phone_worker_sync() {
 run_core_worker_post_update_automation() {
   if (( CORE_WORKER_AUTOMATION_REQUIRED == 0 )); then
     CORE_WORKER_AGENT_UPDATE_STATUS="sem mudanças"
-    CORE_WORKER_APK_BUILD_STATUS="sem mudanças"
+    CORE_WORKER_APK_BUILD_STATUS=""
     CORE_WORKER_NOTIFY_STATUS="sem mudanças"
     return 0
   fi
@@ -416,7 +416,7 @@ run_core_worker_post_update_automation() {
   py="$(current_bot_python_bin)"
   if [[ -z "$py" || ! -f "$REPO_DIR/scripts/core-worker-automation.py" ]]; then
     CORE_WORKER_AGENT_UPDATE_STATUS="não executado: core-worker-automation ausente"
-    CORE_WORKER_APK_BUILD_STATUS="não executado"
+    CORE_WORKER_APK_BUILD_STATUS=""
     CORE_WORKER_NOTIFY_STATUS="não executado"
     return 0
   fi
@@ -435,7 +435,6 @@ try:
 except Exception:
     data = {}
 agent = data.get('agent_update') or {}
-apk = data.get('apk_build') or {}
 def brief_agent(obj):
     if not obj:
         return 'sem mudanças'
@@ -444,34 +443,23 @@ def brief_agent(obj):
     errors = len(obj.get('errors') or [])
     version = obj.get('target_version') or '?'
     return f'agent {version}: {queued} job(s), {skipped} skip, {errors} erro(s)'
-def brief_apk(obj):
-    if not obj:
-        return 'sem mudanças'
-    if obj.get('ok'):
-        job = obj.get('job') or {}
-        if job.get('job_id'):
-            return f"APK {obj.get('versionName') or '?'}: build job {job.get('job_id')}"
-        if obj.get('already_published'):
-            return f"APK {obj.get('versionName') or '?'}: já publicado para esta fonte"
-        return f"APK {obj.get('versionName') or '?'}: {obj.get('message') or obj.get('phase') or 'pendente'}"
-    return f"APK {obj.get('versionName') or '?'}: pendente ({obj.get('message') or obj.get('error') or 'sem builder'})"
 print(brief_agent(agent))
-print(brief_apk(apk))
-print('apps verão banner/notify quando latest.json novo for publicado' if apk else 'sem notificação nova')
+print("")
+print("")
 PYJSON
 )"
   CORE_WORKER_AGENT_UPDATE_STATUS="$(printf '%s\n' "$parsed" | sed -n '1p')"
   CORE_WORKER_APK_BUILD_STATUS="$(printf '%s\n' "$parsed" | sed -n '2p')"
   CORE_WORKER_NOTIFY_STATUS="$(printf '%s\n' "$parsed" | sed -n '3p')"
   [[ -n "${CORE_WORKER_AGENT_UPDATE_STATUS//[[:space:]]/}" ]] || CORE_WORKER_AGENT_UPDATE_STATUS="executado; sem resumo"
-  [[ -n "${CORE_WORKER_APK_BUILD_STATUS//[[:space:]]/}" ]] || CORE_WORKER_APK_BUILD_STATUS="executado; sem resumo"
+  [[ -n "${CORE_WORKER_APK_BUILD_STATUS//[[:space:]]/}" ]] || CORE_WORKER_APK_BUILD_STATUS=""
   [[ -n "${CORE_WORKER_NOTIFY_STATUS//[[:space:]]/}" ]] || CORE_WORKER_NOTIFY_STATUS="executado"
   if (( automation_rc != 0 )); then
     # Telefone offline/pending é um estado normal e o orquestrador retorna rc=0.
     # rc != 0 significa falha interna real: preserve o deploy do bot, mas não
     # pinte a automação como sucesso/degradação genérica.
     CORE_WORKER_AGENT_UPDATE_STATUS="FALHA INTERNA na automação (rc=$automation_rc) · ${CORE_WORKER_AGENT_UPDATE_STATUS}"
-    CORE_WORKER_APK_BUILD_STATUS="FALHA INTERNA na automação (rc=$automation_rc) · ${CORE_WORKER_APK_BUILD_STATUS}"
+    
     CORE_WORKER_NOTIFY_STATUS="falha interna persistida; deploy principal concluído sem rollback por worker offline"
     logger -t "$LOG_TAG" "Core Worker automation FALHOU internamente (rc=$automation_rc); deploy principal preservado"
   fi
