@@ -1148,7 +1148,7 @@ def test_phone_worker_music_health_treats_tts_providers_as_optional():
     source = (ROOT / "cogs/musica/runtime_telefone/ponte_worker/telemetria.py").read_text(encoding="utf-8")
     block = source.split("def music_voice_dependency_specs()", 1)[1].split("\n\ndef ", 1)[0]
     assert '"gTTS": {"module": "gtts", "pip": "gTTS==2.5.4", "optional": True}' in block
-    assert '"edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.2.8", "optional": True}' in block
+    assert '"edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.3.1", "optional": True}' in block
 
 
 def test_music_agent_safe_installer_uses_lightweight_ytdlp_package():

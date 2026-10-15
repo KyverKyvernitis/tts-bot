@@ -430,33 +430,126 @@ def test_network_failure_audit_rate_limits_repeated_same_kind(control, monkeypat
     assert "source=jobs" in lines[0] and "kind=timeout" in lines[0]
 
 
-def test_core_worker_http_posts_are_serialized(monkeypatch):
+def test_slow_optional_telemetry_cannot_block_payload(control, monkeypatch):
+    release = threading.Event()
+    calls = []
+
+    def slow_probe(name):
+        def probe():
+            calls.append(name)
+            assert release.wait(2)
+            return {"ok": True}
+        return probe
+
+    for name in ("system", "battery", "network"):
+        monkeypatch.setattr(control, f"_{'system_status' if name == 'system' else name + '_snapshot'}", slow_probe(name))
+    started = time.monotonic()
+    try:
+        payload = control._core_worker_payload(host="127.0.0.1", port=8766)
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.5
+        assert set(calls) == {"system", "battery", "network"}
+        assert payload["health"]["control_plane_alive"]
+        assert payload["battery"]["available"] is False
+        assert payload["network"]["type"] == "unknown"
+    finally:
+        release.set()
+        for item in list(control._CONTROL_PLANE_SNAPSHOT_CACHE.values()):
+            event = item.get("refresh_event")
+            if event:
+                assert event.wait(1)
+
+
+def test_stale_telemetry_returns_immediately_with_one_collector(control):
+    release = threading.Event()
+    started = threading.Event()
+    calls = []
+    control._CONTROL_PLANE_SNAPSHOT_CACHE["network"] = {"at": 0.0, "data": {"type": "wifi"}}
+
+    def refresh():
+        calls.append(True)
+        started.set()
+        assert release.wait(2)
+        return {"type": "mobile"}
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(control._cached_control_plane_snapshot, "network", refresh, {}, ttl=1) for _ in range(8)]
+            assert [future.result(timeout=0.5) for future in futures] == [{"type": "wifi"}] * 8
+        assert started.wait(1)
+        assert calls == [True]
+    finally:
+        release.set()
+        event = control._CONTROL_PLANE_SNAPSHOT_CACHE["network"].get("refresh_event")
+        if event:
+            assert event.wait(1)
+    assert control._cached_control_plane_snapshot("network", refresh, {}, ttl=10) == {"type": "mobile"}
+
+
+def test_telemetry_ttl_starts_after_probe_finishes(control, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(control.time, "monotonic", lambda: clock[0])
+    calls = []
+
+    def probe():
+        calls.append(True)
+        clock[0] = 120.0
+        return {"ok": True}
+
+    assert control._cached_control_plane_snapshot("system", probe, {}, ttl=10) == {"ok": True}
+    assert control._CONTROL_PLANE_SNAPSHOT_CACHE["system"]["at"] == 120.0
+    clock[0] = 125.0
+    assert control._cached_control_plane_snapshot("system", probe, {}, ttl=10) == {"ok": True}
+    assert calls == [True]
+
+
+def test_invalidated_cache_cannot_publish_obsolete_inflight_snapshot(control):
+    release = threading.Event()
+    event = None
+
+    def obsolete_probe():
+        assert release.wait(2)
+        return {"engine": "missing"}
+
+    try:
+        assert control._cached_control_plane_snapshot("system", obsolete_probe, {}, ttl=10) == {}
+        event = control._CONTROL_PLANE_SNAPSHOT_CACHE["system"]["refresh_event"]
+        with control._CONTROL_PLANE_SNAPSHOT_CACHE_LOCK:
+            control._CONTROL_PLANE_SNAPSHOT_CACHE.clear()
+        assert control._cached_control_plane_snapshot("system", lambda: {"engine": "ready"}, {}, ttl=10) == {"engine": "ready"}
+    finally:
+        release.set()
+        if event:
+            assert event.wait(1)
+    assert control._CONTROL_PLANE_SNAPSHOT_CACHE["system"]["data"] == {"engine": "ready"}
+
+
+def test_stalled_job_poll_does_not_consume_heartbeat_timeout(monkeypatch):
     module = load_worker()
     monkeypatch.setattr(module, "_core_worker_auth_parts", lambda: ("http://vps.invalid", "token", "worker"))
-    active = 0
-    peak = 0
-    guard = threading.Lock()
+    poll_started = threading.Event()
+    release_poll = threading.Event()
+    requests = []
 
     def fake_post(url, payload, *, token="", timeout=8.0):
-        nonlocal active, peak
-        with guard:
-            active += 1
-            peak = max(peak, active)
-        time.sleep(0.04)
-        with guard:
-            active -= 1
+        requests.append((url, token, timeout))
+        if url.endswith("/jobs/poll"):
+            poll_started.set()
+            assert release_poll.wait(2)
         return 200, {"ok": True}
 
     monkeypatch.setattr(module, "_post_json_url", fake_post)
-    threads = [
-        threading.Thread(target=module._post_core_worker_json, args=(f"/t/{index}", {"i": index}))
-        for index in range(3)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=1.0)
-    assert peak == 1
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        poll = pool.submit(module._post_core_worker_json, "/core-worker/jobs/poll", {}, timeout=5.0)
+        try:
+            assert poll_started.wait(1)
+            heartbeat = pool.submit(module._post_core_worker_json, "/core-worker/heartbeat", {}, timeout=3.0)
+            assert heartbeat.result(timeout=0.5) == (200, {"ok": True})
+            assert not poll.done()
+            assert requests[-1] == ("http://vps.invalid/core-worker/heartbeat", "token", 3.0)
+        finally:
+            release_poll.set()
+        assert poll.result(timeout=1) == (200, {"ok": True})
 
 
 def test_watchdog_quiet_probe_suppresses_duplicate_sshd_start_logs():
@@ -467,7 +560,7 @@ def test_watchdog_quiet_probe_suppresses_duplicate_sshd_start_logs():
     assert 'if ! truthy "${PHONE_WORKER_QUIET_HEALTHY:-false}"; then' in start
 
 
-def test_job_post_rechecks_network_backoff_after_http_lock(monkeypatch):
+def test_job_post_respects_network_backoff_while_heartbeat_can_probe(monkeypatch):
     module = load_worker()
     monkeypatch.setattr(module, "_core_worker_auth_parts", lambda: ("http://vps.invalid", "token", "worker"))
     monkeypatch.setattr(module, "_core_worker_network_retry_delay", lambda: 12.5)
@@ -602,6 +695,36 @@ def test_http_response_clears_existing_network_breaker(control):
     assert snapshot.get("last_error_kind", "") == ""
     assert snapshot.get("failure_streak", 0) == 0
     assert "backoff_seconds" not in snapshot
+
+
+def test_transport_audit_preserves_newer_concurrent_failure(control):
+    control._remember_core_worker_network_ok()
+    control._remember_core_worker_network_error(TimeoutError("newer concurrent timeout"))
+    before = dict(control._CORE_WORKER_NETWORK_STATE)
+
+    control._audit_core_worker_network_success("heartbeat", elapsed_ms=25.0, transport_recorded=True)
+
+    assert control._CORE_WORKER_NETWORK_STATE == before
+    assert control._core_worker_network_retry_delay() > 0
+
+
+def test_heartbeat_audit_does_not_reset_failure_after_transport_response(control, monkeypatch):
+    configure(monkeypatch)
+
+    def respond_then_fail_concurrently(*args, **kwargs):
+        control._remember_core_worker_network_ok()
+        control._remember_core_worker_network_error(TimeoutError("concurrent poll timed out"))
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(control, "_core_worker_payload", lambda **kwargs: {"worker_id": "worker"})
+    monkeypatch.setattr(control, "_post_core_worker_json", respond_then_fail_concurrently)
+    monkeypatch.setattr(control, "_write_runtime_status", lambda **kwargs: None)
+    monkeypatch.setattr(control, "_flush_pending_core_worker_job_results", lambda **kwargs: 0)
+
+    assert control._send_core_worker_heartbeat_once(host="127.0.0.1", port=8766)
+    assert control._CORE_WORKER_NETWORK_STATE["last_error_kind"] == "timeout"
+    assert control._CORE_WORKER_NETWORK_STATE["failure_streak"] == 1
+    assert control._core_worker_network_retry_delay() > 0
 
 
 def test_job_result_network_exception_is_returned_for_durable_retry(control, monkeypatch):

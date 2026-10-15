@@ -103,7 +103,6 @@ _CORE_WORKER_NETWORK_STATE: dict[str, Any] = {
     "failure_streak": 0, "backoff_until": 0.0,
 }
 _CORE_WORKER_NETWORK_LOCK = threading.RLock()
-_CORE_WORKER_HTTP_LOCK = threading.Lock()
 _CORE_WORKER_HTTP_STATE: dict[str, Any] = {
     "last_ok_at": 0.0, "last_error_at": 0.0, "last_status": 0,
     "last_source": "", "last_error": "", "failure_streak": 0,
@@ -1042,11 +1041,14 @@ def _audit_core_worker_network_failure(source: str, exc: BaseException | str, *,
     )
 
 
-def _audit_core_worker_network_success(source: str, *, elapsed_ms: float = 0.0) -> None:
+def _audit_core_worker_network_success(source: str, *, elapsed_ms: float = 0.0, transport_recorded: bool = False) -> None:
     # Uma resposta HTTP (inclusive 4xx/5xx) prova que a rota até a VPS está
     # funcional. Limpe de verdade o breaker; antes este helper só limpava a
     # supressão de logs e deixava jobs bloqueados por um incidente já recuperado.
-    _remember_core_worker_network_ok()
+    # HTTP helpers record the response before returning. Do not record it twice:
+    # another concurrent request may have failed between transport and audit.
+    if not transport_recorded:
+        _remember_core_worker_network_ok()
     with _CORE_WORKER_NETWORK_LOCK:
         item = _CORE_WORKER_NETWORK_AUDIT.get(source)
         if not item or not item.get("kind"):
@@ -1331,33 +1333,17 @@ def _post_core_worker_json(
     base_url, token, _worker_id = _core_worker_auth_parts()
     if not base_url or not token:
         return 0, {"ok": False, "error": "Core Worker não configurado"}
-    wait_started = time.perf_counter()
-    with _CORE_WORKER_HTTP_LOCK:
-        wait_ms = (time.perf_counter() - wait_started) * 1000.0
-        if wait_ms >= 500.0:
-            now = time.time()
-            interval = max(30.0, min(600.0, _env_float("CORE_WORKER_NETWORK_ERROR_LOG_INTERVAL_SECONDS", 120.0)))
-            with _CORE_WORKER_NETWORK_LOCK:
-                item = _CORE_WORKER_NETWORK_AUDIT.setdefault("serialized_http", {"logged_at": 0.0, "suppressed": 0})
-                if now - float(item.get("logged_at") or 0.0) >= interval:
-                    suppressed = int(item.get("suppressed") or 0)
-                    item.update({"logged_at": now, "suppressed": 0})
-                    suffix = f" suppressed={suppressed}" if suppressed else ""
-                    print(
-                        f"[core-worker-network] request_serialized path={path!r} wait_ms={round(wait_ms, 1)}{suffix}",
-                        flush=True,
-                    )
-                else:
-                    item["suppressed"] = int(item.get("suppressed") or 0) + 1
-        if respect_network_backoff:
-            retry_delay = _core_worker_network_retry_delay()
-            if retry_delay > 0:
-                return 0, {
-                    "ok": False,
-                    "error": "network_backoff",
-                    "retry_after_seconds": round(retry_delay, 3),
-                }
-        return _post_json_url(f"{base_url}{path}", payload, token=token, timeout=timeout)
+    if respect_network_backoff:
+        retry_delay = _core_worker_network_retry_delay()
+        if retry_delay > 0:
+            return 0, {
+                "ok": False,
+                "error": "network_backoff",
+                "retry_after_seconds": round(retry_delay, 3),
+            }
+    # Each urllib call owns its connection. A stalled poll/result must not hold
+    # heartbeat behind a process-wide lock for another full socket timeout.
+    return _post_json_url(f"{base_url}{path}", payload, token=token, timeout=timeout)
 
 
 def _core_job_runtime_snapshot() -> dict[str, Any]:
@@ -1433,7 +1419,7 @@ def _post_core_worker_job_result_payload_status(payload: dict[str, Any], *, time
     if code == 0 and str(data.get("error") or "") == "network_backoff":
         return False, 0, data
     if code:
-        _audit_core_worker_network_success("job_result", elapsed_ms=elapsed_ms)
+        _audit_core_worker_network_success("job_result", elapsed_ms=elapsed_ms, transport_recorded=True)
     ok = bool(200 <= code < 300 and data.get("ok", True))
     if ok:
         _remember_core_worker_http_success("job_result")
@@ -1635,6 +1621,12 @@ def _control_plane_snapshot(name: str, callback, default: dict[str, Any]) -> dic
 
 
 def _cached_control_plane_snapshot(name: str, callback, default: dict[str, Any], *, ttl: float) -> dict[str, Any]:
+    """Refresh optional probes once in the background; serve the last snapshot.
+
+    Termux API, boot inventories and dependency/agent checks may take seconds.
+    None of them should delay heartbeat/jobs or accumulate parallel collectors.
+    A cold cache allows 50 ms for fast probes before using the recovery default.
+    """
     now = time.monotonic()
     ttl = max(0.0, float(ttl or 0.0))
     with _CONTROL_PLANE_SNAPSHOT_CACHE_LOCK:
@@ -1643,10 +1635,39 @@ def _cached_control_plane_snapshot(name: str, callback, default: dict[str, Any],
             data = cached.get("data")
             if isinstance(data, dict):
                 return dict(data)
-    data = _control_plane_snapshot(name, callback, default)
+        if cached is None:
+            cached = {"at": 0.0, "data": None}
+            _CONTROL_PLANE_SNAPSHOT_CACHE[name] = cached
+        event = cached.get("refresh_event")
+        start_refresh = event is None
+        if start_refresh:
+            event = threading.Event()
+            cached["refresh_event"] = event
+        previous = cached.get("data")
+
+    if start_refresh:
+        def refresh() -> None:
+            try:
+                data = _control_plane_snapshot(name, callback, default)
+                with _CONTROL_PLANE_SNAPSHOT_CACHE_LOCK:
+                    # An installer may invalidate the cache while a probe runs.
+                    # Do not republish that obsolete dependency snapshot.
+                    if _CONTROL_PLANE_SNAPSHOT_CACHE.get(name) is cached:
+                        cached.update({"at": time.monotonic(), "data": dict(data)})
+            finally:
+                with _CONTROL_PLANE_SNAPSHOT_CACHE_LOCK:
+                    cached.pop("refresh_event", None)
+                event.set()
+
+        threading.Thread(target=refresh, name=f"control-plane-{name}", daemon=True).start()
+
+    if isinstance(previous, dict):
+        return dict(previous)
+    event.wait(0.05)
     with _CONTROL_PLANE_SNAPSHOT_CACHE_LOCK:
-        _CONTROL_PLANE_SNAPSHOT_CACHE[name] = {"at": now, "data": dict(data)}
-    return data
+        current = _CONTROL_PLANE_SNAPSHOT_CACHE.get(name)
+        data = current.get("data") if current is cached else None
+        return dict(data) if isinstance(data, dict) else dict(default)
 
 
 def _phone_worker_control_plane_module() -> Any:
@@ -1856,7 +1877,7 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
         request_ms = (time.perf_counter() - request_started) * 1000.0
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
         if 200 <= status < 300 and data.get("ok", True):
-            _audit_core_worker_network_success("heartbeat", elapsed_ms=request_ms)
+            _audit_core_worker_network_success("heartbeat", elapsed_ms=request_ms, transport_recorded=True)
             _remember_core_worker_http_success("heartbeat")
             _write_runtime_status(control_plane_alive=True, heartbeat_ok=True, reason="heartbeat_ok")
             if prepare_ms >= max(750.0, _env_float("CORE_WORKER_SLOW_PAYLOAD_LOG_MS", 1500.0)):
@@ -1867,7 +1888,7 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
         # O servidor respondeu: a rota de rede está saudável. HTTP 4xx/5xx é
         # falha de protocolo/autorização/servidor e não deve abrir o breaker de
         # Tailscale nem pausar jobs por até 60 s.
-        _audit_core_worker_network_success("heartbeat", elapsed_ms=request_ms)
+        _audit_core_worker_network_success("heartbeat", elapsed_ms=request_ms, transport_recorded=True)
         _audit_core_worker_http_failure(
             "heartbeat", status, data.get("error") or data, elapsed_ms=request_ms
         )
@@ -2471,6 +2492,99 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
     return result
 
 
+_EDGE_TTS_RUNTIME_VERSION = "7.3.1"
+_EDGE_TTS_RUNTIME_INSTALL_LOCK = threading.Lock()
+_EDGE_TTS_RUNTIME_INSTALL_RUNNING = False
+
+
+@contextlib.contextmanager
+def _edge_tts_runtime_install_lock():
+    # The supervisor, Music Agent launcher and this process share site-packages.
+    # flock is released by the kernel after a crash and needs no stale-PID cleanup.
+    import fcntl
+    directory = _dependency_install_state_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "edge-tts.install.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _invalidate_tts_dependency_caches() -> None:
+    # pip runs in another process; a failed import from before installation
+    # must be retried, and the next heartbeat must advertise the new engine.
+    importlib.invalidate_caches()
+    with _CONTROL_PLANE_SNAPSHOT_CACHE_LOCK:
+        _CONTROL_PLANE_SNAPSHOT_CACHE.clear()
+
+
+def _ensure_edge_tts_runtime_dependency() -> dict[str, Any]:
+    """Repair Edge in this interpreter without involving the Music Agent.
+
+    Edge is optional for music, but is required by the Phone Worker's R4
+    recovery path. Keep its install separate from optional/heavy music deps and
+    off the HTTP/heartbeat thread; do not borrow a test venv's site-packages.
+    """
+    global _EDGE_TTS_RUNTIME_INSTALL_RUNNING
+    if _current_core_worker_profile() != "turbo" or not _env_bool("PHONE_WORKER_TTS_AGENT_ENABLED", True):
+        return {"started": False, "reason": "tts_disabled"}
+    if _module_import_ok("edge_tts")[0]:
+        return {"started": False, "reason": "available"}
+    if (not _env_bool("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS", True)
+            or not _phone_worker_deps_mode_enabled() or _phone_worker_safe_mode_enabled()):
+        return {"started": False, "reason": "disabled"}
+    cooldown = max(60.0, float(_env_int("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS_COOLDOWN_SECONDS", 900)))
+    with _EDGE_TTS_RUNTIME_INSTALL_LOCK:
+        if _EDGE_TTS_RUNTIME_INSTALL_RUNNING:
+            return {"started": False, "reason": "already_running"}
+        allowed, reason, remaining = _dependency_attempt_allowed(
+            f"edge-tts-{_EDGE_TTS_RUNTIME_VERSION}-runtime", cooldown)
+        if not allowed:
+            return {"started": False, "reason": reason, "remaining_seconds": round(remaining, 1)}
+        _EDGE_TTS_RUNTIME_INSTALL_RUNNING = True
+
+    def install() -> None:
+        # A supervisor may have installed the same wheel after scheduling.
+        importlib.invalidate_caches()
+        if _module_import_ok("edge_tts")[0]:
+            _invalidate_tts_dependency_caches()
+            return
+        package = f"edge-tts=={_EDGE_TTS_RUNTIME_VERSION}"
+        command = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                   "--no-input", "--upgrade", "--prefer-binary", "--only-binary=:all:", package]
+        print(f"[phone-worker-edge] instalando {package} no Python do worker: {sys.executable}", flush=True)
+        result = subprocess.run(command, timeout=max(45, _env_int(
+            "PHONE_WORKER_AUTO_INSTALL_TTS_DEPS_TIMEOUT_SECONDS", 240)), check=False)
+        if result.returncode:
+            raise RuntimeError(f"pip encerrou com código {result.returncode}")
+        _invalidate_tts_dependency_caches()
+        ok, error = _module_import_ok("edge_tts")
+        if not ok:
+            raise RuntimeError(error)
+        print("[phone-worker-edge] Edge disponível no runtime; capacidade será anunciada no próximo heartbeat", flush=True)
+
+    def repair() -> None:
+        global _EDGE_TTS_RUNTIME_INSTALL_RUNNING
+        try:
+            with _edge_tts_runtime_install_lock():
+                install()
+        except Exception as exc:
+            print(f"[phone-worker-edge] reparo falhou: {type(exc).__name__}: {_short_text(exc, limit=160)}", flush=True)
+        finally:
+            with _EDGE_TTS_RUNTIME_INSTALL_LOCK:
+                _EDGE_TTS_RUNTIME_INSTALL_RUNNING = False
+
+    try:
+        threading.Thread(target=repair, name="edge-tts-runtime-repair", daemon=True).start()
+    except Exception as exc:
+        with _EDGE_TTS_RUNTIME_INSTALL_LOCK:
+            _EDGE_TTS_RUNTIME_INSTALL_RUNNING = False
+        return {"started": False, "reason": "thread_failed", "error": _short_text(exc, limit=120)}
+    return {"started": True, "package": f"edge-tts=={_EDGE_TTS_RUNTIME_VERSION}", "python": sys.executable}
+
+
 def _turbo_dependency_snapshot() -> dict[str, Any]:
     profile = _current_core_worker_profile()
     deps: dict[str, Any] = {
@@ -2497,11 +2611,11 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
     if config:
         with contextlib.suppress(Exception):
             deps["piper_config"] = Path(config).expanduser().exists() and Path(config).expanduser().stat().st_size > 0
-    try:
-        import edge_tts  # type: ignore  # noqa: F401
-        deps["edge_tts"] = True
-    except Exception as exc:
-        deps["edge_tts_error"] = _short_text(exc, limit=80)
+    edge_ready, edge_error = _module_import_ok("edge_tts")
+    deps["edge_tts"] = edge_ready
+    if not edge_ready:
+        deps["edge_tts_error"] = _short_text(edge_error, limit=80)
+        deps["edge_tts_repair"] = _ensure_edge_tts_runtime_dependency()
     try:
         import gtts  # type: ignore  # noqa: F401
         deps["gtts"] = True
@@ -2878,13 +2992,15 @@ def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
 
 def _module_import_ok(module_name: str) -> tuple[bool, str]:
     try:
-        importlib.import_module(module_name)
-        pins = {'edge_tts': ('edge-tts', '7.2.8'), 'gtts': ('gTTS', '2.5.4')}
+        pins = {'edge_tts': ('edge-tts', _EDGE_TTS_RUNTIME_VERSION), 'gtts': ('gTTS', '2.5.4')}
         if module_name in pins:
             from importlib.metadata import version
             package, required = pins[module_name]
             if version(package) != required:
                 return False, f'{package} precisa da versão {required}'
+        # Do not cache an old Edge module in this process before an async pip
+        # upgrade; import it only after the validated wheel is installed.
+        importlib.import_module(module_name)
         return True, ""
     except Exception as exc:
         return False, f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
@@ -3038,15 +3154,20 @@ def _start_tts_dependency_autoinstall(missing: list[str], checks: dict[str, dict
                 # Recheck inside the worker thread so a race does not reinstall an
                 # already-present package.
                 module = str(specs.get(name, {}).get("module") or "")
-                if module:
-                    ok, _ = _module_import_ok(module)
-                    if ok:
-                        continue
-                pip_cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--upgrade", "--prefer-binary"]
-                if bool(item.get("optional")) or not allow_source:
-                    pip_cmd.append("--only-binary=:all:")
-                pip_cmd.append(package)
-                subprocess.run(pip_cmd, timeout=timeout, check=False)
+                install_lock = _edge_tts_runtime_install_lock() if module == "edge_tts" else contextlib.nullcontext()
+                with install_lock:
+                    importlib.invalidate_caches()
+                    if module:
+                        ok, _ = _module_import_ok(module)
+                        if ok:
+                            continue
+                    pip_cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--upgrade", "--prefer-binary"]
+                    if bool(item.get("optional")) or not allow_source:
+                        pip_cmd.append("--only-binary=:all:")
+                    pip_cmd.append(package)
+                    result = subprocess.run(pip_cmd, timeout=timeout, check=False)
+                    if result.returncode == 0:
+                        _invalidate_tts_dependency_caches()
             if system_packages and shutil.which("pkg"):
                 env = dict(os.environ)
                 env.setdefault("DEBIAN_FRONTEND", "noninteractive")
@@ -7915,7 +8036,7 @@ def _poll_core_worker_job_once(*, host: str, port: int, max_body_bytes: int, max
         return False
     if code:
         # Qualquer resposta HTTP comprova conectividade, inclusive 4xx/5xx.
-        _audit_core_worker_network_success("jobs", elapsed_ms=request_ms)
+        _audit_core_worker_network_success("jobs", elapsed_ms=request_ms, transport_recorded=True)
     if not (200 <= code < 300):
         _audit_core_worker_http_failure("jobs", code, data.get("error") or data, elapsed_ms=request_ms)
         return False
@@ -8082,6 +8203,7 @@ def main() -> int:
     # O control plane é exclusivamente de saída e precisa sobreviver mesmo sem
     # nenhuma porta HTTP local disponível. Inicie-o antes de tentar bind.
     _write_runtime_status(control_plane_alive=True, heartbeat_ok=None, reason="control_plane_starting")
+    _ensure_edge_tts_runtime_dependency()
     _start_core_worker_heartbeat(host=args.host, port=args.port)
     _start_core_worker_jobs(
         host=args.host,

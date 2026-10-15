@@ -139,7 +139,7 @@ python_module_ok() {
   "$PYTHON_BIN" - "$module" <<'PYMODCHECK' >/dev/null 2>&1
 import importlib, importlib.metadata, sys
 importlib.import_module(sys.argv[1])
-pins = {"edge_tts": ("edge-tts", "7.2.8"), "gtts": ("gTTS", "2.5.4")}
+pins = {"edge_tts": ("edge-tts", "7.3.1"), "gtts": ("gTTS", "2.5.4")}
 if sys.argv[1] in pins:
     package, required = pins[sys.argv[1]]
     if importlib.metadata.version(package) != required:
@@ -187,6 +187,22 @@ safe_pip_install_module() {
     pip_args+=(--only-binary=:all:)
   fi
   local cmd=("$PYTHON_BIN" -m pip "${pip_args[@]}" "$package")
+  if [[ "$module" == "edge_tts" ]]; then
+    # Share the lock with the Phone Worker's repair of the same interpreter.
+    cmd=("$PYTHON_BIN" -c '
+import fcntl, importlib, importlib.metadata, os, subprocess, sys
+os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)
+with open(sys.argv[1], "a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        importlib.import_module("edge_tts")
+        ready = importlib.metadata.version("edge-tts") == "7.3.1"
+    except Exception:
+        ready = False
+    if not ready:
+        sys.exit(subprocess.call(sys.argv[2:]))
+' "${PHONE_WORKER_DEPS_STATE_DIR:-$WORKER_DIR/.dependency-install}/edge-tts.install.lock" "${cmd[@]}")
+  fi
   if command -v timeout >/dev/null 2>&1; then
     timeout "$timeout" "${cmd[@]}" >/dev/null 2>&1 || log "auto-install falhou/expirou para $label"
   else
@@ -207,7 +223,8 @@ cleanup_stale_heavy_dependency_builds() {
   local pattern='pyb/temp\.android|pip/_vendor|pyproject_hooks|build_wheel|python -m pip install|pip install|aarch64-linux-android-clang|clang\+\+'
   local round pid
   for round in 1 2 3; do
-    ps -ef 2>/dev/null | grep -Ei "$pattern" | grep -v grep | grep -Ev 'music_agent\.py|cogs\.musica\.runtime_telefone\.agente\.servidor' | awk '{print $2}' | while read -r pid; do
+    # Do not interrupt wheel-only repairs started by the live Phone Worker.
+    ps -ef 2>/dev/null | grep -Ei "$pattern" | grep -v grep | grep -Ev 'music_agent\.py|cogs\.musica\.runtime_telefone\.agente\.servidor' | grep -v -- '--only-binary=:all:' | awk '{print $2}' | while read -r pid; do
       case "$pid" in ''|*[!0-9]*) continue ;; esac
       [[ "$pid" == "$$" ]] && continue
       log "encerrando build pesado opcional preso; pid=$pid"
@@ -339,7 +356,7 @@ ensure_deps() {
   safe_pip_install_module "davey" "davey" "davey" light || missing=1
   safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light || missing=1
   safe_pip_install_module "gTTS" "gtts" "gTTS==2.5.4" light || true
-  safe_pip_install_module "edge-tts" "edge_tts" "edge-tts==7.2.8" light || true
+  safe_pip_install_module "edge-tts" "edge_tts" "edge-tts==7.3.1" light || true
   if "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1; then
 import aiohttp, discord, nacl, davey, yt_dlp  # noqa: F401
 PYDEPS

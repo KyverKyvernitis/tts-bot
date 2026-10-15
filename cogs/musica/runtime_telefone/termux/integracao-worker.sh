@@ -66,7 +66,7 @@ musica_ensure_agent_deps_if_needed() {
   safe_pip_install_module "PyNaCl" "nacl" "PyNaCl" light || true
   safe_pip_install_module "davey" "davey" "davey" light || true
   safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light || true
-  safe_pip_install_module "edge-tts" "edge_tts" "edge-tts==7.2.8" light || true
+  safe_pip_install_module "edge-tts" "edge_tts" "edge-tts==7.3.1" light || true
   safe_pip_install_module "gTTS" "gtts" "gTTS==2.5.4" light || true
   "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "dependências do Music Agent prontas" || log "Music Agent ainda possui dependências ausentes; será reportado no health"
 import aiohttp, discord, nacl, yt_dlp, davey, edge_tts, gtts  # noqa: F401

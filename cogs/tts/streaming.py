@@ -60,6 +60,16 @@ class SharedSynthesisMixin:
     def _acquire_shared_job(self, state, item, *, store_in_cache: bool) -> StreamJob:
         from . import audio as a
         key = self._cache_key(item)
+        if item.engine == 'edge' and getattr(item, '_edge_phone_recovery', False):
+            # A stalled VPS job can still have another consumer. Recovery must
+            # start a phone job instead of attaching to that same failed origin.
+            key += ':edge-phone'
+        elif item.engine == 'edge' and getattr(item, '_edge_vps_probe', False):
+            # A post-cooldown probe must contact the VPS itself, even if an old
+            # worker job with identical text is still available for replay.
+            key += f':edge-vps-probe:{id(item)}'
+        elif item.engine == 'edge' and getattr(item, '_edge_vps_recovery', False):
+            key += ':edge-vps'
         jobs = self._shared_synthesis_jobs()
         job = jobs.get(key)
         if job is None or job.stop.is_set() or job.buffer.closed:
@@ -77,6 +87,11 @@ class SharedSynthesisMixin:
             if not bool(getattr(item, '_tts_prefetch', False)):
                 job.foreground.set()
             job.task = asyncio.create_task(self._produce_shared_job(job))
+            if item.engine == 'edge' and getattr(item, '_edge_vps_probe', False) and not getattr(item, '_edge_phone_recovery', False):
+                def release_cancelled_probe(task):
+                    if task.cancelled():
+                        self._edge_rate_limit_policy().failed_other()
+                job.task.add_done_callback(release_cancelled_probe)
         job.references += 1
         job.store_in_cache = job.store_in_cache or store_in_cache
         if not bool(getattr(item, '_tts_prefetch', False)):
@@ -168,6 +183,7 @@ class SharedSynthesisMixin:
     async def _produce_shared_job(self, job: StreamJob) -> None:
         from . import audio as a
         forced_phone = bool(getattr(job.item, '_edge_phone_recovery', False))
+        forced_vps = bool(getattr(job.item, '_edge_vps_recovery', False) or getattr(job.item, '_edge_vps_probe', False))
         if forced_phone:
             semaphore = getattr(self, '_tts_edge_phone_stream_slots', None)
             if semaphore is None:
@@ -198,7 +214,7 @@ class SharedSynthesisMixin:
             # Protocol v2 is selected only when explicitly advertised. The
             # provider remains local when an older worker is connected.
             worker_stream = getattr(self, '_produce_worker_stream_job', None)
-            use_worker = callable(worker_stream) and (forced_phone or self._worker_stream_available_for(job.item))
+            use_worker = callable(worker_stream) and (forced_phone or not forced_vps and self._worker_stream_available_for(job.item))
             if use_worker:
                 try:
                     await worker_stream(job)
@@ -211,6 +227,7 @@ class SharedSynthesisMixin:
                     use_worker = False
             if not use_worker:
                 if engine == 'edge':
+                    job.item._edge_vps_attempted = True
                     voice = a.validate_voice(job.item.voice, getattr(self, 'edge_voice_names', set()))
                     communicate = a.edge_tts.Communicate(text=job.item.text, voice=voice,
                         rate=self._normalize_edge_rate(job.item.rate), pitch=self._normalize_edge_pitch(job.item.pitch),
@@ -314,6 +331,10 @@ class SharedSynthesisMixin:
             item._tts_audio_route = job.route
             return path, not os.path.abspath(path).startswith(os.path.abspath(self._tts_cache_directory()) + os.sep)
         finally:
+            if item.engine == 'edge':
+                for flag in ('_edge_worker_attempted', '_edge_vps_attempted'):
+                    if getattr(job.item, flag, False):
+                        setattr(item, flag, True)
             self._release_shared_job(job)
 
     def _tts_cache_directory(self) -> str:
@@ -392,6 +413,10 @@ class SharedSynthesisMixin:
                 max(0.0, (ready_at - max(slot_ready_at, first_byte_at)) * 1000.0))
             return handle
         except BaseException:
+            if item.engine == 'edge':
+                for flag in ('_edge_worker_attempted', '_edge_vps_attempted'):
+                    if getattr(job.item, flag, False):
+                        setattr(item, flag, True)
             if handle is not None:
                 await self._finalize_edge_stream(handle, cancel=True)
             else:
@@ -417,6 +442,8 @@ class SharedSynthesisMixin:
         metrics = self._get_metrics_store()
         metrics['tts_agent_synth_attempts'] = int(metrics.get('tts_agent_synth_attempts', 0)) + 1
         job.route = 'worker'
+        if job.item.engine == 'edge':
+            job.item._edge_worker_attempted = True
         try:
             async with session.post(f'{base}/tts-agent/synthesize.stream', headers=headers, json=payload, timeout=timeout) as response:
                 if response.status != 200:
@@ -426,7 +453,7 @@ class SharedSynthesisMixin:
                     raise RuntimeError(f'worker stream HTTP {response.status}: {detail!r}')
                 if response.headers.get('X-Core-Worker-Stream-Protocol') != '2':
                     raise RuntimeError('worker não confirmou protocolo progressivo')
-                engine = self._worker_header_value(response.headers, 'X-Core-Worker-Engine', job.item.engine)
+                engine = self._worker_header_value(response.headers, 'X-Core-Worker-Engine')
                 if engine != job.item.engine or self._worker_header_value(response.headers, 'X-Core-Worker-Audio-Format') != 'mp3':
                     raise RuntimeError('metadados incompatíveis no stream do worker')
                 job.actual_engine = engine
@@ -446,8 +473,9 @@ class SharedSynthesisMixin:
             raise
         except Exception as error:
             if job.item.engine == 'edge' and not getattr(job.item, '_edge_phone_recovery', False):
-                if a.re.search(r"(?<!\d)429(?!\d)", str(error)):
-                    self._edge_phone_policy().failed_429()
-            if not getattr(job.item, '_edge_phone_recovery', False):
+                self._record_edge_phone_failure(error)
+            if not getattr(job.item, '_edge_phone_recovery', False) and not (
+                job.item.engine == 'edge' and a.re.search(r"(?<!\d)429(?!\d)", str(error))
+            ):
                 self._mark_tts_agent_synth_failure(error)
             raise

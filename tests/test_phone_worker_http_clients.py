@@ -3,6 +3,8 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 
 import pytest
@@ -160,3 +162,50 @@ def test_core_client_uses_live_auth_and_skips_network_without_configuration(clie
         assert calls[-1].get_header("Authorization") == "Bearer " + token
         assert calls[-1].full_url == "https://vps.invalid/heartbeat"
         assert json.loads(calls[-1].data) == {"ok": True}
+
+
+def test_urllib_handler_keeps_concurrent_control_connections_independent(client, monkeypatch):
+    worker, events = client
+    started, release = threading.Event(), threading.Event()
+    connections = []
+
+    class HTTPReply(Reply):
+        code, reason = 202, "Accepted"
+
+        def info(self):
+            return {}
+
+    class Connection(worker.http.client.HTTPConnection):
+        def __init__(self, host, *, timeout, **kwargs):
+            super().__init__(host, timeout=timeout, **kwargs)
+            connections.append(self)
+
+        def request(self, method, url, body, headers, **kwargs):
+            self.request_headers = headers
+            if url.endswith("/jobs/poll"):
+                started.set()
+                assert release.wait(2)
+
+        def getresponse(self):
+            return HTTPReply(b'{"ok":true}')
+
+    # Exercise urllib's real handlers while replacing only socket transport.
+    opener = worker.urllib.request.build_opener(worker.urllib.request.ProxyHandler({}))
+    monkeypatch.setattr(worker.urllib.request, "_opener", opener)
+    monkeypatch.setattr(worker.http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(worker.socket, "create_connection", lambda *a, **kw: pytest.fail("unexpected network"))
+    monkeypatch.setattr(worker, "_core_worker_auth_parts", lambda: ("http://vps.invalid", "test-token", "worker"))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        poll = pool.submit(worker._post_core_worker_json, "/core-worker/jobs/poll", {}, timeout=5)
+        try:
+            assert started.wait(1)
+            heartbeat = pool.submit(worker._post_core_worker_json, "/core-worker/heartbeat", {}, timeout=3)
+            assert heartbeat.result(timeout=0.5) == (202, {"ok": True})
+            assert not poll.done()
+            assert len(connections) == 2 and connections[0] is not connections[1]
+            assert connections[1].timeout == 3
+            assert connections[1].request_headers["Authorization"] == "Bearer test-token"
+        finally:
+            release.set()
+        assert poll.result(timeout=1) == (202, {"ok": True})
+    assert events == ["ok", "ok"]

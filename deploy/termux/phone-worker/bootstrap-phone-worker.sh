@@ -149,5 +149,5 @@ sleep 2
 
 log "teste de heartbeat"
 cd "$WORKER_DIR"
-python phone_worker.py --heartbeat-once || true
+"${PHONE_WORKER_PYTHON:-python}" phone_worker.py --heartbeat-once || true
 log "pronto. Abra o painel workers e aperte Atualizar."

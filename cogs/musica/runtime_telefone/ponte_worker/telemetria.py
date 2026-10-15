@@ -46,7 +46,7 @@ def music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
         "yt-dlp": {"module": "yt_dlp", "pip": "yt-dlp"},
         "aiohttp": {"module": "aiohttp", "pip": "aiohttp"},
         "gTTS": {"module": "gtts", "pip": "gTTS==2.5.4", "optional": True},
-        "edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.2.8", "optional": True},
+        "edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.3.1", "optional": True},
     }
 
 

@@ -62,6 +62,32 @@ class EdgeRateLimitPolicyTests(unittest.TestCase):
         policy = EdgeRateLimitPolicy(first_delay=120)
         self.assertEqual(policy.failed_429(now=0), (120, True))
 
+    def test_recovery_does_not_clear_three_hour_notice_cooldown(self):
+        policy = EdgeRateLimitPolicy()
+        policy.failed_429(now=0)
+        self.assertEqual(policy.reserve_notice(11, now=1), 'initial')
+        self.assertFalse(policy.should_bypass(now=90))
+        policy.success()
+        policy.failed_429(now=100)
+        self.assertIsNone(policy.reserve_notice(11, now=101))
+        self.assertEqual(policy.reserve_notice(11, now=10801), 'followup')
+
+    def test_phone_escalation_uses_same_guild_notice_cooldown(self):
+        policy = EdgeRateLimitPolicy()
+        self.assertEqual(policy.reserve_notice(11, level=1, now=0), 'initial')
+        self.assertIsNone(policy.reserve_notice(11, level=1, now=1))
+        self.assertEqual(policy.reserve_notice(11, level=2, now=2), 'followup')
+        self.assertIsNone(policy.reserve_notice(11, level=2, now=3))
+
+    def test_failed_escalation_notice_restores_previous_cooldown(self):
+        policy = EdgeRateLimitPolicy()
+        policy.reserve_notice(11, level=1, now=0)
+        previous = policy.guild_notices[11]
+        policy.reserve_notice(11, level=2, now=1)
+        policy.undo_notice(11, reserved_at=1, level=2, previous=previous)
+        self.assertIsNone(policy.reserve_notice(11, level=1, now=2))
+        self.assertEqual(policy.reserve_notice(11, level=2, now=2), 'followup')
+
 
 class EdgeRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -117,3 +143,21 @@ class EdgeRateLimitIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.cog._notify_edge_rate_limit(self.item)
         await self.flush()
         self.assertEqual(self.messages, [])
+
+    async def test_phone_rate_limit_can_notify_after_gtts(self):
+        self.cog._edge_phone_policy().failed_429()
+        self.cog._notify_edge_rate_limit(self.item)
+        await self.flush()
+        self.assertEqual(len(self.messages), 1)
+
+    async def test_failed_discord_send_preserves_prior_notice_cooldown(self):
+        policy = self.cog._edge_rate_limit_policy()
+        policy.failed_429()
+        self.cog._notify_edge_rate_limit(self.item)
+        await self.flush()
+        previous = policy.guild_notices[self.item.guild_id]
+        self.cog._edge_phone_policy().level = 2
+        self.channel.send.side_effect = RuntimeError('Discord unavailable')
+        self.cog._notify_edge_rate_limit(self.item)
+        await self.flush()
+        self.assertEqual(policy.guild_notices[self.item.guild_id], previous)

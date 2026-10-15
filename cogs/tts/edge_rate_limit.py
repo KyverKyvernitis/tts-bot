@@ -34,7 +34,8 @@ class EdgeRateLimitPolicy:
             self.level = 0
             self.retry_at = 0.0
             self.probing = False
-            self.guild_notices.clear()
+            # Notification cooldown is per guild, independent of an outage.
+            # A brief recovery followed by another 429 must not spam Discord.
 
     def failed_other(self):
         # A failed recovery probe cannot leave the global guard locked forever.
@@ -53,18 +54,22 @@ class EdgeRateLimitPolicy:
         now = time.monotonic() if now is None else now
         return max(0, math.ceil(self.retry_at - now))
 
-    def reserve_notice(self, guild_id: int, *, now=None):
-        if not self.level or guild_id <= 0:
+    def reserve_notice(self, guild_id: int, *, now=None, level=None):
+        level = self.level if level is None else level
+        if not level or guild_id <= 0:
             return None
         now = time.monotonic() if now is None else now
         previous = self.guild_notices.get(guild_id)
         if previous is not None:
             last_time, last_level = previous
-            if self.level <= last_level and now - last_time < self.NOTICE_INTERVAL:
+            if level <= last_level and now - last_time < self.NOTICE_INTERVAL:
                 return None
-        self.guild_notices[guild_id] = (now, self.level)
+        self.guild_notices[guild_id] = (now, level)
         return 'initial' if previous is None else 'followup'
 
-    def undo_notice(self, guild_id: int, *, reserved_at: float, level: int):
+    def undo_notice(self, guild_id: int, *, reserved_at: float, level: int, previous=None):
         if self.guild_notices.get(guild_id) == (reserved_at, level):
-            self.guild_notices.pop(guild_id, None)
+            if previous is None:
+                self.guild_notices.pop(guild_id, None)
+            else:
+                self.guild_notices[guild_id] = previous

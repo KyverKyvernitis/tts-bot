@@ -77,6 +77,18 @@ class LocalRecoveryProbe(Methods):
     def _edge_circuit_is_open(self):
         return False
 
+    def _edge_rate_limit_bypass(self, item):
+        return False
+
+    async def _try_edge_phone_file(self, item):
+        return None
+
+    def _notify_edge_rate_limit(self, item):
+        pass
+
+    async def _run_timed_generation(self, engine, generate, **kwargs):
+        return await generate()
+
     def _is_music_active_for_guild(self, guild_id):
         return self.music_active
 

@@ -4,7 +4,7 @@ davey
 flask
 waitress>=3.0,<4
 motor
-edge-tts==7.2.8
+edge-tts==7.3.1
 gTTS==2.5.4
 psutil
 pillow

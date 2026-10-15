@@ -25,5 +25,9 @@ def build_payload(
     status.update({key: system.get(key) for key in (
         "python", "platform", "disk_home", "loadavg", "scripts", "boot", "shell_autostart",
         "auto_boot_repair", "supervisor", "sshd")})
+    # Reuse the existing system snapshot: capability publication must not probe
+    # providers or Teto again on the heartbeat thread.
+    if isinstance(system.get("tts_agent"), Mapping):
+        status["tts_agent"] = dict(system["tts_agent"])
     return {**base, "roles": roles, "capabilities": capabilities,
             "battery": dict(battery), "network": dict(network), "health": health, "status": status}
