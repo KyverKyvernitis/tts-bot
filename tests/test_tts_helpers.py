@@ -11,7 +11,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1664,6 +1664,98 @@ class MessageDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cog._state.last_text_channel_id, 99)
         self.assertEqual(len(cog.enqueue_calls), 1)
         self.assertEqual(cog.enqueue_calls[0][1].text, "teste")
+
+
+class ProgressiveReliabilityRegressions(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _probe():
+        class Probe(TTSAudioMixin):
+            def __init__(self):
+                self.guild_states = {}
+                self.bot = SimpleNamespace(audio_router=None, settings_db=None)
+        return Probe()
+
+    @staticmethod
+    def _item(**changes):
+        fields = dict(guild_id=77, channel_id=12, author_id=3, text="teste curto",
+                      engine="gtts", voice="", language="pt", rate="+0%", pitch="+0Hz")
+        fields.update(changes)
+        return QueueItem(**fields)
+
+    async def test_custom_gtts_tld_survives_progressive_preparation(self):
+        probe = self._probe()
+        state = GuildTTSState(queue=asyncio.Queue())
+        item = self._item(tld="com.br")
+        async def prepare(_state, passed_item, *, store_in_cache):
+            self.assertIs(passed_item, item)
+            self.assertEqual(passed_item.tld, "com.br")
+            return "stream-ready"
+        with patch.object(probe, "_prepare_shared_stream", side_effect=prepare):
+            self.assertEqual(await probe._prepare_gtts_stream(state, item, store_in_cache=True), "stream-ready")
+
+    async def test_incomplete_stream_is_never_acknowledged_success(self):
+        probe = self._probe()
+        stream = SimpleNamespace(producer_done=asyncio.Event(), error=RuntimeError("websocket lost"),
+                                 pipe_error=None, shared_job=None, engine="edge", audio_bytes=100)
+        stream.producer_done.set()
+        with self.assertRaises(tts_audio.TTSPlaybackError) as caught:
+            await probe._verify_progressive_stream_completed(stream, guild_id=77)
+        self.assertEqual(caught.exception.code, "stream_incomplete")
+        stream.error = None
+        await probe._verify_progressive_stream_completed(stream, guild_id=77)
+
+    async def test_discord_frames_with_failed_stream_are_not_reported_success(self):
+        probe, voice, _source = PlaybackConfirmationTests()._probe((b"pcm-frame",))
+        item = self._item()
+        ended = asyncio.Event()
+        ended.set()
+        stream = SimpleNamespace(producer_done=ended, error=RuntimeError("provider disconnected"),
+                                 pipe_error=None, shared_job=None, engine="gtts", audio_bytes=1024, first_audio_ms=10.0)
+        with (
+            patch.object(probe, "_edge_stream_handle_for_path", return_value=stream),
+            patch.object(probe, "_activate_edge_stream", new_callable=AsyncMock),
+            patch.object(probe, "_finalize_edge_stream", new_callable=AsyncMock),
+            patch.object(probe, "_close_edge_stream_reader_anchor"),
+            patch.object(probe, "_observe_edge_stream_playback") as observer,
+        ):
+            with self.assertRaises(tts_audio.TTSPlaybackError) as caught:
+                await probe._play_file(voice, "/tmp/speech.mp3", item=item)
+        self.assertEqual(caught.exception.code, "stream_incomplete")
+        self.assertTrue(caught.exception._tts_first_frame_observed)
+        observer.assert_called_once()
+        self.assertFalse(observer.call_args.kwargs["playback_ok"])
+
+    async def test_shared_job_failure_is_not_mistaken_for_complete_fifo(self):
+        probe = self._probe()
+        ended = asyncio.Event()
+        ended.set()
+        stream = SimpleNamespace(producer_done=ended, error=None, pipe_error=None, engine="gtts",
+                                 audio_bytes=256, shared_job=SimpleNamespace(buffer=SimpleNamespace(error=RuntimeError("upstream"))))
+        with self.assertRaisesRegex(tts_audio.TTSPlaybackError, "stream_incomplete"):
+            await probe._verify_progressive_stream_completed(stream, guild_id=77)
+
+    async def test_edge_429_opens_temporarily_rate_limited_circuit(self):
+        probe = self._probe()
+        class RateLimited(Exception):
+            status = 429
+        with patch.object(tts_audio, "TTS_EDGE_CIRCUIT_BREAKER_ENABLED", False):
+            self.assertFalse(probe._edge_circuit_is_open())
+            probe._record_engine_failure("edge", RateLimited("HTTP 429"))
+            self.assertTrue(probe._edge_circuit_is_open())
+            self.assertGreater(probe._tts_edge_rate_limited_until, tts_audio.time.monotonic() + 20)
+            probe._tts_edge_rate_limited_until = 0
+            self.assertFalse(probe._edge_circuit_is_open())
+
+    def test_progressive_timeout_covers_generation_window(self):
+        probe = self._probe()
+        item = self._item()
+        baseline = probe._estimate_playback_timeout(item)
+        gtts = SimpleNamespace(engine="gtts")
+        edge = SimpleNamespace(engine="edge")
+        self.assertEqual(probe._effective_playback_timeout(item, None), baseline)
+        self.assertGreater(probe._effective_playback_timeout(item, gtts), tts_audio.TTS_GTTS_TIMEOUT_SECONDS)
+        self.assertGreater(probe._effective_playback_timeout(item, edge), tts_audio.TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS)
+        self.assertLessEqual(probe._effective_playback_timeout(item, edge), tts_audio.TTS_PLAYBACK_TIMEOUT_MAX_SECONDS)
 
 
 if __name__ == "__main__":
