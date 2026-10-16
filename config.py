@@ -169,6 +169,10 @@ TTS_STREAM_FFMPEG_PROBESIZE_BYTES = min(16384, max(32, _parse_int(os.getenv("TTS
 TTS_EDGE_CIRCUIT_BREAKER_ENABLED = _parse_bool(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_ENABLED", "true"), True)
 TTS_EDGE_CIRCUIT_BREAKER_FAILURES = max(2, _parse_int(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_FAILURES", "3"), 3))
 TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = max(5.0, _parse_float(os.getenv("TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "15.0"), 15.0))
+# Opcional: IPv4 privados já configurados no Linux, cada um associado ao seu
+# IP público. Vazio preserva a rota Edge anterior. A validação ocorre apenas
+# no caminho Edge para não bloquear Teto/música com uma configuração inválida.
+TTS_EDGE_SOURCE_IPS = os.getenv("TTS_EDGE_SOURCE_IPS", "").strip()
 # Um prefetch global preserva dois dos três slots Edge padrão para falas atuais.
 # A prioridade é promovida automaticamente quando o item especulativo vira a
 # próxima fala real.

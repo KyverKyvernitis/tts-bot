@@ -60,6 +60,7 @@ from cogs.musica.integracoes.tts import (
 
 from .edge_endpoint import configure_edge_endpoint
 from .edge_rate_limit import EdgeRateLimitPolicy
+from .edge_sources import EdgeSourcePool, EdgeSourceUnavailable, bound_communicate
 from .helpers import validate_voice
 from .performance import performance_hash
 from .singing_errors import PhoneWorkerResponseError, request_scoped_worker_rejection, singing_failure_code
@@ -118,6 +119,7 @@ TTS_EDGE_CIRCUIT_BREAKER_ENABLED = bool(getattr(config, "TTS_EDGE_CIRCUIT_BREAKE
 TTS_EDGE_CIRCUIT_BREAKER_FAILURES = max(2, int(getattr(config, "TTS_EDGE_CIRCUIT_BREAKER_FAILURES", 3)))
 TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 15.0)))
 TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS = max(30.0, float(getattr(config, "TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS", 90.0)))
+TTS_EDGE_SOURCE_IPS = getattr(config, "TTS_EDGE_SOURCE_IPS", "")
 TTS_EDGE_PREFETCH_CONCURRENCY = min(
     TTS_SYNTH_CONCURRENCY,
     max(1, int(getattr(config, "TTS_EDGE_PREFETCH_CONCURRENCY", max(1, TTS_SYNTH_CONCURRENCY - 1)))),
@@ -1235,6 +1237,106 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     metrics["edge_prebuffer_lowered"] = int(metrics.get("edge_prebuffer_lowered", 0) or 0) + 1
         profiles.move_to_end(handle.prebuffer_profile_key)
 
+    def _edge_sources_enabled(self) -> bool:
+        return bool(TTS_EDGE_SOURCE_IPS.strip() if isinstance(TTS_EDGE_SOURCE_IPS, str) else TTS_EDGE_SOURCE_IPS)
+
+    def _edge_source_pool(self) -> EdgeSourcePool:
+        pool = getattr(self, "_tts_edge_source_pool", None)
+        if pool is None:
+            options = dict(first_delay=TTS_EDGE_RATE_LIMIT_COOLDOWN_SECONDS,
+                circuit_failures=TTS_EDGE_CIRCUIT_BREAKER_FAILURES,
+                circuit_cooldown=TTS_EDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+                circuit_enabled=TTS_EDGE_CIRCUIT_BREAKER_ENABLED)
+            try:
+                pool = EdgeSourcePool(TTS_EDGE_SOURCE_IPS, **options)
+            except (TypeError, ValueError) as exc:
+                # Invalid explicit binding must never silently use the default
+                # route or prevent Teto/music/the phone fallback from starting.
+                pool = EdgeSourcePool((), **options)
+                pool.config_error = str(exc)[:180]
+                logger.error("[tts_edge] origens locais inválidas; recuperação Phone preservada | erro=%s", pool.config_error)
+            self._tts_edge_source_pool = pool
+        return pool
+
+    def _edge_select_source(self, item: QueueItem) -> bool:
+        if not self._edge_sources_enabled():
+            return True
+        lease = getattr(item, "_edge_source_lease", None)
+        if lease is not None and not lease.finished:
+            item._edge_source_ip = lease.source_ip
+            item._edge_source_probe = lease.probe
+            item._edge_vps_probe = lease.probe
+            return True
+        attempted = set(getattr(item, "_edge_sources_attempted", ()) or ())
+        lease = self._edge_source_pool().reserve(item.guild_id, exclude=attempted)
+        item._edge_source_lease = lease
+        item._edge_source_reserved = lease is not None
+        item._edge_source_started = False
+        item._edge_source_result_recorded = False
+        item._edge_source_probe = bool(lease and lease.probe)
+        item._edge_vps_probe = bool(lease and lease.probe)
+        if lease is None:
+            return False
+        item._edge_source_ip = lease.source_ip
+        return True
+
+    @contextlib.asynccontextmanager
+    async def _edge_source_communicate(self, item: QueueItem, **kwargs):
+        if not self._edge_select_source(item):
+            raise RuntimeError("nenhuma origem Edge local disponível")
+        lease = item._edge_source_lease
+        pool = self._edge_source_pool()
+        pool.start(lease)
+        attempted = set(getattr(item, "_edge_sources_attempted", ()) or ())
+        attempted.add(lease.source_ip)
+        item._edge_sources_attempted = attempted
+        item._edge_source_started = True
+        item._edge_vps_attempted = True
+        kwargs.setdefault("connect_timeout", TTS_EDGE_CONNECT_TIMEOUT_SECONDS)
+        kwargs.setdefault("receive_timeout", TTS_EDGE_RECEIVE_TIMEOUT_SECONDS)
+        try:
+            async with bound_communicate(edge_tts.Communicate, lease.source_ip, **kwargs) as communicate:
+                yield communicate
+        except asyncio.CancelledError:
+            self._edge_source_release(item)
+            raise
+
+    def _edge_source_succeeded(self, item: QueueItem, duration_ms: float) -> None:
+        lease = getattr(item, "_edge_source_lease", None)
+        if lease is not None and not lease.finished:
+            self._edge_source_pool().success(lease, duration_ms)
+            item._edge_source_result_recorded = True
+            item._edge_source_reserved = False
+
+    def _edge_source_failed(self, item: QueueItem, error: Exception, duration_ms: float = 0.0) -> None:
+        lease = getattr(item, "_edge_source_lease", None)
+        if lease is None or lease.finished:
+            return
+        result = self._edge_source_pool().failure(lease, error, duration_ms)
+        item._edge_source_result_recorded = True
+        item._edge_source_reserved = False
+        if result is not None and result[1]:
+            state = self._edge_source_pool().states[lease.source_ip]
+            logger.warning("[tts_edge] HTTP 429 | origem=%s cooldown=%ss nivel=%s", lease.source_ip, result[0], state.policy.level)
+
+    def _edge_source_release(self, item: QueueItem) -> None:
+        lease = getattr(item, "_edge_source_lease", None)
+        if lease is not None:
+            self._edge_source_pool().release(lease)
+        item._edge_source_lease = None
+        item._edge_source_reserved = False
+
+    def _edge_source_merge(self, item: QueueItem, producer: QueueItem) -> None:
+        item._edge_sources_attempted = set(getattr(item, "_edge_sources_attempted", ()) or ()) | set(getattr(producer, "_edge_sources_attempted", ()) or ())
+        lease = getattr(item, "_edge_source_lease", None)
+        current_job = getattr(item, "_tts_shared_job", None)
+        current_producer = current_job is None or current_job.item is producer
+        if current_producer and getattr(producer, "_edge_source_ip", "") and (lease is None or lease.finished):
+            item._edge_source_ip = producer._edge_source_ip
+        for flag in ("_edge_worker_attempted", "_edge_vps_attempted"):
+            if getattr(producer, flag, False):
+                setattr(item, flag, True)
+
     def _edge_rate_limit_policy(self) -> EdgeRateLimitPolicy:
         policy = getattr(self, "_tts_edge_rate_limit_policy", None)
         if policy is None:
@@ -1245,7 +1347,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     def _notify_edge_rate_limit(self, item: QueueItem) -> None:
         policy = self._edge_rate_limit_policy()
         phone_policy = self._edge_phone_policy()
-        level = max(policy.level, phone_policy.level)
+        source_policies = [state.policy for state in self._edge_source_pool().states.values()] if self._edge_sources_enabled() else [policy]
+        level = max([phone_policy.level] + [source.level for source in source_policies])
         guild_id = int(getattr(item, "guild_id", 0) or 0)
         channel_id = int(getattr(item, "text_channel_id", 0) or 0)
         if not guild_id or not channel_id or not level:
@@ -1255,7 +1358,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         notice_kind = policy.reserve_notice(guild_id, now=now, level=level)
         if notice_kind is None:
             return
-        seconds = max(1, policy.remaining_seconds(now=now), phone_policy.remaining_seconds(now=now))
+        seconds = max([1, phone_policy.remaining_seconds(now=now)] + [source.remaining_seconds(now=now) for source in source_policies])
         if notice_kind == "initial":
             content = (
                 "-# Usei outra voz pois os serviços da Microsoft estão limitando as requisições, "
@@ -1291,6 +1394,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         self._schedule_tts_background(send_notice())
 
     def _edge_rate_limit_bypass(self, item: QueueItem) -> bool:
+        if self._edge_sources_enabled():
+            return not self._edge_select_source(item)
         # Do not reserve the one recovery probe if the local circuit will skip
         # synthesis anyway. A reserved probe must always own an actual request.
         if self._edge_circuit_is_open():
@@ -1311,6 +1416,29 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return not bool(getattr(job.item, "_edge_vps_attempted", False))
 
     async def _try_edge_vps_stream(self, state: GuildTTSState, item: QueueItem, *, store_in_cache: bool):
+        if self._edge_sources_enabled():
+            while self._edge_select_source(item):
+                item._edge_phone_recovery = False
+                item._edge_vps_recovery = True
+                before = set(getattr(item, "_edge_sources_attempted", ()) or ())
+                selected = item._edge_source_ip
+                try:
+                    handle = await self._prepare_edge_stream(state, item, store_in_cache=store_in_cache)
+                    return handle.fifo_path, True
+                except asyncio.CancelledError:
+                    self._edge_source_release(item)
+                    raise
+                except Exception as exc:
+                    # A producer transfers its lease to a private job item;
+                    # merge its physical attempts before choosing another IP.
+                    job = getattr(item, "_tts_shared_job", None)
+                    if job is not None:
+                        self._edge_source_merge(item, job.item)
+                    self._edge_source_failed(item, exc)
+                    self._edge_source_release(item)
+                    item._edge_sources_attempted = before | set(getattr(item, "_edge_sources_attempted", ()) or ()) | {selected}
+                    logger.warning("[tts_edge] origem progressiva indisponível | origem=%s guild=%s erro=%s", selected, item.guild_id, _tts_safe_exception_detail(exc))
+            return None
         if self._edge_rate_limit_bypass(item):
             return None
         item._edge_phone_recovery = False
@@ -1325,6 +1453,34 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return handle.fifo_path, True
 
     async def _try_edge_vps_file(self, item: QueueItem) -> str | None:
+        if self._edge_sources_enabled():
+            while self._edge_select_source(item):
+                selected = item._edge_source_ip
+                item._edge_phone_recovery = False
+                item._edge_vps_recovery = True
+                try:
+                    path = await self._run_timed_generation(
+                        "edge", lambda: self._generate_edge_file(
+                            item.text, item.voice, item.rate, item.pitch,
+                            foreground=not bool(getattr(item, "_tts_prefetch", False)),
+                            source_item=item,
+                        ), guild_id=item.guild_id, item=item,
+                    )
+                except asyncio.CancelledError:
+                    self._edge_source_release(item)
+                    raise
+                except Exception as exc:
+                    self._edge_source_failed(item, exc)
+                    self._edge_source_release(item)
+                    item._edge_sources_attempted = set(getattr(item, "_edge_sources_attempted", ()) or ()) | {selected}
+                    logger.warning("[tts_edge] origem de arquivo indisponível | origem=%s guild=%s erro=%s", selected, item.guild_id, _tts_safe_exception_detail(exc))
+                    continue
+                item._tts_actual_engine = "edge"
+                item._tts_actual_item = None
+                item._tts_audio_route = "local"
+                item._tts_audio_origin = "generated"
+                return path
+            return None
         if self._edge_rate_limit_bypass(item):
             return None
         item._edge_vps_attempted = True
@@ -1439,6 +1595,10 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return path
 
     def _edge_circuit_is_open(self) -> bool:
+        if self._edge_sources_enabled():
+            pool = self._edge_source_pool()
+            now = time.monotonic()
+            return bool(pool.states) and all(pool._circuit_open(state, now) for state in pool.states.values())
         if not TTS_EDGE_CIRCUIT_BREAKER_ENABLED:
             return False
         engine_metrics = self._get_engine_metrics("edge")
@@ -2824,7 +2984,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         engine_metrics["last_synth_ms"] = round(float(duration_ms), 2)
         if route != "worker":
             engine_metrics["consecutive_failures"] = 0
-        if engine == "edge" and route != "worker":
+        if engine == "edge" and route != "worker" and not self._edge_sources_enabled():
             self._edge_rate_limit_policy().success()
 
         if duration_ms >= TTS_ENGINE_SLOW_WARN_SECONDS * 1000.0:
@@ -3000,16 +3160,21 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             executor.shutdown(wait=False, cancel_futures=True)
 
     def _record_engine_failure(self, engine: str, error: Exception, duration_ms: float | None = None, *, item: QueueItem | None = None, route: str = "local") -> None:
+        if engine == "edge" and isinstance(error, EdgeSourceUnavailable):
+            return
         if engine == "edge" and route != "worker":
-            policy = self._edge_rate_limit_policy()
+            policy = self._edge_rate_limit_policy() if not self._edge_sources_enabled() else None
             if getattr(error, "status", None) == 429:
                 metrics = self._get_metrics_store()
                 metrics["edge_rate_limit_429"] = int(metrics.get("edge_rate_limit_429", 0) or 0) + 1
-                duration, escalated = policy.failed_429()
-                if escalated:
-                    logger.warning("[tts_edge] HTTP 429; cooldown global=%ss nivel=%s", duration, policy.level)
-            else:
+                if policy is not None:
+                    duration, escalated = policy.failed_429()
+                    if escalated:
+                        logger.warning("[tts_edge] HTTP 429; cooldown global=%ss nivel=%s", duration, policy.level)
+            elif policy is not None:
                 policy.failed_other()
+            if self._edge_sources_enabled() and item is not None:
+                self._edge_source_failed(item, error, duration_ms or 0.0)
         engine_metrics = self._get_engine_metrics(engine)
         engine_metrics["synth_failures"] = int(engine_metrics.get("synth_failures", 0) or 0) + 1
         engine_metrics["consecutive_failures"] = int(engine_metrics.get("consecutive_failures", 0) or 0) + 1
@@ -3171,8 +3336,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "edge_prebuffer_profiles": int(len(self._get_edge_prebuffer_profiles())),
             "edge_circuit_bypasses": int(metrics.get("edge_circuit_bypasses", 0) or 0),
             "edge_rate_limit_429": int(metrics.get("edge_rate_limit_429", 0) or 0),
-            "edge_rate_limit_level": self._edge_rate_limit_policy().level,
-            "edge_rate_limit_remaining_seconds": self._edge_rate_limit_policy().remaining_seconds(),
+            "edge_rate_limit_level": max([0] + [state.policy.level for state in self._edge_source_pool().states.values()]) if self._edge_sources_enabled() else self._edge_rate_limit_policy().level,
+            "edge_rate_limit_remaining_seconds": max([0] + [state.policy.remaining_seconds() for state in self._edge_source_pool().states.values()]) if self._edge_sources_enabled() else self._edge_rate_limit_policy().remaining_seconds(),
+            "edge_sources_enabled": self._edge_sources_enabled(),
+            "edge_sources": self._edge_source_pool().snapshot() if self._edge_sources_enabled() else {},
+            "edge_sources_config_error": self._edge_source_pool().config_error if self._edge_sources_enabled() else "",
             "edge_phone_rate_limit_level": self._edge_phone_policy().level,
             "edge_phone_rate_limit_remaining_seconds": self._edge_phone_policy().remaining_seconds(),
             "edge_phone_recovery_attempts": int(metrics.get("edge_phone_recovery_attempts", 0) or 0),
@@ -3892,26 +4060,45 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             item = replace(item, tld=tld, _cache_key_value=None, _dedup_signature=None)
         return await self._prepare_shared_stream(state, item, store_in_cache=store_in_cache)
 
-    async def _generate_edge_file(self, text: str, voice: str, rate: str, pitch: str, *, foreground: bool = True) -> str:
+    async def _generate_edge_file(self, text: str, voice: str, rate: str, pitch: str, *, foreground: bool = True, source_item: QueueItem | None = None) -> str:
         voice = validate_voice(voice, getattr(self, 'edge_voice_names', set()))
         rate = self._normalize_edge_rate(rate)
         pitch = self._normalize_edge_pitch(pitch)
         path = ''
         semaphore = self._get_synth_semaphore()
         await semaphore.acquire(foreground=foreground)
+        started = time.monotonic()
         try:
             path = self._make_runtime_temp_file(suffix='.mp3')
-            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch,
-                connect_timeout=TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
-                receive_timeout=TTS_EDGE_RECEIVE_TIMEOUT_SECONDS)
-            await asyncio.wait_for(communicate.save(path), timeout=TTS_EDGE_TIMEOUT_SECONDS)
+            if self._edge_sources_enabled():
+                if source_item is None:
+                    source_item = QueueItem(guild_id=0, channel_id=0, author_id=0,
+                        text=text, engine="edge", voice=voice, language="pt", rate=rate, pitch=pitch)
+                async with self._edge_source_communicate(source_item,
+                        text=text, voice=voice, rate=rate, pitch=pitch) as communicate:
+                    await asyncio.wait_for(communicate.save(path), timeout=TTS_EDGE_TIMEOUT_SECONDS)
+                if os.path.getsize(path) <= 0:
+                    raise RuntimeError("arquivo Edge vazio")
+                self._edge_source_succeeded(source_item, (time.monotonic() - started) * 1000)
+            else:
+                communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch,
+                    connect_timeout=TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
+                    receive_timeout=TTS_EDGE_RECEIVE_TIMEOUT_SECONDS)
+                await asyncio.wait_for(communicate.save(path), timeout=TTS_EDGE_TIMEOUT_SECONDS)
             return path
-        except BaseException:
+        except BaseException as exc:
+            if self._edge_sources_enabled() and source_item is not None:
+                if isinstance(exc, asyncio.CancelledError):
+                    self._edge_source_release(source_item)
+                elif isinstance(exc, Exception):
+                    self._edge_source_failed(source_item, exc, (time.monotonic() - started) * 1000)
             if path:
                 with contextlib.suppress(OSError):
                     os.remove(path)
             raise
         finally:
+            if self._edge_sources_enabled() and source_item is not None:
+                self._edge_source_release(source_item)
             semaphore.release()
 
 
@@ -5801,7 +5988,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             except Exception:
                 if item.engine != 'edge':
                     raise
-                if self._edge_shared_worker_failed_before_vps(item):
+                if self._edge_sources_enabled() or self._edge_shared_worker_failed_before_vps(item):
                     recovered = await recovered_file(self._try_edge_vps_file)
                     if recovered is not None:
                         return recovered
@@ -5869,8 +6056,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         try:
             result = await factory()
         except asyncio.CancelledError:
-            if engine == "edge" and getattr(item, "_edge_vps_probe", False):
-                self._edge_rate_limit_policy().failed_other()
+            if engine == "edge":
+                if self._edge_sources_enabled() and item is not None:
+                    self._edge_source_release(item)
+                elif getattr(item, "_edge_vps_probe", False):
+                    self._edge_rate_limit_policy().failed_other()
             raise
         except Exception as exc:
             duration_ms = (time.monotonic() - started_at) * 1000.0
@@ -6129,6 +6319,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return history
 
     def _tts_agent_should_try_worker(self, item: QueueItem) -> tuple[bool, str]:
+        if item.engine == "edge" and self._edge_sources_enabled():
+            return False, "edge_local_sources_first"
         if getattr(item, "_tts_music_worker_unavailable", False):
             return False, "music_worker_confirmed_offline"
         if not self._tts_agent_route_available():
@@ -6233,6 +6425,19 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
 
         if item.engine == "edge":
             foreground = not bool(getattr(item, "_tts_prefetch", False))
+            if self._edge_sources_enabled():
+                path = await self._try_edge_vps_file(item)
+                if path is not None:
+                    return path
+                recovered = await self._try_edge_phone_file(item)
+                if recovered is not None:
+                    return recovered
+                item._tts_actual_engine = "gtts"
+                path = await self._run_timed_generation("gtts",
+                    lambda: self._generate_gtts_file_with_priority(item.text, item.language, foreground=foreground),
+                    guild_id=item.guild_id)
+                self._notify_edge_rate_limit(item)
+                return path
             blocked_by_rate_limit = self._edge_rate_limit_bypass(item)
             if blocked_by_rate_limit or self._edge_circuit_is_open():
                 self._record_edge_circuit_bypass()
@@ -6448,7 +6653,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     stream_reason,
                     _tts_safe_exception_detail(exc),
                 )
-                if self._edge_shared_worker_failed_before_vps(item):
+                if self._edge_sources_enabled() or self._edge_shared_worker_failed_before_vps(item):
                     recovered = await self._try_edge_vps_stream(state, item, store_in_cache=store_in_cache)
                     if recovered is not None:
                         return recovered
@@ -7000,6 +7205,38 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     async def _tts_local_complete_file_after_stream_failure(self, item: QueueItem) -> str:
         """Recover an inaudible FIFO failure without reusing the consumed FIFO."""
         foreground = True
+        if str(item.engine or "").lower() == "edge" and bool(getattr(self, "_edge_sources_enabled", lambda: False)()):
+            # The abandoned FIFO belongs to its old producer. A different IP
+            # always starts a new complete file; no partial buffers are mixed.
+            self._edge_source_release(item)
+            path = await self._try_edge_vps_file(item)
+            if path is not None:
+                return path
+            # Preserve the legacy decoder recovery: one complete-file retry of
+            # a source whose network stream was healthy/cancelled by the reader.
+            # A source with a real upstream failure remains excluded.
+            job = getattr(item, "_tts_shared_job", None)
+            previous_ip = getattr(getattr(job, "item", None), "_edge_source_ip", "")
+            previous_error = getattr(getattr(job, "buffer", None), "error", None)
+            retried = set(getattr(item, "_edge_complete_file_retried", ()) or ())
+            if previous_ip and previous_ip not in retried and (previous_error is None or isinstance(previous_error, asyncio.CancelledError)):
+                retried.add(previous_ip)
+                item._edge_complete_file_retried = retried
+                item._edge_sources_attempted = set(getattr(item, "_edge_sources_attempted", ()) or ()) - {previous_ip}
+                path = await self._try_edge_vps_file(item)
+                if path is not None:
+                    return path
+            recovered = await self._try_edge_phone_file(item)
+            if recovered is not None:
+                return recovered
+            item._tts_actual_engine = "gtts"
+            path = await self._generate_gtts_file_with_priority(item.text, item.language, foreground=foreground)
+            if os.path.getsize(path) <= 0:
+                with contextlib.suppress(OSError):
+                    os.remove(path)
+                raise RuntimeError("arquivo local gTTS vazio")
+            self._notify_edge_rate_limit(item)
+            return path
         if str(item.engine or "").lower() == "edge":
             if not self._edge_rate_limit_bypass(item) and not self._edge_circuit_is_open():
                 try:

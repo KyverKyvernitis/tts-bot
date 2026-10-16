@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import os
 import time
 from dataclasses import replace
@@ -60,7 +61,19 @@ class SharedSynthesisMixin:
     def _acquire_shared_job(self, state, item, *, store_in_cache: bool) -> StreamJob:
         from . import audio as a
         key = self._cache_key(item)
-        if item.engine == 'edge' and getattr(item, '_edge_phone_recovery', False):
+        edge = item.engine == 'edge'
+        forced_phone = edge and bool(getattr(item, '_edge_phone_recovery', False))
+        multi_edge = edge and bool(getattr(self, '_edge_sources_enabled', lambda: False)())
+        source_bound = multi_edge and not forced_phone
+        if source_bound:
+            if not self._edge_select_source(item):
+                raise RuntimeError('nenhuma origem Edge local disponível')
+            # Completed audio remains reusable across origins in the audio
+            # cache. An active producer, however, must keep its physical IP.
+            key += ':edge-source:' + item._edge_source_ip
+            if getattr(item, '_edge_source_probe', False):
+                key += f':edge-source-probe:{id(item)}'
+        if forced_phone:
             # A stalled VPS job can still have another consumer. Recovery must
             # start a phone job instead of attaching to that same failed origin.
             key += ':edge-phone'
@@ -78,20 +91,53 @@ class SharedSynthesisMixin:
                 limit = max(1024 * 1024, int(getattr(a.config, 'TTS_STREAM_MEMORY_BUDGET_BYTES', 16 * 1024 * 1024)))
                 budget = self._tts_audio_memory_budget = MemoryBudget(limit)
             a._ensure_tts_temp_dirs()
-            job = StreamJob(key=key, item=item, started_at=time.monotonic(),
+            producer_item = item
+            if multi_edge:
+                # A consumer can retry another origin while this producer
+                # still serves other consumers. Keep the phone recovery flags
+                # isolated too: a local retry must not reclassify a phone job.
+                producer_item = copy.copy(item)
+                producer_item._edge_sources_attempted = set(getattr(item, '_edge_sources_attempted', ()) or ())
+                if hasattr(item, '_edge_complete_file_retried'):
+                    producer_item._edge_complete_file_retried = set(getattr(item, '_edge_complete_file_retried', ()) or ())
+                if not source_bound:
+                    # Phone streams have no local source lease or source IP.
+                    # Inherited local history remains in the attempted set.
+                    producer_item._edge_source_lease = None
+                    producer_item._edge_source_reserved = False
+                    producer_item._edge_source_ip = ''
+                    producer_item._edge_source_probe = False
+                    producer_item._edge_source_started = False
+                    producer_item._edge_source_result_recorded = False
+                    producer_item._edge_vps_probe = False
+                    producer_item._edge_vps_recovery = False
+            job = StreamJob(key=key, item=producer_item, started_at=time.monotonic(),
                 actual_engine=item.engine, store_in_cache=store_in_cache,
                 buffer=ReplayBuffer(a._RUNTIME_DIR, budget,
                     memory_limit=a.TTS_EDGE_STREAM_CACHE_MEMORY_MAX_BYTES,
                     max_bytes=a.TTS_WORKER_AGENT_MAX_AUDIO_MB * 1024 * 1024))
             jobs[key] = job
+            if source_bound:
+                item._edge_source_lease = None
+                item._edge_source_reserved = False
             if not bool(getattr(item, '_tts_prefetch', False)):
                 job.foreground.set()
             job.task = asyncio.create_task(self._produce_shared_job(job))
-            if item.engine == 'edge' and getattr(item, '_edge_vps_probe', False) and not getattr(item, '_edge_phone_recovery', False):
+            if source_bound:
+                def release_cancelled_source(task):
+                    if task.cancelled():
+                        self._edge_source_release(job.item)
+                job.task.add_done_callback(release_cancelled_source)
+            elif item.engine == 'edge' and getattr(item, '_edge_vps_probe', False) and not getattr(item, '_edge_phone_recovery', False):
                 def release_cancelled_probe(task):
                     if task.cancelled():
                         self._edge_rate_limit_policy().failed_other()
                 job.task.add_done_callback(release_cancelled_probe)
+        elif source_bound:
+            # A shared job already owns its reservation. A joining consumer
+            # must not retain a second lease or release the producer's probe.
+            self._edge_source_release(item)
+            self._edge_source_merge(item, job.item)
         job.references += 1
         job.store_in_cache = job.store_in_cache or store_in_cache
         if not bool(getattr(item, '_tts_prefetch', False)):
@@ -194,6 +240,7 @@ class SharedSynthesisMixin:
         acquired = False
         blocking = None
         engine = job.item.engine
+        source_bound = engine == 'edge' and not forced_phone and bool(getattr(self, '_edge_sources_enabled', lambda: False)())
         started = time.monotonic()
         try:
             if forced_phone:
@@ -214,7 +261,7 @@ class SharedSynthesisMixin:
             # Protocol v2 is selected only when explicitly advertised. The
             # provider remains local when an older worker is connected.
             worker_stream = getattr(self, '_produce_worker_stream_job', None)
-            use_worker = callable(worker_stream) and (forced_phone or not forced_vps and self._worker_stream_available_for(job.item))
+            use_worker = callable(worker_stream) and (forced_phone or not forced_vps and not source_bound and self._worker_stream_available_for(job.item))
             if use_worker:
                 try:
                     await worker_stream(job)
@@ -229,14 +276,19 @@ class SharedSynthesisMixin:
                 if engine == 'edge':
                     job.item._edge_vps_attempted = True
                     voice = a.validate_voice(job.item.voice, getattr(self, 'edge_voice_names', set()))
-                    communicate = a.edge_tts.Communicate(text=job.item.text, voice=voice,
+                    options = dict(text=job.item.text, voice=voice,
                         rate=self._normalize_edge_rate(job.item.rate), pitch=self._normalize_edge_pitch(job.item.pitch),
                         connect_timeout=a.TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
                         receive_timeout=a.TTS_EDGE_RECEIVE_TIMEOUT_SECONDS)
-                    async for message in _iter_with_deadline(communicate.stream(), job.deadline):
-                        data = self._edge_stream_audio_chunk(message)
-                        if data and not await self._append_shared_audio(job, data):
-                            raise asyncio.CancelledError()
+                    async with contextlib.AsyncExitStack() as stack:
+                        if source_bound:
+                            communicate = await stack.enter_async_context(self._edge_source_communicate(job.item, **options))
+                        else:
+                            communicate = a.edge_tts.Communicate(**options)
+                        async for message in _iter_with_deadline(communicate.stream(), job.deadline):
+                            data = self._edge_stream_audio_chunk(message)
+                            if data and not await self._append_shared_audio(job, data):
+                                raise asyncio.CancelledError()
                 else:
                     language = (job.item.language or a.GTTS_DEFAULT_LANGUAGE).lower().replace('_', '-')
                     if language == 'pt-br':
@@ -263,6 +315,8 @@ class SharedSynthesisMixin:
             await job.buffer.finish()
             duration = (time.monotonic() - job.started_at) * 1000.0
             self._record_engine_success(engine, duration, route=job.route)
+            if source_bound and job.route != 'worker':
+                self._edge_source_succeeded(job.item, duration)
             self._record_latency_sample(f'synthesis:{engine}:{job.route}', duration - job.slot_wait_ms)
             cached = bool(getattr(job.item, '_tts_worker_cache_hit', False))
             history = self._route_measurements()
@@ -290,6 +344,8 @@ class SharedSynthesisMixin:
             metrics = self._get_metrics_store()
             metrics[f'{engine}_stream_failures'] = int(metrics.get(f'{engine}_stream_failures', 0)) + 1
         finally:
+            if source_bound:
+                self._edge_source_release(job.item)
             job.slot_ready.set()
             if acquired:
                 semaphore.release()
@@ -332,6 +388,8 @@ class SharedSynthesisMixin:
             return path, not os.path.abspath(path).startswith(os.path.abspath(self._tts_cache_directory()) + os.sep)
         finally:
             if item.engine == 'edge':
+                if bool(getattr(self, '_edge_sources_enabled', lambda: False)()):
+                    self._edge_source_merge(item, job.item)
                 for flag in ('_edge_worker_attempted', '_edge_vps_attempted'):
                     if getattr(job.item, flag, False):
                         setattr(item, flag, True)
@@ -354,6 +412,8 @@ class SharedSynthesisMixin:
         except Exception as error:
             handle.error = error
         finally:
+            if handle.item.engine == 'edge' and bool(getattr(self, '_edge_sources_enabled', lambda: False)()):
+                self._edge_source_merge(handle.item, job.item)
             with contextlib.suppress(asyncio.CancelledError):
                 await self._signal_stream_end(handle)
 
@@ -411,9 +471,13 @@ class SharedSynthesisMixin:
             first_byte_at = job.started_at + job.first_audio_ms / 1000.0
             self._record_latency_sample(f'{item.engine}_prebuffer_wait',
                 max(0.0, (ready_at - max(slot_ready_at, first_byte_at)) * 1000.0))
+            if edge and bool(getattr(self, '_edge_sources_enabled', lambda: False)()):
+                self._edge_source_merge(item, job.item)
             return handle
         except BaseException:
             if item.engine == 'edge':
+                if bool(getattr(self, '_edge_sources_enabled', lambda: False)()):
+                    self._edge_source_merge(item, job.item)
                 for flag in ('_edge_worker_attempted', '_edge_vps_attempted'):
                     if getattr(job.item, flag, False):
                         setattr(item, flag, True)

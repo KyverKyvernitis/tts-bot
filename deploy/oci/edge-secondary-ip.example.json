@@ -1,0 +1,7 @@
+{
+  "managed_by": "osaka-edge-secondary-ip/v1",
+  "primary_ip": "10.0.0.174",
+  "secondary_ip": "10.0.0.237",
+  "interface": "ens3",
+  "wait_seconds": 30
+}
