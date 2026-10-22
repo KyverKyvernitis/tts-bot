@@ -71,7 +71,7 @@ async def test_catalog_message_retains_voice_language_and_neutralizes_speech_con
     from cogs.tts.melodies import score_for_melody
     cog = FakeCog(db=FakeDB(resolved={"ttv_voice_id": "hatsune-miku", "ttv_language": "en-US",
                                      "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.25}))
-    msg = message("'/cantar hello Miku", [attachment()])
+    msg = message("'/cantar hello Miku ~", [attachment()])
     payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={"announce_author": True},
                                                  active_prefix="'", forced_engine="teto")
     queued = payload.queue_item
@@ -97,7 +97,7 @@ async def test_midi_only_message_does_not_trigger_singing_or_download():
 async def test_attached_midi_does_not_override_saved_catalog_song():
     from cogs.tts.melodies import score_for_melody
     cog = FakeCog(db=FakeDB(resolved={"ttv_melody_id": "senbonzakura"}))
-    msg = message("'/cantar a ~ ~ a", [attachment(midi(2))])
+    msg = message("'/cantar a ~ ~ a ~", [attachment(midi(2))])
     payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={},
                                                  active_prefix="'", forced_engine="teto")
     assert payload is not None

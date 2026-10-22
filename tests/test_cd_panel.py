@@ -154,7 +154,7 @@ def test_panel_reads_current_voice_and_language_without_network_or_call():
         text = "\n".join(item["content"] for item in walk(view.to_components()) if item["type"] == 10)
         assert "Hatsune Miku" not in text and "Inglês" not in text
         assert "Menu de CDs" in text
-        assert "Escolha seu CD, o bot vai ler e no modo de canto vai cantar no ritmo dele." in text
+        assert "Coloque ~ no final da mensagem TTV para cantar no ritmo dele; sem ~, o bot fala normalmente." in text
         assert "Em uso:" not in text and "Sua escolha neste servidor" not in text
         assert "ryo (supercell)" not in text
         cog._ttv_voice_status.assert_called_once_with("hatsune-miku")

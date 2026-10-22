@@ -15,24 +15,24 @@ from cogs.tts.melodies import score_for_melody
 from test_ttv_audio import Probe, item
 
 
-@pytest.mark.parametrize("text", ["a ~ ~ ~ a", "/cantar Meu pai tem pão", "/CANTAR Olá"])
+@pytest.mark.parametrize("text", ["a ~ ~ ~ a ~", "Olá~", "/cantar Meu pai tem pão ~", "/CANTAR Olá ~"])
 def test_simple_opt_in_requests_default_melody(text):
     clean, wants = singing_request(text)
     assert wants and not clean.lower().startswith("/cantar")
 
 
-@pytest.mark.parametrize("text", ["aaa~", r"a \~ a", 'a "~" a', "a `~` a", "cantar no chuveiro", "https://host/~"])
+@pytest.mark.parametrize("text", ["aaa~!", "a ~ a", "/cantar Olá", r"a \~ a", 'a "~" a', "a `~` a", "cantar no chuveiro", "https://host/~"])
 def test_plain_speech_or_literal_marks_never_enable_music(text):
     assert singing_request(text) == (text, False)
 
 
 def test_directive_preserves_remaining_escapes():
-    assert singing_request(r"/cantar a \~ a") == (r"a \~ a", True)
+    assert singing_request(r"/cantar a \~ a ~") == (r"a \~ a", True)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("voice", ["kasane-teto", "hatsune-miku"])
-@pytest.mark.parametrize("text", ["'a ~ ~ ~ a", "'/cantar Meu pai tem pão"])
+@pytest.mark.parametrize("text", ["'a ~ ~ ~ a ~", "'/cantar Meu pai tem pão ~"])
 async def test_actual_text_renderer_prepares_singing_without_downloads(voice, text):
     cog = LiveRenderCog(db=FakeDB(resolved={"ttv_voice_id": voice, "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.25}))
     msg = make_message(text)
@@ -49,7 +49,7 @@ async def test_actual_text_renderer_prepares_singing_without_downloads(voice, te
 @pytest.mark.asyncio
 async def test_attached_midi_is_ignored_and_catalog_keeps_priority():
     cog = LiveRenderCog(db=FakeDB())
-    msg = make_message("'/cantar a ~ ~ ~ a")
+    msg = make_message("'/cantar a ~ ~ ~ a ~")
     attachment = SimpleNamespace(filename="melodia.mid", size=len(DEMO_MIDI), read=AsyncMock(return_value=DEMO_MIDI))
     msg.attachments = [attachment]
     payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={}, active_prefix="'", forced_engine="teto")

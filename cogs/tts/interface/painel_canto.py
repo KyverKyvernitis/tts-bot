@@ -377,7 +377,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
         container = discord.ui.Container(
             discord.ui.TextDisplay(
                 "## <a:Vinyl_Music_loading:1559374199133315122> Menu de CDs\n"
-                "-# Escolha seu CD, o bot vai ler e no modo de canto vai cantar no ritmo dele."
+                "-# Escolha seu CD. Coloque ~ no final da mensagem TTV para cantar no ritmo dele; sem ~, o bot fala normalmente."
             ),
             accent_color=discord.Color(cover_accent(
                 _cover_bytes(melody.id),

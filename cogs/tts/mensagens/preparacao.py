@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
-import re
 
 import discord
 from typing import Any
@@ -18,8 +17,8 @@ import config
 
 from ..audio import QueueItem, _has_speakable_tts_text
 from ..ttv import resolve_preferences
-from ..performance import parse_performance_text, performance_hash
-from ..melodies import DEFAULT_MELODY_ID, score_for_melody, fit_catalog_lyrics_to_score, arrangement_for_melody, fit_arrangement_lyrics
+from ..performance import parse_performance_text, performance_hash, singing_request
+from ..melodies import score_for_melody, fit_catalog_lyrics_to_score, arrangement_for_melody, fit_arrangement_lyrics
 from ..arrangement_audio import execution_arrangement
 from osaka_cd.lyrics import prepare_message_arrangement
 from osaka_cd.arrangement import arrangement_sha256
@@ -186,12 +185,9 @@ async def preparar_payload_tts_mensagem(
     # Attachments .mid/.midi have no special behavior on any TTV request.
     # Keep ordinary attachment handling for other file types unchanged.
     ttv_message = _WithoutUserMidiAttachments(message) if is_ttv else message
-    catalog_singing = bool(is_ttv and (
-        str(resolved.get('ttv_melody_id') or DEFAULT_MELODY_ID) != DEFAULT_MELODY_ID
-        or re.match(r"^/cantar(?:\s|$)", raw_text, re.IGNORECASE)
-        or re.search(r"(?<!\S)~(?!\S)", raw_text)))
-    if catalog_singing:
-        raw_text = re.sub(r"^/cantar(?=\s|$)\s*", "", raw_text, count=1, flags=re.IGNORECASE)
+    catalog_singing = False
+    if is_ttv:
+        raw_text, catalog_singing = singing_request(raw_text)
     try:
         if catalog_singing:
             clean_text, segments = parse_performance_text(raw_text, singing=True)

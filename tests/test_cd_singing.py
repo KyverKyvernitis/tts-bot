@@ -54,7 +54,7 @@ async def test_message_freezes_selected_catalog_score_before_later_edits(monkeyp
     entry = Melody("fixture", "Melodia de teste", "", 1600, 4, score_json=json.dumps(score))
     monkeypatch.setattr(catalog, "_MELODIES", (*list_melodies(), entry))
     cog = LiveRenderCog(db=FakeDB(resolved={"ttv_melody_id": entry.id}))
-    payload = await preparar_payload_tts_mensagem(cog, make_message("'/cantar a a a a"),
+    payload = await preparar_payload_tts_mensagem(cog, make_message("'/cantar a a a a ~"),
         guild_defaults={}, active_prefix="'", forced_engine="teto")
     queued = payload.queue_item
     assert queued.ttv_score == score
@@ -67,7 +67,7 @@ async def test_message_freezes_selected_catalog_score_before_later_edits(monkeyp
 @pytest.mark.asyncio
 async def test_user_midi_never_overrides_missing_saved_melody():
     cog = LiveRenderCog(db=FakeDB(resolved={"ttv_melody_id": "removed-melody"}))
-    message = make_message("'a ~ ~ ~ a")
+    message = make_message("'a ~ ~ ~ a ~")
     source = SimpleNamespace(filename="melodia.mid", size=len(DEMO_MIDI),
                              read=AsyncMock(return_value=DEMO_MIDI))
     message.attachments = [source]
@@ -78,9 +78,21 @@ async def test_user_midi_never_overrides_missing_saved_melody():
 
 
 @pytest.mark.asyncio
-async def test_unavailable_selected_cd_does_not_silently_fall_back_to_plain_speech():
+async def test_unavailable_selected_cd_does_not_block_plain_speech():
     cog = LiveRenderCog(db=FakeDB(resolved={"ttv_melody_id": "removed-melody"}))
     message = make_message("'Olá, mundo.")
+    payload = await preparar_payload_tts_mensagem(cog, message,
+        guild_defaults={}, active_prefix="'", forced_engine="teto")
+    assert payload is not None
+    assert payload.queue_item.ttv_score is None
+    assert payload.queue_item.ttv_arrangement is None
+    message.reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_selected_cd_rejects_explicit_singing():
+    cog = LiveRenderCog(db=FakeDB(resolved={"ttv_melody_id": "removed-melody"}))
+    message = make_message("'Olá, mundo. ~")
     payload = await preparar_payload_tts_mensagem(cog, message,
         guild_defaults={}, active_prefix="'", forced_engine="teto")
     assert payload is None

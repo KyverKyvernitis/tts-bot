@@ -57,7 +57,7 @@ async def test_real_discord_render_keeps_demo_holds_and_exact_worker_identity(vo
         "ttv_voice_id": voice, "ttv_language": language,
         "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.25,
     }))
-    msg = make_message("'a ~ ~ ~ a")
+    msg = make_message("'a ~ ~ ~ a ~")
     msg.attachments = [SimpleNamespace(
         filename="ttv-09-melodia.mid", size=len(DEMO_MIDI),
         read=AsyncMock(return_value=DEMO_MIDI),

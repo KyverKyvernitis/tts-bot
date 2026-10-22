@@ -29,7 +29,7 @@ from cogs.tts.arrangement_audio import (
     execution_arrangement, frozen_arrangement,
 )
 from cogs.tts.ttv import resolve_preferences, worker_voice_details
-from cogs.tts.performance import performance_hash, parse_performance_text
+from cogs.tts.performance import performance_hash, parse_performance_text, singing_request
 from cogs.tts.melodies import DEFAULT_MELODY_ID, fit_arrangement_lyrics, fit_catalog_lyrics_to_score
 from osaka_cd.lyrics import prepare_message_arrangement
 from osaka_cd.arrangement import arrangement_sha256
@@ -326,7 +326,7 @@ class ProductionFlowTests(unittest.IsolatedAsyncioTestCase):
             def _get_db(self): return SimpleNamespace(resolve_tts=lambda *_: settings)
             async def _maybe_await(self, value): return value
             def _render_tts_text(self, message, text): return text
-        message = SimpleNamespace(content="'/cantar olá mundo", guild=SimpleNamespace(id=1),
+        message = SimpleNamespace(content="'/cantar olá mundo ~", guild=SimpleNamespace(id=1),
             author=SimpleNamespace(id=2, voice=SimpleNamespace(channel=SimpleNamespace(id=3))), attachments=[])
         result = await preparation['preparar_payload_tts_mensagem'](
             MessageOwner(), message, guild_defaults={}, active_prefix="'", forced_engine='teto')

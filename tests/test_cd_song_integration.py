@@ -56,7 +56,7 @@ async def test_all_catalog_selections_freeze_explicit_score_in_discord_worker_pa
         cog = LiveRenderCog(db=FakeDB(resolved={"ttv_melody_id": entry.id,
             "ttv_voice_id": voice, "ttv_language": language,
             "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.25}))
-        prepared = await preparar_payload_tts_mensagem(cog, make_message("'/cantar " + text),
+        prepared = await preparar_payload_tts_mensagem(cog, make_message("'/cantar " + text + " ~"),
             guild_defaults={}, active_prefix="'", forced_engine="teto")
         queued = prepared.queue_item
         assert queued is not None
@@ -86,7 +86,7 @@ async def test_catalog_song_does_not_rewrite_speech_or_read_user_midi():
     assert speech.queue_item.ttv_score is None
     assert speech.queue_item.ttv_pitch_semitones == "-2.0"
     assert speech.queue_item.ttv_speech_rate == 1.25
-    attached = make_message("'a ~ ~ ~ a")
+    attached = make_message("'a ~ ~ ~ a ~")
     user_midi = SimpleNamespace(filename="melodia.mid", size=len(DEMO_MIDI),
         read=AsyncMock(return_value=DEMO_MIDI))
     attached.attachments = [user_midi]

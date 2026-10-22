@@ -1,8 +1,12 @@
 """Comandos curtos do TTV e identidade de uma apresentação.
 
+O ``~`` ativo no final da mensagem solicita canto e é removido antes de
+processar a letra. Sem esse marcador, a melodia salva não muda a fala.
+
 Os efeitos valem para palavras: ``<olá`` entra suavemente, ``olá>`` sai
-suavemente e ``olá~`` sustenta a última vogal. ``|`` separa trechos. No
-canto, ``~`` separado ocupa a próxima nota com a vogal anterior.
+suavemente e, dentro do texto, ``olá~ mundo`` sustenta a última vogal de
+``olá``. ``|`` separa trechos. No canto, ``~`` separado dentro da letra
+ocupa a próxima nota com a vogal anterior.
 
 Texto sem comandos mantém a rota de fala existente. Menções, URLs, código,
 trechos entre aspas duplas e símbolos escapados não viram comandos.
@@ -22,16 +26,24 @@ DEFAULT_MELODY_PRESET = "ttv-demo-v1"
 
 
 def singing_request(text: str) -> tuple[str, bool]:
-    """Explicit /cantar or an unescaped standalone ~ opts into singing."""
+    """Only an active final ~ opts a message into singing.
+
+    The suffix is a mode marker, not a lyric or a held note. Keep the original
+    escaping for the later performance parser; the literal mask is used only
+    to decide whether the final character is an active command. A saved melody
+    chooses the song after this opt-in, never the message's speaking mode.
+    """
     normalized = _normalize(text)
     literal_text, mask = _literal_characters(normalized)
+    if not literal_text.endswith("~") or mask[-1]:
+        return text, False
+    clean = normalized[:-1].rstrip()
+    # Keep the old directive as optional wording, but it cannot activate
+    # singing without the terminal marker.
     directive = re.match(r"(?i)^/cantar(?:\s+|$)", literal_text)
     if directive and not any(mask[:directive.end()]):
-        return normalized[directive.end():].strip(), True
-    for match in re.finditer(r"(?<!\S)~(?!\S)", literal_text):
-        if not mask[match.start()]:
-            return text, True
-    return text, False
+        clean = clean[directive.end():].strip()
+    return clean, True
 
 _DISCORD_LITERAL = re.compile(
     r"<(?:@!?|@&|#)\d+>|<a?:[A-Za-z0-9_]+:\d+>|<t:\d+(?::[tTdDfFR])?>"

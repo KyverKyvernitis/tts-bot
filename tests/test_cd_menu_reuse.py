@@ -21,7 +21,7 @@ def test_cd_panel_approved_title_details_and_no_select_descriptions():
     children = view.to_components()[0]["components"]
     header = children[0]["content"]
     assert header == ("## <a:Vinyl_Music_loading:1559374199133315122> Menu de CDs\n"
-                      "-# Escolha seu CD, o bot vai ler e no modo de canto vai cantar no ritmo dele.")
+                      "-# Escolha seu CD. Coloque ~ no final da mensagem TTV para cantar no ritmo dele; sem ~, o bot fala normalmente.")
     contents = [component.get("content", "") for component in children]
     assert all("Em uso:" not in text and "Sua escolha neste servidor" not in text for text in contents)
     assert any("4 notas · 4 s" in text for text in contents)
