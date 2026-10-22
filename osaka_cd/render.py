@@ -85,13 +85,19 @@ def _preroll(audio, metadata, score):
     actual = frames * 1000 / rate - score["duration_ms"]
     supplied = metadata.get("midi_preroll_ms")
     if supplied is None:
-        # The immutable 1.11.41 renderer trims to exactly duration + preroll;
-        # its binary endpoint omits preroll but preserves the original WAV.
+        # This renderer trims MIDI WAVs to exactly duration + preroll. Its
+        # identity is independent of the worker's control-plane release; SSH
+        # upgrades must not invalidate the unchanged synthesis contract. Raw
+        # and cached responses can omit preroll, so derive it from PCM frames
+        # only for this exact renderer or the established 1.11.41 MIDI wire
+        # contract. Unknown renderers still require explicit timing metadata.
         version = metadata.get("worker_version", metadata.get("version"))
         timeline = metadata.get("teto_timeline_mode", metadata.get("timeline_mode"))
+        renderer = metadata.get("renderer_version") or metadata.get("teto_renderer_version")
+        exact_renderer = renderer == "speech-4g-cvvc-pauses"
         cached_utau = (metadata.get("cache_hit") is True
-                       and metadata.get("renderer_version") == "speech-4g-cvvc-pauses")
-        if version != "1.11.41" or not (timeline == "midi-vowel-continuous" or cached_utau):
+                       and exact_renderer and timeline in (None, ""))
+        if not (version == "1.11.41" or exact_renderer) or not (timeline == "midi-vowel-continuous" or cached_utau):
             raise RenderError("stem_alignment_metadata_missing")
         supplied = actual
     if isinstance(supplied, bool) or not isinstance(supplied, (int, float)):
