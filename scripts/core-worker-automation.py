@@ -39,6 +39,7 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("phone_worker_runtime/tts_android.py", 0o644),
     ("phone_worker_runtime/tts_providers.py", 0o644),
     ("phone_worker_runtime/pcm_io.py", 0o644),
+    ("phone_worker_runtime/ssh_transport.py", 0o644),
     ("phone_worker_bootstrap.py", 0o755),
     ("tts_transport.py", 0o644),
     ("cogs/__init__.py", 0o644),
@@ -291,6 +292,16 @@ def _version_tuple(value: Any) -> tuple[int, ...]:
 
 
 def _public_base_url() -> str:
+    if str(os.getenv("PHONE_WORKER_TRANSPORT") or "legacy").strip().lower() == "ssh":
+        # The paired origin lives on the phone, through its persistent local
+        # forward. Never discover an overlay-network address in SSH mode.
+        try:
+            port = int(os.getenv("CORE_WORKER_SSH_LOCAL_PORT") or 19000)
+        except (TypeError, ValueError):
+            port = 19000
+        if not 1024 <= port <= 65535:
+            raise ValueError("CORE_WORKER_SSH_LOCAL_PORT inválida")
+        return f"http://127.0.0.1:{port}"
     explicit = str(os.getenv("CORE_WORKER_PUBLIC_BASE_URL") or os.getenv("CORE_WORKER_VPS_URL") or os.getenv("VPS_PUBLIC_BASE_URL") or "").strip().rstrip("/")
     if explicit and "IP_TAILSCALE_DA_VPS" not in explicit:
         return explicit
@@ -1164,7 +1175,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     after = sub.add_parser("after-update")
     after.add_argument("--force-agent", action="store_true")
-    sub.add_parser("queue-agent-update")
+    agent = sub.add_parser("queue-agent-update")
+    agent.add_argument("--worker-id", default="")
     sub.add_parser("queue-boot-repair")
     process = sub.add_parser("process-pending")
     process.add_argument("--worker-id", default="")
@@ -1172,7 +1184,7 @@ def main() -> int:
     if args.command == "after-update":
         return after_update(force_agent=args.force_agent)
     if args.command == "queue-agent-update":
-        result = queue_agent_updates(force=True)
+        result = queue_agent_updates(force=True, only_worker_id=args.worker_id)
     elif args.command == "queue-boot-repair":
         result = queue_boot_repairs()
     else:

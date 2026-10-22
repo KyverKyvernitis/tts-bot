@@ -132,10 +132,28 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   mkdir "$LOCK_DIR" 2>/dev/null || exit 1
 fi
 printf '%s\n' "$$" > "$LOCK_DIR/owner.pid"
-trap 'if [[ -f "$LOCK_DIR/owner.pid" ]] && [[ "$(cat "$LOCK_DIR/owner.pid" 2>/dev/null)" == "$$" ]]; then rm -rf "$LOCK_DIR" 2>/dev/null || true; fi' EXIT INT TERM
+cleanup_start_lock() {
+  if [[ -f "$LOCK_DIR/owner.pid" ]] && [[ "$(cat "$LOCK_DIR/owner.pid" 2>/dev/null)" == "$$" ]]; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+trap cleanup_start_lock EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 termux-wake-lock 2>/dev/null || true
-ensure_sshd_running
+if [[ "${PHONE_WORKER_TRANSPORT:-legacy}" == "ssh" ]]; then
+  # Normal watchdog cycles own the transport check. A manual start may kick
+  # the same idempotent one-shot, without waiting for network or restarting it.
+  if [[ "${PHONE_WORKER_SSH_ENSURE_BY_WATCH:-0}" != "1" ]]; then
+    ssh_helper="$WORKER_DIR/phone_worker_runtime/ssh_transport.py"
+    if [[ -f "$ssh_helper" ]]; then
+      "$PYTHON_BIN" "$ssh_helper" ensure >> "$LOG_FILE" 2>&1 &
+    fi
+  fi
+else
+  ensure_sshd_running
+fi
 
 active_release_dir() {
   if [[ -L "$ACTIVE_RELEASE_LINK" || -d "$ACTIVE_RELEASE_LINK" ]]; then

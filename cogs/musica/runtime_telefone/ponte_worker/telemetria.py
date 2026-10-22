@@ -149,3 +149,64 @@ def music_agent_snapshot(hooks: Any) -> dict[str, Any]:
             "dependency_missing": list(deps.get("missing") or []),
             "optional_dependency_missing": list(deps.get("optional_missing") or []),
         }
+
+
+def music_agent_health_snapshot(hooks: Any) -> dict[str, Any]:
+    """Read the running agent without inventories, installers or boot repairs.
+
+    The generic snapshot intentionally audits installed files and dependencies.
+    Selection only needs the already running agent's cached voice readiness and
+    active-session count; querying those must not run pip or scan voicebanks.
+    """
+    hooks.load_runtime_env()
+    token = str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip()
+    host = str(os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip()
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    try:
+        port = int(os.getenv("MUSIC_AGENT_PORT") or 8780)
+        if not 1 <= port <= 65535 or host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError
+    except (TypeError, ValueError):
+        return {"ok": False, "available": False, "configured": False, "reason": "invalid_local_music_endpoint"}
+    if not token:
+        return {"ok": False, "available": False, "configured": False, "reason": "music_agent_token_missing"}
+    base = "http://" + ("[::1]" if host == "::1" else host) + ":" + str(port)
+    headers = {"Accept": "application/json", "Authorization": "Bearer " + token}
+    started = time.perf_counter()
+    try:
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+        request = urllib.request.Request(base + "/health", headers=headers, method="GET")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        timeout = max(0.3, min(2.0, hooks.env_float("MUSIC_AGENT_LIGHT_HEALTH_TIMEOUT_SECONDS", 1.5)))
+        with opener.open(request, timeout=timeout) as response:
+            if int(getattr(response, "status", 200)) != 200:
+                raise ValueError("Music Agent não retornou HTTP 200")
+            raw = response.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            raise ValueError("health excedeu limite")
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("health não retornou objeto")
+        dependencies = data.get("voice_dependencies")
+        dependencies = dependencies if isinstance(dependencies, dict) else {}
+        missing = dependencies.get("missing")
+        missing = [str(item)[:80] for item in missing[:12]] if isinstance(missing, list) else []
+        ready = bool(data.get("ok") and data.get("discord_ready") and dependencies.get("ok"))
+        guilds = data.get("guilds") if isinstance(data.get("guilds"), dict) else {}
+        return {
+            "ok": ready, "available": ready, "configured": True, "payload_mode": "light",
+            "discord_ready": bool(data.get("discord_ready")), "version": str(data.get("version") or "")[:48],
+            "executor_mode": str(data.get("executor_mode") or "")[:24],
+            "voice_dependencies": {"ok": bool(dependencies.get("ok")), "missing": missing},
+            "dependency_missing": missing,
+            "guilds": {str(gid)[:32]: {"status": str(state.get("status") or "")[:32]}
+                       for gid, state in list(guilds.items())[:128] if isinstance(state, dict)},
+            "observed_at": time.time(), "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+    except Exception as exc:
+        return {"ok": False, "available": False, "configured": True, "payload_mode": "light",
+                "reason": "music_agent_health_error", "error": type(exc).__name__, "observed_at": time.time()}

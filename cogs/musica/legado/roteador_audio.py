@@ -4382,6 +4382,8 @@ class AudioRouter:
             }
             started = time.monotonic()
             base = self._phone_worker_base_url()
+            from ..agente_telefone.utilitarios import _phone_worker_bulk_url
+            base = _phone_worker_bulk_url(base)
             timeout = aiohttp.ClientTimeout(total=MUSIC_TTS_PHONE_WORKER_CONVERT_TIMEOUT_SECONDS)
             headers = {
                 "Authorization": f"Bearer {PHONE_WORKER_TOKEN}",

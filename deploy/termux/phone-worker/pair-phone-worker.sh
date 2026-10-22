@@ -21,7 +21,23 @@ if [[ -z "$CODE" ]]; then
   read -r -p "Código CORE-XXXX: " CODE
 fi
 if [[ -z "$VPS_URL" ]]; then
-  read -r -p "URL da VPS/Tailscale (ex: http://100.x.x.x:10000): " VPS_URL
+  if [[ "${PHONE_WORKER_TRANSPORT:-legacy}" == "ssh" ]]; then
+    VPS_URL="http://127.0.0.1:${CORE_WORKER_SSH_LOCAL_PORT:-19000}"
+  else
+    read -r -p "URL pareada da VPS: " VPS_URL
+  fi
+fi
+if [[ "${PHONE_WORKER_TRANSPORT:-legacy}" == "ssh" ]]; then
+  SSH_VPS_URL="http://127.0.0.1:${CORE_WORKER_SSH_LOCAL_PORT:-19000}"
+  if [[ "${VPS_URL%/}" != "$SSH_VPS_URL" ]]; then
+    echo "Em modo SSH, use a origem pareada $SSH_VPS_URL; execute activate do transporte antes de parear." >&2
+    exit 2
+  fi
+  if [[ ! -f "$WORKER_DIR/phone_worker_runtime/ssh_transport.py" ]]; then
+    echo "Transporte SSH não instalado; aplique o pacote antes do pareamento." >&2
+    exit 2
+  fi
+  "$PYTHON_BIN" "$WORKER_DIR/phone_worker_runtime/ssh_transport.py" ensure >/dev/null
 fi
 if [[ -z "$WORKER_NAME" ]]; then
   MANUFACTURER="$(getprop ro.product.manufacturer 2>/dev/null || true)"

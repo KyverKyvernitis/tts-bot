@@ -136,7 +136,17 @@ if ! mkdir "$WATCH_LOCK_DIR" 2>/dev/null; then
   mkdir "$WATCH_LOCK_DIR" 2>/dev/null || exit 1
 fi
 printf '%s\n' "$$" > "$WATCH_LOCK_DIR/owner.pid" 2>/dev/null || true
-trap 'if [[ -f "$WATCH_LOCK_DIR/owner.pid" ]] && [[ "$(cat "$WATCH_LOCK_DIR/owner.pid" 2>/dev/null)" == "$$" ]]; then rm -rf "$WATCH_LOCK_DIR" "$WATCH_PID_FILE" 2>/dev/null || true; fi' EXIT INT TERM
+cleanup_watch() {
+  if [[ -f "$WATCH_LOCK_DIR/owner.pid" ]] && [[ "$(cat "$WATCH_LOCK_DIR/owner.pid" 2>/dev/null)" == "$$" ]]; then
+    rm -rf "$WATCH_LOCK_DIR" "$WATCH_PID_FILE" 2>/dev/null || true
+  fi
+}
+# A signal must stop this watchdog, not just remove its lock and let its loop
+# continue alongside the replacement. SSH masters and the worker are separate
+# owned processes and deliberately survive a watchdog handoff.
+trap cleanup_watch EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 printf '%s\n' "$$" > "$WATCH_PID_FILE" 2>/dev/null || true
 termux-wake-lock 2>/dev/null || true
@@ -168,10 +178,174 @@ run_bootstrap_check() {
   return 1
 }
 
+ssh_mode_configured() {
+  local mode="${PHONE_WORKER_TRANSPORT:-legacy}" file_mode=""
+  # Read this one setting as data. An already-running legacy watchdog must
+  # notice activation without importing an arbitrary shell file every second.
+  if [[ -r "$ENV_FILE" ]]; then
+    file_mode="$(awk '
+      /^[ \t]*(export[ \t]+)?PHONE_WORKER_TRANSPORT[ \t]*=/ {
+        line=$0; sub(/^[^=]*=[ \t]*/, "", line)
+        gsub(/[\047\042]/, "", line); sub(/[ \t]*#.*/, "", line)
+        gsub(/[ \t\r]/, "", line); value=line
+      }
+      END {print value}
+    ' "$ENV_FILE" 2>/dev/null || true)"
+    [[ -n "$file_mode" ]] && mode="$file_mode"
+  fi
+  [[ "$mode" == "ssh" ]]
+}
+
+transport_script() {
+  local candidate="$WORKER_DIR/phone_worker_runtime/ssh_transport.py" active=""
+  # The canonical recovery core remains installed even when current is rolled
+  # back to an older worker release without an SSH implementation.
+  if [[ -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  active="$(dirname "$(active_start_script)")"
+  candidate="$active/phone_worker_runtime/ssh_transport.py"
+  [[ -f "$candidate" ]] && printf '%s\n' "$candidate"
+}
+
+run_ssh_watch_loop() {
+  local next_ssh=0 next_worker=0 next_pull=0 next_maintenance=0
+  local ssh_pid="" worker_check_pid="" pull_pid="" now_epoch=0
+  local ssh_ready=0 ssh_observed_at=0 helper="" current_start="" rc=0
+  local pull_failures=0 worker_failures=0 backoff=0 jitter=0
+  local python_bin="${PHONE_WORKER_PYTHON:-python}" bash_bin=""
+  local ssh_rc="$WATCH_LOCK_DIR/ssh.rc" ssh_json="$WATCH_LOCK_DIR/ssh.json"
+  local worker_rc="$WATCH_LOCK_DIR/worker.rc" pull_rc="$WATCH_LOCK_DIR/pull.rc"
+  bash_bin="$(command -v bash || true)"
+  [[ -n "$bash_bin" ]] || bash_bin="/data/data/com.termux/files/usr/bin/bash"
+  export PHONE_WORKER_TRANSPORT=ssh
+  log "supervisão SSH ativa; transporte=5s worker=${INTERVAL}s bootstrap=${BOOTSTRAP_INTERVAL}s"
+  while true; do
+    now_epoch="$(date +%s 2>/dev/null || echo 0)"
+    [[ "$now_epoch" =~ ^[0-9]+$ ]] || now_epoch=0
+
+    # All three operations are tracked one-shots. Neither a slow update nor a
+    # local health check may hold the loop while the SSH transport is broken.
+    if [[ -n "$ssh_pid" ]] && { [[ -f "$ssh_rc" ]] || ! kill -0 "$ssh_pid" 2>/dev/null; }; then
+      wait "$ssh_pid" 2>/dev/null || true
+      ssh_pid=""
+      ssh_observed_at="$now_epoch"
+      ssh_ready=0
+      if [[ -f "$ssh_rc" ]]; then
+        ssh_ready="$("$python_bin" -c 'import json,sys
+try:
+ d=json.load(open(sys.argv[1])); print(1 if d.get("vps_ready") is True else 0)
+except (OSError,ValueError,TypeError): print(0)' "$ssh_json" 2>/dev/null || echo 0)"
+      fi
+      rm -f "$ssh_rc"
+    fi
+    if [[ -n "$worker_check_pid" ]] && { [[ -f "$worker_rc" ]] || ! kill -0 "$worker_check_pid" 2>/dev/null; }; then
+      wait "$worker_check_pid" 2>/dev/null || true
+      worker_check_pid=""
+      rc="$(cat "$worker_rc" 2>/dev/null || echo 1)"
+      rm -f "$worker_rc"
+      if [[ "$rc" == "0" ]]; then
+        worker_failures=0
+        write_status "watchdog_ok pid=$$ $(now_iso)"
+      else
+        worker_failures=$((worker_failures + 1))
+        log "start falhou; rc=$rc falhas=$worker_failures; nova tentativa em ${INTERVAL}s"
+        write_status "watchdog_start_failed failures=$worker_failures $(now_iso)"
+      fi
+    fi
+    if [[ -n "$pull_pid" ]] && { [[ -f "$pull_rc" ]] || ! kill -0 "$pull_pid" 2>/dev/null; }; then
+      wait "$pull_pid" 2>/dev/null || true
+      pull_pid=""
+      rc="$(cat "$pull_rc" 2>/dev/null || echo 1)"
+      rm -f "$pull_rc"
+      if [[ "$rc" == "0" ]]; then
+        pull_failures=0
+        backoff="$BOOTSTRAP_INTERVAL"
+      else
+        pull_failures=$((pull_failures + 1))
+        backoff=$((BOOTSTRAP_INTERVAL * (1 << (pull_failures > 3 ? 3 : pull_failures))))
+        [[ "$backoff" -gt "$BOOTSTRAP_MAX_BACKOFF" ]] && backoff="$BOOTSTRAP_MAX_BACKOFF"
+      fi
+      jitter=0
+      if [[ "$BOOTSTRAP_JITTER" =~ ^[0-9]+$ && "$BOOTSTRAP_JITTER" -gt 0 ]]; then jitter=$((RANDOM % (BOOTSTRAP_JITTER + 1))); fi
+      next_pull=$((now_epoch + backoff + jitter))
+    fi
+
+    if [[ "$now_epoch" -ge "$next_maintenance" ]]; then
+      rotate_watch_log_if_needed
+      termux-wake-lock 2>/dev/null || true
+      next_maintenance=$((now_epoch + 60))
+    fi
+
+    # Starting/checking the local backend is independent of connectivity. It
+    # uses the existing start script and its identity/lock/health protections.
+    if [[ -z "$worker_check_pid" && "$now_epoch" -ge "$next_worker" ]]; then
+      current_start="$(active_start_script)"
+      next_worker=$((now_epoch + INTERVAL))
+      if [[ -f "$current_start" ]]; then
+        rm -f "$worker_rc"
+        (
+          trap - EXIT INT TERM
+          PHONE_WORKER_RELEASE_DIR="$(dirname "$current_start")" PHONE_WORKER_QUIET_HEALTHY=1 \
+            PHONE_WORKER_SSH_ENSURE_BY_WATCH=1 "$bash_bin" "$current_start"
+          result=$?
+          printf '%s\n' "$result" > "$worker_rc" 2>/dev/null || true
+          exit "$result"
+        ) >> "$WATCH_LOG" 2>&1 &
+        worker_check_pid=$!
+      else
+        log "start script não encontrado: $current_start"
+        write_status "watchdog_missing_start failures=$worker_failures $(now_iso)"
+      fi
+    fi
+
+    # A successful real request through L19000 is required before a pull.
+    # An open local listener alone is not evidence that the VPS is reachable.
+    if [[ -z "$pull_pid" && "$now_epoch" -ge "$next_pull" && "$ssh_ready" == "1" && $((now_epoch - ssh_observed_at)) -le 15 ]]; then
+      rm -f "$pull_rc"
+      (
+        trap - EXIT INT TERM
+        run_bootstrap_check
+        result=$?
+        printf '%s\n' "$result" > "$pull_rc" 2>/dev/null || true
+        exit "$result"
+      ) >> "$WATCH_LOG" 2>&1 &
+      pull_pid=$!
+    fi
+
+    if [[ -z "$ssh_pid" && "$now_epoch" -ge "$next_ssh" ]]; then
+      helper="$(transport_script)"
+      next_ssh=$((now_epoch + 5))
+      if [[ -n "$helper" ]]; then
+        rm -f "$ssh_rc"
+        (
+          trap - EXIT INT TERM
+          "$python_bin" "$helper" ensure > "$ssh_json.tmp" 2>> "$WATCH_LOG"
+          result=$?
+          mv -f "$ssh_json.tmp" "$ssh_json" 2>/dev/null || true
+          printf '%s\n' "$result" > "$ssh_rc" 2>/dev/null || true
+          exit "$result"
+        ) &
+        ssh_pid=$!
+      else
+        ssh_ready=0
+        log "núcleo SSH ausente; reinstale os arquivos do transporte antes de ativar SSH"
+      fi
+    fi
+    sleep 1 &
+    wait $! || true
+  done
+}
+
 next_bootstrap=0
 bootstrap_failures=0
 failures=0
 while true; do
+  if ssh_mode_configured; then
+    run_ssh_watch_loop
+    exit $?
+  fi
   rotate_watch_log_if_needed
   termux-wake-lock 2>/dev/null || true
   ensure_sshd_running
@@ -208,5 +382,6 @@ while true; do
     log "start script não encontrado: $current_start"
     write_status "watchdog_missing_start failures=$failures $(now_iso)"
   fi
-  sleep "$INTERVAL"
+  sleep "$INTERVAL" &
+  wait $! || true
 done

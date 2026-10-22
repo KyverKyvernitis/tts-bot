@@ -8,11 +8,13 @@ import json
 import hashlib
 import hmac
 import re
+import stat
 import time
 import subprocess
 import threading
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from utility.openai_compat import register_openai_compat_routes
 from cogs.musica.integracoes.webserver import registrar_rotas_musica
@@ -244,6 +246,19 @@ def _authenticate_core_worker_agent_request(worker_id: str) -> tuple[bool, tuple
     return True, None, token
 
 
+@app.get("/core-worker/agent/ping")
+def core_worker_agent_ping():
+    """Small authenticated roundtrip; no inventory, jobs or automation kicks."""
+    worker_id = str(request.args.get("worker_id") or request.headers.get("X-Core-Worker-Id") or "").strip()
+    ok, error_response, _token = _authenticate_core_worker_agent_request(worker_id)
+    if not ok:
+        return error_response
+    response = jsonify({"ok": True, "service": "osaka-phone-ssh", "worker_id": worker_id,
+                        "timestamp": int(time.time())})
+    response.headers["Cache-Control"] = "private, no-store"
+    return response, 200
+
+
 def _core_worker_response_hmac(token: str, timestamp: str, body: bytes) -> str:
     # O timestamp faz parte da mensagem autenticada. Sem isso, um adversário que
     # capturasse body+HMAC poderia trocar apenas o header de tempo e prolongar um
@@ -271,6 +286,70 @@ def _safe_agent_release_hash(value: str) -> str:
     return value if re.fullmatch(r"[0-9a-f]{64}", value) else ""
 
 
+def _read_ssh_manifest_registry(path: Path | None = None, *, owner_uid: int = 0) -> dict:
+    """Only the administrator's non-secret SSH registry can select an origin."""
+    path = path or Path("/etc/osaka/phone-ssh.json")
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {}
+    for candidate in (path, *path.parents):
+        meta = candidate.lstat()
+        if stat.S_ISLNK(meta.st_mode) or meta.st_uid not in {0, owner_uid} or meta.st_mode & 0o022:
+            raise ValueError("registro SSH não possui origem administrativa confiável")
+        if candidate != path and not stat.S_ISDIR(meta.st_mode):
+            raise ValueError("diretório do registro SSH inválido")
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 256 * 1024:
+        raise ValueError("registro SSH fora do limite")
+    parsed = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(parsed, dict) or parsed.get("schema") != 1
+            or parsed.get("marker") != "Managed by Osaka Phone SSH v1."
+            or not isinstance(parsed.get("workers"), dict)):
+        raise ValueError("registro SSH inválido")
+    return parsed
+
+
+def _ssh_manifest_origin(worker_id: str) -> str | None:
+    # SSH's local forward connects from loopback. X-Forwarded-* headers are not
+    # used: a public request cannot select the private origin by changing Host.
+    if (request.remote_addr or "").strip() not in {"127.0.0.1", "::1"}:
+        return None
+    registry = _read_ssh_manifest_registry()
+    row = registry.get("workers", {}).get(worker_id)
+    if not isinstance(row, dict) or row.get("state") not in {"enrolled", "active"} or not row.get("client_public_key"):
+        return None
+    try:
+        local_port = int(row["local_port"])
+        origin = str(row["bootstrap_origin"])
+        expected = f"http://127.0.0.1:{local_port}"
+        if not 1024 <= local_port <= 65535 or origin != expected:
+            raise ValueError("origem privada SSH inválida")
+        parsed = urlsplit(origin)
+        request_origin = urlsplit(str(request.scheme) + "://" + str(request.host))
+        if (request_origin.scheme, request_origin.hostname, request_origin.port) != (parsed.scheme, parsed.hostname, parsed.port):
+            return None
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("origem privada SSH inválida") from None
+    return origin
+
+
+def _agent_manifest_for_transport(body: bytes, worker_id: str) -> bytes:
+    origin = _ssh_manifest_origin(worker_id)
+    if not origin:
+        return body
+    manifest = json.loads(body.decode("utf-8"))
+    source_hash = _safe_agent_release_hash(manifest.get("source_hash"))
+    if not source_hash:
+        raise ValueError("manifesto sem source_hash válido")
+    # Rebuild from the immutable artifact identity rather than preserving an
+    # arbitrary published hostname or accepting an origin supplied by a client.
+    release_url = f"{origin}/core-worker/agent/releases/{source_hash}.zip"
+    manifest["url"] = release_url
+    if "release_url" in manifest:
+        manifest["release_url"] = release_url
+    return json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 @app.get("/core-worker/agent/latest")
 def core_worker_agent_latest():
     worker_id = str(request.args.get("worker_id") or request.headers.get("X-Core-Worker-Id") or "").strip()
@@ -283,6 +362,7 @@ def core_worker_agent_latest():
         parsed = json.loads(body.decode("utf-8"))
         if not isinstance(parsed, dict) or not _safe_agent_release_hash(parsed.get("source_hash")):
             raise ValueError("manifesto latest inválido")
+        body = _agent_manifest_for_transport(body, worker_id)
     except FileNotFoundError:
         return jsonify({"ok": False, "error": "nenhuma release do agent publicada"}), 404
     except Exception as exc:

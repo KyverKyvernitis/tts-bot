@@ -62,3 +62,29 @@ def _phone_worker_base_url() -> str:
     except Exception:
         port = 8766
     return f"{scheme}://{host}:{port}"
+
+
+def _phone_worker_bulk_url(base: str) -> str:
+    """Select the second SSH listener only for our configured worker origin.
+
+    Other registered workers and public media URLs must retain their destination;
+    a registry entry cannot use this selector to redirect the configured Bearer.
+    """
+    if str(getattr(config, "PHONE_WORKER_TRANSPORT", "legacy")).lower() != "ssh":
+        return base
+    from urllib.parse import urlsplit, urlunsplit
+    configured = _phone_worker_base_url()
+    if not configured:
+        return base
+    try:
+        source, expected = urlsplit(base), urlsplit(configured)
+        origin = lambda p: (p.scheme.lower(), p.hostname, p.port or (443 if p.scheme == "https" else 80))
+        port = int(getattr(config, "PHONE_WORKER_BULK_PORT", expected.port) or expected.port)
+        if (source.username or source.password or origin(source) != origin(expected)
+                or not 1 <= port <= 65535):
+            return base
+        host = source.hostname or ""
+        authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        return urlunsplit((source.scheme, authority, source.path, source.query, source.fragment))
+    except (TypeError, ValueError):
+        return base

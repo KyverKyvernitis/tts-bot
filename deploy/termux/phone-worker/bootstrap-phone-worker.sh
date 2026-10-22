@@ -1,9 +1,17 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Bootstrap/repair local para transformar um Termux em Core Worker pareado.
 # Uso:
-#   bash bootstrap-phone-worker.sh CORE-XXXX http://100.x.x.x:10000 "Xiaomi Worker 2" midia
+#   bash bootstrap-phone-worker.sh CORE-XXXX http://127.0.0.1:19000 "Xiaomi Worker 2" midia
 set -Eeuo pipefail
 
+copy_runtime_file() {
+  local source="$1" target="$2" temporary="${2}.tmp.$$"
+  [[ "$source" -ef "$target" ]] && return 0
+  mkdir -p "$(dirname "$target")"
+  cp -- "$source" "$temporary"
+  chmod 644 "$temporary"
+  mv -f -- "$temporary" "$target"
+}
 
 install_core_worker_shell_autostart() {
   local block file tmp
@@ -54,6 +62,13 @@ EOF_WRAPPER
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${PHONE_WORKER_ENV:-$HOME/.phone-worker.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 CODE="${1:-}"
 VPS_URL="${2:-${CORE_WORKER_VPS_URL:-}}"
@@ -86,7 +101,11 @@ if [[ -z "$CODE" ]]; then
   read -r -p "Código CORE-XXXX: " CODE
 fi
 if [[ -z "$VPS_URL" ]]; then
-  read -r -p "URL da VPS/Tailscale (ex: http://100.x.x.x:10000): " VPS_URL
+  if [[ "${PHONE_WORKER_TRANSPORT:-legacy}" == "ssh" ]]; then
+    VPS_URL="http://127.0.0.1:${CORE_WORKER_SSH_LOCAL_PORT:-19000}"
+  else
+    read -r -p "URL pareada da VPS: " VPS_URL
+  fi
 fi
 if [[ -z "$WORKER_NAME" ]]; then
   MANUFACTURER="$(getprop ro.product.manufacturer 2>/dev/null || true)"
@@ -98,15 +117,19 @@ if [[ -z "$WORKER_NAME" ]]; then
 fi
 
 log "instalando dependências básicas"
-pkg install python tmux curl -y || true
+pkg install python tmux curl openssh -y || true
 pkg install termux-api -y || true
 
 log "copiando/reparando scripts em $WORKER_DIR"
 mkdir -p "$WORKER_DIR"
 for f in phone_worker.py phone_worker_bootstrap.py repair-phone-worker.sh tts_transport.py start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [[ -f "$SCRIPT_DIR/$f" ]]; then
-    cp "$SCRIPT_DIR/$f" "$WORKER_DIR/$f"
+    copy_runtime_file "$SCRIPT_DIR/$f" "$WORKER_DIR/$f"
   fi
+done
+for source in "$SCRIPT_DIR"/phone_worker_runtime/*.py; do
+  [[ -f "$source" ]] || continue
+  copy_runtime_file "$source" "$WORKER_DIR/phone_worker_runtime/$(basename "$source")"
 done
 MUSIC_PROJECT_ROOT=""
 if [[ -d "$SCRIPT_DIR/cogs/musica/runtime_telefone" ]]; then
@@ -114,7 +137,7 @@ if [[ -d "$SCRIPT_DIR/cogs/musica/runtime_telefone" ]]; then
 elif [[ -d "$SCRIPT_DIR/../../../cogs/musica/runtime_telefone" ]]; then
   MUSIC_PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 fi
-if [[ -n "$MUSIC_PROJECT_ROOT" ]]; then
+if [[ -n "$MUSIC_PROJECT_ROOT" && ! "$MUSIC_PROJECT_ROOT" -ef "$WORKER_DIR" ]]; then
   mkdir -p "$WORKER_DIR/cogs/musica"
   cp "$MUSIC_PROJECT_ROOT/cogs/__init__.py" "$WORKER_DIR/cogs/__init__.py"
   cp "$MUSIC_PROJECT_ROOT/cogs/musica/__init__.py" "$WORKER_DIR/cogs/musica/__init__.py"

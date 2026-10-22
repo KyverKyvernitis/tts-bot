@@ -40,6 +40,8 @@ _PHONE_WORKER_CONFIG_MODULE: Any = None
 _PHONE_WORKER_CONFIG_LOCK = threading.Lock()
 _PHONE_WORKER_TELEMETRY_MODULE: Any = None
 _PHONE_WORKER_TELEMETRY_LOCK = threading.Lock()
+_PHONE_WORKER_SSH_MODULE: Any = None
+_PHONE_WORKER_SSH_LOCK = threading.Lock()
 _PHONE_WORKER_CONTROL_PLANE_MODULE: Any = None
 _PHONE_WORKER_CONTROL_PLANE_LOCK = threading.Lock()
 _PHONE_WORKER_VOICE_STATE_MODULE: Any = None
@@ -130,7 +132,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.41"
+PHONE_WORKER_VERSION = "1.11.42"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "termux"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -215,6 +217,7 @@ SUPPORTED_DIRECT_TASKS = (
     "music_agent_command",
     "music_agent_status",
     "network_probe",
+    "ssh_connection_diagnostic",
     "ping",
     "service_restart",
     "service_start",
@@ -271,6 +274,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "music_agent_command",
     "music_agent_status",
     "network_probe",
+    "ssh_connection_diagnostic",
     "ping",
     "service_restart",
     "service_start",
@@ -483,6 +487,10 @@ def _current_core_worker_roles_and_capabilities() -> tuple[list[str], list[str]]
     preset_capabilities = _core_worker_profile_capabilities(profile)
     roles = _merge_profile_contract(_env_list("CORE_WORKER_ROLES", []), preset_roles)
     capabilities = _merge_profile_contract(_env_list("CORE_WORKER_CAPABILITIES", []), preset_capabilities)
+    if _ssh_transport_enabled():
+        capabilities = [item for item in capabilities if item != "tailscale-status"]
+        if "ssh-transport" not in capabilities:
+            capabilities.append("ssh-transport")
     return roles, capabilities
 
 
@@ -899,7 +907,80 @@ def _looks_like_tailscale_host(host: str) -> bool:
     return text.endswith(".ts.net") or text.endswith(".tailnet")
 
 
+def _ssh_transport_enabled() -> bool:
+    return str(os.getenv("PHONE_WORKER_TRANSPORT") or "legacy").strip().lower() == "ssh"
+
+
+def _phone_worker_ssh_module() -> Any:
+    """Load the optional transport from the release or its stable recovery copy."""
+    global _PHONE_WORKER_SSH_MODULE
+    if _PHONE_WORKER_SSH_MODULE is not None:
+        return _PHONE_WORKER_SSH_MODULE
+    with _PHONE_WORKER_SSH_LOCK:
+        if _PHONE_WORKER_SSH_MODULE is None:
+            relative = Path("phone_worker_runtime/ssh_transport.py")
+            candidates = [Path(__file__).resolve().parent / relative,
+                          Path(os.getenv("PHONE_WORKER_DIR") or Path.home() / "phone-worker").expanduser() / relative]
+            path = next((candidate for candidate in candidates if candidate.is_file()), None)
+            if path is None:
+                raise RuntimeError("módulo de transporte SSH ainda não instalado")
+            name = "core_phone_worker_runtime_ssh_transport"
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("módulo de transporte SSH inválido")
+            module = importlib.util.module_from_spec(spec)
+            # Dataclasses and introspection require the dynamically loaded module
+            # to be registered while its definitions execute.
+            sys.modules[name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                sys.modules.pop(name, None)
+                raise
+            if not callable(getattr(module, "connection_snapshot", None)):
+                raise RuntimeError("módulo SSH não contém connection_snapshot")
+            _PHONE_WORKER_SSH_MODULE = module
+        return _PHONE_WORKER_SSH_MODULE
+
+
+def _ssh_connection_snapshot() -> dict[str, Any]:
+    """Read only compact transport observations; never connect or run a shell."""
+    if not _ssh_transport_enabled():
+        return {"mode": "legacy"}
+    try:
+        raw = _phone_worker_ssh_module().connection_snapshot()
+        if not isinstance(raw, dict):
+            raise TypeError("snapshot SSH não é objeto")
+        allowed = {"mode", "state", "interactive_state", "bulk_state", "last_ok_at", "rtt_ms",
+                   "reconnect_count", "generation", "last_error", "worker_ready"}
+        result = {key: value for key, value in raw.items() if key in allowed and
+                  (value is None or isinstance(value, (str, int, float, bool)))}
+        for key, value in list(result.items()):
+            if isinstance(value, str):
+                result[key] = _sanitize_log_text(value, limit=180 if key == "last_error" else 64)
+            elif isinstance(value, float) and (value != value or abs(value) == float("inf")):
+                result[key] = None
+        result["mode"] = "ssh"
+        result.setdefault("state", "unknown")
+        rtt = result.get("rtt_ms")
+        if isinstance(rtt, bool) or not isinstance(rtt, (int, float)) or rtt <= 0:
+            result["rtt_ms"] = None
+        return result
+    except Exception as exc:
+        return {"mode": "ssh", "state": "not_configured", "interactive_state": "unknown",
+                "bulk_state": "unknown", "last_error": type(exc).__name__ + ": observação SSH indisponível"}
+
+
 def _tailscale_snapshot(*, probe_vps: bool = False) -> dict[str, Any]:
+    if _ssh_transport_enabled():
+        result = {"connected": False, "cli_available": False, "state": "not_required",
+                  "via_vps_url": False, "note": "Comunicação configurada por SSH"}
+        if probe_vps:
+            ping = _vps_tcp_ping_snapshot()
+            result["vps_reachable"] = bool(ping.get("reachable"))
+            if ping.get("latency_ms") is not None:
+                result["vps_latency_ms"] = ping["latency_ms"]
+        return result
     try:
         return _phone_worker_telemetry_module().tailscale_snapshot(
             probe_vps=probe_vps, auth_parts=_core_worker_auth_parts, base_url_host=_base_url_host,
@@ -913,6 +994,16 @@ def _tailscale_snapshot(*, probe_vps: bool = False) -> dict[str, Any]:
 
 def _vps_tcp_ping_snapshot(*, timeout: float = 2.5, cache_ttl: float = 6.0) -> dict[str, Any]:
     try:
+        if _ssh_transport_enabled():
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, *args, **kwargs):
+                    return None
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+            return _phone_worker_telemetry_module().vps_http_ping_snapshot(
+                timeout=timeout, cache_ttl=cache_ttl, auth_parts=_core_worker_auth_parts,
+                ping_cache=_PING_CACHE, monotonic=time.monotonic, perf_counter=time.perf_counter,
+                request_factory=urllib.request.Request, urlopen=opener.open, wall_clock=time.time,
+                mask_ipv4=_mask_ipv4, short_text=_short_text)
         return _phone_worker_telemetry_module().vps_tcp_ping_snapshot(
             timeout=timeout, cache_ttl=cache_ttl, auth_parts=_core_worker_auth_parts,
             ping_cache=_PING_CACHE, monotonic=time.monotonic, perf_counter=time.perf_counter,
@@ -1734,6 +1825,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "last_heartbeat_ok_at": _LAST_HEARTBEAT_OK_AT or None,
         },
         "status": {
+            "connection": _ssh_connection_snapshot(),
             "core_worker_jobs": _core_job_runtime_snapshot(),
             "core_worker_network": _core_worker_network_runtime_snapshot(),
             "runtime_mode": CORE_WORKER_RUNTIME_MODE,
@@ -1757,15 +1849,20 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     try:
         module = _phone_worker_control_plane_module()
         telemetry_ttl = max(2.0, min(60.0, _env_float("CORE_WORKER_TELEMETRY_CACHE_SECONDS", 10.0)))
-        # Disponibilidade do Music Agent muda rapidamente (crash/autorecovery) e
-        # altera roles/capabilities. Leia-a em toda emissão; o restante da
-        # telemetria pesada pode ser reutilizado por poucos segundos.
-        music_agent = _control_plane_snapshot(
-            "music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}
-        )
+        # SSH heartbeats reuse a short, bounded readiness snapshot. Inventories
+        # and dependency checks stay on the background system collector, never
+        # on a heartbeat or TTS/command request thread.
+        if _ssh_transport_enabled():
+            music_agent = _music_agent_light_snapshot()
+        else:
+            music_agent = _control_plane_snapshot(
+                "music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}
+            )
         system_snapshot = _cached_control_plane_snapshot(
             "system", _system_status, {"ok": False}, ttl=telemetry_ttl
         )
+        if _ssh_transport_enabled() and isinstance(system_snapshot.get("music_agent"), dict):
+            music_agent = {**system_snapshot["music_agent"], **music_agent}
         payload = module.build_payload(payload,
             system=system_snapshot,
             battery=_cached_control_plane_snapshot("battery", _battery_snapshot, _empty_battery_snapshot(), ttl=max(telemetry_ttl, 30.0)),
@@ -2796,6 +2893,7 @@ def _tts_agent_snapshot() -> dict[str, Any]:
         "active": active,
         "concurrency_limit": _tts_agent_queue_limit(),
         "stream_protocol": 2 if _tts_transport_module() is not None else 0,
+        "stream_cache_only_protocol": 1 if getattr(_tts_transport_module(), "STREAM_CACHE_ONLY_PROTOCOL", 0) == 1 else 0,
         "ttv_performance_protocol": 2,
         "cache_binary_protocol": 2 if _tts_transport_module() is not None else 0,
         "total": total,
@@ -3216,6 +3314,24 @@ def _music_agent_snapshot() -> dict[str, Any]:
         env_autostart_enabled=_env_autostart_enabled,
     )
     return _phone_worker_music_bridge_module("telemetria").music_agent_snapshot(hooks)
+
+
+def _music_agent_light_snapshot() -> dict[str, Any]:
+    def probe() -> dict[str, Any]:
+        hooks = SimpleNamespace(load_runtime_env=_load_phone_worker_runtime_env, env_float=_env_float)
+        return _phone_worker_music_bridge_module("telemetria").music_agent_health_snapshot(hooks)
+
+    snapshot = _cached_control_plane_snapshot(
+        "music_agent_light", probe,
+        {"ok": False, "available": False, "configured": False, "reason": "health_pending"}, ttl=2.0,
+    )
+    observed = snapshot.get("observed_at")
+    if isinstance(observed, (int, float)):
+        age = time.time() - observed
+        snapshot["observation_age_seconds"] = round(max(0.0, age), 3)
+        if age < -5.0 or age > 5.0:
+            snapshot.update(ok=False, available=False, reason="health_stale")
+    return snapshot
 
 
 _VOICE_AGENT_SESSION_LOCK = threading.RLock()
@@ -4046,6 +4162,7 @@ def _system_status() -> dict[str, Any]:
         "core_worker_heartbeat": _heartbeat_configured(),
         "core_worker_jobs": {"configured": _core_worker_jobs_configured(), **_core_job_runtime_snapshot()},
         "core_worker_network": _core_worker_network_runtime_snapshot(),
+        "connection": _ssh_connection_snapshot(),
         "music_node": _inactive_music_node_snapshot(),
         "music_agent": music_agent_snapshot,
         "voice_agent": voice_agent_snapshot,
@@ -4207,6 +4324,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def _require_local_client(self) -> bool:
         if self._is_local_client():
+            # SSH reverse forwards also arrive from loopback. Keep the APK's
+            # legacy local access, but never treat a tunnel caller as trusted
+            # local maintenance without the existing worker credential.
+            if _ssh_transport_enabled():
+                if not self.token:
+                    _error(self, HTTPStatus.FORBIDDEN, "rota local exige token do worker no modo SSH")
+                    return False
+                return self._require_auth()
             return True
         _error(self, HTTPStatus.FORBIDDEN, "rota local disponível apenas em 127.0.0.1")
         return False
@@ -4261,11 +4386,27 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     "ok": bool(agent.get("ok")),
                     "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
                     "version": PHONE_WORKER_VERSION,
+                    "runtime_kind": "termux",
+                    "pid": os.getpid(),
+                    "process_started_at": START_TIME,
+                    "connection": _ssh_connection_snapshot(),
                     "tts_agent": agent,
                 }
                 _json_response(self, HTTPStatus.OK, payload)
             except Exception as exc:
                 _error(self, HTTPStatus.SERVICE_UNAVAILABLE, f"{type(exc).__name__}: {_short_text(exc, limit=180)}")
+            return
+        if path in {"/music-agent/health", "/music-agent/status"}:
+            if not self._require_auth():
+                return
+            payload = {
+                "ok": True,
+                "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+                "version": PHONE_WORKER_VERSION, "runtime_kind": "termux", "pid": os.getpid(),
+                "profile": _current_core_worker_profile(), "connection": _ssh_connection_snapshot(),
+                "music_agent": _music_agent_light_snapshot(),
+            }
+            _json_response(self, HTTPStatus.OK, payload)
             return
         if path not in {"/", "/health", "/status"}:
             _error(self, HTTPStatus.NOT_FOUND, "rota não encontrada")
@@ -4402,7 +4543,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload.setdefault("summary", "status direto coletado")
             elif task in {"diagnostic_basic", "worker_self_check"}:
                 payload = _execute_core_worker_job({"type": "worker_self_check", "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
-            elif task in {"network_probe", "tailscale_status", "worker_logs", "worker_update", "vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
+            elif task in {"network_probe", "ssh_connection_diagnostic", "tailscale_status", "worker_logs", "worker_update", "vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "boot_status", "boot_repair", "service_status", "service_start", "service_stop", "service_restart", "ffmpeg_check", "ffprobe_check"}:
                 payload = _execute_core_worker_job({"type": task, "payload": body}, max_body_bytes=self.max_body_bytes, max_output_bytes=self.max_output_bytes, job_timeout=self.job_timeout)
             elif task == "sha256":
                 payload = self._task_sha256(body)
@@ -4926,6 +5067,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+            "connection": _ssh_connection_snapshot(),
             "logs": [f"tts agent {snapshot.get('state')} engines={','.join(snapshot.get('available_engines') or [])}"],
         })
         return snapshot
@@ -7311,6 +7453,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker_runtime/__init__.py": ("worker", "phone_worker_runtime/__init__.py", 0o644),
     "phone_worker_runtime/config.py": ("worker", "phone_worker_runtime/config.py", 0o644),
     "phone_worker_runtime/telemetry.py": ("worker", "phone_worker_runtime/telemetry.py", 0o644),
+    "phone_worker_runtime/ssh_transport.py": ("worker", "phone_worker_runtime/ssh_transport.py", 0o644),
     "phone_worker_runtime/control_plane.py": ("worker", "phone_worker_runtime/control_plane.py", 0o644),
     "phone_worker_runtime/voice_state.py": ("worker", "phone_worker_runtime/voice_state.py", 0o644),
     "phone_worker_runtime/tts_policy.py": ("worker", "phone_worker_runtime/tts_policy.py", 0o644),
@@ -7914,6 +8057,15 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
             }
         elif kind == "network_probe":
             result = {"ok": True, "summary": "rede testada", "network": _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}), "tailscale": _safe_telemetry("tailscale", lambda: _tailscale_snapshot(probe_vps=True), {"connected": False, "state": "telemetry_failed"})}
+        elif kind == "ssh_connection_diagnostic":
+            result = {
+                "ok": True, "summary": "conexão SSH e acesso HTTP à VPS verificados",
+                "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+                "runtime_kind": "termux", "pid": os.getpid(), "http_port": _EFFECTIVE_HTTP_PORT,
+                "connection": _ssh_connection_snapshot(),
+                "vps_http": _vps_tcp_ping_snapshot(cache_ttl=0.5) if _ssh_transport_enabled() else {"available": False, "source": "ssh_not_configured"},
+                "note": "A resposta HTTP comprova Phone→VPS. O painel verifica separadamente VPS→Phone.",
+            }
         elif kind == "vps_assist_probe":
             result = _assist_readiness_snapshot(payload)
         elif kind == "tailscale_status":

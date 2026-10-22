@@ -4,7 +4,7 @@ from typing import Any, Mapping
 from urllib.parse import urljoin
 
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
-from .utilitarios import _as_bool
+from .utilitarios import _as_bool, _phone_worker_bulk_url
 
 
 def parece_url(value: str) -> bool:
@@ -25,12 +25,16 @@ def url_stream_worker(base: str, item: Mapping[str, Any]) -> str:
         item.get("worker_stream_url") or item.get("worker_audio_url") or ""
     ).strip()
     if explicit.startswith(("http://", "https://")):
-        return explicit
+        # Only worker-provided PCM/cache paths use the transfer SSH connection.
+        # Public YouTube/CDN URLs never pass through this selector.
+        from urllib.parse import urlsplit
+        return _phone_worker_bulk_url(explicit) if urlsplit(explicit).path.startswith("/music/stream/") else explicit
     path = str(
         item.get("worker_stream_path") or item.get("worker_audio_path") or ""
     ).strip()
     if path.startswith("/") and base:
-        return urljoin(base.rstrip("/") + "/", path.lstrip("/"))
+        joined = urljoin(base.rstrip("/") + "/", path.lstrip("/"))
+        return _phone_worker_bulk_url(joined) if path.startswith("/music/stream/") else joined
     return ""
 
 

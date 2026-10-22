@@ -66,6 +66,8 @@ PHONE_HOST="$(env_value PHONE_WORKER_HOST "")"
 PHONE_PORT="$(env_value PHONE_WORKER_PORT 8766)"
 PHONE_TOKEN="$(env_value PHONE_WORKER_TOKEN "")"
 PHONE_SCHEME="$(env_value PHONE_WORKER_SCHEME http)"
+PHONE_TRANSPORT="$(env_value PHONE_WORKER_TRANSPORT legacy)"
+PHONE_ID="$(env_value PHONE_WORKER_ID "")"
 HEALTH_TIMEOUT="$(env_value PHONE_WORKER_HEALTH_TIMEOUT_SECONDS 4)"
 START_WAIT="$(env_value PHONE_WORKER_START_WAIT_SECONDS 4)"
 SSH_USER="$(env_value PHONE_WORKER_SSH_USER "")"
@@ -88,6 +90,9 @@ if [[ -z "$PHONE_HOST" || -z "$PHONE_TOKEN" ]]; then
 fi
 
 HEALTH_URL="${PHONE_SCHEME}://${PHONE_HOST}:${PHONE_PORT}/health"
+if [[ "$PHONE_TRANSPORT" == "ssh" ]]; then
+  HEALTH_URL="${PHONE_SCHEME}://${PHONE_HOST}:${PHONE_PORT}/tts-agent/health"
+fi
 
 mask_host() {
   local host="${1:-}"
@@ -154,8 +159,27 @@ PYPROBE
 health_probe() {
   local tmp code rc detail
   tmp="$(mktemp)"
-  code="$(curl --max-time "$HEALTH_TIMEOUT" -sS -o "$tmp" -w '%{http_code}' -H "Authorization: Bearer $PHONE_TOKEN" "$HEALTH_URL" 2>&1)"
+  local direct=()
+  [[ "$PHONE_TRANSPORT" == "ssh" ]] && direct=(--noproxy '*')
+  code="$(curl "${direct[@]}" --max-time "$HEALTH_TIMEOUT" -sS -o "$tmp" -w '%{http_code}' -H "Authorization: Bearer $PHONE_TOKEN" "$HEALTH_URL" 2>&1)"
   rc=$?
+  if [[ "$PHONE_TRANSPORT" == "ssh" && "$rc" -eq 0 && "$code" == "200" ]]; then
+    if ! python3 - "$tmp" "$PHONE_ID" <<'PY_IDENTITY'
+import json,sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as source:
+        data=json.load(source)
+    valid=bool(sys.argv[2] and data.get('worker_id')==sys.argv[2] and data.get('ok'))
+except (OSError,ValueError,TypeError):
+    valid=False
+raise SystemExit(0 if valid else 1)
+PY_IDENTITY
+    then
+      rm -f "$tmp"
+      log "health SSH: identidade ou prontidão não confirmada"
+      return 1
+    fi
+  fi
   detail="$(cat "$tmp" 2>/dev/null | head -c 240 | tr '\n' ' ' || true)"
   rm -f "$tmp" 2>/dev/null || true
   if [[ "$rc" -eq 0 && "$code" =~ ^2 ]]; then
@@ -200,7 +224,9 @@ try_pending_sync() {
 }
 
 log "config: host=$(mask_host "$PHONE_HOST") porta=$PHONE_PORT ssh_user=$([[ -n "$SSH_USER" ]] && printf configurado || printf vazio) ssh_port=$SSH_PORT motivo=${WAKE_REASON:-timer}"
-tcp_probe "$PHONE_HOST" "$PHONE_PORT" "$HEALTH_TIMEOUT" "worker-http" | while IFS= read -r line; do log "$line"; done
+if [[ "$PHONE_TRANSPORT" != "ssh" ]]; then
+  tcp_probe "$PHONE_HOST" "$PHONE_PORT" "$HEALTH_TIMEOUT" "worker-http" | while IFS= read -r line; do log "$line"; done
+fi
 if health_probe; then
   clear_offline_state
   try_pending_sync
@@ -214,6 +240,11 @@ if health_probe; then
 fi
 
 log_offline_once "offline:${PHONE_HOST}:${PHONE_PORT}" "worker offline/inacessível; tentando recuperação leve"
+if [[ "$PHONE_TRANSPORT" == "ssh" ]]; then
+  log "o watchdog do Termux reconecta o túnel automaticamente; abra o Termux se o Android encerrou seus processos"
+  log "resultado: ssh-tunnel-unavailable"
+  exit 0
+fi
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 now_epoch="$(date +%s)"

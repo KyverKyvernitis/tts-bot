@@ -39,7 +39,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable
 
-BOOTSTRAP_VERSION = "1.0.0"
+BOOTSTRAP_VERSION = "1.0.1"
 MANIFEST_SCHEMA = "core-phone-worker-release-v2"
 CONFIG_SCHEMA = 2
 DEFAULT_MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
@@ -204,7 +204,10 @@ def _signed_request(
         "User-Agent": f"CorePhoneWorkerBootstrap/{BOOTSTRAP_VERSION}",
     }
     req = urllib.request.Request(url, headers=headers, method="GET")
-    opener = urllib.request.build_opener(_SameOriginRedirect(base_url))
+    handlers: list[Any] = [_SameOriginRedirect(base_url)]
+    if str(os.getenv("PHONE_WORKER_TRANSPORT") or "legacy").strip().lower() == "ssh":
+        handlers.append(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(*handlers)
     digest = None
     total = 0
     chunks: list[bytes] = []
@@ -639,12 +642,54 @@ def _atomic_symlink(link: Path, target: Path) -> None:
     os.replace(tmp, link)
 
 
+def _refresh_transport_anchor(staging: Path) -> bool:
+    """Keep SSH recovery independent of the mutable current/previous pointer.
+
+    Only an extracted, hash-checked release containing the transport may
+    refresh these launchers. Rolling the application back to a pre-SSH release
+    must not replace the established recovery core with old launchers.
+    """
+    inner = _read_json(staging / "phone-worker-release.json")
+    members = {str(item.get("path") or ""): item for item in inner.get("members", []) if isinstance(item, dict)}
+    transport = "phone_worker_runtime/ssh_transport.py"
+    if transport not in members:
+        return False
+    targets = (transport, "phone_worker_runtime/__init__.py", "watch-phone-worker.sh",
+               "start-phone-worker.sh", "phone_worker_bootstrap.py", "pair-phone-worker.sh")
+    verified: list[tuple[str, bytes, int]] = []
+    for target in targets:
+        expected = members.get(target)
+        if expected is None:
+            raise ValueError("release SSH sem launcher obrigatório: " + target)
+        source = staging / target
+        raw = source.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != str(expected.get("sha256") or ""):
+            raise ValueError("hash da âncora SSH divergente: " + target)
+        verified.append((target, raw, int(expected.get("mode") or 0o644)))
+    root = _install_root()
+    for target, raw, mode in verified:
+        dest = root / target
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.is_symlink() or dest.parent.is_symlink():
+            raise ValueError("link recusado na âncora SSH")
+        if dest.is_file() and dest.read_bytes() == raw:
+            continue
+        if dest.exists():
+            previous = dest.with_name(dest.name + ".ssh-previous")
+            if previous.is_symlink():
+                raise ValueError("link recusado no backup da âncora SSH")
+            _atomic_text(previous, dest.read_text("utf-8"), mode=mode)
+        _atomic_text(dest, raw.decode("utf-8"), mode=mode)
+    return True
+
+
 def _promote(staging: Path, source_hash: str) -> tuple[Path, Path | None]:
     runtime = _runtime_root()
     releases = runtime / "releases"
     releases.mkdir(parents=True, exist_ok=True)
     final = releases / source_hash
     current_before = _current_release()
+    _refresh_transport_anchor(staging)
     if final.exists():
         # Release pelo hash é imutável. Reutilizar só se o manifesto confere.
         existing = _read_json(final / "phone-worker-release.json")
@@ -790,6 +835,10 @@ def check_and_apply(*, force: bool = False, restart: bool = True) -> dict[str, A
         _write_state("blocked_by_config", blocked_key=blocker)
         return {"ok": False, "state": "blocked_by_config", "blocked_key": blocker, "migration": migration}
     base_url = str(values.get("CORE_WORKER_VPS_URL") or os.getenv("CORE_WORKER_VPS_URL") or "").strip().rstrip("/")
+    if str(values.get("PHONE_WORKER_TRANSPORT") or os.getenv("PHONE_WORKER_TRANSPORT") or "legacy").strip().lower() == "ssh":
+        local_port = int(values.get("CORE_WORKER_SSH_LOCAL_PORT") or os.getenv("CORE_WORKER_SSH_LOCAL_PORT") or 19000)
+        if not 1024 <= local_port <= 65535 or base_url != f"http://127.0.0.1:{local_port}":
+            raise ValueError("bootstrap SSH exige a origem local pareada; execute activate do transporte")
     worker_id = str(values.get("CORE_WORKER_ID") or os.getenv("CORE_WORKER_ID") or "").strip()
     token = str(values.get("CORE_WORKER_TOKEN") or os.getenv("CORE_WORKER_TOKEN") or "").strip()
     _origin(base_url)

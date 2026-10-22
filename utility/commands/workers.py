@@ -4,13 +4,16 @@ import asyncio
 import base64
 import hashlib
 import contextlib
+import copy
 import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -144,6 +147,7 @@ AUTO_WORKER_ID = "__auto_core_worker__"
 
 WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Testar worker", "value": "ping", "job_type": "ping", "payload": {}, "summary": "teste manual pelo painel workers", "description": "Testa comunicação", "emoji": "🧪", "category": "quick"},
+    {"label": "Diagnóstico da conexão", "value": "ssh_connection_diagnostic", "job_type": "ssh_connection_diagnostic", "payload": {}, "summary": "diagnóstico seguro da conexão SSH", "description": "Canais, rede e recuperação", "emoji": "🔎", "requires_declared": True, "ssh_only": True, "category": "quick"},
     {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede e sistema", "emoji": "🩺", "category": "quick"},
     {"label": "Atualizar agent", "value": "worker_update_quick", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Corrige agent antigo", "emoji": "⬆️", "category": "quick"},
     {"label": "Buildar APK", "value": "apk_build_debug_quick", "job_type": "apk_build_debug", "payload": {"source_zip_url": "auto", "publish": True}, "summary": "compilar APK Core Worker em worker builder", "description": "Retry manual do APK", "emoji": "🏗️", "category": "quick"},
@@ -191,8 +195,10 @@ WORKER_ACTION_SPECS = tuple(spec for spec in WORKER_ACTION_SPECS
     and "core-worker-apk" not in str((spec.get("payload") or {}).get("service") or "").lower())
 
 WORKER_PANEL_ACTION_ORDER: tuple[str, ...] = (
+    "_connection_details",
     "_worker_details",
     "ping",
+    "ssh_connection_diagnostic",
     "worker_self_check",
     "worker_logs",
     "endpoint_probe",
@@ -1366,6 +1372,11 @@ def _public_base_url() -> str:
     2. Tailscale da própria VPS + PORT;
     3. placeholder curto para não mostrar comando errado.
     """
+    if _ssh_transport_enabled():
+        # This URL is local to the phone, forwarded to the paired VPS. Public
+        # host discovery or Tailscale inference would produce unusable commands.
+        port = _ssh_local_api_port()
+        return f"http://127.0.0.1:{port}"
     explicit = str(os.getenv("CORE_WORKER_PUBLIC_BASE_URL") or os.getenv("VPS_PUBLIC_BASE_URL") or "").strip().rstrip("/")
     if explicit and "IP_TAILSCALE_DA_VPS" not in explicit:
         return explicit
@@ -1398,6 +1409,186 @@ def _public_base_url() -> str:
 def _termux_command_block(command: str) -> str:
     command = re.sub(r"\s+", " ", str(command or "")).strip()
     return f"```bash\n{command}\n```"
+
+
+def _worker_connection(worker: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(worker, dict):
+        return {}
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    value = status.get("connection") or worker.get("connection")
+    return value if isinstance(value, dict) else {}
+
+
+def _ssh_transport_enabled(worker: dict[str, Any] | None = None) -> bool:
+    mode = str(_worker_connection(worker).get("mode") or "").strip().lower()
+    if mode:
+        return mode == "ssh"
+    configured = str(os.getenv("PHONE_WORKER_TRANSPORT") or "legacy").strip().lower() == "ssh"
+    if not isinstance(worker, dict):
+        return configured
+    expected = str(os.getenv("PHONE_WORKER_ID") or os.getenv("CORE_WORKER_ID") or "").strip()
+    if expected:
+        return configured and str(worker.get("worker_id") or "") == expected
+    endpoint = str(worker.get("endpoint") or "")
+    return configured and (endpoint.startswith("http://127.0.0.1:") or endpoint.startswith("http://localhost:"))
+
+
+def _open_worker_http_request(request: urllib.request.Request, *, timeout: float):
+    if not _ssh_transport_enabled():
+        return urllib.request.urlopen(request, timeout=timeout)
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    return opener.open(request, timeout=timeout)
+
+
+def _ssh_local_api_port() -> int:
+    try:
+        port = int(os.getenv("CORE_WORKER_SSH_LOCAL_PORT") or 19000)
+        return port if 1 <= port <= 65535 else 19000
+    except (TypeError, ValueError):
+        return 19000
+
+
+def _connection_observation(worker: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+    """Describe SSH only from fresh HTTP evidence, never from an open socket.
+
+    The phone's last_ok_at measures its own round trip through the local
+    forward. A separate stamp added by the VPS panel proves the reverse route.
+    """
+    connection = _worker_connection(worker)
+    ts = time.time() if now is None else float(now)
+    ttl = max(10.0, min(120.0, _env_float("CORE_WORKER_SSH_OBSERVATION_MAX_AGE_SECONDS", 45.0)))
+    last_ok = _telemetry_epoch(connection.get("last_ok_at"))
+    age = ts - last_ok if last_ok > 0.0 else None
+    fresh = age is not None and -5.0 <= age <= ttl
+    observed_at = _telemetry_epoch(connection.get("updated_at") or connection.get("observed_at")
+                                   or worker.get("last_heartbeat_at") or last_ok)
+    observation_age = ts - observed_at if observed_at > 0.0 else None
+    observation_fresh = observation_age is not None and -5.0 <= observation_age <= ttl
+    verified = _telemetry_epoch(worker.get("_panel_http_verified_at"))
+    verified_id = str(worker.get("_panel_http_verified_worker_id") or "")
+    worker_id = str(worker.get("worker_id") or "")
+    reverse_ok = bool(verified_id and verified_id == worker_id and verified > 0.0 and -5.0 <= ts - verified <= ttl)
+    state = str(connection.get("state") or "not_configured").strip().lower()
+    interactive = str(connection.get("interactive_state") or "unknown").strip().lower()
+    bulk = str(connection.get("bulk_state") or "unknown").strip().lower()
+    if reverse_ok:
+        if (fresh and state in {"connected", "ready", "online"}
+                and interactive in {"connected", "ready", "online"}
+                and bulk in {"connected", "ready", "online"}):
+            icon, label = "🟢", "Conectado via SSH"
+        else:
+            icon, label = "🟡", "SSH conectado · conexão parcial"
+    elif state in {"not_configured", "disabled", "unconfigured"}:
+        icon, label = "⚪", "Configurar conexão SSH"
+    elif connection and observed_at > 0.0 and not observation_fresh:
+        icon, label = "🟡", "Dados da conexão desatualizados"
+    elif state in {"worker_unavailable", "worker_down", "worker_not_ready"} or connection.get("worker_ready") is False:
+        icon, label = "🟠", "SSH ativo · worker sem resposta"
+    elif state in {"connected", "ready", "online"}:
+        icon, label = "🟡", "SSH ativo · confirmar acesso da VPS"
+    elif state in {"connecting", "starting", "pending"}:
+        icon, label = "🟠", "Conectando via SSH"
+    elif state in {"reconnecting", "degraded", "offline", "error", "network_error"}:
+        icon, label = "🟠", "Reconectando via SSH"
+    else:
+        icon, label = "⚪", "Configurar conexão SSH"
+    rtt = None
+    if fresh:
+        try:
+            value = float(connection.get("rtt_ms"))
+            if 0.0 < value < 60_000.0:
+                rtt = value
+        except (TypeError, ValueError):
+            pass
+    return {"icon": icon, "label": label, "fresh": fresh, "reverse_ok": reverse_ok,
+            "age_seconds": max(0.0, age) if age is not None else None, "last_ok_at": last_ok,
+            "rtt_ms": rtt, "interactive_state": interactive, "bulk_state": bulk}
+
+
+def _connection_summary(worker: dict[str, Any], *, now: float | None = None) -> str:
+    observed = _connection_observation(worker, now=now)
+    parts = [f"{observed['icon']} **{observed['label']}**"]
+    if observed["rtt_ms"] is not None:
+        parts.append(f"HTTP {observed['rtt_ms']:.0f} ms")
+    if observed["age_seconds"] is not None:
+        parts.append(f"confirmado {_format_age(observed['age_seconds'])}")
+    return " · ".join(parts)
+
+
+def _connection_detail_text(worker: dict[str, Any] | None) -> str:
+    if not isinstance(worker, dict) or not _ssh_transport_enabled(worker):
+        return "## 🔗 Conexão do celular\nEste worker usa o transporte configurado anteriormente. Use **Guia de conexão SSH** para migrar."
+    observed = _connection_observation(worker)
+    connection = _worker_connection(worker)
+    lines = ["## 🔗 Conexão SSH", _connection_summary(worker), "",
+             "**TTS e comandos:** " + _shorten(observed["interactive_state"], limit=32),
+             "**Transferências:** " + _shorten(observed["bulk_state"], limit=32)]
+    for label, key in (("Reconexões", "reconnect_count"), ("Geração", "generation")):
+        value = connection.get(key)
+        if isinstance(value, (int, float)) and 0 <= value < 2**53:
+            lines.append(f"**{label}:** {int(value)}")
+    error = connection.get("last_error")
+    if error:
+        lines.append("**Último erro:** " + _shorten(_redact(error), limit=180))
+    if worker.get("endpoint"):
+        try:
+            endpoint = urllib.parse.urlsplit(str(worker["endpoint"]))
+            label = endpoint.scheme + "://" + (endpoint.hostname or "?")
+            if endpoint.port:
+                label += ":" + str(endpoint.port)
+        except ValueError:
+            label = "endpoint inválido"
+        lines.append("**Endpoint:** `" + _shorten(label, limit=120) + "`")
+    lines.extend(["", "-# A latência HTTP atravessa o túnel. O acesso da VPS é confirmado separadamente."])
+    if not observed["reverse_ok"]:
+        lines.append("Abra o Termux no telefone e mantenha o app autorizado a executar em segundo plano. O watchdog tentará reconectar automaticamente.")
+    return "\n".join(lines)[:1900]
+
+
+def _ssh_onboarding_text(worker_id: str = "") -> str:
+    identity = str(worker_id or os.getenv("PHONE_WORKER_ID") or os.getenv("CORE_WORKER_ID") or "ID_DO_WORKER").strip()
+    quoted_id = shlex.quote(identity)
+    return (
+        "## 🔗 Conectar Termux por SSH\n"
+        "**1 · Preparar a VPS**\n"
+        "Use o IP público da Oracle no lugar de `IP_PUBLICO_DA_VPS`. O comando gera um pacote público de configuração:\n"
+        + _termux_command_block("cd /home/ubuntu/bot && bash deploy/oci/ssh-phone-vps.sh prepare --host IP_PUBLICO_DA_VPS --worker-id " + quoted_id)
+        + "\n**2 · Preparar o telefone**\n"
+        "Salve o JSON exibido em `~/storage/downloads/osaka-ssh.json` e gere a chave pública:\n"
+        + _termux_command_block("python ~/phone-worker/phone_worker_runtime/ssh_transport.py prepare --bundle ~/storage/downloads/osaka-ssh.json")
+        + "\n**3 · Cadastrar e validar**\n"
+        "Na VPS, use `enroll --public-key-file` com a chave pública do telefone. No Termux, execute `activate --apply-worker` em uma janela sem reprodução. Conclua com `activate` na VPS e reinicie o bot para carregar os endereços novos. Cada etapa valida a ligação antes da troca.\n\n"
+        "O ID, os ajustes e os tokens do worker existente são preservados. A chave privada fica no telefone.\n"
+        "-# Mantenha Termux/Termux:Boot com inicialização automática e bateria sem restrição."
+    )[:1900]
+
+
+def _configured_ssh_worker(snapshot: "WorkerSnapshot") -> dict[str, Any]:
+    """A small direct-worker view, including the VPS's own HTTP confirmation."""
+    status = snapshot.status if isinstance(snapshot.status, dict) else {}
+    return {
+        "worker_id": str(status.get("worker_id") or os.getenv("PHONE_WORKER_ID") or ""),
+        "name": snapshot.name,
+        "endpoint": snapshot.base_url_label if snapshot.configured else "",
+        "status": status,
+        "_panel_http_verified_at": status.get("_panel_http_verified_at"),
+        "_panel_http_verified_worker_id": status.get("_panel_http_verified_worker_id"),
+    }
+
+
+def _ssh_engine_summary(worker: dict[str, Any]) -> str:
+    status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+    agent = status.get("tts_agent") if isinstance(status.get("tts_agent"), dict) else {}
+    engines = {str(value).lower() for value in (agent.get("available_engines") or [])}
+    labels = [name for value, name in (("edge", "Edge"), ("teto", "Teto")) if value in engines]
+    if not labels:
+        return "Síntese: aguardando confirmação"
+    return "**Vozes:** " + " · ".join(labels) + (" · prontas" if agent.get("ok") else " · verificar disponibilidade")
 
 
 def _battery_text(worker: dict[str, Any]) -> str:
@@ -3200,6 +3391,9 @@ class WorkersPanelView(discord.ui.LayoutView):
         if selected_worker is not None or self._selected_is_legacy() or self._selected_is_auto():
             specs.append({"label": "Ver último resultado", "value": "_show_last_result", "description": "Detalhes do último job", "emoji": "📄", "panel_action": "last_result", "category": "quick"})
 
+        if _ssh_transport_enabled(selected_worker):
+            specs.append({"label": "Detalhes da conexão", "value": "_connection_details", "description": "Canais SSH, latência e recuperação", "emoji": "🔗", "panel_action": "connection", "category": "quick"})
+
         if selected_worker is not None:
             specs.extend([
                 {"label": "Detalhes do celular", "value": "_worker_details", "description": "Resumo completo", "emoji": "📱", "panel_action": "details", "category": "quick"},
@@ -3299,12 +3493,16 @@ class WorkersPanelView(discord.ui.LayoutView):
             value = str(spec.get("value") or "")
             if value not in WORKER_PANEL_ACTION_VALUES:
                 continue
+            if spec.get("ssh_only") and not _ssh_transport_enabled(self._selected_worker()):
+                continue
             job_type = _task_name(spec.get("job_type"))
             requires_declared = bool(spec.get("requires_declared"))
             if requires_declared and (supported is None or job_type not in supported):
                 continue
             if supported is not None and job_type not in supported:
                 continue
+            if value == "ping" and _ssh_transport_enabled(self._selected_worker()):
+                spec = {**spec, "label": "Testar conexão", "description": "Confirma ida e volta pelo SSH", "emoji": "📡"}
             add_if_visible(spec)
 
         return sorted(
@@ -3406,6 +3604,9 @@ class WorkersPanelView(discord.ui.LayoutView):
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
         refresh.callback = self._refresh_panel
 
+        connect = discord.ui.Button(label="Guia de conexão SSH", emoji="🔗", style=discord.ButtonStyle.secondary)
+        connect.callback = self._show_onboarding_guide
+
         wake = discord.ui.Button(
             label="Acordar phone-worker",
             emoji="📡",
@@ -3425,10 +3626,10 @@ class WorkersPanelView(discord.ui.LayoutView):
                 discord.ui.ActionRow(worker_select),
                 discord.ui.ActionRow(action_select),
             ])
-            components.append(discord.ui.ActionRow(refresh))
+            components.append(discord.ui.ActionRow(refresh, connect))
         else:
-            components.append(discord.ui.ActionRow(refresh))
-        if not CORE_WORKER_APK_REPLACES_TERMUX and not _snapshot_has_online_worker(snapshot):
+            components.append(discord.ui.ActionRow(refresh, connect))
+        if not _ssh_transport_enabled() and not CORE_WORKER_APK_REPLACES_TERMUX and not _snapshot_has_online_worker(snapshot):
             components.append(discord.ui.ActionRow(wake))
         container = discord.ui.Container(*components, accent_color=snapshot.accent)
         self.add_item(container)
@@ -3508,6 +3709,12 @@ class WorkersPanelView(discord.ui.LayoutView):
             seen = _format_age(min(seen_values)) if seen_values else "n/a"
             lines.append(f"**Status:** {('online' if online else 'offline')} · visto {seen}")
 
+            if _ssh_transport_enabled(worker):
+                lines.append(_connection_summary(worker))
+                lines.append(_ssh_engine_summary(worker))
+                if not _connection_observation(worker)["reverse_ok"]:
+                    lines.append("-# A recuperação é automática enquanto Termux executa. Se o app foi encerrado, abra-o no telefone.")
+
             if apk is not None:
                 apk_caps = {str(item) for item in apk.get("capabilities") or []}
                 apk_status = apk.get("status") if isinstance(apk.get("status"), dict) else {}
@@ -3554,12 +3761,20 @@ class WorkersPanelView(discord.ui.LayoutView):
             status = snapshot.status if isinstance(snapshot.status, dict) else {}
             lines.append("**Status:** online direto")
             lines.append(f"**Runtime:** `{version}` · {_script_health_label({'status': status})}")
+            if _ssh_transport_enabled():
+                direct = _configured_ssh_worker(snapshot)
+                lines.append(_connection_summary(direct))
+                lines.append(_ssh_engine_summary(direct))
             lines.append("-# Diagnóstico completo em **Detalhes do celular**.")
         elif workers:
             lines.append("Selecione um worker.")
         elif snapshot.configured:
             legacy_state = "🟢 direto online" if snapshot.online else "🔴 direto offline"
             lines.append(f"{legacy_state}. Nenhum worker pareado ainda.")
+            if _ssh_transport_enabled():
+                lines.append(_connection_summary(_configured_ssh_worker(snapshot)))
+                if not snapshot.online:
+                    lines.append("Abra o Termux no telefone para retomar a recuperação automática.")
         else:
             lines.append("Nenhum worker configurado ou pareado.")
 
@@ -3627,6 +3842,9 @@ class WorkersPanelView(discord.ui.LayoutView):
             return
         if action == "_worker_details":
             await self._show_worker_details(interaction)
+            return
+        if action == "_connection_details":
+            await self._show_connection_details(interaction)
             return
         if action == "_show_last_result":
             await self._show_last_result(interaction)
@@ -3756,6 +3974,13 @@ class WorkersPanelView(discord.ui.LayoutView):
                 await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _wake_worker(self, interaction: discord.Interaction):
+        if _ssh_transport_enabled():
+            await interaction.response.send_message(
+                "O SSH é recuperado pelo watchdog do telefone. Se o Termux foi encerrado, abra-o no celular; "
+                "a VPS voltará a confirmar a conexão automaticamente.",
+                ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         # Responde imediatamente para o Discord não mostrar "Esta interação falhou".
         await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.wake")
         flow = await self._open_flow_message(
@@ -3829,10 +4054,14 @@ class WorkersPanelView(discord.ui.LayoutView):
                 "## 🔐 Recovery manual de pareamento\n"
                 f"**Código:** `{code}` · expira em `{expires}`\n"
                 f"**Nome:** `{default_name}` · **perfil:** `{default_profile}`\n\n"
-                "O fluxo normal do APK 0.8.4+ é automático e não usa código. Use este recovery apenas se o enrollment parent → child não conseguir concluir.\n\n"
-                "**No APK Core Worker:** abra a área de recovery manual, informe o código e confirme a VPS.\n\n"
+                "Use este código somente para adicionar ou reparar o pareamento de um celular. "
+                "Um worker já pareado mantém seu ID e seus ajustes durante a migração SSH.\n\n"
+                "**No Termux, com a conexão à VPS preparada:**\n"
+                + _termux_command_block("bash ~/phone-worker/pair-phone-worker.sh " + " ".join(
+                    shlex.quote(value) for value in (code, base_url, default_name, default_profile)))
+                + "\n"
                 f"Funções desse perfil: `{_shorten(profile_roles, limit=220)}`\n"
-                "-# O token do Termux não é compartilhado com o APK no fluxo automático."
+                "-# O código é temporário. Os tokens permanentes ficam no telefone."
             )
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"código de pareamento gerado: {code}")
             self._ensure_selected_worker()
@@ -3847,19 +4076,8 @@ class WorkersPanelView(discord.ui.LayoutView):
             await interaction.followup.send("Não consegui gerar o pareamento agora.", ephemeral=True)
 
     async def _show_onboarding_guide(self, interaction: discord.Interaction):
-        base_url = _public_base_url()
-        msg = (
-            "## 📲 Como adicionar um celular\n"
-            "O Core Worker 0.8.2+ pareia automaticamente com o Termux já autenticado do mesmo aparelho.\n\n"
-            "**Fluxo normal:**\n"
-            "1. Mantenha o phone-worker Termux online e atualizado.\n"
-            "2. Instale/abra o APK privado publicado por esse worker.\n"
-            "3. O APK abre o enrollment local em 8767 e o Termux cria automaticamente `<worker>-apk`.\n"
-            "4. A credencial filha é entregue pelo loopback e o toolchain começa a sincronizar sozinho.\n\n"
-            f"VPS detectada: `{base_url}`\n"
-            "O código manual existe somente em **Recovery de pareamento**.\n"
-            "-# Termux continua como fallback e nunca entrega o próprio token ao APK."
-        )
+        worker = self._selected_worker()
+        msg = _ssh_onboarding_text(str((worker or {}).get("worker_id") or ""))
         await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def _run_failover_test(self, interaction: discord.Interaction):
@@ -4090,6 +4308,13 @@ class WorkersPanelView(discord.ui.LayoutView):
             return
         await interaction.response.send_message(_worker_detail_text(worker), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _show_connection_details(self, interaction: discord.Interaction):
+        worker = self._selected_worker() or _configured_ssh_worker(self.snapshot)
+        await interaction.response.send_message(
+            _connection_detail_text(worker), ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     async def _show_last_result(self, interaction: discord.Interaction):
         try:
             if self._selected_is_legacy():
@@ -4213,34 +4438,59 @@ class WorkersCommandMixin:
         return False
 
     def _worker_base_config(self) -> tuple[bool, bool, str, str, str, str]:
-        enabled = _env_bool("PHONE_WORKER_ENABLED", False)
         host = str(os.getenv("PHONE_WORKER_HOST") or "").strip()
+        implicit_enabled = bool(_ssh_transport_enabled() and host and str(os.getenv("PHONE_WORKER_TOKEN") or "").strip())
+        enabled = _env_bool("PHONE_WORKER_ENABLED", implicit_enabled)
         port = str(os.getenv("PHONE_WORKER_PORT") or "8766").strip() or "8766"
         scheme = str(os.getenv("PHONE_WORKER_SCHEME") or "http").strip() or "http"
         name = str(os.getenv("PHONE_WORKER_NAME") or os.getenv("CORE_WORKER_NAME") or "Core Phone Worker").strip() or "Core Phone Worker"
         configured = bool(host)
         return enabled, configured, host, port, scheme, name
 
-    def _request_worker_status_sync(self, *, timeout: float) -> dict[str, Any]:
+    def _request_worker_status_sync(self, *, timeout: float, full: bool = False) -> dict[str, Any]:
         enabled, configured, host, port, scheme, _name = self._worker_base_config()
         if not enabled:
             raise RuntimeError("PHONE_WORKER_ENABLED=false")
         if not configured:
             raise RuntimeError("PHONE_WORKER_HOST não configurado")
+        ssh = _ssh_transport_enabled()
+        expected_id = str(os.getenv("PHONE_WORKER_ID") or os.getenv("CORE_WORKER_ID") or "").strip()
+        if ssh and (host not in {"127.0.0.1", "localhost"} or scheme != "http"):
+            raise RuntimeError("o transporte SSH exige o endpoint HTTP privado configurado na VPS")
+        if ssh and not expected_id:
+            raise RuntimeError("PHONE_WORKER_ID não configurado para validar a identidade SSH")
         token = str(os.getenv("PHONE_WORKER_TOKEN") or "").strip()
+        cache_key = (host, port, scheme, expected_id, hashlib.sha256(token.encode()).hexdigest())
+        cached = getattr(self, "_ssh_panel_status_cache", None)
+        if ssh and not full and isinstance(cached, tuple) and len(cached) == 3:
+            if cached[0] == cache_key and 0.0 <= time.monotonic() - cached[1] < 5.0:
+                return copy.deepcopy(cached[2])
         headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        req = urllib.request.Request(f"{scheme}://{host}:{port}/status", headers=headers, method="GET")
+        path = "/tts-agent/health" if ssh and not full else "/status"
+        req = urllib.request.Request(f"{scheme}://{host}:{port}{path}", headers=headers, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=max(0.5, timeout)) as resp:
-                raw = resp.read()
+            with _open_worker_http_request(req, timeout=max(0.5, timeout)) as resp:
+                raw = resp.read(2 * 1024 * 1024 + 1)
+                if len(raw) > 2 * 1024 * 1024:
+                    raise RuntimeError("status do worker excedeu o limite de 2 MiB")
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[:240]
+            body = exc.read(4096).decode("utf-8", errors="replace")[:240]
+            exc.close()
             raise RuntimeError(f"HTTP {exc.code}: {_redact(body)}") from exc
         parsed = json.loads(raw.decode("utf-8", errors="replace"))
         if not isinstance(parsed, dict):
             raise RuntimeError("resposta não é JSON object")
+        if ssh:
+            if str(parsed.get("worker_id") or "") != expected_id:
+                raise RuntimeError("identidade do worker SSH diverge do celular configurado")
+            if str(parsed.get("runtime_kind") or "").lower() != "termux":
+                raise RuntimeError("o endpoint SSH não confirmou o runtime Termux")
+            parsed["_panel_http_verified_at"] = time.time()
+            parsed["_panel_http_verified_worker_id"] = expected_id
+            if not full:
+                self._ssh_panel_status_cache = (cache_key, time.monotonic(), copy.deepcopy(parsed))
         return parsed
 
     def _request_worker_task_sync(self, task: str, payload: dict[str, Any] | None = None, *, timeout: float) -> dict[str, Any]:
@@ -4258,7 +4508,7 @@ class WorkersCommandMixin:
             headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(f"{scheme}://{host}:{port}/task", data=data, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=max(0.8, timeout)) as resp:
+            with _open_worker_http_request(req, timeout=max(0.8, timeout)) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace")[:1024]
@@ -4292,7 +4542,10 @@ class WorkersCommandMixin:
         kind = str(job_type or "").strip().lower().replace("-", "_")
         if kind in {"ping", "status", "diagnostic_basic", "worker_self_check"}:
             timeout = max(1.0, _env_float("WORKERS_PANEL_STATUS_TIMEOUT_SECONDS", 3.0))
-            result = await asyncio.to_thread(self._request_worker_status_sync, timeout=timeout)
+            full = kind in {"status", "diagnostic_basic", "worker_self_check"}
+            if full and _ssh_transport_enabled():
+                timeout = max(timeout, _env_float("WORKERS_PANEL_FULL_STATUS_TIMEOUT_SECONDS", 6.0))
+            result = await asyncio.to_thread(self._request_worker_status_sync, timeout=timeout, full=full)
             result.setdefault("summary", "status direto coletado")
             return result
         timeout = max(3.0, _env_float("WORKERS_PANEL_DIRECT_TASK_TIMEOUT_SECONDS", 18.0))
@@ -4301,6 +4554,7 @@ class WorkersCommandMixin:
         elif kind == "worker_update":
             timeout = max(timeout, _env_float("WORKERS_PANEL_DIRECT_UPDATE_TIMEOUT_SECONDS", 60.0))
         direct_tasks = {
+            "ssh_connection_diagnostic",
             "network_probe",
             "tailscale_status",
             "worker_logs",
@@ -4343,10 +4597,21 @@ class WorkersCommandMixin:
         if enabled and configured:
             try:
                 status = await asyncio.to_thread(self._request_worker_status_sync, timeout=timeout)
-                online = bool(status.get("ok", True))
+                online = bool(status.get("_panel_http_verified_worker_id")) if _ssh_transport_enabled() else bool(status.get("ok", True))
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
         registry_snapshot, registry_error = await self._collect_registry_snapshot()
+        if _ssh_transport_enabled() and status.get("_panel_http_verified_worker_id"):
+            # Keep inventory from the heartbeat; a lightweight HTTP check only
+            # refreshes the sections it actually observed and its own proof.
+            registry_snapshot = copy.deepcopy(registry_snapshot)
+            for worker in registry_snapshot.get("workers") or []:
+                if not isinstance(worker, dict) or str(worker.get("worker_id") or "") != status["_panel_http_verified_worker_id"]:
+                    continue
+                cached_status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
+                worker["status"] = {**cached_status, **{k: status[k] for k in ("tts_agent", "connection", "runtime_kind", "pid") if k in status}}
+                worker["_panel_http_verified_at"] = status["_panel_http_verified_at"]
+                worker["_panel_http_verified_worker_id"] = status["_panel_http_verified_worker_id"]
         roles = _parse_roles(os.getenv("PHONE_WORKER_ROLES") or os.getenv("CORE_WORKER_ROLES"), status=status)
         return WorkerSnapshot(
             enabled=enabled,
@@ -4751,6 +5016,9 @@ class WorkersCommandMixin:
         return lock
 
     async def _run_phone_worker_watch_script(self, *, force: bool = False, reason: str = "manual") -> dict[str, Any]:
+        if _ssh_transport_enabled():
+            return {"ok": False, "ssh_managed": True,
+                    "output": "O watchdog local recupera o SSH. Abra o Termux no telefone se o aplicativo foi encerrado."}
         script = _repo_root() / "scripts" / "phone-worker-watch.sh"
         if not script.exists():
             return {"ok": False, "missing": True, "output": "watchdog não encontrado em scripts/phone-worker-watch.sh"}
@@ -4796,6 +5064,8 @@ class WorkersCommandMixin:
             return {"ok": False, "elapsed_seconds": time.perf_counter() - started, "output": f"watchdog falhou: {_compact_failure(exc)}"}
 
     async def _wake_phone_worker(self, *, force: bool = False, reason: str = "manual") -> WorkerSnapshot:
+        if _ssh_transport_enabled():
+            return await self._collect_workers_snapshot(action_note="SSH supervisionado no telefone; se estiver offline, abra o Termux para retomar a conexão")
         lock = self._get_core_worker_wake_lock()
         if lock.locked() and not force:
             return await self._collect_workers_snapshot(action_note="auto-wake ignorado: já existe tentativa de wake em andamento")
@@ -4850,6 +5120,8 @@ class WorkersCommandMixin:
         return await self._collect_workers_snapshot(action_note=note, watch_output=output)
 
     def _snapshot_needs_auto_wake(self, snapshot: WorkerSnapshot) -> bool:
+        if _ssh_transport_enabled():
+            return False
         if not _env_bool("CORE_WORKER_AUTO_WAKE_ENABLED", True):
             return False
         if not snapshot.enabled or not snapshot.configured:
@@ -4883,6 +5155,8 @@ class WorkersCommandMixin:
             await asyncio.sleep(interval)
 
     def _start_core_worker_auto_wake_task(self) -> None:
+        if _ssh_transport_enabled():
+            return
         if not _env_bool("CORE_WORKER_AUTO_WAKE_ENABLED", True):
             return
         task = getattr(self, "_core_worker_auto_wake_task", None)

@@ -2,6 +2,15 @@
 # Instala os scripts do phone-worker no Termux.
 set -Eeuo pipefail
 
+copy_runtime_file() {
+  local source="$1" target="$2" temporary="${2}.tmp.$$"
+  [[ "$source" -ef "$target" ]] && return 0
+  mkdir -p "$(dirname "$target")"
+  cp -- "$source" "$temporary"
+  chmod 644 "$temporary"
+  mv -f -- "$temporary" "$target"
+}
+
 install_core_worker_boot() {
   mkdir -p "$HOME/.termux/boot"
   printf '%s\n' \
@@ -72,32 +81,33 @@ EOF_WRAPPER
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 
-pkg install python tmux curl termux-api -y || pkg install python tmux curl -y
+pkg install python tmux curl openssh termux-api -y || pkg install python tmux curl openssh -y
 mkdir -p "$WORKER_DIR"
-cp "$SRC_DIR/phone_worker.py" "$WORKER_DIR/phone_worker.py"
-cp "$SRC_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/phone_worker_bootstrap.py"
-cp "$SRC_DIR/repair-phone-worker.sh" "$WORKER_DIR/repair-phone-worker.sh"
-cp "$SRC_DIR/tts_transport.py" "$WORKER_DIR/tts_transport.py"
+copy_runtime_file "$SRC_DIR/phone_worker.py" "$WORKER_DIR/phone_worker.py"
+copy_runtime_file "$SRC_DIR/phone_worker_bootstrap.py" "$WORKER_DIR/phone_worker_bootstrap.py"
+copy_runtime_file "$SRC_DIR/repair-phone-worker.sh" "$WORKER_DIR/repair-phone-worker.sh"
+copy_runtime_file "$SRC_DIR/tts_transport.py" "$WORKER_DIR/tts_transport.py"
+for source in "$SRC_DIR"/phone_worker_runtime/*.py; do
+  [[ -f "$source" ]] || continue
+  copy_runtime_file "$source" "$WORKER_DIR/phone_worker_runtime/$(basename "$source")"
+done
 MUSIC_PROJECT_ROOT=""
 if [[ -d "$SRC_DIR/cogs/musica/runtime_telefone" ]]; then
   MUSIC_PROJECT_ROOT="$SRC_DIR"
 elif [[ -d "$SRC_DIR/../../../cogs/musica/runtime_telefone" ]]; then
   MUSIC_PROJECT_ROOT="$(cd "$SRC_DIR/../../.." && pwd)"
 fi
-if [[ -n "$MUSIC_PROJECT_ROOT" ]]; then
+if [[ -n "$MUSIC_PROJECT_ROOT" && ! "$MUSIC_PROJECT_ROOT" -ef "$WORKER_DIR" ]]; then
   mkdir -p "$WORKER_DIR/cogs/musica"
   cp "$MUSIC_PROJECT_ROOT/cogs/__init__.py" "$WORKER_DIR/cogs/__init__.py"
   cp "$MUSIC_PROJECT_ROOT/cogs/musica/__init__.py" "$WORKER_DIR/cogs/musica/__init__.py"
   rm -rf "$WORKER_DIR/cogs/musica/runtime_telefone"
   cp -R "$MUSIC_PROJECT_ROOT/cogs/musica/runtime_telefone" "$WORKER_DIR/cogs/musica/runtime_telefone"
 fi
-cp "$SRC_DIR/start-phone-worker.sh" "$WORKER_DIR/start-phone-worker.sh"
-cp "$SRC_DIR/watch-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh"
-cp "$SRC_DIR/pair-phone-worker.sh" "$WORKER_DIR/pair-phone-worker.sh"
-cp "$SRC_DIR/bootstrap-phone-worker.sh" "$WORKER_DIR/bootstrap-phone-worker.sh"
-cp "$SRC_DIR/install.sh" "$WORKER_DIR/install.sh"
-cp "$SRC_DIR/README.md" "$WORKER_DIR/README.md" 2>/dev/null || true
-cp "$SRC_DIR/phone-worker.env.example" "$WORKER_DIR/phone-worker.env.example" 2>/dev/null || true
+for name in start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
+  [[ -f "$SRC_DIR/$name" ]] || continue
+  copy_runtime_file "$SRC_DIR/$name" "$WORKER_DIR/$name"
+done
 mkdir -p "$WORKER_DIR/teto_renderer" "$WORKER_DIR/scripts"
 cp "$SRC_DIR"/teto_renderer/*.py "$WORKER_DIR/teto_renderer/" 2>/dev/null || true
 cp "$SRC_DIR/teto_renderer/OPENUTAU_LICENSE.txt" "$WORKER_DIR/teto_renderer/OPENUTAU_LICENSE.txt" 2>/dev/null || true
@@ -125,7 +135,9 @@ fi
 
 echo "Instalado. Para iniciar:"
 echo "  nano ~/.phone-worker.env"
-echo "  ~/phone-worker/pair-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:10000 \"Meu Worker\" midia"
-echo "  # ou tudo de uma vez:"
-echo "  ~/phone-worker/bootstrap-phone-worker.sh CORE-XXXX http://IP_TAILSCALE_DA_VPS:10000 \"Meu Worker\" midia"
+echo "  # Conexão SSH: use o pacote público gerado na VPS e cadastre a chave pública do telefone."
+echo "  python ~/phone-worker/phone_worker_runtime/ssh_transport.py prepare --bundle ~/storage/downloads/osaka-ssh.json"
+echo "  # Após enroll na VPS, ative pelo guia do painel workers. O worker existente mantém ID e tokens."
+echo "  # Pareamento novo, depois de o túnel estar ativo:"
+echo "  ~/phone-worker/pair-phone-worker.sh CORE-XXXX http://127.0.0.1:19000 \"Meu Worker\" midia"
 echo "  nohup bash ~/phone-worker/watch-phone-worker.sh >> ~/phone-worker/phone-worker-watch.log 2>&1 &"

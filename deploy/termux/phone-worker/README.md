@@ -1,5 +1,31 @@
 # Phone Worker Termux
 
+## Conexão SSH direta com a VPS
+
+O modo `PHONE_WORKER_TRANSPORT=ssh` usa dois clientes OpenSSH persistentes,
+supervisionados pelo watchdog atual. TTS/Teto e comandos curtos usam um canal;
+cache, arquivos e streams de música usam outro. O telefone inicia as conexões
+com o IP público da VPS, e os endpoints HTTP ficam em loopback. Heartbeat,
+atualizações e recuperação funcionam sem dependência operacional de Tailscale.
+
+O [guia SSH da Osaka](../../oci/SSH-PHONE.md) contém os comandos de preparação,
+cadastro da chave pública, ativação, diagnóstico e benchmark. Atualize os fontes
+do telefone antes de executar `prepare --bundle`. Para um worker já pareado,
+conserve o ID e os tokens atuais; não refaça o pareamento apenas para mudar o
+transporte. A chave privada do telefone permanece no Termux.
+
+A ativação é uma operação de migração em janela sem reprodução. Depois dela,
+uma queda do SSH refaz somente os canais, mantendo o worker e o Music Agent.
+O bootstrap e os launchers canônicos preservam o caminho de recuperação ao
+trocar `current` ou voltar a uma base compatível com SSH. Configuração e chaves
+ficam fora das releases. Uma porta local aberta não é prova de saúde: o painel
+mostra a confirmação HTTP real e a idade da amostra.
+
+O primeiro áudio continua sendo transmitido em blocos pelo protocolo existente.
+O Edge consulta a Microsoft pela Internet do telefone, conservando essa origem
+independente da VPS. A velocidade deve ser medida no aparelho; SSH não implica
+ganho automático sobre uma conexão WireGuard direta.
+
 ## TTV: voz, idioma, tom e velocidade por usuário
 
 O worker `1.11.41` aceita `ttv_voice_id`, `ttv_language`, `ttv_pitch_semitones` e
@@ -837,7 +863,7 @@ Depois de instalar/reparar, abra o app **Termux:Boot** uma vez e, no Android/MIU
 - Termux
 - Termux:Boot
 - Termux:API
-- Tailscale
+- Tailscale, somente quando estiver usando o transporte legado por VPN
 
 O painel `workers` mostra `boot ok`, `boot faltando` ou `boot incompleto`. Se aparecer faltando/incompleto, use **Manutenção → Reparar boot automático**.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.request
 from typing import Any, Mapping
 
@@ -11,6 +12,27 @@ from .configuracao import ConfiguracaoSelecaoWorker, carregar_configuracao_selec
 from .utilitarios import _as_bool, _nested, _version_at_least
 
 logger = logging.getLogger(__name__)
+_SSH_HEALTH_CACHE: tuple[tuple[str, str, str], float, Mapping[str, Any]] | None = None
+
+
+def geracao_ssh_verificada() -> int:
+    """A generation is useful only while its authenticated HTTP proof is fresh."""
+    cached = _SSH_HEALTH_CACHE
+    if (str(getattr(config, "PHONE_WORKER_TRANSPORT", "legacy")).lower() != "ssh"
+            or not cached or time.monotonic() - cached[1] > 5.0):
+        return 0
+    connection = cached[2].get("connection")
+    if not isinstance(connection, Mapping):
+        return 0
+    try:
+        return max(0, int(connection.get("generation") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+class _NoHealthRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 def _worker_music_agent(worker: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
@@ -106,10 +128,19 @@ def bootstrap_agente_permitido(
 
 
 def consultar_saude_worker_configurado(base_url: str, token: str) -> Mapping[str, Any] | None:
+    global _SSH_HEALTH_CACHE
     if not base_url or not token:
         return None
+    ssh = str(getattr(config, "PHONE_WORKER_TRANSPORT", "legacy")).lower() == "ssh"
+    expected_id = str(getattr(config, "PHONE_WORKER_ID", "") or "").strip()
+    cache_key = (base_url.rstrip("/"), token, expected_id)
+    if ssh and not expected_id:
+        logger.info("[music/worker] PHONE_WORKER_ID precisa identificar o destino SSH")
+        return None
+    if ssh and _SSH_HEALTH_CACHE and _SSH_HEALTH_CACHE[0] == cache_key and time.monotonic() - _SSH_HEALTH_CACHE[1] <= 5.0:
+        return _SSH_HEALTH_CACHE[2]
     enabled = _as_bool(getattr(config, "MUSIC_WORKER_CONFIGURED_HEALTHCHECK_ENABLED", True), True)
-    if not enabled:
+    if not enabled and not ssh:
         return {"ok": True, "profile": "turbo"}
     try:
         timeout = max(
@@ -120,13 +151,36 @@ def consultar_saude_worker_configurado(base_url: str, token: str) -> Mapping[str
         timeout = 3.5
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     try:
-        req = urllib.request.Request(f"{base_url.rstrip('/')}/health", headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read(384 * 1024).decode("utf-8", "replace")
+        endpoint = "/music-agent/health" if ssh else "/health"
+        req = urllib.request.Request(f"{base_url.rstrip('/')}{endpoint}", headers=headers, method="GET")
+        opener = (urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoHealthRedirect()).open
+                  if ssh else urllib.request.urlopen)
+        with opener(req, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) != 200:
+                raise ValueError("health não confirmou HTTP 200")
+            raw = resp.read(384 * 1024 + 1)
+        if len(raw) > 384 * 1024:
+            raise ValueError("health excedeu orçamento")
+        raw = raw.decode("utf-8", "replace")
         data = json.loads(raw or "{}")
         if isinstance(data, Mapping) and bool(data.get("ok")):
+            if ssh:
+                if str(data.get("worker_id") or "") != expected_id or not isinstance(data.get("music_agent"), Mapping):
+                    raise ValueError("identidade ou contrato do health SSH não confirmado")
+                if _SSH_HEALTH_CACHE and _SSH_HEALTH_CACHE[0] == cache_key:
+                    current = _SSH_HEALTH_CACHE[2].get("connection") or {}
+                    incoming = data.get("connection") or {}
+                    if isinstance(current, Mapping) and isinstance(incoming, Mapping):
+                        try:
+                            if int(incoming.get("generation") or 0) < int(current.get("generation") or 0):
+                                return _SSH_HEALTH_CACHE[2] if time.monotonic() - _SSH_HEALTH_CACHE[1] <= 5.0 else None
+                        except (ValueError, TypeError):
+                            return None
+                _SSH_HEALTH_CACHE = (cache_key, time.monotonic(), data)
             return data
     except Exception as exc:
+        if ssh and _SSH_HEALTH_CACHE and _SSH_HEALTH_CACHE[0] == cache_key:
+            _SSH_HEALTH_CACHE = None
         logger.info("[music/worker] phone worker configurado não respondeu rápido: %s", exc)
     return None
 

@@ -15,6 +15,16 @@ if [ -f "$ROOT_DIR/.env" ]; then
   set +a
 fi
 
+if [[ "${PHONE_WORKER_TRANSPORT:-legacy}" == "ssh" ]]; then
+  worker_id="${PHONE_WORKER_ID:-${CORE_WORKER_ID:-}}"
+  if [[ -z "$worker_id" ]]; then
+    log "modo SSH exige PHONE_WORKER_ID; aplique activate do instalador antes de sincronizar"
+    exit 2
+  fi
+  log "publicando atualização pelo canal SSH e bootstrap autenticado"
+  exec python3 "$ROOT_DIR/scripts/core-worker-automation.py" queue-agent-update --worker-id "$worker_id"
+fi
+
 PHONE_HOST="${PHONE_WORKER_HOST:-}"
 PHONE_USER="${PHONE_WORKER_SSH_USER:-}"
 PHONE_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
@@ -53,9 +63,10 @@ log "copiando arquivos do phone-worker"
   "$SRC_DIR/phone_worker.py" \
   "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/phone_worker.py"
 "${SCP_BASE[@]}" \
-"${SCP_BASE[@]}" \
   "$SRC_DIR/tts_transport.py" \
   "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/tts_transport.py"
+"${SSH_BASE[@]}" "mkdir -p '$REMOTE_DIR/phone_worker_runtime'"
+"${SCP_BASE[@]}" "$SRC_DIR"/phone_worker_runtime/*.py "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/phone_worker_runtime/"
 log "copiando runtime canônico de música"
 "${SSH_BASE[@]}" "mkdir -p '$REMOTE_DIR/cogs/musica'"
 "${SCP_BASE[@]}" "$ROOT_DIR/cogs/__init__.py" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/cogs/__init__.py"

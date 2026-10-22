@@ -17,6 +17,9 @@ import time
 import urllib.request
 
 PROTOCOL_VERSION = 2
+# A cache-only stream is guaranteed to stop before constructing a provider on
+# every miss. Consumers may use this capability for repeated transport probes.
+STREAM_CACHE_ONLY_PROTOCOL = 1
 _AUDIO_LINE = re.compile(r'jQ1olc","\[\\"(.*?)\\"\]')
 _LOCAL = threading.local()
 _LOCK = threading.Lock()
@@ -266,6 +269,13 @@ def synthesize_bytes(**kwargs):
         return b''.join(stream)
 
 
+def _cache_only_request(body):
+    mode = str(body.get('cache_mode') or '').strip().lower()
+    requested = body.get('cache_only')
+    return mode in {'only', 'cache_only'} or requested is True or (
+        isinstance(requested, str) and requested.strip().lower() in {'1', 'true', 'yes', 'on'})
+
+
 
 def serve_stream(handler, body, api):
     """Authenticated protocol v2. Never restart a provider after audio headers."""
@@ -285,9 +295,11 @@ def serve_stream(handler, body, api):
     timeout = max(2, min(handler.job_timeout, float(body.get('timeout_seconds') or handler.job_timeout)))
     limit = max(1024, min(handler.max_output_bytes, int(body.get('max_audio_bytes') or handler.max_output_bytes)))
     started = time.monotonic()
+    cache_only = _cache_only_request(body)
     api._tts_agent_record_start()  # atomic check and reservation
     source = None
     cached = None
+    cached_size = None
     staging = None
     target = None
     headers_sent = False
@@ -305,13 +317,22 @@ def serve_stream(handler, body, api):
                     cached = path.open('rb')
                     import fcntl
                     fcntl.flock(cached.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
-                    if not 0 < os.fstat(cached.fileno()).st_size <= limit:
+                    cached_size = os.fstat(cached.fileno()).st_size
+                    if not 0 < cached_size <= limit:
                         raise ValueError('cache fora do limite')
                     handler._touch_tts_cache_file(path)
                 except (OSError, ValueError):
                     if cached is not None:
                         cached.close()
                     cached = None
+                    cached_size = None
+        if cache_only and cached is None:
+            error = 'cache_miss'
+            api._json_response(handler, 409, {
+                'ok': False, 'error': 'cache_miss', 'cache_hit': False,
+                'cache_only': True, 'engine': engine,
+            })
+            return
         if cached is not None:
             chunks = iter(lambda: cached.read(16384), b'')
         else:
@@ -329,6 +350,13 @@ def serve_stream(handler, body, api):
                     staging = tempfile.NamedTemporaryFile(prefix=target.name + '.', suffix='.part', dir=target.parent, delete=False)
         first = next(chunks, b'')
         if not first:
+            if cache_only:
+                error = 'cache_incomplete'
+                api._json_response(handler, 409, {
+                    'ok': False, 'error': 'cache_incomplete', 'cache_hit': False,
+                    'cache_only': True, 'engine': engine,
+                })
+                return
             raise RuntimeError('engine não enviou áudio')
         # A chunked terminator is sent ONLY on complete provider success. aiohttp
         # rejects a disconnected partial response, so it can never enter cache.
@@ -362,6 +390,10 @@ def serve_stream(handler, body, api):
                     staging.close()
                     Path(staging.name).unlink(missing_ok=True)
                     staging = None
+        if cached is not None and (size != cached_size or os.fstat(cached.fileno()).st_size != cached_size):
+            # An externally truncated cache must have the same incomplete HTTP
+            # semantics as an interrupted provider; never silently benchmark it.
+            raise RuntimeError('cache incompleto durante o stream')
         handler.wfile.write(b'0\r\n\r\n')
         handler.wfile.flush()
         ok = True

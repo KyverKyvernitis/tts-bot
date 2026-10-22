@@ -13,6 +13,8 @@ _SESSAO: aiohttp.ClientSession | None = None
 _SESSAO_LOOP: asyncio.AbstractEventLoop | None = None
 _SESSAO_LOCK: asyncio.Lock | None = None
 _SESSAO_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
+_SESSAO_GENERATION = 0
+_RETIRED_SESSIONS: set[aiohttp.ClientSession] = set()
 
 # Pequena janela de recuperação para mudanças de rota/Tailscale. A primeira
 # tentativa é normal; em falha de transporte, o pool/DNS é descartado e a
@@ -36,18 +38,36 @@ async def obter_sessao_http() -> aiohttp.ClientSession:
     O bot roda em um único loop, mas os testes podem criar loops diferentes.
     Quando o loop muda, a sessão antiga é fechada antes de criar outra.
     """
-    global _SESSAO, _SESSAO_LOOP
+    global _SESSAO, _SESSAO_LOOP, _SESSAO_GENERATION
+    from .saude import geracao_ssh_verificada
+    observed_generation = geracao_ssh_verificada()
     loop = asyncio.get_running_loop()
     session = _SESSAO
-    if session is not None and not session.closed and _SESSAO_LOOP is loop:
+    changed_generation = bool(observed_generation and _SESSAO_GENERATION and observed_generation != _SESSAO_GENERATION)
+    if session is not None and not session.closed and _SESSAO_LOOP is loop and not changed_generation:
+        if observed_generation:
+            _SESSAO_GENERATION = observed_generation
         return session
 
     async with _lock_da_sessao():
         session = _SESSAO
-        if session is not None and not session.closed and _SESSAO_LOOP is loop:
+        changed_generation = bool(observed_generation and _SESSAO_GENERATION and observed_generation != _SESSAO_GENERATION)
+        if session is not None and not session.closed and _SESSAO_LOOP is loop and not changed_generation:
             return session
         if session is not None and not session.closed:
-            await session.close()
+            if changed_generation and _SESSAO_LOOP is loop:
+                _RETIRED_SESSIONS.add(session)
+                async def finish_old(old=session):
+                    try:
+                        while not old.closed and getattr(getattr(old, "connector", None), "_acquired", ()):
+                            await asyncio.sleep(0.05)
+                    finally:
+                        if not old.closed:
+                            await old.close()
+                        _RETIRED_SESSIONS.discard(old)
+                loop.create_task(finish_old())
+            else:
+                await session.close()
         connector = aiohttp.TCPConnector(
             limit=8,
             # O endpoint do Phone Worker pode atravessar Tailscale/MagicDNS.
@@ -58,6 +78,7 @@ async def obter_sessao_http() -> aiohttp.ClientSession:
         )
         _SESSAO = aiohttp.ClientSession(connector=connector)
         _SESSAO_LOOP = loop
+        _SESSAO_GENERATION = observed_generation
         return _SESSAO
 
 
@@ -80,6 +101,10 @@ async def invalidar_sessao_http(session: aiohttp.ClientSession | None = None) ->
 
 async def fechar_sessao_http() -> None:
     await invalidar_sessao_http()
+    for session in tuple(_RETIRED_SESSIONS):
+        if not session.closed:
+            await session.close()
+    _RETIRED_SESSIONS.clear()
 
 
 def _erro_transporte_recuperavel(exc: BaseException) -> bool:

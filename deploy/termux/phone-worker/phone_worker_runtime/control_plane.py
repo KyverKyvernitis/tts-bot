@@ -25,6 +25,10 @@ def build_payload(
     status.update({key: system.get(key) for key in (
         "python", "platform", "disk_home", "loadavg", "scripts", "boot", "shell_autostart",
         "auto_boot_repair", "supervisor", "sshd")})
+    # The base carries the live transport observation. A cached system inventory
+    # must not replace it with an older generation after SSH has reconnected.
+    if "connection" not in status and isinstance(system.get("connection"), Mapping):
+        status["connection"] = dict(system["connection"])
     # Reuse the existing system snapshot: capability publication must not probe
     # providers or Teto again on the heartbeat thread.
     if isinstance(system.get("tts_agent"), Mapping):

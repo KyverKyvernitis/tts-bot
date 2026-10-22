@@ -269,4 +269,4 @@ def cache_mode_allows_read(body: dict[str, Any]) -> bool:
 
 def cache_mode_allows_store(body: dict[str, Any]) -> bool:
     mode = str(body.get("cache_mode") or "prefer").strip().lower()
-    return mode not in {"0", "false", "off", "disabled", "none", "bypass", "no_store"}
+    return mode not in {"0", "false", "off", "disabled", "none", "bypass", "no_store", "only", "cache_only"}

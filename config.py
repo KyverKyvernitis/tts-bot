@@ -230,6 +230,11 @@ CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED = _parse_bool(
 
 PHONE_WORKER_HOST = (os.getenv("PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = _parse_int(os.getenv("PHONE_WORKER_PORT", "8766"), 8766)
+PHONE_WORKER_TRANSPORT = (os.getenv("PHONE_WORKER_TRANSPORT", "legacy") or "legacy").strip().lower()
+if PHONE_WORKER_TRANSPORT not in {"legacy", "ssh"}:
+    raise ValueError("PHONE_WORKER_TRANSPORT deve ser legacy ou ssh")
+PHONE_WORKER_BULK_PORT = _parse_int(os.getenv("PHONE_WORKER_BULK_PORT", str(PHONE_WORKER_PORT)), PHONE_WORKER_PORT)
+PHONE_WORKER_ID = (os.getenv("PHONE_WORKER_ID", "") or "").strip()
 PHONE_WORKER_SCHEME = (os.getenv("PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
 PHONE_WORKER_TOKEN = (os.getenv("PHONE_WORKER_TOKEN", "") or "").strip()
 PHONE_WORKER_ENABLED = bool(PHONE_WORKER_HOST and PHONE_WORKER_TOKEN) or _parse_bool(

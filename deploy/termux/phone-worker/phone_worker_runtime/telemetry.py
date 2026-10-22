@@ -248,6 +248,63 @@ def vps_tcp_ping_snapshot(*, timeout: float, cache_ttl: float, auth_parts: Calla
     return result
 
 
+def vps_http_ping_snapshot(*, timeout: float, cache_ttl: float, auth_parts: Callable,
+                          ping_cache: MutableMapping, monotonic: Callable, perf_counter: Callable,
+                          request_factory: Callable, urlopen: Callable, wall_clock: Callable,
+                          mask_ipv4: Callable, short_text: Callable) -> dict[str, Any]:
+    """Measure a complete HTTP exchange through SSH, never its local listener.
+
+    A successful TCP connect to 127.0.0.1 only proves that the SSH client has
+    opened a socket. Reading a bounded JSON response proves that the paired
+    VPS is reachable across the forward. A compact authenticated reply avoids
+    transferring the full diagnostic inventory on every periodic observation.
+    """
+    base_url, token, worker_id = auth_parts()
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+            raise ValueError("URL HTTP da VPS inválida")
+    except Exception:
+        return {"available": False, "reachable": False, "source": "invalid_url" if base_url else "not_configured"}
+    cache_key = "http:" + base_url.rstrip("/") + ":" + worker_id
+    now = monotonic()
+    cached = ping_cache.get(cache_key)
+    if isinstance(cached, dict) and now - float(cached.get("monotonic_at") or 0.0) <= max(0.5, cache_ttl):
+        result = dict(cached.get("result") or {})
+        result["cached"] = True
+        result["sample_age_seconds"] = round(max(0.0, now - float(cached.get("monotonic_at") or 0.0)), 3)
+        return result
+    result: dict[str, Any] = {"available": True, "reachable": False, "source": "http_over_ssh",
+                              "host_masked": mask_ipv4(host), "port": port, "sample_age_seconds": 0.0}
+    started = perf_counter()
+    try:
+        path = "/core-worker/agent/ping?worker_id=" + urllib.parse.quote(worker_id, safe="")
+        request = request_factory(base_url.rstrip("/") + path,
+                                  headers={"Accept": "application/json", "Authorization": "Bearer " + token}, method="GET")
+        with urlopen(request, timeout=max(0.3, timeout)) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            if status != 200:
+                raise ValueError("HTTP " + str(status))
+            raw = response.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            raise ValueError("health excedeu limite")
+        data = json.loads(raw.decode("utf-8"))
+        if (not isinstance(data, dict) or not data.get("ok") or data.get("worker_id") != worker_id
+                or data.get("service") != "osaka-phone-ssh"):
+            raise ValueError("ping não confirmou a identidade pareada")
+        latency = round(max(0.1, (perf_counter() - started) * 1000), 1)
+        result.update(reachable=True, ping_ms=latency, latency_ms=latency, vps_ping_ms=latency,
+                      http_status=status, observed_at=wall_clock(),
+                      health_ok=True)
+    except Exception as exc:
+        # Configuration/URL details and response bodies may contain secrets.
+        result["error"] = type(exc).__name__ + ": falha na resposta HTTP da VPS pelo túnel"
+    ping_cache[cache_key] = {"monotonic_at": now, "result": dict(result)}
+    return result
+
+
 def network_snapshot(*, run_json_command: Callable, heartbeat_configured: Callable,
                      tailscale_snapshot: Callable, safe_telemetry: Callable,
                      ping_snapshot: Callable, short_text: Callable) -> dict[str, Any]:
@@ -295,4 +352,13 @@ def network_snapshot(*, run_json_command: Callable, heartbeat_configured: Callab
             result["vps_port"] = ping.get("port")
         if ping.get("error"):
             result["vps_ping_error"] = short_text(ping.get("error"), limit=120)
+        if ping.get("source") == "http_over_ssh":
+            result["transport"] = "ssh"
+            result["vps_ping_source"] = "http_over_ssh"
+            result["vps_ping_age_seconds"] = ping.get("sample_age_seconds", 0.0)
+            if result.get("source") == "inferred":
+                result["type"] = "connected" if ping.get("reachable") else "unknown"
+                result["source"] = "ssh_http"
+            if ping.get("observed_at") is not None:
+                result["vps_ping_observed_at"] = ping["observed_at"]
     return result

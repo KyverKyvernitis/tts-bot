@@ -263,6 +263,9 @@ TTS_LONG_TEXT_CHUNK_MAX_PARTS = max(1, int(getattr(config, "TTS_LONG_TEXT_CHUNK_
 PHONE_WORKER_ENABLED = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
 PHONE_WORKER_HOST = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
+PHONE_WORKER_TRANSPORT = str(getattr(config, "PHONE_WORKER_TRANSPORT", "legacy") or "legacy").strip().lower()
+PHONE_WORKER_BULK_PORT = int(getattr(config, "PHONE_WORKER_BULK_PORT", PHONE_WORKER_PORT) or PHONE_WORKER_PORT)
+PHONE_WORKER_ID = str(getattr(config, "PHONE_WORKER_ID", "") or "").strip()
 PHONE_WORKER_SCHEME = str(getattr(config, "PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
 PHONE_WORKER_TOKEN = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
 
@@ -1985,7 +1988,42 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             setattr(self, "_phone_worker_http_session", session)
         return session
 
+    async def _get_phone_worker_bulk_http_session(self) -> aiohttp.ClientSession:
+        if PHONE_WORKER_TRANSPORT != "ssh":
+            return await self._get_phone_worker_http_session()
+        session = getattr(self, "_phone_worker_bulk_http_session", None)
+        if session is None or getattr(session, "closed", True):
+            connector = aiohttp.TCPConnector(limit=4, ttl_dns_cache=15, keepalive_timeout=15)
+            session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
+            self._phone_worker_bulk_http_session = session
+        return session
+
+    def _retire_phone_worker_http_generation(self) -> None:
+        """New requests use fresh pools; in-flight audio keeps its own session."""
+        for name in ("_phone_worker_http_session", "_phone_worker_bulk_http_session"):
+            old = getattr(self, name, None)
+            if old is None or getattr(old, "closed", True):
+                continue
+            # Capture and detach before yielding. A late closer cannot detach
+            # the pool created by a newer generation.
+            setattr(self, name, None)
+            async def retire(session=old):
+                try:
+                    while not session.closed and getattr(getattr(session, "connector", None), "_acquired", ()):
+                        await asyncio.sleep(0.05)
+                finally:
+                    if not session.closed:
+                        await session.close()
+            asyncio.get_running_loop().create_task(retire())
+
     def _close_phone_worker_http_session(self) -> None:
+        bulk = getattr(self, '_phone_worker_bulk_http_session', None)
+        if bulk is not None and not getattr(bulk, 'closed', True):
+            self._phone_worker_bulk_http_session = None
+            try:
+                asyncio.get_running_loop().create_task(bulk.close())
+            except RuntimeError:
+                pass
         session = getattr(self, '_phone_worker_http_session', None)
         if session is None or getattr(session, 'closed', True):
             return
@@ -2086,6 +2124,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "last_audio_bytes": int(state.get("last_audio_bytes") or 0),
             "last_cache_hit": bool(state.get("last_cache_hit")),
             "last_synth_ms": float(state.get("last_synth_ms") or 0.0),
+            "connection": dict(state.get("connection") or {}),
             "voice_agent": dict(state.get("voice_agent") or {}),
         }
 
@@ -2436,6 +2475,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return data
 
     async def _probe_tts_agent_health_once(self) -> None:
+        probe_sequence = int(getattr(self, "_tts_agent_probe_sequence", 0)) + 1
+        self._tts_agent_probe_sequence = probe_sequence
         metrics = self._get_metrics_store()
         if not self._tts_agent_base_configured():
             self._tts_agent_set_route(route="vps", ok=False, reason="disabled_or_unconfigured")
@@ -2446,8 +2487,25 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             return
         headers = {"Authorization": f"Bearer {PHONE_WORKER_TOKEN}", "Accept": "application/json"}
         started = time.monotonic()
+        identity_mismatch = False
         try:
             data = await self._fetch_tts_agent_light_health(base=base, headers=headers)
+            if probe_sequence != self._tts_agent_probe_sequence:
+                return
+            if PHONE_WORKER_TRANSPORT == "ssh":
+                if not PHONE_WORKER_ID or str(data.get("worker_id") or "") != PHONE_WORKER_ID:
+                    identity_mismatch = True
+                    raise RuntimeError("identidade do worker SSH não confirmada")
+                connection = data.get("connection")
+                connection = dict(connection) if isinstance(connection, dict) else {}
+                try:
+                    generation = max(0, int(connection.get("generation") or 0))
+                except (TypeError, ValueError):
+                    generation = 0
+                previous = int(getattr(self, "_tts_phone_verified_generation", 0))
+                # A current authenticated probe may observe a lower counter
+                # after the phone's transport state is recreated. The probe
+                # sequence above already rejects late HTTP responses.
             agent = data.get("tts_agent") if isinstance(data, dict) else None
             if not isinstance(agent, dict) and isinstance(data, dict):
                 # /task tts_agent_status devolve o snapshot direto.
@@ -2493,16 +2551,29 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 route = self._tts_agent_route_state()
                 route['stream_protocol'] = int(agent.get('stream_protocol') or 0)
                 route['cache_binary_protocol'] = int(agent.get('cache_binary_protocol') or 0)
+                if PHONE_WORKER_TRANSPORT == "ssh":
+                    if generation and previous and generation != previous:
+                        self._retire_phone_worker_http_generation()
+                    if generation:
+                        self._tts_phone_verified_generation = generation
+                    route['connection'] = connection
+                    # A successful HTTP response proves transport recovery; it
+                    # must not reset the separate Microsoft 429 rate policy.
+                    if 'edge' in route.get('available_engines', ()) and route['stream_protocol'] >= 2:
+                        self._tts_edge_phone_unavailable_until = 0.0
             else:
                 metrics["tts_agent_health_fail"] = int(metrics.get("tts_agent_health_fail", 0) or 0) + 1
                 reason = str(agent.get("reason") or agent.get("state") or "tts_agent_not_ready")
                 self._tts_agent_set_route(route="vps", ok=False, reason=reason, last_error=reason)
         except Exception as exc:
+            if probe_sequence != self._tts_agent_probe_sequence:
+                return
             metrics["tts_agent_health_fail"] = int(metrics.get("tts_agent_health_fail", 0) or 0) + 1
             error = f"{type(exc).__name__}: {exc}"
-            kept = self._tts_agent_note_transient_health_failure(reason="health_error", last_error=error)
+            kept = False if identity_mismatch else self._tts_agent_note_transient_health_failure(reason="health_error", last_error=error)
             if not kept:
-                self._tts_agent_set_route(route="vps", ok=False, reason="health_error", last_error=error)
+                self._tts_agent_set_route(route="vps", ok=False,
+                    reason="worker_identity_mismatch" if identity_mismatch else "health_error", last_error=error)
             if TTS_DEBUG_LOGS:
                 self._log_debug(f"[tts_agent] health leve falhou após {(time.monotonic()-started)*1000.0:.1f}ms: {exc}; kept_worker={kept}")
 
@@ -2510,7 +2581,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         try:
             while True:
                 await self._probe_tts_agent_health_once()
-                await asyncio.sleep(TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS)
+                await asyncio.sleep(5.0 if PHONE_WORKER_TRANSPORT == "ssh" else TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -4115,6 +4186,16 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     def _phone_worker_tts_base_url(self) -> str:
         return self._phone_worker_tts_benchmark_base_url()
 
+    def _phone_worker_bulk_base_url(self) -> str:
+        base = self._phone_worker_tts_base_url()
+        if not base or PHONE_WORKER_TRANSPORT != "ssh":
+            return base
+        if not 1 <= PHONE_WORKER_BULK_PORT <= 65535:
+            raise ValueError("PHONE_WORKER_BULK_PORT inválida")
+        scheme = PHONE_WORKER_SCHEME if PHONE_WORKER_SCHEME in {"http", "https"} else "http"
+        host = f"[{PHONE_WORKER_HOST}]" if ':' in PHONE_WORKER_HOST else PHONE_WORKER_HOST
+        return f"{scheme}://{host}:{PHONE_WORKER_BULK_PORT}"
+
     def _normalize_worker_audio_format(self, value: Any) -> str:
         fmt = str(value or "mp3").strip().lower().replace(".", "")
         if fmt in {"wav", "wave"}:
@@ -4124,7 +4205,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return "mp3"
 
     async def _request_phone_worker_json(self, *, task: str, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int, raise_on_worker_error: bool = True) -> dict[str, Any]:
-        base = self._phone_worker_tts_base_url()
+        bulk = task in {"tts_cache_lookup", "tts_cache_store", "tts_cache_delete", "tts_cache_stats"}
+        base = self._phone_worker_bulk_base_url() if bulk else self._phone_worker_tts_base_url()
         if not base:
             raise RuntimeError("PHONE_WORKER_ENABLED/HOST/TOKEN não configurado")
         headers = {
@@ -4138,7 +4220,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         request_payload.setdefault("max_audio_bytes", max_audio_bytes)
         started = time.monotonic()
         timeout = aiohttp.ClientTimeout(total=max(1.0, float(timeout_seconds)))
-        session = await self._get_phone_worker_http_session()
+        session = await self._get_phone_worker_bulk_http_session() if bulk else await self._get_phone_worker_http_session()
         async with session.post(f"{base}/task", headers=headers, json=request_payload, timeout=timeout) as response:
             response_text = await response.text()
             response_ms = (time.monotonic() - started) * 1000.0
@@ -5343,11 +5425,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             import fcntl
             fcntl.flock(raw_file, fcntl.LOCK_SH | fcntl.LOCK_NB)
             key = self._cache_key(item)
-            base = self._phone_worker_tts_base_url()
+            base = self._phone_worker_bulk_base_url()
             if not base:
                 return
             timeout = aiohttp.ClientTimeout(total=TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS)
-            session = await self._get_phone_worker_http_session()
+            session = await self._get_phone_worker_bulk_http_session()
             headers = {'Authorization': f'Bearer {PHONE_WORKER_TOKEN}'}
             if int(self._tts_agent_route_state().get('cache_binary_protocol') or 0) >= 2:
                 def digest_file():

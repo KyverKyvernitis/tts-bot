@@ -46,6 +46,7 @@ JOB_PAYLOAD_OPAQUE_STRING_KEYS = frozenset({
 })
 
 CORE_WORKER_JOB_TYPES = {
+    'ssh_connection_diagnostic',
     'ping',
     'status',
     'diagnostic_basic',
