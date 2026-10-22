@@ -6,8 +6,10 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import struct
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -102,6 +104,33 @@ class KeyAndPolicyTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 ssh.verify_effective_ssh(row, runner=runner)
             effective[field] = old
+
+
+class NativeServerPolicyTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("sshd") and shutil.which("ssh-keygen"), "native OpenSSH server and keygen required")
+    def test_generated_match_policy_passes_native_sshd_syntax_and_effective_checks(self):
+        # Client ssh -G does not validate server Match directives. Exercise the
+        # real server parser and resulting restrictions without opening a socket
+        # or touching /etc/ssh, even when the dedicated account is not installed.
+        with tempfile.TemporaryDirectory(prefix="osaka-native-sshd-") as temporary:
+            root = Path(temporary)
+            host_key = root / "host_key"
+            generated = subprocess.run([shutil.which("ssh-keygen"), "-q", "-t", "ed25519", "-N", "", "-f", str(host_key)],
+                                       capture_output=True, text=True, timeout=10)
+            self.assertEqual(generated.returncode, 0, generated.stderr)
+            config = root / "sshd_config"
+            rows = registry(bundle())
+            config.write_text(f"HostKey {host_key}\nPidFile {root / 'pid'}\nUsePAM no\n" + ssh.ssh_config(rows).decode())
+            calls = []
+            def native(argv, **kwargs):
+                command = [shutil.which("sshd"), "-f", str(config), *argv[1:]]
+                result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls.append(argv)
+                return result
+            ssh.verify_effective_ssh(rows, runner=native)
+            self.assertTrue(any("-t" in command for command in calls))
+            self.assertTrue(any("-T" in command for command in calls))
 
 
 class EnvironmentTests(unittest.TestCase):

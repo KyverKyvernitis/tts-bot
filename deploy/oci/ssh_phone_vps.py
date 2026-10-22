@@ -213,7 +213,9 @@ def ssh_config(registry):
             "    PermitListen " + " ".join(listens) + "\n"
             "    PermitOpen " + " ".join(opens) + "\n"
             "    PermitTTY no\n    X11Forwarding no\n    AllowAgentForwarding no\n"
-            "    PermitTunnel no\n    PermitUserEnvironment no\n    PermitUserRC no\n"
+            # PermitUserEnvironment is global-only in OpenSSH. The dedicated
+            # root-owned home/authorized_keys and MaxSessions 0 remain in force.
+            "    PermitTunnel no\n    PermitUserRC no\n"
             "    MaxSessions 0\n    ForceCommand /usr/sbin/nologin\n"
             "    AuthorizedKeysFile " + str(HOME_PATH / ".ssh/authorized_keys") + "\nMatch all\n").encode()
 
