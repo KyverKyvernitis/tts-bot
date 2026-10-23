@@ -2282,6 +2282,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 resolved_timing = sanitize_start_timings(resolved_current.agent_timing_ms)
                 self._copy_play_trace(current_ref, resolved_current)
                 resolved_current.agent_timing_ms.update(resolved_timing)
+                resolved_current.start_context["source_mode"] = (
+                    "archive" if resolved_current.archive_ref or resolved_current.attachment_ref else "online"
+                )
                 if not resolved_current.archive_ref and not resolved_current.attachment_ref:
                     resolved_current.start_context["resolve_cache"] = "hit" if resolved_current.transport_hint == "direct-cache" else "miss"
                 resolved_current.agent_timing_ms["resolve_ms"] = round((time.monotonic() - started) * 1000, 1)

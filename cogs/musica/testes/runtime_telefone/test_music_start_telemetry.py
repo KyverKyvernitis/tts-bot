@@ -137,3 +137,35 @@ def test_failed_start_has_terminal_timeout_and_keeps_existing_failed_state(music
         assert outcomes[0]["phase"] == "resolve"
         assert not any(name == "music_first_packet_sent" for name, _data in events)
     asyncio.run(scenario())
+
+
+def test_archive_fallback_packet_reports_online_source_and_keeps_initial_helper_state(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        original = music.AgentTrack(query="song", trace_id="fallback", archive_ref={"guild_id": 1},
+                                    start_context={"queue_state": "immediate"})
+        state = music.GuildMusicState(guild_id=1, queue=[original])
+        agent.states[1] = state
+        events = []
+        agent.log = lambda name, **kwargs: events.append((name, kwargs))
+
+        async def resolve(*args, **kwargs):
+            agent._ytdlp_warm_client = SimpleNamespace(state="warm")
+            return music.AgentTrack(query="song", stream_url="https://media.invalid/song", transport_hint="direct")
+
+        async def play(guild_id, resolved, **kwargs):
+            trace = {"guild_id": guild_id, "track": resolved, "token": state.playback_token,
+                     "first_packet_monotonic": None}
+            agent._record_first_music_packet(SimpleNamespace(_music_packet_trace=trace), trace)
+
+        agent.resolve_track = resolve
+        agent._play_direct_voice = play
+        await agent._play_next(1)
+        attempt = next(data for name, data in events if name == "music_start_attempt")
+        packet = next(data for name, data in events if name == "music_first_packet_sent")
+        assert attempt["start_context"]["source_mode"] == "archive"
+        assert packet["start_context"]["source_mode"] == "online"
+        assert packet["start_context"]["resolve_cache"] == "miss"
+        assert attempt["start_context"]["helper_state"] == packet["start_context"]["helper_state"] == "cold"
+        assert state.current.trace_id == "fallback"
+    asyncio.run(scenario())

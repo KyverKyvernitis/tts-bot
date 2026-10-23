@@ -172,3 +172,23 @@ def test_include_queued_accepts_other_items_once_and_excludes_their_replays(tmp_
     assert result["samples"] == 2 and result["runtime_attempts"] == 2
     assert result["metrics"]["agent.agent_to_first_packet_ms"]["p95_ms"] == 495
     assert result["continuation_packets"] == 1
+
+
+def test_packet_source_replaces_requested_source_without_moving_initial_states(tmp_path):
+    for requested_source, played_source in (("archive", "online"), ("online", "archive")):
+        initial = {"source_mode": requested_source, "helper_state": "cold", "voice_state": "disconnected"}
+        current = {"source_mode": played_source, "helper_state": "warm", "voice_state": "connected"}
+        stale_controller = {"source_mode": requested_source, "helper_state": "warm", "voice_state": "connected"}
+        records = [
+            event("music_start_attempt", origin="controller", start_context=stale_controller),
+            event("music_start_attempt", attempt_id="first:1", start_context=initial),
+            event("music_start_outcome", origin="controller", attempt_id="controller:early", outcome="success", start_context=stale_controller),
+            event("music_first_packet_sent", attempt_id="first:1", start_context=current,
+                  agent_timing_ms={"agent_to_first_packet_ms": 500}),
+            event("music_start_outcome", origin="controller", attempt_id="controller:late", outcome="success", start_context=stale_controller),
+        ]
+        result = bench.summarize(log_records(tmp_path, records))
+        assert set(result["groups"]["source_mode"]) == {played_source}
+        assert result["groups"]["source_mode"][played_source]["samples"] == 1
+        assert set(result["groups"]["helper_state"]) == {"cold"}
+        assert set(result["groups"]["voice_state"]) == {"disconnected"}

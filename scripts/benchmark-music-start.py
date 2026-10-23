@@ -164,8 +164,11 @@ def summarize(path: Path, *, include_queued=False):
             for name, value in context.items():
                 # A tentativa inicial define frio/quente e voz inicial; um
                 # retry aquecido não pode mover uma intenção fria para outro
-                # grupo. Cache descreve o resultado observado da resolução.
-                replace = name == "resolve_cache" or name not in intent["context"] or (
+                # grupo. Cache descreve a resolução; a fonte do primeiro
+                # pacote descreve o caminho efetivamente reproduzido.
+                replace = name == "resolve_cache" or (
+                    name == "source_mode" and origin == "agent" and event == "music_first_packet_sent"
+                ) or name not in intent["context"] or (
                     origin == "agent" and intent["context_origin"].get(name) != "agent")
                 if value != "unknown" and replace:
                     intent["context"][name] = value

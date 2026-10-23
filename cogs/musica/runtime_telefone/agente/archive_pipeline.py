@@ -27,6 +27,26 @@ class _ArchiveThreadCancelled(RuntimeError):
     pass
 
 
+def _archive_attachment_matches(attachment: dict, *, filename: str, size_bytes: int) -> bool:
+    """Allow only Discord's observed ASCII-space replacement, plus exact size."""
+    if not isinstance(attachment, dict):
+        return False
+    try:
+        size = int(attachment.get("size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (size_bytes > 0 and size == size_bytes
+            and attachment.get("filename") in {filename, filename.replace(" ", "_")})
+
+
+def _archive_find_attachment(attachments, *, filename: str, size_bytes: int) -> dict | None:
+    matches = [attachment for attachment in attachments
+               if _archive_attachment_matches(attachment, filename=filename, size_bytes=size_bytes)]
+    if len(matches) > 1:
+        raise ValueError("mais de um anexo corresponde ao arquivo esperado")
+    return matches[0] if matches else None
+
+
 class _ArchiveUploadReader(io.BufferedReader):
     """Seekable upload body with bounded, off-loop backpressure.
 
@@ -386,8 +406,8 @@ class ArchivePipelineMixin:
             raw = await self.client.http.get_message(channel_id, message_id)
             if str((raw.get("author") or {}).get("id")) != str(bot_id):
                 raise ValueError("anexo publicado por outro autor")
-            attachment = next((entry for entry in raw.get("attachments") or []
-                               if entry.get("filename") == filename and int(entry.get("size") or 0) == size_bytes), None)
+            attachment = _archive_find_attachment(raw.get("attachments") or [],
+                                                  filename=filename, size_bytes=size_bytes)
             if attachment is not None:
                 valid_cdn_url(attachment.get("url"))
                 return attachment
@@ -486,7 +506,8 @@ class ArchivePipelineMixin:
                 if getattr(thread, "archived", False):
                     await thread.edit(archived=False)
                 root_raw = await self.client.http.get_message(thread.id, message.id)
-                current = next((a for a in root_raw.get("attachments") or [] if a.get("filename") == first["filename"] and int(a.get("size") or 0) == first["size_bytes"]), None)
+                current = _archive_find_attachment(root_raw.get("attachments") or [],
+                                                   filename=first["filename"], size_bytes=first["size_bytes"])
                 if current is None:
                     await self._archive_wait_stable_voice()
                     files = ([self._archive_upload_file(cover, filename=cover.name)] if cover else []) + [self._archive_upload_file(first["path"], filename=first["filename"])]
@@ -496,22 +517,27 @@ class ArchivePipelineMixin:
                         for file in files:
                             file.close()
             confirmed = await self._archive_confirm_attachment(thread.id, message.id, filename=first["filename"], size_bytes=first["size_bytes"], bot_id=self.client.user.id)
+            # Durable manifests describe the name Discord actually retained.
+            # A title containing spaces may have been stored with underscores.
+            first["filename"] = confirmed["filename"]
             root_ref = {**item["pending_ref"], "attachment_id": int(confirmed["id"])}
             item["pending_ref"] = root_ref
             staging.save_reference(root_ref)
             first["reference"] = dict(root_ref)
             # Child filenames incorporate content hashes. A lost upload ACK can
             # therefore be recovered without sending the same segment again.
-            reusable = {}
+            reusable = []
             if existing is not None:
                 async for candidate in thread.history(limit=None, oldest_first=True):
                     if candidate.id == message.id or candidate.author.id != self.client.user.id:
                         continue
                     for attachment in candidate.attachments:
-                        reusable[(attachment.filename, int(attachment.size or 0))] = candidate
+                        reusable.append({"filename": attachment.filename, "size": int(attachment.size or 0),
+                                         "message": candidate})
             for part in segments[1:]:
                 await self._archive_wait_stable_voice()
-                child = reusable.get((part["filename"], part["size_bytes"]))
+                reused = _archive_find_attachment(reusable, filename=part["filename"], size_bytes=part["size_bytes"])
+                child = reused["message"] if reused is not None else None
                 if child is None:
                     file = self._archive_upload_file(part["path"], filename=part["filename"])
                     try:
@@ -523,6 +549,7 @@ class ArchivePipelineMixin:
                     finally:
                         file.close()
                 attachment = await self._archive_confirm_attachment(thread.id, child.id, filename=part["filename"], size_bytes=part["size_bytes"], bot_id=self.client.user.id)
+                part["filename"] = attachment["filename"]
                 part["reference"] = {**root_ref, "message_id": child.id, "attachment_id": int(attachment["id"])}
             manifest = {"version": 1, "archive_key": item["key"], "duration": total,
                         "sha256": await self._archive_background_call(file_sha256, audio),
