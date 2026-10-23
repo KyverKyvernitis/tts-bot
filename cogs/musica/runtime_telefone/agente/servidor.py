@@ -60,7 +60,7 @@ from cogs.musica.runtime_telefone.agente.configuracao import (  # noqa: E402
     env_int,
     truthy,
 )
-from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState  # noqa: E402
+from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState, sanitize_start_context, sanitize_start_timings  # noqa: E402
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin  # noqa: E402
 from cogs.musica.runtime_telefone.agente.validade_stream import ArchiveMixin, DiscordAttachmentError  # noqa: E402
 from cogs.musica.runtime_telefone.agente.reproducao import ReproducaoMixin  # noqa: E402
@@ -94,7 +94,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.85"
+AGENT_VERSION = "0.3.86"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -251,6 +251,10 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._resolve_waiter_sequence = 0
         self._resolve_scheduler_lock = asyncio.Lock()
         self._resolve_thread_local = threading.local()
+        self._ytdlp_warm_client = None
+        self._ytdlp_warm_client_lock = threading.Lock()
+        self._ytdlp_prewarm_task: asyncio.Task | None = None
+        self._ytdlp_helper_stopping = False
         # Manutenção leve e limitada: limpa caches expirados e estados de guild
         # realmente ociosos para o agente poder ficar dias online sem crescer
         # indefinidamente em servidores que já não usam música.
@@ -321,13 +325,25 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
     def log(self, event: str, *, guild_id: int = 0, **fields: Any) -> None:
         stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
-        if event == "music_first_packet_sent":
+        if event in {"music_start_attempt", "music_start_outcome", "music_first_packet_sent"}:
             # Uma linha JSON completa para medir durações locais sem truncar
             # dicionários nem gravar conteúdo, tokens ou URLs da música.
             record = {"event": event, "guild_id": guild_id, "at": stamp,
+                      "origin": "agent",
                       "trace_id": str(fields.get("trace_id") or "")[:128],
-                      "controller_timing_ms": fields.get("controller_timing_ms") or {},
-                      "agent_timing_ms": fields.get("agent_timing_ms") or {}}
+                      "attempt_id": str(fields.get("attempt_id") or "")[:180],
+                      "start_context": sanitize_start_context(fields.get("start_context")),
+                      "controller_timing_ms": sanitize_start_timings(fields.get("controller_timing_ms")),
+                      "agent_timing_ms": sanitize_start_timings(fields.get("agent_timing_ms"))}
+            item_id = fields.get("item_id")
+            if isinstance(item_id, str) and len(item_id) == 24 and all(char in "0123456789abcdef" for char in item_id):
+                record["item_id"] = item_id
+            outcome = fields.get("outcome")
+            if isinstance(outcome, str) and outcome in {"success", "failed", "timeout", "cancelled", "queued", "unconfirmed"}:
+                record["outcome"] = outcome
+            phase = fields.get("phase")
+            if isinstance(phase, str) and phase in {"prepare", "resolve", "voice_preconnect", "playback_start"}:
+                record["phase"] = phase
             MusicAgent._emit_log_line("[music-start] " + json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             return
         details = " ".join(f"{key}={short_text(_audit_value(key, value), 220)!r}" for key, value in fields.items() if value is not None and value != "")
@@ -1224,11 +1240,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             for player in players:
                 await self._stop_player_instance(player, disconnect=True)
 
-            warm_client = getattr(self, "_ytdlp_warm_client", None)
-            if warm_client is not None:
-                with contextlib.suppress(Exception):
-                    warm_client.close()
-                self._ytdlp_warm_client = None
+            await self._shutdown_ytdlp_helper()
             close_archive_http = getattr(self, "_close_archive_manifest_http", None)
             if callable(close_archive_http):
                 with contextlib.suppress(Exception):
@@ -1257,6 +1269,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             self._archive_temp_cleanup_task = asyncio.create_task(
                 self._archive_temp_maintenance(), name="music-archive-temp-cleanup"
             )
+            self._start_ytdlp_prewarm()
             await self.client.start(self.discord_token)
         finally:
             if self._runner is runner:

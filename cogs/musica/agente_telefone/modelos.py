@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from cogs.musica import configuracao as config
@@ -38,6 +38,11 @@ class MusicWorkerSelection:
     name: str = ""
     reason: str = ""
     worker: Mapping[str, Any] | None = None
+    # Idade da validação original, também quando a seleção vem do cache.
+    # Estes campos são locais: não fazem parte do protocolo com o worker.
+    validated_at: float = field(default=0.0, repr=False, compare=False)
+    validated_until: float = field(default=0.0, repr=False, compare=False)
+    validation_key: tuple[Any, ...] = field(default=(), repr=False, compare=False)
 
     @property
     def message(self) -> str:

@@ -16,7 +16,7 @@ from .modelos import (
     MusicWorkerEngineUnavailable,
     MusicWorkerUnavailable,
 )
-from .selecao import require_music_worker_available_async
+from .selecao import ensure_music_worker_available, require_music_worker_available_async
 from .roteamento import (
     DestinoWorker,
     destino_vinculado,
@@ -25,6 +25,12 @@ from .roteamento import (
     desvincular_guild_worker,
     control_destination,
     post_json_destino,
+    MusicWorkerValidation,
+    validated_command_destination,
+    capture_music_worker_validation,
+    admitted_selection_destination,
+    destino_da_selecao,
+    _same_destination,
 )
 from .transporte_http import post_json_worker
 from .utilitarios import _phone_worker_base_url
@@ -169,13 +175,37 @@ def _cancelar_comando_diferido(guild_id: int, *, reason: str = "superseded") -> 
         state["status"] = "cancelled"
         state["reason"] = reason
         state["finished_at"] = time.monotonic()
+        _observe_deferred_outcome(state)
+
+
+def _observe_deferred_outcome(state: dict[str, Any]) -> None:
+    if state.get("_start_trace_observed"):
+        return
+    outcome = {"failed": "failed", "expired": "timeout", "cancelled": "cancelled"}.get(state.get("status"))
+    if state.get("status") == "delivered":
+        result = state.get("result") or {}
+        remote = result.get("state") if isinstance(result.get("state"), dict) else {}
+        outcome = ("cancelled" if result.get("cancelled") else "queued" if result.get("queued")
+                   else "success" if remote.get("confirmed_playing") else None)
+    if outcome is None:
+        return
+    state["_start_trace_observed"] = True
+    payload = state.get("_start_trace")
+    if not isinstance(payload, dict) or not payload.get("trace_id"):
+        return
+    try:
+        from ..reproducao.inicio import record_deferred_outcome
+        record_deferred_outcome(payload, outcome,
+            wait_ms=(time.monotonic() - float(state["started_at"])) * 1000)
+    except Exception:
+        logger.debug("[music/start] observação da entrega diferida indisponível", exc_info=True)
 
 
 async def cancelar_comandos_diferidos() -> None:
     tasks = [task for task in _DEFERRED_TASKS.values() if isinstance(task, asyncio.Task) and not task.done()]
+    for guild in list(_DEFERRED_TASKS):
+        _cancelar_comando_diferido(guild, reason="shutdown")
     _DEFERRED_TASKS.clear()
-    for task in tasks:
-        task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -198,12 +228,32 @@ async def _resolver_destino_retry(original: DestinoWorker, guild_id: int) -> Des
     return candidate
 
 
+def _admitted_operation_destination(selection, *, guild_id: int,
+                                    original: DestinoWorker) -> DestinoWorker | None:
+    """Renove a rota de um telefone validado sem trocar seu dono lógico."""
+    exact = admitted_selection_destination(selection, guild_id=guild_id)
+    if original.transport == "direct":
+        return exact if exact is not None and _same_destination(exact, original) else None
+    worker = selection.worker if isinstance(selection.worker, Mapping) else {}
+    if not selection.available or worker.get("transport") == "direct":
+        return None
+    candidate = destino_da_selecao(selection)
+    if (candidate is None or not original.worker_id or candidate.worker_id != original.worker_id
+            or candidate.transport != original.transport):
+        return None
+    owner = destino_vinculado(guild_id)
+    if owner is not None and not (_same_destination(owner, original) or _same_destination(owner, candidate)):
+        return None
+    return candidate
+
+
 def _agendar_comando_diferido(
     *,
     destino: DestinoWorker,
     payload: dict[str, Any],
     total_timeout: float,
     erro_inicial: BaseException,
+    require_admission: bool = False,
 ) -> dict[str, Any]:
     guild_id = int(payload.get("guild_id") or 0)
     fingerprint = _fingerprint_comando(payload)
@@ -222,6 +272,7 @@ def _agendar_comando_diferido(
             "queued": False,
             "deferred": True,
             "coalesced": True,
+            "related_trace_id": str((existing.get("_start_trace") or {}).get("trace_id") or "")[:128],
             "state": _estado_sintetico_diferido(
                 payload,
                 erro=str(existing.get("last_error") or erro_inicial),
@@ -246,6 +297,8 @@ def _agendar_comando_diferido(
         "last_error": f"{type(erro_inicial).__name__}: {erro_inicial}"[:260],
         "worker_id": destino.worker_id,
         "base": destino.base,
+        "_start_trace": {key: payload.get(key) for key in
+                         ("guild_id", "trace_id", "controller_timing_ms", "start_context")},
     }
     if guild_id > 0:
         _DEFERRED_STATE[guild_id] = state
@@ -262,7 +315,27 @@ def _agendar_comando_diferido(
                 await asyncio.sleep(delay)
                 attempt += 1
                 state["attempts"] = attempt
-                current_destino = await _resolver_destino_retry(current_destino, guild_id)
+                if require_admission:
+                    try:
+                        admitted = await ensure_music_worker_available()
+                        if not admitted.available:
+                            raise MusicWorkerUnavailable(admitted.message or MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+                        candidate = _admitted_operation_destination(admitted, guild_id=guild_id, original=destino)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        state["last_error"] = f"{type(exc).__name__}: {exc}"[:260]
+                        delay = min(retry_max, max(0.35, delay * 1.7))
+                        continue
+                    if (candidate is None or candidate.worker_id != destino.worker_id
+                            or candidate.transport != destino.transport):
+                        state["status"] = "failed"
+                        state["last_error"] = MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
+                        state["finished_at"] = time.monotonic()
+                        return
+                    current_destino = candidate
+                else:
+                    current_destino = await _resolver_destino_retry(current_destino, guild_id)
                 state["base"] = current_destino.base
                 state["worker_id"] = current_destino.worker_id
                 try:
@@ -336,6 +409,10 @@ def _agendar_comando_diferido(
                 state.get("last_error") or "-",
             )
         finally:
+            if state.get("status") == "pending":
+                state["status"] = "cancelled"
+                state["finished_at"] = time.monotonic()
+            _observe_deferred_outcome(state)
             current = asyncio.current_task()
             if _DEFERRED_TASKS.get(guild_id) is current:
                 _DEFERRED_TASKS.pop(guild_id, None)
@@ -371,6 +448,7 @@ async def music_agent_command(
     requester_id: int = 0,
     requester_name: str = "",
     timeout_seconds: float | None = None,
+    worker_validation: MusicWorkerValidation | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     """Send a command to the phone-worker Music Agent through /task.
@@ -403,6 +481,7 @@ async def music_agent_command(
             "queued": False,
             "deferred": True,
             "coalesced": True,
+            "related_trace_id": str((pending.get("_start_trace") or {}).get("trace_id") or "")[:128],
             "state": _estado_sintetico_diferido(
                 payload,
                 erro=str(pending.get("last_error") or "Phone Worker reconectando"),
@@ -418,7 +497,45 @@ async def music_agent_command(
         timeout_headroom = max(3.0, float(getattr(config, "MUSIC_AGENT_TTS_HTTP_HEADROOM_SECONDS", 12.0) or 12.0))
     total_timeout = max(2.0, float(payload["timeout_seconds"]) + timeout_headroom)
 
-    destino = destino_vinculado(guild_id) if not action_normalized.startswith("archive_") else None
+    destino = None
+    if worker_validation is not None and not action_normalized.startswith("archive_"):
+        destino = validated_command_destination(worker_validation, guild_id=guild_id)
+        if destino is None:
+            # Expiração, mudança de configuração ou de dono exige novamente a
+            # admissão completa, inclusive nos caminhos direto/vinculado.
+            try:
+                refreshed = await ensure_music_worker_available()
+                if not refreshed.available:
+                    raise MusicWorkerUnavailable(refreshed.message or MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                owner = destino_vinculado(guild_id)
+                if (action_normalized in _DEFERRED_PLAY_ACTIONS
+                        and isinstance(worker_validation, MusicWorkerValidation)
+                        and worker_validation.guild_id == int(guild_id or 0)
+                        and (owner is None or _same_destination(owner, worker_validation.destination))):
+                    # A autorização antiga não é usada para enviar. Cada retry
+                    # só entrega depois de obter novamente a admissão completa.
+                    return _agendar_comando_diferido(
+                        destino=worker_validation.destination, payload=payload,
+                        total_timeout=total_timeout, erro_inicial=exc, require_admission=True)
+                raise
+            refreshed_context = capture_music_worker_validation(refreshed, guild_id=guild_id)
+            if refreshed_context is not None:
+                destino = validated_command_destination(refreshed_context, guild_id=guild_id)
+            if destino is None:
+                # TTL=0 desliga reutilização, mas a admissão que acabamos de
+                # executar ainda vale para este envio. Nunca a use para outro
+                # endpoint que já tenha assumido a guild.
+                destino = (_admitted_operation_destination(refreshed, guild_id=guild_id,
+                    original=worker_validation.destination)
+                    if isinstance(worker_validation, MusicWorkerValidation) and worker_validation.guild_id == int(guild_id or 0)
+                    else admitted_selection_destination(refreshed, guild_id=guild_id))
+                if destino is None:
+                    raise MusicWorkerUnavailable(MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE)
+    if destino is None:
+        destino = destino_vinculado(guild_id) if not action_normalized.startswith("archive_") else None
     if destino is None:
         destino = control_destination(guild_id, action_normalized)
     selection = None

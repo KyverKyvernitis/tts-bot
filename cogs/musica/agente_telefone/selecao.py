@@ -104,16 +104,21 @@ def _selection_cache_seconds() -> float:
 
 
 def select_music_worker() -> MusicWorkerSelection:
+    from .roteamento import _validation_config_key, stamp_music_worker_selection
+
     ttl = _selection_cache_seconds()
     now = time.monotonic()
+    validation_key = _validation_config_key()
     cached = _SELECTION_CACHE.get("selection")
     if (
         ttl > 0
         and isinstance(cached, MusicWorkerSelection)
         and now - float(_SELECTION_CACHE.get("at") or 0.0) <= ttl
+        and cached.validation_key == validation_key
     ):
         return cached
     selection = _select_music_worker_uncached()
+    stamp_music_worker_selection(selection, started_at=now, ttl=ttl, config_key=validation_key)
     _SELECTION_CACHE["selection"] = selection
     _SELECTION_CACHE["at"] = now
     return selection

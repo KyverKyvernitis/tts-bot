@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import asyncio
 import ipaddress
 import json
@@ -26,6 +26,94 @@ class DestinoWorker:
 
 _DESTINOS_GUILD: dict[int, DestinoWorker] = {}
 _DIRECT_HEALTH_CACHE: tuple[tuple[str, str], float, MusicWorkerSelection] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MusicWorkerValidation:
+    """Admissão local reutilizável apenas dentro da operação e TTL originais."""
+
+    guild_id: int
+    valid_until: float
+    destination: DestinoWorker = field(repr=False)
+    config_key: tuple[Any, ...] = field(repr=False)
+
+
+def _validation_config_key() -> tuple[Any, ...]:
+    from .configuracao import carregar_configuracao_selecao
+
+    return (
+        carregar_configuracao_selecao(),
+        _phone_worker_base_url(),
+        str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip(),
+        str(getattr(config, "PHONE_WORKER_ID", "") or "").strip(),
+        # Snapshot, não validação de voz: seleção de metadata/arquivo também
+        # usa esta chave e não deve depender de um endpoint VPS opcional.
+        str(getattr(config, "MUSIC_AGENT_VOICE_EXECUTOR", "termux") or "termux").strip().lower(),
+        bool(getattr(config, "MUSIC_AGENT_DIRECT_API_ENABLED", False)),
+        str(getattr(config, "MUSIC_AGENT_DIRECT_API_BASE_URL", "") or "").strip(),
+        str(getattr(config, "MUSIC_AGENT_DIRECT_API_TOKEN", "") or "").strip(),
+    )
+
+
+def stamp_music_worker_selection(
+    selection: MusicWorkerSelection, *, started_at: float, ttl: float,
+    config_key: tuple[Any, ...],
+) -> None:
+    selection.validated_at = started_at
+    selection.validated_until = started_at + max(0.0, ttl)
+    selection.validation_key = config_key
+
+
+def capture_music_worker_validation(
+    selection: MusicWorkerSelection, *, guild_id: int,
+) -> MusicWorkerValidation | None:
+    """Não transforme uma seleção de cache antiga em validação recém-feita."""
+    try:
+        until = float(getattr(selection, "validated_until", 0.0) or 0.0)
+        key = tuple(getattr(selection, "validation_key", ()) or ())
+        if not selection.available or until <= time.monotonic() or key != _validation_config_key():
+            return None
+        destination = admitted_selection_destination(selection, guild_id=guild_id)
+        if destination is None:
+            return None
+        return MusicWorkerValidation(int(guild_id), until, destination, key)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def admitted_selection_destination(
+    selection: MusicWorkerSelection, *, guild_id: int,
+) -> DestinoWorker | None:
+    """Uma seleção de outro endpoint não autoriza o dono de uma sessão ativa."""
+    if not selection.available:
+        return None
+    worker = selection.worker if isinstance(selection.worker, Mapping) else {}
+    destination = configured_direct_destination() if worker.get("transport") == "direct" else destino_da_selecao(selection)
+    bound = destino_vinculado(guild_id)
+    if destination is None or (bound is not None and not _same_destination(bound, destination)):
+        return None
+    return destination
+
+
+def _same_destination(first: DestinoWorker, second: DestinoWorker) -> bool:
+    # O nome de exibição do registry não muda a identidade de transporte.
+    return (first.worker_id, first.base, first.token, first.transport) == (
+        second.worker_id, second.base, second.token, second.transport,
+    )
+
+
+def validated_command_destination(
+    validation: MusicWorkerValidation, *, guild_id: int,
+) -> DestinoWorker | None:
+    if (not isinstance(validation, MusicWorkerValidation)
+            or validation.guild_id != int(guild_id or 0)
+            or validation.valid_until <= time.monotonic()
+            or validation.config_key != _validation_config_key()):
+        return None
+    bound = destino_vinculado(guild_id)
+    if bound is not None and not _same_destination(bound, validation.destination):
+        return None
+    return validation.destination
 
 
 class _NoDirectRedirect(HTTPRedirectHandler):
@@ -99,7 +187,10 @@ def _direct_health_selection(destino: DestinoWorker) -> MusicWorkerSelection:
     global _DIRECT_HEALTH_CACHE
     now = time.monotonic()
     key = (destino.base, destino.token)
-    if _DIRECT_HEALTH_CACHE and _DIRECT_HEALTH_CACHE[0] == key and now - _DIRECT_HEALTH_CACHE[1] < 0.8:
+    validation_key = _validation_config_key()
+    if (_DIRECT_HEALTH_CACHE and _DIRECT_HEALTH_CACHE[0] == key
+            and now - _DIRECT_HEALTH_CACHE[1] < 0.8
+            and _DIRECT_HEALTH_CACHE[2].validation_key == validation_key):
         return _DIRECT_HEALTH_CACHE[2]
     available = False
     reason = "music_agent_direct_indisponivel"
@@ -122,6 +213,7 @@ def _direct_health_selection(destino: DestinoWorker) -> MusicWorkerSelection:
         pass
     selection = MusicWorkerSelection(available, worker_id=destino.worker_id, name=destino.name,
                                     reason=reason, worker={"endpoint": destino.base, "transport": "direct"})
+    stamp_music_worker_selection(selection, started_at=now, ttl=0.8, config_key=validation_key)
     _DIRECT_HEALTH_CACHE = (key, now, selection)
     return selection
 

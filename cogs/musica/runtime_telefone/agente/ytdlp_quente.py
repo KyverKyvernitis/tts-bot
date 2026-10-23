@@ -63,6 +63,7 @@ def _worker_options(yt_dlp: Any, request: dict[str, Any]) -> dict[str, Any]:
 
 def _worker_main() -> int:
     _enable_domain_path()
+    import_started = time.perf_counter()
     try:
         import yt_dlp  # type: ignore
         from cogs.musica.runtime_telefone.agente.utilitarios import select_stream_info, select_playback_stream
@@ -72,15 +73,20 @@ def _worker_main() -> int:
         sys.stdout.flush()
         return 2
 
+    unreported_import_ms = (time.perf_counter() - import_started) * 1000.0
     instance: Any = None
     signature = ""
     for raw in sys.stdin:
         try:
             request = json.loads(raw)
             request_id = int(request.get("id") or 0)
+            action = str(request.get("action") or "resolve")
             target = str(request.get("target") or "").strip()
-            if not target:
+            if action not in {"initialize", "resolve"}:
+                raise ValueError("ação inválida")
+            if action == "resolve" and not target:
                 raise ValueError("target vazio")
+            init_started = time.perf_counter()
             options = _worker_options(yt_dlp, request)
             next_signature = json.dumps(
                 {
@@ -102,6 +108,14 @@ def _worker_main() -> int:
                         pass
                 instance = yt_dlp.YoutubeDL(options)
                 signature = next_signature
+            init_ms = round(unreported_import_ms + (time.perf_counter() - init_started) * 1000.0, 1)
+            unreported_import_ms = 0.0
+            if action == "initialize":
+                # Somente importação/opções/instância. Nunca extraia uma URL
+                # fictícia para aquecer: isso faria rede e alteraria o cache.
+                sys.stdout.write(json.dumps({"ok": True, "id": request_id, "ready": True, "init_ms": init_ms}) + "\n")
+                sys.stdout.flush()
+                continue
             started = time.perf_counter()
             info = instance.extract_info(target, download=False)
             if isinstance(info, dict) and isinstance(info.get("entries"), list):
@@ -129,6 +143,7 @@ def _worker_main() -> int:
             payload = {
                 "ok": True,
                 "id": request_id,
+                "init_ms": init_ms,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
                 "title": info.get("title") or info.get("fulltitle") or target,
                 "uploader": info.get("uploader") or info.get("channel") or info.get("creator") or "",
@@ -163,9 +178,26 @@ class WarmYTDLPResolver:
         self._process: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
         self._sequence = 0
+        self._state_lock = threading.Lock()
+        self._prewarm_event: threading.Event | None = None
+        self._prewarming = False
+        self._prewarm_ok = False
+        self._initialized = False
+        self._closing = threading.Event()
+
+    @property
+    def state(self) -> str:
+        with self._state_lock:
+            if self._closing.is_set():
+                return "closed"
+            if self._prewarming:
+                return "warming"
+            proc = self._process
+            return "warm" if self._initialized and proc is not None and proc.poll() is None else "cold"
 
     def _stop_locked(self) -> None:
         proc, self._process = self._process, None
+        self._initialized = False
         if proc is None:
             return
         if proc.poll() is None:
@@ -183,13 +215,18 @@ class WarmYTDLPResolver:
                         proc.kill()
                 except Exception:
                     pass
-            finally:
-                if os.name == "posix":
-                    # O helper pode sair antes de seu runtime JavaScript.
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+            # SIGKILL precisa ser recolhido antes de outro helper ocupar a vaga.
+            try:
+                proc.wait(timeout=0.6)
+            except Exception:
+                pass
+        if os.name == "posix":
+            # O helper pode já ter saído e deixado um runtime JavaScript no
+            # seu grupo. Ele continua pertencendo a esta geração do helper.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
         for stream in (proc.stdin, proc.stdout):
             try:
                 if stream is not None:
@@ -198,6 +235,9 @@ class WarmYTDLPResolver:
                 pass
 
     def close(self) -> None:
+        # Interrompe também uma inicialização/leitura que atualmente possui o
+        # lock. O chamador async executa este cleanup fora do event loop.
+        self._closing.set()
         with self._lock:
             self._stop_locked()
 
@@ -220,6 +260,100 @@ class WarmYTDLPResolver:
         self._process = proc
         return proc
 
+    @staticmethod
+    def _options_request(*, format_selector: str, format_sort: str, cookiefile: str,
+                         js_runtimes: str, socket_timeout: int) -> dict[str, Any]:
+        return {"format": format_selector, "format_sort": format_sort, "cookiefile": cookiefile,
+                "js_runtimes": js_runtimes, "socket_timeout": socket_timeout}
+
+    def _exchange_locked(self, request: dict[str, Any], *, deadline: float,
+                         cancel_event: threading.Event | None = None) -> dict[str, Any] | None:
+        if self._closing.is_set() or time.monotonic() >= deadline:
+            return None
+        proc = self._ensure_locked()
+        assert proc.stdin is not None and proc.stdout is not None
+        self._sequence += 1
+        request_id = self._sequence
+        request = dict(request, id=request_id)
+        proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+        proc.stdin.flush()
+        selector = selectors.DefaultSelector()
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        pending = bytearray()
+        try:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    self._stop_locked()
+                    raise RuntimeError("resolução yt-dlp cancelada")
+                remaining = deadline - time.monotonic()
+                if self._closing.is_set() or remaining <= 0 or proc.poll() is not None:
+                    self._stop_locked()
+                    return None
+                if not selector.select(timeout=min(0.1, remaining)):
+                    continue
+                # readline() poderia esperar para sempre por '\n' após um
+                # helper travado escrever só metade da resposta.
+                chunk = os.read(proc.stdout.fileno(), 65536)
+                if not chunk:
+                    self._stop_locked()
+                    return None
+                pending.extend(chunk)
+                if len(pending) > 1024 * 1024:
+                    self._stop_locked()
+                    return None
+                if b"\n" not in pending:
+                    continue
+                line, extra = bytes(pending).split(b"\n", 1)
+                if extra.strip():
+                    self._stop_locked()
+                    return None
+                response = json.loads(line)
+                if int(response.get("id") or 0) != request_id:
+                    self._stop_locked()
+                    return None
+                if response.get("ok") is not True:
+                    return None
+                self._initialized = True
+                return dict(response)
+        finally:
+            selector.close()
+
+    def prewarm(self, *, format_selector: str, format_sort: str = "abr,acodec,asr",
+                cookiefile: str = "", js_runtimes: str = "", socket_timeout: int = 12,
+                timeout: float = 5.0) -> bool:
+        """Inicialização local compartilhada; não ocupa uma fila de resolução."""
+        deadline = time.monotonic() + max(0.05, min(5.0, float(timeout)))
+        with self._state_lock:
+            if self._closing.is_set() or self._prewarm_event is not None:
+                return False
+            # Se um play já possui o helper, ele está fazendo a inicialização
+            # necessária. Não o atrase nem inicie outro processo.
+            if not self._lock.acquire(blocking=False):
+                return False
+            event = self._prewarm_event = threading.Event()
+            self._prewarming = True
+        ok = False
+        try:
+            response = self._exchange_locked(
+                dict(self._options_request(format_selector=format_selector, format_sort=format_sort,
+                                           cookiefile=cookiefile, js_runtimes=js_runtimes,
+                                           socket_timeout=socket_timeout), action="initialize"),
+                deadline=deadline,
+            )
+            ok = bool(response and response.get("ready") is True)
+            return ok
+        except Exception:
+            return False
+        finally:
+            if not ok:
+                self._stop_locked()
+            # Publique prontidão somente após terminar toda a leitura/limpeza.
+            self._lock.release()
+            with self._state_lock:
+                self._prewarm_ok = ok
+                self._prewarming = False
+                event.set()
+
     def resolve(
         self,
         target: str,
@@ -233,58 +367,33 @@ class WarmYTDLPResolver:
         cancel_event: threading.Event | None = None,
         expected_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        # Nunca crie uma segunda fila escondida: se o helper já estiver ocupado,
-        # o chamador usa imediatamente o subprocesso yt-dlp tradicional.
+        deadline = time.monotonic() + max(0.5, float(timeout))
+        with self._state_lock:
+            prewarm = self._prewarm_event if self._prewarming else None
+        if prewarm is not None:
+            # Inicialização compartilhada não é outra resolução. Uma chamada
+            # cancelada não encerra o aquecimento que pode servir outra call.
+            while not prewarm.is_set():
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("resolução yt-dlp cancelada")
+                remaining = deadline - time.monotonic()
+                if self._closing.is_set() or remaining <= 0:
+                    return None
+                prewarm.wait(min(0.05, remaining))
+            if not self._prewarm_ok:
+                return None
+        # Outra resolução ocupada mantém o fallback imediato existente.
+        if self._closing.is_set():
+            return None
         if not self._lock.acquire(blocking=False):
             return None
         try:
-            proc = self._ensure_locked()
-            assert proc.stdin is not None and proc.stdout is not None
-            self._sequence += 1
-            request_id = self._sequence
-            request = {
-                "id": request_id,
-                "target": target,
-                "format": format_selector,
-                "format_sort": format_sort,
-                "cookiefile": cookiefile,
-                "js_runtimes": js_runtimes,
-                "socket_timeout": socket_timeout,
-            }
+            request = dict(self._options_request(format_selector=format_selector, format_sort=format_sort,
+                                                 cookiefile=cookiefile, js_runtimes=js_runtimes,
+                                                 socket_timeout=socket_timeout), target=target)
             if expected_metadata is not None:
                 request["expected_metadata"] = dict(expected_metadata)
-            proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
-            proc.stdin.flush()
-            selector = selectors.DefaultSelector()
-            selector.register(proc.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + max(0.5, float(timeout))
-            try:
-                while True:
-                    if cancel_event is not None and cancel_event.is_set():
-                        self._stop_locked()
-                        raise RuntimeError("resolução yt-dlp cancelada")
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        self._stop_locked()
-                        return None
-                    if proc.poll() is not None:
-                        self._stop_locked()
-                        return None
-                    if not selector.select(timeout=min(0.1, remaining)):
-                        continue
-                    line = proc.stdout.readline()
-                    if not line:
-                        self._stop_locked()
-                        return None
-                    response = json.loads(line)
-                    if int(response.get("id") or 0) != request_id:
-                        self._stop_locked()
-                        return None
-                    if response.get("ok") is not True:
-                        return None
-                    return dict(response)
-            finally:
-                selector.close()
+            return self._exchange_locked(request, deadline=deadline, cancel_event=cancel_event)
         except RuntimeError:
             raise
         except Exception:

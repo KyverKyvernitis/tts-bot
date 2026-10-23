@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import math
 import time
 import threading
+import uuid
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -14,7 +16,7 @@ import discord
 from .ciclo_vida import remove_owned_task, stop_player_instance
 from .validade_stream import discord_voice_audio_hint, fetch_discord_attachment, initial_discord_cdn_url, normalize_reference, probe_discord_audio, prazo_stream, DiscordAttachmentError
 from .configuracao import env_float, env_int
-from .estado import AgentTrack, GuildMusicState
+from .estado import AgentTrack, GuildMusicState, sanitize_start_context, sanitize_start_timings
 from .efeitos import filtros
 from .mixer_pcm import AgentMixedAudioSource, AgentTelemetryAudioSource, PCM_FRAME_BYTES
 from .buffer_pcm import BufferedPCMSource
@@ -39,17 +41,16 @@ class VoicePreparationLease:
     voice_client: Any = None
     created: bool = False
     adopted: bool = False
+    started_monotonic: float = 0.0
+    completed_monotonic: float = 0.0
 
 
 class ReproducaoMixin(PreparacaoAudioMixin):
     @staticmethod
     def _attach_play_trace(track: AgentTrack, body: dict[str, Any], received: float) -> None:
-        track.trace_id = str(body.get("trace_id") or "")[:128]
-        timings = body.get("controller_timing_ms")
-        track.controller_timing_ms = {
-            str(key)[:64]: float(value) for key, value in (list(timings.items())[:20] if isinstance(timings, dict) else [])
-            if isinstance(value, (int, float)) and math.isfinite(float(value)) and 0 <= value <= 86400000
-        }
+        track.trace_id = str(body.get("trace_id") or track.trace_id or uuid.uuid4().hex)[:128]
+        track.controller_timing_ms = sanitize_start_timings(body.get("controller_timing_ms") or track.controller_timing_ms)
+        track.start_context = sanitize_start_context(body.get("start_context") or track.start_context)
         track.agent_received_monotonic = received
 
     @staticmethod
@@ -58,6 +59,51 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         following.controller_timing_ms = dict(previous.controller_timing_ms)
         following.agent_timing_ms = dict(previous.agent_timing_ms)
         following.agent_received_monotonic = previous.agent_received_monotonic
+        following.start_context = dict(previous.start_context)
+        following.start_attempt = previous.start_attempt
+        following.voice_preparation = previous.voice_preparation
+
+    def _log_start_trace(self, event: str, guild_id: int, track: AgentTrack, **fields: Any) -> None:
+        try:
+            self.log(event, guild_id=guild_id, origin="agent", trace_id=track.trace_id,
+                     attempt_id=track.start_attempt.get("id", ""), start_context=track.start_context,
+                     item_id=hashlib.sha256(str(track.queue_item_id).encode()).hexdigest()[:24],
+                     controller_timing_ms=track.controller_timing_ms,
+                     agent_timing_ms=track.agent_timing_ms, **fields)
+        except Exception:
+            # Auditoria é best-effort, inclusive na thread que envia o UDP.
+            pass
+
+    def _finish_start_attempt(self, guild_id: int, track: AgentTrack, outcome: str, *, phase: str = "") -> None:
+        attempt = track.start_attempt
+        if not attempt:
+            return
+        with attempt.setdefault("lock", threading.Lock()):
+            if attempt.get("outcome"):
+                return
+            track.agent_timing_ms.update(attempt.get("voice_timings", {}))
+            attempt["outcome"] = outcome
+        track.voice_preparation = None
+        self._log_start_trace("music_start_outcome", guild_id, track, outcome=outcome, phase=phase)
+
+    async def _timed_voice_preconnect(self, guild_id: int, track: AgentTrack) -> tuple[Any, bool]:
+        started = time.monotonic()
+        try:
+            return await self._ensure_direct_voice_client(guild_id)
+        finally:
+            ended = time.monotonic()
+            lease = track.voice_preparation
+            # A lease pode iniciar antes de cmd_play. O tempo real do handshake
+            # e a espera residual são spans distintos, nunca somados.
+            track.agent_timing_ms["voice_preconnect_wait_ms"] = round((ended - started) * 1000, 1)
+            if lease is not None and lease.started_monotonic:
+                track.agent_timing_ms["voice_preconnect_ms"] = round(
+                    ((lease.completed_monotonic or ended) - lease.started_monotonic) * 1000, 1)
+            else:
+                track.agent_timing_ms["voice_preconnect_ms"] = round((ended - started) * 1000, 1)
+            track.start_attempt.setdefault("voice_timings", {}).update({
+                key: value for key, value in track.agent_timing_ms.items() if key.startswith("voice_preconnect")})
+            track.voice_preparation = None
 
     def _voice_prepare_allowed(self, guild_id: int, lease: VoicePreparationLease) -> bool:
         st = self.states.get(guild_id)
@@ -120,6 +166,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         self._archive_foreground_until[guild_id] = time.monotonic() + min(duration, 10.0)
 
         async def prepare() -> None:
+            lease.started_monotonic = time.monotonic()
             try:
                 voice, created = await self._ensure_direct_voice_client(guild_id, speculative_lease=lease)
                 lease.voice_client, lease.created = voice, created
@@ -134,6 +181,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 raise
             except Exception as exc:
                 self.log("prepare_voice_failed", guild_id=guild_id, prepare_id=prepare_id, error=type(exc).__name__)
+            finally:
+                lease.completed_monotonic = time.monotonic()
 
         async def expire() -> None:
             try:
@@ -184,7 +233,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         cancelled = await self._cancel_voice_preparation(guild_id, prepare_id=prepare_id)
         return {"ok": True, "cancelled": cancelled, "prepare_id": prepare_id}
 
-    async def _adopt_voice_preparation(self, guild_id: int, body: dict[str, Any]) -> None:
+    async def _adopt_voice_preparation(self, guild_id: int, body: dict[str, Any]) -> VoicePreparationLease | None:
         lease = getattr(self, "_voice_prepare_leases", {}).get(guild_id)
         if lease is None:
             return
@@ -197,6 +246,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         if lease.expiry_task is not None:
             lease.expiry_task.cancel()
         # O handshake pendente mantém o lock normal; play o reutiliza ao terminar.
+        return lease
 
     def _voice_operation_timeout_seconds(self) -> float:
         default = min(8.0, max(3.0, float(getattr(self, "prepare_timeout", 8.0) or 8.0)))
@@ -879,7 +929,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             raise ValueError("query/url vazia")
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         self._update_auto_leave_from_body(st, body)
-        await self._adopt_voice_preparation(guild_id, body)
+        voice_preparation = await self._adopt_voice_preparation(guild_id, body)
         st.voice_channel_id = voice_channel_id
         st.text_channel_id = text_channel_id
         if not st.normal_volume_percent:
@@ -906,6 +956,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 raise ValueError("playlist/fila sem faixas válidas")
             playable_added = sum(1 for item in tracks if not item.is_virtual_playlist_marker)
             active = bool(st.current and st.status in {"playing", "starting", "preparing", "paused"})
+            for index, item in enumerate(tracks):
+                item.start_context["queue_state"] = "queued" if active or index else "immediate"
+                item.voice_preparation = voice_preparation if not active and index == 0 else None
             if not active:
                 # Start-first: uma playlist iniciada com o player ocioso é uma
                 # interação ativa. Cancele yt-dlp especulativo antigo desta guild
@@ -947,12 +1000,14 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         # que a primeira resolução seja sobreposta à conexão de voz.
         track = self._agent_track_from_metadata(track_meta, body=body, fallback_query=query)
         self._attach_play_trace(track, body, received_monotonic)
+        track.voice_preparation = voice_preparation
         if not (track.query or track.stream_url or track.webpage_url):
             raise ValueError("faixa sem query/url reproduzível")
         if int(getattr(st, "playback_token", 0) or 0) != command_generation or str(getattr(st, "last_action", "") or "").lower() == "stop":
             self.log("play_enqueue_ignored", guild_id=guild_id, reason="stale_or_stopped", generation=command_generation, current_generation=getattr(st, "playback_token", 0), title=getattr(track, "title", ""))
             return {"ok": False, "cancelled": True, "queued": False, "error": "operação cancelada", "state": st.public()}
         if st.current and st.status in {"playing", "starting", "preparing", "paused"}:
+            track.start_context["queue_state"] = "queued"
             st.queue.append(track)
             st.updated_at = time.time()
             self._schedule_youtube_queue_metadata(guild_id, track)
@@ -960,6 +1015,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             self.log("queued_lazy", guild_id=guild_id, title=track.title, queue_size=len(st.queue))
             return {"ok": True, "queued": True, "track": track.public(), "state": st.public()}
         st.queue.append(track)
+        track.start_context["queue_state"] = "immediate"
         self._schedule_youtube_queue_metadata(guild_id, track)
         await self._play_next(guild_id)
         if st.status in {"failed", "error"}:
@@ -2134,6 +2190,19 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         st.volume_percent = st.normal_volume_percent
         st.play_attempt_sequence += 1
         play_attempt = int(st.play_attempt_sequence)
+        next_track.trace_id = next_track.trace_id or uuid.uuid4().hex
+        next_track.start_context = sanitize_start_context(next_track.start_context)
+        next_track.start_context.setdefault("queue_state", "unknown")
+        next_track.start_context["source_mode"] = "archive" if next_track.archive_ref or next_track.attachment_ref else "online"
+        if next_track.voice_preparation is not None:
+            next_track.start_context["voice_state"] = "disconnected"
+        else:
+            next_track.start_context["voice_state"] = "connected" if self._voice_client_is_connected(st.player) else "disconnected"
+        next_track.start_context["helper_state"] = getattr(getattr(self, "_ytdlp_warm_client", None), "state", "cold")
+        next_track.start_context["resolve_cache"] = "hit" if next_track.stream_url and not self._track_stream_needs_refresh(next_track) else "unknown"
+        next_track.start_attempt = {"id": f"{uuid.uuid4().hex}:{play_attempt}", "outcome": "", "lock": threading.Lock()}
+        attempt = next_track.start_attempt
+        self._log_start_trace("music_start_attempt", guild_id, next_track)
         self._set_status(st, "preparing", event="play_preparing")
         self.log(
             "track_loading",
@@ -2165,7 +2234,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 failure_phase = "voice_preconnect"
                 voice_prepare_task = asyncio.create_task(
                     asyncio.wait_for(
-                        self._ensure_direct_voice_client(guild_id),
+                        self._timed_voice_preconnect(guild_id, current_ref),
                         timeout=max(5.0, self.prepare_timeout),
                     )
                 )
@@ -2198,24 +2267,28 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                     )
                     await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                     if stale:
+                        self._finish_start_attempt(guild_id, current_ref, "cancelled", phase="resolve")
                         self.log("lazy_resolve_cancelled", guild_id=guild_id, title=getattr(current_ref, "title", ""), reason="playback_changed")
                         return
                     raise
                 finally:
                     remove_owned_task(self._active_resolve_tasks, guild_id, resolve_task)
                 if int(getattr(st, "playback_token", 0) or 0) != request_token or st.current is not current_ref:
+                    self._finish_start_attempt(guild_id, current_ref, "cancelled", phase="resolve")
                     self.log("lazy_resolve_ignored", guild_id=guild_id, title=getattr(resolved_current, "title", ""), reason="stale_generation")
                     await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                     return
                 st.current = resolved_current
-                resolved_current.trace_id = current_ref.trace_id
-                resolved_current.controller_timing_ms = dict(current_ref.controller_timing_ms)
-                resolved_current.agent_timing_ms = dict(current_ref.agent_timing_ms)
-                resolved_current.agent_received_monotonic = current_ref.agent_received_monotonic
+                resolved_timing = sanitize_start_timings(resolved_current.agent_timing_ms)
+                self._copy_play_trace(current_ref, resolved_current)
+                resolved_current.agent_timing_ms.update(resolved_timing)
+                if not resolved_current.archive_ref and not resolved_current.attachment_ref:
+                    resolved_current.start_context["resolve_cache"] = "hit" if resolved_current.transport_hint == "direct-cache" else "miss"
                 resolved_current.agent_timing_ms["resolve_ms"] = round((time.monotonic() - started) * 1000, 1)
                 current_ref = st.current
                 self.log("lazy_resolve_done", guild_id=guild_id, elapsed_ms=round((time.monotonic() - started) * 1000.0, 1), title=getattr(st.current, "title", ""))
             if int(getattr(st, "playback_token", 0) or 0) != request_token or st.current is not current_ref:
+                self._finish_start_attempt(guild_id, current_ref, "cancelled", phase="prepare")
                 self.log("play_start_ignored", guild_id=guild_id, reason="stale_generation")
                 await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                 return
@@ -2226,7 +2299,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             if voice_prepare_task is not None:
                 failure_phase = "voice_preconnect"
                 prepared_voice = await voice_prepare_task
+                current_ref.agent_timing_ms.update(attempt.get("voice_timings", {}))
+                current_ref.voice_preparation = None
                 if st.playback_token != request_token or st.current is not current_ref:
+                    self._finish_start_attempt(guild_id, current_ref, "cancelled", phase="voice_preconnect")
                     await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
                     return
                 voice_prepare_task = None
@@ -2238,10 +2314,13 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             )
             await asyncio.wait_for(play_coro, timeout=max(5.0, self.prepare_timeout))
         except asyncio.CancelledError:
+            self._finish_start_attempt(guild_id, current_ref, "cancelled", phase=failure_phase)
             await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
             self._cancel_initial_audio(guild_id, item_id=current_ref.queue_item_id)
             raise
         except Exception as exc:
+            self._finish_start_attempt(guild_id, current_ref,
+                                       "timeout" if isinstance(exc, TimeoutError) else "failed", phase=failure_phase)
             await self._discard_prepared_voice_task(guild_id, voice_prepare_task)
             self._cancel_initial_audio(guild_id, item_id=current_ref.queue_item_id)
             self._archive_foreground_until[guild_id] = time.monotonic()
@@ -2346,6 +2425,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             else:
                 self._finish_mixer_when_idle(st)
         finally:
+            if current_ref.start_attempt is attempt and not attempt.get("outcome"):
+                self._finish_start_attempt(guild_id, current_ref,
+                    "cancelled" if st.playback_token != request_token or st.current is not current_ref else "unconfirmed",
+                    phase=failure_phase)
             self._cancel_initial_audio(guild_id, item_id=next_track.queue_item_id)
 
     @staticmethod
@@ -2759,9 +2842,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         self._archive_foreground_until[st.guild_id] = now + 1.0
         if track.agent_received_monotonic:
             track.agent_timing_ms["agent_to_first_packet_ms"] = round((now - track.agent_received_monotonic) * 1000, 1)
-        self.log("music_first_packet_sent", guild_id=st.guild_id, trace_id=track.trace_id,
-                 controller_timing_ms=track.controller_timing_ms, agent_timing_ms=track.agent_timing_ms,
-                 playback_token=trace["token"])
+        self._log_start_trace("music_first_packet_sent", st.guild_id, track)
+        self._finish_start_attempt(st.guild_id, track, "success")
 
     async def _play_direct_voice(self, guild_id: int, track: AgentTrack, *, prepared_voice: tuple[Any, bool] | None = None) -> None:
         direct_start_monotonic = time.monotonic()

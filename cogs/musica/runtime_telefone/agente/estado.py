@@ -3,12 +3,42 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from .efeitos import velocidade
+
+
+START_CONTEXT_VALUES = {
+    "entrypoint": {"command", "selection", "modal", "attachment", "unknown"},
+    "input_kind": {"url", "search", "playlist", "album", "attachment", "unknown"},
+    "source_mode": {"archive", "online", "unknown"},
+    "voice_state": {"disconnected", "connected", "unknown"},
+    "resolve_cache": {"hit", "miss", "unknown"},
+    "helper_state": {"cold", "warming", "warm", "closed", "unknown"},
+    "queue_state": {"immediate", "queued", "unknown"},
+}
+
+
+def sanitize_start_context(value: Any) -> dict[str, str]:
+    """Contexto categórico somente: nunca copie URLs ou metadados para o trace."""
+    if not isinstance(value, dict):
+        return {}
+    return {key: item for key, allowed in START_CONTEXT_VALUES.items()
+            if isinstance((item := value.get(key)), str) and item in allowed}
+
+
+def sanitize_start_timings(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    return {key: float(item) for key, item in list(value.items())[:32]
+            if isinstance(key, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key)
+            and isinstance(item, (int, float)) and not isinstance(item, bool)
+            and 0 <= item <= 86400000 and math.isfinite(float(item))}
 
 
 @dataclass
@@ -51,6 +81,11 @@ class AgentTrack:
     controller_timing_ms: dict[str, float] = field(default_factory=dict)
     agent_timing_ms: dict[str, float] = field(default_factory=dict)
     agent_received_monotonic: float = field(default=0.0, repr=False)
+    start_context: dict[str, str] = field(default_factory=dict)
+    # Compartilhado com substituições da mesma faixa; o callback UDP roda em
+    # outra thread e precisa encerrar exatamente a tentativa que ele observou.
+    start_attempt: dict[str, Any] = field(default_factory=dict, repr=False)
+    voice_preparation: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not str(self.queue_item_id or "").strip():
@@ -66,6 +101,7 @@ class AgentTrack:
             "trace_id": self.trace_id,
             "controller_timing_ms": dict(self.controller_timing_ms),
             "agent_timing_ms": dict(self.agent_timing_ms),
+            "start_context": sanitize_start_context(self.start_context),
             "requester_id": self.requester_id,
             "requester_name": self.requester_name,
             "query": self.query,

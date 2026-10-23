@@ -24,7 +24,7 @@ from .validade_stream import (
     initial_discord_cdn_url, normalize_reference, valid_cdn_url,
 )
 from .correspondencia import CatalogNoMatchError, avaliar_correspondencia, busca_alternativa
-from .estado import AgentTrack
+from .estado import AgentTrack, sanitize_start_context, sanitize_start_timings
 from .ytdlp_quente import WarmYTDLPResolver
 from .validade_stream import prazo_stream
 from .utilitarios import (
@@ -42,6 +42,90 @@ _LOCAL_SEARCH_PREFIXES = ("ytsearch", "ytmsearch")
 
 
 class ResolucaoMixin:
+    def _get_ytdlp_warm_client(self) -> WarmYTDLPResolver:
+        lock = self.__dict__.setdefault("_ytdlp_warm_client_lock", threading.Lock())
+        with lock:
+            if getattr(self, "_ytdlp_helper_stopping", False):
+                raise RuntimeError("resolução yt-dlp cancelada: agente encerrando")
+            client = getattr(self, "_ytdlp_warm_client", None)
+            if client is None:
+                client = WarmYTDLPResolver()
+                self._ytdlp_warm_client = client
+            return client
+
+    def _ytdlp_helper_options(self) -> dict[str, Any]:
+        cookies = Path(self.cookies_file).expanduser()
+        return {"format_selector": self.ytdlp_format, "format_sort": self.ytdlp_sort,
+                "cookiefile": str(cookies) if cookies.exists() and cookies.stat().st_size > 0 else "",
+                "js_runtimes": self.js_runtimes, "socket_timeout": 12}
+
+    def _start_ytdlp_prewarm(self) -> None:
+        enabled = lambda key, default: str(os.getenv(key, default) or default).strip().lower() in {"1", "true", "yes", "on", "sim"}
+        if (not enabled("MUSIC_AGENT_YTDLP_PREWARM_ENABLED", "false")
+                or not enabled("MUSIC_AGENT_YTDLP_WARM_HELPER_ENABLED", "true")
+                or getattr(self, "executor_mode", "full") == "archive"
+                or getattr(self, "_ytdlp_helper_stopping", False)
+                or getattr(self, "_ytdlp_prewarm_task", None) is not None):
+            return
+        client = self._get_ytdlp_warm_client()
+
+        async def run() -> None:
+            started = time.monotonic()
+
+            def initialize() -> bool:
+                # Leitura da configuração local também fica fora do loop e
+                # consome o mesmo orçamento da inicialização opcional.
+                options = self._ytdlp_helper_options()
+                remaining = 5.0 - (time.monotonic() - started)
+                return remaining > 0 and client.prewarm(**options, timeout=remaining)
+
+            work = asyncio.create_task(asyncio.to_thread(initialize))
+            try:
+                ready = await asyncio.shield(work)
+                self.log("ytdlp_prewarm_finished", ready=ready,
+                         elapsed_ms=round((time.monotonic() - started) * 1000, 1))
+            except asyncio.CancelledError:
+                # Cancelar a Future do executor não interromperia sua thread.
+                # Feche o cliente e recolha o trabalho antes de liberar o dono.
+                close = asyncio.create_task(asyncio.to_thread(client.close))
+                await self._finish_ytdlp_cleanup(close, work)
+                raise
+            except Exception as exc:
+                self.log("ytdlp_prewarm_failed", error=type(exc).__name__)
+
+        self._ytdlp_prewarm_task = asyncio.create_task(run(), name="music-ytdlp-prewarm")
+        self._ytdlp_prewarm_task.add_done_callback(consume_task_result)
+
+    @staticmethod
+    async def _finish_ytdlp_cleanup(*tasks: asyncio.Future) -> bool:
+        cleanup = asyncio.gather(*tasks, return_exceptions=True)
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # Cancelamentos repetidos também aguardam a thread real.
+                cancelled = True
+        cleanup.result()
+        return cancelled
+
+    async def _shutdown_ytdlp_helper(self) -> None:
+        lock = self.__dict__.setdefault("_ytdlp_warm_client_lock", threading.Lock())
+        with lock:
+            self._ytdlp_helper_stopping = True
+            client = getattr(self, "_ytdlp_warm_client", None)
+        cleanup = []
+        if client is not None:
+            cleanup.append(asyncio.create_task(asyncio.to_thread(client.close)))
+        task = getattr(self, "_ytdlp_prewarm_task", None)
+        if task is not None:
+            cleanup.append(task)
+        cancelled = await self._finish_ytdlp_cleanup(*cleanup)
+        self._ytdlp_prewarm_task = None
+        self._ytdlp_warm_client = None
+        if cancelled:
+            raise asyncio.CancelledError
+
     def _archive_cache_key(self, ref: dict, key: str) -> tuple:
         try:
             bot_id = int(getattr(getattr(getattr(self, "client", None), "user", None), "id", 0) or 0)
@@ -150,6 +234,8 @@ class ResolucaoMixin:
 
     def _run_ytdlp_command(self, cmd: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
         cancel_event = getattr(self._resolve_thread_local, "cancel_event", None)
+        if getattr(self, "_ytdlp_helper_stopping", False) or (cancel_event is not None and cancel_event.is_set()):
+            raise RuntimeError("resolução yt-dlp cancelada")
         proc = subprocess.Popen(
             cmd,
             cwd=str(Path.home() / "phone-worker"),
@@ -429,6 +515,7 @@ class ResolucaoMixin:
     @staticmethod
     def _play_trace_from_metadata(track_meta: dict[str, Any], body: dict[str, Any]) -> dict:
         result = {"trace_id": short_text(track_meta.get("trace_id") or body.get("trace_id"), 80)}
+        result["start_context"] = sanitize_start_context(body.get("start_context") or track_meta.get("start_context"))
         for field in ("controller_timing_ms", "agent_timing_ms"):
             raw = track_meta.get(field) or body.get(field) or {}
             timing = {}
@@ -961,12 +1048,16 @@ class ResolucaoMixin:
                 direct_refresh=bool(stable_target),
             )
         await self._promote_resolution(logical_key, priority)
+        key_wait_started = time.monotonic()
         async with self._registry_lock(self._resolve_locks, self._resolve_lock_users, logical_key):
+            key_wait_ms = round((time.monotonic() - key_wait_started) * 1000, 1)
             self._resolve_priorities[logical_key] = min(priority, self._resolve_priorities.get(logical_key, priority))
             cached = self._cached_resolved_get(logical_key)
             if cached:
                 self.log("resolve_stream_cache_hit_after_wait", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
-                return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
+                track = self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
+                track.agent_timing_ms["resolve_key_wait_ms"] = key_wait_ms
+                return track
             # Another waiter may have populated metadata while we waited.
             latest_meta = self._metadata_cache_get(logical_key)
             if latest_meta:
@@ -974,7 +1065,9 @@ class ResolucaoMixin:
                 if latest_target:
                     resolve_target = latest_target
             started = time.time()
+            slot_wait_started = time.monotonic()
             async with self._resolve_slot(priority, key=logical_key):
+                slot_wait_ms = round((time.monotonic() - slot_wait_started) * 1000, 1)
                 # The blocking resolver runs in a worker thread, but cancellation
                 # propagates through this Event so an active yt-dlp process (and
                 # its JS-runtime children) is terminated instead of leaking.
@@ -1054,6 +1147,7 @@ class ResolucaoMixin:
                         # operação externa continua sendo um cancelamento.
                         pass
                     raise
+            helper_timing = sanitize_start_timings(resolved.pop("_music_start_timing_ms", {}))
             self._metadata_cache_put(logical_key, resolved)
             media_key = self._media_cache_key(resolved)
             if media_key:
@@ -1066,7 +1160,10 @@ class ResolucaoMixin:
                 cache_media=bool(media_key),
                 reused_resolution=bool(resolve_target != query),
             )
-            return self._agent_track_from_resolved(resolved, query=query, track_meta=track_meta, body=body, cached=False)
+            track = self._agent_track_from_resolved(resolved, query=query, track_meta=track_meta, body=body, cached=False)
+            track.agent_timing_ms.update(helper_timing)
+            track.agent_timing_ms.update(resolve_key_wait_ms=key_wait_ms, resolve_slot_wait_ms=slot_wait_ms)
+            return track
 
     def _resolve_with_ytdlp(self, query: str, *, expected_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         # Helper aquecido, -g e JSON dividem o mesmo limite de tempo. Falhas
@@ -1076,6 +1173,9 @@ class ResolucaoMixin:
             deadline = time.monotonic() + max(1.0, float(getattr(self, "ytdlp_timeout", 20.0) or 20.0))
 
         def remaining() -> float:
+            cancel_event = getattr(self._resolve_thread_local, "cancel_event", None)
+            if getattr(self, "_ytdlp_helper_stopping", False) or (cancel_event is not None and cancel_event.is_set()):
+                raise RuntimeError("resolução yt-dlp cancelada")
             left = float(deadline) - time.monotonic()
             if left < 0.5:
                 raise TimeoutError("prazo total da resolução yt-dlp esgotado")
@@ -1095,12 +1195,9 @@ class ResolucaoMixin:
         self.log("yt_dlp_resolve", query=query, target=target, js=self.js_runtimes)
         warm_enabled = str(os.getenv("MUSIC_AGENT_YTDLP_WARM_HELPER_ENABLED", "true") or "true").strip().lower() in {"1", "true", "yes", "on", "sim"}
         if warm_enabled and remaining() > 1.0:
-            client = getattr(self, "_ytdlp_warm_client", None)
-            if client is None:
-                client = WarmYTDLPResolver()
-                self._ytdlp_warm_client = client
+            client = self._get_ytdlp_warm_client()
             cancel_event = getattr(self._resolve_thread_local, "cancel_event", None)
-            hot_started = time.time()
+            hot_started = time.monotonic()
             try:
                 hot = client.resolve(
                     target,
@@ -1120,15 +1217,19 @@ class ResolucaoMixin:
             if hot and str(hot.get("stream_url") or "").startswith(("http://", "https://")):
                 self.log(
                     "yt_dlp_warm_url_ok" if _looks_like_url(query) else "yt_dlp_warm_search_ok",
-                    elapsed_ms=round((time.time() - hot_started) * 1000.0, 1),
+                    elapsed_ms=round((time.monotonic() - hot_started) * 1000.0, 1),
                     helper_elapsed_ms=hot.get("elapsed_ms"),
                     title=bool(hot.get("title")),
                 )
                 hot.pop("ok", None)
                 hot.pop("id", None)
-                hot.pop("elapsed_ms", None)
+                hot["_music_start_timing_ms"] = sanitize_start_timings({
+                    "helper_request_ms": round((time.monotonic() - hot_started) * 1000.0, 1),
+                    "helper_extract_ms": hot.pop("elapsed_ms", None),
+                    "helper_init_ms": hot.pop("init_ms", None),
+                })
                 return hot
-            self.log("yt_dlp_warm_url_fallback" if _looks_like_url(query) else "yt_dlp_warm_search_fallback", elapsed_ms=round((time.time() - hot_started) * 1000.0, 1))
+            self.log("yt_dlp_warm_url_fallback" if _looks_like_url(query) else "yt_dlp_warm_search_fallback", elapsed_ms=round((time.monotonic() - hot_started) * 1000.0, 1))
         if _looks_like_url(query):
             fast_cmd = base_cmd + [
                 "-f", self.ytdlp_format,

@@ -14,9 +14,9 @@ from ..agente_telefone.comandos import estado_comando_diferido, music_agent_comm
 from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..agente_telefone.conversao import faixa_do_payload
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
+from ..agente_telefone.roteamento import capture_music_worker_validation
 from ..interface.carregamento import MusicLoadingReaction
-from ..busca import registrar_lote_link_busca
-from ..busca.memoria import enfileirar_lote_link_busca, processar_lotes_link_pendentes
+from ..busca.memoria import enfileirar_lote_link_busca
 from ..interface.componentes import SearchResultView
 from ..metadados.modelos import PlayInputKind
 from ..metadados.provedores import classify_play_input, describe_url
@@ -31,34 +31,12 @@ from ..reproducao.playlist_virtual import (
     payload_faixas_agent,
     schedule_playlist_refill_from_result,
 )
+from ..reproducao.inicio import (
+    MusicStartTrace, archived_url_batch, direct_url_batch, prepare_voice,
+    cancel_voice_preparation, retain_music_task, schedule_deferred_learning,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def retain_music_task(router, coroutine, *, name: str, limit: int = 32) -> asyncio.Task | None:
-    """Mantém dono, limite e leitura de erros para trabalho fora do primeiro som."""
-    tasks = getattr(router, "_music_fast_start_tasks", None)
-    if tasks is None:
-        tasks = set()
-        router._music_fast_start_tasks = tasks
-    if len(tasks) >= limit:
-        coroutine.close()
-        return None
-    task = asyncio.create_task(coroutine, name=name)
-    tasks.add(task)
-
-    def completed(finished):
-        tasks.discard(finished)
-        if not finished.cancelled() and finished.exception() is not None:
-            logger.warning("[music/start] trabalho adiado falhou | task=%s erro=%s", name, finished.exception())
-
-    task.add_done_callback(completed)
-    return task
-
-
-def schedule_deferred_learning(router) -> asyncio.Task | None:
-    return retain_music_task(router, asyncio.to_thread(processar_lotes_link_pendentes, limit=2),
-                             name="music-learn-after-start")
 
 
 def agente_nao_pronto_transitorio(exc: Exception | str) -> bool:
@@ -508,18 +486,7 @@ class FluxoTocar:
         return ExtractedBatch(tracks=[track], query=identifier, is_playlist=False)
 
     def _worker_direct_url_batch(self, query: str, *, requester_id: int, requester_name: str) -> ExtractedBatch:
-        profile = self._query_profile(query)
-        title = "YouTube" if profile.is_youtube else "Link"
-        track = MusicTrack(
-            title=title,
-            webpage_url=profile.canonical or query,
-            original_url=query,
-            requester_id=requester_id,
-            requester_name=requester_name or "",
-            source="YouTube" if profile.is_youtube else (profile.platform or "link"),
-            extractor="worker-ytdlp",
-        )
-        return ExtractedBatch(tracks=[track], query=query, is_playlist=False)
+        return direct_url_batch(query, requester_id=requester_id, requester_name=requester_name)
 
     def _worker_url_should_flatten_first(self, query: str) -> bool:
         profile = self._query_profile(query)
@@ -535,18 +502,8 @@ class FluxoTocar:
         self, query: str, *, guild_id: int, requester_id: int, requester_name: str,
     ) -> ExtractedBatch | None:
         """Reusa a faixa do fórum antes de acessar o provedor de metadados."""
-        profile = self._query_profile(query)
-        if not profile.is_url or profile.resource_type in {"playlist", "album"}:
-            return None
-        from ..busca.arquivo import archived_track_for_url
-
-        track = await asyncio.to_thread(
-            archived_track_for_url, profile.canonical or query,
-            guild_id=guild_id, requester_id=requester_id, requester_name=requester_name,
-        )
-        if track is None:
-            return None
-        return ExtractedBatch(tracks=[track], query=query, is_playlist=False)
+        return await archived_url_batch(query, guild_id=guild_id, requester_id=requester_id,
+                                        requester_name=requester_name)
 
     def _music_agent_query_for_track(self, track: MusicTrack, fallback: str = "") -> str:
         return consulta_agent_para_faixa(track, fallback)
@@ -556,31 +513,14 @@ class FluxoTocar:
                                    guild_id=guild_id)
 
     async def _prepare_voice_for_url(self, *, guild_id: int, voice_channel_id: int,
-                                     generation: int, prepare_id: str, trace_id: str) -> None:
-        if self.router.current_music_operation_generation(guild_id) != generation:
-            return
-        try:
-            await music_agent_command("prepare_voice", guild_id=guild_id, voice_channel_id=voice_channel_id,
-                                      prepare_id=prepare_id, trace_id=trace_id, lease_seconds=45,
-                                      timeout_seconds=3.0)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.debug("[music/start] voz antecipada indisponível | guild=%s erro=%s", guild_id, exc)
+                                     generation: int, prepare_id: str, trace_id: str,
+                                     worker_validation=None) -> None:
+        await prepare_voice(self.router, music_agent_command, guild_id=guild_id,
+                            voice_channel_id=voice_channel_id, generation=generation,
+                            prepare_id=prepare_id, trace_id=trace_id, worker_validation=worker_validation)
 
     async def _cancel_voice_preparation(self, guild_id: int, prepare_id: str, task: asyncio.Task) -> None:
-        # Aguarda só a entrega curta, nunca o handshake. O lease também cobre
-        # desconexões HTTP em que o prepare foi aplicado sem resposta.
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-        except asyncio.CancelledError:
-            if not task.cancelled():
-                raise
-        except Exception:
-            pass
-        with contextlib.suppress(Exception):
-            await music_agent_command("cancel_prepare_voice", guild_id=guild_id,
-                                      prepare_id=prepare_id, timeout_seconds=2.0)
+        await cancel_voice_preparation(music_agent_command, guild_id, prepare_id, task)
 
     def _is_lavalink_search_request(self, query: str) -> bool:
         raw = (query or "").strip()
@@ -633,6 +573,13 @@ class FluxoTocar:
             return
 
         operation_generation = self.router.current_music_operation_generation(ctx.guild.id)
+        initial_profile = self._query_profile(query)
+        trace = MusicStartTrace(ctx.guild.id, entrypoint="command",
+                                input_kind=(initial_profile.resource_type if initial_profile.resource_type in {"playlist", "album"}
+                                            else "url" if initial_profile.is_url else "search"),
+                                started=command_started, trace_id=trace_id)
+        controller_timing = trace.timings
+        worker_validation = None
         loading_reaction = MusicLoadingReaction(getattr(ctx, "message", None))
         loading_reaction.start_background()
         finish_loading_reaction = True
@@ -646,6 +593,7 @@ class FluxoTocar:
                     logger.info("[music/worker] play bloqueado: %s", getattr(selection, "reason", "worker indisponível"))
                     await self._reply(ctx, getattr(selection, "message", "") or getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
                     return
+                worker_validation = capture_music_worker_validation(selection, guild_id=ctx.guild.id)
 
             input_profile = self._query_profile(query)
             input_kind = self._play_input_kind(query)
@@ -656,7 +604,7 @@ class FluxoTocar:
                 prepare_task = retain_music_task(
                     self.router, self._prepare_voice_for_url(guild_id=ctx.guild.id,
                         voice_channel_id=voice_channel.id, generation=operation_generation,
-                        prepare_id=prepare_id, trace_id=trace_id), name="music-prepare-voice", limit=8,
+                        prepare_id=prepare_id, trace_id=trace_id, worker_validation=worker_validation), name="music-prepare-voice", limit=8,
                 )
                 if prepare_task is None:
                     prepare_id = ""
@@ -832,6 +780,7 @@ class FluxoTocar:
 
             if self.router.current_music_operation_generation(ctx.guild.id) != operation_generation:
                 logger.info("[music] play ignorado: operação antiga cancelada | guild=%s query=%r", ctx.guild.id, query)
+                trace.finish("cancelled")
                 return
             controller_timing["metadata_ms"] = round((time.monotonic() - metadata_started) * 1000, 2)
 
@@ -906,8 +855,10 @@ class FluxoTocar:
                 await self._reply(
                     ctx,
                     embed=embed,
-                    view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id, query),
+                    view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id, query,
+                                          search_timing_ms={"search_to_results_ms": round((time.monotonic() - command_started) * 1000, 2)}),
                 )
+                trace.search_results()
                 return
 
             if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
@@ -925,8 +876,10 @@ class FluxoTocar:
                         batch.tracks, requester_id=ctx.author.id, requester_name=requester_name, guild_id=ctx.guild.id)
                     controller_timing["archive_payload_ms"] = round((time.monotonic() - payload_started) * 1000, 2)
                     if self.router.current_music_operation_generation(ctx.guild.id) != operation_generation:
+                        trace.finish("cancelled")
                         return
-                    controller_timing["command_to_dispatch_ms"] = round((time.monotonic() - command_started) * 1000, 2)
+                    trace.context["source_mode"] = "archive" if tracks_payload[0].get("archive_ref") else "online"
+                    trace.dispatch()
                     agent_started = time.monotonic()
                     if is_multi:
                         if virtual_active:
@@ -948,6 +901,7 @@ class FluxoTocar:
                             requester_id=ctx.author.id,
                             requester_name=requester_name,
                             prepare_id=prepare_id, trace_id=trace_id, controller_timing_ms=controller_timing,
+                            start_context=trace.context, worker_validation=worker_validation,
                         )
                     else:
                         result = await music_agent_command(
@@ -960,8 +914,11 @@ class FluxoTocar:
                             requester_id=ctx.author.id,
                             requester_name=requester_name,
                             prepare_id=prepare_id, trace_id=trace_id, controller_timing_ms=controller_timing,
+                            start_context=trace.context, worker_validation=worker_validation,
                         )
                     play_delivered = not (result.get("cancelled") or result.get("ok") is False)
+                    result_state = result.get("state") if isinstance(result.get("state"), dict) else {}
+                    trace.result(result, confirmed=bool(result_state.get("confirmed_playing")))
                     if learning_tracks and play_delivered:
                         schedule_deferred_learning(self.router)
                     logger.info("[music/agent] play etapa concluída | guild=%s elapsed_ms=%.1f queued=%s added=%s cancelled=%s", ctx.guild.id, (time.monotonic() - agent_started) * 1000.0, bool(result.get("queued")), result.get("added"), bool(result.get("cancelled")))
@@ -972,6 +929,7 @@ class FluxoTocar:
                         await self._reply(ctx, self._music_error_message(Exception(str(result.get("error")))))
                         return
                 except Exception as exc:
+                    trace.finish("timeout" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else "failed")
                     logger.warning("[music/agent] falha ao enviar play direto | guild=%s erro=%s", ctx.guild.id, exc)
                     if agente_nao_pronto_transitorio(exc):
                         msg = await self._reply(ctx, self._music_agent_play_message(track, {"state": {"status": "preparing"}}))
@@ -1052,6 +1010,7 @@ class FluxoTocar:
             if added <= 0:
                 await self._reply(ctx, "`⚠️` Não adicionei nada: o queue está cheio ou essa música já está no queue/tocando.")
                 return
+            trace.result({"ok": True, "queued": was_session_active}, confirmed=False)
 
             if batch.is_playlist:
                 count_label = "música" if added == 1 else "músicas"
@@ -1076,7 +1035,11 @@ class FluxoTocar:
                     # fazendo ``state.current`` existir antes da resposta do comando. Isso
                     # não significa posição 2; ainda é a faixa que está iniciando agora.
                     await self._reply(ctx, f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`")
+        except asyncio.CancelledError:
+            trace.finish("cancelled")
+            raise
         finally:
+            trace.finish()
             if prepare_task is not None and not play_delivered:
                 retain_music_task(self.router, self._cancel_voice_preparation(ctx.guild.id, prepare_id, prepare_task),
                                   name="music-cancel-prepare-voice")

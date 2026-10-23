@@ -1,4 +1,4 @@
-# Voz no Termux — perfil 0.3.85
+# Voz no Termux — perfil 0.3.86
 
 A voz permanece no Termux. A VPS atende o controller, os comandos e o painel.
 O Phone Worker atende reprodução, resolução e arquivamento. Os arquivos de
@@ -43,3 +43,8 @@ python3 scripts/benchmark-music-start.py antes.log --compare depois.log
 O relatório calcula mediana e p95 de durações locais até o primeiro pacote
 musical enviado. O som recebido pelo cliente Discord ainda depende da rede e
 do cliente; esta execução não mediu uma call no ambiente de produção.
+
+A [versão 0.3.86](../../docs/MUSIC_AGENT_0_3_86.md) estende os traces ao seletor
+e ao modal e oferece aquecimento local opcional do resolvedor. O padrão é
+`MUSIC_AGENT_YTDLP_PREWARM_ENABLED=false`; o piloto usa `true` no ambiente do
+agente no Termux, mantendo o mesmo executor e os limites de áudio.

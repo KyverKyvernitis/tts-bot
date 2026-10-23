@@ -156,7 +156,10 @@ def test_modal_de_adicionar_preserva_direct_play_virtual_start_first() -> None:
     assert "virtual_active = bool(batch.is_playlist" in block
     assert "is_multi = bool(len(batch.tracks) > 1 or virtual_active)" in block
     assert "payload_cursor_playlist(" in block
-    assert 'music_agent_command(\n                        "enqueue_many"' in block
+    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+               and node.func.id == "music_agent_command" and node.args
+               and isinstance(node.args[0], ast.Constant) and node.args[0].value == "enqueue_many"
+               for node in ast.walk(ast.parse(block)))
     assert "schedule_playlist_refill_from_result(self.router, guild.id, result)" in block
     assert "Playlist iniciada" in block
 

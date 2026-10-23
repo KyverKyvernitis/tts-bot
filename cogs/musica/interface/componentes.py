@@ -22,9 +22,16 @@ from ..reproducao.controle_remoto import enviar_controle_remoto
 from ..reproducao.playlist_virtual import (
     carregar_pagina_fila_virtual,
     payload_cursor_playlist,
+    payload_faixas_agent,
     schedule_playlist_refill_from_result,
 )
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
+from ..agente_telefone.roteamento import capture_music_worker_validation
+from ..busca.memoria import enfileirar_lote_link_busca
+from ..reproducao.inicio import (
+    MusicStartTrace, archived_url_batch, direct_url_batch, prepare_voice,
+    cancel_voice_preparation, retain_music_task, schedule_deferred_learning,
+)
 from .carregamento import MusicLoadingReaction
 from .tarefas import agendar_tarefa_unica
 
@@ -398,7 +405,8 @@ def _agent_tracks_payload(tracks: list[MusicTrack], *, requester_id: int = 0, re
     return payload
 
 
-async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, requester_id: int, requester_name: str) -> tuple[ExtractedBatch, bool]:
+async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, requester_id: int,
+                                      requester_name: str, validated_worker: bool = False) -> tuple[ExtractedBatch, bool]:
     """Resolve o input do modal respeitando o backend ativo.
 
     Em modo worker-only, todo input vai para o nó remoto do worker e não
@@ -407,11 +415,21 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
     """
     backends = getattr(router, "backends", None)
     if getattr(router, "music_worker_only_enabled", lambda: False)():
-        selection = await router.ensure_music_worker_available()
-        if not getattr(selection, "available", False):
-            raise RuntimeError(getattr(selection, "message", "") or getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
+        if not validated_worker:
+            selection = await router.ensure_music_worker_available()
+            if not getattr(selection, "available", False):
+                raise RuntimeError(getattr(selection, "message", "") or getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
         profile = describe_url(query)
         youtube_text_search = _is_youtube_text_search(query)
+        if profile.is_url:
+            try:
+                archived = await archived_url_batch(query, guild_id=guild_id,
+                    requester_id=requester_id, requester_name=requester_name)
+            except Exception:
+                logger.warning("[music/archive] índice indisponível no modal; usando resolução normal", exc_info=True)
+            else:
+                if archived is not None:
+                    return archived, False
         if profile.is_metadata_only:
             batch = await router.extractor.extract(
                 query,
@@ -430,6 +448,8 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
                 guild_id=guild_id,
             )
             return batch, False
+        if profile.is_url:
+            return direct_url_batch(query, requester_id=requester_id, requester_name=requester_name), False
         batch = await resolve_music_tracks_on_worker(
             query,
             requester_id=requester_id,
@@ -534,6 +554,7 @@ async def _require_music_voice_interaction(
     *,
     same_as_bot: bool = True,
     check_worker: bool = True,
+    validation_out: dict | None = None,
 ) -> bool:
     state = router.get_state(guild_id)
     user_channel = _interaction_user_voice_channel(interaction)
@@ -551,6 +572,8 @@ async def _require_music_voice_interaction(
             message = getattr(selection, "message", "") or getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online")
             await _send_interaction_notice(interaction, message)
             return False
+        if validation_out is not None:
+            validation_out["worker"] = capture_music_worker_validation(selection, guild_id=guild_id)
     return True
 
 
@@ -1438,7 +1461,7 @@ class SeekModal(discord.ui.Modal):
 
 
 class SearchSelect(discord.ui.Select):
-    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None, query: str = "") -> None:
+    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None, query: str = "", *, search_timing_ms: dict | None = None) -> None:
         self.router = router
         self.guild_id = int(guild_id)
         self.voice_channel_id = int(voice_channel_id)
@@ -1446,6 +1469,7 @@ class SearchSelect(discord.ui.Select):
         self.tracks = tracks
         self.requester_id = int(requester_id or 0)
         self.query = str(query or "").strip()
+        self.search_timing_ms = dict(search_timing_ms or {})
         options = []
         for idx, track in enumerate(tracks[:10]):
             options.append(
@@ -1467,19 +1491,23 @@ class SearchSelect(discord.ui.Select):
             await interaction.response.send_message("Guild não encontrada.", ephemeral=True)
             return
 
+        trace = MusicStartTrace(self.guild_id, entrypoint="selection", input_kind="search",
+                                timing_ms=self.search_timing_ms)
+
         # ACK imediato: escolher um resultado pode resolver stream, consultar worker
         # e iniciar voz. Se isso acontecer antes do defer, o Discord mostra
         # "Esta interação falhou" mesmo quando o painel acaba atualizando.
         try:
             await interaction.response.defer(thinking=False)
         except discord.NotFound:
+            trace.finish("cancelled")
             return
         except Exception:
             # Se já foi respondida por algum caminho defensivo, continua usando edit/followup.
             pass
 
         loading_reaction = MusicLoadingReaction(getattr(interaction, "message", None))
-        await loading_reaction.start()
+        loading_reaction.start_background()
         finish_loading_reaction = True
         operation_generation = self.router.current_music_operation_generation(self.guild_id)
         try:
@@ -1492,8 +1520,12 @@ class SearchSelect(discord.ui.Select):
                     with contextlib.suppress(Exception):
                         await interaction.followup.send(content, ephemeral=True)
 
-            if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
+            validation_out = {}
+            check_started = time.monotonic()
+            if not await _require_music_voice_interaction(interaction, self.router, self.guild_id,
+                                                          validation_out=validation_out):
                 return
+            trace.timings["worker_check_ms"] = round((time.monotonic() - check_started) * 1000, 2)
             idx = int(self.values[0])
             track = self.tracks[idx]
             voice_channel = _interaction_user_voice_channel(interaction)
@@ -1511,6 +1543,10 @@ class SearchSelect(discord.ui.Select):
             )
             if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
                 try:
+                    if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
+                        trace.finish("cancelled")
+                        return
+                    trace.dispatch()
                     result = await music_agent_command(
                         "play",
                         guild_id=self.guild_id,
@@ -1520,8 +1556,13 @@ class SearchSelect(discord.ui.Select):
                         track=track,
                         requester_id=getattr(interaction.user, "id", 0),
                         requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
+                        trace_id=trace.trace_id, controller_timing_ms=trace.timings,
+                        start_context=trace.context, worker_validation=validation_out.get("worker"),
                     )
+                    result_state = result.get("state") if isinstance(result.get("state"), dict) else {}
+                    trace.result(result, confirmed=bool(result_state.get("confirmed_playing")))
                 except Exception as exc:
+                    trace.finish("timeout" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else "failed")
                     if _agent_not_ready_transient(exc):
                         await edit_original(f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`")
                         with contextlib.suppress(Exception):
@@ -1565,6 +1606,7 @@ class SearchSelect(discord.ui.Select):
             if added <= 0:
                 await edit_original("`⚠️` Não adicionei nada: essa música já está no queue/tocando ou o queue está cheio.")
                 return
+            trace.result({"ok": True, "queued": was_session_active}, confirmed=False)
             state = self.router.get_state(self.guild_id)
             position = state.queue_size() + (1 if state.current else 0)
             if was_session_active or position > 1:
@@ -1574,15 +1616,20 @@ class SearchSelect(discord.ui.Select):
             if dropped:
                 msg += "\n`⚠️` Alguns itens extras não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
             await edit_original(msg)
+        except asyncio.CancelledError:
+            trace.finish("cancelled")
+            raise
         finally:
+            trace.finish()
             if finish_loading_reaction:
                 await loading_reaction.finish()
 
 
 class SearchResultView(discord.ui.View):
-    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None, query: str = "") -> None:
+    def __init__(self, router, guild_id: int, voice_channel_id: int, text_channel_id: int, tracks: list[MusicTrack], requester_id: int | None = None, query: str = "", *, search_timing_ms: dict | None = None) -> None:
         super().__init__(timeout=120)
-        self.add_item(SearchSelect(router, guild_id, voice_channel_id, text_channel_id, tracks, requester_id, query))
+        self.add_item(SearchSelect(router, guild_id, voice_channel_id, text_channel_id, tracks, requester_id, query,
+                                   search_timing_ms=search_timing_ms))
 
 
 class AddSongModal(discord.ui.Modal):
@@ -1602,6 +1649,7 @@ class AddSongModal(discord.ui.Modal):
         self.add_item(self.query)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        command_started = time.monotonic()
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("Guild não encontrada.", ephemeral=True)
@@ -1623,220 +1671,287 @@ class AddSongModal(discord.ui.Modal):
         query = str(self.query.value).strip()
         requester_name = getattr(interaction.user, "display_name", str(interaction.user))
         operation_generation = self.router.current_music_operation_generation(self.guild_id)
-        try:
-            batch, force_selection = await _extract_batch_for_add_modal(
-                self.router,
-                guild.id,
-                query,
-                requester_id=interaction.user.id,
-                requester_name=requester_name,
-            )
-        except MusicExtractionError as exc:
-            await interaction.followup.send(f"`⚠️` {exc}", ephemeral=True)
-            return
-        except Exception as exc:
-            message = str(exc or "").strip()
-            if message == getattr(self.router, "music_worker_unavailable_message", "") or message.startswith("Sistema de música indisponível no momento:"):
-                await interaction.followup.send(message, ephemeral=True)
-            else:
-                await interaction.followup.send(f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
-            return
-
-        if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
-            return
-
-        if not batch.tracks:
-            await interaction.followup.send("`📭` Não encontrei nada tocável.", ephemeral=True)
-            return
-
         profile = describe_url(query)
-        if batch.is_playlist and profile.platform == "spotify":
-            with contextlib.suppress(Exception):
-                registrar_lote_link_busca(batch.tracks)
-
-        virtual_playlist_cursor = getattr(batch, "playlist_cursor", None)
-        if (
-            getattr(self.router, "music_worker_only_enabled", lambda: False)()
-            and batch.is_playlist
-            and virtual_playlist_cursor is not None
-            and not virtual_playlist_cursor.exhausted
-        ):
-            window_tracks, virtual_playlist_cursor = bounded_initial_window(
-                batch.tracks,
-                virtual_playlist_cursor,
-            )
-            batch.tracks = window_tracks
-            batch.playlist_cursor = virtual_playlist_cursor
-            batch.truncated = True
-
-        should_open_selection = bool(
-            force_selection
-            or (not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1)
-        )
-        if should_open_selection:
-            embed = discord.Embed(
-                title="🔎 Escolha a música",
-                description="Selecione um dos resultados abaixo.",
-                color=discord.Color.blurple(),
-            )
-            for idx, track in enumerate(batch.tracks[:10], start=1):
-                embed.add_field(name=f"{idx}. {track.short_title}", value=f"{track.uploader or track.source or 'resultado'} • `{track.duration_label}`", inline=False)
-            # Sobreponha resolução do top-1 ao envio do menu no Discord.
-            _schedule_agent_prefetch(
-                self.router,
-                guild.id,
-                batch.tracks[:10],
-                voice_channel_id=getattr(voice_channel, "id", 0),
-                text_channel_id=getattr(text_channel, "id", 0),
-                requester_id=interaction.user.id,
-                requester_name=requester_name,
-            )
-            await interaction.followup.send(
-                embed=embed,
-                view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:10], interaction.user.id, query),
-                ephemeral=True,
-            )
-            return
-
-        if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
-            track = batch.tracks[0]
-            virtual_cursor = getattr(batch, "playlist_cursor", None)
-            virtual_active = bool(batch.is_playlist and virtual_cursor is not None and not virtual_cursor.exhausted)
-            is_multi = bool(len(batch.tracks) > 1 or virtual_active)
+        trace = MusicStartTrace(self.guild_id, entrypoint="modal",
+                                input_kind=(profile.resource_type if profile.resource_type in {"playlist", "album"}
+                                            else "url" if profile.is_url else "search"), started=command_started)
+        worker_validation = None
+        prepare_task = None
+        prepare_id = ""
+        play_delivered = False
+        try:
             try:
-                if is_multi:
-                    tracks_payload = _agent_tracks_payload(batch.tracks, requester_id=interaction.user.id, requester_name=requester_name)
-                    if virtual_active:
-                        tracks_payload.append(
-                            payload_cursor_playlist(
-                                virtual_cursor,
-                                requester_id=interaction.user.id,
-                                requester_name=requester_name,
-                            )
-                        )
-                    result = await music_agent_command(
-                        "enqueue_many",
-                        guild_id=guild.id,
-                        voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
-                        text_channel_id=getattr(text_channel, "id", self.text_channel_id),
-                        query=query,
-                        track=track,
-                        tracks=tracks_payload,
-                        requester_id=interaction.user.id,
-                        requester_name=requester_name,
-                    )
-                else:
-                    result = await music_agent_command(
-                        "play",
-                        guild_id=guild.id,
-                        voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
-                        text_channel_id=getattr(text_channel, "id", self.text_channel_id),
-                        query=_agent_query_for_track(track, query),
-                        track=track,
-                        requester_id=interaction.user.id,
-                        requester_name=requester_name,
-                    )
+                worker_only = getattr(self.router, "music_worker_only_enabled", lambda: False)()
+                if worker_only:
+                    check_started = time.monotonic()
+                    selection = await self.router.ensure_music_worker_available()
+                    trace.timings["worker_check_ms"] = round((time.monotonic() - check_started) * 1000, 2)
+                    if not getattr(selection, "available", False):
+                        raise RuntimeError(getattr(selection, "message", "") or getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
+                    worker_validation = capture_music_worker_validation(selection, guild_id=self.guild_id)
+                    if profile.is_url:
+                        prepare_id = trace.trace_id
+                        prepare_task = retain_music_task(self.router,
+                            prepare_voice(self.router, music_agent_command, guild_id=self.guild_id,
+                                voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                                generation=operation_generation, prepare_id=prepare_id,
+                                trace_id=trace.trace_id, worker_validation=worker_validation),
+                            name="music-modal-prepare-voice", limit=8)
+                        if prepare_task is None:
+                            prepare_id = ""
+                metadata_started = time.monotonic()
+                batch, force_selection = await _extract_batch_for_add_modal(
+                    self.router,
+                    guild.id,
+                    query,
+                    requester_id=interaction.user.id,
+                    requester_name=requester_name,
+                    validated_worker=worker_only,
+                )
+                trace.timings["metadata_ms"] = round((time.monotonic() - metadata_started) * 1000, 2)
+            except MusicExtractionError as exc:
+                await interaction.followup.send(f"`⚠️` {exc}", ephemeral=True)
+                return
             except Exception as exc:
-                if _agent_not_ready_transient(exc):
-                    sent = await _safe_interaction_followup(
-                        interaction,
-                        f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`",
-                        ephemeral=True,
-                        wait=True,
-                    )
-                    if sent is not None:
-                        agendar_tarefa_unica(("watch", int(self.guild_id)), _watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
-                    return
-                await _safe_interaction_followup(interaction, f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
+                message = str(exc or "").strip()
+                if message == getattr(self.router, "music_worker_unavailable_message", "") or message.startswith("Sistema de música indisponível no momento:"):
+                    await interaction.followup.send(message, ephemeral=True)
+                else:
+                    await interaction.followup.send(f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
                 return
-            if isinstance(result, dict) and result.get("cancelled"):
-                return
+
             if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
+                trace.finish("cancelled")
                 return
-            await _sync_agent_panel(
-                self.router,
-                guild.id,
-                getattr(voice_channel, "id", self.voice_channel_id),
-                getattr(text_channel, "id", self.text_channel_id),
-                track,
-                result,
-                queued=bool(result.get("queued")),
+
+            if not batch.tracks:
+                await interaction.followup.send("`📭` Não encontrei nada tocável.", ephemeral=True)
+                return
+
+            learning_tracks = list(batch.tracks) if batch.is_playlist and profile.platform == "spotify" else []
+            if learning_tracks and not worker_only:
+                with contextlib.suppress(Exception):
+                    registrar_lote_link_busca(learning_tracks)
+
+            virtual_playlist_cursor = getattr(batch, "playlist_cursor", None)
+            if (
+                getattr(self.router, "music_worker_only_enabled", lambda: False)()
+                and batch.is_playlist
+                and virtual_playlist_cursor is not None
+                and not virtual_playlist_cursor.exhausted
+            ):
+                window_tracks, virtual_playlist_cursor = bounded_initial_window(
+                    batch.tracks,
+                    virtual_playlist_cursor,
+                )
+                batch.tracks = window_tracks
+                batch.playlist_cursor = virtual_playlist_cursor
+                batch.truncated = True
+
+            should_open_selection = bool(
+                force_selection
+                or (not profile.is_url and len(batch.tracks) > 1)
             )
-            if virtual_active:
-                # Igual ao comando _play: a primeira faixa chega ao Worker antes
-                # de qualquer refill. O restante da janela só é agendado depois
-                # do ACK de play/enqueue, sem polling adicional.
-                schedule_playlist_refill_from_result(self.router, guild.id, result)
-            if is_multi:
-                added = int(result.get("added") or len(batch.tracks))
-                label = f" de **{discord.utils.escape_markdown((batch.playlist_title or '')[:80])}**" if batch.playlist_title else ""
-                count_label = "música" if added == 1 else "músicas"
-                state_payload = result.get("state") if isinstance(result.get("state"), dict) else {}
+            if should_open_selection:
+                embed = discord.Embed(
+                    title="🔎 Escolha a música",
+                    description="Selecione um dos resultados abaixo.",
+                    color=discord.Color.blurple(),
+                )
+                for idx, track in enumerate(batch.tracks[:10], start=1):
+                    embed.add_field(name=f"{idx}. {track.short_title}", value=f"{track.uploader or track.source or 'resultado'} • `{track.duration_label}`", inline=False)
+                # Sobreponha resolução do top-1 ao envio do menu no Discord.
+                _schedule_agent_prefetch(
+                    self.router,
+                    guild.id,
+                    batch.tracks[:10],
+                    voice_channel_id=getattr(voice_channel, "id", 0),
+                    text_channel_id=getattr(text_channel, "id", 0),
+                    requester_id=interaction.user.id,
+                    requester_name=requester_name,
+                )
+                await interaction.followup.send(
+                    embed=embed,
+                    view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:10], interaction.user.id, query,
+                                          search_timing_ms={"search_to_results_ms": round((time.monotonic() - trace.started) * 1000, 2)}),
+                    ephemeral=True,
+                )
+                trace.search_results()
+                return
+
+            if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                track = batch.tracks[0]
+                virtual_cursor = getattr(batch, "playlist_cursor", None)
+                virtual_active = bool(batch.is_playlist and virtual_cursor is not None and not virtual_cursor.exhausted)
+                is_multi = bool(len(batch.tracks) > 1 or virtual_active)
                 try:
-                    queue_total = int(state_payload.get("queue_size") or 0)
-                except Exception:
-                    queue_total = 0
+                    if learning_tracks:
+                        journal_started = time.monotonic()
+                        await asyncio.to_thread(enfileirar_lote_link_busca, learning_tracks)
+                        trace.timings["learning_journal_ms"] = round((time.monotonic() - journal_started) * 1000, 2)
+                    payload_started = time.monotonic()
+                    tracks_payload = await asyncio.to_thread(payload_faixas_agent, batch.tracks,
+                        requester_id=interaction.user.id, requester_name=requester_name, guild_id=guild.id)
+                    trace.timings["archive_payload_ms"] = round((time.monotonic() - payload_started) * 1000, 2)
+                    if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
+                        trace.finish("cancelled")
+                        return
+                    trace.context["source_mode"] = "archive" if tracks_payload[0].get("archive_ref") else "online"
+                    trace.dispatch()
+                    if is_multi:
+                        if virtual_active:
+                            tracks_payload.append(
+                                payload_cursor_playlist(
+                                    virtual_cursor,
+                                    requester_id=interaction.user.id,
+                                    requester_name=requester_name,
+                                )
+                            )
+                        result = await music_agent_command(
+                            "enqueue_many",
+                            guild_id=guild.id,
+                            voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                            text_channel_id=getattr(text_channel, "id", self.text_channel_id),
+                            query=query,
+                            track=tracks_payload[0],
+                            tracks=tracks_payload,
+                            requester_id=interaction.user.id,
+                            requester_name=requester_name,
+                            prepare_id=prepare_id, trace_id=trace.trace_id,
+                            controller_timing_ms=trace.timings, start_context=trace.context,
+                            worker_validation=worker_validation,
+                        )
+                    else:
+                        result = await music_agent_command(
+                            "play",
+                            guild_id=guild.id,
+                            voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                            text_channel_id=getattr(text_channel, "id", self.text_channel_id),
+                            query=_agent_query_for_track(track, query),
+                            track=tracks_payload[0],
+                            requester_id=interaction.user.id,
+                            requester_name=requester_name,
+                            prepare_id=prepare_id, trace_id=trace.trace_id,
+                            controller_timing_ms=trace.timings, start_context=trace.context,
+                            worker_validation=worker_validation,
+                        )
+                    play_delivered = not (result.get("cancelled") or result.get("ok") is False)
+                    result_state = result.get("state") if isinstance(result.get("state"), dict) else {}
+                    trace.result(result, confirmed=bool(result_state.get("confirmed_playing")))
+                    if learning_tracks and play_delivered:
+                        schedule_deferred_learning(self.router)
+                except Exception as exc:
+                    trace.finish("timeout" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else "failed")
+                    if _agent_not_ready_transient(exc):
+                        sent = await _safe_interaction_followup(
+                            interaction,
+                            f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`",
+                            ephemeral=True,
+                            wait=True,
+                        )
+                        if sent is not None:
+                            agendar_tarefa_unica(("watch", int(self.guild_id)), _watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
+                        return
+                    await _safe_interaction_followup(interaction, f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
+                    return
+                if isinstance(result, dict) and result.get("cancelled"):
+                    return
+                if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
+                    return
+                await _sync_agent_panel(
+                    self.router,
+                    guild.id,
+                    getattr(voice_channel, "id", self.voice_channel_id),
+                    getattr(text_channel, "id", self.text_channel_id),
+                    track,
+                    result,
+                    queued=bool(result.get("queued")),
+                )
                 if virtual_active:
-                    if bool(result.get("queued")):
+                    # Igual ao comando _play: a primeira faixa chega ao Worker antes
+                    # de qualquer refill. O restante da janela só é agendado depois
+                    # do ACK de play/enqueue, sem polling adicional.
+                    schedule_playlist_refill_from_result(self.router, guild.id, result)
+                if is_multi:
+                    added = int(result.get("added") or len(batch.tracks))
+                    label = f" de **{discord.utils.escape_markdown((batch.playlist_title or '')[:80])}**" if batch.playlist_title else ""
+                    count_label = "música" if added == 1 else "músicas"
+                    state_payload = result.get("state") if isinstance(result.get("state"), dict) else {}
+                    try:
+                        queue_total = int(state_payload.get("queue_size") or 0)
+                    except Exception:
+                        queue_total = 0
+                    if virtual_active:
+                        if bool(result.get("queued")):
+                            sent = await interaction.followup.send(
+                                f"`📑` **Playlist adicionada à fila{label}.**",
+                                ephemeral=True,
+                                wait=True,
+                            )
+                        else:
+                            sent = await interaction.followup.send(
+                                f"`📑` **Playlist iniciada{label}.**",
+                                ephemeral=True,
+                                wait=True,
+                            )
+                    elif bool(result.get("queued")):
+                        total_line = f"\n`🎶` Fila agora: `{queue_total}` música(s)." if queue_total else ""
                         sent = await interaction.followup.send(
-                            f"`📑` **Playlist adicionada à fila{label}.**",
+                            f"`📑` **Playlist adicionada ao final da fila:** `{added}` {count_label}{label}.{total_line}",
                             ephemeral=True,
                             wait=True,
                         )
                     else:
                         sent = await interaction.followup.send(
-                            f"`📑` **Playlist iniciada{label}.**",
+                            f"`📑` **Playlist adicionada à fila:** `{added}` {count_label}{label}.\n`🎧` Preparando a primeira faixa...",
                             ephemeral=True,
                             wait=True,
                         )
-                elif bool(result.get("queued")):
-                    total_line = f"\n`🎶` Fila agora: `{queue_total}` música(s)." if queue_total else ""
-                    sent = await interaction.followup.send(
-                        f"`📑` **Playlist adicionada ao final da fila:** `{added}` {count_label}{label}.{total_line}",
-                        ephemeral=True,
-                        wait=True,
-                    )
                 else:
-                    sent = await interaction.followup.send(
-                        f"`📑` **Playlist adicionada à fila:** `{added}` {count_label}{label}.\n`🎧` Preparando a primeira faixa...",
-                        ephemeral=True,
-                        wait=True,
-                    )
-            else:
-                msg = _agent_play_message(track, result)
-                sent = await interaction.followup.send(msg, ephemeral=True, wait=True)
-            state = result.get("state") if isinstance(result.get("state"), dict) else {}
-            status = str(state.get("status") or "").lower()
-            if sent is not None and not result.get("queued") and status not in {"playing", "failed", "error"}:
-                agendar_tarefa_unica(("watch", int(self.guild_id)), _watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
-            return
+                    msg = _agent_play_message(track, result)
+                    sent = await interaction.followup.send(msg, ephemeral=True, wait=True)
+                state = result.get("state") if isinstance(result.get("state"), dict) else {}
+                status = str(state.get("status") or "").lower()
+                if sent is not None and not result.get("queued") and status not in {"playing", "failed", "error"}:
+                    agendar_tarefa_unica(("watch", int(self.guild_id)), _watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
+                return
 
-        state_before = self.router.get_state(self.guild_id)
-        was_session_active = bool(
-            state_before.current
-            or state_before.queue_size() > 0
-            or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
-        )
-        added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, batch.tracks)
-        if added <= 0:
-            await interaction.followup.send("`⚠️` Não adicionei nada: tudo já estava no queue/tocando ou o queue está cheio.", ephemeral=True)
-            return
-        if batch.is_playlist:
-            msg = f"`📑` **Playlist adicionada:** `{added}` música(s)"
-            if batch.playlist_title:
-                msg += f" de **{batch.playlist_title}**"
-            if batch.truncated:
-                msg += f"\n`⚠️` Playlist limitada aos primeiros `{getattr(config, 'MUSIC_MAX_PLAYLIST_ITEMS', 100)}` itens para economizar RAM."
-        else:
-            state = self.router.get_state(self.guild_id)
-            position = state.queue_size() + (1 if state.current else 0)
-            if was_session_active or position > 1:
-                msg = f"`🎶` **Adicionada ao queue:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}` • posição `{max(1, position)}`"
+            state_before = self.router.get_state(self.guild_id)
+            was_session_active = bool(
+                state_before.current
+                or state_before.queue_size() > 0
+                or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
+            )
+            added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, batch.tracks)
+            if added <= 0:
+                await interaction.followup.send("`⚠️` Não adicionei nada: tudo já estava no queue/tocando ou o queue está cheio.", ephemeral=True)
+                return
+            trace.result({"ok": True, "queued": was_session_active}, confirmed=False)
+            if batch.is_playlist:
+                msg = f"`📑` **Playlist adicionada:** `{added}` música(s)"
+                if batch.playlist_title:
+                    msg += f" de **{batch.playlist_title}**"
+                if batch.truncated:
+                    msg += f"\n`⚠️` Playlist limitada aos primeiros `{getattr(config, 'MUSIC_MAX_PLAYLIST_ITEMS', 100)}` itens para economizar RAM."
             else:
-                msg = f"`🎧` **Preparando para tocar:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}`"
-        if dropped and len(batch.tracks) > added:
-            msg += f"\n`⚠️` `{dropped}` item(ns) não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
-        await interaction.followup.send(msg, ephemeral=True)
+                state = self.router.get_state(self.guild_id)
+                position = state.queue_size() + (1 if state.current else 0)
+                if was_session_active or position > 1:
+                    msg = f"`🎶` **Adicionada ao queue:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}` • posição `{max(1, position)}`"
+                else:
+                    msg = f"`🎧` **Preparando para tocar:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}`"
+            if dropped and len(batch.tracks) > added:
+                msg += f"\n`⚠️` `{dropped}` item(ns) não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
+            await interaction.followup.send(msg, ephemeral=True)
+        except asyncio.CancelledError:
+            trace.finish("cancelled")
+            raise
+        finally:
+            trace.finish()
+            if prepare_task is not None and not play_delivered:
+                retain_music_task(self.router,
+                    cancel_voice_preparation(music_agent_command, self.guild_id, prepare_id, prepare_task),
+                    name="music-modal-cancel-prepare-voice")
 
 
 class QueueSelect(discord.ui.Select):
