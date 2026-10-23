@@ -79,6 +79,9 @@ class KeyAndPolicyTests(unittest.TestCase):
         config = ssh.ssh_config(registry(one)).decode()
         self.assertIn("GatewayPorts no", config)
         self.assertIn("MaxSessions 0", config)
+        self.assertIn("ClientAliveInterval 15", config)
+        self.assertIn("ClientAliveCountMax 2", config)
+        self.assertTrue(config.startswith("# " + ssh.MARKER + "\nMatch User osaka-phone-ssh\n"))
         self.assertNotIn("0.0.0.0", config)
 
     def test_effective_server_policy_must_enforce_private_ports_and_key_only_auth(self):
@@ -89,6 +92,7 @@ class KeyAndPolicyTests(unittest.TestCase):
             "permittty": "no", "gatewayports": "no", "allowagentforwarding": "no",
             "x11forwarding": "no", "forcecommand": "/usr/sbin/nologin", "allowtcpforwarding": "yes",
             "allowstreamlocalforwarding": "no", "permittunnel": "no", "maxsessions": "0",
+            "clientaliveinterval": "15", "clientalivecountmax": "2",
             "authorizedkeysfile": str(ssh.HOME_PATH / ".ssh/authorized_keys"),
             "permitlisten": "127.0.0.1:18766 127.0.0.1:18767", "permitopen": "127.0.0.1:10000"}
         calls = []
@@ -98,7 +102,8 @@ class KeyAndPolicyTests(unittest.TestCase):
         ssh.verify_effective_ssh(row, runner=runner)
         self.assertTrue(any("-t" in call for call in calls))
         for field, bad in (("gatewayports", "yes"), ("permitopen", "any"), ("permitlisten", "any"),
-                           ("authenticationmethods", "any"), ("maxsessions", "10")):
+                           ("authenticationmethods", "any"), ("maxsessions", "10"),
+                           ("clientaliveinterval", "0"), ("clientalivecountmax", "3")):
             old = effective[field]
             effective[field] = bad
             with self.subTest(field=field), self.assertRaises(RuntimeError):
@@ -131,6 +136,14 @@ class NativeServerPolicyTests(unittest.TestCase):
             ssh.verify_effective_ssh(rows, runner=native)
             self.assertTrue(any("-t" in command for command in calls))
             self.assertTrue(any("-T" in command for command in calls))
+            # The forwarding account's dead-peer deadline must not become a
+            # global SSH policy or close an administrator's idle session.
+            admin = native([shutil.which("sshd"), "-T", "-C",
+                            "user=ubuntu,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=22"])
+            effective = dict(line.split(" ", 1) for line in admin.stdout.splitlines())
+            self.assertEqual(effective["clientaliveinterval"], "0")
+            self.assertEqual(effective["clientalivecountmax"], "3")
+            self.assertNotEqual(effective["forcecommand"], "/usr/sbin/nologin")
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -274,6 +287,85 @@ class TransactionTests(unittest.TestCase):
         verify.assert_called_once()
         self.write.assert_not_called()
         runner.assert_not_called()
+
+    def test_refresh_updates_only_policy_and_preserves_all_registered_devices(self):
+        rows = registry(bundle(), bundle("phone-two", remote_port=18770, bulk_remote_port=18771, local_port=19001))
+        rows["workers"]["phone-one"]["state"] = "active"
+        for path, raw in ssh.registry_changes(rows).items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        old = ssh.DROPIN_PATH.read_bytes().replace(b"    ClientAliveInterval 15\n    ClientAliveCountMax 2\n", b"")
+        ssh.DROPIN_PATH.write_bytes(old)
+        registry_before = ssh.CONFIG_PATH.read_bytes()
+        keys_before = (ssh.HOME_PATH / ".ssh/authorized_keys").read_bytes()
+        runner = Mock()
+        with patch.object(ssh, "verify_effective_ssh") as verify, patch.object(ssh, "ensure_account") as account:
+            result = ssh.refresh(args(), runner=runner)
+            again = ssh.refresh(args(), runner=runner)
+        self.assertTrue(result["changed"])
+        self.assertFalse(again["changed"])
+        self.assertEqual(ssh.CONFIG_PATH.read_bytes(), registry_before)
+        self.assertEqual((ssh.HOME_PATH / ".ssh/authorized_keys").read_bytes(), keys_before)
+        self.assertEqual(ssh.read_registry(), rows)
+        self.assertEqual(self.write.call_count, 1)
+        self.assertEqual(self.write.call_args.args[0], ssh.DROPIN_PATH)
+        self.assertEqual(verify.call_count, 2)
+        runner.assert_called_once_with(["systemctl", "reload", "ssh.service"])
+        account.assert_not_called()
+
+    def test_refresh_missing_registry_is_a_noop_and_unknown_worker_is_refused(self):
+        runner = Mock()
+        result = ssh.refresh(args(), runner=runner)
+        self.assertEqual(result["state"], "not_configured")
+        self.assertFalse(result["changed"])
+        self.assertFalse(ssh.CONFIG_PATH.exists())
+        ssh.CONFIG_PATH.write_bytes(ssh.dump_json(registry(bundle())))
+        with self.assertRaises(ValueError):
+            ssh.refresh(args(worker_id="unknown"), runner=runner)
+        runner.assert_not_called()
+        self.write.assert_not_called()
+
+    def test_refresh_dry_run_never_writes_or_reloads_and_rejects_foreign_policy(self):
+        ssh.CONFIG_PATH.write_bytes(ssh.dump_json(registry(bundle())))
+        runner = Mock()
+        result = ssh.refresh(args(dry_run=True), runner=runner)
+        self.assertTrue(result["dry_run"])
+        self.assertFalse(result["changed"])
+        ssh.DROPIN_PATH.write_text("# Owned by the administrator\n")
+        with self.assertRaises(RuntimeError):
+            ssh.refresh(args(dry_run=True), runner=runner)
+        runner.assert_not_called()
+        self.write.assert_not_called()
+
+    def test_refresh_rejected_policy_restores_previous_bytes_without_reload(self):
+        rows = registry(bundle())
+        for path, raw in ssh.registry_changes(rows).items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        previous = ssh.DROPIN_PATH.read_bytes().replace(b"    ClientAliveInterval 15\n    ClientAliveCountMax 2\n", b"")
+        ssh.DROPIN_PATH.write_bytes(previous)
+        runner = Mock()
+        with patch.object(ssh, "verify_effective_ssh", side_effect=RuntimeError("policy not applied")):
+            with self.assertRaises(RuntimeError):
+                ssh.refresh(args(), runner=runner)
+        self.assertEqual(ssh.DROPIN_PATH.read_bytes(), previous)
+        self.assertEqual(ssh.read_registry(), rows)
+        runner.assert_not_called()
+
+    def test_refresh_reload_failure_restores_previous_managed_configuration(self):
+        rows = registry(bundle())
+        for path, raw in ssh.registry_changes(rows).items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        previous = ssh.DROPIN_PATH.read_bytes().replace(b"    ClientAliveInterval 15\n    ClientAliveCountMax 2\n", b"")
+        ssh.DROPIN_PATH.write_bytes(previous)
+        runner = Mock(side_effect=RuntimeError("reload failed"))
+        with patch.object(ssh, "verify_effective_ssh"):
+            with self.assertRaises(RuntimeError):
+                ssh.refresh(args(), runner=runner)
+        self.assertEqual(ssh.DROPIN_PATH.read_bytes(), previous)
+        self.assertEqual(ssh.read_registry(), rows)
+        runner.assert_called_once_with(["systemctl", "reload", "ssh.service"])
 
     def test_foreign_dropin_is_refused_before_account_creation(self):
         ssh.DROPIN_PATH.write_text("# Administrator-owned configuration\n")

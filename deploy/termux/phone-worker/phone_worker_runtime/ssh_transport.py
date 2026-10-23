@@ -12,8 +12,10 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
+import random
 import re
 import shlex
 import shutil
@@ -32,6 +34,13 @@ MARKER = "Managed by Osaka Phone SSH v1."
 WORKER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\Z")
 SECRET_RE = re.compile(r"token|password|secret|authorization|cookie|credential|identity_file|known_hosts", re.I)
 MAX_JSON = 512 * 1024
+# Both masters share a source IP with administrative SSH clients. Leave room
+# below UFW's six connections per 30 seconds, including at window boundaries.
+START_WINDOW_SECONDS = 35
+START_WINDOW_LIMIT = 4
+RETRY_BASE_SECONDS = 10
+RETRY_MAX_SECONDS = 60
+HEALTHY_RESET_SECONDS = 30
 
 
 def read_env(path):
@@ -375,6 +384,74 @@ def connection_snapshot():
         return {"mode": "ssh", "state": "not_configured", "last_error": type(exc).__name__ + ": estado SSH indisponível"}
 
 
+def retry_failure(record, now, *, force=False):
+    """Count a failed master once; a local control socket is not recovery."""
+    pid = record.get("pid")
+    if not force and pid and record.get("failed_pid") == pid:
+        return
+    if pid:
+        record["failed_pid"] = pid
+    failures = int(record.get("failures") or 0) + 1
+    base = min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * 2 ** min(3, failures - 1))
+    delay = min(RETRY_MAX_SECONDS, base * random.uniform(1.0, 1.2))
+    record.update(failures=failures, next_retry=now + delay, state="reconnecting")
+
+
+def normalize_retry_clock(state, now):
+    """Rebase deadlines after a backward clock step without dropping admission."""
+    previous = state.get("retry_clock", state.get("updated_at", now))
+    if isinstance(previous, (int, float)) and now - previous > HEALTHY_RESET_SECONDS / 2:
+        # A phone/watchdog suspension does not prove continuous readiness.
+        state.pop("healthy_since", None)
+    shift = min(0, now - previous) if isinstance(previous, (int, float)) and math.isfinite(previous) else 0
+    state["ssh_starts"] = [min(now, stamp + shift) for stamp in state.get("ssh_starts", [])
+                           if isinstance(stamp, (int, float)) and math.isfinite(stamp)]
+    for record in state.get("channels", {}).values():
+        for key, ceiling in (("next_retry", now + RETRY_MAX_SECONDS), ("started_at", now)):
+            value = record.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                if key != "next_retry" or value != 0:
+                    record[key] = min(ceiling, value + shift)
+            elif value is not None:
+                record.pop(key, None)
+    for key in ("healthy_since",):
+        value = state.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            state[key] = min(now, value + shift)
+        elif value is not None:
+            state.pop(key, None)
+    state["retry_clock"] = now
+
+
+def admit_start(state, now):
+    """Reserve one shared SSH start while ensure holds the persistent lock."""
+    recent = [float(stamp) for stamp in state.get("ssh_starts", [])
+              if isinstance(stamp, (int, float)) and 0 <= now - stamp < START_WINDOW_SECONDS]
+    recent.sort()
+    state["ssh_starts"] = recent[-START_WINDOW_LIMIT:]
+    if len(recent) >= START_WINDOW_LIMIT:
+        return recent[-START_WINDOW_LIMIT] + START_WINDOW_SECONDS
+    state["ssh_starts"].append(now)
+    return now
+
+
+def failed_master_error(locations, channel, record, env):
+    """Read only the failed attempt's stderr, without leaking credentials."""
+    message = "SSH encerrou antes de confirmar o encaminhamento"
+    try:
+        log = locations["private"] / (channel + ".log")
+        private_file(log)
+        size = log.stat().st_size
+        offset = max(0, int(record.get("log_offset") or 0), size - 2048)
+        with log.open("rb") as stream:
+            stream.seek(offset)
+            lines = stream.read(2048).decode(errors="replace").splitlines()
+        message = next((line.strip() for line in reversed(lines) if line.strip()), message)
+    except (OSError, ValueError):
+        pass
+    return sanitize(channel + ": " + message, env)[:180]
+
+
 def ensure(env=None):
     env = environment(env)
     if str(env.get("PHONE_WORKER_TRANSPORT", "legacy")).lower() != "ssh":
@@ -391,12 +468,14 @@ def ensure(env=None):
             return public_snapshot(read_json(locations["state"]), env)
         state = read_json(locations["state"])
         now = time.time()
+        normalize_retry_clock(state, now)
         state.setdefault("generation", 0)
         state.setdefault("reconnect_count", 0)
         records = state.setdefault("channels", {})
         worker_port, body = local_worker(config, env)
         ready = bool(body and body.get("ok") and (body.get("tts_agent") or {}).get("ok"))
-        state.update(mode="ssh", worker_ready=ready, vps_ready=False, updated_at=now, last_error="")
+        state.update(mode="ssh", worker_ready=ready, vps_ready=False, updated_at=now)
+        state.setdefault("last_error", "")
         changed = False
         for channel in ("interactive", "bulk"):
             record = records.setdefault(channel, {})
@@ -408,22 +487,24 @@ def ensure(env=None):
                     if old_port != worker_port or record.get("reverse_ready") is False:
                         move_reverse(config, locations, channel, old_port, worker_port)
                         changed = True
-                    record.update(worker_port=worker_port, reverse_ready=True, failures=0, next_retry=0, state="connected")
+                    record.update(worker_port=worker_port, reverse_ready=True, state="connected")
                 elif owned_pid(record.get("pid"), control) and now - float(record.get("started_at") or 0) < 10:
                     record["state"] = "connecting"
                 else:
                     # Terminate only the exact SSH process recorded for our
                     # private control path. Never pkill, kill a worker or music.
                     if owned_pid(record.get("pid"), control):
-                        os.kill(int(record["pid"]), signal.SIGTERM)
+                        if record.get("failed_pid") != record.get("pid"):
+                            os.kill(int(record["pid"]), signal.SIGTERM)
+                            retry_failure(record, now)
+                            state["last_error"] = failed_master_error(locations, channel, record, env)
                         record["state"] = "reconnecting"
-                        record["next_retry"] = now + 1
                     elif record.get("pid") and record.get("failed_pid") != record["pid"]:
-                        record["failed_pid"] = record["pid"]
-                        record["failures"] = int(record.get("failures") or 0) + 1
-                        record["next_retry"] = now + min(5, 2 ** min(3, record["failures"] - 1))
-                        record["state"] = "reconnecting"
-                    if now >= float(record.get("next_retry") or 0):
+                        retry_failure(record, now)
+                        state["last_error"] = failed_master_error(locations, channel, record, env)
+                    retry_at = record.get("next_retry")
+                    if (not owned_pid(record.get("pid"), control)
+                            and (retry_at in (None, 0) or now >= float(retry_at))):
                         if control.exists():
                             # A control socket is removed only after the exact
                             # master check failed and its owned process is dead.
@@ -434,23 +515,35 @@ def ensure(env=None):
                         private_file(log, must_exist=False)
                         if log.exists() and log.stat().st_size > 256000:
                             atomic_write(log, log.read_bytes()[-64000:])
-                        with log.open("ab") as errors:
-                            os.chmod(log, 0o600)
-                            process = subprocess.Popen(master_command(config, locations, channel, worker_port),
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors,
-                                start_new_session=True, close_fds=True)
-                        if record.get("started_at"):
-                            state["reconnect_count"] += 1
-                        record.update(pid=process.pid, started_at=now, worker_port=worker_port,
-                                      reverse_ready=None, state="connecting", next_retry=0)
-                        changed = True
+                        command = master_command(config, locations, channel, worker_port)
+                        # Health/control probes can take seconds. Budget the
+                        # actual start time, not the beginning of this ensure.
+                        start_now = time.time()
+                        retry_at = admit_start(state, start_now)
+                        if retry_at > start_now:
+                            record.update(state="reconnecting", next_retry=retry_at)
+                        else:
+                            # Reserve on disk before Popen: separate ensure calls,
+                            # crashes and explicit reconnect cannot bypass it.
+                            atomic_write(locations["state"], json_bytes(state))
+                            with log.open("ab") as errors:
+                                os.chmod(log, 0o600)
+                                log_offset = errors.tell()
+                                process = subprocess.Popen(command,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors,
+                                    start_new_session=True, close_fds=True)
+                            if "started_at" in record:
+                                state["reconnect_count"] += 1
+                            record.update(pid=process.pid, started_at=start_now, worker_port=worker_port,
+                                          reverse_ready=None, state="connecting", next_retry=0,
+                                          log_offset=log_offset)
+                            changed = True
                 state[channel + "_state"] = record.get("state", "reconnecting")
             except Exception as exc:
-                record.update(state="reconnecting", next_retry=now + 5)
+                retry_failure(record, now, force=True)
+                record["state"] = "reconnecting"
                 state[channel + "_state"] = "reconnecting"
                 state["last_error"] = sanitize(type(exc).__name__ + ": " + str(exc), env)[:180]
-        if changed:
-            state["generation"] += 1
         if state.get("bulk_state") == "connected":
             try:
                 vps, rtt = vps_ping(config, env)
@@ -460,6 +553,17 @@ def ensure(env=None):
         else:
             state["rtt_ms"] = None
         masters_ok = all(state.get(channel + "_state") == "connected" for channel in ("interactive", "bulk"))
+        if masters_ok and state["vps_ready"]:
+            healthy_since = state.setdefault("healthy_since", now)
+            if now - healthy_since >= HEALTHY_RESET_SECONDS:
+                for record in records.values():
+                    record.update(failures=0, next_retry=0)
+                    record.pop("failed_pid", None)
+                state["last_error"] = ""
+        else:
+            state.pop("healthy_since", None)
+        if changed:
+            state["generation"] += 1
         state["state"] = ("connected" if ready else "worker_unavailable") if masters_ok and state["vps_ready"] else "reconnecting"
         state["updated_at"] = time.time()
         atomic_write(locations["state"], json_bytes(state))

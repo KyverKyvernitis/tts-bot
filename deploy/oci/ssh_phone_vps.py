@@ -210,6 +210,10 @@ def ssh_config(registry):
             "    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n"
             "    PermitEmptyPasswords no\n    AllowTcpForwarding yes\n"
             "    AllowStreamLocalForwarding no\n    GatewayPorts no\n"
+            # Reclaim reverse listeners held by a phone that lost its network.
+            # This Match applies only to the dedicated forwarding account;
+            # administrator sessions retain their existing keepalive policy.
+            "    ClientAliveInterval 15\n    ClientAliveCountMax 2\n"
             "    PermitListen " + " ".join(listens) + "\n"
             "    PermitOpen " + " ".join(opens) + "\n"
             "    PermitTTY no\n    X11Forwarding no\n    AllowAgentForwarding no\n"
@@ -247,6 +251,7 @@ def verify_effective_ssh(registry, *, runner=run, sshd="/usr/sbin/sshd"):
                     "permittty": "no", "gatewayports": "no", "allowagentforwarding": "no",
                     "x11forwarding": "no", "forcecommand": "/usr/sbin/nologin",
                     "allowstreamlocalforwarding": "no", "permittunnel": "no", "maxsessions": "0",
+                    "clientaliveinterval": "15", "clientalivecountmax": "2",
                     "authorizedkeysfile": str(HOME_PATH / ".ssh/authorized_keys")}
         if any(values.get(k) != v for k, v in expected.items()):
             raise RuntimeError("sshd efetivo não aplicou as restrições; configuração restaurada")
@@ -388,6 +393,21 @@ def enroll(args, *, runner=run):
             "next": "Ative o transporte no Termux; depois execute activate na VPS para validar e ajustar a configuração do bot."}
 
 
+def refresh(args, *, runner=run):
+    """Reapply managed server policy without reenrolling keys or changing routes."""
+    registry = read_registry()
+    if not registry["workers"]:
+        return {"ok": True, "dry_run": args.dry_run, "changed": False,
+                "state": "not_configured", "worker_id": args.worker_id}
+    if args.worker_id not in registry["workers"]:
+        raise ValueError("worker não cadastrado; nenhuma configuração será alterada")
+    validate_registry_targets(registry)
+    changed = False if args.dry_run else commit_registry(registry, runner=runner)
+    return {"ok": True, "dry_run": args.dry_run, "changed": changed,
+            "worker_id": args.worker_id,
+            "note": "Política SSH gerenciada atualizada para novas conexões. Chaves, portas, .env e sessões existentes foram preservados."}
+
+
 def parse_env(raw):
     values = {}
     for line in raw.decode("utf-8").splitlines():
@@ -523,6 +543,8 @@ def execute(args):
         return prepare(args)
     if args.command == "enroll":
         return enroll(args)
+    if args.command == "refresh":
+        return refresh(args)
     if args.command == "status":
         row = read_registry()["workers"].get(args.worker_id)
         return {"ok": bool(row), "worker_id": args.worker_id, "state": (row or {}).get("state", "not_configured"),
@@ -534,7 +556,7 @@ def execute(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Osaka: instalação SSH privada e verificável para Phone Worker")
-    parser.add_argument("command", choices=("prepare", "enroll", "status", "activate", "rollback"))
+    parser.add_argument("command", choices=("prepare", "enroll", "refresh", "status", "activate", "rollback"))
     parser.add_argument("--worker-id", required=True)
     parser.add_argument("--host")
     parser.add_argument("--ssh-port", type=int, default=22)

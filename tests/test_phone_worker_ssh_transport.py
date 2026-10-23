@@ -321,13 +321,268 @@ class SSHTransportContracts(unittest.TestCase):
              mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
              mock.patch.object(self.module, "master_alive", side_effect=lambda c, p, name: name == "bulk"), \
              mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.random, "uniform", return_value=1), \
              mock.patch.object(self.module, "http_json", return_value=({"ok": True, "worker_id": "phone-test", "service": "osaka-phone-ssh"}, 80)), \
              mock.patch.object(self.module.subprocess, "Popen", side_effect=AssertionError("backoff not elapsed")), \
              mock.patch.object(self.module.os, "kill", side_effect=AssertionError("unowned process")):
             result = self.module.ensure(self.env)
         self.assertEqual(result["interactive_state"], "reconnecting")
-        self.assertEqual(self.state()["channels"]["interactive"]["next_retry"], 101)
+        self.assertEqual(self.state()["channels"]["interactive"]["next_retry"], 110)
         self.assertEqual(result["generation"], 3)
+
+    def test_long_outage_bounds_both_channels_and_keeps_pairing_and_workers(self):
+        clock = {"now": 100.0}
+        starts = []
+        before = {name: self.locations[name].read_bytes() for name in ("config", "identity", "known_hosts")}
+        env_before = self.env_path.read_bytes()
+        def spawn(args, **kwargs):
+            starts.append((clock["now"], "bulk" if "-L" in args else "interactive"))
+            return SimpleNamespace(pid=1000000 + len(starts))
+        with mock.patch.object(self.module.time, "time", side_effect=lambda: clock["now"]), \
+             mock.patch.object(self.module.random, "uniform", return_value=1.2), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.os, "kill", side_effect=AssertionError("must preserve worker/music")), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=spawn):
+            # Each invocation reloads the persistent state, as the watchdog does.
+            for seconds in range(0, 1801, 5):
+                clock["now"] = 100 + seconds
+                self.module.ensure(self.env)
+        self.assertEqual(starts[:2], [(100, "interactive"), (100, "bulk")])
+        self.assertGreater(len(starts), 20)
+        for endpoint, _ in starts:
+            self.assertLessEqual(sum(endpoint - 35 < at <= endpoint for at, _ in starts), 4)
+        for channel in ("interactive", "bulk"):
+            times = [at for at, name in starts if name == channel]
+            self.assertTrue(all(b - a >= 60 for a, b in zip(times[-5:], times[-4:])))
+        self.assertTrue(self.state()["worker_ready"])
+        self.assertFalse(self.state()["vps_ready"])
+        for name, raw in before.items():
+            self.assertEqual(self.locations[name].read_bytes(), raw)
+        self.assertEqual(self.env_path.read_bytes(), env_before)
+
+    def test_reconnect_does_not_reset_shared_budget_or_channel_deadline(self):
+        self.write_state({"updated_at": 120, "ssh_starts": [100, 100, 110, 110],
+                          "channels": {"interactive": {"next_retry": 125}}})
+        with mock.patch.object(self.module.time, "time", return_value=120), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=AssertionError("shared budget exhausted")):
+            self.module.reconnect(self.env)
+            self.assertEqual(self.state()["channels"]["interactive"]["next_retry"], 125)
+            self.module.ensure(self.env)
+        self.assertEqual(self.state()["ssh_starts"], [100, 100, 110, 110])
+        self.assertEqual(self.state()["channels"]["bulk"]["next_retry"], 135)
+        with mock.patch.object(self.module.time, "time", return_value=135), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=[SimpleNamespace(pid=1001), SimpleNamespace(pid=1002)]) as spawn:
+            self.module.ensure(self.env)
+        self.assertEqual(spawn.call_count, 2)
+
+    def test_start_reservation_survives_interrupted_ensure(self):
+        with mock.patch.object(self.module.time, "time", return_value=100), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=KeyboardInterrupt) as spawn:
+            for _ in range(4):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.module.ensure(self.env)
+            result = self.module.ensure(self.env)
+        self.assertEqual(spawn.call_count, 4)
+        self.assertEqual(self.state()["ssh_starts"], [100] * 4)
+        self.assertEqual(result["state"], "reconnecting")
+
+    def test_slow_health_checks_budget_actual_launch_times(self):
+        clock = {"now": 0}
+        starts = []
+        def worker(config, env):
+            if clock["now"] == 0:
+                clock["now"] = 7
+            return 8766, self.worker_body()
+        def spawn(args, **kwargs):
+            starts.append(clock["now"])
+            return SimpleNamespace(pid=1000000 + len(starts))
+        with mock.patch.object(self.module.time, "time", side_effect=lambda: clock["now"]), \
+             mock.patch.object(self.module, "local_worker", side_effect=worker), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=spawn):
+            self.module.ensure(self.env)
+            self.assertEqual(self.state()["channels"]["bulk"]["started_at"], 7)
+            # Admission remains global even if channel records are recreated.
+            for second in (10, 35):
+                clock["now"] = second
+                state = self.state()
+                state["channels"] = {}
+                self.write_state(state)
+                self.module.ensure(self.env)
+        self.assertEqual(starts, [7, 7, 10, 10])
+        for endpoint in starts:
+            self.assertLessEqual(sum(endpoint - 35 < at <= endpoint for at in starts), 4)
+
+    def test_failed_interactive_channel_preserves_working_bulk_and_vps(self):
+        self.write_state(self.connected_state())
+        clock = {"now": 100}
+        starts = []
+        def spawn(args, **kwargs):
+            self.assertNotIn("-L", args)
+            starts.append(clock["now"])
+            return SimpleNamespace(pid=1000000 + len(starts))
+        response = {"ok": True, "worker_id": "phone-test", "service": "osaka-phone-ssh"}
+        with mock.patch.object(self.module.time, "time", side_effect=lambda: clock["now"]), \
+             mock.patch.object(self.module.random, "uniform", return_value=1), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", side_effect=lambda c, p, name: name == "bulk"), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module, "http_json", return_value=(response, 1)), \
+             mock.patch.object(self.module, "run", side_effect=AssertionError("must preserve working bulk")), \
+             mock.patch.object(self.module.os, "kill", side_effect=AssertionError("must not signal worker/music")), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=spawn):
+            for second in range(100, 401, 5):
+                clock["now"] = second
+                result = self.module.ensure(self.env)
+                self.assertTrue(result["vps_ready"])
+                self.assertEqual(result["bulk_state"], "connected")
+        self.assertEqual(self.state()["channels"]["bulk"]["pid"], 511)
+        self.assertGreater(len(starts), 3)
+
+    def test_failed_attempt_does_not_reuse_stderr_from_an_older_process(self):
+        for channel in ("interactive", "bulk"):
+            self.module.atomic_write(self.locations["private"] / (channel + ".log"), "old failure must not be reused\n")
+        clock = {"now": 100}
+        with mock.patch.object(self.module.time, "time", side_effect=lambda: clock["now"]), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=[SimpleNamespace(pid=1001), SimpleNamespace(pid=1002)]):
+            self.module.ensure(self.env)
+            clock["now"] = 105
+            result = self.module.ensure(self.env)
+        self.assertIn("SSH encerrou", result["last_error"])
+        self.assertNotIn("old failure", result["last_error"])
+
+    def test_clock_reversal_preserves_budget_and_bounds_existing_deadlines(self):
+        self.write_state({"updated_at": 1000, "ssh_starts": [995] * 4,
+                          "channels": {"interactive": {"next_retry": 1005}}})
+        with mock.patch.object(self.module.time, "time", return_value=-100), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=AssertionError("must retain window")):
+            self.module.ensure(self.env)
+        state = self.state()
+        self.assertEqual(state["ssh_starts"], [-105] * 4)
+        self.assertEqual(state["channels"]["interactive"]["next_retry"], -95)
+        self.assertEqual(state["channels"]["bulk"]["next_retry"], -70)
+        with mock.patch.object(self.module.time, "time", return_value=-65), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=[SimpleNamespace(pid=1001), SimpleNamespace(pid=1002)]) as spawn:
+            self.module.ensure(self.env)
+        self.assertEqual(spawn.call_count, 2)
+
+    def test_legacy_future_deadline_cannot_block_recovery_indefinitely(self):
+        self.write_state({"channels": {"interactive": {"next_retry": 10 ** 20}}})
+        with mock.patch.object(self.module.time, "time", return_value=100), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.subprocess, "Popen", return_value=SimpleNamespace(pid=1001)) as spawn:
+            self.module.ensure(self.env)
+        self.assertEqual(spawn.call_count, 1)  # Only the other channel starts.
+        self.assertEqual(self.state()["channels"]["interactive"]["next_retry"], 160)
+
+    def test_failure_budget_resets_only_after_sustained_authenticated_readiness(self):
+        state = self.connected_state()
+        for record in state["channels"].values():
+            record["failures"] = 3
+        self.write_state(state)
+        clock = {"now": 100}
+        response = {"ok": True, "worker_id": "phone-test", "service": "osaka-phone-ssh"}
+        with mock.patch.object(self.module.time, "time", side_effect=lambda: clock["now"]), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=True), \
+             mock.patch.object(self.module, "http_json", return_value=(response, 1)) as probe, \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=AssertionError("must retain masters")):
+            for second in (100, 105, 110, 120, 130, 139, 140):
+                clock["now"] = second
+                probe.side_effect = OSError("temporary network failure") if second == 105 else None
+                self.module.ensure(self.env)
+                expected = 0 if second == 140 else 3
+                self.assertEqual(self.state()["channels"]["bulk"]["failures"], expected)
+
+    def test_watchdog_suspension_requires_new_readiness_samples(self):
+        state = self.connected_state()
+        state["healthy_since"] = 80
+        for record in state["channels"].values():
+            record["failures"] = 3
+        self.write_state(state)
+        clock = {"now": 200}
+        response = {"ok": True, "worker_id": "phone-test", "service": "osaka-phone-ssh"}
+        with mock.patch.object(self.module.time, "time", side_effect=lambda: clock["now"]), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=True), \
+             mock.patch.object(self.module, "http_json", return_value=(response, 1)):
+            for second in (200, 215, 230):
+                clock["now"] = second
+                self.module.ensure(self.env)
+                self.assertEqual(self.state()["channels"]["bulk"]["failures"], 0 if second == 230 else 3)
+
+    def test_failed_master_surfaces_sanitized_stderr_and_preserves_it_while_waiting(self):
+        clock = {"now": 100}
+        def spawn(args, **kwargs):
+            kwargs["stderr"].write(b"ssh: Connection refused Bearer CORE-SENTINEL PHONE-SENTINEL\n")
+            return SimpleNamespace(pid=1001 if "-L" in args else 1002)
+        with mock.patch.object(self.module.time, "time", side_effect=lambda: clock["now"]), \
+             mock.patch.object(self.module.random, "uniform", return_value=1), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=False), \
+             mock.patch.object(self.module, "owned_pid", return_value=False), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=spawn):
+            self.module.ensure(self.env)
+            clock["now"] = 105
+            result = self.module.ensure(self.env)
+            self.assertIn("Connection refused", result["last_error"])
+            self.assertNotIn("SENTINEL", json.dumps(result))
+            clock["now"] = 110
+            self.assertEqual(self.module.ensure(self.env)["last_error"], result["last_error"])
+
+    def test_unresponsive_api_does_not_interrupt_live_ssh_or_transfers(self):
+        self.write_state(self.connected_state())
+        clock = {"now": 100}
+        with mock.patch.object(self.module.time, "time", side_effect=lambda: clock["now"]), \
+             mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+             mock.patch.object(self.module, "master_alive", return_value=True), \
+             mock.patch.object(self.module, "http_json", side_effect=urllib.error.URLError("connection refused")), \
+             mock.patch.object(self.module, "run", side_effect=AssertionError("API failure must not interrupt SSH transfers")), \
+             mock.patch.object(self.module.os, "kill", side_effect=AssertionError("must not signal worker/music")), \
+             mock.patch.object(self.module.subprocess, "Popen", side_effect=AssertionError("must not duplicate live masters")):
+            for second in range(100, 701, 5):
+                clock["now"] = second
+                result = self.module.ensure(self.env)
+                self.assertEqual(result["state"], "reconnecting")
+                self.assertFalse(result["vps_ready"])
+
+    def test_api_errors_and_wrong_identity_do_not_recycle_live_ssh(self):
+        for error in (urllib.error.HTTPError("http://localhost", 503, "restarting", {}, None),
+                      ValueError("VPS não confirmou o ping autenticado")):
+            with self.subTest(error=type(error).__name__):
+                self.write_state(self.connected_state())
+                clock = {"now": 100}
+                with mock.patch.object(self.module.time, "time", side_effect=lambda: clock["now"]), \
+                     mock.patch.object(self.module, "local_worker", return_value=(8766, self.worker_body())), \
+                     mock.patch.object(self.module, "master_alive", return_value=True), \
+                     mock.patch.object(self.module, "http_json", side_effect=error), \
+                     mock.patch.object(self.module, "run", side_effect=AssertionError("API response proves SSH works")):
+                    for second in range(100, 701, 5):
+                        clock["now"] = second
+                        self.module.ensure(self.env)
 
     def test_local_worker_rejects_wrong_id_and_apk_before_using_fallback_port(self):
         replies = [({**self.worker_body(), "worker_id": "another-phone"}, 1),
