@@ -28,20 +28,26 @@ class _ArchiveThreadCancelled(RuntimeError):
 
 
 def _archive_attachment_matches(attachment: dict, *, filename: str, size_bytes: int) -> bool:
-    """Allow only Discord's observed ASCII-space replacement, plus exact size."""
-    if not isinstance(attachment, dict):
+    """Allow exact legacy names or the observed Discord substitutions only."""
+    if not isinstance(attachment, dict) or not isinstance(filename, str):
         return False
     try:
         size = int(attachment.get("size") or 0)
     except (TypeError, ValueError):
         return False
+    names = {filename, filename.replace(" ", "_"),
+             filename.replace("'", "").replace("&", "").replace(" ", "_")}
+    observed = attachment.get("filename")
     return (size_bytes > 0 and size == size_bytes
-            and attachment.get("filename") in {filename, filename.replace(" ", "_")})
+            and isinstance(observed, str) and observed in names)
 
 
-def _archive_find_attachment(attachments, *, filename: str, size_bytes: int) -> dict | None:
+def _archive_find_attachment(attachments, *, filename: str, size_bytes: int,
+                             aliases: tuple[str, ...] = ()) -> dict | None:
+    names = (filename, *aliases)
     matches = [attachment for attachment in attachments
-               if _archive_attachment_matches(attachment, filename=filename, size_bytes=size_bytes)]
+               if any(_archive_attachment_matches(attachment, filename=name, size_bytes=size_bytes)
+                      for name in names)]
     if len(matches) > 1:
         raise ValueError("mais de um anexo corresponde ao arquivo esperado")
     return matches[0] if matches else None
@@ -467,12 +473,15 @@ class ArchivePipelineMixin:
                 cover, budget = None, upload_audio_budget(forum.guild)
             segments = await self._archive_prepare_segments(audio, folder, duration=duration, audio_index=index, codec=codec, budget=budget)
             safe_title = _archive_audio_filename(str(item["track"].get("display_title") or item["track"].get("title") or "Música"), "")[:60]
+            legacy_filenames = {}
             for part in segments:
                 await self._archive_wait_stable_voice()
-                part["filename"] = _archive_audio_filename(
+                legacy_filenames[part["order"]] = _archive_audio_filename(
                     safe_title
                     + (f" · {part['order'] + 1:06d}" if len(segments) > 1 else "")
                     + "-" + part["sha256"][:12], part["path"].suffix)
+                # Wire names stay ASCII and independent of display-title normalization.
+                part["filename"] = f"audio-{part['order'] + 1:06d}-{part['sha256']}{part['path'].suffix.lower()}"
             emoji, source = item["emoji"], str(item["track"].get("display_source") or item["track"].get("source") or "Áudio")[:80]
             total = sum(part["duration"] for part in segments)
             first = segments[0]
@@ -507,7 +516,8 @@ class ArchivePipelineMixin:
                     await thread.edit(archived=False)
                 root_raw = await self.client.http.get_message(thread.id, message.id)
                 current = _archive_find_attachment(root_raw.get("attachments") or [],
-                                                   filename=first["filename"], size_bytes=first["size_bytes"])
+                                                   filename=first["filename"], size_bytes=first["size_bytes"],
+                                                   aliases=(legacy_filenames[first["order"]],))
                 if current is None:
                     await self._archive_wait_stable_voice()
                     files = ([self._archive_upload_file(cover, filename=cover.name)] if cover else []) + [self._archive_upload_file(first["path"], filename=first["filename"])]
@@ -516,9 +526,11 @@ class ArchivePipelineMixin:
                     finally:
                         for file in files:
                             file.close()
+                else:
+                    first["filename"] = current["filename"]
             confirmed = await self._archive_confirm_attachment(thread.id, message.id, filename=first["filename"], size_bytes=first["size_bytes"], bot_id=self.client.user.id)
             # Durable manifests describe the name Discord actually retained.
-            # A title containing spaces may have been stored with underscores.
+            # Existing title-based names may have been normalized by Discord.
             first["filename"] = confirmed["filename"]
             root_ref = {**item["pending_ref"], "attachment_id": int(confirmed["id"])}
             item["pending_ref"] = root_ref
@@ -536,8 +548,11 @@ class ArchivePipelineMixin:
                                          "message": candidate})
             for part in segments[1:]:
                 await self._archive_wait_stable_voice()
-                reused = _archive_find_attachment(reusable, filename=part["filename"], size_bytes=part["size_bytes"])
+                reused = _archive_find_attachment(reusable, filename=part["filename"], size_bytes=part["size_bytes"],
+                                                  aliases=(legacy_filenames[part["order"]],))
                 child = reused["message"] if reused is not None else None
+                if reused is not None:
+                    part["filename"] = reused["filename"]
                 if child is None:
                     file = self._archive_upload_file(part["path"], filename=part["filename"])
                     try:
