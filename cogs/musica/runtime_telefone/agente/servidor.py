@@ -99,7 +99,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.89"
+AGENT_VERSION = "0.3.90"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -193,10 +193,12 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             "profile": os.getenv("MUSIC_AGENT_AUDIO_OUTPUT_PROFILE", "balanced"),
             "fec": truthy(os.getenv("MUSIC_AGENT_DISCORD_OPUS_FEC"), True),
             "expected_packet_loss": env_float("MUSIC_AGENT_DISCORD_OPUS_EXPECTED_PACKET_LOSS", 0.15),
+            "opus_direct": os.getenv("MUSIC_AGENT_OPUS_DIRECT", "off"),
         })
         self.audio_output_default_profile = output_defaults["profile"]
         self.discord_opus_fec = output_defaults["fec"]
         self.discord_opus_expected_packet_loss = output_defaults["expected_packet_loss"]
+        self.audio_output_default_opus_direct = output_defaults["opus_direct"]
         self.default_volume_percent = max(0, min(150, env_int("MUSIC_AGENT_DEFAULT_VOLUME_PERCENT", 55)))
         self.duck_volume_percent = max(0, min(100, env_int("MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT", 8)))
         # PCMVolumeTransformer lets the worker-owned direct voice path duck TTS and restore volume.
@@ -1026,7 +1028,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
     @staticmethod
     def _audio_output_runtime(player: Any = None) -> dict[str, Any]:
-        encoder = getattr(player, "encoder", None)
+        encoder = getattr(getattr(player, "source", None), "output_encoder", None) or getattr(player, "encoder", None)
         opus = getattr(discord, "opus", None)
         libopus_version = None
         try:
@@ -1070,6 +1072,25 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         metrics = self._audio_source_telemetry(source) if source is not None else {}
         track = getattr(st, "current", None)
         effects = st.effect_signature() if st is not None else (0, 0, 0)
+        passthrough = opus_passthrough_eligibility(
+            self, track, volume_percent=getattr(st, "volume_percent", self.default_volume_percent),
+            effects=effects, state=st, output_bitrate_kbps=requested["bitrate_kbps"],
+        )
+        direct_status = getattr(source, "opus_direct_status", None)
+        if active and callable(direct_status):
+            live = direct_status()
+            passthrough.update(live)
+            if live.get("copy_active"):
+                passthrough["reasons"] = []
+                passthrough["packet_validation_required"] = False
+                # These are original source packets. Fallback encoder controls
+                # cannot retroactively change their bitrate/FEC/protection.
+                applied = {**applied, "state": "copied", "output_mode": "opus_direct",
+                           "bitrate_kbps": None, "fec": None, "expected_packet_loss": None}
+            else:
+                applied = {**applied, "output_mode": "pcm_encoded"}
+        elif active and requested.get("opus_direct") == "auto" and passthrough.get("candidate"):
+            passthrough["reason"] = "next_track_required"
         return {
             "settings": public_output["settings"],
             "revision": int(getattr(st, "audio_output_revision", 0) or 0),
@@ -1082,10 +1103,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 "audio_frame_count", "audio_bytes", "source_stall_count", "partial_frame_count",
                 "source_deadline_overruns", "mix_limited_frames",
             ) if key in metrics},
-            "passthrough": opus_passthrough_eligibility(
-                self, track, volume_percent=getattr(st, "volume_percent", self.default_volume_percent),
-                effects=effects, force_pcm=bool(getattr(track, "archive_segments", None)),
-            ),
+            "passthrough": passthrough,
         }
 
     async def cmd_audio_output(self, body: dict[str, Any]) -> dict[str, Any]:

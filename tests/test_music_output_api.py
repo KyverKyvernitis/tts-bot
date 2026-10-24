@@ -41,7 +41,7 @@ def load_api():
                      safe_id=lambda x: int(x or 0), audio_output_capabilities=audio_output_capabilities,
                      audio_output_policy=audio_output_policy, opus_passthrough_eligibility=opus_passthrough_eligibility,
                      validate_audio_output_settings=validate_audio_output_settings,
-                     AGENT_VERSION='0.3.89', truthy=lambda x, default=False: bool(x))
+                     AGENT_VERSION='0.3.90', truthy=lambda x, default=False: bool(x))
     exec(compile(module, str(SERVER), 'exec'), namespace)
     return namespace['Agent'], discord
 
@@ -57,6 +57,7 @@ class OutputAPITests(unittest.TestCase):
         self.agent.states = {}
         self.agent.default_volume_percent = 55
         self.agent.audio_output_default_profile = 'balanced'
+        self.agent.audio_output_default_opus_direct = 'off'
         self.agent.log = Mock()
         self.agent._sync_audio_output = AsyncMock(return_value={'state': 'queued'})
         self.agent._voice_client_is_connected = lambda player: player.is_connected()
@@ -75,6 +76,7 @@ class OutputAPITests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertFalse(result['audio_output']['active'])
         self.assertEqual(result['audio_output']['requested']['profile'], 'balanced')
+        self.assertEqual(result['audio_output']['requested']['opus_direct'], 'off')
         self.assertEqual(self.agent.states, {})
         self.agent._sync_audio_output.assert_not_awaited()
 
@@ -88,6 +90,75 @@ class OutputAPITests(unittest.TestCase):
         self.assertEqual(result['audio_output']['requested']['bitrate_kbps'], 192)
         self.assertEqual(result['sync']['state'], 'queued')
         self.agent._sync_audio_output.assert_awaited_once_with(1, reason='audio_output_settings_changed')
+
+    def test_direct_mode_is_scoped_and_does_not_raise_volume_or_change_protection(self):
+        one = self.agent.get_state(1)
+        two = self.agent.get_state(2)
+        self.command(settings={'profile': 'quality_192', 'fec': True, 'expected_packet_loss': .15})
+        result = self.command(settings={'opus_direct': 'auto'})
+        self.assertEqual(result['version'], '0.3.90')
+        self.assertEqual(result['audio_output']['settings']['opus_direct'], 'auto')
+        self.assertEqual(result['audio_output']['requested']['opus_direct'], 'auto')
+        self.assertEqual(result['audio_output']['requested']['profile'], 'quality_192')
+        self.assertTrue(result['audio_output']['requested']['fec'])
+        self.assertEqual(result['audio_output']['requested']['expected_packet_loss'], .15)
+        self.assertEqual(one.volume_percent, 55)
+        self.assertEqual(two.audio_output_settings, {})
+        self.assertIn('volume_requires_pcm', result['audio_output']['passthrough']['reasons'])
+        self.assertFalse(result['audio_output']['passthrough']['candidate'])
+
+    def test_direct_reset_restores_off_but_preserves_volume(self):
+        self.command(settings={'opus_direct': 'auto'})
+        state = self.agent.states[1]
+        state.volume_percent = 100
+        result = self.command(reset=True)
+        self.assertEqual(result['audio_output']['requested']['opus_direct'], 'off')
+        self.assertEqual(result['audio_output']['settings'], {})
+        self.assertEqual(state.volume_percent, 100)
+
+    def test_copy_status_does_not_claim_fallback_encoder_controls_apply_to_original_packets(self):
+        state = self.agent.get_state(1)
+        state.current = AgentTrack(audio_codec='opus', audio_abr=128, audio_sample_rate=48000,
+                                   audio_channels=2)
+        state.voice_channel_id = 19
+        state.volume_percent = 100
+        state.audio_output_settings = {'opus_direct': 'auto', 'profile': 'quality_256'}
+        state.audio_output_applied = {'profile': 'quality_256', 'bitrate_kbps': 256, 'state': 'applied',
+                                     'fec': True, 'expected_packet_loss': .15, 'encoder_kind': 'hybrid_fallback'}
+        live = {'state': 'copy', 'copy_active': True, 'copied_packets': 12, 'encoded_packets': 0,
+                'validated_packets': 12, 'source_bitrate_kbps': 128,
+                'fallback_encoder': {'bitrate_kbps': 256, 'fec': True, 'expected_packet_loss': .15}}
+        source = SimpleNamespace(audio_telemetry=lambda: {}, opus_direct_status=lambda: dict(live))
+        state.player = SimpleNamespace(channel=SimpleNamespace(id=19, bitrate=256000), source=source,
+                                       is_connected=lambda: True, encoder=SimpleNamespace())
+        result = self.command()['audio_output']
+        self.assertEqual(result['applied']['state'], 'copied')
+        self.assertEqual(result['applied']['output_mode'], 'opus_direct')
+        for key in ('bitrate_kbps', 'fec', 'expected_packet_loss'):
+            self.assertIsNone(result['applied'][key])
+        self.assertEqual(result['passthrough']['fallback_encoder']['bitrate_kbps'], 256)
+        self.assertEqual(result['passthrough']['source_bitrate_kbps'], 128)
+        live.update(state='pcm_fallback', copy_active=False, encoded_packets=3)
+        fallback = self.command()['audio_output']
+        self.assertEqual(fallback['applied']['state'], 'applied')
+        self.assertEqual(fallback['applied']['output_mode'], 'pcm_encoded')
+        self.assertTrue(fallback['applied']['fec'])
+        self.assertEqual(fallback['applied']['bitrate_kbps'], 256)
+
+    def test_enabling_direct_on_an_ordinary_pcm_source_waits_for_next_track(self):
+        state = self.agent.get_state(1)
+        state.current = AgentTrack(audio_codec='opus', audio_abr=128, audio_sample_rate=48000,
+                                   audio_channels=2)
+        state.voice_channel_id = 19
+        state.volume_percent = 100
+        source = SimpleNamespace(audio_telemetry=lambda: {})
+        state.player = SimpleNamespace(channel=SimpleNamespace(id=19, bitrate=256000), source=source,
+                                       is_connected=lambda: True, encoder=SimpleNamespace())
+        result = self.command(settings={'opus_direct': 'auto'})['audio_output']
+        self.assertTrue(result['passthrough']['candidate'])
+        self.assertEqual(result['passthrough']['reason'], 'next_track_required')
+        self.assertIs(state.player.source, source)
+        self.assertEqual(state.volume_percent, 100)
 
     def test_same_settings_are_idempotent_and_reset_preserves_other_defaults(self):
         self.command(settings={'profile': 'quality_256', 'fec': False, 'expected_packet_loss': 0})
@@ -105,7 +176,8 @@ class OutputAPITests(unittest.TestCase):
         self.command(settings={'profile': 'quality_192'})
         state = self.agent.states[1]
         before = (dict(state.audio_output_settings), state.audio_output_revision)
-        for invalid in ({'stream_url': 'https://other'}, {'fec': 'false'}, {'expected_packet_loss': float('nan')}):
+        for invalid in ({'stream_url': 'https://other'}, {'fec': 'false'}, {'expected_packet_loss': float('nan')},
+                        {'opus_direct': True}, {'opus_direct': 'on'}):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 self.command(settings=invalid)
             self.assertEqual((state.audio_output_settings, state.audio_output_revision), before)
@@ -119,6 +191,7 @@ class OutputAPITests(unittest.TestCase):
         self.agent.executor_mode = 'archive'
         self.assertTrue(self.command()['ok'])
         self.assertFalse(self.command(settings={'profile': 'quality_256'})['ok'])
+        self.assertFalse(self.command(settings={'opus_direct': 'auto'})['ok'])
         self.assertFalse(self.command(reset=True)['ok'])
         self.assertEqual(self.agent.states, {})
 

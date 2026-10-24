@@ -31,7 +31,7 @@ def load_production_boundaries():
     with mock.patch.dict("sys.modules", {"discord": SimpleNamespace(AudioSource=AudioSource)}):
         spec.loader.exec_module(mixer)
     wanted = {"_discord_opus_bitrate_kbps", "_resolved_audio_output_policy", "_output_policy_signature", "_audio_output_voice_view",
-              "_sync_audio_output", "_play_music_source", "_play_direct_voice"}
+              "_sync_audio_output", "_play_music_source", "_play_direct_voice", "_build_ffmpeg_source"}
     source = ast.parse((RUNTIME / "reproducao.py").read_text())
     original = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "ReproducaoMixin")
     selected = [node for node in original.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in wanted]
@@ -41,7 +41,8 @@ def load_production_boundaries():
     namespace = {"SimpleNamespace": SimpleNamespace, "contextlib": contextlib, "time": time, "asyncio": asyncio,
                  "GuildMusicState": SimpleNamespace, "env_float": lambda key, default: default,
                  "safe_id": lambda value: int(value or 0), "short_text": lambda value, limit: str(value)[:limit],
-                 "AgentMixedAudioSource": mixer.AgentMixedAudioSource}
+                 "AgentMixedAudioSource": mixer.AgentMixedAudioSource,
+                 "AgentHybridOpusAudioSource": mixer.AgentHybridOpusAudioSource}
     exec(compile(module, str(RUNTIME / "reproducao.py"), "exec"), namespace)
     return namespace["Agent"], mixer
 
@@ -125,6 +126,77 @@ class OutputSyncTests(unittest.TestCase):
         self.assertGreater(self.st.updated_at, 0)
         self.assertEqual(self.source.quality_context["opus_bitrate_kbps"], 192)
         self.assertFalse(self.pcm.closed)
+
+    def _install_hybrid(self, packet=b'\xf8valid-boundary'):
+        self.pcm.last_opus_packet = packet
+        self.pcm.opus_direct_capable = True
+        self.encoder.encode = lambda frame, size: b'\xf8encoded-boundary'
+        self.hybrid = self.mixer.AgentHybridOpusAudioSource(
+            loop=self.loop, music_source=self.pcm, music_volume=1, persistent=True,
+            output_policy={**self.policy(), 'opus_direct': 'auto'},
+            output_encoder=self.encoder, telemetry_enabled=False)
+        self.addCleanup(self.hybrid.cleanup)
+        self.hybrid.quality_context = {}
+        self.voice.source = self.hybrid
+        self.voice.encoder = Encoder()  # must not control this stale encoder
+        return self.hybrid
+
+    def test_hybrid_sync_controls_its_own_encoder_and_keeps_copy_eligible(self):
+        source = self._install_hybrid()
+        self.agent._audio_output_policy = lambda *args: {**self.policy(), 'opus_direct': 'auto'}
+        self.encoder.calls.clear()
+        self.assertEqual(self.sync()['state'], 'queued')
+        self.assertEqual(self.encoder.calls, [])
+        self.assertEqual(source.read(), self.pcm.last_opus_packet)
+        self.assertEqual(self.encoder.calls[0], ('bitrate', 192))
+        self.assertEqual(self.voice.encoder.calls, [])
+        self.assertTrue(source.opus_direct_status()['copy_active'])
+
+    def test_hybrid_mode_off_is_applied_on_next_audio_read(self):
+        source = self._install_hybrid()
+        self.assertEqual(source.read(), self.pcm.last_opus_packet)
+        self.agent._audio_output_policy = lambda *args: {**self.policy(revision=2), 'opus_direct': 'off'}
+        self.assertEqual(self.sync()['state'], 'queued')
+        self.assertEqual(source.read(), b'\xf8encoded-boundary')
+        self.assertFalse(source.opus_direct_status()['copy_active'])
+        self.assertEqual(source.opus_direct_status()['reason'], 'disabled')
+
+    def test_hybrid_channel_reduction_checks_new_packet_budget_before_sending(self):
+        source = self._install_hybrid(packet=b'\xf8' + b'a' * 399)
+        self.assertEqual(source.read(), self.pcm.last_opus_packet)
+        self.agent._audio_output_policy = lambda *args: {**self.policy(bitrate=96), 'opus_direct': 'auto'}
+        self.sync()
+        self.assertEqual(source.read(), b'\xf8encoded-boundary')
+        self.assertEqual(source.opus_direct_status()['reason'], 'packet_bitrate_limit')
+
+    def test_hybrid_play_uses_opus_only_and_preserves_owned_encoder(self):
+        source = self._install_hybrid()
+        played = []
+        self.voice.play = lambda source, **kwargs: played.append((source, kwargs))
+        policy = {**self.policy(), 'opus_direct': 'auto'}
+        self.agent._play_music_source(self.voice, source, after=None, opus_bitrate_kbps=192,
+                                      output_policy=policy)
+        self.assertIs(self.voice.encoder, source.output_encoder)
+        self.assertEqual(played, [(source, {'after': None})])
+        self.assertEqual(self.voice._music_audio_output_applied['encoder_kind'], 'hybrid_fallback')
+
+    def test_reused_hybrid_tightens_copy_limit_before_new_track_read(self):
+        source = self._install_hybrid(packet=b'\xf8' + b'a' * 399)
+        self.assertEqual(source.read(), self.pcm.last_opus_packet)
+        self.agent.direct_pcm_volume_enabled = True
+        self.agent.default_volume_percent = 55
+        self.agent._loop = self.loop
+        self.agent._ffmpeg_before_options_for_offset = lambda *args: ''
+        self.agent._ffmpeg_options_for_source = lambda *args, **kwargs: ('', 'native_48k')
+        replacement = PCM()
+        replacement.last_opus_packet = self.pcm.last_opus_packet
+        replacement.opus_direct_capable = True
+        result = self.agent._build_ffmpeg_source(
+            'unused', volume_percent=100, reuse_mixer=source, pcm_source=replacement,
+            output_policy={**self.policy(bitrate=96), 'opus_direct': 'auto'})
+        self.assertIs(result, source)
+        self.assertEqual(source.read(), b'\xf8encoded-boundary')
+        self.assertEqual(source.opus_direct_status()['reason'], 'packet_bitrate_limit')
 
     def test_channel_and_profile_changed_during_pcm_prepare_apply_to_initial_play(self):
         self._exercise_startup_policy_change(during_prepare=True)

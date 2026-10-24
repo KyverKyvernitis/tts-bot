@@ -113,6 +113,7 @@ def parser() -> argparse.ArgumentParser:
         ("status", "consulta perfil solicitado, encoder aplicado e capacidades"),
         ("profile", "seleciona um perfil de saída para este servidor"),
         ("protection", "ajusta FEC e perda esperada para uma comparação controlada"),
+        ("direct", "habilita a tentativa de Opus direto ou mantém PCM neste servidor"),
         ("reset", "remove os ajustes de teste deste servidor e restaura os defaults instalados"),
     ):
         action = actions.add_parser(name, help=help_text)
@@ -123,6 +124,8 @@ def parser() -> argparse.ArgumentParser:
             action.add_argument("--fec", required=True, choices=("on", "off"))
             action.add_argument("--loss", required=True, type=loss_fraction,
                                 help="fração esperada de perda; 0.05 significa 5%%")
+        elif name == "direct":
+            action.add_argument("--mode", required=True, choices=("auto", "off"))
     return result
 
 
@@ -132,6 +135,8 @@ def command_body(args: argparse.Namespace) -> dict:
         body["settings"] = {"profile": args.profile}
     elif args.action == "protection":
         body["settings"] = {"fec": args.fec == "on", "expected_packet_loss": args.loss}
+    elif args.action == "direct":
+        body["settings"] = {"opus_direct": args.mode}
     elif args.action == "reset":
         body["reset"] = True
     return body
@@ -172,7 +177,7 @@ def request_command(body: dict, values: dict[str, str], *, opener=None) -> dict:
         with local.open(request, timeout=TIMEOUT_SECONDS) as response:
             status = getattr(response, "status", 200)
             if status != 200:
-                raise HelperError(f"HTTP {int(status)}: confira a versão 0.3.89 ou mais nova e o estado do agente.")
+                raise HelperError(f"HTTP {int(status)}: confira a versão 0.3.90 ou mais nova e o estado do agente.")
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
         raise HelperError(f"HTTP {error.code}: confira o agente atualizado e o token já instalado.") from None
@@ -216,6 +221,15 @@ QUALITY_KEYS = frozenset({
     "passthrough_default", "unsupported_controls", "error_type", "applied_at", "encoder_kind",
     "encoder_supported", "unsupported", "capabilities", "requested_profile", "fec_applied",
     "expected_packet_loss_applied",
+    "opus_direct", "opus_direct_modes", "opus_direct_default", "output_mode",
+    "copied_packets", "encoded_packets", "latched", "packet_duration_ms", "source_bitrate_kbps",
+    "preskip_samples", "trimmed_tail_samples", "packet_validation_required", "candidate",
+    "validated_packets", "fallback_encoder", "copy_active", "copy_supported", "required_packet_duration_ms",
+    "source", "copied_bytes", "fallback_latched", "copy_packet_limit_bytes", "copy_fec",
+    "sample_rate", "input_sample_rate", "pre_skip", "output_gain", "mapping_family",
+    "input_sample_rate_hz", "pre_skip_samples", "channel_mapping", "output_gain_q8",
+    "end_granule_samples", "ogg_pages", "audio_packets", "trim_mode", "tail_padding_samples",
+    "raw_duration_samples", "decoded_samples",
 })
 
 

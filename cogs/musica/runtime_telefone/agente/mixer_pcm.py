@@ -701,3 +701,303 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                 # O fechamento da voz interrompeu a fala. Nunca anuncie um
                 # overlay incompleto como reprodução concluída com sucesso.
                 self._future_exception(future, RuntimeError("TTS interrompido: sessão de voz encerrada"))
+
+
+class AgentHybridOpusAudioSource(AgentMixedAudioSource):
+    """Mantém o mixer, copiando somente pacotes Opus verificados e intactos.
+
+    A interface para o Discord é sempre Opus. Assim uma entrada de TTS não
+    exige trocar AudioPlayer, SSRC ou a interpretação dos bytes em voo. O
+    source musical fornece PCM e o pacote que originou exatamente esse frame;
+    seu decoder permanece aquecido, inclusive enquanto copiamos o pacote.
+
+    A primeira necessidade de processamento torna o caminho PCM permanente
+    até a próxima faixa. Trocar de volta entre streams Opus independentes no
+    meio de uma faixa pode causar transientes no decoder remoto. Esta classe
+    garante frames/pacotes contínuos, não igualdade perceptiva nessa mudança.
+    """
+
+    def __init__(self, *, output_policy: dict[str, Any], output_encoder: Any = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._opus_policy: dict[str, Any] = {}
+        self._opus_encoder_settings: dict[str, Any] = {}
+        self._opus_encoder_state = "applied"
+        self._opus_generation = 0
+        self._opus_latched = False
+        self._opus_reason = ""
+        self._opus_mode = "ready"
+        self._opus_copied_packets = 0
+        self._opus_copied_bytes = 0
+        self._opus_encoded_packets = 0
+        self._opus_input_pcm = b""
+        self._opus_input_source: Any = None
+        self.output_encoder = output_encoder
+        try:
+            if self.output_encoder is None:
+                self.output_encoder = discord.opus.Encoder(
+                    application="audio", bitrate=int(output_policy.get("bitrate_kbps", 160)),
+                    fec=bool(output_policy.get("fec", True)),
+                    expected_packet_loss=float(output_policy.get("expected_packet_loss", 0.15)),
+                    bandwidth="full", signal_type="music",
+                )
+            self.set_output_policy(output_policy)
+        except BaseException:
+            self.cleanup()
+            raise
+        if abs(self.normal_music_volume - 1.0) > 0.000001:
+            self._latch_opus_pcm("volume_requires_pcm")
+        elif self.bassboost_level:
+            self._latch_opus_pcm("effects_require_pcm")
+
+    def is_opus(self) -> bool:
+        return True
+
+    @staticmethod
+    def _opus_packet_is_20ms(packet: bytes) -> bool:
+        # Full framing/native decoding is done upstream. Recheck the TOC of
+        # every emitted packet here; a first packet does not validate a stream.
+        if not isinstance(packet, bytes) or not 1 <= len(packet) <= 1275:
+            return False
+        toc = packet[0]
+        if toc & 0x80:
+            samples = 120 << ((toc >> 3) & 3)
+        elif (toc & 0x60) == 0x60:
+            samples = 960 if toc & 0x08 else 480
+        else:
+            samples = (480, 960, 1920, 2880)[(toc >> 3) & 3]
+        code = toc & 3
+        count = 1 if code == 0 else 2
+        if code == 3:
+            if len(packet) < 2:
+                return False
+            count = packet[1] & 0x3F
+        return count > 0 and samples * count == 960
+
+    def _latch_opus_pcm(self, reason: str) -> None:
+        if not self._opus_latched:
+            self._opus_latched = True
+            self._opus_reason = reason
+        self._opus_mode = "pcm_fallback"
+
+    def set_output_policy(self, policy: dict[str, Any], *, apply_encoder: bool = True,
+                          applied_encoder: dict[str, Any] | None = None) -> None:
+        """Atualiza na thread de áudio, separando política de CTLs confirmados.
+
+        Com apply=False, a política muda a elegibilidade da cópia sem inventar
+        parâmetros aplicados ao encoder. O chamador pode fornecer os valores
+        realmente aplicados, inclusive None para controles desconhecidos.
+        """
+        bitrate = max(16, min(512, int(policy.get("bitrate_kbps", 160))))
+        mode = policy.get("opus_direct", "auto")
+        if mode not in {"auto", "off"}:
+            raise ValueError("opus_direct deve ser auto ou off")
+        fec = policy.get("fec", True)
+        loss = float(policy.get("expected_packet_loss", 0.15))
+        if not isinstance(fec, bool) or not math.isfinite(loss) or not 0 <= loss <= 1:
+            raise ValueError("proteção Opus inválida")
+        with self._lock:
+            if self._closed:
+                return
+            applied_bitrate = bitrate
+            if apply_encoder:
+                encoder = self.output_encoder
+                chosen = encoder.set_bitrate(bitrate)
+                if chosen is not None:
+                    applied_bitrate = int(chosen)
+                encoder.set_fec(fec)
+                encoder.set_expected_packet_loss_percent(loss)
+                encoder.set_signal_type("music")
+                encoder.set_bandwidth("full")
+            self._opus_policy = {**policy, "bitrate_kbps": bitrate, "opus_direct": mode,
+                                 "fec": fec, "expected_packet_loss": loss}
+            if apply_encoder:
+                self._opus_encoder_state = "applied"
+                self._opus_encoder_settings = {
+                    "bitrate_kbps": applied_bitrate, "fec": fec,
+                    "expected_packet_loss": loss,
+                }
+            elif applied_encoder is not None:
+                state = applied_encoder.get("state")
+                if state in {"applied", "partial", "unsupported"}:
+                    self._opus_encoder_state = state
+                for key in ("bitrate_kbps", "fec", "expected_packet_loss"):
+                    if key in applied_encoder:
+                        self._opus_encoder_settings[key] = applied_encoder[key]
+            if mode == "off":
+                self._latch_opus_pcm("disabled")
+
+    def _read_source(self, source: discord.AudioSource) -> bytes:
+        frame = super()._read_source(source)
+        self._opus_input_source = source
+        self._opus_input_pcm = frame
+        return frame
+
+    def set_music_volume(self, volume: float) -> None:
+        with self._lock:
+            if abs(float(volume) - 1.0) > 0.000001:
+                self._latch_opus_pcm("volume_requires_pcm")
+            super().set_music_volume(volume)
+
+    def set_bassboost_level(self, level: int) -> None:
+        with self._lock:
+            if int(level or 0) > 0:
+                self._latch_opus_pcm("effects_require_pcm")
+            super().set_bassboost_level(level)
+
+    def set_music_paused(self, paused: bool) -> None:
+        with self._lock:
+            if paused:
+                self._latch_opus_pcm("music_paused")
+            super().set_music_paused(paused)
+
+    def reserve_tts(self) -> None:
+        with self._lock:
+            self._latch_opus_pcm("tts_reservation")
+            super().reserve_tts()
+
+    def add_tts(self, source: discord.AudioSource, *, volume: float = 1.0) -> asyncio.Future:
+        with self._lock:
+            self._latch_opus_pcm("tts_overlay")
+            return super().add_tts(source, volume=volume)
+
+    def stop_music(self) -> None:
+        with self._lock:
+            self._latch_opus_pcm("music_stopped")
+            super().stop_music()
+
+    def replace_music_source(self, source: discord.AudioSource, *, volume: float,
+                             on_music_end: Any, bassboost: bool | None = None,
+                             bassboost_level: int | None = None) -> None:
+        with self._lock:
+            super().replace_music_source(
+                source, volume=volume, on_music_end=on_music_end,
+                bassboost=bassboost, bassboost_level=bassboost_level,
+            )
+            self._opus_generation += 1
+            self._opus_latched = False
+            self._opus_reason = ""
+            self._opus_mode = "ready"
+            self._opus_copied_packets = self._opus_encoded_packets = 0
+            self._opus_copied_bytes = 0
+            self._opus_input_pcm = b""
+            self._opus_input_source = None
+            if self._opus_policy.get("opus_direct", "auto") != "auto":
+                self._latch_opus_pcm("disabled")
+            elif self._overlays or self._tts_reservations:
+                self._latch_opus_pcm("tts_pending")
+            elif abs(self.normal_music_volume - 1.0) > 0.000001:
+                self._latch_opus_pcm("volume_requires_pcm")
+            elif self.bassboost_level:
+                self._latch_opus_pcm("effects_require_pcm")
+
+    def read(self) -> bytes:
+        generation = self._opus_generation
+        self._opus_input_pcm = b""
+        self._opus_input_source = None
+        frame = super().read()
+        if not frame:
+            return b""
+        with self._lock:
+            if self._closed:
+                return b""
+            if generation != self._opus_generation:
+                # Never forward a packet/PCM from a source replaced during read.
+                frame = PCM_SILENCE
+                self.last_read_had_music = False
+                self.last_read_music_source = None
+                self._latch_opus_pcm("source_changed")
+            source = self.music_source
+            packet = getattr(source, "last_opus_packet", None)
+            if not self._opus_latched:
+                if self._overlays or self._tts_reservations:
+                    self._latch_opus_pcm("tts_pending")
+                elif self._music_paused:
+                    self._latch_opus_pcm("music_paused")
+                elif abs(self.normal_music_volume - 1.0) > 0.000001:
+                    self._latch_opus_pcm("volume_requires_pcm")
+                elif self.bassboost_level or self._bass_mix >= 0.003:
+                    self._latch_opus_pcm("effects_require_pcm")
+                elif (not self.last_read_had_music or source is not self._opus_input_source
+                      or self.last_read_music_source is not source):
+                    self._latch_opus_pcm("synthetic_silence")
+                elif getattr(source, "passthrough_reason", ""):
+                    source_reason = str(source.passthrough_reason)
+                    if not (0 < len(source_reason) <= 48 and all(
+                            char in "abcdefghijklmnopqrstuvwxyz0123456789_" for char in source_reason)):
+                        source_reason = "requires_pcm"
+                    self._latch_opus_pcm("source_" + source_reason)
+                elif not packet:
+                    self._latch_opus_pcm("source_requires_pcm")
+                elif not self._opus_packet_is_20ms(packet):
+                    self._latch_opus_pcm("packet_duration_invalid")
+                elif len(packet) > min(1275, int(self._opus_policy.get("bitrate_kbps", 160) * 2.5)):
+                    self._latch_opus_pcm("packet_bitrate_limit")
+                elif frame != self._opus_input_pcm:
+                    # Byte comparison is native, bounded to one 3840-byte frame;
+                    # never copy when gain/limiter/filter changed even one byte.
+                    self._latch_opus_pcm("pcm_processing")
+            if not self._opus_latched:
+                self._opus_mode = "copy"
+                self._opus_copied_packets += 1
+                self._opus_copied_bytes += len(packet)
+                self._update_opus_quality_context(copy=True)
+                return packet
+            packet = self.output_encoder.encode(frame, 960)
+            self._opus_encoded_packets += 1
+            self._update_opus_quality_context(copy=False)
+            return packet
+
+    def _update_opus_quality_context(self, *, copy: bool) -> None:
+        context = getattr(self, "quality_context", None)
+        if not isinstance(context, dict):
+            return
+        encoder_state = "applied"
+        if (self._opus_encoder_state in {"partial", "unsupported"}
+                or any(self._opus_encoder_settings.get(key) is None
+                       or self._opus_encoder_settings.get(key) != self._opus_policy.get(key)
+                       for key in ("bitrate_kbps", "fec", "expected_packet_loss"))):
+            encoder_state = "partial"
+        context.update(
+            output_mode="opus_direct" if copy else "pcm_encoded",
+            audio_output_state="copied" if copy else encoder_state,
+            opus_bitrate_kbps=None if copy else self._opus_encoder_settings.get("bitrate_kbps"),
+            opus_fec=None if copy else self._opus_encoder_settings.get("fec"),
+            opus_expected_packet_loss=None if copy else self._opus_encoder_settings.get("expected_packet_loss"),
+            opus_direct_fallback_reason=self._opus_reason,
+            opus_copied_packets=self._opus_copied_packets,
+            opus_encoded_packets=self._opus_encoded_packets,
+        )
+
+    def opus_direct_status(self) -> dict[str, Any]:
+        with self._lock:
+            metadata = getattr(self.music_source, "opus_metadata", {})
+            source = {}
+            if isinstance(metadata, dict):
+                for key in ("channels", "sample_rate", "input_sample_rate", "pre_skip",
+                            "output_gain", "mapping_family", "packet_duration_ms", "sample_rate_hz",
+                            "input_sample_rate_hz", "pre_skip_samples", "channel_mapping",
+                            "output_gain_q8", "end_granule_samples", "ogg_pages", "audio_packets",
+                            "tail_padding_samples", "raw_duration_samples", "decoded_samples"):
+                    value = metadata.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                        source[key] = value
+                if metadata.get("trim_mode") == "raw_packets_no_sample_exact_trim":
+                    source["trim_mode"] = metadata["trim_mode"]
+            copy = self._opus_mode == "copy" and not self._opus_latched
+            return {
+                "state": self._opus_mode,
+                "reason": self._opus_reason,
+                "eligible": copy,
+                "copy_active": copy,
+                "packet_validation_required": not copy,
+                "copied_packets": self._opus_copied_packets,
+                "copied_bytes": self._opus_copied_bytes,
+                "source_bitrate_kbps": round(self._opus_copied_bytes * 0.4 / self._opus_copied_packets, 2)
+                    if self._opus_copied_packets else None,
+                "encoded_packets": self._opus_encoded_packets,
+                "fallback_latched": self._opus_latched,
+                "copy_packet_limit_bytes": min(1275, int(self._opus_policy.get("bitrate_kbps", 160) * 2.5)),
+                "source": source,
+                "copy_fec": None,
+                "fallback_encoder": {**self._opus_encoder_settings, "state": self._opus_encoder_state},
+            }

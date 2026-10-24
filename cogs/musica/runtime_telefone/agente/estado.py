@@ -338,12 +338,12 @@ class GuildMusicState:
             "unsupported", "capabilities", "libopus_version", "discord_version",
             "requested_profile", "requested_kbps", "applied_kbps", "fec_applied",
             "expected_packet_loss_applied", "passthrough", "state",
-            "unsupported_controls", "error_type",
+            "unsupported_controls", "error_type", "opus_direct", "output_mode",
         }
         settings, applied = dict(self.audio_output_settings), dict(self.audio_output_applied)
         return {
             "settings": {key: value for key, value in settings.items()
-                         if key in {"profile", "fec", "expected_packet_loss"}},
+                         if key in {"profile", "fec", "expected_packet_loss", "opus_direct"}},
             "revision": int(self.audio_output_revision),
             "applied": {key: value for key, value in applied.items() if key in allowed},
         }

@@ -17,6 +17,7 @@ from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicSta
 def agent(**overrides):
     return SimpleNamespace(**{
         "audio_output_default_profile": "balanced",
+        "audio_output_default_opus_direct": "off",
         "discord_opus_fec": True,
         "discord_opus_expected_packet_loss": 0.15,
         "discord_opus_default_bitrate": 160,
@@ -81,6 +82,25 @@ class OutputPolicyTests(unittest.TestCase):
         self.assertEqual(result["expected_packet_loss"], 0.15)
         self.assertEqual((result["application"], result["bandwidth"], result["signal_type"]),
                          ("audio", "full", "music"))
+        self.assertEqual(result["opus_direct"], "off")
+
+    def test_direct_mode_is_per_guild_and_preserves_music_defaults(self):
+        current = agent()
+        enabled = GuildMusicState(1, audio_output_settings={"opus_direct": "auto"})
+        other = GuildMusicState(2)
+        one = audio_output_policy(current, voice(256), AgentTrack(audio_abr=128), enabled)
+        two = audio_output_policy(current, voice(256), AgentTrack(audio_abr=128), other)
+        self.assertEqual(one["opus_direct"], "auto")
+        self.assertEqual(two["opus_direct"], "off")
+        self.assertEqual(one["bitrate_kbps"], two["bitrate_kbps"])
+        self.assertTrue(one["fec"])
+        self.assertEqual(one["expected_packet_loss"], 0.15)
+        self.assertTrue(current.direct_pcm_volume_enabled)
+
+    def test_explicit_off_overrides_global_direct_default(self):
+        current = agent(audio_output_default_opus_direct="auto")
+        state = GuildMusicState(1, audio_output_settings={"opus_direct": "off"})
+        self.assertEqual(audio_output_policy(current, voice(256), state=state)["opus_direct"], "off")
 
     def test_guild_override_preserves_explicit_zero_and_false(self):
         state = GuildMusicState(1, audio_output_settings={"fec": False, "expected_packet_loss": 0},
@@ -138,6 +158,15 @@ class OutputSettingValidationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_audio_output_settings({"fec": value})
 
+    def test_direct_mode_requires_known_string_without_changing_other_settings(self):
+        for value in ("on", "true", "disabled", "", None, True, False, 0, 1, []):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_audio_output_settings({"opus_direct": value})
+        old = {"profile": "quality_192", "fec": True, "expected_packet_loss": 0.15}
+        expected = {**old, "opus_direct": "auto"}
+        self.assertEqual(validate_audio_output_settings({"opus_direct": " AUTO "}, old), expected)
+        self.assertNotIn("opus_direct", old)
+
     def test_packet_loss_rejects_nonfinite_and_out_of_range_values(self):
         for value in (math.nan, math.inf, -math.inf, -0.001, 1.001, True, False, "0.15", None):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -154,6 +183,8 @@ class OutputSettingValidationTests(unittest.TestCase):
         self.assertEqual(second["profile_target_kbps"]["quality_192"], 192)
         self.assertFalse(second["loss_is_measured"])
         self.assertTrue(second["pcm_mixer_preserved"])
+        self.assertEqual(second["opus_direct_modes"], ["off", "auto"])
+        self.assertEqual(second["opus_direct_default"], "off")
 
 
 class OutputStateTests(unittest.TestCase):
@@ -192,25 +223,28 @@ class OpusPassthroughDiagnosticTests(unittest.TestCase):
     def test_default_mixer_is_not_disabled_for_passthrough(self):
         result = opus_passthrough_eligibility(agent(), self.track(), volume_percent=55)
         self.assertFalse(result["eligible"])
-        for reason in ("disabled", "pcm_mixer_required", "volume_requires_pcm", "packet_duration_unverified"):
+        for reason in ("disabled", "volume_requires_pcm", "packet_validation_required"):
             self.assertIn(reason, result["reasons"])
+        self.assertNotIn("pcm_mixer_required", result["reasons"])
+        self.assertEqual(result["mode"], "off")
 
     def test_metadata_compatible_candidate_still_requires_packet_validation(self):
         result = opus_passthrough_eligibility(
-            agent(opus_passthrough_enabled=True, direct_pcm_volume_enabled=False),
+            agent(audio_output_default_opus_direct="auto"),
             self.track(), volume_percent=100)
         self.assertTrue(result["candidate"])
         self.assertFalse(result["eligible"])
-        self.assertEqual(result["reasons"], ["packet_duration_unverified"])
+        self.assertEqual(result["reasons"], ["packet_validation_required"])
+        self.assertEqual(result["mode"], "auto")
 
     def test_incompatible_source_or_requested_processing_is_reported(self):
-        current = agent(opus_passthrough_enabled=True, direct_pcm_volume_enabled=False)
+        current = agent(audio_output_default_opus_direct="auto")
         cases = (({"audio_codec": "aac"}, {}, "codec_not_opus"),
                  ({"audio_sample_rate": 44100}, {}, "sample_rate_not_48000"),
                  ({"audio_channels": 1}, {}, "channels_not_stereo"),
                  ({"is_live": True}, {}, "live_stream"),
                  ({"start_offset_seconds": 10}, {}, "seek_requires_pcm"),
-                 ({"archive_segments": [{"order": 0}]}, {}, "segmented_archive"),
+                 ({"archive_segments": [{"order": 0}, {"order": 1}]}, {}, "segmented_archive"),
                  ({}, {"force_pcm": True}, "pcm_mixer_required"),
                  ({}, {"effects": (1, 0, 0)}, "effects_require_pcm"))
         for track_values, call_values, reason in cases:
@@ -222,11 +256,39 @@ class OpusPassthroughDiagnosticTests(unittest.TestCase):
                 self.assertFalse(result["eligible"])
 
     def test_custom_audio_filter_requires_pcm(self):
-        current = agent(opus_passthrough_enabled=True, direct_pcm_volume_enabled=False,
+        current = agent(audio_output_default_opus_direct="auto",
                         ffmpeg_options="-vn -af volume=0.8")
         result = opus_passthrough_eligibility(current, self.track(), volume_percent=100)
         self.assertIn("custom_audio_filter", result["reasons"])
         self.assertFalse(result["eligible"])
+
+    def test_single_archive_segment_can_be_validated_without_disabling_mixer(self):
+        current = agent()
+        state = GuildMusicState(1, audio_output_settings={"opus_direct": "auto"})
+        result = opus_passthrough_eligibility(
+            current, self.track(archive_segments=[{"order": 0}]), volume_percent=100, state=state)
+        self.assertTrue(result["candidate"])
+        self.assertTrue(current.direct_pcm_volume_enabled)
+        self.assertFalse(result["eligible"])
+
+    def test_source_abr_above_selected_output_limit_requires_pcm(self):
+        current = agent(audio_output_default_opus_direct="auto")
+        for source, output, expected in ((128, 96, False), (128, 128, True),
+                                         (128, 256, True), (0, 96, True)):
+            with self.subTest(source=source, output=output):
+                result = opus_passthrough_eligibility(
+                    current, self.track(audio_abr=source), volume_percent=100,
+                    output_bitrate_kbps=output)
+                self.assertEqual(result["candidate"], expected)
+                self.assertEqual("source_bitrate_limit" in result["reasons"], not expected)
+
+    def test_per_guild_off_takes_precedence_over_global_auto(self):
+        result = opus_passthrough_eligibility(
+            agent(audio_output_default_opus_direct="auto"), self.track(), volume_percent=100,
+            state=GuildMusicState(1, audio_output_settings={"opus_direct": "off"}))
+        self.assertEqual(result["mode"], "off")
+        self.assertIn("disabled", result["reasons"])
+        self.assertFalse(result["candidate"])
 
 
 if __name__ == "__main__":

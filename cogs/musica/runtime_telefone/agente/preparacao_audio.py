@@ -5,15 +5,17 @@ import asyncio
 import contextlib
 import threading
 import time
+from types import SimpleNamespace
 from dataclasses import dataclass, replace
 from typing import Any
 
 import discord
 
-from .buffer_pcm import BufferedPCMSource
+from .buffer_pcm import BufferedOpusPCMSource, BufferedPCMSource, OpusPCMDecoderSource
 from .audio_segmentado import ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource, ExactSegmentPCMSource
 from .ciclo_vida import consume_task_result, remove_owned_task
 from .estado import AgentTrack, GuildMusicState
+from .configuracao import opus_passthrough_eligibility
 
 
 @dataclass
@@ -44,6 +46,60 @@ class AudioInicial:
 
 
 class PreparacaoAudioMixin:
+    def _opus_direct_preflight(self, guild_id: int, track: AgentTrack) -> dict[str, Any]:
+        st = self.states.get(guild_id)
+        mode = (getattr(st, "audio_output_settings", {}) or {}).get(
+            "opus_direct", getattr(self, "audio_output_default_opus_direct", "off"))
+        if mode != "auto":
+            return {"candidate": False, "reason": "disabled"}
+        if getattr(track, "_opus_direct_failed", False):
+            return {"candidate": False, "reason": "previous_copy_failure"}
+        channel_id = getattr(st, "voice_channel_id", 0)
+        get_channel = getattr(getattr(self, "client", None), "get_channel", None)
+        channel = get_channel(channel_id) if callable(get_channel) else None
+        if channel is None:
+            channel = getattr(getattr(st, "player", None), "channel", None)
+        if not channel or not int(getattr(channel, "bitrate", 0) or 0):
+            return {"candidate": False, "reason": "channel_bitrate_unknown"}
+        policy = self._audio_output_policy(SimpleNamespace(channel=channel), track, st)
+        result = opus_passthrough_eligibility(
+            self, track, state=st, output_bitrate_kbps=policy["bitrate_kbps"],
+            volume_percent=getattr(st, "volume_percent", self.default_volume_percent),
+            effects=st.effect_signature() if st is not None else (),
+        )
+        has_tts = getattr(self, "_tts_active_for_guild", None)
+        if callable(has_tts) and has_tts(guild_id):
+            result.update(candidate=False, reason="tts_active")
+        return result
+
+    def _create_music_pcm_source(self, guild_id: int, track: AgentTrack, **kwargs: Any) -> Any:
+        """Prefer a validated copy reader only for an explicitly opted-in track.
+
+        It still supplies continuously decoded PCM to the same mixer. Startup
+        validation failure is retried by _prepare_current_pcm through FFmpeg's
+        ordinary PCM decoder, without trusting media metadata as proof.
+        """
+        if not self._opus_direct_preflight(guild_id, track).get("candidate"):
+            return self._create_pcm_source(track, **kwargs)
+        try:
+            raw = OpusPCMDecoderSource.from_ffmpeg(
+                track.stream_url, executable=self.ffmpeg_executable,
+                before_options=self._ffmpeg_before_options_for_offset(0),
+                audio_stream_index=track.audio_stream_index if track.attachment_ref else -1,
+            )
+        except Exception as exc:
+            track._opus_direct_failed = True
+            self.log("opus_direct_prepare_fallback", guild_id=guild_id, error_type=type(exc).__name__)
+            return self._create_pcm_source(track, **kwargs)
+        try:
+            return BufferedOpusPCMSource(
+                raw, max_frames=kwargs.get("buffer_max_frames") or getattr(self, "pcm_buffer_max_frames", 75),
+                stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0),
+            )
+        except BaseException:
+            raw.cleanup()
+            raise
+
     def _claim_audio_prepare_slot(self, owner: Any) -> bool:
         """Uma cota compartilhada por início, próxima faixa e próxima parte."""
         if getattr(self, "_audio_prepare_stopping", False):
@@ -128,7 +184,12 @@ class PreparacaoAudioMixin:
         effects = (0, st.effect_level("nightcore"), st.effect_level("slowed_reverb"))  # Bassboost atua somente no mixer
         source = self._take_prepared_audio(guild_id, track)
         initial = self._take_initial_audio(guild_id, track, playback_token) if source is None else None
-        source = source or initial or self._create_pcm_source(track, effects=effects)
+        source = source or initial
+        if (source is not None and not getattr(source, "opus_direct_capable", False)
+                and self._opus_direct_preflight(guild_id, track).get("candidate")):
+            source.cleanup()
+            source = None
+        source = source or self._create_music_pcm_source(guild_id, track, effects=effects)
 
         async def wait_for_audio(candidate: Any) -> Any:
             self._starting_pcm[guild_id] = candidate
@@ -146,6 +207,10 @@ class PreparacaoAudioMixin:
         try:
             return await wait_for_audio(source)
         except Exception as exc:
+            if getattr(source, "opus_direct_capable", False) and st.playback_token == playback_token:
+                track._opus_direct_failed = True
+                self.log("opus_direct_prepare_fallback", guild_id=guild_id, error_type=type(exc).__name__)
+                return await wait_for_audio(self._create_pcm_source(track, effects=effects))
             # Um decoder antecipado pode perder a corrida com o CDN. Antes de
             # renovar a URL, tente a mesma URL com a trilha já verificada.
             if initial is None or st.playback_token != playback_token:
@@ -274,8 +339,8 @@ class PreparacaoAudioMixin:
             return False
         effects = (0, st.effect_level("nightcore"), st.effect_level("slowed_reverb"))
         try:
-            source = self._create_pcm_source(
-                track, effects=effects, first_audio_stream=speculative_first_audio,
+            source = self._create_music_pcm_source(
+                guild_id, track, effects=effects, first_audio_stream=speculative_first_audio,
                 buffer_max_frames=min(25, self.pcm_buffer_max_frames),
                 preparing=True,
             )
@@ -458,7 +523,7 @@ class PreparacaoAudioMixin:
                 if not self._claim_audio_prepare_slot(("track", guild_id)):
                     return
                 try:
-                    source = self._create_pcm_source(track, effects=effects, preparing=True)
+                    source = self._create_music_pcm_source(guild_id, track, effects=effects, preparing=True)
                 except BaseException:
                     self._release_audio_prepare_slot(("track", guild_id))
                     raise

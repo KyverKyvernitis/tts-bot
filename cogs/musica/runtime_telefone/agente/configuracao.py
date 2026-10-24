@@ -11,7 +11,8 @@ from typing import Any
 
 
 AUDIO_OUTPUT_PROFILES = {"balanced": None, "quality_192": 192, "quality_256": 256}
-AUDIO_OUTPUT_SETTINGS = frozenset({"profile", "fec", "expected_packet_loss"})
+AUDIO_OUTPUT_OPUS_DIRECT_MODES = ("off", "auto")
+AUDIO_OUTPUT_SETTINGS = frozenset({"profile", "fec", "expected_packet_loss", "opus_direct"})
 
 
 def validate_audio_output_settings(
@@ -28,6 +29,11 @@ def validate_audio_output_settings(
         if not isinstance(profile, str) or profile.strip().lower() not in AUDIO_OUTPUT_PROFILES:
             raise ValueError("perfil de saída deve ser balanced, quality_192 ou quality_256")
         merged["profile"] = profile.strip().lower()
+    if "opus_direct" in merged:
+        mode = merged["opus_direct"]
+        if not isinstance(mode, str) or mode.strip().lower() not in AUDIO_OUTPUT_OPUS_DIRECT_MODES:
+            raise ValueError("opus_direct deve ser off ou auto")
+        merged["opus_direct"] = mode.strip().lower()
     if "fec" in merged and not isinstance(merged["fec"], bool):
         raise ValueError("fec deve ser booleano")
     if "expected_packet_loss" in merged:
@@ -45,6 +51,7 @@ def audio_output_policy(agent: Any, voice_client: Any, track: Any = None, state:
         "profile": getattr(agent, "audio_output_default_profile", "balanced"),
         "fec": getattr(agent, "discord_opus_fec", True),
         "expected_packet_loss": getattr(agent, "discord_opus_expected_packet_loss", 0.15),
+        "opus_direct": getattr(agent, "audio_output_default_opus_direct", "off"),
     })
     settings = validate_audio_output_settings(getattr(state, "audio_output_settings", {}) or {}, defaults)
     channel = getattr(voice_client, "channel", None)
@@ -71,6 +78,7 @@ def audio_output_policy(agent: Any, voice_client: Any, track: Any = None, state:
         "limited_by_config": target > maximum,
         "fec": settings["fec"],
         "expected_packet_loss": settings["expected_packet_loss"],
+        "opus_direct": settings["opus_direct"],
         "application": "audio", "bandwidth": "full", "signal_type": "music",
         "revision": max(0, int(getattr(state, "audio_output_revision", 0) or 0)),
     }
@@ -86,24 +94,33 @@ def audio_output_capabilities() -> dict[str, Any]:
         "loss_is_measured": False,
         "pcm_mixer_preserved": True,
         "passthrough_default": False,
+        "opus_direct_modes": list(AUDIO_OUTPUT_OPUS_DIRECT_MODES),
+        "opus_direct_default": "off",
     }
 
 
 def opus_passthrough_eligibility(
     agent: Any, track: Any, *, volume_percent: int | float,
     effects: tuple[Any, ...] = (), force_pcm: bool = False,
+    state: Any = None, output_bitrate_kbps: int = 0,
 ) -> dict[str, Any]:
-    """Verifica as restrições do modo sem mixer; pacotes exigem validação real.
+    """Pré-valida a cópia de Opus sem desativar o mixer ou os controles.
 
-    Codec/rate/canais corretos não garantem duração Opus de 20 ms. O chamador
-    deve validar os pacotes do fluxo antes de tratá-lo como passthrough.
+    Codec/rate/canais corretos não comprovam cabeçalho e pacotes compatíveis.
+    O chamador ainda precisa validar o fluxo antes de encaminhar cada pacote.
+    O mixer híbrido mantém PCM pronto para volume, efeitos e overlays TTS.
     """
+    settings = validate_audio_output_settings(
+        getattr(state, "audio_output_settings", {}) or {},
+        {"opus_direct": getattr(agent, "audio_output_default_opus_direct", "off")},
+    )
+    mode = settings["opus_direct"]
     reasons: list[str] = []
-    if not bool(getattr(agent, "opus_passthrough_enabled", False)):
+    if mode != "auto":
         reasons.append("disabled")
-    if bool(getattr(agent, "direct_pcm_volume_enabled", True)) or force_pcm:
+    if force_pcm:
         reasons.append("pcm_mixer_required")
-    if getattr(track, "archive_segments", None):
+    if len(getattr(track, "archive_segments", None) or ()) > 1:
         reasons.append("segmented_archive")
     try:
         unity_gain = math.isfinite(float(volume_percent)) and abs(float(volume_percent) - 100) < 0.000001
@@ -126,11 +143,15 @@ def opus_passthrough_eligibility(
         reasons.append("live_stream")
     if float(getattr(track, "start_offset_seconds", 0) or 0) != 0:
         reasons.append("seek_requires_pcm")
+    source_abr = max(0, int(getattr(track, "audio_abr", 0) or 0))
+    output_limit = max(0, int(output_bitrate_kbps or 0))
+    if output_limit and source_abr > output_limit:
+        reasons.append("source_bitrate_limit")
     candidate = not reasons
-    # A metadata pública da faixa não atesta o tamanho de cada pacote Opus.
-    # Esta entrega só diagnostica elegibilidade; nunca habilita cópia insegura.
-    reasons.append("packet_duration_unverified")
-    return {"eligible": False, "candidate": candidate,
+    # A pré-validação nunca alega cópia ativa. Isso pertence ao source após
+    # validar o cabeçalho e os pacotes e é consultado separadamente no status.
+    reasons.append("packet_validation_required")
+    return {"mode": mode, "eligible": False, "candidate": candidate,
             "reasons": reasons, "required_packet_duration_ms": 20,
             "packet_validation_required": True}
 

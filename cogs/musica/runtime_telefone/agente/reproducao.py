@@ -16,10 +16,10 @@ import discord
 
 from .ciclo_vida import remove_owned_task, stop_player_instance
 from .validade_stream import discord_voice_audio_hint, fetch_discord_attachment, initial_discord_cdn_url, normalize_reference, probe_discord_audio, prazo_stream, DiscordAttachmentError
-from .configuracao import env_float, env_int
+from .configuracao import env_float, env_int, opus_passthrough_eligibility
 from .estado import AgentTrack, GuildMusicState, sanitize_start_context, sanitize_start_timings
 from .efeitos import filtros
-from .mixer_pcm import AgentMixedAudioSource, AgentTelemetryAudioSource, PCM_FRAME_BYTES
+from .mixer_pcm import AgentHybridOpusAudioSource, AgentMixedAudioSource, AgentTelemetryAudioSource, PCM_FRAME_BYTES
 from .buffer_pcm import BufferedPCMSource
 from .audio_segmentado import ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource
 from .preparacao_audio import PreparacaoAudioMixin
@@ -2764,7 +2764,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
     @staticmethod
     def _output_policy_signature(policy: dict[str, Any]) -> tuple[Any, ...]:
         return tuple(policy.get(key) for key in (
-            "bitrate_kbps", "channel_bitrate_kbps", "profile", "fec", "expected_packet_loss", "revision"))
+            "bitrate_kbps", "channel_bitrate_kbps", "profile", "fec", "expected_packet_loss", "revision", "opus_direct"))
 
     def _audio_output_voice_view(self, voice_client: Any, *, channel: Any = None, prefer_cache: bool = False) -> Any:
         """Read the current guild cache; VoiceClient.channel can be an old object."""
@@ -2813,7 +2813,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         policy = self._resolved_audio_output_policy(policy_voice, track, st)
         applied = dict(getattr(st, "audio_output_applied", {}) or {})
         result = {"state": "queued", "requested": policy, "applied": applied}
-        if (source is None or getattr(source, "is_opus", lambda: False)()
+        hybrid = callable(getattr(source, "opus_direct_status", None))
+        if (source is None or (getattr(source, "is_opus", lambda: False)() and not hybrid)
                 or not isinstance(source, AgentMixedAudioSource)):
             result.update(state="deferred", reason="encoded_source_requires_next_track")
             return result
@@ -2851,7 +2852,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                     source._music_output_pending_signature = None
                 return
             source._music_output_pending_signature = None
-            encoder = getattr(voice_client, "encoder", None)
+            encoder = getattr(source, "output_encoder", None) or getattr(voice_client, "encoder", None)
             setter = getattr(encoder, "set_bitrate", None)
             if not callable(setter):
                 self.log("audio_output_deferred", guild_id=guild_id, reason="encoder_control_unavailable")
@@ -2887,6 +2888,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 applied["unsupported_controls"] = unsupported
             if error:
                 applied["error_type"] = error
+            if hybrid:
+                source.set_output_policy(fresh, apply_encoder=False, applied_encoder={**actual, "state": status})
+                applied["encoder_kind"] = "hybrid_fallback"
             st.audio_output_applied = applied
             st.updated_at = applied["applied_at"]
             voice_client._music_audio_output_applied = dict(applied)
@@ -2922,6 +2926,18 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         self, voice_client: Any, source: Any, *, after: Any, opus_bitrate_kbps: int,
         output_policy: dict[str, Any] | None = None,
     ) -> None:
+        if callable(getattr(source, "opus_direct_status", None)):
+            # The hybrid owns the PCM encoder and always emits Opus, so the
+            # Discord audio thread never guesses a per-frame encode flag.
+            if output_policy is not None:
+                source.set_output_policy(output_policy)
+            voice_client.encoder = source.output_encoder
+            voice_client.play(source, after=after)
+            voice_client._music_opus_bitrate_kbps = int(opus_bitrate_kbps)
+            voice_client._music_audio_output_applied = {
+                **(output_policy or {}), "state": "applied", "status": "applied",
+                "applied_at": time.time(), "reason": "track_start", "encoder_kind": "hybrid_fallback"}
+            return
         if getattr(source, "is_opus", lambda: False)():
             # FFmpegOpusAudio já chega codificado; kwargs do encoder seriam
             # ignorados pelo discord.py.
@@ -3066,12 +3082,16 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         track.agent_timing_ms["direct_voice_ready_ms"] = round((time.monotonic() - direct_start_monotonic) * 1000, 1)
         existing_source = getattr(voice_client, "source", None)
         pcm_pipeline = self.direct_pcm_volume_enabled or bool(track.archive_segments)
+        preflight = getattr(self, "_opus_direct_preflight", None)
+        wants_opus = bool(callable(preflight) and preflight(guild_id, track).get("candidate"))
         reusable = bool(
             pcm_pipeline
             and isinstance(existing_source, AgentMixedAudioSource)
             and existing_source.persistent
             and existing_source.music_ended
             and getattr(voice_client, "is_playing", lambda: False)()
+            and (not wants_opus or callable(getattr(existing_source, "opus_direct_status", None))
+                 or self._tts_active_for_guild(guild_id))
         )
         if not reusable and (getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)()):
             if isinstance(existing_source, AgentMixedAudioSource) and existing_source.persistent:
@@ -3119,6 +3139,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title, offset=round(float(getattr(track, "start_offset_seconds", 0.0) or 0.0), 2), mixer_reused=reusable)
 
         def on_music_end(error: Exception | None, metrics: dict[str, Any]) -> None:
+            if error is not None and getattr(pcm_source, "opus_direct_capable", False):
+                track._opus_direct_failed = True
             loop = self._loop
             if loop is None or loop.is_closed():
                 return
@@ -3213,6 +3235,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 pcm_source=pcm_source,
                 effects=effects,
                 is_live=track.is_live,
+                output_policy=output_policy,
                 **({"force_pcm": True} if track.archive_segments else {}),
             )
         except BaseException:
@@ -3421,6 +3444,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         effects: tuple[int | bool, ...] = (0, 0, 0),
         is_live: bool = False,
         force_pcm: bool = False,
+        output_policy: dict[str, Any] | None = None,
     ) -> Any:
         volume = max(0.0, min(1.5, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
         before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
@@ -3434,11 +3458,17 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             ), effects=effects)
             loop = self._loop or asyncio.get_running_loop()
             if reuse_mixer is not None:
+                if callable(getattr(reuse_mixer, "opus_direct_status", None)) and output_policy is not None:
+                    # Tighten the copy budget/mode before the new source can be
+                    # read. Encoder CTLs are queued separately on its thread.
+                    reuse_mixer.set_output_policy(output_policy, apply_encoder=False)
                 reuse_mixer.replace_music_source(
                     pcm, volume=volume, on_music_end=on_music_end, bassboost_level=int(effects[0] or 0),
                 )
                 return reuse_mixer
-            return AgentMixedAudioSource(
+            hybrid = bool(getattr(pcm, "opus_direct_capable", False))
+            mixer_class = AgentHybridOpusAudioSource if hybrid else AgentMixedAudioSource
+            return mixer_class(
                 loop=loop,
                 music_source=pcm,
                 music_volume=volume,
@@ -3449,6 +3479,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 persistent=on_music_end is not None,
                 bassboost=bool(effects[0]),
                 bassboost_level=int(effects[0] or 0),
+                **({"output_policy": output_policy or {"bitrate_kbps": opus_bitrate_kbps or 160,
+                                                       "opus_direct": "auto"}} if hybrid else {}),
             )
         opus_cls = getattr(discord, "FFmpegOpusAudio", None)
         if opus_cls is not None:

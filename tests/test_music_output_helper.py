@@ -93,6 +93,8 @@ class OutputHelperTests(unittest.TestCase):
             (["profile", "--guild", "7", "--profile", "quality_256"], {"settings": {"profile": "quality_256"}}),
             (["protection", "--guild", "7", "--fec", "on", "--loss", "0.05"], {"settings": {"fec": True, "expected_packet_loss": 0.05}}),
             (["protection", "--guild", "7", "--fec", "off", "--loss", "0"], {"settings": {"fec": False, "expected_packet_loss": 0.0}}),
+            (["direct", "--guild", "7", "--mode", "auto"], {"settings": {"opus_direct": "auto"}}),
+            (["direct", "--guild", "7", "--mode", "off"], {"settings": {"opus_direct": "off"}}),
             (["reset", "--guild", "7"], {"reset": True}),
         ]
         for argv, payload in cases:
@@ -104,6 +106,7 @@ class OutputHelperTests(unittest.TestCase):
             ["status"], ["status", "--guild", "0"], ["status", "--guild", "-1"],
             ["status", "--guild", "18446744073709551616"],
             ["profile", "--guild", "1", "--profile", "ultra"],
+            ["direct", "--guild", "1"], ["direct", "--guild", "1", "--mode", "on"],
         ]
         cases += [["protection", "--guild", "1", "--fec", "on", "--loss", value]
                   for value in ("nan", "inf", "-0.1", "1.1", "15%")]
@@ -204,6 +207,49 @@ class OutputHelperTests(unittest.TestCase):
         secret = "private-" + "x" * 300
         output = helper.metadata_only({"reason": secret}, {"SERVICE_API_KEY": secret})
         self.assertEqual(output["reason"], "[redacted]")
+
+    def test_direct_payload_only_changes_mode_and_keeps_protection_untouched(self):
+        args = helper.parser().parse_args(["direct", "--guild", "7", "--mode", "auto"])
+        payload = helper.command_body(args)
+        self.assertEqual(payload["settings"], {"opus_direct": "auto"})
+        self.assertNotIn("fec", payload["settings"])
+        self.assertNotIn("profile", payload["settings"])
+
+    def test_opus_direct_status_fields_remain_visible_without_source_secrets(self):
+        direct = {"mode": "auto", "state": "pcm_fallback", "reason": "tts_overlay",
+                  "copied_packets": 17, "encoded_packets": 8, "latched": True,
+                  "packet_duration_ms": 20, "source_bitrate_kbps": 128,
+                  "preskip_samples": 312, "trimmed_tail_samples": 648,
+                  "packet_validation_required": True, "candidate": True,
+                  "validated_packets": 25, "copy_active": False, "copy_supported": True,
+                  "fallback_encoder": {"bitrate_kbps": 192, "fec": True, "expected_packet_loss": .15},
+                  "source_url": "https://private.invalid/secret"}
+        raw = {"ok": True, "version": "0.3.90", "guild_id": 7,
+               "audio_output": {"settings": {"opus_direct": "auto"}, "passthrough": direct}}
+        public = helper.public_result(raw, self.values)
+        self.assertEqual(public["audio_output"]["settings"], {"opus_direct": "auto"})
+        self.assertEqual(public["audio_output"]["passthrough"],
+                         {key: value for key, value in direct.items() if key != "source_url"})
+        self.assertNotIn("private.invalid", json.dumps(public))
+
+    def test_real_hybrid_status_shape_preserves_packet_metrics_and_trim_limits(self):
+        direct = {"state": "copy", "reason": "", "eligible": True, "copy_active": True,
+                  "packet_validation_required": False, "copied_packets": 20, "copied_bytes": 5600,
+                  "source_bitrate_kbps": 112, "encoded_packets": 0, "fallback_latched": False,
+                  "copy_packet_limit_bytes": 480, "copy_fec": None,
+                  "fallback_encoder": {"bitrate_kbps": 192, "fec": True, "expected_packet_loss": .15},
+                  "source": {"sample_rate_hz": 48000, "channels": 2, "input_sample_rate_hz": 44100,
+                             "pre_skip_samples": 312, "channel_mapping": 0, "output_gain_q8": 0,
+                             "end_granule_samples": 48312, "ogg_pages": 4, "audio_packets": 51,
+                             "trim_mode": "raw_packets_no_sample_exact_trim", "tail_padding_samples": 648,
+                             "raw_duration_samples": 48960, "decoded_samples": 48960,
+                             "token": "SENTINEL-MUSIC-TOKEN", "source_url": "https://private.invalid"}}
+        result = helper.metadata_only(direct, self.values)
+        expected_source = {key: value for key, value in direct['source'].items()
+                           if key not in {'token', 'source_url'}}
+        self.assertEqual(result, {**direct, 'source': expected_source})
+        self.assertNotIn("SENTINEL", json.dumps(result))
+        self.assertNotIn("private.invalid", json.dumps(result))
 
     def test_real_capabilities_and_runtime_metrics_remain_visible(self):
         config_path = ROOT / "cogs/musica/runtime_telefone/agente/configuracao.py"
