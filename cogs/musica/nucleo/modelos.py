@@ -81,6 +81,9 @@ class MusicTrack:
     virtual_source_index: int = -1
     virtual_provider: str = ""
     virtual_source_url: str = ""
+    # Evidência efêmera do player remoto para esta faixa em execução. Não é
+    # preferência de qualidade nem metadado persistente da mídia/fila.
+    opus_direct_active: bool = False
 
     @property
     def display_url(self) -> str:

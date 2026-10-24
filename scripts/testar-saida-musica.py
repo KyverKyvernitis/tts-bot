@@ -180,7 +180,13 @@ def request_command(body: dict, values: dict[str, str], *, opener=None) -> dict:
                 raise HelperError(f"HTTP {int(status)}: confira a versão 0.3.90 ou mais nova e o estado do agente.")
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
-        raise HelperError(f"HTTP {error.code}: confira o agente atualizado e o token já instalado.") from None
+        if error.code == 401:
+            message = "autenticação recusada; confira o token já instalado."
+        elif error.code == 400:
+            message = "o agente recusou o comando; confira command_error no music_agent.log."
+        else:
+            message = "confira o agente atualizado e o serviço local."
+        raise HelperError(f"HTTP {error.code}: {message}") from None
     except (urllib.error.URLError, OSError, TimeoutError):
         # Não incluir a exceção: algumas bibliotecas imprimem request, URL ou header.
         raise HelperError("O Music Agent não respondeu pela conexão local; consulte music_agent.log.") from None

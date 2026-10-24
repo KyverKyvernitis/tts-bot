@@ -513,6 +513,20 @@ async def sincronizar_estado_agente(
             state.current_started_at_monotonic = time.monotonic()
         state.paused = False
         state.voice_status_pause_position_seconds = -1.0
+    if state.current is not None:
+        # O objeto local pode ser preservado durante uma resposta de enqueue.
+        # Atualize também esse caso sem herdar evidência da faixa anterior ou
+        # confundir a preferência configurada com pacotes realmente copiados.
+        remote_item_id = str(current_payload.get("queue_item_id") or "")
+        local_item_id = str(getattr(state.current, "queue_item_id", "") or "")
+        same_current = bool(
+            track is state.current
+            or (remote_item_id and local_item_id and remote_item_id == local_item_id)
+        )
+        state.current.opus_direct_active = bool(
+            current_payload.get("opus_direct_active") is True
+            and same_current and raw_status == "playing" and not state.paused
+        )
     state.music_session_active = bool(state.current or raw_status in {"preparing", "starting", "playing", "paused", "queued"})
     if raw_status and raw_status not in {"failed", "error"}:
         if state.agent_voice_recovery_pending:

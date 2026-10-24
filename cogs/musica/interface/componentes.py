@@ -827,6 +827,15 @@ def _public_audio_quality_label(state, track: MusicTrack | None) -> str:
         codec_label = ext.upper()
 
     backend = str(getattr(state, "current_backend", "") or "").lower()
+    if (
+        codec_label == "Opus"
+        and backend == "agent"
+        and getattr(state, "current", None) is track
+        and getattr(track, "opus_direct_active", False) is True
+        and str(getattr(state, "current_status", "") or "").lower() == "playing"
+        and not bool(getattr(state, "paused", False))
+    ):
+        codec_label = "Opus direto"
     if not abr and backend == "agent":
         with contextlib.suppress(Exception):
             abr = int(float(getattr(state, "current_quality_kbps", 0) or 0))

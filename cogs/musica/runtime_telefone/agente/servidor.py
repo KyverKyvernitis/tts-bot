@@ -99,7 +99,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.90"
+AGENT_VERSION = "0.3.91"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -1117,7 +1117,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             raise ValueError("use reset ou settings, separadamente")
         sync = {"state": "unchanged"}
         if reset or "settings" in body:
-            st = self.get_state(guild_id)
+            st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
             settings = {} if reset else validate_audio_output_settings(body["settings"], st.audio_output_settings)
             if settings != st.audio_output_settings:
                 st.audio_output_settings = settings

@@ -33,6 +33,7 @@ def _assinatura_faixa_painel(item: Any) -> tuple[Any, ...]:
             "resolved_audio_abr",
             "resolved_audio_sample_rate",
             "resolved_audio_channels",
+            "opus_direct_active",
         )
     )
 
@@ -195,6 +196,10 @@ def estado_local_music_agent(router: Any, guild_id: int) -> dict[str, Any]:
 async def _marcar_monitor_reconectando(router: Any, guild_id: int, *, falhas: int, erro: str = "") -> None:
     """Espelha indisponibilidade transitória sem fingir que a faixa terminou."""
     state = router.get_state(int(guild_id))
+    current = getattr(state, "current", None)
+    if current is not None:
+        # A última confirmação remota não prova cópia durante um outage.
+        current.opus_direct_active = False
     state.agent_monitor_failures = max(0, int(falhas or 0))
     state.agent_monitor_last_error = str(erro or "")[:260]
     deferred = estado_comando_diferido(guild_id)

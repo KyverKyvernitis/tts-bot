@@ -215,6 +215,20 @@ class OutputHelperTests(unittest.TestCase):
         self.assertNotIn("fec", payload["settings"])
         self.assertNotIn("profile", payload["settings"])
 
+    def test_http_400_is_a_command_error_and_only_401_suggests_auth(self):
+        for status, expected in ((400, "command_error"), (401, "autenticação recusada")):
+            opener = mock.Mock()
+            opener.open.side_effect = helper.urllib.error.HTTPError(
+                "http://127.0.0.1:8780/command", status,
+                "SENTINEL-MUSIC-TOKEN", {}, None)
+            with self.subTest(status=status), self.assertRaises(helper.HelperError) as caught:
+                helper.request_command({"guild_id": 7}, self.values, opener=opener)
+            message = str(caught.exception)
+            self.assertIn(expected, message)
+            self.assertNotIn("SENTINEL", message)
+            if status == 400:
+                self.assertNotIn("token", message)
+
     def test_opus_direct_status_fields_remain_visible_without_source_secrets(self):
         direct = {"mode": "auto", "state": "pcm_fallback", "reason": "tts_overlay",
                   "copied_packets": 17, "encoded_packets": 8, "latched": True,

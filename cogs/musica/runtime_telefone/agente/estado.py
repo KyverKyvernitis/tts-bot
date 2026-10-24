@@ -325,9 +325,47 @@ class GuildMusicState:
                 total += remaining
         return max(0, total)
 
+    def _opus_direct_active(self) -> bool:
+        """Live output of this exact track/session, never an enabled setting."""
+        if (self.current is None or self.transport != "direct" or self.status != "playing"
+                or self.paused or self.voice_runtime_recovery_pending):
+            return False
+        try:
+            player = self.player
+            if player is None or not player.is_connected():
+                return False
+            channel = getattr(player, "channel", None)
+            if not self.voice_channel_id or int(getattr(channel, "id", 0)) != self.voice_channel_id:
+                return False
+            source = getattr(player, "source", None)
+            if (source is None or getattr(source, "_closed", False)
+                    or getattr(source, "music_ended", False)
+                    or not getattr(source, "last_read_had_music", False)):
+                return False
+            trace = getattr(player, "_music_packet_trace", None)
+            if not isinstance(trace, dict):
+                return False
+            expected = trace.get("expected_music_source")
+            if (trace.get("track") is not self.current
+                    or trace.get("token") != self.playback_token
+                    or trace.get("guild_id") != self.guild_id
+                    or trace.get("source") is not source
+                    or trace.get("first_packet_monotonic") is None
+                    or expected is None or getattr(source, "music_source", None) is not expected
+                    or getattr(source, "last_read_music_source", None) is not expected):
+                return False
+            getter = getattr(source, "opus_direct_status", None)
+            live = getter() if callable(getter) else None
+            return isinstance(live, dict) and live.get("copy_active") is True
+        except Exception:
+            # Missing/old runtime metadata and concurrent cleanup are not proof
+            # of copy. A label must never interfere with otherwise healthy audio.
+            return False
+
     def state_revision(self) -> str:
         current = f"{self.updated_at:.6f}:{self.playback_token}"
-        return f"{current}:audio{self.audio_output_revision}" if self.audio_output_revision else current
+        current = f"{current}:audio{self.audio_output_revision}" if self.audio_output_revision else current
+        return f"{current}:opus_direct" if self._opus_direct_active() else current
 
     def audio_output_public(self) -> dict[str, Any]:
         allowed = {
@@ -489,7 +527,7 @@ class GuildMusicState:
             "last_disconnect_human_count": int(self.last_disconnect_human_count),
             "auto_leave_enabled": bool(self.auto_leave_enabled),
             "updated_at": self.updated_at,
-            "current": self.current.public() if self.current else None,
+            "current": {**self.current.public(), "opus_direct_active": self._opus_direct_active()} if self.current else None,
             "queue_size": sum(1 for item in self.queue if not item.is_virtual_playlist_marker),
             "logical_queue_size": self._logical_queue_size(),
             "history_size": len(self.history),
