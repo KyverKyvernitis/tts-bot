@@ -9,6 +9,7 @@ import time
 import threading
 import uuid
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 
 import discord
@@ -2749,22 +2750,201 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         # bitrate menor que o piso configurado; nesse caso respeite o canal.
         return max(16, min(512, int(desired))), channel_kbps
 
-    def _play_music_source(self, voice_client: Any, source: Any, *, after: Any, opus_bitrate_kbps: int) -> None:
+    def _resolved_audio_output_policy(
+        self, voice_client: Any, track: AgentTrack | None, st: GuildMusicState | None = None,
+    ) -> dict[str, Any]:
+        getter = getattr(self, "_audio_output_policy", None)
+        if callable(getter):
+            return dict(getter(voice_client, track, st))
+        bitrate, channel_bitrate = self._discord_opus_bitrate_kbps(voice_client, track)
+        return {"bitrate_kbps": bitrate, "channel_bitrate_kbps": channel_bitrate,
+                "profile": "balanced", "fec": True, "expected_packet_loss": 0.15,
+                "application": "audio", "bandwidth": "full", "signal_type": "music", "revision": 0}
+
+    @staticmethod
+    def _output_policy_signature(policy: dict[str, Any]) -> tuple[Any, ...]:
+        return tuple(policy.get(key) for key in (
+            "bitrate_kbps", "channel_bitrate_kbps", "profile", "fec", "expected_packet_loss", "revision"))
+
+    def _audio_output_voice_view(self, voice_client: Any, *, channel: Any = None, prefer_cache: bool = False) -> Any:
+        """Read the current guild cache; VoiceClient.channel can be an old object."""
+        original = getattr(voice_client, "channel", None)
+        channel_id = safe_id(getattr(original, "id", 0))
+        getter = getattr(getattr(self, "client", None), "get_channel", None)
+        cached = getter(channel_id) if callable(getter) and channel_id else None
+        if cached is not None:
+            same_id = safe_id(getattr(cached, "id", 0)) == channel_id
+            original_guild = safe_id(getattr(getattr(original, "guild", None), "id", 0))
+            cached_guild = safe_id(getattr(getattr(cached, "guild", None), "id", 0))
+            if not same_id or (original_guild and cached_guild != original_guild):
+                cached = None
+        selected = (cached or channel or original) if prefer_cache else (channel or cached or original)
+        return SimpleNamespace(channel=selected)
+
+    async def _sync_audio_output(
+        self, guild_id: int, *, reason: str = "channel_update", expected_channel_id: int | None = None,
+        channel: Any = None,
+    ) -> dict[str, Any]:
+        """Queue codec controls on the owning audio thread, never restart a track.
+
+        Discord replaces cached channel objects on a channel update. The event
+        can pass its validated ``after`` object without mutating VoiceClient.
+        A queued callback owns exactly one player/source/track/generation.
+        """
+        st = self.states.get(int(guild_id))
+        if st is None or st.current is None or st.transport != "direct":
+            return {"state": "idle", "reason": "no_direct_music"}
+        voice_client = st.player
+        if not getattr(voice_client, "is_connected", lambda: True)():
+            return {"state": "deferred", "reason": "voice_disconnected"}
+        source = getattr(voice_client, "source", None)
+        current_channel = getattr(voice_client, "channel", None)
+        channel_id = safe_id(getattr(current_channel, "id", 0))
+        if (not channel_id or channel_id != safe_id(st.voice_channel_id)
+                or (expected_channel_id is not None and channel_id != safe_id(expected_channel_id))):
+            return {"state": "deferred", "reason": "channel_mismatch"}
+        if channel is not None:
+            if (safe_id(getattr(channel, "id", 0)) != channel_id
+                    or safe_id(getattr(getattr(channel, "guild", None), "id", guild_id)) != int(guild_id)):
+                return {"state": "deferred", "reason": "channel_mismatch"}
+        policy_voice = self._audio_output_voice_view(voice_client, channel=channel)
+        track = st.current
+        token = st.playback_token
+        policy = self._resolved_audio_output_policy(policy_voice, track, st)
+        applied = dict(getattr(st, "audio_output_applied", {}) or {})
+        result = {"state": "queued", "requested": policy, "applied": applied}
+        if (source is None or getattr(source, "is_opus", lambda: False)()
+                or not isinstance(source, AgentMixedAudioSource)):
+            result.update(state="deferred", reason="encoded_source_requires_next_track")
+            return result
+        signature = self._output_policy_signature(policy)
+        if (applied.get("state") == "applied" and self._output_policy_signature(applied) == signature):
+            result.update(state="unchanged")
+            return result
+        pending_signature = (signature, token, id(track), channel_id, id(voice_client))
+        if getattr(source, "_music_output_pending_signature", None) == pending_signature:
+            return result
+        revision = int(getattr(source, "_music_output_update_revision", 0)) + 1
+        source._music_output_update_revision = revision
+        source._music_output_pending_signature = pending_signature
+
+        def apply_encoder_update() -> None:
+            # Runs immediately before the next PCM read/encode, including while
+            # the music is paused but TTS keeps the persistent mixer running.
+            if (self.states.get(int(guild_id)) is not st or st.player is not voice_client
+                    or st.current is not track or st.playback_token != token
+                    or getattr(voice_client, "source", None) is not source
+                    or safe_id(st.voice_channel_id) != channel_id
+                    or safe_id(getattr(getattr(voice_client, "channel", None), "id", 0)) != channel_id
+                    or getattr(source, "_music_output_update_revision", None) != revision
+                    or getattr(source, "_closed", False)
+                    or not getattr(voice_client, "is_connected", lambda: True)()
+                    or getattr(source, "music_ended", False)):
+                if getattr(source, "_music_output_update_revision", None) == revision:
+                    source._music_output_pending_signature = None
+                return
+            fresh_voice = self._audio_output_voice_view(voice_client, channel=channel, prefer_cache=True)
+            fresh = self._resolved_audio_output_policy(fresh_voice, track, st)
+            if self._output_policy_signature(fresh) != signature:
+                # A later setting/channel change must schedule its own policy.
+                if getattr(source, "_music_output_update_revision", None) == revision:
+                    source._music_output_pending_signature = None
+                return
+            source._music_output_pending_signature = None
+            encoder = getattr(voice_client, "encoder", None)
+            setter = getattr(encoder, "set_bitrate", None)
+            if not callable(setter):
+                self.log("audio_output_deferred", guild_id=guild_id, reason="encoder_control_unavailable")
+                return
+            previous = dict(getattr(st, "audio_output_applied", {}) or {})
+            actual = {key: previous.get(key) for key in ("bitrate_kbps", "fec", "expected_packet_loss")}
+            unsupported: list[str] = []
+            error = ""
+            try:
+                chosen = setter(int(fresh["bitrate_kbps"]))
+                actual["bitrate_kbps"] = int(fresh["bitrate_kbps"] if chosen is None else chosen)
+                voice_client._music_opus_bitrate_kbps = actual["bitrate_kbps"]
+                for method, key, value in (
+                    ("set_fec", "fec", bool(fresh.get("fec", True))),
+                    ("set_expected_packet_loss_percent", "expected_packet_loss", float(fresh.get("expected_packet_loss", 0.15))),
+                ):
+                    callback = getattr(encoder, method, None)
+                    if callable(callback):
+                        callback(value)
+                        actual[key] = value
+                    elif actual.get(key) != value:
+                        unsupported.append(key)
+                for method, value in (("set_signal_type", "music"), ("set_bandwidth", "full")):
+                    callback = getattr(encoder, method, None)
+                    if callable(callback):
+                        callback(value)
+            except Exception as exc:
+                error = type(exc).__name__
+            status = "partial" if unsupported or error else "applied"
+            applied = {**fresh, **actual, "state": status, "status": status,
+                       "applied_at": time.time(), "reason": reason}
+            if unsupported:
+                applied["unsupported_controls"] = unsupported
+            if error:
+                applied["error_type"] = error
+            st.audio_output_applied = applied
+            st.updated_at = applied["applied_at"]
+            voice_client._music_audio_output_applied = dict(applied)
+            context = getattr(source, "quality_context", None)
+            if isinstance(context, dict):
+                context.update(opus_bitrate_kbps=actual["bitrate_kbps"],
+                               opus_requested_bitrate_kbps=fresh["bitrate_kbps"],
+                               channel_bitrate_kbps=fresh.get("channel_bitrate_kbps"),
+                               audio_output_profile=fresh.get("profile"),
+                               opus_fec=actual["fec"], opus_expected_packet_loss=actual["expected_packet_loss"],
+                               audio_output_state=applied["state"])
+            self.log("opus_encoder_updated", guild_id=guild_id, reason=reason,
+                     requested_kbps=fresh["bitrate_kbps"], applied_kbps=actual["bitrate_kbps"],
+                     channel_bitrate_kbps=fresh.get("channel_bitrate_kbps"), profile=fresh.get("profile"),
+                     fec=actual["fec"], expected_packet_loss=actual["expected_packet_loss"],
+                     state=applied["state"], unsupported_controls=unsupported, error_type=error)
+
+        def update_encoder() -> None:
+            # A failed control/diagnostic must not escape AudioSource.read and
+            # terminate otherwise healthy music or an overlapping TTS stream.
+            try:
+                apply_encoder_update()
+            except Exception as exc:
+                if getattr(source, "_music_output_update_revision", None) == revision:
+                    source._music_output_pending_signature = None
+                with contextlib.suppress(Exception):
+                    self.log("opus_update_failed", guild_id=guild_id, error=type(exc).__name__)
+
+        source.queue_encoder_update(update_encoder)
+        return result
+
+    def _play_music_source(
+        self, voice_client: Any, source: Any, *, after: Any, opus_bitrate_kbps: int,
+        output_policy: dict[str, Any] | None = None,
+    ) -> None:
         if getattr(source, "is_opus", lambda: False)():
             # FFmpegOpusAudio já chega codificado; kwargs do encoder seriam
             # ignorados pelo discord.py.
             voice_client.play(source, after=after)
+            voice_client._music_opus_bitrate_kbps = None
+            voice_client._music_audio_output_applied = {
+                "state": "encoded_source", "bitrate_kbps": None, "fec": None, "expected_packet_loss": None}
             return
+        codec_options = {"application": "audio", "bitrate": max(16, min(512, int(opus_bitrate_kbps))),
+                         "bandwidth": "full", "signal_type": "music"}
+        if output_policy is not None:
+            codec_options.update(fec=bool(output_policy.get("fec", True)),
+                                 expected_packet_loss=float(output_policy.get("expected_packet_loss", 0.15)))
         try:
             voice_client.play(
                 source,
                 after=after,
-                application="audio",
-                bitrate=max(16, min(512, int(opus_bitrate_kbps))),
-                bandwidth="full",
-                signal_type="music",
+                **codec_options,
             )
             voice_client._music_opus_bitrate_kbps = int(opus_bitrate_kbps)
+            if output_policy is not None:
+                voice_client._music_audio_output_applied = {**output_policy, "state": "applied", "status": "applied",
+                                                           "applied_at": time.time(), "reason": "track_start"}
         except TypeError as exc:
             # Compatibilidade defensiva com wrappers/test doubles/discord.py
             # antigo. Não esconda TypeError real vindo de dentro do play().
@@ -2772,6 +2952,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 raise
             self.log("opus_encoder_kwargs_unsupported", error=short_text(exc, 180))
             voice_client.play(source, after=after)
+            voice_client._music_opus_bitrate_kbps = None
+            voice_client._music_audio_output_applied = {"state": "unsupported", "bitrate_kbps": None,
+                                                       "fec": None, "expected_packet_loss": None}
 
     @staticmethod
     def _audio_source_telemetry(source: Any) -> dict[str, Any]:
@@ -2894,7 +3077,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             if isinstance(existing_source, AgentMixedAudioSource) and existing_source.persistent:
                 existing_source.stop_music()
             voice_client.stop()
-        opus_bitrate_kbps, channel_bitrate_kbps = self._discord_opus_bitrate_kbps(voice_client, track)
+        output_policy = self._resolved_audio_output_policy(self._audio_output_voice_view(voice_client), track, st)
+        opus_bitrate_kbps = int(output_policy["bitrate_kbps"])
+        channel_bitrate_kbps = int(output_policy["channel_bitrate_kbps"])
         source_rate = max(0, int(getattr(track, "audio_sample_rate", 0) or 0))
         effects = st.effect_signature()
         _audio_options, resample_mode = self._ffmpeg_options_for_source(
@@ -2919,6 +3104,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             "output": "pcm_s16le_48k_stereo" if pcm_pipeline else "discord-opus",
             "channel_bitrate_kbps": channel_bitrate_kbps,
             "opus_bitrate_kbps": opus_bitrate_kbps,
+            "audio_output_profile": output_policy.get("profile", "balanced"),
+            "opus_fec": output_policy.get("fec"),
+            "opus_expected_packet_loss": output_policy.get("expected_packet_loss"),
             "volume_percent": int(st.volume_percent),
             "volume_mode": "soft_limited_boost" if int(st.volume_percent) > 100 else "linear",
             "bassboost": st.effect_level("bassboost") > 0,
@@ -2928,23 +3116,6 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             "slowed_reverb": st.effect_level("slowed_reverb") > 0 and not track.is_live,
             "slowed_reverb_level": st.effect_level("slowed_reverb") if not track.is_live else 0,
         }
-        self.log(
-            "audio_source_selected",
-            guild_id=guild_id,
-            format=getattr(track, "audio_format_id", ""),
-            codec=getattr(track, "audio_codec", ""),
-            abr_kbps=max(0, int(getattr(track, "audio_abr", 0) or 0)),
-            sample_rate=source_rate,
-            channels=source_channels,
-            output="pcm_s16le_48k_stereo" if pcm_pipeline else "discord-opus",
-            resample=bool(source_rate and source_rate != 48000),
-            resample_mode=resample_mode,
-            channel_bitrate_kbps=channel_bitrate_kbps,
-            opus_bitrate_kbps=opus_bitrate_kbps,
-            opus_signal="music",
-            volume_percent=int(st.volume_percent),
-            volume_mode="soft_limited_boost" if int(st.volume_percent) > 100 else "linear",
-        )
         self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title, offset=round(float(getattr(track, "start_offset_seconds", 0.0) or 0.0), 2), mixer_reused=reusable)
 
         def on_music_end(error: Exception | None, metrics: dict[str, Any]) -> None:
@@ -2999,6 +3170,37 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 return
             quality_context["pcm_prepare_ms"] = round((time.monotonic() - pcm_prepare_started) * 1000.0, 1)
             track.agent_timing_ms["pcm_prepare_ms"] = quality_context["pcm_prepare_ms"]
+        # PCM preparation can await network/FFmpeg while the channel or the
+        # output profile changes. Re-read the guild cache immediately before
+        # constructing/starting the source; no provider request is added.
+        output_policy = self._resolved_audio_output_policy(self._audio_output_voice_view(voice_client), track, st)
+        opus_bitrate_kbps = int(output_policy["bitrate_kbps"])
+        channel_bitrate_kbps = int(output_policy["channel_bitrate_kbps"])
+        quality_context.update(opus_bitrate_kbps=opus_bitrate_kbps,
+                               channel_bitrate_kbps=channel_bitrate_kbps,
+                               audio_output_profile=output_policy.get("profile", "balanced"),
+                               opus_fec=output_policy.get("fec"),
+                               opus_expected_packet_loss=output_policy.get("expected_packet_loss"))
+        self.log(
+            "audio_source_selected",
+            guild_id=guild_id,
+            format=getattr(track, "audio_format_id", ""),
+            codec=getattr(track, "audio_codec", ""),
+            abr_kbps=max(0, int(getattr(track, "audio_abr", 0) or 0)),
+            sample_rate=source_rate,
+            channels=source_channels,
+            output="pcm_s16le_48k_stereo" if pcm_pipeline else "discord-opus",
+            resample=bool(source_rate and source_rate != 48000),
+            resample_mode=resample_mode,
+            channel_bitrate_kbps=channel_bitrate_kbps,
+            opus_bitrate_kbps=opus_bitrate_kbps,
+            audio_output_profile=output_policy.get("profile", "balanced"),
+            opus_fec=output_policy.get("fec"),
+            opus_expected_packet_loss=output_policy.get("expected_packet_loss"),
+            opus_signal="music",
+            volume_percent=int(st.volume_percent),
+            volume_mode="soft_limited_boost" if int(st.volume_percent) > 100 else "linear",
+        )
         try:
             source = self._build_ffmpeg_source(
                 track.stream_url,
@@ -3018,7 +3220,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 pcm_source.cleanup()
             raise
         if isinstance(source, AgentMixedAudioSource) and source.persistent:
-            source.quality_context = dict(quality_context)
+            # Keep this track's context shared with its live codec updates.
+            # A channel event can apply while first-frame confirmation awaits.
+            source.quality_context = quality_context
         if playback_token != st.playback_token:
             # Uma ação mais recente assumiu a sessão enquanto FFmpeg preparava.
             if not reusable:
@@ -3061,31 +3265,20 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                                     token=playback_token, pcm_source=pcm_source)
         if not reusable:
             try:
-                self._play_music_source(voice_client, source, after=after, opus_bitrate_kbps=opus_bitrate_kbps)
+                self._play_music_source(voice_client, source, after=after, opus_bitrate_kbps=opus_bitrate_kbps,
+                                        output_policy=output_policy)
+                st.audio_output_applied = dict(getattr(voice_client, "_music_audio_output_applied", {}) or {})
+                initial_applied = st.audio_output_applied
+                quality_context.update(opus_requested_bitrate_kbps=opus_bitrate_kbps,
+                                       opus_bitrate_kbps=initial_applied.get("bitrate_kbps"),
+                                       opus_fec=initial_applied.get("fec"),
+                                       opus_expected_packet_loss=initial_applied.get("expected_packet_loss"),
+                                       audio_output_state=initial_applied.get("state"))
             except BaseException:
                 source.cleanup()
                 raise
         else:
-            def update_encoder() -> None:
-                encoder = getattr(voice_client, "encoder", None)
-                setter = getattr(encoder, "set_bitrate", None)
-                actual = getattr(voice_client, "_music_opus_bitrate_kbps", None)
-                if callable(setter):
-                    try:
-                        actual = setter(opus_bitrate_kbps)
-                        if actual is None:
-                            actual = opus_bitrate_kbps
-                        for name, value in (("set_signal_type", "music"), ("set_bandwidth", "full")):
-                            callback = getattr(encoder, name, None)
-                            if callable(callback):
-                                callback(value)
-                        voice_client._music_opus_bitrate_kbps = int(actual)
-                    except Exception as exc:
-                        self.log("opus_update_failed", guild_id=guild_id, error=type(exc).__name__)
-                quality_context["opus_bitrate_kbps"] = actual
-                source.quality_context.update(opus_bitrate_kbps=actual)
-                self.log("opus_encoder_updated", guild_id=guild_id, requested_kbps=opus_bitrate_kbps, applied_kbps=actual)
-            source.queue_encoder_update(update_encoder)
+            await self._sync_audio_output(guild_id, reason="track_start", expected_channel_id=st.voice_channel_id)
         # Confirme assim que o primeiro frame for consumido. O timeout limita
         # falhas de início; não acrescenta uma espera fixa ao caminho normal.
         confirm_delay = max(0.05, min(15.0, env_float("MUSIC_AGENT_FIRST_FRAME_TIMEOUT_SECONDS", 8.0)))
@@ -3120,7 +3313,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         quality_context["play_start_ms"] = round((time.monotonic() - direct_start_monotonic) * 1000.0, 1)
         quality_context["transition_gap_ms"] = round(transition_gap_ms, 1) if transition_gap_ms is not None else None
         if isinstance(source, AgentMixedAudioSource) and source.persistent:
-            source.quality_context = dict(quality_context)
+            source.quality_context = quality_context
         st.consecutive_start_failures = 0
         st.last_error_category = ""
         st.last_error_phase = ""

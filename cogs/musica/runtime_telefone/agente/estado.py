@@ -179,6 +179,11 @@ class GuildMusicState:
     slowed_reverb_level: int = 0
     effects_revision: int = 0
     effects_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    # Ajustes locais de saída sobrevivem à troca de faixa, sem alterar a fonte.
+    # A sessão/processo continua sendo o dono; não há persistência em .env.
+    audio_output_settings: dict[str, Any] = field(default_factory=dict)
+    audio_output_revision: int = 0
+    audio_output_applied: dict[str, Any] = field(default_factory=dict)
     # Shuffle virtual: embaralha cada janela materializada da playlist sem
     # carregar a coleção inteira em memória. O seed mantém o comportamento
     # determinístico durante a sessão e é descartado quando o cursor termina.
@@ -321,7 +326,27 @@ class GuildMusicState:
         return max(0, total)
 
     def state_revision(self) -> str:
-        return f"{self.updated_at:.6f}:{self.playback_token}"
+        current = f"{self.updated_at:.6f}:{self.playback_token}"
+        return f"{current}:audio{self.audio_output_revision}" if self.audio_output_revision else current
+
+    def audio_output_public(self) -> dict[str, Any]:
+        allowed = {
+            "profile", "bitrate_kbps", "target_bitrate_kbps", "channel_bitrate_kbps",
+            "source_abr_kbps", "limited_by_channel", "limited_by_config", "fec",
+            "expected_packet_loss", "application", "bandwidth", "signal_type", "revision",
+            "applied_at", "reason", "mode", "status", "encoder_kind", "encoder_supported",
+            "unsupported", "capabilities", "libopus_version", "discord_version",
+            "requested_profile", "requested_kbps", "applied_kbps", "fec_applied",
+            "expected_packet_loss_applied", "passthrough", "state",
+            "unsupported_controls", "error_type",
+        }
+        settings, applied = dict(self.audio_output_settings), dict(self.audio_output_applied)
+        return {
+            "settings": {key: value for key, value in settings.items()
+                         if key in {"profile", "fec", "expected_packet_loss"}},
+            "revision": int(self.audio_output_revision),
+            "applied": {key: value for key, value in applied.items() if key in allowed},
+        }
 
     def effect_level(self, effect: str) -> int:
         flag = bool(getattr(self, effect, False))
@@ -478,6 +503,7 @@ class GuildMusicState:
             "slowed_reverb_level": self.effect_level("slowed_reverb"),
             "speed_multiplier": self.playback_speed,
             "effects_revision": self.effects_revision,
+            "audio_output": self.audio_output_public(),
             "normal_volume_percent": self.normal_volume_percent,
             "ducked": self.ducked,
             "shuffle": bool(self.shuffle or self.virtual_shuffle_active),

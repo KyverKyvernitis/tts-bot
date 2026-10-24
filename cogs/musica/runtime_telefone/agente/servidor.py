@@ -35,6 +35,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 def _enable_music_domain_path() -> None:
     """Locate the canonical cogs.musica package in repo or extracted worker release."""
@@ -55,10 +56,14 @@ from cogs.musica.runtime_telefone.agente.ciclo_vida import (  # noqa: E402
     stop_player_instance,
 )
 from cogs.musica.runtime_telefone.agente.configuracao import (  # noqa: E402
+    audio_output_capabilities,
+    audio_output_policy,
     bootstrap_env,
     env_float,
     env_int,
     truthy,
+    validate_audio_output_settings,
+    opus_passthrough_eligibility,
 )
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState, sanitize_start_context, sanitize_start_timings  # noqa: E402
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin  # noqa: E402
@@ -94,7 +99,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.88"
+AGENT_VERSION = "0.3.89"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -184,6 +189,14 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.discord_opus_min_bitrate = max(16, min(512, env_int("MUSIC_AGENT_DISCORD_OPUS_MIN_BITRATE_KBPS", 96)))
         self.discord_opus_max_bitrate = max(self.discord_opus_min_bitrate, min(512, env_int("MUSIC_AGENT_DISCORD_OPUS_MAX_BITRATE_KBPS", 256)))
         self.discord_opus_source_headroom = max(0, min(128, env_int("MUSIC_AGENT_DISCORD_OPUS_SOURCE_HEADROOM_KBPS", 32)))
+        output_defaults = validate_audio_output_settings({
+            "profile": os.getenv("MUSIC_AGENT_AUDIO_OUTPUT_PROFILE", "balanced"),
+            "fec": truthy(os.getenv("MUSIC_AGENT_DISCORD_OPUS_FEC"), True),
+            "expected_packet_loss": env_float("MUSIC_AGENT_DISCORD_OPUS_EXPECTED_PACKET_LOSS", 0.15),
+        })
+        self.audio_output_default_profile = output_defaults["profile"]
+        self.discord_opus_fec = output_defaults["fec"]
+        self.discord_opus_expected_packet_loss = output_defaults["expected_packet_loss"]
         self.default_volume_percent = max(0, min(150, env_int("MUSIC_AGENT_DEFAULT_VOLUME_PERCENT", 55)))
         self.duck_volume_percent = max(0, min(100, env_int("MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT", 8)))
         # PCMVolumeTransformer lets the worker-owned direct voice path duck TTS and restore volume.
@@ -364,6 +377,23 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         @self.client.event
         async def on_ready() -> None:  # type: ignore[no-untyped-def]
             self.log("discord_ready", user=str(self.client.user), version=AGENT_VERSION, playback="direct")
+
+        @self.client.event
+        async def on_guild_channel_update(before, after) -> None:  # type: ignore[no-untyped-def]
+            if self.executor_mode == "archive":
+                return
+            channel_id = safe_id(getattr(after, "id", 0))
+            guild_id = safe_id(getattr(getattr(after, "guild", None), "id", 0))
+            if not channel_id or channel_id != safe_id(getattr(before, "id", 0)) or guild_id not in self.states:
+                return
+            if getattr(before, "bitrate", None) == getattr(after, "bitrate", None):
+                return
+            try:
+                await self._sync_audio_output(guild_id, reason="channel_bitrate_changed",
+                                              expected_channel_id=channel_id, channel=after)
+            except Exception as exc:
+                # A channel event must not tear down playback or leak settings.
+                self.log("audio_output_sync_failed", guild_id=guild_id, error_type=type(exc).__name__)
 
         @self.client.event
         async def on_voice_state_update(member, before, after) -> None:  # type: ignore[no-untyped-def]
@@ -990,13 +1020,108 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         })
         return base
 
+    def _audio_output_policy(self, voice_client: Any, track: AgentTrack | None = None,
+                             st: GuildMusicState | None = None) -> dict[str, Any]:
+        return audio_output_policy(self, voice_client, track, st)
+
+    @staticmethod
+    def _audio_output_runtime(player: Any = None) -> dict[str, Any]:
+        encoder = getattr(player, "encoder", None)
+        opus = getattr(discord, "opus", None)
+        libopus_version = None
+        try:
+            # Inspect an already loaded encoder; status never loads native code.
+            if opus is not None and getattr(opus, "is_loaded", lambda: False)():
+                getter = getattr(getattr(opus, "Encoder", None), "get_opus_version", None)
+                if callable(getter):
+                    libopus_version = str(getter())[:96]
+        except Exception:
+            pass
+        return {
+            "discord_py_version": str(getattr(discord, "__version__", "unknown"))[:48],
+            "libopus_version": libopus_version,
+            "encoder_controls": {
+                name: callable(getattr(encoder, method, None)) for name, method in (
+                    ("bitrate", "set_bitrate"), ("fec", "set_fec"),
+                    ("expected_packet_loss", "set_expected_packet_loss_percent"),
+                )
+            },
+            # discord.py's public play/Encoder interface does not expose these
+            # getters. Unknown is different from promising a quality setting.
+            "complexity": None, "vbr": None,
+        }
+
+    def _audio_output_snapshot(self, guild_id: int) -> dict[str, Any]:
+        st = self.states.get(guild_id)
+        player = getattr(st, "player", None)
+        channel = getattr(player, "channel", None)
+        channel_id = safe_id(getattr(channel, "id", 0) or getattr(st, "voice_channel_id", 0))
+        getter = getattr(self.client, "get_channel", None)
+        cached = getter(channel_id) if callable(getter) and channel_id else None
+        if cached is not None and safe_id(getattr(cached, "id", 0)) == channel_id:
+            channel = cached
+        requested = self._audio_output_policy(SimpleNamespace(channel=channel), getattr(st, "current", None), st)
+        public_output = st.audio_output_public() if st is not None else {"settings": {}, "applied": {}}
+        applied = public_output["applied"]
+        active = bool(player and self._voice_client_is_connected(player) and getattr(st, "current", None))
+        if not active:
+            applied = {}
+        source = getattr(player, "source", None)
+        metrics = self._audio_source_telemetry(source) if source is not None else {}
+        track = getattr(st, "current", None)
+        effects = st.effect_signature() if st is not None else (0, 0, 0)
+        return {
+            "settings": public_output["settings"],
+            "revision": int(getattr(st, "audio_output_revision", 0) or 0),
+            "active": active,
+            "channel_id": channel_id,
+            "requested": requested,
+            "applied": applied,
+            "runtime": self._audio_output_runtime(player),
+            "metrics": {key: metrics[key] for key in (
+                "audio_frame_count", "audio_bytes", "source_stall_count", "partial_frame_count",
+                "source_deadline_overruns", "mix_limited_frames",
+            ) if key in metrics},
+            "passthrough": opus_passthrough_eligibility(
+                self, track, volume_percent=getattr(st, "volume_percent", self.default_volume_percent),
+                effects=effects, force_pcm=bool(getattr(track, "archive_segments", None)),
+            ),
+        }
+
+    async def cmd_audio_output(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = safe_id(body.get("guild_id"))
+        if guild_id <= 0:
+            raise ValueError("audio_output exige guild_id positivo")
+        if "reset" in body and not isinstance(body["reset"], bool):
+            raise ValueError("reset deve ser booleano")
+        reset = body.get("reset", False)
+        if reset and "settings" in body:
+            raise ValueError("use reset ou settings, separadamente")
+        sync = {"state": "unchanged"}
+        if reset or "settings" in body:
+            st = self.get_state(guild_id)
+            settings = {} if reset else validate_audio_output_settings(body["settings"], st.audio_output_settings)
+            if settings != st.audio_output_settings:
+                st.audio_output_settings = settings
+                st.audio_output_revision += 1
+                st.updated_at = time.time()
+                sync = await self._sync_audio_output(guild_id, reason="audio_output_settings_changed")
+                self.log("audio_output_settings_changed", guild_id=guild_id,
+                         revision=st.audio_output_revision, profile=settings.get("profile", self.audio_output_default_profile))
+        return {"ok": True, "version": AGENT_VERSION, "guild_id": guild_id,
+                "audio_output": self._audio_output_snapshot(guild_id),
+                "sync": sync, "capabilities": audio_output_capabilities()}
+
     async def _dispatch_action(self, body: dict[str, Any], action: str) -> dict[str, Any]:
-        read_only = action in {"status", "get_state"}
+        read_only = action in {"status", "get_state"} or (
+            action == "audio_output" and "settings" not in body and not body.get("reset"))
         archive_action = action.startswith("archive_")
         if not read_only and ((self.executor_mode == "voice" and archive_action)
                               or (self.executor_mode == "archive" and not archive_action)):
             return {"ok": False, "error": "ação indisponível neste modo de executor",
                     "executor_mode": self.executor_mode}
+        if action == "audio_output":
+            return await self.cmd_audio_output(body)
         if action == "prepare_voice":
             return await self.cmd_prepare_voice(body)
         if action == "cancel_prepare_voice":
