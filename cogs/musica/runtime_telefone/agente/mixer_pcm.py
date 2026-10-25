@@ -733,6 +733,9 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
         self._opus_input_source: Any = None
         self._opus_processed_source: Any = None
         self._opus_processed_generation = -1
+        self._original_pcm_requested_source: Any = None
+        self._original_pcm_requested_generation = -1
+        self._pending_music_handoff: tuple[Any, Any, Any, Any] | None = None
         self.output_encoder = output_encoder
         try:
             if self.output_encoder is None:
@@ -780,6 +783,137 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
             self._opus_latched = True
             self._opus_reason = reason
         self._opus_mode = "pcm_fallback"
+        self._request_original_pcm(reason)
+
+    def _request_original_pcm(self, reason: str) -> None:
+        """Signal processing of a prepared source without doing work here.
+
+        This hook also runs on the voice thread. Its owner may only schedule
+        asynchronous preparation; network/decoder/cleanup work belongs there.
+        A pause can latch PCM first, so a later real processing request must
+        still be signalled once for this exact source and generation.
+        """
+        if reason not in {"volume_requires_pcm", "effects_require_pcm", "tts_reservation",
+                          "tts_overlay", "tts_pending"}:
+            return
+        with self._lock:
+            source = self.music_source
+            if (self._closed or self._music_ended or source is None
+                    or getattr(source, "_prepared_opus_source", False) is not True
+                    or (self._original_pcm_requested_source is source
+                        and self._original_pcm_requested_generation == self._opus_generation)):
+                return
+            request = getattr(source, "request_original_pcm", None)
+            if not callable(request):
+                return
+            self._original_pcm_requested_source = source
+            self._original_pcm_requested_generation = self._opus_generation
+            with contextlib.suppress(Exception):
+                request(reason)
+
+    def reset_original_pcm_request(self, expected_source: Any) -> bool:
+        """Allow a later control to retry a failed, bounded preparation.
+
+        No request is sent here or from already-latched read frames. The
+        routing owner calls this only after disposing a failed candidate;
+        a later volume/effect/TTS action may then request this source again.
+        """
+        with self._lock:
+            if (self._closed or self._music_ended or self.music_source is not expected_source
+                    or self._original_pcm_requested_source is not expected_source
+                    or self._original_pcm_requested_generation != self._opus_generation):
+                return False
+            self._original_pcm_requested_source = None
+            self._original_pcm_requested_generation = -1
+            return True
+
+    @staticmethod
+    def _notify_music_handoff(callback: Any, committed: bool) -> None:
+        if callable(callback):
+            # The callback must only publish to the owner's event loop. It
+            # never owns or cleans a source on the voice thread.
+            with contextlib.suppress(Exception):
+                callback(committed)
+
+    def queue_music_source_handoff(
+        self, expected_source: Any, source: Any, on_result: Any, *, validate: Any = None,
+    ) -> bool:
+        """Queue an ownership transfer at the next complete audio-read boundary.
+
+        The caller owns ``source`` until on_result(True), and must close it
+        off-loop after rejection. The old source is never cleaned here.
+        This dedicated slot cannot replace an encoder-policy update.
+        """
+        with self._lock:
+            if (self._closed or self._music_ended or source is None or source is expected_source
+                    or self.music_source is not expected_source or self._pending_music_handoff is not None):
+                return False
+            self._pending_music_handoff = (expected_source, source, on_result, validate)
+            return True
+
+    def cancel_music_source_handoff(self, expected_source: Any, source: Any) -> bool:
+        """Cancel only a still-pending transfer; False may mean it committed."""
+        with self._lock:
+            pending = getattr(self, "_pending_music_handoff", None)
+            if pending is None or pending[0] is not expected_source or pending[1] is not source:
+                return False
+            self._pending_music_handoff = None
+        self._notify_music_handoff(pending[2], False)
+        return True
+
+    def _cancel_pending_music_handoff(self) -> None:
+        with self._lock:
+            pending = getattr(self, "_pending_music_handoff", None)
+            self._pending_music_handoff = None
+        if pending is not None:
+            self._notify_music_handoff(pending[2], False)
+
+    def handoff_music_source(self, expected_source: Any, source: Any) -> bool:
+        """Transfer one track's source, preserving DSP, overlays and its clock.
+
+        Production callers queue this operation so a read cannot still own an
+        old frame. They clean ``expected_source`` off-loop after success.
+        """
+        with self._lock:
+            if (self._closed or self._music_ended or self.music_source is not expected_source
+                    or source is None or source is expected_source):
+                return False
+            self.music_source = source
+            self._opus_generation += 1
+            self._opus_latched = True
+            self._opus_mode = "pcm_fallback"
+            self._opus_reason = self._opus_reason or "original_pcm"
+            self._opus_input_pcm = b""
+            self._opus_input_source = None
+            self._opus_processed_source = None
+            self._opus_processed_generation = -1
+            self._original_pcm_requested_source = None
+            self._original_pcm_requested_generation = -1
+            self.last_read_had_music = False
+            self.last_read_music_source = None
+            return True
+
+    def _apply_pending_music_handoff(self) -> None:
+        with self._lock:
+            pending = self._pending_music_handoff
+            self._pending_music_handoff = None
+            committed = False
+            if pending is not None:
+                expected, source, _callback, validate = pending
+                valid = True
+                if callable(validate):
+                    try:
+                        valid = bool(validate())
+                    except Exception:
+                        valid = False
+                if valid:
+                    committed = self.handoff_music_source(expected, source)
+        if pending is not None:
+            self._notify_music_handoff(pending[2], committed)
+
+    def cleanup(self) -> None:
+        self._cancel_pending_music_handoff()
+        super().cleanup()
 
     def _opus_processed_active(self) -> bool:
         """Proof of a native encoded music read from this exact source.
@@ -897,6 +1031,7 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
 
     def stop_music(self) -> None:
         with self._lock:
+            self._cancel_pending_music_handoff()
             self._latch_opus_pcm("music_stopped")
             super().stop_music()
 
@@ -904,6 +1039,7 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                              on_music_end: Any, bassboost: bool | None = None,
                              bassboost_level: int | None = None) -> None:
         with self._lock:
+            self._cancel_pending_music_handoff()
             super().replace_music_source(
                 source, volume=volume, on_music_end=on_music_end,
                 bassboost=bassboost, bassboost_level=bassboost_level,
@@ -918,6 +1054,8 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
             self._opus_input_source = None
             self._opus_processed_source = None
             self._opus_processed_generation = -1
+            self._original_pcm_requested_source = None
+            self._original_pcm_requested_generation = -1
             if self._opus_policy.get("opus_direct", "auto") != "auto":
                 self._latch_opus_pcm("disabled")
             elif self._overlays or self._tts_reservations:
@@ -928,6 +1066,10 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                 self._latch_opus_pcm("effects_require_pcm")
 
     def read(self) -> bytes:
+        # Commit before either the generation or source snapshot. Replacing
+        # from an encoder-update callback would be one snapshot too late and
+        # discard a 20 ms frame from the old source.
+        self._apply_pending_music_handoff()
         generation = self._opus_generation
         self._opus_input_pcm = b""
         self._opus_input_source = None
@@ -1063,6 +1205,11 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                 "output_mode": "opus_direct" if copy else "opus_processed" if processed else "",
                 "processed_bitrate_kbps": actual_bitrate if processed and known_bitrate else None,
                 "opus_transport": True,
+                # Input provenance is independent of packet/output proof.
+                # Warming/queued sources cannot claim to be the active input.
+                "pcm_origin": "original" if getattr(self.music_source, "_original_pcm_handoff", False) is True
+                    else "prepared_opus" if getattr(self.music_source, "_prepared_opus_source", False) is True
+                    else "source",
                 "packet_validation_required": not copy,
                 "copied_packets": self._opus_copied_packets,
                 "copied_bytes": self._opus_copied_bytes,

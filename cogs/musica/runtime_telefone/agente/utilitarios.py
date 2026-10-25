@@ -202,6 +202,62 @@ def select_stream_url(entry: dict[str, Any]) -> str:
     return str(select_stream_info(entry).get("stream_url") or "")
 
 
+def shared_audio_format_selector(baseline: Any, *, format_selector: str, format_sort: str):
+    """Apply playback selection inside yt-dlp's existing extraction/download.
+
+    yt-dlp owns the baseline selector, authentication, protocols and download.
+    Only an equivalent audio-only candidate selected by the shared policy can
+    replace its default choice. Yield the complete format object so headers,
+    fragments and other downloader metadata remain intact.
+    """
+    def select(context: dict[str, Any]):
+        for original in baseline(context):
+            if not isinstance(original, dict):
+                continue
+            formats = [item for item in context.get("formats", ()) if isinstance(item, dict)]
+            entry = {**context, **original, "formats": formats, "requested_downloads": [original]}
+            selected = select_playback_stream(entry, format_selector=format_selector, format_sort=format_sort)
+            match = next((item for item in formats
+                          if str(item.get("url") or "").strip() == selected.get("stream_url")
+                          and short_text(item.get("format_id"), 40) == selected.get("audio_format_id")), None)
+            yield match if match is not None else original
+    return select
+
+
+def archive_download_main(arguments: list[str]) -> int:
+    """Private yt-dlp download entrypoint, reusing the playback format policy.
+
+    Receives the same structured CLI arguments as the archive downloader used
+    before. No shell, extra metadata request or synthetic media URL is used.
+    Explicit format/sort settings remain yt-dlp's own selectors.
+    """
+    import yt_dlp  # type: ignore
+
+    parsed = yt_dlp.parse_options(arguments)
+    options = dict(parsed.ydl_opts)
+    selector = str(options.get("format") or DEFAULT_YTDLP_AUDIO_FORMAT)
+    raw_sort = options.get("format_sort") or DEFAULT_YTDLP_AUDIO_SORT
+    sort = ",".join(raw_sort) if isinstance(raw_sort, (list, tuple)) else str(raw_sort)
+    shared = selector == DEFAULT_YTDLP_AUDIO_FORMAT and sort == DEFAULT_YTDLP_AUDIO_SORT
+    holder: dict[str, Any] = {}
+    if shared:
+        def choose(context: dict[str, Any]):
+            return shared_audio_format_selector(
+                holder["baseline"], format_selector=selector, format_sort=sort)(context)
+        options["format"] = choose
+    try:
+        with yt_dlp.YoutubeDL(options) as downloader:
+            if shared:
+                holder["baseline"] = downloader.build_format_selector(selector)
+            return int(downloader.download(parsed.urls) or 0)
+    except yt_dlp.DownloadError as exc:
+        # Match the normal CLI's nonzero failure without a Python traceback.
+        # Archive failure handling maps this stderr to its existing safe reason.
+        import sys
+        sys.stderr.write(str(exc) + "\n")
+        return 1
+
+
 # Aliases privados mantêm compatibilidade com imports e testes antigos enquanto
 # o entrypoint monolítico é desmontado em waves.
 _looks_like_url = looks_like_url
@@ -212,3 +268,10 @@ _format_audio_info = format_audio_info
 _select_stream_info = select_stream_info
 _select_stream_url = select_stream_url
 _audio_format_score = audio_format_score
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--archive-download":
+        raise SystemExit(archive_download_main(sys.argv[2:]))
+    raise SystemExit("uso interno: --archive-download")

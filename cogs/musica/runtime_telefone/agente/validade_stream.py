@@ -23,6 +23,7 @@ import discord
 from .correspondencia import CatalogNoMatchError, avaliar_correspondencia
 from .archive_pipeline import ArchivePipelineMixin
 from .archive_manifest import (MANIFEST_MARKER, inline_manifest, validate_manifest, flatten_segments, hydrate_archive_manifest)
+from .utilitarios import DEFAULT_YTDLP_AUDIO_FORMAT, DEFAULT_YTDLP_AUDIO_SORT, formato_audio_configurado
 
 _ARCHIVE_PAUSE_SLICE_SECONDS = 15.0
 _ARCHIVE_RUN_SLICE_SECONDS = 1.0
@@ -1020,9 +1021,13 @@ class ArchiveMixin(ArchivePipelineMixin):
         download_budget = resumed_bytes + max(0, int(free_bytes * 0.45) - 64 * 1024 * 1024)
         if download_budget <= resumed_bytes:
             raise ArchiveDownloadFailure("temporary_space_unavailable")
-        base = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist", "--no-warnings",
+        # The existing pure utility module hosts a private yt-dlp entrypoint.
+        # It installs the same selector as playback inside this one extraction,
+        # preserving yt-dlp's full downloader metadata and all CLI options.
+        base = [sys.executable, str(Path(__file__).with_name("utilitarios.py")), "--archive-download",
+                "--ignore-config", "--no-playlist", "--no-warnings",
                 "--no-progress", "--max-filesize", str(download_budget), "--socket-timeout", "12",
-                "--format-sort", str(getattr(self, "ytdlp_sort", "abr,acodec,asr")),
+                "--format-sort", str(getattr(self, "ytdlp_sort", DEFAULT_YTDLP_AUDIO_SORT)),
                 "-o", str(folder / "audio.%(ext)s")]
         if self._archive_playback_active():
             base.extend(("--limit-rate", "512K"))
@@ -1036,7 +1041,8 @@ class ArchiveMixin(ArchivePipelineMixin):
                 base += ["--js-runtimes", runtime.strip()]
         oversized = False
         failure_reason = "download_failed"
-        formats = ("bestaudio/best",)
+        formats = (DEFAULT_YTDLP_AUDIO_FORMAT if archive_source else
+                   formato_audio_configurado(getattr(self, "ytdlp_format", DEFAULT_YTDLP_AUDIO_FORMAT)),)
         for fmt in formats:
             if self._archive_active != item["key"]:
                 return None

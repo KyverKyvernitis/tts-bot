@@ -118,6 +118,7 @@ class PreparacaoAudioMixin:
                 source._prepared_opus_source = True
                 source._prepared_opus_cache_key = key
                 source._prepared_opus_cache_hit = cache_hit
+                self._install_original_pcm_request(guild_id, track, source)
                 return source
             except BaseException:
                 raw.cleanup()
@@ -165,6 +166,235 @@ class PreparacaoAudioMixin:
                 with contextlib.suppress(Exception):
                     writer.abort()
             raise
+
+    def _install_original_pcm_request(self, guild_id: int, track: AgentTrack, source: Any) -> None:
+        """Keep original media and an actual-consumer clock beside prepared Opus.
+
+        The producer may buffer ahead; only frames consumed by the mixer count.
+        The voice thread merely posts a request, never opens media or waits.
+        """
+        source._original_pcm_track = replace(
+            track, archive_segments=[dict(part) for part in track.archive_segments],
+            archive_ref=dict(track.archive_ref), attachment_ref=dict(track.attachment_ref),
+        )
+        source._original_pcm_owner_track = track
+        if callable(getattr(source, "original_pcm_position_seconds", None)):
+            return  # Rebind a reused warm source without wrapping/counting twice.
+        clock_lock, samples = threading.RLock(), 0
+        original_read = getattr(source, "read", None)
+        start = float(track.start_offset_seconds or 0)
+
+        def position() -> float:
+            metadata = getattr(source, "opus_metadata", {})
+            preskip = int(metadata.get("pre_skip_samples", 0)) if isinstance(metadata, dict) else 0
+            with clock_lock:
+                return start + max(0, samples - preskip) / 48000.0
+
+        if callable(original_read):
+            def counted_read() -> bytes:
+                nonlocal samples
+                frame = original_read()
+                if frame and getattr(source, "last_read_had_audio", True):
+                    with clock_lock:
+                        samples += len(frame) // 4  # signed 16-bit stereo at 48 kHz
+                return frame
+            source.read = counted_read
+        source.original_pcm_position_seconds = position
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            with contextlib.suppress(RuntimeError):
+                loop = asyncio.get_running_loop()
+
+        def request(reason: str) -> None:
+            if loop is not None and not loop.is_closed():
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(self._request_original_pcm_handoff, guild_id,
+                                             source._original_pcm_owner_track, source, reason)
+        source.request_original_pcm = request
+
+    def _request_original_pcm_handoff(self, guild_id: int, track: AgentTrack, source: Any, reason: str) -> None:
+        if getattr(self, "_audio_prepare_stopping", False):
+            return
+        st = self.states.get(guild_id)
+        mixer = getattr(getattr(st, "player", None), "source", None)
+        if (st is None or st.current is not track or st.transport != "direct"
+                or getattr(mixer, "music_source", None) is not source
+                or not getattr(source, "_prepared_opus_source", False)):
+            return
+        tasks = getattr(self, "_original_pcm_handoff_tasks", None)
+        if tasks is None:
+            tasks = self._original_pcm_handoff_tasks = {}
+        previous = tasks.get(guild_id)
+        if previous is not None and not previous.done():
+            if getattr(previous, "_original_pcm_source", source) is not source:
+                # A skipped track may still own an off-loop cleanup. Serialize
+                # its successor instead of consuming the successor's request.
+                previous._original_pcm_retry = (guild_id, track, source, reason)
+            return
+        task = asyncio.create_task(self._original_pcm_handoff(guild_id, track, source, reason))
+        task._original_pcm_source = source
+        tasks[guild_id] = task
+        task.add_done_callback(consume_task_result)
+        task.add_done_callback(lambda finished: remove_owned_task(tasks, guild_id, finished))
+        def retry_after_cleanup(finished: Any) -> None:
+            retry = getattr(finished, "_original_pcm_retry", None)
+            if retry is not None:
+                self._request_original_pcm_handoff(*retry)
+        task.add_done_callback(retry_after_cleanup)
+
+    def _cancel_original_pcm_handoff(self, guild_id: int) -> None:
+        task = getattr(self, "_original_pcm_handoff_tasks", {}).get(guild_id)
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    async def _original_pcm_handoff(self, guild_id: int, track: AgentTrack, source: Any, reason: str) -> bool:
+        """Replace prepared decoding with original PCM, keeping healthy audio live.
+
+        Warming/catching up is bounded. Ownership passes only at a complete
+        mixer read boundary; cleanup and cancellation cannot close a live source.
+        """
+        st = self.states.get(guild_id)
+        player = getattr(st, "player", None)
+        mixer = getattr(player, "source", None)
+        if st is None or getattr(mixer, "music_source", None) is not source:
+            return False
+        token = st.playback_token
+        effects = tuple(st.effect_signature()[1:])
+        deadline = time.monotonic() + 4.0
+        owner = ("original", guild_id, id(source))
+        claimed = queued = committed = False
+        transfer = {"accepted": False}
+        candidate = None
+        outcome = "unavailable"
+        resumed_at = 0.0
+
+        def valid() -> bool:
+            return bool(
+                not getattr(self, "_audio_prepare_stopping", False)
+                and self.states.get(guild_id) is st and st.current is track
+                and st.playback_token == token and st.player is player
+                and getattr(player, "source", None) is mixer
+                and st.transport == "direct" and not getattr(mixer, "music_ended", False)
+                and not getattr(mixer, "_closed", False)
+                and tuple(st.effect_signature()[1:]) == effects
+            )
+
+        def remaining() -> float:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise asyncio.TimeoutError
+            return left
+
+        try:
+            if not valid() or not callable(getattr(mixer, "queue_music_source_handoff", None)):
+                return False
+            while not self._claim_audio_prepare_slot(owner):
+                if not valid():
+                    outcome = "stale"
+                    return False
+                await asyncio.sleep(min(0.02, remaining()))
+            claimed = True
+            original = source._original_pcm_track
+            selected = replace(original, archive_segments=[dict(part) for part in original.archive_segments],
+                               archive_ref=dict(original.archive_ref), attachment_ref=dict(original.attachment_ref))
+            selected.start_offset_seconds = source.original_pcm_position_seconds()
+            # Existing verified URLs need no additional REST/metadata request.
+            if selected.attachment_ref and self._track_stream_needs_refresh(selected):
+                refreshed = await asyncio.wait_for(self._resolve_discord_attachment(
+                    track_meta=selected.public(), body={"guild_id": guild_id}), remaining())
+                selected.stream_url = refreshed.stream_url
+                selected.stream_resolved_monotonic = refreshed.stream_resolved_monotonic
+                selected.archive_segment_index = refreshed.archive_segment_index
+                selected.archive_segments = refreshed.archive_segments
+            if not valid() or getattr(mixer, "music_source", None) is not source:
+                outcome = "stale"
+                return False
+            resumed_at = selected.start_offset_seconds = source.original_pcm_position_seconds()
+            candidate = self._create_pcm_source(selected, effects=(0, *effects), preparing=True)
+            if not callable(getattr(candidate, "wait_ready", None)):
+                candidate = BufferedPCMSource(candidate, max_frames=10,
+                    stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0))
+            await asyncio.wait_for(candidate.wait_ready(timeout=remaining(), min_frames=1), remaining())
+            # The current source continues playing while the original warms.
+            # Discard only real decoded frames to catch its moving media clock.
+            discarded_samples = 0
+            while True:
+                remaining()
+                if not valid() or getattr(mixer, "music_source", None) is not source:
+                    outcome = "stale"
+                    return False
+                position = resumed_at + discarded_samples / 48000.0
+                if position >= source.original_pcm_position_seconds() - 0.02:
+                    break
+                frame = candidate.read()
+                if not frame:
+                    raise ValueError("original_pcm_eof")
+                if getattr(candidate, "last_read_had_audio", True):
+                    discarded_samples += len(frame) // 4
+                    await asyncio.sleep(0)
+                else:
+                    await asyncio.sleep(min(0.005, remaining()))
+            candidate._original_pcm_handoff = True
+            activate = getattr(candidate, "activate_playback", None)
+            if callable(activate):
+                activate()
+            loop = asyncio.get_running_loop()
+            result = loop.create_future()
+
+            def completed(accepted: bool) -> None:
+                # Record ownership synchronously on the voice thread. A later
+                # skip can replace the candidate before its loop callback runs.
+                transfer["accepted"] = accepted
+                def publish() -> None:
+                    if not result.done():
+                        result.set_result(accepted)
+                if not loop.is_closed():
+                    with contextlib.suppress(RuntimeError):
+                        loop.call_soon_threadsafe(publish)
+
+            queued = mixer.queue_music_source_handoff(source, candidate, completed, validate=valid)
+            if not queued:
+                outcome = "stale"
+                return False
+            committed = await asyncio.wait_for(asyncio.shield(result), remaining())
+            outcome = "success" if committed else "stale"
+            return committed
+        except asyncio.TimeoutError:
+            outcome = "timeout"
+            return False
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except Exception as exc:
+            # No URLs, filenames, cookies or exception text in this telemetry.
+            self.log("original_pcm_handoff_error", guild_id=guild_id, error_type=type(exc).__name__)
+            return False
+        finally:
+            if queued and candidate is not None:
+                mixer.cancel_music_source_handoff(source, candidate)
+            # A voice-thread commit can win a cancellation/timeout race. The
+            # candidate is then owned by the mixer even before its callback runs.
+            committed = committed or transfer["accepted"] or (
+                candidate is not None and getattr(mixer, "music_source", None) is candidate)
+            try:
+                if committed:
+                    outcome = "success"
+                    if valid():
+                        with contextlib.suppress(Exception):
+                            self._arm_music_packet_trace(player, mixer, guild_id=guild_id, track=track,
+                                token=token, pcm_source=candidate, output_refresh=True)
+                    await self._cleanup_audio_off_loop(source)
+                elif candidate is not None:
+                    await self._cleanup_audio_off_loop(candidate)
+            finally:
+                if claimed:
+                    self._release_audio_prepare_slot(owner)
+                if not committed:
+                    reset = getattr(mixer, "reset_original_pcm_request", None)
+                    if callable(reset):
+                        reset(source)
+                self.log("original_pcm_handoff", guild_id=guild_id, outcome=outcome,
+                         offset_seconds=round(resumed_at, 3))
 
     def _opus_direct_preflight(self, guild_id: int, track: AgentTrack) -> dict[str, Any]:
         st = self.states.get(guild_id)
@@ -278,7 +508,7 @@ class PreparacaoAudioMixin:
             if len(self._audio_extra_owners) >= getattr(self, "next_audio_prepare_max_sources", 1):
                 # Uma parte da música atual tem prioridade sobre aquecer uma
                 # faixa futura. A vaga continua ocupada durante o cleanup.
-                if isinstance(owner, tuple) and owner[0] == "segment":
+                if isinstance(owner, tuple) and owner[0] in {"segment", "original"}:
                     for optional in list(self._audio_extra_owners):
                         if (isinstance(optional, tuple) and optional[0] == "track"
                                 and optional not in self._audio_extra_preempting):
@@ -367,6 +597,10 @@ class PreparacaoAudioMixin:
                 source.cleanup()
                 source = None
         source = source or self._create_music_pcm_source(guild_id, track, effects=effects)
+        if getattr(source, "_prepared_opus_source", False):
+            # Initial warming may have used a provisional AgentTrack before
+            # probe/resolve completed. The active track now owns the request.
+            self._install_original_pcm_request(guild_id, track, source)
 
         async def wait_for_audio(candidate: Any) -> Any:
             self._starting_pcm[guild_id] = candidate

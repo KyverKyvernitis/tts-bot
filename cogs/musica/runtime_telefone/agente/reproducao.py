@@ -416,6 +416,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         keep_prefetch_task_keys: set[str] | None = None,
     ) -> int:
         self._cancel_voice_runtime_recovery(st.guild_id)
+        cancel_handoff = getattr(self, "_cancel_original_pcm_handoff", None)
+        if callable(cancel_handoff):
+            cancel_handoff(st.guild_id)
         pending_pcm = self._starting_pcm.pop(st.guild_id, None)
         if pending_pcm is not None:
             pending_pcm.cleanup()

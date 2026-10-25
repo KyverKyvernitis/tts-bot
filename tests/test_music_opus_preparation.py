@@ -11,6 +11,7 @@ import contextlib
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+import threading
 import time
 import unittest
 from unittest.mock import AsyncMock, Mock
@@ -65,6 +66,7 @@ def load_preparation():
     tree = ast.parse(SOURCE.read_text())
     original = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'PreparacaoAudioMixin')
     wanted = {'_opus_direct_preflight', '_opus_preparation_preflight', '_create_prepared_opus_source',
+              '_install_original_pcm_request',
               '_create_music_pcm_source', '_prepare_current_pcm',
               '_archive_audio_identity', '_take_prepared_audio'}
     methods = [node for node in original.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -76,7 +78,7 @@ def load_preparation():
     reader = SimpleNamespace(from_ffmpeg=Mock(), from_prepared_ffmpeg=Mock(),
                              from_prepared_pcm=Mock(), from_prepared_file=Mock())
     namespace = dict(SimpleNamespace=SimpleNamespace, GuildMusicState=GuildMusicState,
-                     asyncio=asyncio, contextlib=contextlib, replace=replace, time=time,
+                     asyncio=asyncio, contextlib=contextlib, replace=replace, time=time, threading=threading,
                      ArchiveOpusPCMSource=ArchiveOpusBuffer,
                      opus_passthrough_eligibility=opus_passthrough_eligibility,
                      opus_preparation_eligibility=opus_preparation_eligibility,
@@ -453,6 +455,30 @@ class OpusPreparationTests(unittest.TestCase):
         self.assertTrue(warmed.closed)
         self.assertTrue(result._prepared_opus_source)
         self.assertEqual(self.reader.from_prepared_ffmpeg.call_args.kwargs['bitrate_kbps'], 96)
+
+    def test_reused_initial_prepared_source_rebinds_confirmed_track_and_stream_index(self):
+        self.aac()
+        async def scenario():
+            self.agent._loop = asyncio.get_running_loop()
+            provisional = replace(self.track, audio_stream_index=-1)
+            source = self.agent._create_prepared_opus_source(1, provisional)
+            confirmed = replace(provisional, audio_stream_index=2)
+            self.state.current = confirmed
+            self.agent._take_initial_audio.return_value = source
+            self.agent._request_original_pcm_handoff = Mock()
+            result = await self.agent._prepare_current_pcm(1, confirmed, 7)
+            self.assertIs(result, source)
+            self.assertFalse(source.closed)
+            self.assertIs(source._original_pcm_owner_track, confirmed)
+            self.assertEqual(source._original_pcm_track.audio_stream_index, 2)
+            self.assertEqual(provisional.audio_stream_index, -1)
+            source.request_original_pcm('volume_requires_pcm')
+            await asyncio.sleep(0)
+            self.agent._request_original_pcm_handoff.assert_called_once_with(
+                1, confirmed, source, 'volume_requires_pcm')
+        asyncio.run(scenario())
+        self.reader.from_prepared_ffmpeg.assert_called_once()
+        self.agent._create_pcm_source.assert_not_called()
 
     def test_processing_guards_prevent_aac_conversion_and_preserve_original_pcm(self):
         for guard in ('volume', 'tts', 'off', 'seek', 'live', 'filter', 'unknown_channel'):

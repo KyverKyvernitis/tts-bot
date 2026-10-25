@@ -87,6 +87,19 @@ class OutputHelperTests(unittest.TestCase):
         args = helper.parser().parse_args(["status", "--guild", "927002914449424404"])
         self.assertEqual(helper.command_body(args), {"action": "audio_output", "guild_id": 927002914449424404})
 
+    def test_current_pcm_origin_is_visible_without_exposing_the_media_location(self):
+        for origin in ("original", "prepared_opus", "source"):
+            raw = {"ok": True, "version": "0.3.96", "guild_id": 7,
+                   "audio_output": {"passthrough": {
+                       "pcm_origin": origin, "copy_active": False,
+                       "source_url": "https://private.invalid/original",
+                       "path": "/private/prepared.opus"}}}
+            with self.subTest(origin=origin):
+                public = helper.public_result(raw, self.values)
+                self.assertEqual(public["audio_output"]["passthrough"],
+                                 {"pcm_origin": origin, "copy_active": False})
+                self.assertNotIn("private", json.dumps(public))
+
     def test_profile_protection_and_reset_payloads(self):
         parse = helper.parser().parse_args
         cases = [

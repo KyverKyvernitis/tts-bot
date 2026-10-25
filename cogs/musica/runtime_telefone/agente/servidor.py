@@ -102,7 +102,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.95"
+AGENT_VERSION = "0.3.96"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -310,6 +310,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self.next_audio_prepare_frames = max(1, min(self.pcm_buffer_max_frames, env_int("MUSIC_AGENT_NEXT_AUDIO_PREPARE_FRAMES", 15)))
         self.next_audio_prepare_max_sources = max(1, min(2, env_int("MUSIC_AGENT_NEXT_AUDIO_PREPARE_MAX_SOURCES", 1)))
         self._audio_prepare_tasks: dict[int, asyncio.Task] = {}
+        self._original_pcm_handoff_tasks: dict[int, asyncio.Task] = {}
         self._audio_prepare_keys: dict[int, str] = {}
         self._prepared_audio: dict[int, Any] = {}
         self._starting_pcm: dict[int, Any] = {}
@@ -1494,6 +1495,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 + list(self._youtube_metadata_tasks.values())
                 + list(self._voice_runtime_recovery_tasks.values())
                 + list(self._audio_prepare_tasks.values())
+                + list(getattr(self, "_original_pcm_handoff_tasks", {}).values())
             )
             self._idle_disconnect_tasks.clear()
             self._voice_presence_disconnect_tasks.clear()
@@ -1507,6 +1509,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             for guild_id in list(self._initial_audio):
                 self._cancel_initial_audio(guild_id)
             self._audio_prepare_tasks.clear()
+            getattr(self, "_original_pcm_handoff_tasks", {}).clear()
             self._audio_prepare_keys.clear()
 
             players: list[Any] = []
