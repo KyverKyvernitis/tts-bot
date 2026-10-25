@@ -239,6 +239,10 @@ QUALITY_KEYS = frozenset({
     "raw_duration_samples", "decoded_samples",
     "archive_reader_continuous", "archive_segment_index", "archive_segments_total",
     "archive_segments_completed", "archive_preroll_packets_skipped", "archive_preroll_samples_skipped",
+    "preparation", "cache_enabled", "prepared_opus", "prepared_bitrate_kbps", "prepared_source_codec",
+    "prepared_cache_hit", "opus_direct_preparation", "opus_direct_origin", "opus_direct_bitrate_kbps",
+    "preparation_required", "cache", "max_bytes", "max_item_bytes", "hits", "misses", "active_writers",
+    "prepared_requested_fec", "prepared_expected_packet_loss",
 })
 
 

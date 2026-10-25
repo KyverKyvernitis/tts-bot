@@ -15,7 +15,10 @@ from .buffer_pcm import BufferedOpusPCMSource, BufferedPCMSource, OpusPCMDecoder
 from .audio_segmentado import ArchiveOpusPCMSource, ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource, ExactSegmentPCMSource
 from .ciclo_vida import consume_task_result, remove_owned_task
 from .estado import AgentTrack, GuildMusicState
-from .configuracao import effective_opus_direct_mode, opus_passthrough_eligibility
+from .configuracao import (
+    effective_opus_direct_mode, opus_passthrough_eligibility,
+    opus_preparation_eligibility, prepared_opus_cache_key,
+)
 
 
 @dataclass
@@ -47,6 +50,122 @@ class AudioInicial:
 
 
 class PreparacaoAudioMixin:
+    def _opus_preparation_preflight(self, guild_id: int, track: AgentTrack) -> dict[str, Any]:
+        """Prepare finite media only when its output could actually be copied."""
+        st = self.states.get(guild_id)
+        if effective_opus_direct_mode(self, st, guild_id=guild_id) != "auto":
+            return {"candidate": False, "reason": "disabled"}
+        if getattr(track, "_opus_prepared_failed", False):
+            return {"candidate": False, "reason": "previous_preparation_failure"}
+        channel_id = getattr(st, "voice_channel_id", 0)
+        getter = getattr(getattr(self, "client", None), "get_channel", None)
+        channel = getter(channel_id) if callable(getter) else None
+        if channel is None:
+            channel = getattr(getattr(st, "player", None), "channel", None)
+        if not channel or not int(getattr(channel, "bitrate", 0) or 0):
+            return {"candidate": False, "reason": "channel_bitrate_unknown"}
+        policy = self._audio_output_policy(SimpleNamespace(channel=channel), track, st)
+        capacity = policy.get("copy_bitrate_kbps", policy.get("bitrate_kbps", 0))
+        result = opus_preparation_eligibility(
+            self, track, state=st, output_bitrate_kbps=capacity,
+            volume_percent=getattr(st, "volume_percent", self.default_volume_percent),
+            effects=st.effect_signature() if st is not None else (),
+        )
+        has_tts = getattr(self, "_tts_active_for_guild", None)
+        if callable(has_tts) and has_tts(guild_id):
+            result.update(candidate=False, reason="tts_active")
+        if result.get("candidate"):
+            # A 20 ms packet cannot exceed 1275 bytes: 510 kbps is the
+            # largest exact CBR payload below that physical Opus limit.
+            result["bitrate_kbps"] = min(510, int(capacity))
+            result["fec"] = policy.get("fec", True)
+            result["expected_packet_loss"] = policy.get("expected_packet_loss", 0.15)
+            quality = getattr(self, "_ffmpeg_quality_resample_filter", None)
+            result["resample_filter"] = (quality() if callable(quality)
+                                         and getattr(self, "resample_quality_enabled", True) else "")
+        return result
+
+    def _create_prepared_opus_source(
+        self, guild_id: int, track: AgentTrack, *, skip_cache: bool = False, **kwargs: Any,
+    ) -> Any | None:
+        """Stream one encoding pass, or read an already completed local version."""
+        preflight = self._opus_preparation_preflight(guild_id, track)
+        if not preflight.get("candidate"):
+            return None
+        bitrate = preflight["bitrate_kbps"]
+        codec = str(getattr(track, "audio_codec", "") or "")
+        protection = {"fec": preflight["fec"], "expected_packet_loss": preflight["expected_packet_loss"]}
+        signature = {**protection, "resample_filter": preflight["resample_filter"]}
+        cache = None if kwargs.get("first_audio_stream") else getattr(self, "prepared_opus_cache", None)
+        key, path, writer = None, None, None
+        if cache is not None:
+            with contextlib.suppress(Exception):
+                key = prepared_opus_cache_key(track, bitrate, **signature)
+                if not skip_cache:
+                    path = cache.get(key)
+
+        def invalidate() -> None:
+            if cache is not None and key is not None:
+                with contextlib.suppress(Exception):
+                    cache.invalidate(key)
+
+        def wrap(raw: Any, *, cache_hit: bool) -> Any:
+            try:
+                source = BufferedOpusPCMSource(
+                    raw, max_frames=kwargs.get("buffer_max_frames") or getattr(self, "pcm_buffer_max_frames", 75),
+                    stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0),
+                )
+                source._prepared_opus_source = True
+                source._prepared_opus_cache_key = key
+                source._prepared_opus_cache_hit = cache_hit
+                return source
+            except BaseException:
+                raw.cleanup()
+                raise
+
+        if path is not None:
+            try:
+                raw = OpusPCMDecoderSource.from_prepared_file(
+                    path, bitrate_kbps=bitrate, source_codec=codec, on_error=invalidate, **protection)
+                return wrap(raw, cache_hit=True)
+            except Exception:
+                invalidate()  # A missing/replaced cache file is not an audio failure.
+        if cache is not None:
+            with contextlib.suppress(Exception):
+                writer = cache.writer(key)
+        raw, pcm = None, None
+        try:
+            if len(track.archive_segments) > 1:
+                archived = replace(track, archive_segments=[dict(part) for part in track.archive_segments],
+                                   archive_ref=dict(track.archive_ref), attachment_ref=dict(track.attachment_ref))
+                # Decode the original parts continuously using the already
+                # verified archive path, then encode that joined signal once.
+                pcm = self._create_pcm_source(archived, **kwargs)
+                raw = OpusPCMDecoderSource.from_prepared_pcm(
+                    pcm, bitrate_kbps=bitrate, source_codec=codec, executable=self.ffmpeg_executable,
+                    cache_writer=writer, stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0),
+                    **protection)
+            else:
+                stream_index = (-1 if kwargs.get("first_audio_stream") else track.audio_stream_index
+                                if track.attachment_ref or track.archive_ref else -1)
+                raw = OpusPCMDecoderSource.from_prepared_ffmpeg(
+                    track.stream_url, bitrate_kbps=bitrate, source_codec=codec,
+                    executable=self.ffmpeg_executable,
+                    before_options=self._ffmpeg_before_options_for_offset(0),
+                    audio_stream_index=stream_index, cache_writer=writer,
+                    resample_filter=preflight["resample_filter"] if track.audio_sample_rate not in (0, 48000) else "",
+                    **protection)
+            return wrap(raw, cache_hit=False)
+        except BaseException:
+            if raw is not None:
+                raw.cleanup()
+            elif pcm is not None:
+                pcm.cleanup()
+            if writer is not None:
+                with contextlib.suppress(Exception):
+                    writer.abort()
+            raise
+
     def _opus_direct_preflight(self, guild_id: int, track: AgentTrack) -> dict[str, Any]:
         st = self.states.get(guild_id)
         mode = effective_opus_direct_mode(self, st, guild_id=guild_id)
@@ -80,6 +199,13 @@ class PreparacaoAudioMixin:
         ordinary PCM decoder, without trusting media metadata as proof.
         """
         if not self._opus_direct_preflight(guild_id, track).get("candidate"):
+            try:
+                prepared = self._create_prepared_opus_source(guild_id, track, **kwargs)
+                if prepared is not None:
+                    return prepared
+            except Exception as exc:
+                track._opus_prepared_failed = True
+                self.log("opus_preparation_fallback", guild_id=guild_id, error_type=type(exc).__name__)
             return self._create_pcm_source(track, **kwargs)
         try:
             if len(track.archive_segments) > 1:
@@ -118,6 +244,13 @@ class PreparacaoAudioMixin:
         except Exception as exc:
             track._opus_direct_failed = True
             self.log("opus_direct_prepare_fallback", guild_id=guild_id, error_type=type(exc).__name__)
+            try:
+                prepared = self._create_prepared_opus_source(guild_id, track, **kwargs)
+                if prepared is not None:
+                    return prepared
+            except Exception as prepared_exc:
+                track._opus_prepared_failed = True
+                self.log("opus_preparation_fallback", guild_id=guild_id, error_type=type(prepared_exc).__name__)
             return self._create_pcm_source(track, **kwargs)
         try:
             return BufferedOpusPCMSource(
@@ -219,10 +352,20 @@ class PreparacaoAudioMixin:
         source = self._take_prepared_audio(guild_id, track)
         initial = self._take_initial_audio(guild_id, track, playback_token) if source is None else None
         source = source or initial
-        if (source is not None and not getattr(source, "opus_direct_capable", False)
-                and self._opus_direct_preflight(guild_id, track).get("candidate")):
-            source.cleanup()
-            source = None
+        if source is not None:
+            copy_candidate = self._opus_direct_preflight(guild_id, track).get("candidate")
+            prepared_policy = self._opus_preparation_preflight(guild_id, track)
+            replace_source = bool(not getattr(source, "opus_direct_capable", False)
+                                  and (copy_candidate or prepared_policy.get("candidate")))
+            if getattr(source, "_prepared_opus_source", False):
+                metadata = getattr(source, "opus_metadata", {})
+                replace_source = bool(not prepared_policy.get("candidate")
+                                      or metadata.get("prepared_bitrate_kbps") != prepared_policy["bitrate_kbps"])
+            elif not copy_candidate and prepared_policy.get("candidate"):
+                replace_source = True
+            if replace_source:
+                source.cleanup()
+                source = None
         source = source or self._create_music_pcm_source(guild_id, track, effects=effects)
 
         async def wait_for_audio(candidate: Any) -> Any:
@@ -238,19 +381,57 @@ class PreparacaoAudioMixin:
                 if self._starting_pcm.get(guild_id) is candidate:
                     self._starting_pcm.pop(guild_id, None)
 
-        try:
-            return await wait_for_audio(source)
-        except Exception as exc:
-            if getattr(source, "opus_direct_capable", False) and st.playback_token == playback_token:
+        def still_current() -> bool:
+            return self.states.get(guild_id) is st and st.playback_token == playback_token
+
+        async def recover_direct_source(failed: Any, error: Exception) -> Any:
+            if not still_current():
+                raise error
+            prepared = bool(getattr(failed, "_prepared_opus_source", False))
+            cached = bool(getattr(failed, "_prepared_opus_cache_hit", False))
+            if prepared and cached:
+                cache = getattr(self, "prepared_opus_cache", None)
+                if cache is not None:
+                    with contextlib.suppress(Exception):
+                        cache.invalidate(getattr(failed, "_prepared_opus_cache_key", None))
+            elif prepared:
+                track._opus_prepared_failed = True
+            else:
                 track._opus_direct_failed = True
-                self.log("opus_direct_prepare_fallback", guild_id=guild_id, error_type=type(exc).__name__)
-                return await wait_for_audio(self._create_pcm_source(track, effects=effects))
+            self.log("opus_preparation_fallback" if prepared else "opus_direct_prepare_fallback",
+                     guild_id=guild_id, error_type=type(error).__name__)
+            if not getattr(track, "_opus_prepared_failed", False):
+                try:
+                    replacement = self._create_prepared_opus_source(
+                        guild_id, track, skip_cache=cached, effects=effects)
+                    if replacement is not None:
+                        return await wait_for_audio(replacement)
+                except Exception as replacement_error:
+                    if not still_current():
+                        raise
+                    track._opus_prepared_failed = True
+                    self.log("opus_preparation_fallback", guild_id=guild_id,
+                             error_type=type(replacement_error).__name__)
+            if not still_current():
+                raise error
+            return await wait_for_audio(self._create_pcm_source(track, effects=effects))
+
+        try:
+            result = await wait_for_audio(source)
+        except Exception as exc:
+            if getattr(source, "opus_direct_capable", False):
+                return await recover_direct_source(source, exc)
             # Um decoder antecipado pode perder a corrida com o CDN. Antes de
             # renovar a URL, tente a mesma URL com a trilha já verificada.
-            if initial is None or st.playback_token != playback_token:
+            if initial is None or not still_current():
                 raise
             self.log("initial_audio_retry_verified", guild_id=guild_id, error=type(exc).__name__)
             return await wait_for_audio(self._create_pcm_source(track, effects=effects))
+        reason = getattr(getattr(source, "source", None), "passthrough_reason", "")
+        if getattr(source, "opus_direct_capable", False) and reason:
+            source.cleanup()
+            return await recover_direct_source(source, ValueError("pacotes exigem preparação Opus"))
+        return result
 
     def _create_pcm_source(
         self, track: AgentTrack, *, effects: tuple[int | bool, ...] = (0, 0, 0),

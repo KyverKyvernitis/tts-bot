@@ -84,6 +84,8 @@ class MusicTrack:
     # Evidência efêmera do player remoto para esta faixa em execução. Não é
     # preferência de qualidade nem metadado persistente da mídia/fila.
     opus_direct_active: bool = False
+    opus_direct_origin: str = ""
+    opus_direct_bitrate_kbps: int = 0
 
     @property
     def display_url(self) -> str:

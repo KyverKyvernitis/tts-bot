@@ -2,22 +2,347 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
 import re
 import secrets
+import shutil
 import stat
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
+from urllib.parse import parse_qs, urlsplit
 
 
 AUDIO_OUTPUT_PROFILES = {"balanced": None, "quality_192": 192, "quality_256": 256}
 AUDIO_OUTPUT_OPUS_DIRECT_MODES = ("off", "auto")
 AUDIO_OUTPUT_SETTINGS = frozenset({"profile", "fec", "expected_packet_loss", "opus_direct"})
+
+
+def prepared_opus_cache_key(track: Any, bitrate_kbps: Any, *, resample_filter: str = "",
+                            fec: bool = True, expected_packet_loss: float = 0.15) -> str | None:
+    """Immutable media/preparation identity, never a signed playback URL."""
+    if (isinstance(bitrate_kbps, bool) or not isinstance(bitrate_kbps, int)
+            or not 16 <= bitrate_kbps <= 512 or getattr(track, "is_live", False)):
+        return None
+    try:
+        if (not isinstance(resample_filter, str) or len(resample_filter) > 2048
+                or not isinstance(fec, bool) or isinstance(expected_packet_loss, bool)
+                or not isinstance(expected_packet_loss, (int, float))
+                or not math.isfinite(expected_packet_loss) or not 0 <= expected_packet_loss <= 1):
+            return None
+        if float(getattr(track, "start_offset_seconds", 0) or 0) != 0:
+            return None
+        technical = {name: getattr(track, name, None) for name in (
+            "audio_format_id", "audio_codec", "audio_ext", "audio_abr", "audio_stream_index",
+            "audio_sample_rate", "audio_channels", "duration")}
+        identity: dict[str, Any] = {"revision": "opus-prepared-cbr-48k-stereo-20ms-v2",
+                                    "bitrate_kbps": bitrate_kbps, "technical": technical,
+                                    "resample_filter": resample_filter, "fec": fec,
+                                    "packet_loss_percent": int(expected_packet_loss * 100)}
+        ref = getattr(track, "archive_ref", None) or getattr(track, "attachment_ref", None)
+        if ref:
+            if not isinstance(ref, dict):
+                return None
+            ids = {name: int(ref[name]) for name in ("guild_id", "channel_id", "message_id", "attachment_id")}
+            if any(isinstance(ref[name], bool) or not 0 < value < 2 ** 64 for name, value in ids.items()):
+                return None
+            identity["reference"] = ids
+            identity["archive_key"] = str(getattr(track, "archive_key", "") or "")
+            identity["manifest_attachment_id"] = ref.get("manifest_attachment_id")
+            parts = getattr(track, "archive_segments", ()) or ()
+            if not isinstance(parts, (list, tuple)) or len(parts) > 4096:
+                return None
+            fields = ("order", "guild_id", "channel_id", "message_id", "attachment_id", "sha256",
+                      "size_bytes", "filename", "duration", "offset_seconds", "audio_codec",
+                      "audio_sample_rate", "audio_channels", "audio_stream_index")
+            identity["segments"] = []
+            for part in parts:
+                if (not isinstance(part, dict)
+                        or not re.fullmatch(r"[a-f0-9]{64}", str(part.get("sha256") or ""))):
+                    return None
+                identity["segments"].append({field: part.get(field) for field in fields})
+        else:
+            raw = str(getattr(track, "webpage_url", "") or getattr(track, "original_url", "") or "")
+            parsed = urlsplit(raw)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username or parsed.password or len(raw) > 4096):
+                return None
+            # A general page or /latest.mp3 may serve different audio later.
+            # Cache only a recognized video resource; unknown sources still
+            # stream through preparation without persistent reuse.
+            video_id = ""
+            host = parsed.hostname.lower()
+            if parsed.port is not None:
+                return None
+            if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
+                if parsed.path.rstrip("/") == "/watch":
+                    values = parse_qs(parsed.query).get("v", ())
+                    video_id = values[0] if len(values) == 1 else ""
+                else:
+                    path = parsed.path.strip("/").split("/")
+                    if len(path) == 2 and path[0] in {"shorts", "embed", "live"}:
+                        video_id = path[1]
+            elif host in {"youtu.be", "www.youtu.be"}:
+                video_id = parsed.path.strip("/")
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                return None
+            identity["youtube_video_id"] = video_id
+        encoded = json.dumps(identity, sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
+class PreparedOpusCache:
+    """Optional bounded disk cache. Only a validated stream may commit a writer.
+
+    No media bytes are read by get(). Its caller must still validate Ogg/Opus
+    while consuming a hit. Cache failures never become playback failures.
+    """
+    def __init__(self, path: str | Path, *, max_bytes: int = 256 * 1024 * 1024,
+                 max_item_bytes: int = 64 * 1024 * 1024, min_free_bytes: int = 64 * 1024 * 1024) -> None:
+        self.path = Path(path).expanduser()
+        self.max_bytes = max(0, int(max_bytes))
+        self.max_item_bytes = max(0, min(self.max_bytes, int(max_item_bytes)))
+        self.min_free_bytes = max(0, int(min_free_bytes))
+        self._lock = threading.RLock()
+        self._writers: set[str] = set()
+        self._temporary_names: set[str] = set()
+        self._pending_bytes = 0
+        self._stored_bytes = 0
+        self._last_scan = 0.0
+        self._hits = self._misses = 0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.max_bytes and self.max_item_bytes)
+
+    @staticmethod
+    def _valid_key(key: Any) -> bool:
+        return isinstance(key, str) and re.fullmatch(r"[a-f0-9]{64}", key) is not None
+
+    def _directory(self, *, create: bool = False) -> bool:
+        if self.path.is_symlink():
+            return False
+        if create:
+            self.path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return self.path.is_dir() and not self.path.is_symlink()
+
+    def _entries(self) -> list[tuple[float, int, Path]]:
+        if not self._directory():
+            raise OSError("diretório do cache preparado indisponível")
+        entries = []
+        self._foreign_temporary_bytes = 0
+        with os.scandir(self.path) as directory:
+            for count, entry in enumerate(directory):
+                if count >= 8192:
+                    raise OSError("cache preparado excede o limite de entradas")
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                info = entry.stat(follow_symlinks=False)
+                if re.fullmatch(r"[a-f0-9]{64}\.ogg", entry.name):
+                    entries.append((info.st_mtime, info.st_size, Path(entry.path)))
+                    continue
+                if (not re.fullmatch(r"\.opus-prepare-[A-Za-z0-9_-]+\.tmp", entry.name)
+                        or entry.name in self._temporary_names):
+                    continue
+                owner = re.fullmatch(r"\.opus-prepare-([1-9][0-9]*)-[A-Za-z0-9_-]+\.tmp", entry.name)
+                stale = False
+                if owner is not None:
+                    try:
+                        os.kill(int(owner[1]), 0)
+                    except ProcessLookupError:
+                        stale = True
+                    except (OSError, ValueError, OverflowError):
+                        pass  # Unknown ownership is not permission to delete.
+                elif time.time() - info.st_mtime > 86400:
+                    stale = True  # Legacy unowned temporary files, after a day.
+                if stale:
+                    try:
+                        Path(entry.path).unlink()
+                        continue
+                    except OSError:
+                        pass
+                # Another live writer or an unknown old revision may own it.
+                # Count it against the quota without removing its open stream.
+                self._foreign_temporary_bytes += info.st_size
+        return entries
+
+    def _prune_locked(self, limit: int) -> None:
+        entries = self._entries()
+        total = sum(size for _mtime, size, _path in entries) + self._foreign_temporary_bytes
+        for _mtime, size, path in sorted(entries):
+            if total <= limit:
+                break
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            total -= size
+        self._stored_bytes = total
+        self._last_scan = time.monotonic()
+
+    def get(self, key: Any) -> Path | None:
+        if not self.enabled or not self._valid_key(key):
+            return None
+        try:
+            with self._lock:
+                if not self._directory():
+                    return None
+                if time.monotonic() - self._last_scan > 60:
+                    self._prune_locked(max(0, self.max_bytes - self._pending_bytes))
+                path = self.path / (key + ".ogg")
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= self.max_item_bytes:
+                    return None
+                os.utime(path, None, follow_symlinks=False)
+                self._hits += 1
+                return path
+        except (OSError, ValueError):
+            pass
+        self._misses += 1
+        return None
+
+    def writer(self, key: Any) -> Any:
+        if not self.enabled or not self._valid_key(key):
+            return None
+        fd, name, output = None, None, None
+        try:
+            with self._lock:
+                if key in self._writers or not self._directory(create=True):
+                    return None
+                target = self.path / (key + ".ogg")
+                if target.exists() or target.is_symlink():
+                    return None
+                if shutil.disk_usage(self.path).free < self.min_free_bytes:
+                    return None
+                self._prune_locked(max(0, self.max_bytes - self._pending_bytes))
+                fd, name = tempfile.mkstemp(prefix=f".opus-prepare-{os.getpid()}-", suffix=".tmp", dir=self.path)
+                os.fchmod(fd, 0o600)
+                output = os.fdopen(fd, "wb")
+                fd = None  # fdopen now owns the descriptor.
+                self._writers.add(key)
+                self._temporary_names.add(Path(name).name)
+                return _PreparedOpusCacheWriter(self, key, Path(name), output)
+        except (OSError, ValueError):
+            if output is not None:
+                with contextlib.suppress(OSError):
+                    output.close()
+            elif fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            if name is not None:
+                with contextlib.suppress(OSError):
+                    Path(name).unlink(missing_ok=True)
+            return None
+
+    def invalidate(self, key: Any) -> None:
+        if not self._valid_key(key):
+            return
+        with self._lock:
+            try:
+                if not self._directory():
+                    return
+                path = self.path / (key + ".ogg")
+                info = path.lstat()
+                path.unlink()
+                if stat.S_ISREG(info.st_mode):
+                    self._stored_bytes = max(0, self._stored_bytes - info.st_size)
+            except (OSError, ValueError):
+                pass
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {"enabled": self.enabled, "max_bytes": self.max_bytes,
+                    "max_item_bytes": self.max_item_bytes, "hits": self._hits, "misses": self._misses,
+                    "active_writers": len(self._writers)}
+
+
+class _PreparedOpusCacheWriter:
+    def __init__(self, cache: PreparedOpusCache, key: str, temporary: Path, output: Any) -> None:
+        self.cache, self.key, self.temporary, self.output = cache, key, temporary, output
+        self._lock = threading.RLock()
+        self._size = 0
+        self._active = True
+        self._committed = False
+        self._disk_checked = 0.0
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def write(self, raw: bytes) -> int:
+        size = len(raw)
+        with self._lock:
+            if not self._active:
+                return size
+            try:
+                cache = self.cache
+                if self._size + size > cache.max_item_bytes:
+                    raise OSError("item preparado excede o orçamento do cache")
+                now = time.monotonic()
+                if now - self._disk_checked >= 1:
+                    if shutil.disk_usage(cache.path).free - size < cache.min_free_bytes:
+                        raise OSError("espaço insuficiente para cache opcional")
+                    self._disk_checked = now
+                with cache._lock:
+                    required = cache._stored_bytes + cache._pending_bytes + size
+                    if required > cache.max_bytes:
+                        cache._prune_locked(max(0, cache.max_bytes - cache._pending_bytes - size))
+                    if cache._stored_bytes + cache._pending_bytes + size > cache.max_bytes:
+                        raise OSError("cache preparado sem orçamento disponível")
+                    cache._pending_bytes += size
+                self._size += size
+                if self.output.write(raw) != size:
+                    raise OSError("gravação parcial do cache preparado")
+            except Exception:
+                self.abort()
+            return size
+
+    def commit(self) -> bool:
+        with self._lock:
+            if not self._active or not self._size:
+                self.abort()
+                return self._committed
+            try:
+                self.output.flush()
+                os.fsync(self.output.fileno())
+                self.output.close()
+                with self.cache._lock:
+                    if not self.cache._directory():
+                        raise OSError("diretório do cache preparado indisponível")
+                    os.replace(self.temporary, self.cache.path / (self.key + ".ogg"))
+                    self.cache._pending_bytes = max(0, self.cache._pending_bytes - self._size)
+                    self.cache._stored_bytes += self._size
+                    self.cache._writers.discard(self.key)
+                    self.cache._temporary_names.discard(self.temporary.name)
+                self._active, self._committed = False, True
+                return True
+            except Exception:
+                self.abort()
+                return False
+
+    def abort(self) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            self._active = False
+            with contextlib.suppress(Exception):
+                self.output.close()
+            with contextlib.suppress(OSError):
+                self.temporary.unlink(missing_ok=True)
+            with self.cache._lock:
+                self.cache._pending_bytes = max(0, self.cache._pending_bytes - self._size)
+                self.cache._writers.discard(self.key)
+                self.cache._temporary_names.discard(self.temporary.name)
+
+    cleanup = abort
 
 
 class OpusDirectPreferenceStore:
@@ -288,6 +613,7 @@ def audio_output_capabilities(default_opus_direct: str = "auto") -> dict[str, An
         "opus_direct_default": direct_default,
         "opus_direct_persistent": True,
         "opus_direct_segmented_archive": True,
+        "opus_direct_preparation": True,
     }
 
 
@@ -390,6 +716,38 @@ def opus_passthrough_eligibility(
     return {"mode": mode, "eligible": False, "candidate": candidate,
             "reasons": reasons, "required_packet_duration_ms": 20,
             "packet_validation_required": True}
+
+
+def opus_preparation_eligibility(
+    agent: Any, track: Any, *, volume_percent: int | float,
+    effects: tuple[Any, ...] = (), force_pcm: bool = False,
+    state: Any = None, output_bitrate_kbps: int = 0,
+) -> dict[str, Any]:
+    """Allow one preparation pass, preserving every processing/session guard.
+
+    The result authorizes preparation, never claims original-packet copy. AAC,
+    mono, other sample rates or legacy archive parts can be decoded by the
+    existing source path, then encoded once to the bounded Opus output format.
+    """
+    valid_capacity = (isinstance(output_bitrate_kbps, int) and not isinstance(output_bitrate_kbps, bool)
+                      and 16 <= output_bitrate_kbps <= 512)
+    try:
+        result = opus_passthrough_eligibility(
+            agent, track, volume_percent=volume_percent, effects=effects, force_pcm=force_pcm,
+            state=state, output_bitrate_kbps=output_bitrate_kbps if valid_capacity else 0)
+    except (TypeError, ValueError, OverflowError):
+        return {"mode": "off", "eligible": False, "candidate": False,
+                "reasons": ["invalid_metadata", "packet_validation_required"],
+                "required_packet_duration_ms": 20, "packet_validation_required": True,
+                "preparation_required": True}
+    conversion = {"segmented_archive", "codec_not_opus", "sample_rate_not_48000",
+                  "channels_not_stereo", "source_bitrate_limit", "packet_validation_required"}
+    reasons = [reason for reason in result["reasons"] if reason not in conversion]
+    if not valid_capacity:
+        reasons.append("channel_bitrate_unknown")
+    return {**result, "candidate": not reasons, "reasons": reasons + ["packet_validation_required"],
+            "preparation_required": True,
+            "prepared_bitrate_kbps": min(output_bitrate_kbps, 510) if valid_capacity else 0}
 
 
 def load_env_file(path: Path, *, override: bool = False) -> None:

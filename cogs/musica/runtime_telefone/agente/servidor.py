@@ -57,6 +57,7 @@ from cogs.musica.runtime_telefone.agente.ciclo_vida import (  # noqa: E402
 )
 from cogs.musica.runtime_telefone.agente.configuracao import (  # noqa: E402
     OpusDirectPreferenceStore,
+    PreparedOpusCache,
     audio_output_capabilities,
     audio_output_policy,
     bootstrap_env,
@@ -65,6 +66,7 @@ from cogs.musica.runtime_telefone.agente.configuracao import (  # noqa: E402
     truthy,
     validate_audio_output_settings,
     opus_passthrough_eligibility,
+    opus_preparation_eligibility,
 )
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState, sanitize_start_context, sanitize_start_timings  # noqa: E402
 from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin  # noqa: E402
@@ -100,7 +102,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.93"
+AGENT_VERSION = "0.3.94"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -204,6 +206,14 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         preferences_file = Path(os.getenv("MUSIC_AGENT_OUTPUT_PREFERENCES_FILE") or
                                 worker_dir / "state" / "music-agent-output-preferences.json")
         self.opus_direct_preferences = OpusDirectPreferenceStore(preferences_file)
+        cache_dir = Path(os.getenv("MUSIC_AGENT_PREPARED_OPUS_CACHE_DIR") or
+                         worker_dir / "state" / "prepared-opus-cache").expanduser()
+        cache_bytes = max(0, min(4096, env_int("MUSIC_AGENT_PREPARED_OPUS_CACHE_MB", 256))) * 1024 * 1024
+        try:
+            self.prepared_opus_cache = PreparedOpusCache(cache_dir, max_bytes=cache_bytes)
+        except Exception:
+            # Disk caching is optional; streaming preparation can still start.
+            self.prepared_opus_cache = None
         self.default_volume_percent = max(0, min(150, env_int("MUSIC_AGENT_DEFAULT_VOLUME_PERCENT", 55)))
         self.duck_volume_percent = max(0, min(100, env_int("MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT", 8)))
         # PCMVolumeTransformer lets the worker-owned direct voice path duck TTS and restore volume.
@@ -1090,6 +1100,16 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             effects=effects, state=policy_state,
             output_bitrate_kbps=requested.get("copy_bitrate_kbps", requested["bitrate_kbps"]),
         )
+        preparation = opus_preparation_eligibility(
+            self, track, volume_percent=getattr(st, "volume_percent", self.default_volume_percent),
+            effects=effects, state=policy_state,
+            output_bitrate_kbps=requested.get("copy_bitrate_kbps", requested["bitrate_kbps"]),
+        )
+        preparation["cache_enabled"] = bool(getattr(getattr(self, "prepared_opus_cache", None), "max_bytes", 0))
+        cache_status = getattr(getattr(self, "prepared_opus_cache", None), "status", None)
+        if callable(cache_status):
+            with contextlib.suppress(Exception):
+                preparation["cache"] = cache_status()
         direct_status = getattr(source, "opus_direct_status", None)
         if active and callable(direct_status):
             live = direct_status()
@@ -1097,8 +1117,8 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             if live.get("copy_active"):
                 passthrough["reasons"] = []
                 passthrough["packet_validation_required"] = False
-                # These are original source packets. Fallback encoder controls
-                # cannot retroactively change their bitrate/FEC/protection.
+                # These are packets of the selected Opus source, which can be
+                # original or prepared. Encoder controls cannot change them.
                 applied = {**applied, "state": "copied", "output_mode": "opus_direct",
                            "bitrate_kbps": None, "fec": None, "expected_packet_loss": None}
             else:
@@ -1118,6 +1138,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 "source_deadline_overruns", "mix_limited_frames",
             ) if key in metrics},
             "passthrough": passthrough,
+            "preparation": preparation,
             "persistence": persistence,
         }
 

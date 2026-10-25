@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import os
 import shlex
+import stat
 import struct
 import subprocess
 import threading
@@ -586,6 +588,10 @@ class OpusPCMDecoderSource(discord.AudioSource):
         self.last_opus_packet: bytes | None = None
         self.passthrough_reason = ""
         self.last_read_had_audio = False
+        self._prepared_metadata: dict[str, Any] = {}
+        self._prepared_complete: Any = None
+        self._prepared_input: Any = None
+        self._prepared_on_error: Any = None
 
     @property
     def opus_metadata(self) -> dict[str, Any]:
@@ -596,7 +602,8 @@ class OpusPCMDecoderSource(discord.AudioSource):
                   "end_granule_samples", "tail_padding_samples", "raw_duration_samples",
                   "archive_reader_continuous", "archive_segment_index", "archive_segments_total", "archive_segments_completed",
                   "archive_preroll_packets_skipped", "archive_preroll_samples_skipped")
-        return {**{key: self.reader.metadata.get(key) for key in fields}, "decoded_samples": self._decoded_samples}
+        return {**{key: self.reader.metadata.get(key) for key in fields},
+                **self._prepared_metadata, "decoded_samples": self._decoded_samples}
 
     def _validate_eos_page(self, packet: bytes) -> None:
         if self._validated_eos or not self.reader._eos:
@@ -620,6 +627,18 @@ class OpusPCMDecoderSource(discord.AudioSource):
         return False
 
     def read(self) -> bytes:
+        try:
+            return self._read_frame()
+        except Exception:
+            if self._prepared_metadata.get("prepared_opus"):
+                callback, self._prepared_on_error = self._prepared_on_error, None
+                if callable(callback):
+                    with contextlib.suppress(Exception):
+                        callback()
+                self.cleanup()
+            raise
+
+    def _read_frame(self) -> bytes:
         self.last_opus_packet = None
         self.last_read_had_audio = False
         if self._closed:
@@ -627,10 +646,17 @@ class OpusPCMDecoderSource(discord.AudioSource):
         while len(self._pcm) < FRAME_BYTES and not self._eof:
             packet = self.reader.read_packet()
             if not packet:
+                if callable(self._prepared_complete):
+                    self._prepared_complete()
+                    self._prepared_complete = None
                 self._eof = True
                 break
             self._validate_eos_page(packet)
             samples = opus_packet_samples(packet)
+            if self._prepared_metadata.get("prepared_opus"):
+                budget = min(1275, int(self._prepared_metadata["prepared_bitrate_kbps"] * 2.5))
+                if samples != 960 or len(packet) != budget:
+                    raise OpusPacketError("pacote da preparação Opus fora do perfil confirmado")
             pcm = self.decoder.decode(packet, fec=False)
             if not isinstance(pcm, bytes) or len(pcm) != samples * 4:
                 raise OpusPacketError("decoder Opus não confirmou duração/estéreo")
@@ -681,6 +707,124 @@ class OpusPCMDecoderSource(discord.AudioSource):
             close_process()
             raise
 
+    @classmethod
+    def from_prepared_ffmpeg(
+        cls, stream_url: str, *, bitrate_kbps: int, source_codec: str = "",
+        executable: str = "ffmpeg", before_options: str = "", audio_stream_index: int = -1,
+        decoder_factory: Any = None, cache_writer: Any = None,
+        resample_filter: str = "", fec: bool = True, expected_packet_loss: float = 0.15,
+    ) -> OpusPCMDecoderSource:
+        """Encode an incompatible source once, streaming validated Opus packets.
+
+        This is a prepared derivative, never a claim that AAC/MP3 were original
+        Opus packets. It does not wait for the whole file before producing audio.
+        """
+        selected = "0:a:0" if int(audio_stream_index) < 0 else f"0:{int(audio_stream_index)}"
+        input_args = [*shlex.split(before_options), "-i", str(stream_url), "-map", selected]
+        return cls._from_prepared_process(
+            input_args, bitrate_kbps=bitrate_kbps, source_codec=source_codec,
+            executable=executable, decoder_factory=decoder_factory, cache_writer=cache_writer,
+            resample_filter=resample_filter, fec=fec, expected_packet_loss=expected_packet_loss,
+        )
+
+    @classmethod
+    def from_prepared_pcm(
+        cls, pcm_source: Any, *, bitrate_kbps: int, source_codec: str = "",
+        executable: str = "ffmpeg", decoder_factory: Any = None,
+        cache_writer: Any = None, stall_seconds: float = 12.0,
+        fec: bool = True, expected_packet_loss: float = 0.15,
+    ) -> OpusPCMDecoderSource:
+        """Encode a continuous segmented PCM source through one Opus encoder."""
+        return cls._from_prepared_process(
+            ["-f", "s16le", "-ar", "48000", "-ac", "2", "-probesize", "32",
+             "-analyzeduration", "0", "-i", "pipe:0", "-map", "0:a:0"],
+            bitrate_kbps=bitrate_kbps, source_codec=source_codec, executable=executable,
+            decoder_factory=decoder_factory, cache_writer=cache_writer,
+            pcm_source=pcm_source, stall_seconds=stall_seconds,
+            fec=fec, expected_packet_loss=expected_packet_loss,
+        )
+
+    @classmethod
+    def from_prepared_file(
+        cls, path: Any, *, bitrate_kbps: int, source_codec: str = "",
+        decoder_factory: Any = None, on_error: Any = None,
+        fec: bool = True, expected_packet_loss: float = 0.15,
+    ) -> OpusPCMDecoderSource:
+        """Read an already committed prepared cache entry without FFmpeg."""
+        metadata, _bits = _prepared_opus_settings(bitrate_kbps, source_codec, cache_hit=True,
+                                                 fec=fec, expected_packet_loss=expected_packet_loss)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 512 * 1024 * 1024:
+                raise ValueError("arquivo preparado Opus inválido")
+            stream = os.fdopen(fd, "rb")
+            fd = -1
+            source = cls(OggOpusPacketReader(stream, close_stream=True), decoder_factory=decoder_factory)
+            source._prepared_metadata = metadata
+            source._prepared_on_error = on_error
+            return source
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            else:
+                stream.close()
+            raise
+
+    @classmethod
+    def _from_prepared_process(
+        cls, input_arguments: list[str], *, bitrate_kbps: int, source_codec: str,
+        executable: str, decoder_factory: Any, cache_writer: Any,
+        pcm_source: Any = None, stall_seconds: float = 12.0,
+        resample_filter: str = "", fec: bool = True, expected_packet_loss: float = 0.15,
+    ) -> OpusPCMDecoderSource:
+        try:
+            metadata, bits = _prepared_opus_settings(bitrate_kbps, source_codec,
+                                                      fec=fec, expected_packet_loss=expected_packet_loss)
+            if not isinstance(resample_filter, str) or len(resample_filter) > 2048:
+                raise ValueError("filtro de reamostragem da preparação inválido")
+            filters = ["-af", resample_filter] if resample_filter else []
+            command = [str(executable), "-nostdin", *input_arguments, "-vn", "-sn", "-dn",
+                       *filters,
+                       "-c:a", "libopus", "-application", "audio", "-frame_duration", "20",
+                       "-b:a", str(bits), "-vbr", "off", "-compression_level", "10",
+                       "-fec", "1" if fec else "0", "-packet_loss", str(int(expected_packet_loss * 100)),
+                       "-ar", "48000", "-ac", "2", "-f", "opus", "-page_duration", "20000",
+                       "-flush_packets", "1", "-loglevel", "error", "pipe:1"]
+            process = subprocess.Popen(command, stdin=subprocess.PIPE if pcm_source is not None else subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        except BaseException:
+            _prepared_cache_call(cache_writer, "abort")
+            if pcm_source is not None:
+                with contextlib.suppress(Exception):
+                    pcm_source.cleanup()
+            raise
+        owner = _PreparedOpusProcess(process, pcm_source=pcm_source,
+                                     cache_writer=cache_writer, stall_seconds=stall_seconds)
+        try:
+            stream = _PreparedOpusMirror(process.stdout, owner)
+            source = cls(OggOpusPacketReader(stream), decoder_factory=decoder_factory, cleanup=owner.cleanup)
+            source._prepared_metadata = metadata
+            source._prepared_complete = owner.complete
+            source._prepared_input = pcm_source
+            # Exposed only as a private lifecycle handle for native checks.
+            source._prepared_process = process
+            owner.start()
+            return source
+        except BaseException:
+            owner.cleanup()
+            raise
+
+    def activate_playback(self) -> None:
+        callback = getattr(self._prepared_input, "activate_playback", None)
+        if callable(callback):
+            callback()
+
+    def set_max_frames(self, value: int) -> None:
+        callback = getattr(self._prepared_input, "set_max_frames", None)
+        if callable(callback):
+            callback(value)
+
     def cleanup(self) -> None:
         if self._closed:
             return
@@ -693,6 +837,155 @@ class OpusPCMDecoderSource(discord.AudioSource):
         self.reader.cleanup()
         # Decoder lifetime follows the producer/source. Do not destroy a native
         # decoder here while another thread may still be completing decode().
+
+
+def _prepared_opus_settings(bitrate_kbps: Any, source_codec: Any, *, cache_hit: bool = False,
+                            fec: bool = True, expected_packet_loss: float = 0.15) -> tuple[dict, int]:
+    if isinstance(bitrate_kbps, bool) or not isinstance(bitrate_kbps, int) or not 16 <= bitrate_kbps <= 512:
+        raise ValueError("bitrate da preparação Opus inválido")
+    if (not isinstance(fec, bool) or isinstance(expected_packet_loss, bool)
+            or not isinstance(expected_packet_loss, (int, float))
+            or not math.isfinite(expected_packet_loss) or not 0 <= expected_packet_loss <= 1):
+        raise ValueError("proteção da preparação Opus inválida")
+    # A 20 ms Opus packet is physically limited to 1275 bytes. Round the CBR
+    # allocation down to a whole number of bytes so an odd kbps budget never
+    # produces a packet one byte above the mixer's conservative wire limit.
+    bits = min(510000, bitrate_kbps * 1000) // 400 * 400
+    codec = str(source_codec or "unknown").lower()
+    if not 0 < len(codec) <= 40 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789_" for c in codec):
+        codec = "unknown"
+    return {"prepared_opus": True, "prepared_bitrate_kbps": min(510, bitrate_kbps),
+            "prepared_source_codec": codec, "prepared_cache_hit": bool(cache_hit),
+            "prepared_requested_fec": fec,
+            "prepared_expected_packet_loss": int(expected_packet_loss * 100) / 100}, bits
+
+
+def _prepared_cache_call(writer: Any, method: str, *args: Any) -> Any:
+    callback = getattr(writer, method, None)
+    if callable(callback):
+        try:
+            return callback(*args)
+        except Exception:
+            return None  # disk/cache failures must never stop otherwise valid audio
+    return None
+
+
+class _PreparedOpusMirror:
+    """Mirror only bytes consumed by the bounded packet reader."""
+    def __init__(self, stream: Any, owner: Any) -> None:
+        self.stream, self.owner = stream, owner
+
+    def read(self, size: int) -> bytes:
+        raw = self.stream.read(size)
+        if raw:
+            self.owner.cache_bytes(raw)
+        return raw
+
+
+class _PreparedOpusProcess:
+    def __init__(self, process: Any, *, pcm_source: Any, cache_writer: Any, stall_seconds: float) -> None:
+        self.process, self.pcm_source, self.cache_writer = process, pcm_source, cache_writer
+        self.stall_seconds = max(.1, min(30.0, float(stall_seconds)))
+        self.closed = threading.Event()
+        self._lock = threading.RLock()
+        self._committed = False
+        self._cache_failed = False
+        self._input_error: BaseException | None = None
+        self._writer: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.pcm_source is not None:
+            self._writer = threading.Thread(target=self._feed_pcm, name="prepared-opus-input", daemon=True)
+            self._writer.start()
+
+    def _feed_pcm(self) -> None:
+        empty_since: float | None = None
+        try:
+            while not self.closed.is_set():
+                frame = self.pcm_source.read()
+                if not frame:
+                    upstream_error = getattr(self.pcm_source, "_current_error", None)
+                    if isinstance(upstream_error, BaseException):
+                        raise upstream_error
+                    break
+                if not isinstance(frame, bytes) or len(frame) > 65536 or len(frame) % 4:
+                    raise ValueError("bloco PCM da preparação inválido")
+                if not getattr(self.pcm_source, "last_read_had_audio", True):
+                    now = time.monotonic()
+                    empty_since = now if empty_since is None else empty_since
+                    if now - empty_since >= self.stall_seconds:
+                        raise TimeoutError("a preparação PCM parou de fornecer áudio")
+                    self.closed.wait(.005)  # worker only; never synthesize gap audio
+                    continue
+                empty_since = None
+                pending = memoryview(frame)
+                while pending and not self.closed.is_set():
+                    written = self.process.stdin.write(pending)
+                    if not written:
+                        raise RuntimeError("o preparador Opus encerrou a entrada")
+                    pending = pending[written:]
+        except BaseException as exc:
+            if not self.closed.is_set():
+                self._input_error = exc
+        finally:
+            with contextlib.suppress(Exception):
+                self.process.stdin.close()
+
+    def cache_bytes(self, raw: bytes) -> None:
+        if not self.closed.is_set() and not self._committed and not self._cache_failed:
+            callback = getattr(self.cache_writer, "write", None)
+            if callable(callback):
+                try:
+                    callback(raw)
+                except Exception:
+                    self._cache_failed = True
+                    _prepared_cache_call(self.cache_writer, "abort")
+
+    def complete(self) -> None:
+        # Called only by the buffered producer after strict EOS/container and
+        # native packet validation. It does not run in AudioPlayer.read().
+        if self.closed.is_set():
+            raise RuntimeError("a preparação Opus foi encerrada")
+        try:
+            status = self.process.wait(timeout=2.0)
+            if self._input_error is not None:
+                raise self._input_error
+            if status != 0:
+                raise RuntimeError("o preparador Opus encerrou com erro")
+            if not self.closed.is_set():
+                if not self._cache_failed:
+                    saved = _prepared_cache_call(self.cache_writer, "commit")
+                    if self.cache_writer is not None and saved is not True:
+                        _prepared_cache_call(self.cache_writer, "abort")
+                self._committed = True
+        except BaseException:
+            _prepared_cache_call(self.cache_writer, "abort")
+            raise
+
+    def cleanup(self) -> None:
+        with self._lock:
+            if self.closed.is_set():
+                return
+            self.closed.set()
+        # Killing the process first releases a blocked stdin writer/stdout
+        # reader. No writer join or child wait is performed on the voice loop.
+        if self.process.poll() is None:
+            with contextlib.suppress(Exception):
+                self.process.kill()
+        with contextlib.suppress(Exception):
+            self.process.stdout.close()
+        with contextlib.suppress(Exception):
+            if self.process.stdin is not None:
+                self.process.stdin.close()
+        def reap() -> None:
+            if not self._committed:
+                _prepared_cache_call(self.cache_writer, "abort")
+            with contextlib.suppress(Exception):
+                self.process.wait(timeout=2.0)
+            if self.pcm_source is not None:
+                with contextlib.suppress(Exception):
+                    self.pcm_source.cleanup()
+        threading.Thread(target=reap, name="prepared-opus-reap", daemon=True).start()
 
 
 class BufferedOpusPCMSource(BufferedPCMSource):
@@ -720,6 +1013,17 @@ class BufferedOpusPCMSource(BufferedPCMSource):
     def read(self) -> bytes:
         self.last_opus_packet = None
         return super().read()
+
+    def activate_playback(self) -> None:
+        callback = getattr(self.source, "activate_playback", None)
+        if callable(callback):
+            callback()
+
+    def set_max_frames(self, max_frames: int) -> None:
+        super().set_max_frames(max_frames)
+        callback = getattr(self.source, "set_max_frames", None)
+        if callable(callback):
+            callback(self.max_frames)
 
     def audio_buffer_metrics(self) -> dict[str, Any]:
         return {**super().audio_buffer_metrics(), "opus_packet_buffer_max_bytes": self.max_frames * 1275}

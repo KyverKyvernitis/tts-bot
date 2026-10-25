@@ -1002,6 +1002,22 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                     source["trim_mode"] = metadata["trim_mode"]
                 if metadata.get("archive_reader_continuous") is True:
                     source["archive_reader_continuous"] = True
+                if metadata.get("prepared_opus") is True:
+                    source["prepared_opus"] = True
+                    source["prepared_cache_hit"] = metadata.get("prepared_cache_hit") is True
+                    if isinstance(metadata.get("prepared_requested_fec"), bool):
+                        source["prepared_requested_fec"] = metadata["prepared_requested_fec"]
+                    prepared_loss = metadata.get("prepared_expected_packet_loss")
+                    if (isinstance(prepared_loss, (int, float)) and not isinstance(prepared_loss, bool)
+                            and math.isfinite(prepared_loss) and 0 <= prepared_loss <= 1):
+                        source["prepared_expected_packet_loss"] = prepared_loss
+                    prepared_bitrate = metadata.get("prepared_bitrate_kbps")
+                    if isinstance(prepared_bitrate, int) and not isinstance(prepared_bitrate, bool) and 16 <= prepared_bitrate <= 510:
+                        source["prepared_bitrate_kbps"] = prepared_bitrate
+                    original_codec = metadata.get("prepared_source_codec")
+                    if (isinstance(original_codec, str) and 0 < len(original_codec) <= 40
+                            and all(char in "abcdefghijklmnopqrstuvwxyz0123456789_" for char in original_codec)):
+                        source["prepared_source_codec"] = original_codec
             copy = self._opus_mode == "copy" and not self._opus_latched
             return {
                 "state": self._opus_mode,

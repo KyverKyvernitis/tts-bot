@@ -527,6 +527,20 @@ async def sincronizar_estado_agente(
             current_payload.get("opus_direct_active") is True
             and same_current and raw_status == "playing" and not state.paused
         )
+        # These fields describe this exact output, never a queue preference.
+        # The local current object may survive enqueue responses, so missing
+        # metadata and stale responses must clear every part of the evidence.
+        state.current.opus_direct_origin = ""
+        state.current.opus_direct_bitrate_kbps = 0
+        if state.current.opus_direct_active:
+            origin = current_payload.get("opus_direct_origin")
+            bitrate = current_payload.get("opus_direct_bitrate_kbps")
+            if (origin == "prepared" and isinstance(bitrate, int) and not isinstance(bitrate, bool)
+                    and 16 <= bitrate <= 512):
+                state.current.opus_direct_origin = origin
+                state.current.opus_direct_bitrate_kbps = bitrate
+            elif origin == "original":
+                state.current.opus_direct_origin = origin
     state.music_session_active = bool(state.current or raw_status in {"preparing", "starting", "playing", "paused", "queued"})
     if raw_status and raw_status not in {"failed", "error"}:
         if state.agent_voice_recovery_pending:

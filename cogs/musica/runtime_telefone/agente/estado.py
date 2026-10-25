@@ -362,10 +362,51 @@ class GuildMusicState:
             # of copy. A label must never interfere with otherwise healthy audio.
             return False
 
+    def _opus_direct_public(self) -> dict[str, Any]:
+        """Expose current output provenance without changing source metadata."""
+        inactive = {"opus_direct_active": False, "opus_direct_origin": "",
+                    "opus_direct_bitrate_kbps": 0}
+        if not self._opus_direct_active():
+            return inactive
+        try:
+            player = self.player
+            source = player.source
+            expected = source.music_source
+            metadata = getattr(expected, "opus_metadata", None)
+            if not isinstance(metadata, dict):
+                live = source.opus_direct_status()
+                metadata = live.get("source", {}) if isinstance(live, dict) else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            origin, bitrate = "", 0
+            if metadata.get("prepared_opus") is True:
+                prepared_bitrate = metadata.get("prepared_bitrate_kbps")
+                if (isinstance(prepared_bitrate, int) and not isinstance(prepared_bitrate, bool)
+                        and 16 <= prepared_bitrate <= 512):
+                    origin, bitrate = "prepared", prepared_bitrate
+                else:
+                    return inactive
+            elif str(getattr(self.current, "audio_codec", "") or "").lower() in {"opus", "libopus"}:
+                origin = "original"
+            # Source replacement or fallback during the snapshot invalidates
+            # the old source's metadata, even if another source can also copy.
+            if (self.player is not player or getattr(player, "source", None) is not source
+                    or getattr(source, "music_source", None) is not expected
+                    or not self._opus_direct_active()):
+                return inactive
+            return {"opus_direct_active": True, "opus_direct_origin": origin,
+                    "opus_direct_bitrate_kbps": bitrate}
+        except Exception:
+            return inactive
+
     def state_revision(self) -> str:
         current = f"{self.updated_at:.6f}:{self.playback_token}"
         current = f"{current}:audio{self.audio_output_revision}" if self.audio_output_revision else current
-        return f"{current}:opus_direct" if self._opus_direct_active() else current
+        output = self._opus_direct_public()
+        if not output["opus_direct_active"]:
+            return current
+        current = f"{current}:opus_direct"
+        return f"{current}:prepared{output['opus_direct_bitrate_kbps']}" if output["opus_direct_origin"] == "prepared" else current
 
     def audio_output_public(self) -> dict[str, Any]:
         allowed = {
@@ -527,7 +568,7 @@ class GuildMusicState:
             "last_disconnect_human_count": int(self.last_disconnect_human_count),
             "auto_leave_enabled": bool(self.auto_leave_enabled),
             "updated_at": self.updated_at,
-            "current": {**self.current.public(), "opus_direct_active": self._opus_direct_active()} if self.current else None,
+            "current": {**self.current.public(), **self._opus_direct_public()} if self.current else None,
             "queue_size": sum(1 for item in self.queue if not item.is_virtual_playlist_marker),
             "logical_queue_size": self._logical_queue_size(),
             "history_size": len(self.history),

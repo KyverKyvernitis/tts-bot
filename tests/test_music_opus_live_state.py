@@ -39,6 +39,84 @@ class LiveOpusStateTests(unittest.TestCase):
         self.assertIs(payload["current"]["opus_direct_active"], True)
         self.assertNotIn("opus_direct_active", self.track.public())
         self.assertNotIn("opus_direct_active", payload["queue"][0])
+        for field in ("opus_direct_origin", "opus_direct_bitrate_kbps"):
+            self.assertNotIn(field, self.track.public())
+            self.assertNotIn(field, payload["queue"][0])
+
+    def prepared_source(self, bitrate=256):
+        self.track.audio_codec, self.track.audio_abr = "aac", 128
+        metadata = {"prepared_opus": True, "prepared_bitrate_kbps": bitrate,
+                    "prepared_source_codec": "aac", "prepared_cache_hit": False}
+        self.music = SimpleNamespace(opus_metadata=metadata)
+        self.source.music_source = self.source.last_read_music_source = self.music
+        self.trace["expected_music_source"] = self.music
+        return metadata
+
+    def test_prepared_aac_exposes_verified_output_without_rewriting_original_metadata(self):
+        self.prepared_source()
+        current = self.state.public()["current"]
+        self.assertTrue(current["opus_direct_active"])
+        self.assertEqual(current["opus_direct_origin"], "prepared")
+        self.assertEqual(current["opus_direct_bitrate_kbps"], 256)
+        self.assertEqual(current["audio_codec"], "aac")
+        self.assertEqual(current["audio_abr"], 128)
+        self.assertEqual(self.track.audio_codec, "aac")
+        self.assertEqual(self.track.audio_abr, 128)
+
+    def test_missing_or_invalid_prepared_provenance_never_invents_output_bitrate(self):
+        for bitrate in (None, True, "256", 0, 15, 513, float("nan")):
+            with self.subTest(bitrate=bitrate):
+                self.prepared_source(bitrate)
+                current = self.state.public()["current"]
+                self.assertEqual(current["opus_direct_origin"], "")
+                self.assertEqual(current["opus_direct_bitrate_kbps"], 0)
+        for marker in (None, 1, "true", False):
+            with self.subTest(marker=marker):
+                metadata = self.prepared_source()
+                metadata["prepared_opus"] = marker
+                self.assertEqual(self.state.public()["current"]["opus_direct_origin"], "")
+
+    def test_prepared_revision_tracks_static_provenance_and_not_packet_average_or_cache_hit(self):
+        metadata = self.prepared_source()
+        revision = self.state.state_revision()
+        self.assertTrue(revision.endswith(":opus_direct:prepared256"))
+        metadata["prepared_cache_hit"] = True
+        self.live.update(copied_packets=1000, source_bitrate_kbps=255.9)
+        self.assertEqual(self.state.state_revision(), revision)
+        metadata["prepared_bitrate_kbps"] = 192
+        self.assertNotEqual(self.state.state_revision(), revision)
+        self.assertTrue(self.state.state_revision().endswith(":prepared192"))
+        metadata["prepared_opus"] = False
+        self.track.audio_codec = "opus"
+        self.assertEqual(self.state.public()["current"]["opus_direct_origin"], "original")
+        self.assertTrue(self.state.state_revision().endswith(":opus_direct"))
+
+    def test_fallback_and_pause_clear_every_prepared_output_field(self):
+        self.prepared_source()
+        self.live["copy_active"] = False
+        current = self.state.public()["current"]
+        self.assertEqual((current["opus_direct_active"], current["opus_direct_origin"],
+                          current["opus_direct_bitrate_kbps"]), (False, "", 0))
+        self.live["copy_active"] = True
+        self.state.paused = True
+        self.assertEqual(self.state._opus_direct_public(),
+                         {"opus_direct_active": False, "opus_direct_origin": "",
+                          "opus_direct_bitrate_kbps": 0})
+
+    def test_source_replaced_while_reading_preparation_metadata_fails_closed(self):
+        self.prepared_source()
+        owner = self
+        class Replaced:
+            @property
+            def opus_metadata(self):
+                owner.voice.source = object()
+                return {"prepared_opus": True, "prepared_bitrate_kbps": 256}
+        self.music = Replaced()
+        self.source.music_source = self.source.last_read_music_source = self.music
+        self.trace["expected_music_source"] = self.music
+        self.assertEqual(self.state._opus_direct_public(),
+                         {"opus_direct_active": False, "opus_direct_origin": "",
+                          "opus_direct_bitrate_kbps": 0})
 
     def test_enabled_setting_and_fallback_encoder_never_prove_copy(self):
         self.state.audio_output_settings = {"opus_direct": "auto"}
@@ -128,6 +206,24 @@ class LiveOpusStateTests(unittest.TestCase):
         boundary.synchronize(router, self.state.public())
         self.assertEqual(boundary.ui._public_audio_quality_label(router.state, router.state.current),
                          "Opus · 131 kbps")
+
+    def test_prepared_runtime_payload_reaches_sync_and_panel_with_original_aac_preserved(self):
+        from tests import test_music_opus_panel as panel
+        panel.OpusPanelTests.setUpClass()
+        boundary = panel.OpusPanelTests("test_full_sync_tracks_copy_then_tts_or_volume_fallback")
+        router = panel.Router()
+        self.prepared_source()
+        boundary.synchronize(router, self.state.public())
+        self.assertEqual(boundary.ui._public_audio_quality_label(router.state, router.state.current),
+                         "Opus direto · 256 kbps · fonte AAC 128 kbps")
+        self.assertEqual(router.state.current.resolved_audio_codec, "aac")
+        self.assertEqual(router.state.current.resolved_audio_abr, 128)
+        self.live["copy_active"] = False
+        boundary.synchronize(router, self.state.public())
+        self.assertEqual(boundary.ui._public_audio_quality_label(router.state, router.state.current),
+                         "AAC · 128 kbps")
+        self.assertEqual(router.state.current.opus_direct_origin, "")
+        self.assertEqual(router.state.current.opus_direct_bitrate_kbps, 0)
 
 
 if __name__ == "__main__":

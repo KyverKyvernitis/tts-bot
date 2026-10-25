@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import importlib.util
 import json
 from pathlib import Path
@@ -20,8 +21,8 @@ from unittest.mock import AsyncMock, Mock, patch
 from aiohttp import web
 
 from cogs.musica.runtime_telefone.agente.configuracao import (
-    OpusDirectPreferenceStore, audio_output_capabilities, audio_output_policy,
-    env_float, opus_passthrough_eligibility, validate_audio_output_settings,
+    OpusDirectPreferenceStore, PreparedOpusCache, audio_output_capabilities, audio_output_policy,
+    env_float, opus_passthrough_eligibility, opus_preparation_eligibility, validate_audio_output_settings,
 )
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState
 from cogs.musica.runtime_telefone.agente.utilitarios import safe_id
@@ -47,9 +48,11 @@ def load_api():
     agent_version = next(n.value.value for n in tree.body if isinstance(n, ast.Assign)
                          and any(isinstance(t, ast.Name) and t.id == 'AGENT_VERSION' for t in n.targets))
     namespace = dict(SimpleNamespace=SimpleNamespace, discord=discord, time=time, web=web,
+                     contextlib=contextlib,
                      asyncio=asyncio, env_float=env_float,
                      safe_id=safe_id, audio_output_capabilities=audio_output_capabilities,
                      audio_output_policy=audio_output_policy, opus_passthrough_eligibility=opus_passthrough_eligibility,
+                     opus_preparation_eligibility=opus_preparation_eligibility,
                      validate_audio_output_settings=validate_audio_output_settings,
                      GuildMusicState=GuildMusicState, AGENT_VERSION=agent_version,
                      DiscordAttachmentError=type('DiscordAttachmentError', (Exception,), {}),
@@ -185,6 +188,30 @@ class OutputAPITests(unittest.TestCase):
         self.assertTrue(result['passthrough']['candidate'])
         self.assertNotIn('source_bitrate_limit', result['passthrough']['reasons'])
         self.assertFalse(result['passthrough'].get('copy_active', False))
+
+    def test_prepared_aac_status_exposes_provenance_and_cache_without_rewriting_source(self):
+        self.agent.prepared_opus_cache = PreparedOpusCache(
+            self.preferences_path.parent / 'prepared', max_bytes=1024 * 1024)
+        state = self.state(1)
+        state.current = AgentTrack(audio_codec='aac', audio_abr=128, audio_sample_rate=44100,
+                                   audio_channels=1)
+        state.voice_channel_id, state.volume_percent = 19, 100
+        state.audio_output_settings = {'opus_direct': 'auto'}
+        source_metadata = {'prepared_opus': True, 'prepared_bitrate_kbps': 256,
+                           'prepared_source_codec': 'aac', 'prepared_cache_hit': False}
+        source = SimpleNamespace(audio_telemetry=lambda: {}, opus_direct_status=lambda: {
+            'copy_active': True, 'copied_packets': 3, 'source': source_metadata})
+        state.player = SimpleNamespace(channel=SimpleNamespace(id=19, bitrate=256000), source=source,
+                                       is_connected=lambda: True)
+        result = self.command()['audio_output']
+        self.assertTrue(result['preparation']['candidate'])
+        self.assertTrue(result['preparation']['cache_enabled'])
+        self.assertEqual(result['preparation']['cache']['max_bytes'], 1024 * 1024)
+        self.assertEqual(result['passthrough']['source'], source_metadata)
+        self.assertEqual(result['applied']['output_mode'], 'opus_direct')
+        self.assertEqual(state.current.audio_codec, 'aac')
+        self.assertEqual(state.current.audio_abr, 128)
+        self.assertNotIn(str(self.preferences_path.parent), json.dumps(result))
 
     def test_http_invalid_settings_return_400_without_mutating_existing_session(self):
         state = self.state(1)

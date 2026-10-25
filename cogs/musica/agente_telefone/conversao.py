@@ -96,6 +96,15 @@ def faixa_do_payload(payload: dict[str, Any], fallback: MusicTrack | None = None
     # Um modo solicitado não comprova cópia. O Worker publica somente a
     # evidência atual da faixa; payloads antigos/ausentes limpam o indicador.
     track.opus_direct_active = payload.get("opus_direct_active") is True
+    if track.opus_direct_active:
+        origin = payload.get("opus_direct_origin")
+        bitrate = payload.get("opus_direct_bitrate_kbps")
+        if (origin == "prepared" and isinstance(bitrate, int) and not isinstance(bitrate, bool)
+                and 16 <= bitrate <= 512):
+            track.opus_direct_origin = origin
+            track.opus_direct_bitrate_kbps = bitrate
+        elif origin == "original":
+            track.opus_direct_origin = origin
     with contextlib.suppress(Exception):
         track.resolved_audio_sample_rate = int(float(payload.get("resolved_audio_sample_rate") or payload.get("audio_sample_rate") or payload.get("asr") or 0))
     with contextlib.suppress(Exception):

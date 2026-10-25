@@ -107,6 +107,42 @@ class OpusPanelTests(unittest.TestCase):
         self.assertEqual(self.ui._public_audio_quality_label(self.state(track), track),
                          "Opus direto · 131 kbps")
 
+    def prepared_track(self, *, direct=True, origin="prepared", bitrate=256):
+        return faixa_do_payload({"title": "Test", "queue_item_id": "current",
+                                 "audio_codec": "aac", "audio_abr": 128,
+                                 "opus_direct_active": direct, "opus_direct_origin": origin,
+                                 "opus_direct_bitrate_kbps": bitrate})
+
+    def test_prepared_aac_label_distinguishes_output_from_original_source(self):
+        track = self.prepared_track()
+        self.assertEqual(self.ui._public_audio_quality_label(self.state(track), track),
+                         "Opus direto · 256 kbps · fonte AAC 128 kbps")
+        self.assertEqual(track.resolved_audio_codec, "aac")
+        self.assertEqual(track.resolved_audio_abr, 128)
+
+    def test_aac_requires_live_copy_and_valid_prepared_provenance(self):
+        cases = ({"direct": False}, {"origin": "original"}, {"origin": ""},
+                 {"bitrate": None}, {"bitrate": True}, {"bitrate": "256"}, {"bitrate": 0},
+                 {"bitrate": float("nan")}, {"bitrate": 513})
+        for patch in cases:
+            with self.subTest(patch=patch):
+                track = self.prepared_track(**patch)
+                self.assertEqual(self.ui._public_audio_quality_label(self.state(track), track),
+                                 "AAC · 128 kbps")
+        track = self.prepared_track()
+        for patch in ({"current_status": "paused"}, {"paused": True},
+                      {"current_status": "reconnecting"}, {"current_backend": "lavalink"}):
+            with self.subTest(patch=patch):
+                state = self.state(track)
+                state.__dict__.update(patch)
+                self.assertEqual(self.ui._public_audio_quality_label(state, track), "AAC · 128 kbps")
+
+    def test_prepared_provenance_is_not_inherited_from_fallback_metadata(self):
+        old = self.prepared_track()
+        current = faixa_do_payload({"title": "Test", "audio_codec": "aac"}, old)
+        self.assertEqual((current.opus_direct_active, current.opus_direct_origin,
+                          current.opus_direct_bitrate_kbps), (False, "", 0))
+
     def test_configured_auto_is_not_evidence_of_copy(self):
         track = self.track()
         state = self.state(track)
@@ -149,6 +185,20 @@ class OpusPanelTests(unittest.TestCase):
             assinatura=direct, assinatura_anterior=first, agora=1, ultimo_refresh=1,
             painel_existe=True, refresh_seconds=30))
 
+    def test_prepared_static_fields_change_panel_signature_without_counter_churn(self):
+        remote = self.remote()
+        first = self.monitor._assinatura_painel_remoto(remote)
+        remote["current"].update(opus_direct_origin="prepared", opus_direct_bitrate_kbps=256)
+        prepared = self.monitor._assinatura_painel_remoto(remote)
+        self.assertNotEqual(first, prepared)
+        remote["current"]["opus_direct_bitrate_kbps"] = 192
+        self.assertNotEqual(prepared, self.monitor._assinatura_painel_remoto(remote))
+        stable = self.monitor._assinatura_painel_remoto(remote)
+        remote["audio_output"] = {"passthrough": {"copied_packets": 200,
+                                                   "source_bitrate_kbps": 191.7,
+                                                   "source": {"prepared_cache_hit": True}}}
+        self.assertEqual(stable, self.monitor._assinatura_painel_remoto(remote))
+
     def remote(self, *, direct=True, **patch):
         return {"status": "playing", "confirmed_playing": True, "voice_connected": True,
                 "player_present": True, "playback_token": 7,
@@ -171,6 +221,50 @@ class OpusPanelTests(unittest.TestCase):
         self.assertFalse(router.state.current.opus_direct_active)
         self.assertEqual(self.ui._public_audio_quality_label(router.state, router.state.current),
                          "Opus · 131 kbps")
+
+    def prepared_remote(self, **patch):
+        remote = self.remote(**patch)
+        remote["current"].update(audio_codec="aac", audio_abr=128,
+                                  opus_direct_origin="prepared", opus_direct_bitrate_kbps=256)
+        return remote
+
+    def test_full_sync_prepared_aac_then_fallback_clears_its_provenance(self):
+        router = Router()
+        remote = self.prepared_remote()
+        self.synchronize(router, remote)
+        current = router.state.current
+        self.assertEqual(self.ui._public_audio_quality_label(router.state, current),
+                         "Opus direto · 256 kbps · fonte AAC 128 kbps")
+        remote["current"]["opus_direct_active"] = False
+        self.synchronize(router, remote, queued=True)
+        self.assertIs(router.state.current, current)
+        self.assertEqual((current.opus_direct_active, current.opus_direct_origin,
+                          current.opus_direct_bitrate_kbps), (False, "", 0))
+        self.assertEqual(self.ui._public_audio_quality_label(router.state, current), "AAC · 128 kbps")
+
+    def test_preserved_current_clears_missing_or_other_item_prepared_fields(self):
+        router = Router()
+        self.synchronize(router, self.prepared_remote())
+        current = router.state.current
+        remote = self.prepared_remote()
+        remote["current"].pop("opus_direct_origin")
+        remote["current"].pop("opus_direct_bitrate_kbps")
+        self.synchronize(router, remote, queued=True)
+        self.assertEqual((current.opus_direct_origin, current.opus_direct_bitrate_kbps), ("", 0))
+        self.synchronize(router, self.prepared_remote(), queued=True)
+        remote = self.prepared_remote()
+        remote["current"]["queue_item_id"] = "another"
+        self.synchronize(router, remote, queued=True)
+        self.assertEqual((current.opus_direct_active, current.opus_direct_origin,
+                          current.opus_direct_bitrate_kbps), (False, "", 0))
+
+    def test_reconnect_clears_prepared_output_before_next_authoritative_sync(self):
+        router = Router()
+        self.synchronize(router, self.prepared_remote())
+        current = router.state.current
+        asyncio.run(self.monitor._marcar_monitor_reconectando(router, 1, falhas=2))
+        self.assertEqual((current.opus_direct_active, current.opus_direct_origin,
+                          current.opus_direct_bitrate_kbps), (False, "", 0))
 
     def test_same_track_enqueue_response_updates_preserved_object_and_clears_missing_flag(self):
         router = Router()

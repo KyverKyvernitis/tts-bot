@@ -181,6 +181,9 @@ class OutputHelperTests(unittest.TestCase):
                                 "requested": {"bitrate_kbps": 192, "copy_bitrate_kbps": 256,
                                               "fec": True, "expected_packet_loss": .15},
                                 "applied": {"profile": "balanced", "bitrate_kbps": 64},
+                                "preparation": {"candidate": True, "cache_enabled": True,
+                                                "cache": {"hits": 1, "max_bytes": 268435456,
+                                                          "path": "/private/cache"}},
                                 "source_url": "https://private.invalid/track", "reason": "SENTINEL-MUSIC-TOKEN"},
                "sync": {"status": "queued", "error": "private traceback"},
                "capabilities": {"profiles": ["balanced", "quality_192", "quality_256"],
@@ -193,6 +196,8 @@ class OutputHelperTests(unittest.TestCase):
         self.assertEqual(output["audio_output"]["requested"]["bitrate_kbps"], 192)
         self.assertEqual(output["audio_output"]["requested"]["copy_bitrate_kbps"], 256)
         self.assertEqual(output["audio_output"]["applied"]["bitrate_kbps"], 64)
+        self.assertEqual(output["audio_output"]["preparation"]["cache"]["hits"], 1)
+        self.assertNotIn("/private/cache", text)
         self.assertEqual(output["sync"]["status"], "queued")
 
     def test_cli_success_and_failure_status_codes_are_meaningful(self):
