@@ -191,6 +191,21 @@ class OutputSyncTests(unittest.TestCase):
         self.assertEqual(source.read(), b'\xf8encoded-boundary')
         self.assertEqual(source.opus_direct_status()['reason'], 'packet_bitrate_limit')
 
+    def test_hybrid_copy_capacity_changes_even_when_encoder_target_is_unchanged(self):
+        source = self._install_hybrid(packet=b'\xf8' + b'a' * 499)
+        policy = {**self.policy(bitrate=96), 'opus_direct': 'auto', 'copy_bitrate_kbps': 256}
+        self.agent._audio_output_policy = lambda *args: dict(policy)
+        self.sync()
+        self.assertEqual(source.read(), self.pcm.last_opus_packet)
+        self.assertEqual(self.st.audio_output_applied['bitrate_kbps'], 96)
+        self.assertEqual(source.opus_direct_status()['copy_bitrate_kbps'], 256)
+        policy['copy_bitrate_kbps'] = 128
+        self.assertEqual(self.sync()['state'], 'queued')
+        self.assertEqual(source.read(), b'\xf8encoded-boundary')
+        self.assertEqual(source.opus_direct_status()['reason'], 'packet_bitrate_limit')
+        self.assertEqual(self.st.audio_output_applied['bitrate_kbps'], 96)
+        self.assertEqual(self.st.audio_output_applied['copy_bitrate_kbps'], 128)
+
     def test_hybrid_play_uses_opus_only_and_preserves_owned_encoder(self):
         source = self._install_hybrid()
         played = []

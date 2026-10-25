@@ -369,7 +369,7 @@ class GuildMusicState:
 
     def audio_output_public(self) -> dict[str, Any]:
         allowed = {
-            "profile", "bitrate_kbps", "target_bitrate_kbps", "channel_bitrate_kbps",
+            "profile", "bitrate_kbps", "copy_bitrate_kbps", "target_bitrate_kbps", "channel_bitrate_kbps",
             "source_abr_kbps", "limited_by_channel", "limited_by_config", "fec",
             "expected_packet_loss", "application", "bandwidth", "signal_type", "revision",
             "applied_at", "reason", "mode", "status", "encoder_kind", "encoder_supported",

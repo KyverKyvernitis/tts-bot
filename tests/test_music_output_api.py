@@ -169,6 +169,23 @@ class OutputAPITests(unittest.TestCase):
         self.assertIn('volume_requires_pcm', result['audio_output']['passthrough']['reasons'])
         self.assertIn('source_bitrate_limit', result['audio_output']['passthrough']['reasons'])
 
+    def test_status_uses_copy_capacity_instead_of_encoder_target_for_source_candidate(self):
+        state = self.state(1)
+        state.current = AgentTrack(audio_codec='opus', audio_abr=220, audio_sample_rate=48000,
+                                   audio_channels=2)
+        state.voice_channel_id = 19
+        state.volume_percent = 100
+        state.audio_output_settings = {'opus_direct': 'auto', 'profile': 'quality_192'}
+        state.player = SimpleNamespace(channel=SimpleNamespace(id=19, bitrate=256000),
+                                       source=SimpleNamespace(audio_telemetry=lambda: {}),
+                                       is_connected=lambda: True)
+        result = self.command()['audio_output']
+        self.assertEqual(result['requested']['bitrate_kbps'], 192)
+        self.assertEqual(result['requested']['copy_bitrate_kbps'], 256)
+        self.assertTrue(result['passthrough']['candidate'])
+        self.assertNotIn('source_bitrate_limit', result['passthrough']['reasons'])
+        self.assertFalse(result['passthrough'].get('copy_active', False))
+
     def test_http_invalid_settings_return_400_without_mutating_existing_session(self):
         state = self.state(1)
         state.audio_output_settings = {'opus_direct': 'auto', 'profile': 'quality_192'}

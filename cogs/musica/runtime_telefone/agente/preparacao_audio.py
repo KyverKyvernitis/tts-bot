@@ -12,7 +12,7 @@ from typing import Any
 import discord
 
 from .buffer_pcm import BufferedOpusPCMSource, BufferedPCMSource, OpusPCMDecoderSource
-from .audio_segmentado import ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource, ExactSegmentPCMSource
+from .audio_segmentado import ArchiveOpusPCMSource, ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource, ExactSegmentPCMSource
 from .ciclo_vida import consume_task_result, remove_owned_task
 from .estado import AgentTrack, GuildMusicState
 from .configuracao import effective_opus_direct_mode, opus_passthrough_eligibility
@@ -27,6 +27,7 @@ class AudioPreparado:
     created_at: float
     ready: bool = False
     effects: tuple[int, int, int] = (0, 0, 0)
+    archive_identity: tuple = ()
 
 
 @dataclass
@@ -62,7 +63,7 @@ class PreparacaoAudioMixin:
             return {"candidate": False, "reason": "channel_bitrate_unknown"}
         policy = self._audio_output_policy(SimpleNamespace(channel=channel), track, st)
         result = opus_passthrough_eligibility(
-            self, track, state=st, output_bitrate_kbps=policy["bitrate_kbps"],
+            self, track, state=st, output_bitrate_kbps=policy.get("copy_bitrate_kbps", policy["bitrate_kbps"]),
             volume_percent=getattr(st, "volume_percent", self.default_volume_percent),
             effects=st.effect_signature() if st is not None else (),
         )
@@ -81,6 +82,34 @@ class PreparacaoAudioMixin:
         if not self._opus_direct_preflight(guild_id, track).get("candidate"):
             return self._create_pcm_source(track, **kwargs)
         try:
+            if len(track.archive_segments) > 1:
+                # The stream proof belongs to one immutable manifest revision.
+                # A queue refresh may replace metadata while a producer runs.
+                archived = replace(track, archive_segments=[dict(part) for part in track.archive_segments],
+                                   archive_ref=dict(track.archive_ref), attachment_ref=dict(track.attachment_ref))
+                async def resolve_segment(index: int, *, force_refresh: bool = False) -> dict:
+                    if (index == 0 and not force_refresh and archived.archive_segment_index == 0
+                            and archived.stream_url and not self._track_stream_needs_refresh(archived)):
+                        # This URL was verified when the manifest/root attachment
+                        # resolved; do not repeat its REST request on first audio.
+                        return {**archived.archive_segments[0], "url": archived.stream_url}
+                    return await self._resolve_archive_segment(archived, index, force_refresh=force_refresh)
+
+                async def create_fallback(offset: float) -> Any:
+                    resumed = replace(archived, start_offset_seconds=offset)
+                    return self._create_pcm_source(resumed, **{**kwargs, "preparing": False})
+
+                return ArchiveOpusPCMSource(
+                    segments=archived.archive_segments, resolve_segment=resolve_segment,
+                    create_fallback=create_fallback, loop=self._loop or asyncio.get_running_loop(),
+                    max_frames=kwargs.get("buffer_max_frames") or getattr(self, "pcm_buffer_max_frames", 75),
+                    stall_seconds=getattr(self, "pcm_buffer_stall_seconds", 12.0),
+                    preparing=kwargs.get("preparing", False),
+                    claim_prepare=self._claim_audio_prepare_slot,
+                    release_prepare=self._release_audio_prepare_slot,
+                    on_fallback=lambda offset: self.log("archive_opus_pcm_fallback", guild_id=guild_id,
+                                                       offset_seconds=round(offset, 6)),
+                )
             raw = OpusPCMDecoderSource.from_ffmpeg(
                 track.stream_url, executable=self.ffmpeg_executable,
                 before_options=self._ffmpeg_before_options_for_offset(0),
@@ -173,10 +202,16 @@ class PreparacaoAudioMixin:
 
     @staticmethod
     def _archive_audio_identity(track: AgentTrack) -> tuple:
-        return tuple(tuple(segment.get(key) for key in (
+        if not track.archive_segments:
+            return ()
+        reference = getattr(track, "archive_ref", {}) or {}
+        return (getattr(track, "archive_key", ""), tuple(reference.get(key) for key in (
+            "guild_id", "channel_id", "message_id", "attachment_id", "manifest_attachment_id")),
+            tuple(tuple(segment.get(key) for key in (
             "guild_id", "channel_id", "message_id", "attachment_id", "duration", "offset_seconds",
-            "audio_stream_index", "audio_sample_rate", "audio_channels",
-        )) for segment in track.archive_segments)
+            "audio_stream_index", "audio_sample_rate", "audio_channels", "audio_codec",
+            "sha256", "size_bytes", "filename", "order",
+        )) for segment in track.archive_segments))
 
     async def _prepare_current_pcm(self, guild_id: int, track: AgentTrack, playback_token: int) -> Any:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
@@ -449,6 +484,7 @@ class PreparacaoAudioMixin:
             prepared.ready and prepared.item_id == track.queue_item_id
             and prepared.effects == (0, self.states[guild_id].effect_level("nightcore"), self.states[guild_id].effect_level("slowed_reverb"))
             and prepared.stream_url == track.stream_url
+            and getattr(prepared, "archive_identity", ()) == self._archive_audio_identity(track)
             and abs(prepared.offset - track.start_offset_seconds) < 0.01
             and time.monotonic() - prepared.created_at <= 45.0
         ):
@@ -478,7 +514,8 @@ class PreparacaoAudioMixin:
         if task is not None and not task.done() and self._audio_prepare_keys.get(guild_id) == prepare_key:
             return
         prepared = self._prepared_audio.get(guild_id)
-        if prepared is not None and prepared.item_id == item_id and prepared.effects == effects and prepared.ready:
+        if (prepared is not None and prepared.item_id == item_id and prepared.effects == effects and prepared.ready
+                and getattr(prepared, "archive_identity", ()) == self._archive_audio_identity(st.queue[0])):
             return
         self._cancel_audio_preparation(guild_id)
         token = st.playback_token
@@ -526,7 +563,8 @@ class PreparacaoAudioMixin:
                 except BaseException:
                     self._release_audio_prepare_slot(("track", guild_id))
                     raise
-                owned = AudioPreparado(item_id, track.stream_url, track.start_offset_seconds, source, time.monotonic(), effects=effects)
+                owned = AudioPreparado(item_id, track.stream_url, track.start_offset_seconds, source, time.monotonic(),
+                                       effects=effects, archive_identity=self._archive_audio_identity(track))
                 self._prepared_audio[guild_id] = owned
                 await source.wait_ready(
                     timeout=min(12.0, self.prepare_timeout),

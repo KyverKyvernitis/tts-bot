@@ -257,6 +257,63 @@ class HybridOpusTests(unittest.TestCase):
         self.assertEqual(self.source.read(), ENCODED)
         self.assertEqual(self.source.opus_direct_status()["reason"], "packet_bitrate_limit")
 
+    def test_vbr_packet_uses_copy_capacity_without_raising_fallback_bitrate(self):
+        self.source.set_output_policy(self.policy(bitrate_kbps=163,
+            copy_bitrate_kbps=256, channel_bitrate_kbps=256))
+        self.input.packet = b"\xf8" + b"x" * 499
+        self.assertEqual(self.source.read(), self.input.packet)
+        status = self.source.opus_direct_status()
+        self.assertEqual(status["copy_packet_limit_bytes"], 640)
+        self.assertEqual(status["copy_bitrate_kbps"], 256)
+        self.assertEqual(status["fallback_encoder"]["bitrate_kbps"], 163)
+        self.assertEqual(self.encoder.frames, [])
+
+    def test_copy_capacity_cannot_exceed_observed_channel_or_packet_limit(self):
+        for channel, copy_budget, packet_size, should_copy in (
+            (96, 256, 240, True), (96, 256, 241, False),
+            (256, 512, 640, True), (256, 512, 641, False),
+            (512, 512, 1275, True), (512, 512, 1276, False),
+        ):
+            with self.subTest(channel=channel, copy_budget=copy_budget, packet_size=packet_size):
+                self.replace()
+                self.source.set_output_policy(self.policy(bitrate_kbps=163,
+                    copy_bitrate_kbps=copy_budget, channel_bitrate_kbps=channel))
+                self.source.music_source.packet = b"\xf8" + b"x" * (packet_size - 1)
+                result = self.source.read()
+                self.assertEqual(result, self.source.music_source.packet if should_copy else ENCODED)
+
+    def test_channel_shrink_changes_copy_budget_even_when_encoder_target_is_unchanged(self):
+        self.source.set_output_policy(self.policy(bitrate_kbps=96,
+            copy_bitrate_kbps=256, channel_bitrate_kbps=256))
+        self.input.packet = b"\xf8" + b"x" * 399
+        self.assertEqual(self.source.read(), self.input.packet)
+        self.source.set_output_policy(self.policy(bitrate_kbps=96,
+            copy_bitrate_kbps=128, channel_bitrate_kbps=128), apply_encoder=False)
+        self.assertEqual(self.source.read(), ENCODED)
+        self.assertEqual(self.source.opus_direct_status()["copy_packet_limit_bytes"], 320)
+        self.assertEqual(self.source.opus_direct_status()["reason"], "packet_bitrate_limit")
+
+    def test_copy_budget_unknown_or_invalid_channel_does_not_authorize_packets(self):
+        for channel in (None, 0, True, "256", float("inf"), -1):
+            with self.subTest(channel=channel):
+                self.replace()
+                policy = self.policy(copy_bitrate_kbps=256)
+                if channel is not None:
+                    policy["channel_bitrate_kbps"] = channel
+                self.source.set_output_policy(policy)
+                self.assertEqual(self.source.read(), ENCODED)
+                self.assertEqual(self.source.opus_direct_status()["copy_packet_limit_bytes"], 0)
+
+    def test_invalid_explicit_copy_budget_does_not_mutate_policy_or_encoder(self):
+        before = dict(self.source._opus_policy)
+        self.encoder.calls.clear()
+        for budget in (True, False, None, "256", 256.0, float("inf"), float("nan"), -1, 513):
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                self.source.set_output_policy(self.policy(
+                    copy_bitrate_kbps=budget, channel_bitrate_kbps=256))
+            self.assertEqual(self.source._opus_policy, before)
+            self.assertEqual(self.encoder.calls, [])
+
     def test_output_policy_updates_ctls_but_never_resets_encoder(self):
         self.encoder.calls.clear()
         self.source.set_output_policy(self.policy(bitrate_kbps=256, expected_packet_loss=0.05))

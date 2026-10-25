@@ -178,7 +178,8 @@ class OutputHelperTests(unittest.TestCase):
     def test_only_quality_metadata_reaches_terminal_and_known_secrets_are_redacted(self):
         raw = {"ok": True, "version": "0.3.89", "guild_id": 7,
                "audio_output": {"settings": {"profile": "quality_192", "token": "SENTINEL-MUSIC-TOKEN"},
-                                "requested": {"bitrate_kbps": 192, "fec": True, "expected_packet_loss": .15},
+                                "requested": {"bitrate_kbps": 192, "copy_bitrate_kbps": 256,
+                                              "fec": True, "expected_packet_loss": .15},
                                 "applied": {"profile": "balanced", "bitrate_kbps": 64},
                                 "source_url": "https://private.invalid/track", "reason": "SENTINEL-MUSIC-TOKEN"},
                "sync": {"status": "queued", "error": "private traceback"},
@@ -190,6 +191,7 @@ class OutputHelperTests(unittest.TestCase):
         for forbidden in ("SENTINEL-MUSIC-TOKEN", "source_url", "private.invalid", "traceback", '"env"', '"token"'):
             self.assertNotIn(forbidden, text)
         self.assertEqual(output["audio_output"]["requested"]["bitrate_kbps"], 192)
+        self.assertEqual(output["audio_output"]["requested"]["copy_bitrate_kbps"], 256)
         self.assertEqual(output["audio_output"]["applied"]["bitrate_kbps"], 64)
         self.assertEqual(output["sync"]["status"], "queued")
 

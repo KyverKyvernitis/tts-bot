@@ -56,6 +56,25 @@ class OutputPolicyTests(unittest.TestCase):
             self.assertEqual(result["source_abr_kbps"], 128)
         self.assertEqual(track.audio_abr, 128)
 
+    def test_copy_budget_uses_channel_capacity_without_raising_encoder_target(self):
+        track = AgentTrack(audio_abr=131)
+        state = GuildMusicState(1)
+        for profile, encoder in (("balanced", 163), ("quality_192", 192), ("quality_256", 256)):
+            with self.subTest(profile=profile):
+                state.audio_output_settings = {"profile": profile}
+                result = audio_output_policy(agent(), voice(256), track, state)
+                self.assertEqual(result["bitrate_kbps"], encoder)
+                self.assertEqual(result["copy_bitrate_kbps"], 256)
+                self.assertEqual(track.audio_abr, 131)
+
+    def test_copy_budget_respects_channel_config_and_unknown_capacity(self):
+        for channel, maximum, expected in ((96, 256, 96), (384, 128, 128),
+                                           (384, 512, 384), (0, 256, 0)):
+            with self.subTest(channel=channel, maximum=maximum):
+                result = audio_output_policy(agent(discord_opus_max_bitrate=maximum),
+                                             voice(channel), AgentTrack(audio_abr=131))
+                self.assertEqual(result["copy_bitrate_kbps"], expected)
+
     def test_channel_cap_wins_over_quality_profile(self):
         state = GuildMusicState(1, audio_output_settings={"profile": "quality_256"})
         result = audio_output_policy(agent(), voice(64), AgentTrack(audio_abr=320), state)

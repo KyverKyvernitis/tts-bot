@@ -100,7 +100,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.92"
+AGENT_VERSION = "0.3.93"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -1087,7 +1087,8 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         effects = st.effect_signature() if st is not None else (0, 0, 0)
         passthrough = opus_passthrough_eligibility(
             self, track, volume_percent=getattr(st, "volume_percent", self.default_volume_percent),
-            effects=effects, state=policy_state, output_bitrate_kbps=requested["bitrate_kbps"],
+            effects=effects, state=policy_state,
+            output_bitrate_kbps=requested.get("copy_bitrate_kbps", requested["bitrate_kbps"]),
         )
         direct_status = getattr(source, "opus_direct_status", None)
         if active and callable(direct_status):

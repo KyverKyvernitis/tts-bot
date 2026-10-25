@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import shlex
 import struct
 import subprocess
@@ -219,7 +220,8 @@ class OggOpusPacketReader:
 
     MAX_PACKET_BYTES = 65536
 
-    def __init__(self, stream: Any, *, close_stream: bool = False) -> None:
+    def __init__(self, stream: Any, *, close_stream: bool = False,
+                 _allow_archive_preroll: bool = False) -> None:
         self.stream = stream
         self.close_stream = close_stream
         self.metadata: dict[str, Any] = {}
@@ -233,6 +235,9 @@ class OggOpusPacketReader:
         self._finished = False
         self._pages = 0
         self._audio_packets = 0
+        # Only the continuous archive reader may consume a segment's duplicated
+        # preroll. Standalone streams retain the original strict 20 ms bound.
+        self._max_pre_skip = 9600 if _allow_archive_preroll else 960
 
     def _read_exact(self, size: int, *, allow_eof: bool = False) -> bytes:
         result = bytearray()
@@ -302,7 +307,7 @@ class OggOpusPacketReader:
                 or packet[9] != 2 or packet[18] != 0):
             raise OpusPacketError("OpusHead incompatível com estéreo mapping 0")
         preskip, input_rate, gain = struct.unpack_from("<HIh", packet, 10)
-        if gain != 0 or preskip > 960:
+        if gain != 0 or preskip > self._max_pre_skip:
             raise OpusPacketError("ganho/pre-skip Opus incompatível")
         self.metadata.update(codec="opus", sample_rate_hz=48000, channels=2,
                              input_sample_rate_hz=input_rate, pre_skip_samples=preskip,
@@ -371,6 +376,195 @@ class OggOpusPacketReader:
                 self.stream.close()
 
 
+class ArchiveOpusPacketReader:
+    """One packet stream across verified archive parts, without duplicated preroll.
+
+    ``open_segment`` is called by the buffer's producer thread and must return
+    a bounded, cancellable binary stream or an OggOpusPacketReader. Only the
+    active part is owned here. A caller may separately prefetch the next part.
+    The same Opus decoder consumes every emitted packet; duplicated packets
+    warm neither the decoder nor the wire a second time.
+    """
+
+    MAX_SEGMENTS = 4096
+    MAX_PREROLL_SAMPLES = 9600
+
+    def __init__(self, segments: list[dict], open_segment: Any) -> None:
+        if (not isinstance(segments, (list, tuple)) or not 2 <= len(segments) <= self.MAX_SEGMENTS
+                or not callable(open_segment)):
+            raise OpusPacketError("partes Opus ausentes ou fora do limite")
+        self._durations: list[int] = []
+        offset = 0
+        for order, segment in enumerate(segments):
+            if not isinstance(segment, dict):
+                raise OpusPacketError("parte Opus inválida")
+            seconds, start = segment.get("duration"), segment.get("offset_seconds")
+            if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                    or not math.isfinite(seconds) or seconds <= 0
+                    or isinstance(start, bool) or not isinstance(start, (int, float))
+                    or not math.isfinite(start) or abs(start * 48000 - offset) > 1.01
+                    or ("order" in segment and segment["order"] != order)):
+                raise OpusPacketError("duração ou ordem das partes Opus inválida")
+            if seconds * 48000 > 0x7FFFFFFFFFFFFFFF - offset:
+                raise OpusPacketError("duração das partes Opus excede o limite")
+            count = round(seconds * 48000)
+            if count <= 0 or abs(seconds * 48000 - count) > 0.01:
+                raise OpusPacketError("duração das partes Opus não alinhada às amostras")
+            if (segment.get("audio_codec", "opus") not in {"opus", "libopus"}
+                    or segment.get("audio_sample_rate", 48000) != 48000
+                    or segment.get("audio_channels", 2) != 2):
+                raise OpusPacketError("perfil das partes Opus incompatível")
+            self._durations.append(count)
+            offset += count
+        self._open_segment = open_segment
+        self._current: OggOpusPacketReader | None = None
+        self._index = 0
+        self._closed = False
+        self._finished = False
+        self._eos = False
+        self._packets: deque[bytes] = deque()
+        self._part_samples = 0
+        self._part_validated_eos = False
+        self._emitted_samples = 0
+        self._part_emitted_start = 0
+        self._tail: deque[tuple[bytes, int]] = deque()
+        self._tail_samples = 0
+        self.metadata: dict[str, Any] = {
+            "archive_reader_continuous": True, "archive_segment_index": 0,
+            "archive_segments_total": len(segments),
+            "archive_segments_completed": 0, "archive_preroll_packets_skipped": 0,
+            "archive_preroll_samples_skipped": 0,
+        }
+
+    @property
+    def segment_index(self) -> int:
+        return self._index
+
+    def _validate_eos(self, packet: bytes) -> None:
+        child = self._current
+        if child is None or self._part_validated_eos or not child._eos:
+            return
+        remaining = (packet, *child._packets)
+        if not remaining or len(remaining) > 255:
+            raise OpusPacketError("quantidade de pacotes EOS da parte inválida")
+        counts = [opus_packet_samples(value) for value in remaining]
+        total = self._part_samples + sum(counts)
+        granule = child.metadata.get("end_granule_samples")
+        pre = child.metadata.get("pre_skip_samples")
+        if (not isinstance(granule, int) or not isinstance(pre, int)
+                or granule > total or total - granule > counts[-1]
+                or (self._index + 1 < len(self._durations) and granule != total)
+                or abs(granule - pre - self._durations[self._index]) > 1):
+            raise OpusPacketError("duração ou corte final da parte Opus inválido")
+        self._part_validated_eos = True
+        if self._index + 1 == len(self._durations):
+            removed = 0 if self._index == 0 else pre
+            self.metadata["end_granule_samples"] = self._part_emitted_start + granule - removed
+
+    def _read_child(self) -> bytes:
+        child = self._current
+        if child is None:
+            raise OpusPacketError("parte Opus não aberta")
+        packet = child.read_packet()
+        if packet:
+            self._validate_eos(packet)
+            self._part_samples += opus_packet_samples(packet)
+        elif not self._part_validated_eos:
+            raise OpusPacketError("parte Opus sem áudio ou EOS validado")
+        return packet
+
+    def _begin_part(self) -> bytes:
+        opened = self._open_segment(self._index)
+        child = (opened if isinstance(opened, OggOpusPacketReader) else
+                 OggOpusPacketReader(opened, close_stream=True, _allow_archive_preroll=True))
+        # Publish before checking closed: cleanup may run while opening the
+        # stream or between the check and assignment. Either thread then owns
+        # closing this child; no newly opened stream escapes cancellation.
+        self._current = child
+        if self._closed:
+            child.cleanup()
+            return b""
+        self._part_samples = 0
+        self._part_validated_eos = False
+        self._part_emitted_start = self._emitted_samples
+        packet = self._read_child()
+        pre = int(child.metadata.get("pre_skip_samples", -1))
+        if self._index == 0:
+            if pre < 0 or pre > 960:
+                raise OpusPacketError("pre-skip inicial do arquivo incompatível")
+            self.metadata.update({key: child.metadata.get(key) for key in (
+                "codec", "sample_rate_hz", "channels", "input_sample_rate_hz", "pre_skip_samples",
+                "output_gain_q8", "channel_mapping", "trim_mode")})
+            return packet
+        # The archive writer repeats its preceding complete packets. Match
+        # their bytes as well as their sample count; pre-skip alone is not proof.
+        if not 0 < pre <= self.MAX_PREROLL_SAMPLES or pre > self._tail_samples:
+            raise OpusPacketError("preroll da parte Opus não confirmado")
+        expected: deque[bytes] = deque()
+        count = 0
+        for previous, samples in reversed(self._tail):
+            expected.appendleft(previous)
+            count += samples
+            if count >= pre:
+                break
+        if count != pre:
+            raise OpusPacketError("preroll Opus não alinhado aos pacotes")
+        skipped = 0
+        while expected:
+            if packet != expected.popleft():
+                raise OpusPacketError("pacotes de preroll Opus diferentes da parte anterior")
+            skipped += 1
+            packet = self._read_child()
+        if not packet:
+            raise OpusPacketError("parte Opus contém somente preroll")
+        self.metadata["archive_preroll_packets_skipped"] += skipped
+        self.metadata["archive_preroll_samples_skipped"] += pre
+        return packet
+
+    def read_packet(self) -> bytes:
+        if self._closed or self._finished:
+            return b""
+        while True:
+            packet = self._begin_part() if self._current is None else self._read_child()
+            if self._closed:
+                return b""
+            if packet:
+                samples = opus_packet_samples(packet)
+                self._emitted_samples += samples
+                self._tail.append((packet, samples))
+                self._tail_samples += samples
+                while len(self._tail) > 1 and self._tail_samples - self._tail[0][1] >= 3840:
+                    self._tail_samples -= self._tail.popleft()[1]
+                child = self._current
+                final = self._index + 1 == len(self._durations)
+                self._eos = bool(final and child is not None and child._eos)
+                # The old decoder's bounded final-page validation sees only
+                # the logical final page, after preroll has been removed.
+                self._packets = child._packets if self._eos else deque()
+                self.metadata["archive_segment_index"] = self._index
+                self.metadata["audio_packets"] = self.metadata.get("audio_packets", 0) + 1
+                return packet
+            child = self._current
+            if child is not None:
+                child.cleanup()
+                self._current = None
+            self.metadata["archive_segments_completed"] = self._index + 1
+            self._index += 1
+            if self._index == len(self._durations):
+                self._finished = True
+                return b""
+
+    def cleanup(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        child = self._current
+        if child is not None:
+            child.cleanup()
+        self._tail.clear()
+        self._packets = deque()
+
+
 class OpusPCMDecoderSource(discord.AudioSource):
     """Um decode aquecido acompanha cada pacote original antes de copiá-lo.
 
@@ -399,7 +593,9 @@ class OpusPCMDecoderSource(discord.AudioSource):
         # Read fixed keys rather than iterating a dictionary growing on it.
         fields = ("codec", "sample_rate_hz", "channels", "input_sample_rate_hz", "pre_skip_samples",
                   "output_gain_q8", "channel_mapping", "trim_mode", "ogg_pages", "audio_packets",
-                  "end_granule_samples", "tail_padding_samples", "raw_duration_samples")
+                  "end_granule_samples", "tail_padding_samples", "raw_duration_samples",
+                  "archive_reader_continuous", "archive_segment_index", "archive_segments_total", "archive_segments_completed",
+                  "archive_preroll_packets_skipped", "archive_preroll_samples_skipped")
         return {**{key: self.reader.metadata.get(key) for key in fields}, "decoded_samples": self._decoded_samples}
 
     def _validate_eos_page(self, packet: bytes) -> None:

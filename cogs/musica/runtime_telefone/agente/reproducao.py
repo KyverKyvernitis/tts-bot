@@ -2774,7 +2774,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
     @staticmethod
     def _output_policy_signature(policy: dict[str, Any]) -> tuple[Any, ...]:
         return tuple(policy.get(key) for key in (
-            "bitrate_kbps", "channel_bitrate_kbps", "profile", "fec", "expected_packet_loss", "revision", "opus_direct"))
+            "bitrate_kbps", "copy_bitrate_kbps", "channel_bitrate_kbps", "profile", "fec",
+            "expected_packet_loss", "revision", "opus_direct"))
 
     def _audio_output_voice_view(self, voice_client: Any, *, channel: Any = None, prefer_cache: bool = False) -> Any:
         """Read the current guild cache; VoiceClient.channel can be an old object."""
@@ -2908,12 +2909,14 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             if isinstance(context, dict):
                 context.update(opus_bitrate_kbps=actual["bitrate_kbps"],
                                opus_requested_bitrate_kbps=fresh["bitrate_kbps"],
+                               copy_bitrate_kbps=fresh.get("copy_bitrate_kbps"),
                                channel_bitrate_kbps=fresh.get("channel_bitrate_kbps"),
                                audio_output_profile=fresh.get("profile"),
                                opus_fec=actual["fec"], opus_expected_packet_loss=actual["expected_packet_loss"],
                                audio_output_state=applied["state"])
             self.log("opus_encoder_updated", guild_id=guild_id, reason=reason,
                      requested_kbps=fresh["bitrate_kbps"], applied_kbps=actual["bitrate_kbps"],
+                     copy_bitrate_kbps=fresh.get("copy_bitrate_kbps"),
                      channel_bitrate_kbps=fresh.get("channel_bitrate_kbps"), profile=fresh.get("profile"),
                      fec=actual["fec"], expected_packet_loss=actual["expected_packet_loss"],
                      state=applied["state"], unsupported_controls=unsupported, error_type=error)
@@ -3210,6 +3213,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         channel_bitrate_kbps = int(output_policy["channel_bitrate_kbps"])
         quality_context.update(opus_bitrate_kbps=opus_bitrate_kbps,
                                channel_bitrate_kbps=channel_bitrate_kbps,
+                               copy_bitrate_kbps=output_policy.get("copy_bitrate_kbps"),
                                audio_output_profile=output_policy.get("profile", "balanced"),
                                opus_fec=output_policy.get("fec"),
                                opus_expected_packet_loss=output_policy.get("expected_packet_loss"))
@@ -3226,6 +3230,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             resample_mode=resample_mode,
             channel_bitrate_kbps=channel_bitrate_kbps,
             opus_bitrate_kbps=opus_bitrate_kbps,
+            copy_bitrate_kbps=output_policy.get("copy_bitrate_kbps"),
             audio_output_profile=output_policy.get("profile", "balanced"),
             opus_fec=output_policy.get("fec"),
             opus_expected_packet_loss=output_policy.get("expected_packet_loss"),

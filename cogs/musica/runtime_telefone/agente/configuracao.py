@@ -251,11 +251,17 @@ def audio_output_policy(agent: Any, voice_client: Any, track: Any = None, state:
     desired = min(maximum, target)
     if channel_kbps > 0:
         desired = min(desired, channel_kbps)
+    # Original VBR packets are not produced by the fallback encoder. Their
+    # budget follows the observed channel/configuration capacity, independently
+    # of balanced/profile targets. Unknown channel capacity never authorizes
+    # forwarding compressed packets.
+    copy_bitrate = min(maximum, channel_kbps) if channel_kbps > 0 else 0
     return {
         "profile": profile,
         "bitrate_kbps": max(16, min(512, int(desired))),
         "target_bitrate_kbps": int(target),
         "channel_bitrate_kbps": channel_kbps,
+        "copy_bitrate_kbps": copy_bitrate,
         "source_abr_kbps": source_abr,
         "limited_by_channel": bool(channel_kbps and channel_kbps < min(maximum, target)),
         "limited_by_config": target > maximum,
@@ -281,7 +287,55 @@ def audio_output_capabilities(default_opus_direct: str = "auto") -> dict[str, An
         "opus_direct_modes": list(AUDIO_OUTPUT_OPUS_DIRECT_MODES),
         "opus_direct_default": direct_default,
         "opus_direct_persistent": True,
+        "opus_direct_segmented_archive": True,
     }
+
+
+def opus_archive_segments_candidate(track: Any) -> bool:
+    """Check the manifest shape; only the packet reader can prove continuity."""
+    segments = getattr(track, "archive_segments", None)
+    reference = getattr(track, "archive_ref", None)
+    if (not isinstance(segments, list) or not 2 <= len(segments) <= 4096
+            or not isinstance(reference, dict)
+            or not re.fullmatch(r"[a-f0-9]{32}", str(getattr(track, "archive_key", "") or ""))):
+        return False
+    seen: set[tuple[int, int]] = set()
+    offset = 0.0
+    try:
+        root = {key: int(reference[key]) for key in ("guild_id", "channel_id", "message_id", "attachment_id")}
+        if any(isinstance(reference[key], bool) or not 0 < value < 2 ** 64 for key, value in root.items()):
+            return False
+        for order, segment in enumerate(segments):
+            if (not isinstance(segment, dict) or isinstance(segment.get("order"), bool)
+                    or segment.get("order") != order
+                    or str(segment.get("audio_codec", "")).lower() not in {"opus", "libopus"}
+                    or segment.get("audio_sample_rate") != 48000 or segment.get("audio_channels") != 2
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(segment.get("sha256") or ""))):
+                return False
+            ids = {key: int(segment[key]) for key in root}
+            identity = (ids["message_id"], ids["attachment_id"])
+            if (any(isinstance(segment[key], bool) or not 0 < ids[key] < 2 ** 64 for key in root)
+                    or ids["guild_id"] != root["guild_id"] or ids["channel_id"] != root["channel_id"]
+                    or identity in seen or (order == 0 and ids != root)):
+                return False
+            seen.add(identity)
+            seconds, start = float(segment["duration"]), float(segment["offset_seconds"])
+            size = segment["size_bytes"]
+            filename = segment.get("filename")
+            if (isinstance(segment["duration"], bool) or isinstance(segment["offset_seconds"], bool)
+                    or not math.isfinite(seconds) or seconds <= 0 or not math.isfinite(start)
+                    or abs(start - offset) > 0.05 or isinstance(size, bool)
+                    or not isinstance(size, int) or size <= 0 or not isinstance(filename, str)
+                    or not 0 < len(filename) <= 240 or "/" in filename or "\\" in filename):
+                return False
+            offset += seconds
+        duration = getattr(track, "duration", None)
+        if duration is not None and (not math.isfinite(float(duration))
+                or abs(float(duration) - offset) > max(0.1, offset * 0.0001)):
+            return False
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return True
 
 
 def opus_passthrough_eligibility(
@@ -301,7 +355,8 @@ def opus_passthrough_eligibility(
         reasons.append("disabled")
     if force_pcm:
         reasons.append("pcm_mixer_required")
-    if len(getattr(track, "archive_segments", None) or ()) > 1:
+    if (len(getattr(track, "archive_segments", None) or ()) > 1
+            and not opus_archive_segments_candidate(track)):
         reasons.append("segmented_archive")
     try:
         unity_gain = math.isfinite(float(volume_percent)) and abs(float(volume_percent) - 100) < 0.000001

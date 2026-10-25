@@ -210,7 +210,7 @@ def request_command(body: dict, values: dict[str, str], *, opener=None) -> dict:
 # Apenas esta árvore de metadados de qualidade pode chegar ao terminal.
 QUALITY_KEYS = frozenset({
     "settings", "revision", "requested", "applied", "profile", "bitrate_kbps",
-    "channel_bitrate_kbps", "target_bitrate_kbps", "source_abr_kbps", "fec",
+    "channel_bitrate_kbps", "copy_bitrate_kbps", "target_bitrate_kbps", "source_abr_kbps", "fec",
     "expected_packet_loss", "application", "bandwidth", "signal_type", "active",
     "transport", "status", "state", "reason", "changed", "queued", "supported",
     "limited_by_channel", "limited_by_config", "channel_id", "playback_token",
@@ -228,7 +228,7 @@ QUALITY_KEYS = frozenset({
     "encoder_supported", "unsupported", "capabilities", "requested_profile", "fec_applied",
     "expected_packet_loss_applied",
     "opus_direct", "opus_direct_modes", "opus_direct_default", "output_mode",
-    "persistence", "ready", "stored", "opus_direct_persistent",
+    "persistence", "ready", "stored", "opus_direct_persistent", "opus_direct_segmented_archive",
     "copied_packets", "encoded_packets", "latched", "packet_duration_ms", "source_bitrate_kbps",
     "preskip_samples", "trimmed_tail_samples", "packet_validation_required", "candidate",
     "validated_packets", "fallback_encoder", "copy_active", "copy_supported", "required_packet_duration_ms",
@@ -237,6 +237,8 @@ QUALITY_KEYS = frozenset({
     "input_sample_rate_hz", "pre_skip_samples", "channel_mapping", "output_gain_q8",
     "end_granule_samples", "ogg_pages", "audio_packets", "trim_mode", "tail_padding_samples",
     "raw_duration_samples", "decoded_samples",
+    "archive_reader_continuous", "archive_segment_index", "archive_segments_total",
+    "archive_segments_completed", "archive_preroll_packets_skipped", "archive_preroll_samples_skipped",
 })
 
 

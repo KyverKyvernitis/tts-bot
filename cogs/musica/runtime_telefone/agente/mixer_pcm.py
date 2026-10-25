@@ -788,6 +788,21 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
         realmente aplicados, inclusive None para controles desconhecidos.
         """
         bitrate = max(16, min(512, int(policy.get("bitrate_kbps", 160))))
+        if "copy_bitrate_kbps" in policy:
+            copy_bitrate = policy["copy_bitrate_kbps"]
+            if (isinstance(copy_bitrate, bool) or not isinstance(copy_bitrate, int)
+                    or not 0 <= copy_bitrate <= 512):
+                raise ValueError("limite da cópia Opus inválido")
+            # New policies prove channel capacity explicitly. A partial policy
+            # cannot invent channel capacity from the fallback encoder's target.
+            channel_bitrate = policy.get("channel_bitrate_kbps")
+            if (isinstance(channel_bitrate, int) and not isinstance(channel_bitrate, bool)
+                    and 0 <= channel_bitrate <= 512):
+                copy_bitrate = min(copy_bitrate, channel_bitrate)
+            else:
+                copy_bitrate = 0
+        else:
+            copy_bitrate = bitrate  # compatibility with existing bounded policies
         mode = policy.get("opus_direct", "auto")
         if mode not in {"auto", "off"}:
             raise ValueError("opus_direct deve ser auto ou off")
@@ -808,7 +823,7 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                 encoder.set_expected_packet_loss_percent(loss)
                 encoder.set_signal_type("music")
                 encoder.set_bandwidth("full")
-            self._opus_policy = {**policy, "bitrate_kbps": bitrate, "opus_direct": mode,
+            self._opus_policy = {**policy, "bitrate_kbps": bitrate, "copy_bitrate_kbps": copy_bitrate, "opus_direct": mode,
                                  "fec": fec, "expected_packet_loss": loss}
             if apply_encoder:
                 self._opus_encoder_state = "applied"
@@ -930,7 +945,7 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                     self._latch_opus_pcm("source_requires_pcm")
                 elif not self._opus_packet_is_20ms(packet):
                     self._latch_opus_pcm("packet_duration_invalid")
-                elif len(packet) > min(1275, int(self._opus_policy.get("bitrate_kbps", 160) * 2.5)):
+                elif len(packet) > min(1275, int(self._opus_policy["copy_bitrate_kbps"] * 2.5)):
                     self._latch_opus_pcm("packet_bitrate_limit")
                 elif frame != self._opus_input_pcm:
                     # Byte comparison is native, bounded to one 3840-byte frame;
@@ -977,12 +992,16 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                             "output_gain", "mapping_family", "packet_duration_ms", "sample_rate_hz",
                             "input_sample_rate_hz", "pre_skip_samples", "channel_mapping",
                             "output_gain_q8", "end_granule_samples", "ogg_pages", "audio_packets",
-                            "tail_padding_samples", "raw_duration_samples", "decoded_samples"):
+                            "tail_padding_samples", "raw_duration_samples", "decoded_samples",
+                            "archive_segment_index", "archive_segments_total", "archive_segments_completed",
+                            "archive_preroll_packets_skipped", "archive_preroll_samples_skipped"):
                     value = metadata.get(key)
                     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
                         source[key] = value
                 if metadata.get("trim_mode") == "raw_packets_no_sample_exact_trim":
                     source["trim_mode"] = metadata["trim_mode"]
+                if metadata.get("archive_reader_continuous") is True:
+                    source["archive_reader_continuous"] = True
             copy = self._opus_mode == "copy" and not self._opus_latched
             return {
                 "state": self._opus_mode,
@@ -996,7 +1015,8 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                     if self._opus_copied_packets else None,
                 "encoded_packets": self._opus_encoded_packets,
                 "fallback_latched": self._opus_latched,
-                "copy_packet_limit_bytes": min(1275, int(self._opus_policy.get("bitrate_kbps", 160) * 2.5)),
+                "copy_bitrate_kbps": self._opus_policy["copy_bitrate_kbps"],
+                "copy_packet_limit_bytes": min(1275, int(self._opus_policy["copy_bitrate_kbps"] * 2.5)),
                 "source": source,
                 "copy_fec": None,
                 "fallback_encoder": {**self._opus_encoder_settings, "state": self._opus_encoder_state},
