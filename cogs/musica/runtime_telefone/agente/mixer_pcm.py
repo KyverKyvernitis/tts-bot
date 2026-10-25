@@ -731,6 +731,8 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
         self._opus_encoded_packets = 0
         self._opus_input_pcm = b""
         self._opus_input_source: Any = None
+        self._opus_processed_source: Any = None
+        self._opus_processed_generation = -1
         self.output_encoder = output_encoder
         try:
             if self.output_encoder is None:
@@ -778,6 +780,22 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
             self._opus_latched = True
             self._opus_reason = reason
         self._opus_mode = "pcm_fallback"
+
+    def _opus_processed_active(self) -> bool:
+        """Proof of a native encoded music read from this exact source.
+
+        Opus transport also carries TTS and synthetic silence. Neither proves
+        the current music was processed, and a previous track cannot lend its
+        encoder counter to a replacement source.
+        """
+        source = self.music_source
+        return bool(
+            not self._closed and not self._music_ended and not self._music_paused
+            and self._opus_mode == "pcm_fallback" and self._opus_encoded_packets > 0
+            and source is not None and self._opus_processed_source is source
+            and self._opus_processed_generation == self._opus_generation
+            and self.last_read_had_music and self.last_read_music_source is source
+        )
 
     def set_output_policy(self, policy: dict[str, Any], *, apply_encoder: bool = True,
                           applied_encoder: dict[str, Any] | None = None) -> None:
@@ -863,6 +881,8 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
         with self._lock:
             if paused:
                 self._latch_opus_pcm("music_paused")
+                self._opus_processed_source = None
+                self._opus_processed_generation = -1
             super().set_music_paused(paused)
 
     def reserve_tts(self) -> None:
@@ -896,6 +916,8 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
             self._opus_copied_bytes = 0
             self._opus_input_pcm = b""
             self._opus_input_source = None
+            self._opus_processed_source = None
+            self._opus_processed_generation = -1
             if self._opus_policy.get("opus_direct", "auto") != "auto":
                 self._latch_opus_pcm("disabled")
             elif self._overlays or self._tts_reservations:
@@ -909,6 +931,8 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
         generation = self._opus_generation
         self._opus_input_pcm = b""
         self._opus_input_source = None
+        self._opus_processed_source = None
+        self._opus_processed_generation = -1
         frame = super().read()
         if not frame:
             return b""
@@ -959,6 +983,12 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                 return packet
             packet = self.output_encoder.encode(frame, 960)
             self._opus_encoded_packets += 1
+            if (generation == self._opus_generation and self.last_read_had_music
+                    and source is not None and self.music_source is source
+                    and self.last_read_music_source is source
+                    and source is self._opus_input_source and not self._music_paused):
+                self._opus_processed_source = source
+                self._opus_processed_generation = generation
             self._update_opus_quality_context(copy=False)
             return packet
 
@@ -973,7 +1003,7 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                        for key in ("bitrate_kbps", "fec", "expected_packet_loss"))):
             encoder_state = "partial"
         context.update(
-            output_mode="opus_direct" if copy else "pcm_encoded",
+            output_mode="opus_direct" if copy else "opus_processed" if self._opus_processed_active() else "pcm_encoded",
             audio_output_state="copied" if copy else encoder_state,
             opus_bitrate_kbps=None if copy else self._opus_encoder_settings.get("bitrate_kbps"),
             opus_fec=None if copy else self._opus_encoder_settings.get("fec"),
@@ -1019,11 +1049,20 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                             and all(char in "abcdefghijklmnopqrstuvwxyz0123456789_" for char in original_codec)):
                         source["prepared_source_codec"] = original_codec
             copy = self._opus_mode == "copy" and not self._opus_latched
+            processed = self._opus_processed_active()
+            actual_bitrate = self._opus_encoder_settings.get("bitrate_kbps")
+            known_bitrate = (isinstance(actual_bitrate, int) and not isinstance(actual_bitrate, bool)
+                             and 16 <= actual_bitrate <= 512
+                             and self._opus_encoder_state in {"applied", "partial"})
             return {
                 "state": self._opus_mode,
                 "reason": self._opus_reason,
                 "eligible": copy,
                 "copy_active": copy,
+                "processed_active": processed,
+                "output_mode": "opus_direct" if copy else "opus_processed" if processed else "",
+                "processed_bitrate_kbps": actual_bitrate if processed and known_bitrate else None,
+                "opus_transport": True,
                 "packet_validation_required": not copy,
                 "copied_packets": self._opus_copied_packets,
                 "copied_bytes": self._opus_copied_bytes,

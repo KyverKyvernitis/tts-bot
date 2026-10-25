@@ -2758,6 +2758,20 @@ def test_eof_no_meio_de_faixa_recupera_sem_erro_ffmpeg(music):
 
 
 def test_mixer_persistente_carrega_tts_na_troca_de_faixa(music, monkeypatch):
+    class Encoder:
+        """Codec boundary only; this test verifies queue/TTS ownership."""
+        def __init__(self, **kwargs): pass
+        def set_bitrate(self, value): return value
+        def set_fec(self, value): pass
+        def set_expected_packet_loss_percent(self, value): pass
+        def set_signal_type(self, value): pass
+        def set_bandwidth(self, value): pass
+        def encode(self, frame, samples):
+            assert len(frame) == 3840 and samples == 960
+            return b"\xf8fixture-opus"
+
+    monkeypatch.setattr(music.discord, "opus", types.SimpleNamespace(Encoder=Encoder), raising=False)
+
     class PCM:
         def __init__(self, url, **kwargs):
             self.frames = [b"\x04\x00" * 1920, b""]

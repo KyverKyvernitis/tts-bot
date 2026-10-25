@@ -541,6 +541,15 @@ async def sincronizar_estado_agente(
                 state.current.opus_direct_bitrate_kbps = bitrate
             elif origin == "original":
                 state.current.opus_direct_origin = origin
+        processed_bitrate = current_payload.get("opus_processed_bitrate_kbps")
+        state.current.opus_processed_active = bool(
+            not state.current.opus_direct_active and same_current
+            and raw_status == "playing" and not state.paused
+            and current_payload.get("opus_processed_active") is True
+            and isinstance(processed_bitrate, int) and not isinstance(processed_bitrate, bool)
+            and 16 <= processed_bitrate <= 512
+        )
+        state.current.opus_processed_bitrate_kbps = processed_bitrate if state.current.opus_processed_active else 0
     state.music_session_active = bool(state.current or raw_status in {"preparing", "starting", "playing", "paused", "queued"})
     if raw_status and raw_status not in {"failed", "error"}:
         if state.agent_voice_recovery_pending:

@@ -184,6 +184,8 @@ class OutputHelperTests(unittest.TestCase):
                                 "preparation": {"candidate": True, "cache_enabled": True,
                                                 "cache": {"hits": 1, "max_bytes": 268435456,
                                                           "path": "/private/cache"}},
+                                "passthrough": {"processed_active": True, "processed_bitrate_kbps": 160,
+                                                "opus_transport": True, "output_mode": "opus_processed"},
                                 "source_url": "https://private.invalid/track", "reason": "SENTINEL-MUSIC-TOKEN"},
                "sync": {"status": "queued", "error": "private traceback"},
                "capabilities": {"profiles": ["balanced", "quality_192", "quality_256"],
@@ -197,6 +199,7 @@ class OutputHelperTests(unittest.TestCase):
         self.assertEqual(output["audio_output"]["requested"]["copy_bitrate_kbps"], 256)
         self.assertEqual(output["audio_output"]["applied"]["bitrate_kbps"], 64)
         self.assertEqual(output["audio_output"]["preparation"]["cache"]["hits"], 1)
+        self.assertTrue(output["audio_output"]["passthrough"]["processed_active"])
         self.assertNotIn("/private/cache", text)
         self.assertEqual(output["sync"]["status"], "queued")
 

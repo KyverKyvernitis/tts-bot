@@ -86,6 +86,8 @@ class MusicTrack:
     opus_direct_active: bool = False
     opus_direct_origin: str = ""
     opus_direct_bitrate_kbps: int = 0
+    opus_processed_active: bool = False
+    opus_processed_bitrate_kbps: int = 0
 
     @property
     def display_url(self) -> str:

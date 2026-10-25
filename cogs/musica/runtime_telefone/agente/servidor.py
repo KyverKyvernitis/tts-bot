@@ -102,7 +102,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.94"
+AGENT_VERSION = "0.3.95"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -1121,6 +1121,12 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 # original or prepared. Encoder controls cannot change them.
                 applied = {**applied, "state": "copied", "output_mode": "opus_direct",
                            "bitrate_kbps": None, "fec": None, "expected_packet_loss": None}
+            elif live.get("processed_active") is True and live.get("output_mode") == "opus_processed":
+                actual = live.get("fallback_encoder") if isinstance(live.get("fallback_encoder"), dict) else {}
+                applied = {**applied, "output_mode": "opus_processed",
+                           "state": actual.get("state", "partial"),
+                           "bitrate_kbps": live.get("processed_bitrate_kbps"),
+                           "fec": actual.get("fec"), "expected_packet_loss": actual.get("expected_packet_loss")}
             else:
                 applied = {**applied, "output_mode": "pcm_encoded"}
         elif active and requested.get("opus_direct") == "auto" and passthrough.get("candidate"):

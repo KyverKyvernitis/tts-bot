@@ -325,26 +325,27 @@ class GuildMusicState:
                 total += remaining
         return max(0, total)
 
-    def _opus_direct_active(self) -> bool:
+    def _opus_output_evidence(self) -> dict[str, Any] | None:
         """Live output of this exact track/session, never an enabled setting."""
         if (self.current is None or self.transport != "direct" or self.status != "playing"
                 or self.paused or self.voice_runtime_recovery_pending):
-            return False
+            return None
         try:
+            track, token = self.current, self.playback_token
             player = self.player
             if player is None or not player.is_connected():
-                return False
+                return None
             channel = getattr(player, "channel", None)
             if not self.voice_channel_id or int(getattr(channel, "id", 0)) != self.voice_channel_id:
-                return False
+                return None
             source = getattr(player, "source", None)
             if (source is None or getattr(source, "_closed", False)
                     or getattr(source, "music_ended", False)
                     or not getattr(source, "last_read_had_music", False)):
-                return False
+                return None
             trace = getattr(player, "_music_packet_trace", None)
             if not isinstance(trace, dict):
-                return False
+                return None
             expected = trace.get("expected_music_source")
             if (trace.get("track") is not self.current
                     or trace.get("token") != self.playback_token
@@ -353,20 +354,52 @@ class GuildMusicState:
                     or trace.get("first_packet_monotonic") is None
                     or expected is None or getattr(source, "music_source", None) is not expected
                     or getattr(source, "last_read_music_source", None) is not expected):
-                return False
+                return None
             getter = getattr(source, "opus_direct_status", None)
             live = getter() if callable(getter) else None
-            return isinstance(live, dict) and live.get("copy_active") is True
+            if (self.current is not track or self.playback_token != token or self.player is not player
+                    or getattr(player, "source", None) is not source
+                    or getattr(player, "_music_packet_trace", None) is not trace
+                    or getattr(source, "music_source", None) is not expected
+                    or getattr(source, "last_read_music_source", None) is not expected
+                    or not getattr(source, "last_read_had_music", False)
+                    or getattr(source, "_closed", False) or getattr(source, "music_ended", False)
+                    or not player.is_connected()
+                    or int(getattr(getattr(player, "channel", None), "id", 0)) != self.voice_channel_id
+                    or self.status != "playing" or self.paused or self.voice_runtime_recovery_pending):
+                return None
+            return dict(live) if isinstance(live, dict) else None
         except Exception:
             # Missing/old runtime metadata and concurrent cleanup are not proof
             # of copy. A label must never interfere with otherwise healthy audio.
+            return None
+
+    def _opus_direct_active(self) -> bool:
+        live = self._opus_output_evidence()
+        return bool(live is not None and live.get("copy_active") is True)
+
+    def _opus_processed_active(self) -> bool:
+        live = self._opus_output_evidence()
+        if (live is None or live.get("copy_active") is True or live.get("processed_active") is not True
+                or live.get("opus_transport") is not True or live.get("output_mode") != "opus_processed"):
             return False
+        bitrate = live.get("processed_bitrate_kbps")
+        return isinstance(bitrate, int) and not isinstance(bitrate, bool) and 16 <= bitrate <= 512
 
     def _opus_direct_public(self) -> dict[str, Any]:
         """Expose current output provenance without changing source metadata."""
         inactive = {"opus_direct_active": False, "opus_direct_origin": "",
-                    "opus_direct_bitrate_kbps": 0}
+                    "opus_direct_bitrate_kbps": 0, "opus_processed_active": False,
+                    "opus_processed_bitrate_kbps": 0}
         if not self._opus_direct_active():
+            live = self._opus_output_evidence()
+            if (live is not None and live.get("copy_active") is not True
+                    and live.get("processed_active") is True and live.get("opus_transport") is True
+                    and live.get("output_mode") == "opus_processed"):
+                bitrate = live.get("processed_bitrate_kbps")
+                if isinstance(bitrate, int) and not isinstance(bitrate, bool) and 16 <= bitrate <= 512:
+                    return {**inactive, "opus_processed_active": True,
+                            "opus_processed_bitrate_kbps": bitrate}
             return inactive
         try:
             player = self.player
@@ -395,7 +428,8 @@ class GuildMusicState:
                     or not self._opus_direct_active()):
                 return inactive
             return {"opus_direct_active": True, "opus_direct_origin": origin,
-                    "opus_direct_bitrate_kbps": bitrate}
+                    "opus_direct_bitrate_kbps": bitrate, "opus_processed_active": False,
+                    "opus_processed_bitrate_kbps": 0}
         except Exception:
             return inactive
 
@@ -403,6 +437,8 @@ class GuildMusicState:
         current = f"{self.updated_at:.6f}:{self.playback_token}"
         current = f"{current}:audio{self.audio_output_revision}" if self.audio_output_revision else current
         output = self._opus_direct_public()
+        if output["opus_processed_active"]:
+            return f"{current}:opus_processed:{output['opus_processed_bitrate_kbps']}"
         if not output["opus_direct_active"]:
             return current
         current = f"{current}:opus_direct"
@@ -418,6 +454,7 @@ class GuildMusicState:
             "requested_profile", "requested_kbps", "applied_kbps", "fec_applied",
             "expected_packet_loss_applied", "passthrough", "state",
             "unsupported_controls", "error_type", "opus_direct", "output_mode",
+            "opus_transport", "processed_active", "processed_bitrate_kbps",
         }
         settings, applied = dict(self.audio_output_settings), dict(self.audio_output_applied)
         return {

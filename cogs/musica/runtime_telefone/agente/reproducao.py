@@ -1957,11 +1957,16 @@ class ReproducaoMixin(PreparacaoAudioMixin):
 
     async def cmd_volume(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
-        volume = max(0, min(150, int(float(body.get("volume") or body.get("volume_percent") or self.default_volume_percent))))
+        requested = body.get("volume") if body.get("volume") is not None else body.get("volume_percent")
+        if requested is None:
+            requested = self.default_volume_percent
+        if isinstance(requested, bool) or not math.isfinite(float(requested)):
+            raise ValueError("volume deve ser um número finito")
+        volume = max(0, min(150, int(float(requested))))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.normal_volume_percent = volume
-        if not st.ducked:
-            await self._apply_player_volume(st, volume)
+        duck_limit = max(0, min(100, int(getattr(st, "_duck_volume_limit", self.duck_volume_percent))))
+        await self._apply_player_volume(st, min(duck_limit, volume) if st.ducked else volume)
         return {"ok": True, "volume": st.volume_percent, "normal_volume": st.normal_volume_percent, "ducked": st.ducked, "state": st.public()}
 
     async def cmd_audio_effect(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -2080,6 +2085,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 # de telemetria/prefetch não podem reportar uma troca concluída
                 # como falha nem tentar restaurar uma fonte já encerrada.
                 self._bump_playback_generation(st, reason="audio_effect")
+                with contextlib.suppress(Exception):
+                    self._arm_music_packet_trace(
+                        player, mixer, guild_id=guild_id, track=track, token=st.playback_token,
+                        pcm_source=mixer.music_source, output_refresh=True,
+                    )
                 st.apply_effect_signature(desired)
                 st.effects_revision += 1
                 track.start_offset_seconds = offset
@@ -2117,8 +2127,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         if requested is None:
             requested = self.duck_volume_percent
         duck_volume = max(0, min(100, int(float(requested))))
-        if not st.normal_volume_percent:
-            st.normal_volume_percent = max(0, min(150, int(st.volume_percent or self.default_volume_percent)))
+        st._duck_volume_limit = duck_volume
+        if st.normal_volume_percent is None:
+            st.normal_volume_percent = max(0, min(150, int(st.volume_percent)))
+        duck_volume = min(duck_volume, max(0, int(st.normal_volume_percent)))
         st.ducked = True
         await self._apply_player_volume(st, duck_volume)
         self.log("tts_duck", guild_id=guild_id, volume=duck_volume, normal=st.normal_volume_percent)
@@ -2127,7 +2139,12 @@ class ReproducaoMixin(PreparacaoAudioMixin):
     async def cmd_unduck(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
-        restore = max(0, min(150, int(float(body.get("volume") or body.get("volume_percent") or st.normal_volume_percent or self.default_volume_percent))))
+        requested = body.get("volume") if body.get("volume") is not None else body.get("volume_percent")
+        if requested is None:
+            requested = st.normal_volume_percent if st.normal_volume_percent is not None else self.default_volume_percent
+        if isinstance(requested, bool) or not math.isfinite(float(requested)):
+            raise ValueError("volume deve ser um número finito")
+        restore = max(0, min(150, int(float(requested))))
         st.ducked = False
         st.normal_volume_percent = restore
         await self._apply_player_volume(st, restore)
@@ -2997,11 +3014,13 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         return dict(payload) if isinstance(payload, dict) else {}
 
     def _arm_music_packet_trace(self, voice_client: Any, source: Any, *, guild_id: int,
-                               track: AgentTrack, token: int, pcm_source: Any = None) -> None:
+                               track: AgentTrack, token: int, pcm_source: Any = None,
+                               output_refresh: bool = False) -> None:
         """Mede o envio UDP real, inclusive quando discord.py suprime OSError."""
         trace = {"source": source, "expected_music_source": pcm_source,
                  "guild_id": guild_id, "track": track, "token": token,
-                 "first_packet_monotonic": None, "supported": False}
+                 "first_packet_monotonic": None, "supported": False,
+                 "output_refresh": output_refresh}
         voice_client._music_packet_trace = trace
         connection = getattr(voice_client, "_connection", None)
         original_transport = getattr(connection, "send_packet", None)
@@ -3053,6 +3072,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             return
         now = time.monotonic()
         trace["first_packet_monotonic"] = now
+        if trace.get("output_refresh"):
+            return  # a new effect source is not a new music-start attempt
         st.first_audio_sent_monotonic = now
         self._archive_foreground_until[st.guild_id] = now + 1.0
         if track.agent_received_monotonic:
@@ -3095,8 +3116,8 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         track.agent_timing_ms["direct_voice_ready_ms"] = round((time.monotonic() - direct_start_monotonic) * 1000, 1)
         existing_source = getattr(voice_client, "source", None)
         pcm_pipeline = self.direct_pcm_volume_enabled or bool(track.archive_segments)
-        preflight = getattr(self, "_opus_direct_preflight", None)
-        wants_opus = bool(callable(preflight) and preflight(guild_id, track).get("candidate"))
+        output_policy = self._resolved_audio_output_policy(self._audio_output_voice_view(voice_client), track, st)
+        wants_opus = output_policy.get("opus_direct") == "auto"
         reusable = bool(
             pcm_pipeline
             and isinstance(existing_source, AgentMixedAudioSource)
@@ -3481,7 +3502,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                     pcm, volume=volume, on_music_end=on_music_end, bassboost_level=int(effects[0] or 0),
                 )
                 return reuse_mixer
-            hybrid = bool(getattr(pcm, "opus_direct_capable", False))
+            # Effects/volume require PCM internally. The hybrid encodes the
+            # mixed result once and still sends Opus packets to VoiceClient.
+            hybrid = bool(getattr(pcm, "opus_direct_capable", False)
+                          or (output_policy is not None and output_policy.get("opus_direct") == "auto"))
             mixer_class = AgentHybridOpusAudioSource if hybrid else AgentMixedAudioSource
             return mixer_class(
                 loop=loop,

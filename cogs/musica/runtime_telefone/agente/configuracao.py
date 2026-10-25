@@ -614,6 +614,10 @@ def audio_output_capabilities(default_opus_direct: str = "auto") -> dict[str, An
         "opus_direct_persistent": True,
         "opus_direct_segmented_archive": True,
         "opus_direct_preparation": True,
+        "opus_output_processing": True,
+        "opus_processed_effects": ["bassboost", "nightcore", "slowed_reverb"],
+        "opus_processed_volume_min": 0, "opus_processed_volume_max": 150,
+        "original_packet_copy_with_effects": False,
     }
 
 

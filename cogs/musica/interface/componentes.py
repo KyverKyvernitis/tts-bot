@@ -835,6 +835,13 @@ def _public_audio_quality_label(state, track: MusicTrack | None) -> str:
         and 16 <= prepared_bitrate <= 512
     )
     prepared_source = ""
+    processed_bitrate = getattr(track, "opus_processed_bitrate_kbps", 0)
+    processed_output = bool(
+        getattr(track, "opus_processed_active", False) is True
+        and getattr(track, "opus_direct_active", False) is not True
+        and isinstance(processed_bitrate, int) and not isinstance(processed_bitrate, bool)
+        and 16 <= processed_bitrate <= 512
+    )
     if (
         (codec_label == "Opus" or prepared_output)
         and backend == "agent"
@@ -849,6 +856,15 @@ def _public_audio_quality_label(state, track: MusicTrack | None) -> str:
                 prepared_source += f" {abr} kbps"
             abr = prepared_bitrate
         codec_label = "Opus direto"
+    elif (processed_output and backend == "agent"
+          and getattr(state, "current", None) is track
+          and str(getattr(state, "current_status", "") or "").lower() == "playing"
+          and not bool(getattr(state, "paused", False))):
+        prepared_source = f"fonte {codec_label}" if codec_label else ""
+        if prepared_source and abr:
+            prepared_source += f" {abr} kbps"
+        abr = processed_bitrate
+        codec_label = "Opus processado"
     if not abr and backend == "agent":
         with contextlib.suppress(Exception):
             abr = int(float(getattr(state, "current_quality_kbps", 0) or 0))

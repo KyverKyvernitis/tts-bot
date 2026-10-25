@@ -36,6 +36,8 @@ def _assinatura_faixa_painel(item: Any) -> tuple[Any, ...]:
             "opus_direct_active",
             "opus_direct_origin",
             "opus_direct_bitrate_kbps",
+            "opus_processed_active",
+            "opus_processed_bitrate_kbps",
         )
     )
 
@@ -204,6 +206,8 @@ async def _marcar_monitor_reconectando(router: Any, guild_id: int, *, falhas: in
         current.opus_direct_active = False
         current.opus_direct_origin = ""
         current.opus_direct_bitrate_kbps = 0
+        current.opus_processed_active = False
+        current.opus_processed_bitrate_kbps = 0
     state.agent_monitor_failures = max(0, int(falhas or 0))
     state.agent_monitor_last_error = str(erro or "")[:260]
     deferred = estado_comando_diferido(guild_id)

@@ -101,7 +101,8 @@ class LiveOpusStateTests(unittest.TestCase):
         self.state.paused = True
         self.assertEqual(self.state._opus_direct_public(),
                          {"opus_direct_active": False, "opus_direct_origin": "",
-                          "opus_direct_bitrate_kbps": 0})
+                          "opus_direct_bitrate_kbps": 0, "opus_processed_active": False,
+                          "opus_processed_bitrate_kbps": 0})
 
     def test_source_replaced_while_reading_preparation_metadata_fails_closed(self):
         self.prepared_source()
@@ -116,7 +117,8 @@ class LiveOpusStateTests(unittest.TestCase):
         self.trace["expected_music_source"] = self.music
         self.assertEqual(self.state._opus_direct_public(),
                          {"opus_direct_active": False, "opus_direct_origin": "",
-                          "opus_direct_bitrate_kbps": 0})
+                          "opus_direct_bitrate_kbps": 0, "opus_processed_active": False,
+                          "opus_processed_bitrate_kbps": 0})
 
     def test_enabled_setting_and_fallback_encoder_never_prove_copy(self):
         self.state.audio_output_settings = {"opus_direct": "auto"}

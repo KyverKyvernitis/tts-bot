@@ -213,6 +213,26 @@ class OutputAPITests(unittest.TestCase):
         self.assertEqual(state.current.audio_abr, 128)
         self.assertNotIn(str(self.preferences_path.parent), json.dumps(result))
 
+    def test_processed_opus_status_reports_applied_encoder_and_retains_copy_reasons(self):
+        state = self.state(1)
+        state.current = AgentTrack(audio_codec='aac', audio_abr=128)
+        state.voice_channel_id, state.volume_percent = 19, 55
+        state.audio_output_settings = {'opus_direct': 'auto'}
+        source = SimpleNamespace(audio_telemetry=lambda: {}, opus_direct_status=lambda: {
+            'copy_active': False, 'processed_active': True, 'output_mode': 'opus_processed',
+            'opus_transport': True, 'processed_bitrate_kbps': 160,
+            'fallback_encoder': {'state': 'applied', 'bitrate_kbps': 160,
+                                 'fec': True, 'expected_packet_loss': .15}})
+        state.player = SimpleNamespace(channel=SimpleNamespace(id=19, bitrate=256000), source=source,
+                                       is_connected=lambda: True)
+        result = self.command()['audio_output']
+        self.assertEqual(result['applied']['output_mode'], 'opus_processed')
+        self.assertEqual(result['applied']['bitrate_kbps'], 160)
+        self.assertTrue(result['passthrough']['processed_active'])
+        self.assertFalse(result['passthrough']['copy_active'])
+        self.assertIn('volume_requires_pcm', result['passthrough']['reasons'])
+        self.assertEqual(state.volume_percent, 55)
+
     def test_http_invalid_settings_return_400_without_mutating_existing_session(self):
         state = self.state(1)
         state.audio_output_settings = {'opus_direct': 'auto', 'profile': 'quality_192'}

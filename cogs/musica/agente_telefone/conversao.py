@@ -105,6 +105,12 @@ def faixa_do_payload(payload: dict[str, Any], fallback: MusicTrack | None = None
             track.opus_direct_bitrate_kbps = bitrate
         elif origin == "original":
             track.opus_direct_origin = origin
+    processed_bitrate = payload.get("opus_processed_bitrate_kbps")
+    if (not track.opus_direct_active and payload.get("opus_processed_active") is True
+            and isinstance(processed_bitrate, int) and not isinstance(processed_bitrate, bool)
+            and 16 <= processed_bitrate <= 512):
+        track.opus_processed_active = True
+        track.opus_processed_bitrate_kbps = processed_bitrate
     with contextlib.suppress(Exception):
         track.resolved_audio_sample_rate = int(float(payload.get("resolved_audio_sample_rate") or payload.get("audio_sample_rate") or payload.get("asr") or 0))
     with contextlib.suppress(Exception):
