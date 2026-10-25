@@ -1045,7 +1045,24 @@ class AudioRouter:
         # Quando só uma guild está tocando, usa o máximo permitido pelo servidor.
         # Com várias guilds tocando, mantém bitrate alto o bastante para música,
         # mas evita forçar todos os canais no teto ao mesmo tempo.
-        active = max(1, self._active_player_count())
+        active = max(0, self._active_player_count())
+        pending = getattr(self, "_music_channel_preparations", None)
+        if isinstance(pending, dict):
+            pending_guilds = {int(key[0]) for key, item in pending.items()
+                              if isinstance(key, tuple) and len(key) == 2 and item.get("owners")}
+            if pending_guilds:
+                pending_guilds.add(int(getattr(guild, "id", 0) or 0))
+                states = getattr(self, "_states", {})
+                for pending_guild in pending_guilds - {0}:
+                    pending_state = states.get(pending_guild) if isinstance(states, dict) else None
+                    counted = bool(pending_state is not None and (
+                        getattr(pending_state, "current", None)
+                        or getattr(pending_state, "current_source", None)
+                        or getattr(pending_state, "current_status", "") in {"resolving", "starting", "playing", "paused"}
+                    ))
+                    if not counted:
+                        active += 1
+        active = max(1, active)
         hard_limit = min(int(MUSIC_AUTO_BITRATE_MAX), guild_limit)
         if active <= MUSIC_HIGH_QUALITY_MAX_ACTIVE_GUILDS:
             target = hard_limit
@@ -3860,7 +3877,22 @@ class AudioRouter:
                     channel = guild.get_channel(int(st.last_voice_channel_id)) or self.bot.get_channel(int(st.last_voice_channel_id))
                 if channel is None:
                     return
-                await self._boost_auto_bitrate_for_music(guild, channel, st)
+                from ..reproducao.inicio import _music_channel_policy_lock
+                async with _music_channel_policy_lock(self, int(guild_id)):
+                    st = self.get_state(int(guild_id))
+                    records = getattr(self, "_music_channel_preparations", {})
+                    explicit_other_channel = isinstance(records, dict) and any(
+                        key[0] == int(guild_id) and key[1] != int(getattr(channel, "id", 0) or 0)
+                        and (record.get("owners") or (
+                            record.get("committed")
+                            and int(getattr(st, "auto_bitrate_channel_id", 0) or 0) == key[1]))
+                        for key, record in records.items()
+                    )
+                    if (st.current is not None and self._panel_key_for_track(st.current) == track_key
+                            and int(st.last_voice_channel_id or 0) == int(getattr(channel, "id", 0) or 0)
+                            and not explicit_other_channel):
+                        with contextlib.suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(self._boost_auto_bitrate_for_music(guild, channel, st), timeout=2.0)
                 # O controlador de status faz o primeiro write e o retry
                 # deduplicado. Evita os três PUTs que antes eram disparados no
                 # início de cada faixa do Music Agent.

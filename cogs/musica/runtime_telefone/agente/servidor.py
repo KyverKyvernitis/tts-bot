@@ -56,6 +56,7 @@ from cogs.musica.runtime_telefone.agente.ciclo_vida import (  # noqa: E402
     stop_player_instance,
 )
 from cogs.musica.runtime_telefone.agente.configuracao import (  # noqa: E402
+    OpusDirectPreferenceStore,
     audio_output_capabilities,
     audio_output_policy,
     bootstrap_env,
@@ -99,7 +100,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.91"
+AGENT_VERSION = "0.3.92"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -193,12 +194,16 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             "profile": os.getenv("MUSIC_AGENT_AUDIO_OUTPUT_PROFILE", "balanced"),
             "fec": truthy(os.getenv("MUSIC_AGENT_DISCORD_OPUS_FEC"), True),
             "expected_packet_loss": env_float("MUSIC_AGENT_DISCORD_OPUS_EXPECTED_PACKET_LOSS", 0.15),
-            "opus_direct": os.getenv("MUSIC_AGENT_OPUS_DIRECT", "off"),
+            "opus_direct": os.getenv("MUSIC_AGENT_OPUS_DIRECT", "auto"),
         })
         self.audio_output_default_profile = output_defaults["profile"]
         self.discord_opus_fec = output_defaults["fec"]
         self.discord_opus_expected_packet_loss = output_defaults["expected_packet_loss"]
         self.audio_output_default_opus_direct = output_defaults["opus_direct"]
+        worker_dir = Path(os.getenv("PHONE_WORKER_DIR") or Path.home() / "phone-worker").expanduser()
+        preferences_file = Path(os.getenv("MUSIC_AGENT_OUTPUT_PREFERENCES_FILE") or
+                                worker_dir / "state" / "music-agent-output-preferences.json")
+        self.opus_direct_preferences = OpusDirectPreferenceStore(preferences_file)
         self.default_volume_percent = max(0, min(150, env_int("MUSIC_AGENT_DEFAULT_VOLUME_PERCENT", 55)))
         self.duck_volume_percent = max(0, min(100, env_int("MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT", 8)))
         # PCMVolumeTransformer lets the worker-owned direct voice path duck TTS and restore volume.
@@ -1062,8 +1067,16 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         cached = getter(channel_id) if callable(getter) and channel_id else None
         if cached is not None and safe_id(getattr(cached, "id", 0)) == channel_id:
             channel = cached
-        requested = self._audio_output_policy(SimpleNamespace(channel=channel), getattr(st, "current", None), st)
+        policy_state = st if st is not None else SimpleNamespace(guild_id=guild_id, audio_output_settings={})
+        requested = self._audio_output_policy(SimpleNamespace(channel=channel), getattr(st, "current", None), policy_state)
         public_output = st.audio_output_public() if st is not None else {"settings": {}, "applied": {}}
+        store = getattr(self, "opus_direct_preferences", None)
+        persistence = store.status(guild_id) if store is not None else {
+            "persistent": False, "ready": False, "stored": False, "mode": None, "error_type": "unavailable"}
+        if store is not None and "opus_direct" not in public_output["settings"]:
+            stored = store.mode(guild_id)
+            if stored is not None:
+                public_output["settings"]["opus_direct"] = stored
         applied = public_output["applied"]
         active = bool(player and self._voice_client_is_connected(player) and getattr(st, "current", None))
         if not active:
@@ -1074,7 +1087,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         effects = st.effect_signature() if st is not None else (0, 0, 0)
         passthrough = opus_passthrough_eligibility(
             self, track, volume_percent=getattr(st, "volume_percent", self.default_volume_percent),
-            effects=effects, state=st, output_bitrate_kbps=requested["bitrate_kbps"],
+            effects=effects, state=policy_state, output_bitrate_kbps=requested["bitrate_kbps"],
         )
         direct_status = getattr(source, "opus_direct_status", None)
         if active and callable(direct_status):
@@ -1104,6 +1117,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 "source_deadline_overruns", "mix_limited_frames",
             ) if key in metrics},
             "passthrough": passthrough,
+            "persistence": persistence,
         }
 
     async def cmd_audio_output(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1119,7 +1133,20 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         if reset or "settings" in body:
             st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
             settings = {} if reset else validate_audio_output_settings(body["settings"], st.audio_output_settings)
-            if settings != st.audio_output_settings:
+            persist_mode = reset or "opus_direct" in body.get("settings", {})
+            persistence_changed = False
+            if persist_mode:
+                mode = None if reset else settings["opus_direct"]
+                store = getattr(self, "opus_direct_preferences", None)
+                if store is None:
+                    raise RuntimeError("preferências Opus indisponíveis; reinicie o agente atualizado")
+                persistence_changed = store.mode(guild_id) != mode
+                try:
+                    store.set_mode(guild_id, mode)
+                except Exception as exc:
+                    self.log("opus_preferences_save_failed", guild_id=guild_id, error_type=type(exc).__name__)
+                    raise RuntimeError("não consegui salvar a preferência Opus; confira o arquivo de estado") from None
+            if settings != st.audio_output_settings or persistence_changed:
                 st.audio_output_settings = settings
                 st.audio_output_revision += 1
                 st.updated_at = time.time()
@@ -1128,7 +1155,75 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                          revision=st.audio_output_revision, profile=settings.get("profile", self.audio_output_default_profile))
         return {"ok": True, "version": AGENT_VERSION, "guild_id": guild_id,
                 "audio_output": self._audio_output_snapshot(guild_id),
-                "sync": sync, "capabilities": audio_output_capabilities()}
+                "sync": sync, "capabilities": audio_output_capabilities(
+                    getattr(self, "audio_output_default_opus_direct", "auto"))}
+
+    async def _wait_channel_bitrate_hint(self, body: dict[str, Any], *, action: str = "") -> dict[str, Any]:
+        """Observe our cache after a controller-confirmed edit; never override it."""
+        hint = body.get("channel_bitrate_hint_bps")
+        if isinstance(hint, bool) or not isinstance(hint, int) or not 8000 <= hint <= 512000:
+            return {"state": "ignored", "wait_ms": 0.0}
+        guild_id, channel_id = safe_id(body.get("guild_id")), safe_id(body.get("voice_channel_id"))
+        if guild_id <= 0 or channel_id <= 0 or safe_id(body.get("channel_bitrate_hint_channel_id")) != channel_id:
+            return {"state": "ignored", "wait_ms": 0.0}
+        getter = getattr(self.client, "get_channel", None)
+        if not callable(getter):
+            return {"state": "ignored", "wait_ms": 0.0}
+        append_action = action in {"play", "enqueue", "play_direct", "enqueue_many", "queue_many",
+                                   "add_many", "playlist", "enqueue_discord_attachment"}
+        initial_state = self.states.get(guild_id)
+        generation = (getattr(initial_state, "playback_token", None),
+                      getattr(initial_state, "queue_reset_generation", None))
+        initial_channel_id = safe_id(getattr(initial_state, "voice_channel_id", 0))
+        started = time.monotonic()
+        duration = max(0.0, min(1.5, env_float("MUSIC_AGENT_CHANNEL_BITRATE_HINT_WAIT_SECONDS", 0.75)))
+        deadline = started + duration
+        outcome = "timeout"
+        observed = 0
+        while True:
+            current = self.states.get(guild_id)
+            if (initial_state is None and current is not None
+                    and getattr(current, "queue_reset_generation", 0) == 0
+                    and ((getattr(current, "playback_token", 0) == 0
+                          and getattr(current, "status", "idle") == "idle"
+                          and safe_id(getattr(current, "voice_channel_id", 0)) in {0, channel_id}
+                          and getattr(current, "current", None) is None and not getattr(current, "queue", ()))
+                         or (append_action
+                             and safe_id(getattr(current, "voice_channel_id", 0)) == channel_id
+                             and getattr(current, "last_action", "") not in {"stop", "queue_clear"}))):
+                # A speculative prepare or another accepted play may create
+                # this channel's session while an append waits. Stop/clear
+                # increments queue_reset_generation and must never be adopted.
+                initial_state = current
+                generation = (getattr(current, "playback_token", None),
+                              getattr(current, "queue_reset_generation", None))
+                initial_channel_id = safe_id(getattr(current, "voice_channel_id", 0))
+            token_changed = getattr(current, "playback_token", None) != generation[0]
+            reset_changed = getattr(current, "queue_reset_generation", None) != generation[1]
+            if (current is not initial_state or safe_id(getattr(current, "voice_channel_id", 0))
+                    not in {0, channel_id, initial_channel_id} or reset_changed
+                    or (token_changed and (not append_action or
+                                           getattr(current, "last_action", "") in {"stop", "queue_clear"}))):
+                outcome = "cancelled"
+                break
+            channel = getter(channel_id)
+            if (channel is None or safe_id(getattr(channel, "id", 0)) != channel_id
+                    or safe_id(getattr(getattr(channel, "guild", None), "id", 0)) != guild_id):
+                outcome = "ignored"
+                break
+            observed = max(0, int(getattr(channel, "bitrate", 0) or 0))
+            if observed >= hint:
+                outcome = "ready"
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.025, remaining))
+        waited_ms = round(max(0.0, (time.monotonic() - started) * 1000), 2)
+        if waited_ms >= 1 or outcome == "cancelled":
+            self.log("channel_bitrate_hint_observed", guild_id=guild_id, channel_id=channel_id,
+                     state=outcome, hinted_bps=hint, observed_bps=observed, wait_ms=waited_ms)
+        return {"state": outcome, "wait_ms": waited_ms}
 
     async def _dispatch_action(self, body: dict[str, Any], action: str) -> dict[str, Any]:
         read_only = action in {"status", "get_state"} or (
@@ -1138,6 +1233,25 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                               or (self.executor_mode == "archive" and not archive_action)):
             return {"ok": False, "error": "ação indisponível neste modo de executor",
                     "executor_mode": self.executor_mode}
+        startup_actions = {"play", "enqueue", "play_direct", "enqueue_many", "queue_many", "add_many",
+                           "playlist", "enqueue_discord_attachment", "queue_play_now", "play_queue_position",
+                           "queue_jump", "previous", "back",
+                           "prev", "anterior", "voltar", "skip", "next"}
+        starts_playback = action in startup_actions or (
+            action in {"queue_virtual_action", "virtual_queue_action"}
+            and str(body.get("virtual_action") or body.get("operation") or "").strip().lower() == "play_now"
+        )
+        if starts_playback:
+            body = dict(body)
+            body.pop("_channel_bitrate_wait_ms", None)
+            body.pop("_channel_bitrate_received_monotonic", None)
+            received = time.monotonic()
+            readiness = await self._wait_channel_bitrate_hint(body, action=action)
+            if readiness["state"] == "cancelled":
+                return {"ok": False, "cancelled": True, "error": "a reprodução mudou durante a preparação do canal"}
+            if readiness["wait_ms"] >= 1:
+                body["_channel_bitrate_received_monotonic"] = received
+                body["_channel_bitrate_wait_ms"] = readiness["wait_ms"]
         if action == "audio_output":
             return await self.cmd_audio_output(body)
         if action == "prepare_voice":

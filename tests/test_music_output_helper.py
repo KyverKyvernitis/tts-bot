@@ -229,6 +229,18 @@ class OutputHelperTests(unittest.TestCase):
             if status == 400:
                 self.assertNotIn("token", message)
 
+    def test_persistence_metadata_is_visible_without_exposing_local_paths(self):
+        persistence = {'persistent': True, 'ready': True, 'stored': True, 'mode': 'off',
+                       'error_type': '', 'path': '/private/local/preferences.json'}
+        response = {'ok': True, 'guild_id': 7,
+                    'audio_output': {'persistence': persistence},
+                    'capabilities': {'opus_direct_persistent': True}}
+        result = helper.public_result(response, self.values)
+        self.assertEqual(result['audio_output']['persistence'],
+                         {key: value for key, value in persistence.items() if key != 'path'})
+        self.assertTrue(result['capabilities']['opus_direct_persistent'])
+        self.assertNotIn('/private', json.dumps(result))
+
     def test_opus_direct_status_fields_remain_visible_without_source_secrets(self):
         direct = {"mode": "auto", "state": "pcm_fallback", "reason": "tts_overlay",
                   "copied_packets": 17, "encoded_packets": 8, "latched": True,

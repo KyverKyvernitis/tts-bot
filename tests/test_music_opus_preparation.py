@@ -12,7 +12,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
-from cogs.musica.runtime_telefone.agente.configuracao import audio_output_policy, opus_passthrough_eligibility
+from cogs.musica.runtime_telefone.agente.configuracao import (
+    audio_output_policy, effective_opus_direct_mode, opus_passthrough_eligibility,
+)
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState
 
 
@@ -59,6 +61,7 @@ def load_preparation():
     reader = SimpleNamespace(from_ffmpeg=Mock())
     namespace = dict(SimpleNamespace=SimpleNamespace, GuildMusicState=GuildMusicState,
                      opus_passthrough_eligibility=opus_passthrough_eligibility,
+                     effective_opus_direct_mode=effective_opus_direct_mode,
                      OpusPCMDecoderSource=reader, BufferedOpusPCMSource=OpusBuffer,
                      BufferedPCMSource=Buffer, ArchiveSegmentedPCMSource=Buffer,
                      ContinuousArchiveDSPSource=Buffer)

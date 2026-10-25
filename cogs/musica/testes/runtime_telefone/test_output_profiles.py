@@ -82,7 +82,7 @@ class OutputPolicyTests(unittest.TestCase):
         self.assertEqual(result["expected_packet_loss"], 0.15)
         self.assertEqual((result["application"], result["bandwidth"], result["signal_type"]),
                          ("audio", "full", "music"))
-        self.assertEqual(result["opus_direct"], "off")
+        self.assertEqual(result["opus_direct"], "auto")
 
     def test_direct_mode_is_per_guild_and_preserves_music_defaults(self):
         current = agent()
@@ -184,7 +184,12 @@ class OutputSettingValidationTests(unittest.TestCase):
         self.assertFalse(second["loss_is_measured"])
         self.assertTrue(second["pcm_mixer_preserved"])
         self.assertEqual(second["opus_direct_modes"], ["off", "auto"])
-        self.assertEqual(second["opus_direct_default"], "off")
+        self.assertEqual(second["opus_direct_default"], "auto")
+        self.assertTrue(second["opus_direct_persistent"])
+        self.assertTrue(second["passthrough_default"])
+        explicit_off = audio_output_capabilities("off")
+        self.assertEqual(explicit_off["opus_direct_default"], "off")
+        self.assertFalse(explicit_off["passthrough_default"])
 
 
 class OutputStateTests(unittest.TestCase):

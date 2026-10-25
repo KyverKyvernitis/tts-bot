@@ -13,16 +13,18 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import time
+import tempfile
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import web
 
 from cogs.musica.runtime_telefone.agente.configuracao import (
-    audio_output_capabilities, audio_output_policy, opus_passthrough_eligibility,
-    validate_audio_output_settings,
+    OpusDirectPreferenceStore, audio_output_capabilities, audio_output_policy,
+    env_float, opus_passthrough_eligibility, validate_audio_output_settings,
 )
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState
+from cogs.musica.runtime_telefone.agente.utilitarios import safe_id
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +36,8 @@ def load_api():
     original = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'MusicAgent')
     wanted = {'_audio_output_policy', '_audio_output_runtime', '_audio_output_snapshot',
               'cmd_audio_output', '_dispatch_action', '_wire_discord_events',
-              'handle_command', 'dispatch', '_auth_ok', '_agent_response_headers'}
+              'handle_command', 'dispatch', '_auth_ok', '_agent_response_headers',
+              '_wait_channel_bitrate_hint'}
     methods = [n for n in original.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in wanted]
     assert {n.name for n in methods} == wanted
     node = ast.ClassDef(name='Agent', bases=[], keywords=[], body=methods, decorator_list=[])
@@ -44,7 +47,8 @@ def load_api():
     agent_version = next(n.value.value for n in tree.body if isinstance(n, ast.Assign)
                          and any(isinstance(t, ast.Name) and t.id == 'AGENT_VERSION' for t in n.targets))
     namespace = dict(SimpleNamespace=SimpleNamespace, discord=discord, time=time, web=web,
-                     safe_id=lambda x: int(x or 0), audio_output_capabilities=audio_output_capabilities,
+                     asyncio=asyncio, env_float=env_float,
+                     safe_id=safe_id, audio_output_capabilities=audio_output_capabilities,
                      audio_output_policy=audio_output_policy, opus_passthrough_eligibility=opus_passthrough_eligibility,
                      validate_audio_output_settings=validate_audio_output_settings,
                      GuildMusicState=GuildMusicState, AGENT_VERSION=agent_version,
@@ -64,7 +68,11 @@ class OutputAPITests(unittest.TestCase):
         helper_spec.loader.exec_module(cls.helper)
 
     def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='output-api-preferences-')
+        self.addCleanup(temporary.cleanup)
+        self.preferences_path = Path(temporary.name) / 'state/opus-preferences.json'
         self.agent = self.Agent()
+        self.agent.opus_direct_preferences = OpusDirectPreferenceStore(self.preferences_path)
         self.agent.executor_mode = 'full'
         self.agent.states = {}
         self.agent.default_volume_percent = 55
@@ -80,7 +88,19 @@ class OutputAPITests(unittest.TestCase):
         self.client.event = lambda fn: setattr(self.client, fn.__name__, fn) or fn
         self.agent.client = self.client
         self.agent._maybe_run_maintenance = Mock()
-        self.agent.status_payload = lambda: {'version': '0.3.91'}
+        self.agent.status_payload = lambda: {'version': self.agent._agent_response_headers()['X-Music-Agent-Version']}
+
+    def restart_agent(self):
+        """New process boundary data; reload the real store, never copy its map."""
+        restarted = self.Agent()
+        for name, value in vars(self.agent).items():
+            if name not in {'states', 'opus_direct_preferences', '_sync_audio_output'}:
+                setattr(restarted, name, value)
+        restarted.states = {}
+        restarted.opus_direct_preferences = OpusDirectPreferenceStore(self.preferences_path)
+        restarted._sync_audio_output = AsyncMock(return_value={'state': 'queued'})
+        self.agent = restarted
+        return restarted
 
     def state(self, guild_id):
         """Test data only; do not inject a nonexistent production state method."""
@@ -117,7 +137,7 @@ class OutputAPITests(unittest.TestCase):
                 request.json.assert_awaited_once()
                 result = json.loads(response.text)
                 self.assertTrue(result['ok'])
-                self.assertEqual(result['version'], '0.3.91')
+                self.assertEqual(result['version'], self.agent._agent_response_headers()['X-Music-Agent-Version'])
                 self.assertEqual(result['guild_id'], guild_id)
                 self.assertEqual(result['audio_output']['settings'], expected)
                 self.assertEqual(self.agent.states[guild_id].audio_output_settings, expected)
@@ -180,6 +200,99 @@ class OutputAPITests(unittest.TestCase):
         self.assertEqual(self.agent.states, {})
         self.agent._sync_audio_output.assert_not_awaited()
 
+    def test_direct_preference_survives_new_agent_and_read_before_state_exists(self):
+        self.agent.audio_output_default_opus_direct = 'auto'
+        result = self.command(settings={'opus_direct': 'off'})
+        self.assertTrue(result['audio_output']['persistence']['stored'])
+        self.assertEqual(result['audio_output']['persistence']['mode'], 'off')
+        self.restart_agent()
+        result = self.command()
+        self.assertEqual(result['audio_output']['requested']['opus_direct'], 'off')
+        self.assertEqual(result['audio_output']['settings'], {'opus_direct': 'off'})
+        self.assertEqual(self.agent.states, {})
+        self.agent._sync_audio_output.assert_not_awaited()
+        self.assertEqual(self.command(guild_id=2)['audio_output']['requested']['opus_direct'], 'auto')
+
+    def test_preference_survives_pruned_idle_state_and_does_not_persist_profile_or_fec(self):
+        self.command(settings={'opus_direct': 'auto', 'profile': 'quality_256', 'fec': False,
+                               'expected_packet_loss': .05})
+        self.assertEqual(json.loads(self.preferences_path.read_bytes())['guilds'], {'1': 'auto'})
+        self.agent.states.clear()
+        state = self.state(1)
+        result = self.command()['audio_output']
+        self.assertEqual(state.audio_output_settings, {})
+        self.assertEqual(result['requested']['opus_direct'], 'auto')
+        self.assertEqual(result['requested']['profile'], 'balanced')
+        self.assertTrue(result['requested']['fec'])
+        self.assertEqual(result['requested']['expected_packet_loss'], .15)
+
+    def test_reset_removes_persisted_override_and_returns_configured_auto_default(self):
+        self.agent.audio_output_default_opus_direct = 'auto'
+        self.command(settings={'opus_direct': 'off', 'profile': 'quality_192'})
+        state = self.state(1)
+        state.volume_percent = 100
+        result = self.command(reset=True)['audio_output']
+        self.assertFalse(result['persistence']['stored'])
+        self.assertEqual(result['requested']['opus_direct'], 'auto')
+        self.assertEqual(state.audio_output_settings, {})
+        self.assertEqual(state.volume_percent, 100)
+        self.restart_agent()
+        self.assertEqual(self.command()['audio_output']['requested']['opus_direct'], 'auto')
+
+    def test_profile_and_protection_alone_do_not_create_preference_file(self):
+        with patch.object(self.agent.opus_direct_preferences, 'set_mode', side_effect=AssertionError('no write')):
+            self.command(settings={'profile': 'quality_192'})
+            self.command(settings={'fec': False, 'expected_packet_loss': .05})
+        self.assertFalse(self.preferences_path.exists())
+
+    def test_idempotent_explicit_mode_is_persisted_before_sync_and_not_rewritten_later(self):
+        state = self.state(1)
+        state.audio_output_settings = {'opus_direct': 'auto'}
+        def observe_saved(*args, **kwargs):
+            self.assertEqual(json.loads(self.preferences_path.read_bytes())['guilds'], {'1': 'auto'})
+            return {'state': 'queued'}
+        self.agent._sync_audio_output.side_effect = observe_saved
+        result = self.command(settings={'opus_direct': 'auto'})
+        self.assertTrue(result['audio_output']['persistence']['stored'])
+        self.agent._sync_audio_output.assert_awaited_once()
+        revision = state.audio_output_revision
+        with patch.object(self.agent.opus_direct_preferences, '_atomic_write', side_effect=AssertionError('must not rewrite')):
+            self.command(settings={'opus_direct': 'auto'})
+        self.assertEqual(state.audio_output_revision, revision)
+
+    def test_failed_save_does_not_mutate_active_state_or_queue_encoder_controls(self):
+        state = self.state(1)
+        state.audio_output_settings = {'profile': 'quality_192'}
+        before = (dict(state.audio_output_settings), state.audio_output_revision, state.updated_at)
+        with patch.object(self.agent.opus_direct_preferences, 'set_mode', side_effect=OSError('PRIVATE-PATH')):
+            response, _ = self.http_command(self.helper_body('direct', '--guild', '1', '--mode', 'auto'))
+        self.assertEqual(response.status, 400)
+        self.assertNotIn('PRIVATE-PATH', response.text)
+        self.assertEqual((state.audio_output_settings, state.audio_output_revision, state.updated_at), before)
+        self.agent._sync_audio_output.assert_not_awaited()
+        self.assertFalse(self.preferences_path.exists())
+
+    def test_corrupt_preference_store_is_reported_and_never_overwritten_by_command(self):
+        self.preferences_path.parent.mkdir(parents=True)
+        self.preferences_path.write_bytes(b'invalid')
+        self.restart_agent()
+        self.agent.audio_output_default_opus_direct = 'auto'
+        result = self.command()['audio_output']
+        self.assertFalse(result['persistence']['ready'])
+        self.assertEqual(result['requested']['opus_direct'], 'off')
+        response, _ = self.http_command(self.helper_body('direct', '--guild', '1', '--mode', 'auto'))
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.preferences_path.read_bytes(), b'invalid')
+        self.agent._sync_audio_output.assert_not_awaited()
+
+    def test_capabilities_report_explicit_global_off_and_requested_global_auto(self):
+        self.assertEqual(self.command()['capabilities']['opus_direct_default'], 'off')
+        self.agent.audio_output_default_opus_direct = 'auto'
+        result = self.command()
+        self.assertEqual(result['capabilities']['opus_direct_default'], 'auto')
+        self.assertTrue(result['capabilities']['opus_direct_persistent'])
+        self.assertEqual(result['audio_output']['requested']['opus_direct'], 'auto')
+
     def test_read_before_playback_does_not_create_state_or_sync(self):
         result = self.command()
         self.assertTrue(result['ok'])
@@ -205,7 +318,7 @@ class OutputAPITests(unittest.TestCase):
         two = self.state(2)
         self.command(settings={'profile': 'quality_192', 'fec': True, 'expected_packet_loss': .15})
         result = self.command(settings={'opus_direct': 'auto'})
-        self.assertEqual(result['version'], '0.3.91')
+        self.assertEqual(result['version'], self.agent._agent_response_headers()['X-Music-Agent-Version'])
         self.assertEqual(result['audio_output']['settings']['opus_direct'], 'auto')
         self.assertEqual(result['audio_output']['requested']['opus_direct'], 'auto')
         self.assertEqual(result['audio_output']['requested']['profile'], 'quality_192')

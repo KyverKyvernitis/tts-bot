@@ -15,7 +15,7 @@ from .buffer_pcm import BufferedOpusPCMSource, BufferedPCMSource, OpusPCMDecoder
 from .audio_segmentado import ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource, ExactSegmentPCMSource
 from .ciclo_vida import consume_task_result, remove_owned_task
 from .estado import AgentTrack, GuildMusicState
-from .configuracao import opus_passthrough_eligibility
+from .configuracao import effective_opus_direct_mode, opus_passthrough_eligibility
 
 
 @dataclass
@@ -48,8 +48,7 @@ class AudioInicial:
 class PreparacaoAudioMixin:
     def _opus_direct_preflight(self, guild_id: int, track: AgentTrack) -> dict[str, Any]:
         st = self.states.get(guild_id)
-        mode = (getattr(st, "audio_output_settings", {}) or {}).get(
-            "opus_direct", getattr(self, "audio_output_default_opus_direct", "off"))
+        mode = effective_opus_direct_mode(self, st, guild_id=guild_id)
         if mode != "auto":
             return {"candidate": False, "reason": "disabled"}
         if getattr(track, "_opus_direct_failed", False):

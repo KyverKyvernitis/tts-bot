@@ -34,6 +34,7 @@ from ..reproducao.playlist_virtual import (
 from ..reproducao.inicio import (
     MusicStartTrace, archived_url_batch, direct_url_batch, prepare_voice,
     cancel_voice_preparation, retain_music_task, schedule_deferred_learning,
+    prepare_music_channel, finish_music_channel_preparation, channel_bitrate_hints,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,10 +88,20 @@ class FluxoTocar:
         generation = self.router.current_music_operation_generation(ctx.guild.id)
         loading = MusicLoadingReaction(getattr(ctx, "message", None))
         loading.start_background()
+        play_delivered = False
         try:
             # music_agent_command já escolhe/verifica o worker. Uma checagem
             # adicional aqui duplicava a consulta de saúde antes do probe.
+            channel_prepared = await prepare_music_channel(
+                self.router, guild_id=ctx.guild.id, voice_channel_id=voice.id,
+                generation=generation, operation_id=request_id)
+            if (channel_prepared.get("state") == "cancelled"
+                    or generation != self.router.current_music_operation_generation(ctx.guild.id)):
+                return
             command_started = time.monotonic()
+            # A lost ACK does not prove the worker rejected the play. Keep its
+            # temporary channel policy until authoritative session cleanup.
+            play_delivered = True
             result = await music_agent_command(
                 "enqueue_discord_attachment",
                 guild_id=ctx.guild.id,
@@ -103,7 +114,9 @@ class FluxoTocar:
                 command_id=request_id,
                 attachment_url_hint=str(getattr(selected.anexo, "url", "") or ""),
                 timeout_seconds=60.0,
+                **channel_bitrate_hints(channel_prepared),
             )
+            play_delivered = not (result.get("cancelled") or result.get("ok") is False)
             worker_elapsed_ms = (time.monotonic() - command_started) * 1000.0
             if generation != self.router.current_music_operation_generation(ctx.guild.id) or result.get("cancelled"):
                 return
@@ -130,6 +143,9 @@ class FluxoTocar:
             logger.warning("[music/discord] anexo rejeitado | guild=%s attachment=%s error=%s", ctx.guild.id, attachment_id, type(exc).__name__)
             await self._reply(ctx, self._music_error_message(exc))
         finally:
+            await finish_music_channel_preparation(
+                self.router, guild_id=ctx.guild.id, voice_channel_id=voice.id,
+                operation_id=request_id, committed=play_delivered)
             await loading.finish()
 
     def _schedule_music_agent_prefetch(
@@ -520,7 +536,7 @@ class FluxoTocar:
                             prepare_id=prepare_id, trace_id=trace_id, worker_validation=worker_validation)
 
     async def _cancel_voice_preparation(self, guild_id: int, prepare_id: str, task: asyncio.Task) -> None:
-        await cancel_voice_preparation(music_agent_command, guild_id, prepare_id, task)
+        await cancel_voice_preparation(music_agent_command, guild_id, prepare_id, task, router=self.router)
 
     def _is_lavalink_search_request(self, query: str) -> bool:
         raw = (query or "").strip()
@@ -878,6 +894,15 @@ class FluxoTocar:
                     if self.router.current_music_operation_generation(ctx.guild.id) != operation_generation:
                         trace.finish("cancelled")
                         return
+                    bitrate_started = time.monotonic()
+                    channel_prepared = await prepare_music_channel(
+                        self.router, guild_id=ctx.guild.id, voice_channel_id=voice_channel.id,
+                        generation=operation_generation, operation_id=trace_id)
+                    controller_timing["channel_prepare_ms"] = round((time.monotonic() - bitrate_started) * 1000, 2)
+                    if (channel_prepared.get("state") == "cancelled"
+                            or self.router.current_music_operation_generation(ctx.guild.id) != operation_generation):
+                        trace.finish("cancelled")
+                        return
                     trace.context["source_mode"] = "archive" if tracks_payload[0].get("archive_ref") else "online"
                     trace.dispatch()
                     agent_started = time.monotonic()
@@ -890,6 +915,7 @@ class FluxoTocar:
                                     requester_name=requester_name,
                                 )
                             )
+                        play_delivered = True
                         result = await music_agent_command(
                             "enqueue_many",
                             guild_id=ctx.guild.id,
@@ -902,8 +928,10 @@ class FluxoTocar:
                             requester_name=requester_name,
                             prepare_id=prepare_id, trace_id=trace_id, controller_timing_ms=controller_timing,
                             start_context=trace.context, worker_validation=worker_validation,
+                            **channel_bitrate_hints(channel_prepared),
                         )
                     else:
+                        play_delivered = True
                         result = await music_agent_command(
                             "play",
                             guild_id=ctx.guild.id,
@@ -915,6 +943,7 @@ class FluxoTocar:
                             requester_name=requester_name,
                             prepare_id=prepare_id, trace_id=trace_id, controller_timing_ms=controller_timing,
                             start_context=trace.context, worker_validation=worker_validation,
+                            **channel_bitrate_hints(channel_prepared),
                         )
                     play_delivered = not (result.get("cancelled") or result.get("ok") is False)
                     result_state = result.get("state") if isinstance(result.get("state"), dict) else {}
@@ -1043,5 +1072,8 @@ class FluxoTocar:
             if prepare_task is not None and not play_delivered:
                 retain_music_task(self.router, self._cancel_voice_preparation(ctx.guild.id, prepare_id, prepare_task),
                                   name="music-cancel-prepare-voice")
+            await finish_music_channel_preparation(
+                self.router, guild_id=ctx.guild.id, voice_channel_id=voice_channel.id,
+                operation_id=trace_id, committed=play_delivered)
             if finish_loading_reaction:
                 await loading_reaction.finish()

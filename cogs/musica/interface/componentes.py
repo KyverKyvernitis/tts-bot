@@ -31,6 +31,7 @@ from ..busca.memoria import enfileirar_lote_link_busca
 from ..reproducao.inicio import (
     MusicStartTrace, archived_url_batch, direct_url_batch, prepare_voice,
     cancel_voice_preparation, retain_music_task, schedule_deferred_learning,
+    prepare_music_channel, finish_music_channel_preparation, channel_bitrate_hints,
 )
 from .carregamento import MusicLoadingReaction
 from .tarefas import agendar_tarefa_unica
@@ -1519,6 +1520,8 @@ class SearchSelect(discord.ui.Select):
         loading_reaction.start_background()
         finish_loading_reaction = True
         operation_generation = self.router.current_music_operation_generation(self.guild_id)
+        play_delivered = False
+        channel_for_preparation = int(self.voice_channel_id or 0)
         try:
             async def edit_original(content: str) -> None:
                 try:
@@ -1542,6 +1545,7 @@ class SearchSelect(discord.ui.Select):
             if voice_channel is None or text_channel is None:
                 await edit_original("Canal não encontrado.")
                 return
+            channel_for_preparation = int(voice_channel.id)
             registrar_selecao_busca(
                 self.query,
                 track,
@@ -1555,7 +1559,15 @@ class SearchSelect(discord.ui.Select):
                     if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
                         trace.finish("cancelled")
                         return
+                    channel_prepared = await prepare_music_channel(
+                        self.router, guild_id=self.guild_id, voice_channel_id=channel_for_preparation,
+                        generation=operation_generation, operation_id=trace.trace_id)
+                    if (channel_prepared.get("state") == "cancelled"
+                            or self.router.current_music_operation_generation(self.guild_id) != operation_generation):
+                        trace.finish("cancelled")
+                        return
                     trace.dispatch()
+                    play_delivered = True  # preserve policy if only the ACK is lost
                     result = await music_agent_command(
                         "play",
                         guild_id=self.guild_id,
@@ -1567,7 +1579,9 @@ class SearchSelect(discord.ui.Select):
                         requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
                         trace_id=trace.trace_id, controller_timing_ms=trace.timings,
                         start_context=trace.context, worker_validation=validation_out.get("worker"),
+                        **channel_bitrate_hints(channel_prepared),
                     )
+                    play_delivered = not (result.get("cancelled") or result.get("ok") is False)
                     result_state = result.get("state") if isinstance(result.get("state"), dict) else {}
                     trace.result(result, confirmed=bool(result_state.get("confirmed_playing")))
                 except Exception as exc:
@@ -1630,6 +1644,9 @@ class SearchSelect(discord.ui.Select):
             raise
         finally:
             trace.finish()
+            await finish_music_channel_preparation(
+                self.router, guild_id=self.guild_id, voice_channel_id=channel_for_preparation,
+                operation_id=trace.trace_id, committed=play_delivered)
             if finish_loading_reaction:
                 await loading_reaction.finish()
 
@@ -1805,6 +1822,16 @@ class AddSongModal(discord.ui.Modal):
                     if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
                         trace.finish("cancelled")
                         return
+                    bitrate_started = time.monotonic()
+                    channel_prepared = await prepare_music_channel(
+                        self.router, guild_id=guild.id,
+                        voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                        generation=operation_generation, operation_id=trace.trace_id)
+                    trace.timings["channel_prepare_ms"] = round((time.monotonic() - bitrate_started) * 1000, 2)
+                    if (channel_prepared.get("state") == "cancelled"
+                            or self.router.current_music_operation_generation(self.guild_id) != operation_generation):
+                        trace.finish("cancelled")
+                        return
                     trace.context["source_mode"] = "archive" if tracks_payload[0].get("archive_ref") else "online"
                     trace.dispatch()
                     if is_multi:
@@ -1816,6 +1843,7 @@ class AddSongModal(discord.ui.Modal):
                                     requester_name=requester_name,
                                 )
                             )
+                        play_delivered = True
                         result = await music_agent_command(
                             "enqueue_many",
                             guild_id=guild.id,
@@ -1829,8 +1857,10 @@ class AddSongModal(discord.ui.Modal):
                             prepare_id=prepare_id, trace_id=trace.trace_id,
                             controller_timing_ms=trace.timings, start_context=trace.context,
                             worker_validation=worker_validation,
+                            **channel_bitrate_hints(channel_prepared),
                         )
                     else:
+                        play_delivered = True
                         result = await music_agent_command(
                             "play",
                             guild_id=guild.id,
@@ -1843,6 +1873,7 @@ class AddSongModal(discord.ui.Modal):
                             prepare_id=prepare_id, trace_id=trace.trace_id,
                             controller_timing_ms=trace.timings, start_context=trace.context,
                             worker_validation=worker_validation,
+                            **channel_bitrate_hints(channel_prepared),
                         )
                     play_delivered = not (result.get("cancelled") or result.get("ok") is False)
                     result_state = result.get("state") if isinstance(result.get("state"), dict) else {}
@@ -1959,8 +1990,12 @@ class AddSongModal(discord.ui.Modal):
             trace.finish()
             if prepare_task is not None and not play_delivered:
                 retain_music_task(self.router,
-                    cancel_voice_preparation(music_agent_command, self.guild_id, prepare_id, prepare_task),
+                    cancel_voice_preparation(music_agent_command, self.guild_id, prepare_id, prepare_task, router=self.router),
                     name="music-modal-cancel-prepare-voice")
+            await finish_music_channel_preparation(
+                self.router, guild_id=self.guild_id,
+                voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                operation_id=trace.trace_id, committed=play_delivered)
 
 
 class QueueSelect(discord.ui.Select):

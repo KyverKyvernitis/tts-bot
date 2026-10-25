@@ -12,11 +12,15 @@ import asyncio
 from array import array
 import contextlib
 import importlib.util
+import math
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+
+from cogs.musica.runtime_telefone.agente.estado import AgentTrack, sanitize_start_context, sanitize_start_timings
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -31,7 +35,7 @@ def load_production_boundaries():
     with mock.patch.dict("sys.modules", {"discord": SimpleNamespace(AudioSource=AudioSource)}):
         spec.loader.exec_module(mixer)
     wanted = {"_discord_opus_bitrate_kbps", "_resolved_audio_output_policy", "_output_policy_signature", "_audio_output_voice_view",
-              "_sync_audio_output", "_play_music_source", "_play_direct_voice", "_build_ffmpeg_source"}
+              "_sync_audio_output", "_play_music_source", "_play_direct_voice", "_build_ffmpeg_source", "_attach_play_trace"}
     source = ast.parse((RUNTIME / "reproducao.py").read_text())
     original = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "ReproducaoMixin")
     selected = [node for node in original.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in wanted]
@@ -39,6 +43,8 @@ def load_production_boundaries():
     boundary = ast.ClassDef(name="Agent", bases=[], keywords=[], body=selected, decorator_list=[])
     module = ast.fix_missing_locations(ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), boundary], type_ignores=[]))
     namespace = {"SimpleNamespace": SimpleNamespace, "contextlib": contextlib, "time": time, "asyncio": asyncio,
+                 "math": math, "uuid": uuid,
+                 "sanitize_start_context": sanitize_start_context, "sanitize_start_timings": sanitize_start_timings,
                  "GuildMusicState": SimpleNamespace, "env_float": lambda key, default: default,
                  "safe_id": lambda value: int(value or 0), "short_text": lambda value, limit: str(value)[:limit],
                  "AgentMixedAudioSource": mixer.AgentMixedAudioSource,
@@ -126,6 +132,22 @@ class OutputSyncTests(unittest.TestCase):
         self.assertGreater(self.st.updated_at, 0)
         self.assertEqual(self.source.quality_context["opus_bitrate_kbps"], 192)
         self.assertFalse(self.pcm.closed)
+
+    def test_hint_cache_wait_is_included_in_agent_start_clock(self):
+        track = AgentTrack()
+        self.agent._attach_play_trace(track, {
+            'trace_id': 'channel-prepare', '_channel_bitrate_received_monotonic': 99.75,
+            '_channel_bitrate_wait_ms': 250}, 100)
+        self.assertEqual(track.agent_received_monotonic, 99.75)
+        self.assertEqual(track.agent_timing_ms['channel_bitrate_wait_ms'], 250)
+        for invalid in (float('nan'), -1, 101, True):
+            with self.subTest(invalid=invalid):
+                rejected = AgentTrack()
+                self.agent._attach_play_trace(rejected, {
+                    '_channel_bitrate_received_monotonic': invalid,
+                    '_channel_bitrate_wait_ms': 250}, 100)
+                self.assertEqual(rejected.agent_received_monotonic, 100)
+                self.assertNotIn('channel_bitrate_wait_ms', rejected.agent_timing_ms)
 
     def _install_hybrid(self, packet=b'\xf8valid-boundary'):
         self.pcm.last_opus_packet = packet

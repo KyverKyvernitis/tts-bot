@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from typing import Any
+import uuid
 
 from cogs.musica import configuracao as config
 
 from ..agente_telefone.comandos import music_agent_command
 from ..nucleo.modelos import MusicTrack
+from .inicio import prepare_music_channel, finish_music_channel_preparation, channel_bitrate_hints
 
 
 async def enviar_controle_remoto(
@@ -38,21 +40,51 @@ async def enviar_controle_remoto(
         if callable(cancel):
             cancel(int(guild_id), reason="agent_stop")
 
-    result = await music_agent_command(
-        action,
-        guild_id=int(guild_id),
-        voice_channel_id=int(voice_channel_id or 0),
-        text_channel_id=int(text_channel_id or 0),
-        query=str(query or ""),
-        track=track,
-        requester_id=int(requester_id or 0),
-        requester_name=str(requester_name or ""),
-        timeout_seconds=extra.pop(
-            "timeout_seconds",
-            getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0),
-        ),
-        **extra,
+    start_actions = {"skip", "next", "previous", "back", "prev", "queue_play_now",
+                     "play_queue_position", "queue_jump"}
+    starts_playback = action in start_actions or (
+        action in {"queue_virtual_action", "virtual_queue_action"}
+        and str(extra.get("virtual_action") or extra.get("operation") or "").strip().lower() == "play_now"
     )
+    operation_id = str(extra.get("command_id") or uuid.uuid4().hex)
+    prepared_channel_id = 0
+    committed = False
+    try:
+        if starts_playback:
+            state = router.get_state(int(guild_id))
+            prepared_channel_id = int(voice_channel_id or getattr(state, "last_voice_channel_id", 0) or 0)
+            current_generation = getattr(router, "current_music_operation_generation", None)
+            generation = current_generation(int(guild_id)) if callable(current_generation) else None
+            prepared = await prepare_music_channel(
+                router, guild_id=int(guild_id), voice_channel_id=prepared_channel_id,
+                generation=generation, operation_id=operation_id)
+            if prepared.get("state") == "cancelled":
+                return {"ok": True, "cancelled": True}
+            extra.update(channel_bitrate_hints(prepared))
+        # A transport exception may lose only the ACK after successful play.
+        # Never restore an allegedly idle channel based on that ambiguity.
+        committed = True
+        result = await music_agent_command(
+            action,
+            guild_id=int(guild_id),
+            voice_channel_id=int(voice_channel_id or prepared_channel_id or 0),
+            text_channel_id=int(text_channel_id or 0),
+            query=str(query or ""),
+            track=track,
+            requester_id=int(requester_id or 0),
+            requester_name=str(requester_name or ""),
+            timeout_seconds=extra.pop(
+                "timeout_seconds",
+                getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0),
+            ),
+            **extra,
+        )
+        committed = not (result.get("ok") is False or result.get("cancelled"))
+    finally:
+        if prepared_channel_id:
+            await finish_music_channel_preparation(
+                router, guild_id=int(guild_id), voice_channel_id=prepared_channel_id,
+                operation_id=operation_id, committed=committed)
 
     remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
     if remote:

@@ -53,6 +53,14 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         track.controller_timing_ms = sanitize_start_timings(body.get("controller_timing_ms") or track.controller_timing_ms)
         track.start_context = sanitize_start_context(body.get("start_context") or track.start_context)
         track.agent_received_monotonic = received
+        hint_received = body.get("_channel_bitrate_received_monotonic")
+        hint_wait = body.get("_channel_bitrate_wait_ms")
+        if (isinstance(hint_received, (int, float)) and not isinstance(hint_received, bool)
+                and math.isfinite(hint_received) and 0 < hint_received <= received
+                and isinstance(hint_wait, (int, float)) and not isinstance(hint_wait, bool)
+                and math.isfinite(hint_wait) and 0 <= hint_wait <= 1600):
+            track.agent_received_monotonic = hint_received
+            track.agent_timing_ms["channel_bitrate_wait_ms"] = round(hint_wait, 2)
 
     @staticmethod
     def _copy_play_trace(previous: AgentTrack, following: AgentTrack) -> None:
@@ -2168,7 +2176,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         st.current = next_track
         st.first_audio_sent_monotonic = 0.0
         self._archive_foreground_until[guild_id] = time.monotonic() + max(5.0, self.prepare_timeout)
-        next_track.agent_timing_ms = {}
+        hint_wait = next_track.agent_timing_ms.get("channel_bitrate_wait_ms")
+        next_track.agent_timing_ms = ({"channel_bitrate_wait_ms": hint_wait}
+                                    if isinstance(hint_wait, (int, float)) and 0 <= hint_wait <= 1600 else {})
         if next_track.agent_received_monotonic:
             next_track.agent_timing_ms["queue_wait_ms"] = round((time.monotonic() - next_track.agent_received_monotonic) * 1000, 1)
         repaired = st._repair_current_queue_alias()

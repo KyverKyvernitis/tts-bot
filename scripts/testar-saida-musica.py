@@ -3,7 +3,7 @@
 
 Usa somente a biblioteca padrão. Lê configurações já existentes como dados;
 não importa o worker/servidor, não cria tokens e não grava arquivos de env.
-Os ajustes são por servidor e duram até o Music Agent reiniciar.
+O modo Opus direto é salvo por servidor. Perfil e proteção duram até reiniciar.
 """
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ def parser() -> argparse.ArgumentParser:
         ("status", "consulta perfil solicitado, encoder aplicado e capacidades"),
         ("profile", "seleciona um perfil de saída para este servidor"),
         ("protection", "ajusta FEC e perda esperada para uma comparação controlada"),
-        ("direct", "habilita a tentativa de Opus direto ou mantém PCM neste servidor"),
+        ("direct", "salva Opus direto automático ou desligado para este servidor"),
         ("reset", "remove os ajustes de teste deste servidor e restaura os defaults instalados"),
     ):
         action = actions.add_parser(name, help=help_text)
@@ -228,6 +228,7 @@ QUALITY_KEYS = frozenset({
     "encoder_supported", "unsupported", "capabilities", "requested_profile", "fec_applied",
     "expected_packet_loss_applied",
     "opus_direct", "opus_direct_modes", "opus_direct_default", "output_mode",
+    "persistence", "ready", "stored", "opus_direct_persistent",
     "copied_packets", "encoded_packets", "latched", "packet_duration_ms", "source_bitrate_kbps",
     "preskip_samples", "trimmed_tail_samples", "packet_validation_required", "candidate",
     "validated_packets", "fallback_encoder", "copy_active", "copy_supported", "required_packet_duration_ms",
