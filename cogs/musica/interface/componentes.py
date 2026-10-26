@@ -19,6 +19,7 @@ from ..metadados.provedores import describe_url
 from ..agente_telefone.comandos import estado_comando_diferido, music_agent_command, music_agent_status
 from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..reproducao.controle_remoto import enviar_controle_remoto
+from ..reproducao.estimativa_fila import estimate_queue_waits, queue_wait_line
 from ..reproducao.playlist_virtual import (
     carregar_pagina_fila_virtual,
     payload_cursor_playlist,
@@ -96,7 +97,10 @@ async def _safe_interaction_followup(interaction: discord.Interaction, content: 
         return None
 
 
-def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
+def _agent_play_message(
+    track: MusicTrack, result: dict | None = None, *, duration_state=None,
+    wait_line: str | None = None,
+) -> str:
     result = result or {}
     state = result.get("state") if isinstance(result.get("state"), dict) else {}
     current = state.get("current") if isinstance(state.get("current"), dict) else {}
@@ -116,10 +120,12 @@ def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
     # Em queued=True o estado remoto ainda descreve a música atual. A confirmação
     # precisa renderizar o candidato que acabou de entrar na fila, não now-playing.
     queued_track = result.get("track") if isinstance(result.get("track"), dict) else {}
+    estimate_target = queued_track or track
     queue_preview = state.get("queue") if isinstance(state.get("queue"), list) else []
     if queued and not queued_track and queue_preview:
-        last = queue_preview[-1]
-        queued_track = last if isinstance(last, dict) else {}
+        target_id = str(getattr(track, "queue_item_id", "") or "")
+        queued_track = next((item for item in queue_preview if isinstance(item, dict)
+                             and target_id and str(item.get("queue_item_id") or "") == target_id), {})
     source_payload = queued_track if queued else current
     title = (
         useful(source_payload.get("display_title"))
@@ -145,9 +151,13 @@ def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
         pass
     status = str(state.get("status") or "").lower()
     if queued:
+        # This describes the enqueue snapshot. Completing a provisional title
+        # must not turn it into a new, continuously updated countdown.
+        estimate_line = (queue_wait_line(state, estimate_target, duration_state=duration_state)
+                         if wait_line is None else wait_line)
         if not title or title.lower() in {"youtube", "desconhecida", "música", "musica"}:
-            return "`🎶` **Música adicionada ao queue.** Carregando detalhes..."
-        return f"`🎶` **Adicionada ao queue:** {title} • `{duration_label}`"
+            return "`🎶` **Música adicionada à fila.** Carregando detalhes...\n" + estimate_line
+        return f"`🎶` **Adicionada à fila:** {title} • `{duration_label}`\n{estimate_line}"
     if _agent_confirmed_playing(state):
         return f"`🎧` **Tocando:** {title} • `{duration_label}`"
     if status in {"failed", "error"}:
@@ -263,7 +273,7 @@ async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, rou
                     continue
                 last_status = status
                 if _agent_confirmed_playing(state):
-                    await message.edit(content=_music_agent_play_message(track, {"state": state}), embed=None, view=None)
+                    await message.edit(content=_agent_play_message(track, {"state": state}), embed=None, view=None)
                     return
                 if status in {"failed", "error"}:
                     error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:220]
@@ -834,7 +844,6 @@ def _public_audio_quality_label(state, track: MusicTrack | None) -> str:
         and isinstance(prepared_bitrate, int) and not isinstance(prepared_bitrate, bool)
         and 16 <= prepared_bitrate <= 512
     )
-    prepared_source = ""
     processed_bitrate = getattr(track, "opus_processed_bitrate_kbps", 0)
     processed_output = bool(
         getattr(track, "opus_processed_active", False) is True
@@ -851,18 +860,12 @@ def _public_audio_quality_label(state, track: MusicTrack | None) -> str:
         and not bool(getattr(state, "paused", False))
     ):
         if prepared_output:
-            prepared_source = f"fonte {codec_label}" if codec_label else ""
-            if prepared_source and abr:
-                prepared_source += f" {abr} kbps"
             abr = prepared_bitrate
         codec_label = "Opus direto"
     elif (processed_output and backend == "agent"
           and getattr(state, "current", None) is track
           and str(getattr(state, "current_status", "") or "").lower() == "playing"
           and not bool(getattr(state, "paused", False))):
-        prepared_source = f"fonte {codec_label}" if codec_label else ""
-        if prepared_source and abr:
-            prepared_source += f" {abr} kbps"
         abr = processed_bitrate
         codec_label = "Opus processado"
     if not abr and backend == "agent":
@@ -874,8 +877,6 @@ def _public_audio_quality_label(state, track: MusicTrack | None) -> str:
         parts.append(codec_label)
     if abr:
         parts.append(f"{abr} kbps")
-    if prepared_source:
-        parts.append(prepared_source)
     if parts:
         return " · ".join(parts)
 
@@ -1638,7 +1639,7 @@ class SearchSelect(discord.ui.Select):
                     result,
                     queued=bool(result.get("queued")),
                 )
-                msg = _agent_play_message(track, result)
+                msg = _agent_play_message(track, result, duration_state=self.router.get_state(self.guild_id))
                 await edit_original(msg)
                 state = result.get("state") if isinstance(result.get("state"), dict) else {}
                 status = str(state.get("status") or "").lower()
@@ -1663,7 +1664,8 @@ class SearchSelect(discord.ui.Select):
             state = self.router.get_state(self.guild_id)
             position = state.queue_size() + (1 if state.current else 0)
             if was_session_active or position > 1:
-                msg = f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`"
+                msg = (f"`🎶` **Adicionada à fila:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`"
+                       f"\n{queue_wait_line(state, track)}")
             else:
                 msg = f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
             if dropped:
@@ -1978,7 +1980,7 @@ class AddSongModal(discord.ui.Modal):
                             wait=True,
                         )
                 else:
-                    msg = _agent_play_message(track, result)
+                    msg = _agent_play_message(track, result, duration_state=self.router.get_state(self.guild_id))
                     sent = await interaction.followup.send(msg, ephemeral=True, wait=True)
                 state = result.get("state") if isinstance(result.get("state"), dict) else {}
                 status = str(state.get("status") or "").lower()
@@ -2007,7 +2009,8 @@ class AddSongModal(discord.ui.Modal):
                 state = self.router.get_state(self.guild_id)
                 position = state.queue_size() + (1 if state.current else 0)
                 if was_session_active or position > 1:
-                    msg = f"`🎶` **Adicionada ao queue:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}` • posição `{max(1, position)}`"
+                    msg = (f"`🎶` **Adicionada à fila:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}` • posição `{max(1, position)}`"
+                           f"\n{queue_wait_line(state, batch.tracks[0])}")
                 else:
                     msg = f"`🎧` **Preparando para tocar:** {batch.tracks[0].short_title} • `{batch.tracks[0].duration_label}`"
             if dropped and len(batch.tracks) > added:
@@ -2427,15 +2430,25 @@ class QueueView(discord.ui.LayoutView):
 
         current = getattr(state, "current", None)
         if current is not None:
-            lines.extend([f"-# Tocando agora: {_track_link_v2(current, title_limit=64)}", ""])
+            current_link = _track_link_v2(current, title_limit=64)
+            if len(current_link) > 256:
+                current_link = _escape(current.short_title, limit=64)
+            lines.extend([f"-# Tocando agora: {current_link}", ""])
 
         if not page_items:
             lines.append("-# Esta página ainda não ficou disponível para visualização.")
         else:
-            for offset, track in enumerate(page_items, start=1):
+            # One pure prefix calculation serves this page. Opening or moving
+            # the page recalculates from the current state, without a timer.
+            estimates = estimate_queue_waits(state, page_items)
+            for offset, (track, estimate) in enumerate(zip(page_items, estimates), start=1):
                 index = start + offset
                 marker = "▶" if self.selected_position == index else f"{index:02d}"
-                lines.append(f"**{marker}**  {_track_link_v2(track, title_limit=62)}  ·  {track.duration_label}")
+                title_link = _track_link_v2(track, title_limit=62)
+                if len(title_link) > 256:
+                    title_link = _escape(track.short_title, limit=62)
+                lines.append(f"**{marker}**  {title_link}")
+                lines.append(f"-# {track.duration_label} · {estimate.metadata_label()}")
 
         lines.extend(["", f"-# Duração da fila: {_queue_duration_for_panel(state, items, total)}"])
         return "\n".join(lines)

@@ -116,7 +116,7 @@ class OpusPanelTests(unittest.TestCase):
     def test_prepared_aac_label_distinguishes_output_from_original_source(self):
         track = self.prepared_track()
         self.assertEqual(self.ui._public_audio_quality_label(self.state(track), track),
-                         "Opus direto · 256 kbps · fonte AAC 128 kbps")
+                         "Opus direto · 256 kbps")
         self.assertEqual(track.resolved_audio_codec, "aac")
         self.assertEqual(track.resolved_audio_abr, 128)
 
@@ -234,7 +234,7 @@ class OpusPanelTests(unittest.TestCase):
         self.synchronize(router, remote)
         current = router.state.current
         self.assertEqual(self.ui._public_audio_quality_label(router.state, current),
-                         "Opus direto · 256 kbps · fonte AAC 128 kbps")
+                         "Opus direto · 256 kbps")
         remote["current"]["opus_direct_active"] = False
         self.synchronize(router, remote, queued=True)
         self.assertIs(router.state.current, current)

@@ -139,7 +139,7 @@ class ProcessedPanelTests(unittest.TestCase):
         self.assertTrue(track.opus_processed_active)
         self.assertEqual(track.opus_processed_bitrate_kbps, 160)
         self.assertEqual(self.ui._public_audio_quality_label(self.local_state(track), track),
-                         "Opus processado · 160 kbps · fonte AAC 128 kbps")
+                         "Opus processado · 160 kbps")
         for patch in ({"processed": 1}, {"processed": "true"}, {"processed": False},
                       {"bitrate": None}, {"bitrate": True}, {"bitrate": 513}, {"bitrate": "160"}):
             with self.subTest(patch=patch):
@@ -169,7 +169,7 @@ class ProcessedPanelTests(unittest.TestCase):
         self.synchronize(router, remote)
         current = router.state.current
         self.assertEqual(self.ui._public_audio_quality_label(router.state, current),
-                         "Opus processado · 160 kbps · fonte AAC 128 kbps")
+                         "Opus processado · 160 kbps")
         self.assertFalse(current.opus_direct_active)
         self.assertEqual(current.resolved_audio_codec, "aac")
 
