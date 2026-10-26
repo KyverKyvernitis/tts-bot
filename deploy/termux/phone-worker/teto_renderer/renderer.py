@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -41,6 +42,10 @@ class TetoRenderer:
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
     PERFORMANCE_VERSION = "ttv-performance-5-default-melody"
     PERFORMANCE_PROTOCOL = 2
+    SUPPORTS_BACKGROUND_CANCELLATION = True
+    # This bridge closes/waits for its ESPER supervisor on KeyboardInterrupt.
+    # Custom resamplers retain foreground support, without speculative warming.
+    BACKGROUND_BRIDGE_SHA256 = "b80dc4c34717611a6f7dd7056dcc6c31f1e59b3b0d660b9fe746773ce16e4f74"
 
     def __init__(
         self, *, resource_guard: Callable[[], dict[str, Any]] | None = None,
@@ -172,7 +177,7 @@ class TetoRenderer:
             self._clear_reading_context()
 
     def _clear_reading_context(self) -> None:
-        for name in ("profile", "render_metrics", "performance_sources", "performance_singing"):
+        for name in ("profile", "render_metrics", "performance_sources", "performance_singing", "cancelled"):
             if hasattr(self._reading_context, name):
                 delattr(self._reading_context, name)
 
@@ -358,6 +363,19 @@ class TetoRenderer:
         elif not shutil.which(executable):
             raise TetoConfigurationError(f"executável do resampler não encontrado: {executable}")
         return command
+
+    def supports_background_cancellation(self) -> bool:
+        if self.RENDER_VERSION.startswith('worldline'):
+            return False
+        try:
+            for candidate in self._resampler_command()[:2]:
+                path = Path(candidate).expanduser()
+                if path.is_file() and path.stat().st_size <= 128 * 1024:
+                    if hashlib.sha256(path.read_bytes()).hexdigest() == self.BACKGROUND_BRIDGE_SHA256:
+                        return True
+        except (OSError, TetoConfigurationError):
+            pass
+        return False
 
     def _load_index(self) -> VoicebankIndex:
         candidates = self._voicebank_candidates()
@@ -564,6 +582,7 @@ class TetoRenderer:
     def _resample_note(
         self, *, index: VoicebankIndex, entry: OtoEntry, note: RenderNote, workdir: Path, deadline: float
     ) -> tuple[Path, bool, bool]:
+        self._check_render_cancelled()
         payload = self._fragment_cache_payload(
             fingerprint=self._fragment_fingerprint(index), entry=entry, note=note
         )
@@ -627,14 +646,15 @@ class TetoRenderer:
                 pitchbend,
             ]
             self._record_render_metric("resampler_calls")
-            proc = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=max(0.5, deadline - time.monotonic()),
-                check=False,
-                env=self._subprocess_environment(),
-            )
+            cancelled = getattr(self._reading_context, "cancelled", None)
+            if cancelled is None:
+                proc = subprocess.run(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    timeout=max(0.5, deadline - time.monotonic()), check=False,
+                    env=self._subprocess_environment(),
+                )
+            else:
+                proc = self._run_cancellable_resampler(command, deadline, cancelled)
             return proc, command
 
         proc, _ = run_resampler(note.pitchbend)
@@ -683,6 +703,53 @@ class TetoRenderer:
         if pitchbend_fallback:
             return normalized_output, True, False
         return self._cache.put(key, normalized_output), False, False
+
+    def _check_render_cancelled(self) -> None:
+        cancelled = getattr(self._reading_context, "cancelled", None)
+        if cancelled is not None and cancelled():
+            raise TetoResourceError("renderização TTV cancelada")
+
+    def _run_cancellable_resampler(self, command, deadline, cancelled):
+        """Interrupt the Python bridge gracefully, retaining its physical lease.
+
+        The ESPER bridge catches KeyboardInterrupt around its supervisor, closes
+        the control pipe and waits for guest cleanup before exiting. SIGKILL
+        would let the caller observe bridge exit before that cleanup completes.
+        """
+        if cancelled():
+            raise TetoResourceError("renderização TTV cancelada")
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env=self._subprocess_environment(), start_new_session=True)
+        interrupted = False
+        try:
+            while True:
+                if cancelled() and not interrupted:
+                    interrupted = True
+                    with contextlib.suppress(ProcessLookupError):
+                        process.send_signal(signal.SIGINT)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, 0)
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                    if interrupted or cancelled():
+                        raise TetoResourceError("renderização TTV cancelada")
+                    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            if process.poll() is None:
+                if not interrupted:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.send_signal(signal.SIGINT)
+                try:
+                    process.communicate(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
 
     def _read_samples(self, path: Path) -> array.array:
         with wave.open(str(path), "rb") as wav:
@@ -1060,6 +1127,7 @@ class TetoRenderer:
         rendered_intervals: list[tuple[int, int]] = []
 
         for number, (note, entry, placement) in enumerate(zip(notes, entries, placements)):
+            self._check_render_cancelled()
             if time.monotonic() >= deadline:
                 raise TimeoutError("renderização Teto excedeu o timeout")
             if entry is None:
@@ -1145,6 +1213,33 @@ class TetoRenderer:
         return phonemize(text, max_moras=1025, resolve_alias=index.resolve,
                          voicebank_profile=self._index_profile,
                          reading_language=language, **self._phonemizer_options())
+
+    @classmethod
+    def _apply_midi_velocity(cls, samples: array.array, notes, preroll: float, *, check_cancelled=None) -> None:
+        """Keep the original PCM rounding, evaluating sin only during the ramp."""
+        previous_gain = previous_end = None
+        for event in notes:
+            if check_cancelled is not None:
+                check_cancelled()
+            first = max(0, round(cls.SAMPLE_RATE * (preroll + event['start_ms']) / 1000))
+            end = min(len(samples), round(cls.SAMPLE_RATE * (preroll + event['start_ms'] + event['duration_ms']) / 1000))
+            gain = 0.72 + 0.28 * math.sqrt(event['velocity'] / 127.0)
+            incoming = previous_gain if previous_gain is not None and first - previous_end <= round(cls.SAMPLE_RATE * 0.02) else gain
+            smooth_frames = min(end - first, round(cls.SAMPLE_RATE * 0.008))
+            ramp_end = min(end, first + max(1, smooth_frames - 1))
+            if incoming != gain:
+                for number in range(first, ramp_end):
+                    ratio = math.sin((number - first) / max(1, smooth_frames - 1) * math.pi / 2.0) ** 2
+                    samples[number] = round(samples[number] * (incoming + (gain - incoming) * ratio))
+            else:
+                ramp_end = first
+            # Preserve this arithmetic rather than substituting `gain`: the
+            # former expression can round differently by one PCM unit.
+            tail_gain = incoming + (gain - incoming)
+            if tail_gain != 1.0:
+                for number in range(ramp_end, end):
+                    samples[number] = round(samples[number] * tail_gain)
+            previous_gain, previous_end = gain, end
 
     @staticmethod
     def _singing_message_tokens(text, segments=None):
@@ -1364,7 +1459,8 @@ class TetoRenderer:
 
     def synthesize_performance(self, text: str, *, score=None, segments=None,
                                pitch_offset_semitones=0.0, speech_rate=1.0, reading_language='pt-BR',
-                               timeout_seconds=120.0, max_audio_bytes=8 * 1024 * 1024):
+                               timeout_seconds=120.0, max_audio_bytes=8 * 1024 * 1024,
+                               cancelled: Callable[[], bool] | None = None):
         """Render score vowels on a musical clock, or a phrase with inline effects.
 
         MIDI uses original pitches/tempo and a consonantal preroll reported in
@@ -1383,6 +1479,8 @@ class TetoRenderer:
             raise ValueError('canto MIDI preserva tom e andamento; use tom 0 e velocidade 1')
         pitch = round(pitch * 2.0) / 2.0
         if self.RENDER_VERSION.startswith('worldline'):
+            if cancelled is not None:
+                raise TetoResourceError('motor WORLDLINE sem cancelamento de canto em segundo plano')
             if score is not None:
                 raise ValueError('canto MIDI exige ESPER; o motor WORLDLINE ainda não aceita partituras')
             return self._worldline_effects(text, segments, pitch_offset_semitones=pitch,
@@ -1398,7 +1496,16 @@ class TetoRenderer:
             raise TetoResourceError('renderer TTV ocupado')
         started = time.monotonic()
         deadline = started + float(timeout_seconds)
+        cache_before = self._cache.statistics()
+        cache_started = False
+        render_stopped = threading.Event()
+        def should_cancel():
+            return render_stopped.is_set() or cancelled()
         try:
+            self._reading_context.cancelled = should_cancel if cancelled is not None else None
+            self._check_render_cancelled()
+            self._cache.begin_render()
+            cache_started = True
             self._reading_context.performance_singing = score is not None
             if score is not None:
                 # Singing always uses this character's CVVC bank. Its spoken
@@ -1509,6 +1616,7 @@ class TetoRenderer:
                     self._reading_context.profile = request_profile
                     self._reading_context.performance_sources = performance_sources
                     self._reading_context.performance_singing = score is not None
+                    self._reading_context.cancelled = should_cancel if cancelled is not None else None
                     local = {key: 0 for key in metrics}
                     self._reading_context.render_metrics = local
                     try:
@@ -1534,15 +1642,20 @@ class TetoRenderer:
                             for key in metrics:
                                 metrics[key] += local[key]
                     except BaseException:
+                        render_stopped.set()
                         for future in futures:
                             future.cancel()
                         raise
                 resample_ms = (time.monotonic() - resample_start) * 1000
                 if score is not None and any(fragment[1] for fragment in fragments.values()):
                     raise TetoSynthesisError('o resampler não aceitou a curva de notas MIDI; atualize o ESPER antes de cantar')
+                self._check_render_cancelled()
+                compose_started = time.monotonic()
                 combined, missing, rendered, fallback, legacy, timeline = self._compose_english_cvvc(
                     notes=notes, entries=entries, fragments=fragments, deadline=deadline,
                     placements=placements, planned_end_ms=planned_ms)
+                compose_ms = (time.monotonic() - compose_started) * 1000
+            postprocess_started = time.monotonic()
             target_frames = round(self.SAMPLE_RATE * planned_ms / 1000)
             if len(combined) < target_frames:
                 combined.extend([0] * (target_frames - len(combined)))
@@ -1552,26 +1665,18 @@ class TetoRenderer:
             if not peak:
                 raise TetoSynthesisError('a apresentação TTV gerou áudio silencioso')
             scale = min(3.6, 30000.0 / peak)
+            self._check_render_cancelled()
             combined = self._apply_gain(combined, scale)
+            self._check_render_cancelled()
             if score is not None:
                 # MIDI velocity controls musical intensity, not UTAU consonant
                 # velocity. Apply it after common peak normalization.
-                previous_gain = None
-                previous_end = None
-                for event in score['notes']:
-                    first = max(0, round(self.SAMPLE_RATE * (preroll + event['start_ms']) / 1000))
-                    end = min(len(combined), round(self.SAMPLE_RATE * (preroll + event['start_ms'] + event['duration_ms']) / 1000))
-                    gain = 0.72 + 0.28 * math.sqrt(event['velocity'] / 127.0)
-                    incoming = previous_gain if previous_gain is not None and first - previous_end <= round(self.SAMPLE_RATE * 0.02) else gain
-                    smooth_frames = min(end - first, round(self.SAMPLE_RATE * 0.008))
-                    for number in range(first, end):
-                        offset = number - first
-                        ratio = math.sin(min(1.0, offset / max(1, smooth_frames - 1)) * math.pi / 2.0) ** 2
-                        combined[number] = round(combined[number] * (incoming + (gain - incoming) * ratio))
-                    previous_gain, previous_end = gain, end
+                self._apply_midi_velocity(combined, score['notes'], preroll,
+                                          check_cancelled=self._check_render_cancelled if cancelled is not None else None)
                 if segments:
                     word_index = 0
                     for segment in segments:
+                        self._check_render_cancelled()
                         if segment['text'].strip() in {'|', '~'}:
                             continue
                         words = self._performance_phonemize(segment['text'], index, language)
@@ -1585,11 +1690,14 @@ class TetoRenderer:
                         word_index += count
             else:
                 for first, end, segment in effect_ranges:
+                    self._check_render_cancelled()
                     first_ms = min(placement['start_ms'] for placement in placements[first:end])
                     end_ms = max(placements[number]['anchor_ms'] + notes[number].duration_ms for number in range(first, end))
                     self._performance_envelope(combined, round(first_ms * self.SAMPLE_RATE / 1000), round(end_ms * self.SAMPLE_RATE / 1000),
                                                fade_in=segment['fade_in'], fade_out=segment['fade_out'])
             raw = self._performance_wav(combined, self.SAMPLE_RATE)
+            self._check_render_cancelled()
+            postprocess_ms = (time.monotonic() - postprocess_started) * 1000
             if len(raw) > max_audio_bytes:
                 raise TetoSynthesisError('áudio TTV grande demais')
             renderer_fingerprint = hashlib.sha256((self._request_fingerprint(index, pitch_offset_semitones=pitch,
@@ -1604,6 +1712,7 @@ class TetoRenderer:
                         'rendered_phonemes': rendered, 'missing_phonemes': missing, 'pitchbend_fallbacks': fallback,
                         'legacy_fragment_hits': legacy, 'render_workers': workers, 'source_groups': len(source_groups),
                         'resample_ms': round(resample_ms, 2), **metrics,
+                        'compose_ms': round(compose_ms, 2), 'postprocess_ms': round(postprocess_ms, 2),
                         'worker_synth_ms': round((time.monotonic() - started) * 1000, 2),
                         'timeline_mode': 'midi-vowel-continuous' if score is not None else 'phrase-effects-continuous',
                         'timeline_planned_ms': round(planned_ms, 3), 'timeline_audio_ms': round(len(combined) * 1000 / self.SAMPLE_RATE, 3),
@@ -1613,10 +1722,16 @@ class TetoRenderer:
                         'melisma_notes': sum(max(0, len(group) - 1) for group in groups) if groups is not None else 0,
                         'duration_seconds': len(combined) / self.SAMPLE_RATE, 'sample_rate': self.SAMPLE_RATE,
                         'channels': 1, 'sample_width_bytes': 2, 'sha256': hashlib.sha256(raw).hexdigest()}
+            cache_after = self._cache.statistics()
+            metadata.update({key: round(cache_after[key] - cache_before[key], 2)
+                             for key in ('cache_scans', 'cache_evictions', 'cache_maintenance_ms')})
+            metadata['cache_size_bytes'] = cache_after['cache_size_bytes']
             if score is not None:
                 metadata['effective_score'] = score
             return raw, metadata
         finally:
+            if cache_started:
+                self._cache.end_render()
             self._clear_reading_context()
             self._lock.release()
 
@@ -1652,7 +1767,10 @@ class TetoRenderer:
             raise TetoResourceError("renderer Teto ocupado")
 
         started = time.monotonic()
+        cache_started = False
         try:
+            self._cache.begin_render()
+            cache_started = True
             index = self._load_reading_index(language)
             max_moras = max(8, self._env_int("PHONE_WORKER_TETO_MAX_PHONEMES", 240))
             moras = phonemize(
@@ -1889,5 +2007,7 @@ class TetoRenderer:
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }
         finally:
+            if cache_started:
+                self._cache.end_render()
             self._clear_reading_context()
             self._lock.release()

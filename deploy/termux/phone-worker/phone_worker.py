@@ -117,6 +117,7 @@ _CORE_JOB_ACTIVE: dict[str, Any] = {}
 _CORE_JOB_LAST_RESULT: dict[str, Any] = {}
 _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 _HEAVY_RESOURCE_LOCK = threading.Lock()
+_TETO_BACKGROUND_STATE = {"lock": threading.Lock(), "cancelled": None, "foreground_waiters": 0}
 _TETO_RENDERER_LOCK = threading.RLock()
 _TETO_RENDERER: Any = None
 _TETO_RENDERER_ERROR = ""
@@ -2096,6 +2097,33 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
     if meta.get("teto_continuity_repairs") not in (None, ""):
         handler.send_header("X-Core-Worker-Teto-Continuity-Repairs", _header_ascii(meta.get("teto_continuity_repairs"), limit=20))
     for key, header in (
+        ("resample_ms", "X-Core-Worker-TTV-Resample-Ms"),
+        ("compose_ms", "X-Core-Worker-TTV-Compose-Ms"),
+        ("postprocess_ms", "X-Core-Worker-TTV-Postprocess-Ms"),
+        ("cache_maintenance_ms", "X-Core-Worker-TTV-Cache-Maintenance-Ms"),
+        ("render_workers", "X-Core-Worker-TTV-Render-Workers"),
+        ("source_groups", "X-Core-Worker-TTV-Source-Groups"),
+        ("fragment_cache_hits", "X-Core-Worker-TTV-Fragment-Cache-Hits"),
+        ("fragment_cache_misses", "X-Core-Worker-TTV-Fragment-Cache-Misses"),
+        ("resampler_calls", "X-Core-Worker-TTV-Resampler-Calls"),
+        ("cache_scans", "X-Core-Worker-TTV-Cache-Scans"),
+        ("cache_evictions", "X-Core-Worker-TTV-Cache-Evictions"),
+        ("cache_size_bytes", "X-Core-Worker-TTV-Cache-Size-Bytes"),
+    ):
+        value = meta.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        try:
+            number = float(value)
+        except (OverflowError, ValueError):
+            continue
+        if not 0 <= number < float("inf"):
+            continue
+        if key.endswith("_ms"):
+            handler.send_header(header, str(round(number, 2)))
+        elif number.is_integer():
+            handler.send_header(header, str(int(number)))
+    for key, header in (
         ("worker_total_ms", "X-Core-Worker-Worker-Total-Ms"),
         ("worker_synth_ms", "X-Core-Worker-Worker-Synth-Ms"),
         ("cache_read_ms", "X-Core-Worker-Cache-Read-Ms"),
@@ -2123,6 +2151,7 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
             ("cache_key", "X-Core-Worker-Cache-Key-Ms"),
             ("cache_lookup", "X-Core-Worker-Cache-Lookup-Ms"),
             ("teto_render", "X-Core-Worker-Teto-Render-Ms"),
+            ("teto_admission", "X-Core-Worker-Teto-Admission-Ms"),
             ("cache_store", "X-Core-Worker-Cache-Store-Ms"),
         ):
             if timing.get(key) not in (None, ""):
@@ -2348,7 +2377,7 @@ def _phone_worker_tts_providers_module() -> Any:
                 raise RuntimeError("tts_providers.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            required = ("synthesize_teto", "synthesize_edge", "synthesize_gtts")
+            required = ("synthesize_teto", "synthesize_edge", "synthesize_gtts", "render_telemetry")
             if not all(callable(getattr(module, name, None)) for name in required):
                 raise RuntimeError("tts_providers.py incompleto")
             _PHONE_WORKER_TTS_PROVIDERS_MODULE = module
@@ -2860,6 +2889,9 @@ def _tts_agent_snapshot() -> dict[str, Any]:
     enabled = _env_bool("PHONE_WORKER_TTS_AGENT_ENABLED", True)
     with _TTS_AGENT_LOCK:
         active = int(_TTS_AGENT_ACTIVE)
+        background_active = int(_TTS_AGENT_BACKGROUND_ACTIVE)
+        background_total = int(_TTS_AGENT_BACKGROUND_TOTAL)
+        background_aborted = int(_TTS_AGENT_BACKGROUND_ABORTED)
         total = int(_TTS_AGENT_TOTAL)
         failed = int(_TTS_AGENT_FAILED)
         total_ms = float(_TTS_AGENT_TOTAL_MS)
@@ -2891,10 +2923,14 @@ def _tts_agent_snapshot() -> dict[str, Any]:
         "deps": deps,
         "teto": deps.get("teto") if isinstance(deps.get("teto"), dict) else _teto_status(),
         "active": active,
+        "background_active": background_active,
+        "background_total": background_total,
+        "background_aborted": background_aborted,
         "concurrency_limit": _tts_agent_queue_limit(),
         "stream_protocol": 2 if _tts_transport_module() is not None else 0,
         "stream_cache_only_protocol": 1 if getattr(_tts_transport_module(), "STREAM_CACHE_ONLY_PROTOCOL", 0) == 1 else 0,
         "ttv_performance_protocol": 2,
+        "ttv_background_protocol": 1,
         "cache_binary_protocol": 2 if _tts_transport_module() is not None else 0,
         "total": total,
         "failed": failed,
@@ -2905,17 +2941,30 @@ def _tts_agent_snapshot() -> dict[str, Any]:
     }
 
 
-def _tts_agent_record_start() -> None:
-    global _TTS_AGENT_ACTIVE
+def _tts_agent_record_start(*, background: bool = False) -> None:
+    global _TTS_AGENT_ACTIVE, _TTS_AGENT_BACKGROUND_ACTIVE
     with _TTS_AGENT_LOCK:
+        if background:
+            if _TTS_AGENT_ACTIVE or _TTS_AGENT_BACKGROUND_ACTIVE:
+                raise RuntimeError("TTS Agent ocupado; aquecimento TTV adiado")
+            # Background work never occupies the foreground admission slot,
+            # including installations configured with concurrency=1.
+            _TTS_AGENT_BACKGROUND_ACTIVE += 1
+            return
         if _TTS_AGENT_ACTIVE >= _tts_agent_queue_limit():
             raise RuntimeError("TTS Agent ocupado; fila local cheia")
         _TTS_AGENT_ACTIVE += 1
 
 
-def _tts_agent_record_done(*, ok: bool, engine: str, elapsed_ms: float, error: str = "") -> None:
+def _tts_agent_record_done(*, ok: bool, engine: str, elapsed_ms: float, error: str = "", background: bool = False) -> None:
     global _TTS_AGENT_ACTIVE, _TTS_AGENT_TOTAL, _TTS_AGENT_FAILED, _TTS_AGENT_TOTAL_MS, _TTS_AGENT_LAST_ERROR, _TTS_AGENT_LAST_ENGINE, _TTS_AGENT_LAST_OK_AT
+    global _TTS_AGENT_BACKGROUND_ACTIVE, _TTS_AGENT_BACKGROUND_TOTAL, _TTS_AGENT_BACKGROUND_ABORTED
     with _TTS_AGENT_LOCK:
+        if background:
+            _TTS_AGENT_BACKGROUND_ACTIVE = max(0, _TTS_AGENT_BACKGROUND_ACTIVE - 1)
+            _TTS_AGENT_BACKGROUND_TOTAL += 1
+            _TTS_AGENT_BACKGROUND_ABORTED += int(not ok)
+            return
         _TTS_AGENT_ACTIVE = max(0, _TTS_AGENT_ACTIVE - 1)
         _TTS_AGENT_TOTAL += 1
         _TTS_AGENT_TOTAL_MS += max(0.0, float(elapsed_ms or 0.0))
@@ -3042,6 +3091,9 @@ _TTS_DEP_AUTOINSTALL_LAST_AT = 0.0
 _TTS_DEP_AUTOINSTALL_RUNNING = False
 _TTS_AGENT_LOCK = threading.Lock()
 _TTS_AGENT_ACTIVE = 0
+_TTS_AGENT_BACKGROUND_ACTIVE = 0
+_TTS_AGENT_BACKGROUND_TOTAL = 0
+_TTS_AGENT_BACKGROUND_ABORTED = 0
 _TTS_AGENT_TOTAL = 0
 _TTS_AGENT_FAILED = 0
 _TTS_AGENT_TOTAL_MS = 0.0
@@ -5269,6 +5321,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             data, audio_format, teto_meta = _phone_worker_tts_providers_module().synthesize_teto(
                 text=text, timeout=remaining, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
                 heavy_lock=_HEAVY_RESOURCE_LOCK,
+                background_state=_TETO_BACKGROUND_STATE,
+                priority="background" if body.get("priority") == "background" else "foreground",
                 get_renderer=lambda: _get_ttv_renderer(ttv_settings["ttv_voice_id"]),
                 monotonic=time.monotonic, normalize_format=self._normalize_tts_cache_format,
                 pitch_offset_semitones=ttv_settings["ttv_pitch_semitones"],
@@ -5381,6 +5435,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         }
         if engine == "teto":
             result.update(ttv_settings)
+            result.update(_phone_worker_tts_providers_module().render_telemetry(teto_meta))
             result["ttv_speech_rate"] = result["teto_speech_rate"]
             result["ttv_pitch_semitones"] = teto_meta.get("pitch_offset_semitones", ttv_settings["ttv_pitch_semitones"])
             result["ttv_language"] = teto_meta.get("reading_language", ttv_settings["ttv_language"])
@@ -5394,6 +5449,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
         text = str(body.get("text") or "").strip()
         requested_engine = _tts_agent_normalize_engine(body.get("engine"))
         performance = _phone_worker_tts_policy_module().performance_request(body, engine=requested_engine)
+        background = body.get("priority") == "background"
+        if background and (requested_engine != "teto" or performance.get("score") is None):
+            raise ValueError("aquecimento de fundo exige uma partitura TTV")
         if not text and performance.get("score") is None:
             raise ValueError("texto vazio")
         max_chars = 2048 if performance.get("score") is not None else max(64, _env_int("PHONE_WORKER_TTS_AGENT_MAX_TEXT_LENGTH", 1200))
@@ -5442,7 +5500,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             f"tts-agent chars={len(text)} order={','.join(order)} timeout={timeout}s",
         ]
         errors: list[str] = []
-        _tts_agent_record_start()
+        accounting = {"background": True} if background else {}
+        _tts_agent_record_start(**accounting)
         started = request_started if teto_request else time.monotonic()
         selected = ""
 
@@ -5479,7 +5538,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         result["logs"] = (base_logs + list(result.get("logs") or []))[:10]
                         elapsed_ms = (time.monotonic() - started) * 1000.0
                         finalize_timing(result)
-                        _tts_agent_record_done(ok=True, engine="piper", elapsed_ms=elapsed_ms)
+                        _tts_agent_record_done(ok=True, engine="piper", elapsed_ms=elapsed_ms, **accounting)
                         return result
                     engine_body = dict(body)
                     if engine != requested_engine:
@@ -5510,7 +5569,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         result["logs"] = existing_logs[:10]
                     finalize_timing(result)
                     elapsed_ms = (time.monotonic() - started) * 1000.0
-                    _tts_agent_record_done(ok=True, engine=engine, elapsed_ms=elapsed_ms)
+                    _tts_agent_record_done(ok=True, engine=engine, elapsed_ms=elapsed_ms, **accounting)
                     return result
                 except Exception as exc:
                     failure = f"{engine}: {type(exc).__name__}: {_short_text(exc, limit=140)}"
@@ -5523,7 +5582,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise RuntimeError("; ".join(errors) or "todas as engines falharam")
         except Exception as exc:
             elapsed_ms = (time.monotonic() - started) * 1000.0
-            _tts_agent_record_done(ok=False, engine=selected, elapsed_ms=elapsed_ms, error=str(exc))
+            _tts_agent_record_done(ok=False, engine=selected, elapsed_ms=elapsed_ms, error=str(exc), **accounting)
             raise
 
     def _resolve_piper_command(self) -> str:

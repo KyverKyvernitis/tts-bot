@@ -179,6 +179,9 @@ async def preparar_payload_tts_mensagem(
     if voice_channel is None:
         return None
 
+    import time
+    preparation_started = time.perf_counter()
+    adaptation_ms = 0.0
     raw_text = message.content[len(active_prefix):].strip()
     score, segments, arrangement = None, None, None
     is_ttv = resolved.get("engine") == "teto"
@@ -213,8 +216,10 @@ async def preparar_payload_tts_mensagem(
                               'lyrics_source':'message','notes':score['notes']}]}
             if len(text)>2048:
                 raise ValueError('Use até 2048 caracteres de letra por mensagem.')
+            adaptation_started = time.perf_counter()
             arrangement = await asyncio.to_thread(prepare_message_arrangement, arrangement, text, segments,
                                                   language=ttv_preferences['ttv_language'])
+            adaptation_ms = (time.perf_counter() - adaptation_started) * 1000
             ttv_preferences.update(ttv_pitch_semitones="+0.0", ttv_speech_rate=1.0)
             resolved.update(ttv_preferences)
             resolved["teto_pitch_semitones"] = "+0.0"
@@ -277,4 +282,7 @@ async def preparar_payload_tts_mensagem(
         piper_fallback_pitch=fallback_pitch,
         piper_model=str(resolved.get("piper_model") or getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default"),
     )
+    if arrangement is not None:
+        queue_item._cd_preparation_ms = round((time.perf_counter() - preparation_started) * 1000, 2)
+        queue_item._cd_lyrics_adaptation_ms = round(adaptation_ms, 2)
     return PayloadTTSMensagem(text=text, resolved=resolved, queue_item=queue_item, forced_gtts=forced_gtts)

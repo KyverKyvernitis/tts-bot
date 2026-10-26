@@ -6,6 +6,7 @@ import contextlib
 from dataclasses import replace
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import threading
@@ -14,7 +15,9 @@ import time
 from osaka_cd.arrangement import (
     arrangement_performance_sha256, arrangement_sha256, validate_arrangement,
 )
-from osaka_cd.render import render_arrangement
+from osaka_cd.render import render_arrangement, warm_arrangement_stems
+
+_LOG = logging.getLogger(__name__)
 
 
 def execution_arrangement(value, voice_id, *, message=True):
@@ -79,6 +82,148 @@ def arrangement_profile_identity(item, route):
 
 
 class ArrangementAudioMixin:
+    async def _request_cd_stem(self, item, request, *, background=False):
+        child = replace(item, text=request['text'], voice=request['voice_id'],
+                        ttv_voice_id=request['voice_id'], ttv_score=request['score'],
+                        language=request['language'], ttv_language=request['language'],
+                        rate='1.0', pitch='+0Hz', ttv_pitch_semitones='+0.0',
+                        teto_pitch_semitones='+0.0', ttv_speech_rate=1.0,
+                        ttv_segments=request.get('segments'), ttv_performance_hash='',
+                        ttv_arrangement=None, ttv_arrangement_hash='',
+                        _normalized_cache_text=None, _cache_key_value=None, _dedup_signature=None)
+        for key in ('_tts_settings_frozen', '_tts_route_decision', '_tts_agent_render_metadata'):
+            child.__dict__.pop(key, None)
+        if background:
+            child._cd_background = True
+        path = ''
+        try:
+            path = await self._generate_tts_agent_worker_file(child)
+            raw = await asyncio.to_thread(Path(path).read_bytes)
+            return raw, dict(getattr(child, '_tts_agent_render_metadata', {}))
+        finally:
+            if path:
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+
+    def _cd_warmup_idle(self):
+        if getattr(self, '_tts_shutting_down', False):
+            return False
+        if int(getattr(self, '_cd_foreground_compositions', 0)):
+            return False
+        pending = getattr(self, '_tts_foreground_work_pending', None)
+        if callable(pending) and pending():
+            return False
+        if any(not task.done() for task in getattr(self, '_tts_message_tasks', {}).values()):
+            return False
+        return not any(getattr(state, 'active_item', None) is not None
+                       or not state.queue.empty()
+                       for state in getattr(self, 'guild_states', {}).values())
+
+    def _schedule_cd_accompaniment_warmup(self, guild_id, user_id, *, melody_id, settings):
+        owner = (int(guild_id), int(user_id))
+        tasks = getattr(self, '_cd_warmup_tasks', None)
+        if tasks is None:
+            tasks = self._cd_warmup_tasks = {}
+        previous = tasks.pop(owner, None)
+        if previous is not None and not previous.done():
+            previous.cancel()
+        if getattr(self, '_tts_shutting_down', False):
+            return None
+        if os.getenv('OSAKA_CD_WARMUP_ENABLED', 'true').strip().lower() in {'0', 'false', 'no', 'off'}:
+            return None
+        from .melodies import DEFAULT_MELODY_ID
+        if melody_id == DEFAULT_MELODY_ID:
+            return None
+        if len(tasks) >= 16 and owner not in tasks:
+            return None
+        frozen_settings = dict(settings)
+
+        async def run():
+            from .audio import QueueItem
+            from .melodies import arrangement_for_melody
+            from .ttv import resolve_preferences
+            from osaka_cd.runtime import pin_snapshot
+            preferences = resolve_preferences(frozen_settings)
+            with pin_snapshot():
+                arrangement = execution_arrangement(arrangement_for_melody(melody_id, preview=True),
+                                                    preferences['ttv_voice_id'])
+            if arrangement is None or not any(part.get('lyrics_source') != 'message'
+                                               for part in arrangement['parts']):
+                return
+            idle_since, deadline = None, time.monotonic() + 300
+            while time.monotonic() < deadline:
+                if self._cd_warmup_idle():
+                    idle_since = idle_since or time.monotonic()
+                    if time.monotonic() - idle_since >= 5:
+                        break
+                else:
+                    idle_since = None
+                await asyncio.sleep(1)
+            else:
+                return
+            route = self._tts_agent_route_state()
+            if route.get('ttv_background_protocol') != 1:
+                return
+            item = QueueItem(guild_id=int(guild_id), channel_id=0, author_id=int(user_id),
+                text='a', engine='teto', voice=preferences['ttv_voice_id'],
+                language=preferences['ttv_language'], rate='1.0', pitch='+0Hz',
+                teto_pitch_semitones='+0.0', ttv_arrangement=arrangement, **preferences)
+            profile = arrangement_profile_identity(item, route)
+            if not profile:
+                return
+            await self._warm_cd_accompaniment(item, profile)
+
+        async def guarded():
+            try:
+                await run()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # Speculation is optional and must not suspend a healthy route
+                # or put lyrics, local paths or credentials in logs.
+                _LOG.debug('[cd_warmup] stopped type=%s', type(error).__name__)
+            finally:
+                if tasks.get(owner) is asyncio.current_task():
+                    tasks.pop(owner, None)
+
+        schedule = getattr(self, '_schedule_tts_background', asyncio.create_task)
+        task = schedule(guarded())
+        if task is not None:
+            tasks[owner] = task
+        return task
+
+    async def _warm_cd_accompaniment(self, item, profile):
+        loop = asyncio.get_running_loop()
+        cancelled = threading.Event()
+
+        async def request(request):
+            if not self._cd_warmup_idle():
+                raise RuntimeError('cd_warmup_foreground_pending')
+            return await self._request_cd_stem(item, request, background=True)
+
+        def render_part(**call):
+            return asyncio.run_coroutine_threadsafe(request(call), loop).result()
+
+        data_root = Path(os.getenv('OSAKA_CD_DATA_ROOT', str(Path.home() / 'osaka-data/cd'))).expanduser()
+        # No foreground gate here: a user request must reach the phone so it
+        # can preempt the active background render and await physical cleanup.
+        task = asyncio.create_task(asyncio.to_thread(warm_arrangement_stems,
+            frozen_arrangement(item), render_part, cache_dir=data_root / 'audio-cache',
+            render_profile_fingerprint=profile, language=item.ttv_language,
+            cancelled=cancelled.is_set, timeout_seconds=300, max_stems=8))
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled.set()
+            from .runtime import await_physical_completion
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await await_physical_completion(task)
+            raise
+        metrics = self._get_metrics_store()
+        metrics['cd_warmup_last_stems'] = len(result['stems'])
+        metrics['cd_warmup_last_rendered'] = sum(not stem['cache_hit'] for stem in result['stems'])
+        return result
+
     async def _generate_arrangement_worker_file(self, item):
         arrangement = frozen_arrangement(item)
         if arrangement is None:
@@ -92,54 +237,28 @@ class ArrangementAudioMixin:
         # Never substitute a static protocol version for the actual bank identity.
         profile = arrangement_profile_identity(item, route)
 
-        async def request_part(request):
-            child = replace(item, text=request['text'], voice=request['voice_id'],
-                            ttv_voice_id=request['voice_id'], ttv_score=request['score'],
-                            language=request['language'], ttv_language=request['language'],
-                            rate='1.0', pitch='+0Hz', ttv_pitch_semitones='+0.0',
-                            teto_pitch_semitones='+0.0', ttv_speech_rate=1.0,
-                            ttv_segments=request.get('segments'), ttv_performance_hash='',
-                            ttv_arrangement=None, ttv_arrangement_hash='',
-                            _normalized_cache_text=None, _cache_key_value=None, _dedup_signature=None)
-            # Settings and cache decisions are specific to this physical score.
-            for key in ('_tts_settings_frozen', '_tts_route_decision', '_tts_agent_render_metadata'):
-                child.__dict__.pop(key, None)
-            path = ''
-            try:
-                path = await self._generate_tts_agent_worker_file(child)
-                raw = await asyncio.to_thread(Path(path).read_bytes)
-                metadata = dict(getattr(child, '_tts_agent_render_metadata', {}))
-                return raw, metadata
-            finally:
-                if path:
-                    with contextlib.suppress(OSError):
-                        os.unlink(path)
-
         def render_part(**request):
             # A synchronous composition thread delegates HTTP to the bot loop.
             # Its lease lasts until the actual request has returned.
-            return asyncio.run_coroutine_threadsafe(request_part(request), loop).result()
+            return asyncio.run_coroutine_threadsafe(self._request_cd_stem(item, request), loop).result()
 
         timeout = min(3600.0, max(60.0, float(os.getenv('OSAKA_CD_RENDER_TIMEOUT_SECONDS', '1200'))))
         data_root = Path(os.getenv('OSAKA_CD_DATA_ROOT', str(Path.home() / 'osaka-data/cd'))).expanduser()
         started = time.monotonic()
-        async with gate:
-            task = asyncio.create_task(asyncio.to_thread(
-                render_arrangement, arrangement, item.text, render_part,
-                cache_dir=data_root / 'audio-cache', render_profile_fingerprint=profile,
-                language=item.ttv_language, output_format='mp3',
-                segments=getattr(item, 'ttv_segments', None),
-                cancelled=cancelled.is_set, timeout_seconds=timeout))
-            try:
-                result = await asyncio.shield(task)
-            except asyncio.CancelledError:
-                cancelled.set()
-                from .runtime import await_physical_completion
-                try:
-                    await await_physical_completion(task)
-                except (Exception, asyncio.CancelledError):
-                    pass
-                raise
+        self._cd_foreground_compositions = int(getattr(self, '_cd_foreground_compositions', 0)) + 1
+        gate_started = time.monotonic()
+        try:
+            async with gate:
+                gate_wait_ms = (time.monotonic() - gate_started) * 1000
+                result = await self._run_cd_composition(item, arrangement, render_part, profile,
+                                                        data_root, cancelled, timeout)
+        finally:
+            self._cd_foreground_compositions -= 1
+        result['metadata']['timing_ms']['composition_queue'] = round(gate_wait_ms, 2)
+        for field, stage in (('_cd_preparation_ms', 'preparation'),
+                             ('_cd_lyrics_adaptation_ms', 'lyrics_adaptation')):
+            if hasattr(item, field):
+                result['metadata']['timing_ms'][stage] = getattr(item, field)
         path = self._make_runtime_temp_file(suffix='.mp3')
         try:
             await asyncio.to_thread(Path(path).write_bytes, result['audio'])
@@ -153,6 +272,32 @@ class ArrangementAudioMixin:
                                       ('sha256', 'mix_sha256', 'arrangement_sha256', 'stems')}
         metrics = self._get_metrics_store()
         metrics['cd_arrangement_last_ms'] = round((time.monotonic() - started) * 1000, 2)
+        metrics['cd_arrangement_last_queue_ms'] = round(gate_wait_ms, 2)
+        metrics['cd_arrangement_last_timing_ms'] = result['metadata']['timing_ms']
+        metrics['cd_arrangement_last_stems'] = result['stems']
         metrics['cd_arrangement_last_parts'] = len(arrangement['parts'])
         metrics['cd_arrangement_last_mix_cache_hit'] = bool(result.get('mix_cache_hit'))
+        _LOG.info('[cd_render] mix=%s parts=%s stems=%s mix_cache_hit=%s resampler_calls=%s timing_ms=%s',
+                  result['mix_sha256'][:12], len(arrangement['parts']), len(result['stems']),
+                  bool(result.get('mix_cache_hit')),
+                  sum(stem['render_metrics'].get('resampler_calls', 0) for stem in result['stems']),
+                  result['metadata']['timing_ms'])
         return path
+
+    async def _run_cd_composition(self, item, arrangement, render_part, profile, data_root, cancelled, timeout):
+        task = asyncio.create_task(asyncio.to_thread(
+            render_arrangement, arrangement, item.text, render_part,
+            cache_dir=data_root / 'audio-cache', render_profile_fingerprint=profile,
+            language=item.ttv_language, output_format='mp3',
+            segments=getattr(item, 'ttv_segments', None),
+            cancelled=cancelled.is_set, timeout_seconds=timeout))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled.set()
+            from .runtime import await_physical_completion
+            try:
+                await await_physical_completion(task)
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise

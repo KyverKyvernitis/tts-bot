@@ -432,18 +432,27 @@ def synthesize(values: list[str], *, root: Path, cache: Path, container: str, ti
     key = identity.hexdigest()
     with source_lock(cache / "sources" / f"{key}.lock", deadline):
         directory = private_source(cache, key, data)
-        with tempfile.TemporaryDirectory(prefix="esper-job-", dir=cache / "jobs") as temporary:
-            workdir = Path(temporary)
-            command = guest_command(container, runtime["release"], cache, directory, workdir, args)
-            run_guest(command, workdir, deadline)
-            rendered = read_regular(workdir / "output.wav", minimum=45, maximum=MAX_OUTPUT_BYTES)
-            evidence = pcm_evidence(rendered, output=True)
-            require_time(deadline)
-            for auxiliary, maximum in ((directory / "source.esp", MAX_ANALYSIS_BYTES),
-                                       (directory / "source_wav.frq", MAX_FRQ_BYTES)):
-                if auxiliary.exists() or auxiliary.is_symlink():
-                    regular_info(auxiliary, maximum=maximum)
-            atomic_write(target, rendered)
+        try:
+            with tempfile.TemporaryDirectory(prefix="esper-job-", dir=cache / "jobs") as temporary:
+                workdir = Path(temporary)
+                command = guest_command(container, runtime["release"], cache, directory, workdir, args)
+                run_guest(command, workdir, deadline)
+                rendered = read_regular(workdir / "output.wav", minimum=45, maximum=MAX_OUTPUT_BYTES)
+                evidence = pcm_evidence(rendered, output=True)
+                require_time(deadline)
+                for auxiliary, maximum in ((directory / "source.esp", MAX_ANALYSIS_BYTES),
+                                           (directory / "source_wav.frq", MAX_FRQ_BYTES)):
+                    if auxiliary.exists() or auxiliary.is_symlink():
+                        regular_info(auxiliary, maximum=maximum)
+                atomic_write(target, rendered)
+        except BaseException:
+            # Interrupted analysis can leave a partial file that looks reusable.
+            # Discard only the bridge's generated auxiliaries while still owning
+            # the source lock; the next request regenerates them natively.
+            for auxiliary in (directory / "source.esp", directory / "source_wav.frq"):
+                with contextlib.suppress(OSError):
+                    auxiliary.unlink()
+            raise
     return {"ok": True, "resampler": "ESPER-Utau", "source_version": RELEASE,
             "implementation_id": hashlib.sha256(read_regular(SCRIPT, maximum=128 * 1024)).hexdigest(),
             "engine_sha256": runtime["engine_sha256"], "config_sha256": runtime["config_sha256"],
@@ -486,6 +495,9 @@ def probe(*, root: Path, cache: Path, container: str, timeout: float) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A background/nohup parent can pass SIG_IGN through exec. Restore Python's
+    # cooperative interruption so run_guest closes and joins its supervisor.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     parser = argparse.ArgumentParser(description="Executa ESPER-Utau Linux ARM64 com cópia privada da fonte UTAU.")
     parser.add_argument("--root", default=os.getenv("PHONE_WORKER_ESPER_ROOT") or str(Path.home() / ".esper-utau"))
     parser.add_argument("--cache-dir", default=os.getenv("PHONE_WORKER_ESPER_CACHE_DIR"))

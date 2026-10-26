@@ -303,21 +303,7 @@ def automatic_render_plan(arrangement, text, segments=None, *, language='pt-BR')
             group_segments.extend(effects)
             group_moras+=moras
         finish()
-    from .arrangement import arrangement_render_plan
-    guides=copy.deepcopy(arrangement)
-    for part in guides['parts']:
-        if part.get('lyrics_source')=='message':
-            part['lyrics_source']='vowel'
-        split=[]
-        for span in _spans(part['notes']):
-            split.extend(span)
-        part['notes']=split
-        part.pop('source_note_ids',None)
-    for chunk in arrangement_render_plan(guides)['chunks']:
-        parts=[request for request in chunk['parts']
-               if next(part for part in arrangement['parts'] if part['id']==request['id']).get('lyrics_source')!='message']
-        if parts:
-            calls.append(dict(chunk,parts=parts))
+    calls.extend(accompaniment_render_chunks(arrangement))
     calls.sort(key=lambda chunk:chunk['start_ms'])
     return {'chunks':calls,'warnings':['lyrics_automatically_adapted']}
 
@@ -410,17 +396,28 @@ def _finite_render_plan(arrangement,text,segments,*,language):
             if unit['boundary']:
                 finish()
         finish()
-    from .arrangement import arrangement_render_plan
-    guides=copy.deepcopy(arrangement)
-    for part in guides['parts']:
-        if part.get('lyrics_source')=='message':
-            part['lyrics_source']='vowel'
-        part['notes']=[note for span in _spans(part['notes']) for note in span]
-        part.pop('source_note_ids',None)
-    for chunk in arrangement_render_plan(guides)['chunks']:
-        parts=[request for request in chunk['parts'] if next(
-            part for part in arrangement['parts'] if part['id']==request['id']).get('lyrics_source')!='message']
-        if parts:
-            calls.append(dict(chunk,parts=parts))
+    calls.extend(accompaniment_render_chunks(arrangement))
     calls.sort(key=lambda chunk:chunk['start_ms'])
     return {'chunks':calls,'warnings':['lyrics_automatically_adapted']}
+
+
+def accompaniment_render_chunks(arrangement):
+    """Use exactly the guide windows of message singing, then omit its lyrics.
+
+    Keeping the lead while planning is essential: removing it first changes
+    shared chunk boundaries and makes warmed stems unusable by real messages.
+    """
+    from .arrangement import arrangement_render_plan
+    guides = copy.deepcopy(arrangement)
+    sources = {part['id']: part.get('lyrics_source') for part in guides['parts']}
+    for part in guides['parts']:
+        if part.get('lyrics_source') == 'message':
+            part['lyrics_source'] = 'vowel'
+        part['notes'] = [note for span in _spans(part['notes']) for note in span]
+        part.pop('source_note_ids', None)
+    chunks = []
+    for chunk in arrangement_render_plan(guides)['chunks']:
+        parts = [request for request in chunk['parts'] if sources[request['id']] != 'message']
+        if parts:
+            chunks.append(dict(chunk, parts=parts))
+    return chunks

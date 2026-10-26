@@ -582,6 +582,10 @@ class CDPanelView(VisaoLayoutBaseTTS):
             await asyncio.wait_for(self.cog._set_user_tts_and_refresh(
                 self.guild_id, self.owner_id, ttv_melody_id=melody_id), timeout=12.0)
             self.active_melody_id = melody_id
+            warmup = getattr(self.cog, '_schedule_cd_accompaniment_warmup', None)
+            if callable(warmup):
+                warmup(self.guild_id, self.owner_id, melody_id=melody_id,
+                       settings=dict(self._preferences))
         except asyncio.TimeoutError:
             await _reply(interaction, "A confirmação demorou. Abra o painel novamente para conferir sua seleção.")
         except Exception:

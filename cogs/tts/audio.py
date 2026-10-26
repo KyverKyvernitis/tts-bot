@@ -2108,6 +2108,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "teto_reading_mode": str(state.get("teto_reading_mode") or ""),
             "ttv_personal_settings": bool(state.get("ttv_personal_settings")),
             "ttv_performance_protocol": int(state.get("ttv_performance_protocol") or 0),
+            "ttv_background_protocol": int(state.get("ttv_background_protocol") or 0),
             "ttv_voices": list(state.get("ttv_voices") or [])[:25],
             "ttv_languages": list(state.get("ttv_languages") or [])[:2],
             "last_ok_age_seconds": round(now - last_ok, 1) if last_ok else None,
@@ -2524,6 +2525,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             route["teto_fingerprint"] = str(teto_state.get("fingerprint") or "")
             route["ttv_personal_settings"] = bool(teto_state.get("ttv_personal_settings"))
             route["ttv_performance_protocol"] = int(teto_state.get("ttv_performance_protocol") or agent.get("ttv_performance_protocol") or 0)
+            route["ttv_background_protocol"] = int(agent.get("ttv_background_protocol") or 0)
             route["ttv_languages"] = [code for code in (teto_state.get("ttv_languages") or [])
                                       if code in {"pt-BR", "en-US"}]
             route["ttv_language_fingerprints"] = {
@@ -4371,9 +4373,17 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 ("X-Core-Worker-Cache-Read-Ms", "cache_read"),
                 ("X-Core-Worker-Android-Synth-Ms", "android_synth"),
                 ("X-Core-Worker-Android-Roundtrip-Ms", "android_roundtrip"),
+                ("X-Core-Worker-Preflight-Ms", "preflight"),
+                ("X-Core-Worker-Dependency-Snapshot-Ms", "dependency_snapshot"),
+                ("X-Core-Worker-Engine-Order-Ms", "engine_order"),
+                ("X-Core-Worker-Cache-Key-Ms", "cache_key"),
+                ("X-Core-Worker-Cache-Lookup-Ms", "cache_lookup"),
+                ("X-Core-Worker-Teto-Render-Ms", "teto_render"),
+                ("X-Core-Worker-Teto-Admission-Ms", "teto_admission"),
+                ("X-Core-Worker-Cache-Store-Ms", "cache_store"),
             ):
                 value = self._parse_header_float(self._worker_header_value(response.headers, header_name))
-                if value is not None:
+                if value is not None and 0 <= value < float("inf"):
                     timing_ms[key] = round(value, 2)
             data = {
                 "ok": True,
@@ -4393,6 +4403,26 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 "_vps_worker_response_bytes": audio_size,
                 "audio_bytes_len": audio_size,
             }
+            for header_name, key in (
+                ("X-Core-Worker-TTV-Resample-Ms", "resample_ms"),
+                ("X-Core-Worker-TTV-Compose-Ms", "compose_ms"),
+                ("X-Core-Worker-TTV-Postprocess-Ms", "postprocess_ms"),
+                ("X-Core-Worker-TTV-Cache-Maintenance-Ms", "cache_maintenance_ms"),
+                ("X-Core-Worker-TTV-Render-Workers", "render_workers"),
+                ("X-Core-Worker-TTV-Source-Groups", "source_groups"),
+                ("X-Core-Worker-TTV-Fragment-Cache-Hits", "fragment_cache_hits"),
+                ("X-Core-Worker-TTV-Fragment-Cache-Misses", "fragment_cache_misses"),
+                ("X-Core-Worker-TTV-Resampler-Calls", "resampler_calls"),
+                ("X-Core-Worker-TTV-Cache-Scans", "cache_scans"),
+                ("X-Core-Worker-TTV-Cache-Evictions", "cache_evictions"),
+                ("X-Core-Worker-TTV-Cache-Size-Bytes", "cache_size_bytes"),
+            ):
+                value = self._parse_header_float(self._worker_header_value(response.headers, header_name))
+                if value is not None and 0 <= value < float("inf"):
+                    if key.endswith("_ms"):
+                        data[key] = round(value, 2)
+                    elif value.is_integer():
+                        data[key] = int(value)
             data["ttv_performance_hash"] = self._worker_header_value(response.headers, "X-Core-Worker-TTV-Performance-Hash")
             data['teto_timeline_mode'] = self._worker_header_value(response.headers, 'X-Core-Worker-Teto-Timeline')
             data['renderer_version'] = self._worker_header_value(response.headers, 'X-Core-Worker-Teto-Renderer')
@@ -6184,6 +6214,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "teto_pitch_semitones": preferences.get("ttv_pitch_semitones", ""),
             **preferences,
             **performance,
+            **({"priority": "background"} if is_teto and getattr(item, "_cd_background", False) else {}),
             # Uma requisição explícita da Teto não pode ser desviada pela engine
             # global preferida do worker; o fallback continua separado abaixo.
             "preferred_engine": "edge" if engine == "edge" else "teto" if is_teto else TTS_WORKER_AGENT_PREFERRED_ENGINE,
@@ -6206,6 +6237,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         text = str(exc or "").lower()
         return any(token in text for token in (
             "tts agent ocupado",
+            "recurso pesado ocupado",
             "fila local cheia",
             "busy",
             "queue full",
@@ -6255,7 +6287,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         metrics["tts_agent_synth_attempts"] = int(metrics.get("tts_agent_synth_attempts", 0) or 0) + 1
         started = time.monotonic()
         last_error: Exception | None = None
-        max_attempts = 1 if getattr(item, "_edge_phone_recovery", False) else max(1, int(TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS or 0) + 1)
+        max_attempts = 1 if getattr(item, "_edge_phone_recovery", False) or getattr(item, "_cd_background", False) else max(1, int(TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS or 0) + 1)
         for attempt in range(max_attempts):
             path = ""
             try:
@@ -6380,7 +6412,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         final_error = last_error or RuntimeError("falha desconhecida no TTS Agent")
         if engine == "edge" and not getattr(item, "_edge_phone_recovery", False):
             self._record_edge_phone_failure(final_error)
-        if not getattr(item, "_edge_phone_recovery", False) and not (
+        if not getattr(item, "_cd_background", False) and not getattr(item, "_edge_phone_recovery", False) and not (
             engine == "edge" and re.search(r"(?<!\d)429(?!\d)", str(final_error))
         ):
             self._mark_tts_agent_synth_failure(final_error)

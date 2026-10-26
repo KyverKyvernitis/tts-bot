@@ -35,6 +35,8 @@ DOTNET_FREE_SPACE_RESERVE = 400 * 1024 * 1024
 # Exact source shipped in kits v1 and v2/v3. Other local launchers belong to
 # the operator and must never be replaced by an installation retry.
 KNOWN_LAUNCHER_SHA256 = frozenset({
+    # Previous native-pitch/volume-headroom bridge, before cooperative warming.
+    "49fac2cae6396f3ee8dda7bc6e2ccbe2ae3835d48b9e25b6eeedffb5b955b43b",
     "da55173230453b3e06c74416c88bdec73a94ae86e8afda320a2b7f12b04305e1",
     "072c37648c164db924add41a56dd234fe97080703a5317cbe96cc9f86bb912c5",
 })

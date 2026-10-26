@@ -25,6 +25,61 @@ MAX_STEM_BYTES = 16 * 1024 * 1024
 SAMPLE_RATE = 48000
 
 
+def _stem_key(call, profile):
+    # Shared by foreground composition and idle warming. Never relax duration,
+    # pitch curves or bank identity merely to increase the cache hit rate.
+    return _digest({"version": RENDER_VERSION, "score": call['score'],
+                    "text": call['text'], "segments": call.get('segments'),
+                    "voice_id": call['voice_id'], "language": call['language'],
+                    "render_profile": profile})
+
+
+def _render_metrics(metadata):
+    result = {}
+    for key in ('resample_ms', 'compose_ms', 'postprocess_ms', 'cache_maintenance_ms',
+                'render_workers', 'source_groups', 'fragment_cache_hits',
+                'fragment_cache_misses', 'resampler_calls', 'cache_scans',
+                'cache_evictions', 'cache_size_bytes'):
+        value = metadata.get(key)
+        if type(value) not in (int, float):
+            continue
+        try:
+            number = float(value)
+        except OverflowError:
+            continue
+        if math.isfinite(number) and number >= 0:
+            if key.endswith('_ms'):
+                result[key] = round(number, 2)
+            elif number.is_integer():
+                result[key] = int(number)
+    return result
+
+
+def _worker_stage_metrics(metadata):
+    stages = metadata.get('timing_ms')
+    if not isinstance(stages, dict):
+        stages = {}
+    result = {}
+    for key in ('worker_total', 'worker_synth', 'preflight', 'dependency_snapshot',
+                'engine_order', 'cache_key', 'cache_lookup', 'cache_read',
+                'teto_admission', 'teto_render', 'cache_store'):
+        value = stages.get(key)
+        if type(value) in (int, float):
+            try:
+                if 0 <= float(value) < float('inf'):
+                    result[key] = round(float(value), 2)
+            except OverflowError:
+                pass
+    value = metadata.get('_vps_worker_request_ms')
+    if type(value) in (int, float):
+        try:
+            if 0 <= float(value) < float('inf'):
+                result['worker_http'] = round(float(value), 2)
+        except OverflowError:
+            pass
+    return result
+
+
 class RenderError(ValueError):
     """Stable, credential-free failure code suitable for a pending artifact."""
 
@@ -271,18 +326,22 @@ def _mix_controls(part):
 
 
 def _composition_result(audio, output_format, mix_key, arrangement, rendered,
-                        common_preroll, profile, chunks, *, cache_hit=False, alignment_warnings=()):
+                        common_preroll, profile, chunks, *, cache_hit=False, alignment_warnings=(), timing_ms=None):
     return {"audio": audio, "audio_format": output_format,
             "sha256": hashlib.sha256(audio).hexdigest(), "mix_sha256": mix_key,
             "arrangement_sha256": _digest(arrangement), "duration_ms": arrangement["duration_ms"],
             "mix_cache_hit": cache_hit,
             "stems": [{key: item[key] for key in ("part_id", "voice_id", "cache_hit", "key")}
                       | {"score_sha256": _digest(item["score"]), "render_sha256": item["sha256"],
-                         "start_ms": item["start_ms"]} for item in rendered],
+                         "start_ms": item["start_ms"],
+                         "timing_ms": item.get('timing_ms', {}),
+                         "worker_timing_ms": item.get('worker_timing_ms', {}),
+                         "render_metrics": item.get('render_metrics', {})} for item in rendered],
             "metadata": {"renderer_version": RENDER_VERSION,
                          **({'lyrics_adaptation': arrangement['lyrics_adaptation']}
                             if 'lyrics_adaptation' in arrangement else {}),
                          "render_profile_fingerprint": profile,
+                         "timing_ms": {key: round(value, 2) for key, value in (timing_ms or {}).items()},
                          "midi_preroll_ms": common_preroll, "sample_rate": SAMPLE_RATE,
                          "channels": 2, "parts": len(arrangement["parts"]), "chunks": chunks,
                          "alignment_warnings": list(alignment_warnings),
@@ -344,6 +403,49 @@ def render_arrangement(arrangement, text, render_part, *, segments=None, cache_d
             workspace=Path(workspace))
 
 
+def warm_arrangement_stems(arrangement, render_part, *, cache_dir,
+                           render_profile_fingerprint, language='pt-BR',
+                           cancelled=None, timeout_seconds=300, max_stems=8):
+    """Warm fixed accompaniment only, without synthesizing lyrics or a mix.
+
+    The caller provides low-priority admission at the physical worker. This
+    function deliberately does not take the foreground composition lease.
+    """
+    from .arrangement import validate_arrangement
+    from .lyrics import accompaniment_render_chunks
+    arrangement = validate_arrangement(arrangement)
+    if language not in {'pt-BR', 'en-US'}:
+        raise RenderError('invalid_render_text_or_language')
+    if (type(max_stems) is not int or not 1 <= max_stems <= 64
+            or type(timeout_seconds) not in (int, float)
+            or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 3600):
+        raise RenderError('invalid_warmup_limits')
+    if not render_profile_fingerprint or cache_dir is None:
+        return {'stems': [], 'skipped': 'missing_render_profile'}
+    cache, deadline = Path(cache_dir), time.monotonic() + timeout_seconds
+    stems = []
+    for chunk in accompaniment_render_chunks(arrangement):
+        for request in chunk['parts']:
+            _check(cancelled, deadline)
+            score = request['score']
+            call = {'score': score, 'text': 'a', 'voice_id': request['voice_id'],
+                    'language': language, 'pitch': 0.0, 'rate': 1.0,
+                    'part_id': request['id'], 'role': request['role']}
+            key = _stem_key(call, render_profile_fingerprint)
+            hit = _cached_stem(cache, key, score) is not None
+            if not hit:
+                audio, meta = _result_audio(render_part(**call))
+                _check(cancelled, deadline)
+                preroll = _preroll(audio, meta, score)
+                if len(audio) > MAX_STEM_BYTES:
+                    raise RenderError('stem_size_limit')
+                _remember_stem(cache, key, audio, meta, preroll)
+            stems.append({'part_id': request['id'], 'key': key, 'cache_hit': hit})
+            if len(stems) >= max_stems:
+                return {'stems': stems}
+    return {'stems': stems}
+
+
 def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
                         render_profile_fingerprint, language, output_format,
                         cancelled, timeout_seconds, workspace):
@@ -354,6 +456,9 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
     occurs before/after each physical request and composition stage. The
     caller must keep its admission lease until a blocking request has ended.
     """
+    started = time.monotonic()
+    timing = dict.fromkeys(('plan', 'stems', 'stem_cache_lookup', 'synthesize', 'stem_store',
+                            'mix_cache_lookup', 'mix', 'encode', 'cache_store', 'total'), 0.0)
     from .arrangement import arrangement_render_plan, validate_arrangement, vowel_guide_score
     arrangement = validate_arrangement(arrangement)
     if not isinstance(text, str) or language not in {"pt-BR", "en-US"}:
@@ -388,6 +493,8 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
                     if part["id"] == identity and part["score"].get("lyrics_source") == "message"]
         if requests:
             message_words[identity] = iter(_message_allocation(text, requests, segments))
+    timing['plan'] = (time.monotonic() - started) * 1000
+    stems_started = time.monotonic()
     for chunk in plan["chunks"]:
         for request in chunk["parts"]:
             _check(cancelled, deadline)
@@ -412,19 +519,24 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
             if effects is not None:
                 call["segments"] = effects
             # Role/id/mix are orchestration labels, not synthesis inputs.
-            key = _digest({"version": RENDER_VERSION, "score": score, "text": lyrics,
-                           "segments": effects,
-                           "voice_id": call["voice_id"], "language": language,
-                           "render_profile": render_profile_fingerprint})
+            key = _stem_key(call, render_profile_fingerprint)
+            part_started = time.monotonic()
             saved = _cached_stem(cache, key, score)
+            lookup_ms = (time.monotonic() - part_started) * 1000
+            timing['stem_cache_lookup'] += lookup_ms
             hit = saved is not None
+            synth_started = time.monotonic()
             audio, meta = saved if hit else _result_audio(render_part(**call))
+            synth_ms = 0.0 if hit else (time.monotonic() - synth_started) * 1000
+            timing['synthesize'] += synth_ms
             _check(cancelled, deadline)
             preroll = _preroll(audio, meta, score)
             if len(audio) > MAX_STEM_BYTES:
                 raise RenderError("stem_size_limit")
             if not hit:
+                store_started = time.monotonic()
                 _remember_stem(cache, key, audio, meta, preroll)
+                timing['stem_store'] += (time.monotonic() - store_started) * 1000
             audio_sha256 = hashlib.sha256(audio).hexdigest()
             audio_path = workspace / (str(len(rendered)) + ".wav")
             audio_path.write_bytes(audio)
@@ -432,10 +544,16 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
             rendered.append({"part_id": request["id"], "start_ms": chunk["start_ms"],
                              "score": score, "audio_path": audio_path, "sha256": audio_sha256,
                              "preroll_ms": preroll,
+                             "timing_ms": {'cache_lookup': round(lookup_ms, 2),
+                                           'synthesize': round(synth_ms, 2),
+                                           'total': round((time.monotonic() - part_started) * 1000, 2)},
+                             "render_metrics": {} if hit else _render_metrics(meta),
+                             "worker_timing_ms": {} if hit else _worker_stage_metrics(meta),
                              "key": key, "cache_hit": hit, "voice_id": call["voice_id"],
                              "continuations": any(bool(marker.get("continues_from_previous")
                                                        or marker.get("continues_in_next"))
                                                   for marker in request.get("continuations", []))})
+    timing['stems'] = (time.monotonic() - stems_started) * 1000
     if not rendered:
         raise RenderError("empty_composition")
     common_preroll = max(item["preroll_ms"] for item in rendered)
@@ -447,12 +565,16 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
          "offset": item["start_ms"], "preroll": item["preroll_ms"]} for item in rendered],
         "controls": controls, "duration_ms": arrangement["duration_ms"],
         "sample_rate": SAMPLE_RATE, "format": output_format})
+    lookup_started = time.monotonic()
     saved_mix = _cached_mix(cache, mix_key, output_format)
+    timing['mix_cache_lookup'] = (time.monotonic() - lookup_started) * 1000
     if saved_mix is not None:
         _check(cancelled, deadline)
+        timing['total'] = (time.monotonic() - started) * 1000
         return _composition_result(saved_mix, output_format, mix_key, arrangement, rendered,
                                    common_preroll, render_profile_fingerprint, len(plan["chunks"]),
-                                   cache_hit=True, alignment_warnings=plan["warnings"])
+                                   cache_hit=True, alignment_warnings=plan["warnings"], timing_ms=timing)
+    mix_started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="osaka-cd-mix-") as temporary:
         directory = Path(temporary)
         inputs, labels, filters = [], [], []
@@ -508,6 +630,8 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
         filters.append("".join(labels) + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0:normalize=0,volume={attenuation:.9f}[out]")
         target = directory / ("composition." + output_format)
         encoding = ["-c:a", "pcm_s16le"] if output_format == "wav" else ["-c:a", "libmp3lame", "-b:a", "128k"]
+        timing['mix'] = (time.monotonic() - mix_started) * 1000
+        encode_started = time.monotonic()
         _check(cancelled, deadline)
         _ffmpeg([*inputs, "-filter_complex", ";".join(filters), "-map", "[out]", *encoding, str(target)],
                 timeout=min(120, max(1, deadline - time.monotonic())))
@@ -516,6 +640,8 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
             raise RenderError("invalid_composition_audio")
         _ffmpeg(["-xerror", "-i", str(target), "-f", "null", "-"], timeout=60)
         audio = target.read_bytes()
+        timing['encode'] = (time.monotonic() - encode_started) * 1000
+    store_started = time.monotonic()
     if cache is not None:
         mix_path = cache / "mixes" / (mix_key + "." + output_format)
         try:
@@ -525,6 +651,8 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
             _prune_cache(cache, mix_path)
         except OSError:
             pass
+    timing['cache_store'] = (time.monotonic() - store_started) * 1000
+    timing['total'] = (time.monotonic() - started) * 1000
     return _composition_result(audio, output_format, mix_key, arrangement, rendered,
                                common_preroll, render_profile_fingerprint, len(plan["chunks"]),
-                               alignment_warnings=plan["warnings"])
+                               alignment_warnings=plan["warnings"], timing_ms=timing)
