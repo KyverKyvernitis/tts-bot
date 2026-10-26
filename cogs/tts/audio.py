@@ -1931,6 +1931,10 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 os.remove(handle.part_path)
 
     async def _discard_edge_stream_path(self, path: str | None) -> None:
+        cd_handle = getattr(self, '_cd_stream_for_path', lambda _: None)(path)
+        if cd_handle is not None:
+            await self._finalize_cd_pcm_stream(cd_handle, cancel=True)
+            return
         handle = self._edge_stream_handle_for_path(path)
         if handle is not None:
             await self._finalize_edge_stream(handle, cancel=True)
@@ -3202,6 +3206,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
 
     def _shutdown_tts_runtime(self) -> None:
         self._tts_shutting_down = True
+        cancel_cd = getattr(self, '_cancel_cd_pcm_streams', None)
+        if callable(cancel_cd):
+            cancel_cd()
         prepared_cache = getattr(self, "_tts_prepared_opus", None)
         if prepared_cache is not None:
             prepared_cache.close()
@@ -4416,10 +4423,17 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 ("X-Core-Worker-TTV-Cache-Scans", "cache_scans"),
                 ("X-Core-Worker-TTV-Cache-Evictions", "cache_evictions"),
                 ("X-Core-Worker-TTV-Cache-Size-Bytes", "cache_size_bytes"),
+                ("X-Core-Worker-TTV-PCM-Cache-Hits", "pcm_cache_hits"),
+                ("X-Core-Worker-TTV-PCM-Cache-Misses", "pcm_cache_misses"),
+                ("X-Core-Worker-TTV-PCM-Cache-Bytes", "pcm_cache_bytes"),
+                ("X-Core-Worker-TTV-Normalization-Gain", "normalization_gain"),
             ):
                 value = self._parse_header_float(self._worker_header_value(response.headers, header_name))
                 if value is not None and 0 <= value < float("inf"):
-                    if key.endswith("_ms"):
+                    if key == 'normalization_gain':
+                        if 0.6 <= value <= 1.2:
+                            data[key] = value
+                    elif key.endswith("_ms"):
                         data[key] = round(value, 2)
                     elif value.is_integer():
                         data[key] = int(value)
@@ -5101,6 +5115,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         )
 
     async def _try_worker_voice_direct_tts(self, guild: discord.Guild, item: QueueItem) -> dict[str, Any] | None:
+        cd_allowed = getattr(self, '_cd_streaming_allowed_for', None)
+        if callable(cd_allowed) and cd_allowed(item)[0]:
+            return None
         try:
             allowed, reason = self._worker_voice_direct_tts_available_for(guild, item)
         except Exception as exc:
@@ -5274,6 +5291,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return compose_audio_filters(TTS_FFMPEG_OPTIONS, self._tts_effect_filter(item))
 
     def _make_discord_tts_source_for_item(self, path: str, item: QueueItem | None) -> tuple[Any, str]:
+        cd_handle = getattr(self, '_cd_stream_for_path', lambda _: None)(path)
+        if cd_handle is not None:
+            return cd_handle.buffer.as_audio_source(_DiscordAudioSourceBase), 'cd_pcm_ram'
         factory = self._make_discord_tts_source
         try:
             return factory(path, item=item)
@@ -6215,6 +6235,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             **preferences,
             **performance,
             **({"priority": "background"} if is_teto and getattr(item, "_cd_background", False) else {}),
+            **({"cache_mode": "bypass"} if is_teto and getattr(item, "_cd_progressive_request", False) else {}),
             # Uma requisição explícita da Teto não pode ser desviada pela engine
             # global preferida do worker; o fallback continua separado abaixo.
             "preferred_engine": "edge" if engine == "edge" else "teto" if is_teto else TTS_WORKER_AGENT_PREFERRED_ENGINE,
@@ -6709,6 +6730,21 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         allow_edge_stream: bool = False,
     ) -> tuple[str, bool]:
         self._snapshot_tts_item(item)
+        cd_allowed = getattr(self, '_cd_streaming_allowed_for', None)
+        if callable(cd_allowed) and cd_allowed(item)[0]:
+            cached = self._try_get_cached_path(state, item)
+            if cached:
+                return cached, False
+            try:
+                handle = await self._prepare_cd_pcm_stream(state, item)
+                return handle.path, True
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # No source has been handed to a player yet. The existing
+                # verified complete-file route remains a safe fallback.
+                item._cd_force_full_file = True
+                logger.info('[cd_pcm] prefix failed before playback type=%s', type(error).__name__)
         normalized_text = self._get_item_normalized_cache_text(item)
         text_length = len(normalized_text)
         if self._tts_agent_route_available():
@@ -6905,6 +6941,13 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         item: QueueItem,
     ) -> tuple[str, bool, _PreparedTTSPlayback | None]:
         path, should_cleanup = await audio_task
+        cd_handle = getattr(self, '_cd_stream_for_path', lambda _: None)(path)
+        if cd_handle is not None:
+            # Ready PCM needs no FFmpeg or speculative read. In particular,
+            # first-audible timing must be observed by the playback thread.
+            source, kind = self._make_discord_tts_source_for_item(path, item)
+            return path, should_cleanup, _PreparedTTSPlayback(
+                path=path, source=source, source_kind=kind, prime_ms=0.0)
         if not TTS_FFMPEG_PRIME_ENABLED or not path:
             return path, should_cleanup, None
         if self._is_music_active_for_guild(item.guild_id):
@@ -7016,6 +7059,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         guild_id = int(getattr(guild, "id", 0) or getattr(item, "guild_id", 0) or 0)
         lock = self._get_tts_playback_lock(guild_id) if guild_id else asyncio.Lock()
         edge_stream = self._edge_stream_handle_for_path(path)
+        cd_stream = getattr(self, '_cd_stream_for_path', lambda _: None)(path)
+        cd_playback_ok = False
         stream_playback_ok = False
         playback_counted = False
         source_handed_to_player = False
@@ -7066,7 +7111,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 # a bounded, nonblocking PCM reader. Remote routers still need
                 # complete files, and all voice ownership checks stay in place.
                 local_stream_overlay = edge_stream is not None and permite_streaming_tts_mixer_local(self.bot, guild_id, vc)
-                if (edge_stream is None or local_stream_overlay) and not bool(getattr(item, "chatbot_no_auto_connect", False)) and not bool(getattr(item, "_tts_music_worker_unavailable", False)) and roteador_suporta_tts(self.bot) and guild is not None:
+                if cd_stream is None and (edge_stream is None or local_stream_overlay) and not bool(getattr(item, "chatbot_no_auto_connect", False)) and not bool(getattr(item, "_tts_music_worker_unavailable", False)) and roteador_suporta_tts(self.bot) and guild is not None:
                     if local_stream_overlay:
                         await self._activate_edge_stream(edge_stream)
                     if item is not None:
@@ -7162,6 +7207,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
 
                 playback_started_at = time.monotonic()
                 playback_timeout = self._effective_playback_timeout(item, edge_stream)
+                if cd_stream is not None:
+                    # Rendering continues while playing. The reader enforces
+                    # its own bounded stall deadline; preserve the native job
+                    # deadline as well as the musical presentation duration.
+                    playback_timeout = max(playback_timeout, 1200.0 + cd_stream.buffer.total_duration_ms / 1000)
                 try:
                     await asyncio.wait_for(finished, timeout=playback_timeout)
                 except asyncio.TimeoutError as exc:
@@ -7212,14 +7262,34 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     result[f"{stream_engine}_stream_bytes"] = edge_stream.audio_bytes
                     self._verify_progressive_stream_completed(edge_stream, guild_id=guild_id)
                     stream_playback_ok = True
+                if cd_stream is not None:
+                    if cd_stream.buffer.error is not None:
+                        raise cd_stream.buffer.error
+                    if not cd_stream.buffer.done:
+                        raise TTSPlaybackError('cd_pcm_incomplete')
+                    cd_playback_ok = True
+                    result['progressive_stream'] = True
+                    result['cd_pcm_stream'] = True
+                    result['audio_format'] = 'pcm_s16le'
+                    audible = cd_stream.buffer.first_non_silent_at
+                    if audible is not None:
+                        received = float(getattr(item, 'received_at_monotonic', 0.0) or getattr(item, 'enqueued_at_monotonic', audible))
+                        audible_ms = max(0.0, (audible - received) * 1000)
+                        result['first_audible_at'] = audible
+                        result['message_to_first_audible_ms'] = audible_ms
+                        self._record_latency_sample('cd_message_to_first_audible', audible_ms)
                 return result
             except Exception as exc:
-                if edge_stream is not None:
+                if edge_stream is not None or cd_stream is not None:
                     # Never replay an utterance after PCM frames may have gone
                     # out to Discord. A FIFO is single-use after an attempt.
                     exc._tts_first_frame_observed = bool(first_frame.done() and not first_frame.cancelled())
                 raise
             except asyncio.CancelledError:
+                if cd_stream is not None and source_handed_to_player:
+                    with contextlib.suppress(Exception):
+                        if getattr(vc, 'source', source) is source:
+                            vc.stop()
                 if item is not None and getattr(item, "chatbot_no_auto_connect", False) and source_handed_to_player:
                     with contextlib.suppress(Exception):
                         if self._get_voice_client_for_guild(guild) is vc and not self._is_music_active_for_guild(guild_id) and getattr(vc, "source", source) is source:
@@ -7244,6 +7314,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                         playback_ok=stream_playback_ok,
                     )
                     await self._finalize_edge_stream(edge_stream, cancel=not stream_playback_ok)
+                if cd_stream is not None:
+                    await self._finalize_cd_pcm_stream(cd_stream, cancel=not cd_playback_ok)
 
     def _is_already_playing_audio_error(self, exc: Exception | str) -> bool:
         return "already playing audio" in str(exc or "").lower()
@@ -7398,6 +7470,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         *,
         prepared: _PreparedTTSPlayback | None = None,
     ) -> dict[str, float]:
+        if getattr(self, '_cd_stream_for_path', lambda _: None)(path) is not None:
+            # A RAM stream is consumed once. A retry could repeat sung words.
+            return await self._play_file(vc, path, item=item, prepared=prepared)
         if getattr(item, "chatbot_no_auto_connect", False):
             return await self._play_file(vc, path, item=item, prepared=prepared)
         stream_handle = self._edge_stream_handle_for_path(path)
@@ -7704,7 +7779,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
 
         setattr(prefetched_item, "_dequeued_at_monotonic", time.monotonic())
         engine = str(getattr(prefetched_item, "engine", "") or "gtts").strip().lower().replace("-", "_")
-        if engine in {"edge", "gtts"}:
+        cd_allowed = getattr(self, '_cd_streaming_allowed_for', None)
+        if engine in {"edge", "gtts"} or callable(cd_allowed) and cd_allowed(prefetched_item)[0]:
             setattr(prefetched_item, "_tts_prefetch", True)
             setattr(prefetched_item, "_tts_foreground_event", asyncio.Event())
             self._record_prefetch_started()
@@ -7719,7 +7795,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         setattr(item, "_dequeued_at_monotonic", time.monotonic())
         engine = str(getattr(item, "engine", "") or "gtts").strip().lower().replace("-", "_")
         audio_task: asyncio.Task | None = None
-        if engine in {"edge", "gtts"}:
+        cd_allowed = getattr(self, '_cd_streaming_allowed_for', None)
+        if engine in {"edge", "gtts"} or callable(cd_allowed) and cd_allowed(item)[0]:
             setattr(item, "_tts_prefetch", True)
             setattr(item, "_tts_foreground_event", asyncio.Event())
             self._record_prefetch_started()
@@ -7733,6 +7810,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             return
         setattr(item, "_tts_prefetch", False)
         setattr(item, "_tts_was_prefetched", True)
+        cd_handle = getattr(self, '_cd_stream_for_path', lambda _: None)(getattr(item, '_cd_stream_path', ''))
+        if cd_handle is not None:
+            cd_handle.buffer.promote()
         promotion_event = getattr(item, "_tts_foreground_event", None)
         if isinstance(promotion_event, asyncio.Event):
             promotion_event.set()
@@ -7948,7 +8028,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                         continue
                     edge_stream = self._edge_stream_handle_for_path(current_path)
                     source_kind_for_failure = "fifo" if edge_stream is not None else "arquivo"
-                    valid_stream = bool(edge_stream is not None and os.path.exists(current_path))
+                    cd_stream = getattr(self, '_cd_stream_for_path', lambda _: None)(current_path)
+                    valid_stream = bool((edge_stream is not None or cd_stream is not None) and os.path.exists(current_path))
                     valid_file = bool(
                         current_path
                         and os.path.isfile(current_path)

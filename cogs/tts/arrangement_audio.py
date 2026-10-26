@@ -16,6 +16,7 @@ from osaka_cd.arrangement import (
     arrangement_performance_sha256, arrangement_sha256, validate_arrangement,
 )
 from osaka_cd.render import render_arrangement, warm_arrangement_stems
+from .cd_audio import CDStreamingMixin
 
 _LOG = logging.getLogger(__name__)
 
@@ -81,8 +82,8 @@ def arrangement_profile_identity(item, route):
     return hashlib.sha256(json.dumps(profiles, sort_keys=True).encode()).hexdigest()
 
 
-class ArrangementAudioMixin:
-    async def _request_cd_stem(self, item, request, *, background=False):
+class ArrangementAudioMixin(CDStreamingMixin):
+    async def _request_cd_stem(self, item, request, *, background=False, progressive=False):
         child = replace(item, text=request['text'], voice=request['voice_id'],
                         ttv_voice_id=request['voice_id'], ttv_score=request['score'],
                         language=request['language'], ttv_language=request['language'],
@@ -95,6 +96,8 @@ class ArrangementAudioMixin:
             child.__dict__.pop(key, None)
         if background:
             child._cd_background = True
+        if progressive:
+            child._cd_progressive_request = True
         path = ''
         try:
             path = await self._generate_tts_agent_worker_file(child)

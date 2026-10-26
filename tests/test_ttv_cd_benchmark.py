@@ -82,6 +82,7 @@ class CDLatencyBenchmarkTests(unittest.TestCase):
                 data = raw.getvalue()
                 return data, {'voice_id': self.voice_id, 'reading_language': kwargs['reading_language'],
                     'pitch_offset_semitones': 0.0, 'speech_rate': 1.0, 'midi_preroll_ms': 0,
+                    'normalization_gain': 1.0,
                     'sha256': hashlib.sha256(data).hexdigest(), 'resampler_calls': 1,
                     'render_workers': int(self.env['PHONE_WORKER_TETO_RENDER_THREADS'])}
 
@@ -187,6 +188,61 @@ class CDLatencyBenchmarkTests(unittest.TestCase):
         self.assertFalse(report['physical_utau_completed'])
         self.assertIn('PCM differs', report['samples'][-1]['error'])
         self.assertEqual(report['samples'][-1]['threads_requested'], 2)
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'FFmpeg required for fixture sample conversion')
+    def test_progressive_phases_report_availability_without_claiming_playback(self):
+        report = self.perform(progressive=True, rounds=1, threads=(1,))
+        self.assertTrue(report['ok'], json.dumps(report))
+        self.assertEqual(report['output_mode'], 'progressive_pcm')
+        self.assertFalse(report['discord_called'])
+        self.assertIn('no audio is played', report['first_audio_note'])
+        self.assertTrue(report['temporary_files_removed'])
+        for record in report['samples']:
+            self.assertEqual(record['output_mode'], 'progressive_pcm')
+            self.assertTrue(record['pcm_matches_reference'])
+            self.assertNotIn('mp3_sha256', record)
+            self.assertIsNotNone(record['first_nonzero_pcm_available_ms'])
+            self.assertIsNotNone(record['buffer_ready_ms'])
+            self.assertLessEqual(record['first_pcm_available_ms'], record['buffer_ready_ms'])
+            self.assertLessEqual(record['first_nonzero_pcm_available_ms'], record['elapsed_ms'])
+            self.assertLessEqual(record['buffer_ready_ms'], record['elapsed_ms'])
+        repeat = report['samples'][2]
+        self.assertFalse(repeat['physical_parts'])
+        self.assertTrue(all(stem['cache_kind'] == 'memory' for stem in repeat['stems']))
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'FFmpeg required for fixture sample conversion')
+    def test_progressive_prefix_precedes_later_physical_lead(self):
+        selected = {'score_schema': 2, 'duration_ms': 6000, 'parts': [
+            {'id': 'lead', 'role': 'lead', 'voice_id': 'kasane-teto', 'lyrics_source': 'message',
+             'notes': [{'midi_note': 60 if i < 6 else 62, 'start_ms': i*500,
+                        'duration_ms': 500, 'velocity': 100} for i in range(12)]},
+            {'id': 'harmony', 'role': 'harmony', 'voice_id': 'kasane-teto', 'lyrics_source': 'vowel',
+             'notes': [{'midi_note': 64, 'start_ms': 0, 'duration_ms': 6000, 'velocity': 100}]}]}
+        report = self.perform(progressive=True, arrangement=selected,
+                              text=' '.join(['a']*12), new_text=' '.join(['o']*12),
+                              rounds=1, threads=(1,))
+        self.assertTrue(report['ok'], json.dumps(report))
+        cold = report['samples'][0]
+        leads = [part for part in cold['physical_parts'] if part['role'] == 'lead']
+        self.assertGreaterEqual(len(leads), 2)
+        self.assertLessEqual(cold['first_nonzero_pcm_available_ms'], leads[1]['started_ms'])
+        self.assertLessEqual(cold['buffer_ready_ms'], leads[1]['started_ms'])
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'FFmpeg required for fixture sample conversion')
+    def test_progressive_pcm_mismatch_stops_thread_comparison(self):
+        original = self.factory
+
+        class ChangedRenderer(original):
+            def synthesize_performance(self, text, **kwargs):
+                raw, meta = super().synthesize_performance(text, **kwargs)
+                if self.env['PHONE_WORKER_TETO_RENDER_THREADS'] == '2':
+                    raw = raw[:-2] + b'\x01\x00'
+                    meta['sha256'] = hashlib.sha256(raw).hexdigest()
+                return raw, meta
+
+        report = self.perform(progressive=True, factory=ChangedRenderer, rounds=1)
+        self.assertFalse(report['ok'])
+        self.assertIn('PCM differs', report['samples'][-1]['error'])
 
 
 if __name__ == '__main__':

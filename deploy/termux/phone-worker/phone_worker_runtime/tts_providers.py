@@ -59,7 +59,8 @@ def render_telemetry(metadata):
         "resample_ms", "compose_ms", "postprocess_ms", "cache_maintenance_ms",
         "render_workers", "source_groups", "fragment_cache_hits",
         "fragment_cache_misses", "resampler_calls", "cache_scans",
-        "cache_evictions", "cache_size_bytes",
+        "cache_evictions", "cache_size_bytes", "pcm_cache_hits", "pcm_cache_misses", "pcm_cache_bytes",
+        "normalization_gain",
     ):
         value = metadata.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -70,7 +71,10 @@ def render_telemetry(metadata):
             continue
         if not 0 <= number < float("inf"):
             continue
-        if key.endswith("_ms"):
+        if key == 'normalization_gain':
+            if 0.6 <= number <= 1.2:
+                result[key] = number
+        elif key.endswith("_ms"):
             result[key] = round(number, 2)
         elif number.is_integer():
             result[key] = int(number)

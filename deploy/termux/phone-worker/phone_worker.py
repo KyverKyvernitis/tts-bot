@@ -2109,6 +2109,10 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
         ("cache_scans", "X-Core-Worker-TTV-Cache-Scans"),
         ("cache_evictions", "X-Core-Worker-TTV-Cache-Evictions"),
         ("cache_size_bytes", "X-Core-Worker-TTV-Cache-Size-Bytes"),
+        ("pcm_cache_hits", "X-Core-Worker-TTV-PCM-Cache-Hits"),
+        ("pcm_cache_misses", "X-Core-Worker-TTV-PCM-Cache-Misses"),
+        ("pcm_cache_bytes", "X-Core-Worker-TTV-PCM-Cache-Bytes"),
+        ("normalization_gain", "X-Core-Worker-TTV-Normalization-Gain"),
     ):
         value = meta.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -2119,7 +2123,10 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
             continue
         if not 0 <= number < float("inf"):
             continue
-        if key.endswith("_ms"):
+        if key == 'normalization_gain':
+            if 0.6 <= number <= 1.2:
+                handler.send_header(header, str(number))
+        elif key.endswith("_ms"):
             handler.send_header(header, str(round(number, 2)))
         elif number.is_integer():
             handler.send_header(header, str(int(number)))
@@ -2407,6 +2414,7 @@ def _teto_renderer_config_fingerprint(*, backend: str | None = None) -> str:
         "PHONE_WORKER_TETO_MODULATION", "PHONE_WORKER_TETO_FLAGS",
         "PHONE_WORKER_TETO_LENGTH_MODE", "PHONE_WORKER_TETO_RESAMPLER_COMMAND",
         "PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR", "PHONE_WORKER_TETO_FRAGMENT_CACHE_MB",
+        "PHONE_WORKER_TETO_PCM_CACHE_MB",
         "PHONE_WORKER_TETO_STATUS_CACHE_SECONDS", "PHONE_WORKER_TETO_WORLDLINE_CONTAINER",
         "PHONE_WORKER_TETO_WORLDLINE_LIBRARY", "PHONE_WORKER_WORLDLINE_CONTAINER",
         "PHONE_WORKER_WORLDLINE_LIBRARY", "PHONE_WORKER_TETO_ALIAS_SUFFIX",
@@ -2470,7 +2478,7 @@ def _miku_renderer_environment() -> dict[str, str]:
                                                    Path.home() / "phone-worker/cache/miku-fragments"),
     })
     defaults = {
-        "LENGTH_MODE": "total", "FRAGMENT_CACHE_MB": "256", "STATUS_CACHE_SECONDS": "15",
+        "LENGTH_MODE": "total", "FRAGMENT_CACHE_MB": "256", "PCM_CACHE_MB": "256", "STATUS_CACHE_SECONDS": "15",
         "MIN_ALIASES": "500", "ENGLISH_MIN_ALIASES": "500", "MAX_CHARACTERS": "180",
         "MAX_PHONEMES": "240", "MAX_AUDIO_SECONDS": "20", "RENDER_THREADS": "4",
     }

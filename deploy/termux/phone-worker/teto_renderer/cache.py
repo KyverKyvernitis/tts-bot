@@ -65,7 +65,11 @@ class FragmentCache:
         with self._write_lock:
             try:
                 if path.is_file() and (size := path.stat().st_size) > 44:
-                    os.utime(path, None)
+                    # Access recency belongs to the live index. Touching the
+                    # file changes mtime/ctime on every hit, invalidating safe
+                    # decoded-PCM caches and adding writes to the hot path.
+                    # After restart eviction is based on write recency until
+                    # this process has observed fresh accesses.
                     if self._indexed:
                         self._remember(path, size, time.time_ns())
                     if self._renders:
@@ -130,7 +134,9 @@ class FragmentCache:
                 try:
                     if path.is_file():
                         info = path.stat()
-                        entries[path] = (info.st_size, info.st_mtime_ns)
+                        previous = self._entries.get(path)
+                        recent = previous[1] if previous and previous[0] == info.st_size else 0
+                        entries[path] = (info.st_size, max(info.st_mtime_ns, recent))
                 except OSError:
                     continue
         except OSError:

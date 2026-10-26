@@ -260,9 +260,14 @@ def _tokens(notes, units):
     return segments
 
 
-def automatic_render_plan(arrangement, text, segments=None, *, language='pt-BR'):
+def automatic_render_plan(arrangement, text, segments=None, *, language='pt-BR',
+                          first_request_ms=None, request_ms=None):
+    for value in (first_request_ms, request_ms):
+        if value is not None and (type(value) is not int or not 40 <= value <= 16000):
+            raise ValueError('invalid_lyrics_request_duration')
     if arrangement.get('message_lyrics_mode')==POLICY:
-        return _finite_render_plan(arrangement,text,segments,language=language)
+        return _finite_render_plan(arrangement,text,segments,language=language,
+                                   first_request_ms=first_request_ms, request_ms=request_ms)
     units=_units(text,segments,language)
     calls=[]
     for part in arrangement['parts']:
@@ -308,7 +313,8 @@ def automatic_render_plan(arrangement, text, segments=None, *, language='pt-BR')
     return {'chunks':calls,'warnings':['lyrics_automatically_adapted']}
 
 
-def _finite_render_plan(arrangement,text,segments,*,language):
+def _finite_render_plan(arrangement,text,segments,*,language,
+                        first_request_ms=None, request_ms=None):
     """Pack complete words and their finite holds into unchanged v1 requests."""
     units=_units(text,segments,language)
     slots=sum(unit['nuclei']+unit['holds'] for unit in units)
@@ -321,8 +327,9 @@ def _finite_render_plan(arrangement,text,segments,*,language):
         pending_notes,pending_segments=[],[]
         pending_moras=0
         anchor=None
+        completed_requests=0
         def finish():
-            nonlocal pending_moras,anchor
+            nonlocal pending_moras,anchor,completed_requests
             if not pending_notes:
                 return
             start=pending_notes[0]['start_ms']
@@ -333,6 +340,7 @@ def _finite_render_plan(arrangement,text,segments,*,language):
                 'voice_id':part.get('voice_id','kasane-teto'),'score':score,
                 'adaptive_text':' '.join(effect['text'] for effect in pending_segments),
                 'adaptive_segments':copy.deepcopy(pending_segments)}]})
+            completed_requests+=1
             pending_notes.clear()
             pending_segments.clear()
             pending_moras=0
@@ -347,6 +355,13 @@ def _finite_render_plan(arrangement,text,segments,*,language):
             nonlocal pending_moras,anchor
             effect={'text':word,'fade_in':bool(fade_in),'fade_out':bool(fade_out),
                     'hold':bool(hold),'pause_after_ms':0}
+            # Latency targets are soft and only close a request before a whole
+            # new word. Sustained vowels keep their original phoneme anchor;
+            # splitting a hold just to meet the target adds an audible attack.
+            target=(first_request_ms if completed_requests==0 else request_ms)
+            if (not hold and pending_notes and target is not None
+                    and notes[-1]['start_ms']+notes[-1]['duration_ms']-pending_notes[0]['start_ms']>target):
+                finish()
             if pending_notes and (not fits(notes,effect,moras)
                 or notes[-1]['start_ms']+notes[-1]['duration_ms']-pending_notes[0]['start_ms']>16000):
                 finish()

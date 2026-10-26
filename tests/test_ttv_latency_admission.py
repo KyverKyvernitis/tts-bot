@@ -35,6 +35,8 @@ MEASUREMENTS = {
     "cache_maintenance_ms": 1.25, "render_workers": 2, "source_groups": 3,
     "fragment_cache_hits": 9, "fragment_cache_misses": 4, "resampler_calls": 4,
     "cache_scans": 0, "cache_evictions": 0, "cache_size_bytes": 2048,
+    "pcm_cache_hits": 3, "pcm_cache_misses": 2, "pcm_cache_bytes": 4096,
+    "normalization_gain": 0.95,
 }
 
 

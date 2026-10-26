@@ -34,7 +34,8 @@ TELEMETRY_KEYS = ('render_workers', 'source_groups', 'fragment_cache_hits',
                   'fragment_cache_misses', 'resampler_calls', 'resample_ms',
                   'worker_synth_ms', 'compose_ms', 'postprocess_ms',
                   'cache_maintenance_ms', 'cache_scans', 'cache_evictions',
-                  'cache_size_bytes', 'rendered_phonemes')
+                  'cache_size_bytes', 'rendered_phonemes', 'pcm_cache_hits',
+                  'pcm_cache_misses', 'pcm_cache_bytes', 'normalization_gain')
 NOTE = ('Local UTAU/ESPER singing and composition only; excludes HTTP, bot queue and Discord playback. '
         'Cold means empty temporary ESPER analysis cache, not a cold OS/filesystem. '
         'Production caches are not measured. Temperature and other apps affect results.')
@@ -53,7 +54,7 @@ def read_settings(quality, env):
     helper = quality.installer()
     allowed = quality.ALLOWED_KEYS | frozenset(
         f'PHONE_WORKER_{voice}_{key}' for voice in ('TETO', 'MIKU')
-        for key in ('MIN_ALIASES', 'ENGLISH_MIN_ALIASES', 'FRAGMENT_CACHE_MB'))
+        for key in ('MIN_ALIASES', 'ENGLISH_MIN_ALIASES', 'FRAGMENT_CACHE_MB', 'PCM_CACHE_MB'))
     raw = helper.regular_bytes(env, helper.MAX_ENV_BYTES, allow_empty=True)
     if b'\0' in raw:
         raise ValueError('invalid configuration')
@@ -88,7 +89,7 @@ def isolated_environment(quality, values, *, voice, bank, container, esper_root,
     env['PHONE_WORKER_ESPER_DEADLINE'] = ''
     env['PHONE_WORKER_TETO_RENDER_THREADS'] = str(threads)
     prefix = VOICES[voice][1]
-    for key in ('MIN_ALIASES', 'ENGLISH_MIN_ALIASES', 'FRAGMENT_CACHE_MB'):
+    for key in ('MIN_ALIASES', 'ENGLISH_MIN_ALIASES', 'FRAGMENT_CACHE_MB', 'PCM_CACHE_MB'):
         value = values.get(f'PHONE_WORKER_{prefix}_{key}')
         if value:
             env[f'PHONE_WORKER_TETO_{key}'] = value
@@ -149,10 +150,12 @@ def battery_temperature():
 
 
 def measure(arrangement, text, *, renderer, voice_id, language, cache, timeout,
-            phase, threads, round_number, references, pcm_hashes):
+            phase, threads, round_number, references, pcm_hashes, progressive=False,
+            memory_cache=None):
     from osaka_cd.render import render_arrangement
     record = {'phase': phase, 'threads_requested': threads, 'round': round_number,
-              'ok': False, 'temperature_before_c': battery_temperature(), 'physical_parts': []}
+              'ok': False, 'temperature_before_c': battery_temperature(), 'physical_parts': [],
+              'output_mode': 'progressive_pcm' if progressive else 'complete_mp3'}
     started = time.perf_counter()
     try:
         clean, segments, adapted = prepare(arrangement, text, voice_id, language)
@@ -175,15 +178,58 @@ def measure(arrangement, text, *, renderer, voice_id, language, cache, timeout,
             pcm_hash = pcm_digest(raw)
             pcm_hashes[hashlib.sha256(raw).hexdigest()] = pcm_hash
             record['physical_parts'].append({'part_id': request['part_id'], 'role': request['role'],
+                'started_ms': round((part_start-started)*1000, 3),
                 'elapsed_ms': round((time.perf_counter() - part_start) * 1000, 3),
                 'pcm_sha256': pcm_hash,
                 'metrics': {key: meta[key] for key in TELEMETRY_KEYS if key in meta}})
             return raw, meta
 
         render_start = time.perf_counter()
-        result = render_arrangement(adapted, clean, render_part, segments=segments, cache_dir=cache,
-            render_profile_fingerprint=profile, language=language, output_format='mp3',
-            timeout_seconds=1200)
+        if progressive:
+            from cogs.tts.cd_stream import PCMStreamBuffer
+            from osaka_cd.progressive import PREROLL_MS, stream_arrangement
+            buffer = PCMStreamBuffer(adapted['duration_ms'] + PREROLL_MS,
+                                     prebuffer_ms=1000, safety_ms=500)
+            output_hash = hashlib.sha256()
+            output_bytes = 0
+            record.update(first_pcm_available_ms=None, first_nonzero_pcm_available_ms=None,
+                          buffer_ready_ms=None, buffer_ready_audio_ms=None)
+
+            def capture_ready():
+                if record['buffer_ready_ms'] is None and buffer.ready:
+                    record['buffer_ready_ms'] = round((time.perf_counter()-started)*1000, 3)
+                    record['buffer_ready_audio_ms'] = round(buffer.produced_ms, 3)
+
+            def emit(pcm):
+                nonlocal output_bytes
+                available_ms = round((time.perf_counter()-started)*1000, 3)
+                if record['first_pcm_available_ms'] is None:
+                    record['first_pcm_available_ms'] = available_ms
+                if record['first_nonzero_pcm_available_ms'] is None and any(pcm):
+                    record['first_nonzero_pcm_available_ms'] = available_ms
+                output_hash.update(pcm)
+                output_bytes += len(pcm)
+                # This is a readiness probe, not a simulated Discord player.
+                # Retain only the runway needed to observe its first readiness.
+                if record['buffer_ready_ms'] is None:
+                    buffer.append(pcm)
+                    capture_ready()
+
+            try:
+                result = stream_arrangement(adapted, clean, render_part, emit,
+                    segments=segments, cache_dir=cache, memory_cache=memory_cache,
+                    render_profile_fingerprint=profile, language=language,
+                    timeout_seconds=1200, require_normalization=True)
+                buffer.finish()
+                capture_ready()
+                if output_hash.hexdigest() != result['pcm_sha256'] or output_bytes != result['audio_bytes']:
+                    raise ValueError('progressive PCM publication hash/length mismatch')
+            finally:
+                buffer.cleanup()
+        else:
+            result = render_arrangement(adapted, clean, render_part, segments=segments, cache_dir=cache,
+                render_profile_fingerprint=profile, language=language, output_format='mp3',
+                timeout_seconds=1200)
         record['render_ms'] = round((time.perf_counter() - render_start) * 1000, 3)
         stems = []
         for stem in result['stems']:
@@ -199,7 +245,10 @@ def measure(arrangement, text, *, renderer, voice_id, language, cache, timeout,
             stems.append({**stem, 'pcm_sha256': pcm_hashes[digest]})
         signature = [(stem['part_id'], stem['score_sha256'], stem['start_ms'], stem['pcm_sha256'])
                      for stem in stems]
-        reference_key = json.dumps({'text': clean, 'segments': segments}, sort_keys=True, ensure_ascii=False)
+        if progressive:
+            signature.append(('final_progressive_pcm', result['pcm_sha256']))
+        reference_key = json.dumps({'text': clean, 'segments': segments, 'progressive': progressive},
+                                   sort_keys=True, ensure_ascii=False)
         reference = references.setdefault(reference_key, signature)
         fixed_ids = {part['id'] for part in adapted['parts'] if part.get('lyrics_source') != 'message'}
         record.update(ok=signature == reference, pcm_matches_reference=signature == reference,
@@ -207,8 +256,13 @@ def measure(arrangement, text, *, renderer, voice_id, language, cache, timeout,
             fixed_stem_cache_hits=sum(stem['cache_hit'] for stem in stems if stem['part_id'] in fixed_ids),
             resampler_calls=sum(part['metrics'].get('resampler_calls', 0) for part in record['physical_parts']),
             duration_ms=result['duration_ms'], parts=len(adapted['parts']),
-            composition_metrics=result['metadata'].get('timing_ms', {}),
-            mp3_sha256=result['sha256'], output_bytes=len(result['audio']))
+            composition_metrics=(result if progressive else result['metadata']).get('timing_ms', {}),
+            output_bytes=result['audio_bytes'] if progressive else len(result['audio']))
+        if progressive:
+            record['pcm_sha256'] = result['pcm_sha256']
+            record['first_nonzero_offset_ms'] = result['first_nonzero_offset_ms']
+        else:
+            record['mp3_sha256'] = result['sha256']
         if not record['ok']:
             record['error'] = 'PCM differs for identical text/score across configurations'
     except Exception as exc:
@@ -225,8 +279,9 @@ def summaries(records):
     for threads, phase in sorted({(r['threads_requested'], r['phase']) for r in records}):
         selected = [r for r in records if r['ok'] and (r['threads_requested'], r['phase']) == (threads, phase)]
         item = {'threads_requested': threads, 'phase': phase, 'successful_runs': len(selected)}
-        for key in ('elapsed_ms', 'prepare_ms', 'profile_ms', 'render_ms'):
-            values = sorted(r[key] for r in selected)
+        for key in ('elapsed_ms', 'prepare_ms', 'profile_ms', 'render_ms',
+                    'first_nonzero_pcm_available_ms', 'buffer_ready_ms'):
+            values = sorted(r[key] for r in selected if r.get(key) is not None)
             for label, fraction in (('p50', .5), ('p95', .95)):
                 if values:
                     position = (len(values) - 1) * fraction
@@ -238,7 +293,8 @@ def summaries(records):
 
 def benchmark(*, values, arrangement, voice='teto', bank=None, container='voicepeak-arm64',
               esper_root=None, language='pt-BR', text='Olá meu amor', new_text='Eu vou cantar',
-              rounds=2, threads=None, timeout=120, factory=renderer_factory, quality=None):
+              rounds=2, threads=None, timeout=120, factory=renderer_factory, quality=None,
+              progressive=False):
     quality = quality or quality_helpers()
     if voice not in VOICES or language not in ('pt-BR', 'en-US'):
         raise ValueError('invalid voice/language')
@@ -271,9 +327,16 @@ def benchmark(*, values, arrangement, voice='teto', bank=None, container='voicep
               'arrangement_sha256': arrangement_sha256(arrangement),
               'text_sha256': hashlib.sha256(text.encode()).hexdigest(),
               'new_text_sha256': hashlib.sha256(new_text.encode()).hexdigest()}
+    report['output_mode'] = 'progressive_pcm' if progressive else 'complete_mp3'
+    report['first_audio_note'] = ('PCM availability and buffer readiness only; no audio is played. '
+                                  'Use runtime cd_message_to_first_audible for Discord delivery.')
     with tempfile.TemporaryDirectory(prefix='ttv-cd-benchmark-') as temporary:
         root = Path(temporary)
         analysis = root / 'analysis'
+        if progressive:
+            from osaka_cd.progressive import DecodedPCMCache
+        else:
+            DecodedPCMCache = lambda: None
 
         def renderer_for(fragments, count):
             environment = isolated_environment(quality, values, voice=voice, bank=bank,
@@ -284,18 +347,20 @@ def benchmark(*, values, arrangement, voice='teto', bank=None, container='voicep
         cold = renderer_for(root / 'cold-fragments', threads[0])
         records.append(measure(arrangement, text, renderer=cold, voice_id=voice_id, language=language,
             cache=root / 'cold-composition', timeout=timeout, phase='analysis_cold', threads=threads[0],
-            round_number=0, references=references, pcm_hashes=pcm_hashes))
+            round_number=0, references=references, pcm_hashes=pcm_hashes,
+            progressive=progressive, memory_cache=DecodedPCMCache()))
         if records[-1]['ok']:
             for number in range(1, rounds + 1):
                 for count in (threads if number % 2 else tuple(reversed(threads))):
                     case = root / f'round-{number}-threads-{count}'
                     renderer = renderer_for(case / 'fragments', count)
+                    decoded = DecodedPCMCache()
                     for phase, lyrics in (('analysis_warm_new_fragments', text), ('exact_repeat', text),
                                           ('new_text_same_cd', new_text)):
                         records.append(measure(arrangement, lyrics, renderer=renderer, voice_id=voice_id,
                             language=language, cache=case / 'composition', timeout=timeout,
                             phase=phase, threads=count, round_number=number, references=references,
-                            pcm_hashes=pcm_hashes))
+                            pcm_hashes=pcm_hashes, progressive=progressive, memory_cache=decoded))
                         if not records[-1]['ok']:
                             break
                     if not records[-1]['ok']:
@@ -340,6 +405,8 @@ def main(argv=None):
     parser.add_argument('--container', default='voicepeak-arm64')
     parser.add_argument('--esper-root', type=Path)
     parser.add_argument('--output', type=Path, help='Optional JSON report outside the repository')
+    parser.add_argument('--progressive', action='store_true',
+                        help='Measure progressive PCM availability/readiness instead of complete MP3')
     options = parser.parse_args(argv)
     try:
         quality = quality_helpers()
@@ -355,7 +422,8 @@ def main(argv=None):
         result = benchmark(values=values, arrangement=load_arrangement(options.cd, options.arrangement),
             voice=options.voice, bank=bank, container=options.container, esper_root=options.esper_root,
             language=options.language, text=options.text, new_text=options.new_text, rounds=options.rounds,
-            threads=options.threads, timeout=options.timeout, quality=quality)
+            threads=options.threads, timeout=options.timeout, quality=quality,
+            progressive=options.progressive)
         if target:
             target.parent.mkdir(parents=True, exist_ok=True)
             quality.installer().atomic_write(target, (json.dumps(result, ensure_ascii=False,

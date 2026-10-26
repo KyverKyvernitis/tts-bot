@@ -39,7 +39,7 @@ def _render_metrics(metadata):
     for key in ('resample_ms', 'compose_ms', 'postprocess_ms', 'cache_maintenance_ms',
                 'render_workers', 'source_groups', 'fragment_cache_hits',
                 'fragment_cache_misses', 'resampler_calls', 'cache_scans',
-                'cache_evictions', 'cache_size_bytes'):
+                'cache_evictions', 'cache_size_bytes', 'pcm_cache_hits', 'pcm_cache_misses', 'pcm_cache_bytes'):
         value = metadata.get(key)
         if type(value) not in (int, float):
             continue
@@ -209,6 +209,9 @@ def _remember_stem(cache, key, audio, metadata, preroll):
     # Store only timing and opaque identities, never arbitrary backend metadata
     # which can contain paths, private config or command diagnostics.
     meta = {"midi_preroll_ms": preroll}
+    gain = metadata.get('normalization_gain')
+    if type(gain) in (int, float) and 0.6 <= gain <= 1.2:
+        meta['normalization_gain'] = float(gain)
     for name in ("worker_version", "renderer_version", "renderer_fingerprint",
                  "voicebank_fingerprint", "teto_fingerprint"):
         value = metadata.get(name)

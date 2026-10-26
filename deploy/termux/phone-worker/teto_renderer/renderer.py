@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import wave
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
@@ -66,6 +67,15 @@ class TetoRenderer:
         self._last_status: dict[str, Any] = {}
         cache_root = self._getenv("PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / ("miku-fragments" if self.voice_id == "hatsune-miku" else "teto-fragments"))
         self._cache = FragmentCache(cache_root, max_mb=self._env_int("PHONE_WORKER_TETO_FRAGMENT_CACHE_MB", 256))
+        # A decoded fragment can be reused by many successive short singing
+        # windows. Keep immutable native PCM, not a mutable array later edited
+        # by gain/envelope/overlap operations.
+        self._pcm_cache_lock = threading.RLock()
+        self._pcm_cache: OrderedDict[str, tuple[tuple[int, ...], bytes]] = OrderedDict()
+        self._pcm_cache_limit = max(0, min(4096, self._env_int('PHONE_WORKER_TETO_PCM_CACHE_MB', 256))) * 1024 * 1024
+        self._pcm_cache_bytes = 0
+        self._pcm_cache_hits = 0
+        self._pcm_cache_misses = 0
 
     def _configure_voice(self, *, environment: Mapping[str, str] | None, voice_id: str) -> None:
         if voice_id not in {"kasane-teto", "hatsune-miku"}:
@@ -752,14 +762,77 @@ class TetoRenderer:
                     pipe.close()
 
     def _read_samples(self, path: Path) -> array.array:
-        with wave.open(str(path), "rb") as wav:
-            if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or wav.getframerate() != self.SAMPLE_RATE:
-                raise TetoSynthesisError(f"fragmento WAV inesperado: {path.name}")
-            samples = array.array("h")
-            samples.frombytes(wav.readframes(wav.getnframes()))
-            if os.sys.byteorder != "little":
-                samples.byteswap()
-            return samples
+        path = Path(path)
+        key = str(path.expanduser().absolute())
+        def signature(info):
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        try:
+            stamp = signature(path.stat())
+        except OSError:
+            with self._pcm_cache_lock:
+                self._drop_pcm_cache_entry(key)
+            raise
+        with self._pcm_cache_lock:
+            saved = self._pcm_cache.get(key)
+            if saved is not None and saved[0] == stamp:
+                self._pcm_cache.move_to_end(key)
+                self._pcm_cache_hits += 1
+                pcm = saved[1]
+            else:
+                self._drop_pcm_cache_entry(key)
+                self._pcm_cache_misses += 1
+                pcm = None
+        if pcm is None:
+            with path.open('rb') as source:
+                opened = signature(os.fstat(source.fileno()))
+                with wave.open(source, "rb") as wav:
+                    if (wav.getnchannels() != 1 or wav.getsampwidth() != 2
+                            or wav.getframerate() != self.SAMPLE_RATE or wav.getcomptype() != 'NONE'):
+                        raise TetoSynthesisError(f"fragmento WAV inesperado: {path.name}")
+                    frames = wav.getnframes()
+                    pcm = wav.readframes(frames)
+                    if len(pcm) != frames * 2:
+                        raise TetoSynthesisError(f"fragmento WAV truncado: {path.name}")
+                final = signature(os.fstat(source.fileno()))
+            if opened != final or signature(path.stat()) != final:
+                raise TetoSynthesisError(f"fragmento WAV mudou durante leitura: {path.name}")
+            with self._pcm_cache_lock:
+                self._drop_pcm_cache_entry(key)
+                if self._pcm_cache_limit and len(pcm) <= self._pcm_cache_limit:
+                    while self._pcm_cache and self._pcm_cache_bytes + len(pcm) > self._pcm_cache_limit:
+                        _, (_, evicted) = self._pcm_cache.popitem(last=False)
+                        self._pcm_cache_bytes -= len(evicted)
+                    self._pcm_cache[key] = (final, pcm)
+                    self._pcm_cache_bytes += len(pcm)
+        samples = array.array('h')
+        samples.frombytes(pcm)
+        if os.sys.byteorder != "little":
+            samples.byteswap()
+        return samples
+
+    def _drop_pcm_cache_entry(self, key):
+        saved = self._pcm_cache.pop(key, None)
+        if saved is not None:
+            self._pcm_cache_bytes -= len(saved[1])
+
+    def _pcm_cache_statistics(self):
+        with self._pcm_cache_lock:
+            return {'pcm_cache_hits': self._pcm_cache_hits,
+                    'pcm_cache_misses': self._pcm_cache_misses,
+                    'pcm_cache_bytes': self._pcm_cache_bytes}
+
+    @staticmethod
+    def _ordered_source_groups(groups, placements=None):
+        """Prioritize the earliest audible recording without racing a source.
+
+        CVVC preutterance can make the audible order differ from lexical note
+        order. Every recording still belongs to exactly one serial group.
+        """
+        def start(item):
+            number = item[0]
+            return (placements[number]['start_ms'], number) if placements is not None else (number, number)
+        ordered = [sorted(items, key=start) for items in groups.values()]
+        return sorted(ordered, key=lambda items: start(items[0]))
 
     @staticmethod
     def _apply_gain(fragment: array.array, gain: float) -> array.array:
@@ -1497,6 +1570,7 @@ class TetoRenderer:
         started = time.monotonic()
         deadline = started + float(timeout_seconds)
         cache_before = self._cache.statistics()
+        pcm_before = self._pcm_cache_statistics()
         cache_started = False
         render_stopped = threading.Event()
         def should_cancel():
@@ -1634,7 +1708,8 @@ class TetoRenderer:
                 fragments = {}
                 resample_start = time.monotonic()
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = [pool.submit(render_group, items) for items in source_groups.values()]
+                    futures = [pool.submit(render_group, items)
+                               for items in self._ordered_source_groups(source_groups, placements)]
                     try:
                         for future in as_completed(futures):
                             result, local = future.result()
@@ -1665,6 +1740,11 @@ class TetoRenderer:
             if not peak:
                 raise TetoSynthesisError('a apresentação TTV gerou áudio silencioso')
             scale = min(3.6, 30000.0 / peak)
+            # Report the gain _apply_gain actually applies, including its
+            # unity tolerance and headroom clamps. Progressive composition can
+            # compensate per-request normalization before using a stable mix
+            # gain across windows; reporting the requested scale would pump.
+            normalization_gain = 1.0 if abs(float(scale) - 1.0) < 0.002 else max(0.60, min(1.20, float(scale)))
             self._check_render_cancelled()
             combined = self._apply_gain(combined, scale)
             self._check_render_cancelled()
@@ -1713,6 +1793,7 @@ class TetoRenderer:
                         'legacy_fragment_hits': legacy, 'render_workers': workers, 'source_groups': len(source_groups),
                         'resample_ms': round(resample_ms, 2), **metrics,
                         'compose_ms': round(compose_ms, 2), 'postprocess_ms': round(postprocess_ms, 2),
+                        'normalization_gain': normalization_gain,
                         'worker_synth_ms': round((time.monotonic() - started) * 1000, 2),
                         'timeline_mode': 'midi-vowel-continuous' if score is not None else 'phrase-effects-continuous',
                         'timeline_planned_ms': round(planned_ms, 3), 'timeline_audio_ms': round(len(combined) * 1000 / self.SAMPLE_RATE, 3),
@@ -1726,6 +1807,10 @@ class TetoRenderer:
             metadata.update({key: round(cache_after[key] - cache_before[key], 2)
                              for key in ('cache_scans', 'cache_evictions', 'cache_maintenance_ms')})
             metadata['cache_size_bytes'] = cache_after['cache_size_bytes']
+            pcm_after = self._pcm_cache_statistics()
+            metadata.update({key: pcm_after[key] - pcm_before[key]
+                             for key in ('pcm_cache_hits', 'pcm_cache_misses')})
+            metadata['pcm_cache_bytes'] = pcm_after['pcm_cache_bytes']
             if score is not None:
                 metadata['effective_score'] = score
             return raw, metadata
@@ -1767,6 +1852,7 @@ class TetoRenderer:
             raise TetoResourceError("renderer Teto ocupado")
 
         started = time.monotonic()
+        pcm_before = self._pcm_cache_statistics()
         cache_started = False
         try:
             self._cache.begin_render()
@@ -1869,7 +1955,8 @@ class TetoRenderer:
                 render_metrics = {"fragment_cache_hits": 0, "fragment_cache_misses": 0, "resampler_calls": 0}
                 resample_started = time.monotonic()
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = [pool.submit(render_group, items) for items in groups.values()]
+                    futures = [pool.submit(render_group, items) for items in self._ordered_source_groups(
+                        groups, placements if self._index_profile == 'english-cvvc' else None)]
                     try:
                         for future in as_completed(futures):
                             group_fragments, group_metrics = future.result()
@@ -1946,6 +2033,7 @@ class TetoRenderer:
             if not raw or len(raw) > max_audio_bytes:
                 raise TetoSynthesisError(f"áudio Teto inválido ou grande demais ({len(raw)} bytes)")
             elapsed_ms = (time.monotonic() - started) * 1000.0
+            pcm_after = self._pcm_cache_statistics()
             nuclei = [note.duration_ms for note in notes if note.role == "nucleus"]
             mean_nucleus_ms = (sum(nuclei) / len(nuclei)) if nuclei else 0.0
             nucleus_stddev_ms = (
@@ -2002,6 +2090,9 @@ class TetoRenderer:
                 "render_workers": workers,
                 "source_groups": len(groups),
                 **render_metrics,
+                **{key: pcm_after[key] - pcm_before[key]
+                   for key in ('pcm_cache_hits', 'pcm_cache_misses')},
+                'pcm_cache_bytes': pcm_after['pcm_cache_bytes'],
                 "resample_ms": round(resample_ms, 2),
                 "worker_synth_ms": round(elapsed_ms, 2),
                 "sha256": hashlib.sha256(raw).hexdigest(),
