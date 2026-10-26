@@ -217,7 +217,7 @@ class LiveOpusStateTests(unittest.TestCase):
         self.prepared_source()
         boundary.synchronize(router, self.state.public())
         self.assertEqual(boundary.ui._public_audio_quality_label(router.state, router.state.current),
-                         "Opus direto · 256 kbps · fonte AAC 128 kbps")
+                         "Opus direto · 256 kbps")
         self.assertEqual(router.state.current.resolved_audio_codec, "aac")
         self.assertEqual(router.state.current.resolved_audio_abr, 128)
         self.live["copy_active"] = False

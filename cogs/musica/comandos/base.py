@@ -6,6 +6,7 @@ import discord
 from discord.ext import commands
 
 from ..reproducao.controle_remoto import enviar_controle_remoto
+from ..reproducao.atividade import has_music_activity
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +20,24 @@ class BaseComandosMusica:
             return voice
         return None
 
-    async def _ensure_music_action_voice(self, ctx: commands.Context) -> bool:
+    async def _ensure_music_action_voice(
+        self, ctx: commands.Context, *, ignore_idle_stop: bool = False,
+    ) -> bool:
+        def stopped_while_waiting() -> bool:
+            return bool(ignore_idle_stop and not has_music_activity(self.router, ctx.guild.id))
+
+        if stopped_while_waiting():
+            return False
         user_channel = await self._voice_channel_from_ctx(ctx)
+        if stopped_while_waiting():
+            return False
         if user_channel is None:
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return False
         if getattr(self.router, "music_worker_only_enabled", lambda: False)():
             selection = await self.router.ensure_music_worker_available()
+            if stopped_while_waiting():
+                return False
             if not getattr(selection, "available", False):
                 logger.info("[music/worker] ação bloqueada: %s", getattr(selection, "reason", "worker indisponível"))
                 await self._reply(
@@ -49,12 +61,14 @@ class BaseComandosMusica:
             return False
         return True
 
-    async def _send_music_agent_control(self, ctx: commands.Context, action: str, success_message: str) -> bool:
+    async def _send_music_agent_control(
+        self, ctx: commands.Context, action: str, success_message: str, *, _stop_owner=None,
+    ) -> bool:
         if not self._music_agent_default_enabled():
             return False
         try:
             voice = getattr(getattr(ctx.author, "voice", None), "channel", None)
-            await enviar_controle_remoto(
+            result = await enviar_controle_remoto(
                 self.router,
                 action,
                 guild_id=ctx.guild.id,
@@ -62,10 +76,15 @@ class BaseComandosMusica:
                 requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
                 voice_channel_id=getattr(voice, "id", 0),
                 text_channel_id=getattr(ctx.channel, "id", 0),
-                create_panel=True,
+                create_panel=action != "stop",
+                _stop_owner=_stop_owner,
             )
         except Exception as exc:
+            if action == "stop" and not has_music_activity(self.router, ctx.guild.id):
+                return True
             await self._reply(ctx, self._music_error_message(exc))
+            return True
+        if isinstance(result, dict) and result.get("ignored"):
             return True
         await self._reply(ctx, success_message)
         return True

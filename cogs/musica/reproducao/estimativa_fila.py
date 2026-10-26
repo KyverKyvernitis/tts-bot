@@ -31,12 +31,19 @@ class QueueWaitEstimate:
         minutes, seconds = divmod(remainder, 60)
         return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
 
+    def _word_time_label(self) -> str:
+        total = max(0, math.ceil(float(self.seconds or 0)))
+        minutes, seconds = divmod(total, 60)
+        minute_unit = "minuto" if minutes == 1 else "minutos"
+        second_unit = "segundo" if seconds == 1 else "segundos"
+        return f"{minutes} {minute_unit} e {seconds} {second_unit}"
+
     def label(self) -> str:
         if self.seconds is None:
-            return "⏳ Previsão indisponível"
+            return "-# ⏳ Previsão indisponível"
         if self.paused:
-            return f"⏸️ Após retomar: aproximadamente **{self._time_label()}**"
-        return f"⏳ Começa em aproximadamente **{self._time_label()}**"
+            return f"-# ⏸️ Após retomar: {self._word_time_label()}"
+        return f"-# ⏳ Vai começar em: {self._word_time_label()}"
 
     def metadata_label(self) -> str:
         if self.seconds is None:

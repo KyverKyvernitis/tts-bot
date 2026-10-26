@@ -97,7 +97,7 @@ class QueueConfirmationTests(unittest.TestCase):
         original = deepcopy(result)
         content = self.ui._agent_play_message(self.track, result)
         self.assertEqual(content, '`🎶` **Adicionada à fila:** Labyrinth • `2:33`\n'
-                                 '⏳ Começa em aproximadamente **4:20**')
+                                 '-# ⏳ Vai começar em: 4 minutos e 20 segundos')
         self.assertNotIn('Atual', content)
         self.assertEqual(result, original)
 
@@ -109,21 +109,21 @@ class QueueConfirmationTests(unittest.TestCase):
         result['track']['title'] = 'Labyrinth — título completo'
         edited = self.ui._agent_play_message(self.track, result, wait_line=wait_line)
         self.assertIn('título completo', edited)
-        self.assertTrue(edited.endswith('⏳ Começa em aproximadamente **4:20**'))
+        self.assertTrue(edited.endswith('-# ⏳ Vai começar em: 4 minutos e 20 segundos'))
 
     def test_provisional_title_also_contains_initial_wait_estimate(self):
         result = response()
         result['track']['title'] = self.track.title = 'YouTube'
         content = self.ui._agent_play_message(self.track, result)
         self.assertIn('Carregando detalhes...', content)
-        self.assertTrue(content.endswith('⏳ Começa em aproximadamente **4:20**'))
+        self.assertTrue(content.endswith('-# ⏳ Vai começar em: 4 minutos e 20 segundos'))
 
     def test_pause_is_conditional_and_unknown_duration_is_not_a_false_number(self):
         result = response()
         result['state'].update(status='paused', paused=True)
-        self.assertIn('Após retomar: aproximadamente **4:20**', self.ui._agent_play_message(self.track, result))
+        self.assertIn('Após retomar: 4 minutos e 20 segundos', self.ui._agent_play_message(self.track, result))
         result['state']['current']['duration'] = None
-        self.assertTrue(self.ui._agent_play_message(self.track, result).endswith('⏳ Previsão indisponível'))
+        self.assertTrue(self.ui._agent_play_message(self.track, result).endswith('-# ⏳ Previsão indisponível'))
 
     def test_truncated_preview_last_item_cannot_supply_eta_for_another_target(self):
         result = response()
@@ -134,7 +134,7 @@ class QueueConfirmationTests(unittest.TestCase):
         content = self.ui._agent_play_message(self.track, result)
         self.assertIn('Adicionada à fila:** Labyrinth', content)
         self.assertNotIn('unrelated', content)
-        self.assertTrue(content.endswith('⏳ Previsão indisponível'))
+        self.assertTrue(content.endswith('-# ⏳ Previsão indisponível'))
 
     def test_starting_playing_and_failed_confirmation_do_not_gain_a_queue_estimate(self):
         for state, expected in [
@@ -151,7 +151,7 @@ class QueueConfirmationTests(unittest.TestCase):
         calls = []
         def fixed(state, target, **options):
             calls.append((state, target, options))
-            return '⏳ Previsão indisponível'
+            return '-# ⏳ Previsão indisponível'
         ui = load_ui(queue_wait_line=fixed)
         result, cache = response(), object()
         ui._agent_play_message(self.track, result, duration_state=cache)

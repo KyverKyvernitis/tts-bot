@@ -20,6 +20,7 @@ from ..agente_telefone.comandos import estado_comando_diferido, music_agent_comm
 from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..reproducao.controle_remoto import enviar_controle_remoto
 from ..reproducao.estimativa_fila import estimate_queue_waits, queue_wait_line
+from ..reproducao.atividade import begin_music_request, end_music_request, has_music_activity
 from ..reproducao.playlist_virtual import (
     carregar_pagina_fila_virtual,
     payload_cursor_playlist,
@@ -1534,13 +1535,23 @@ class SearchSelect(discord.ui.Select):
 
         trace = MusicStartTrace(self.guild_id, entrypoint="selection", input_kind="search",
                                 timing_ms=self.search_timing_ms)
+        operation_generation = self.router.current_music_operation_generation(self.guild_id)
+        request_owner = (begin_music_request(self.router, self.guild_id)
+                         if _interaction_user_voice_channel(interaction) is not None else None)
 
         # ACK imediato: escolher um resultado pode resolver stream, consultar worker
         # e iniciar voz. Se isso acontecer antes do defer, o Discord mostra
         # "Esta interação falhou" mesmo quando o painel acaba atualizando.
         try:
             await interaction.response.defer(thinking=False)
+        except asyncio.CancelledError:
+            if request_owner is not None:
+                end_music_request(self.router, self.guild_id, request_owner)
+            trace.finish("cancelled")
+            raise
         except discord.NotFound:
+            if request_owner is not None:
+                end_music_request(self.router, self.guild_id, request_owner)
             trace.finish("cancelled")
             return
         except Exception:
@@ -1550,7 +1561,6 @@ class SearchSelect(discord.ui.Select):
         loading_reaction = MusicLoadingReaction(getattr(interaction, "message", None))
         loading_reaction.start_background()
         finish_loading_reaction = True
-        operation_generation = self.router.current_music_operation_generation(self.guild_id)
         play_delivered = False
         channel_for_preparation = int(self.voice_channel_id or 0)
         try:
@@ -1567,6 +1577,9 @@ class SearchSelect(discord.ui.Select):
             check_started = time.monotonic()
             if not await _require_music_voice_interaction(interaction, self.router, self.guild_id,
                                                           validation_out=validation_out):
+                return
+            if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
+                trace.finish("cancelled")
                 return
             trace.timings["worker_check_ms"] = round((time.monotonic() - check_started) * 1000, 2)
             idx = int(self.values[0])
@@ -1630,6 +1643,9 @@ class SearchSelect(discord.ui.Select):
                     return
                 if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
                     return
+                if request_owner is not None:
+                    end_music_request(self.router, self.guild_id, request_owner)
+                    request_owner = None
                 await _sync_agent_panel(
                     self.router,
                     self.guild_id,
@@ -1660,6 +1676,9 @@ class SearchSelect(discord.ui.Select):
             if added <= 0:
                 await edit_original("`⚠️` Não adicionei nada: essa música já está no queue/tocando ou o queue está cheio.")
                 return
+            if request_owner is not None:
+                end_music_request(self.router, self.guild_id, request_owner)
+                request_owner = None
             trace.result({"ok": True, "queued": was_session_active}, confirmed=False)
             state = self.router.get_state(self.guild_id)
             position = state.queue_size() + (1 if state.current else 0)
@@ -1675,6 +1694,8 @@ class SearchSelect(discord.ui.Select):
             trace.finish("cancelled")
             raise
         finally:
+            if request_owner is not None:
+                end_music_request(self.router, self.guild_id, request_owner)
             trace.finish()
             await finish_music_channel_preparation(
                 self.router, guild_id=self.guild_id, voice_channel_id=channel_for_preparation,
@@ -1725,7 +1746,6 @@ class AddSongModal(discord.ui.Modal):
             text_channel = guild.get_channel(int(cid)) or interaction.client.get_channel(int(cid))
         text_channel = text_channel or interaction.channel
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
         query = str(self.query.value).strip()
         requester_name = getattr(interaction.user, "display_name", str(interaction.user))
         operation_generation = self.router.current_music_operation_generation(self.guild_id)
@@ -1737,7 +1757,10 @@ class AddSongModal(discord.ui.Modal):
         prepare_task = None
         prepare_id = ""
         play_delivered = False
+        request_owner = (begin_music_request(self.router, self.guild_id)
+                         if query and voice_channel is not None else None)
         try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
             try:
                 worker_only = getattr(self.router, "music_worker_only_enabled", lambda: False)()
                 if worker_only:
@@ -1930,6 +1953,9 @@ class AddSongModal(discord.ui.Modal):
                     return
                 if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
                     return
+                if request_owner is not None:
+                    end_music_request(self.router, self.guild_id, request_owner)
+                    request_owner = None
                 await _sync_agent_panel(
                     self.router,
                     guild.id,
@@ -1998,6 +2024,9 @@ class AddSongModal(discord.ui.Modal):
             if added <= 0:
                 await interaction.followup.send("`⚠️` Não adicionei nada: tudo já estava no queue/tocando ou o queue está cheio.", ephemeral=True)
                 return
+            if request_owner is not None:
+                end_music_request(self.router, self.guild_id, request_owner)
+                request_owner = None
             trace.result({"ok": True, "queued": was_session_active}, confirmed=False)
             if batch.is_playlist:
                 msg = f"`📑` **Playlist adicionada:** `{added}` música(s)"
@@ -2020,6 +2049,8 @@ class AddSongModal(discord.ui.Modal):
             trace.finish("cancelled")
             raise
         finally:
+            if request_owner is not None:
+                end_music_request(self.router, self.guild_id, request_owner)
             trace.finish()
             if prepare_task is not None and not play_delivered:
                 retain_music_task(self.router,
@@ -2171,6 +2202,16 @@ class MoveSelectedModal(discord.ui.Modal):
             view = QueueView(self.router, self.guild_id, self.page, owner_id=self.owner_id)
             with contextlib.suppress(Exception):
                 await interaction.edit_original_response(content=None, embeds=[], attachments=[], view=view)
+
+
+class FinishedMusicMessageView(discord.ui.LayoutView):
+    """Keep the original V2 message while displaying only its terminal text."""
+
+    TEXT = "-# Parece que acabou as músicas <:emoji_86:1564113432905654353>"
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.TextDisplay(self.TEXT))
 
 
 class StaticMusicMessageView(discord.ui.LayoutView):
@@ -3089,9 +3130,11 @@ class MusicPlayerView(discord.ui.LayoutView):
         self.add_item(container)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        custom_id = str((getattr(interaction, "data", {}) or {}).get("custom_id") or "")
+        if custom_id == "music:stop" and await self._ignore_empty_stop(interaction):
+            return False
         state = self.router.get_state(self.guild_id)
         if _panel_controls_invalid(state):
-            custom_id = str((getattr(interaction, "data", {}) or {}).get("custom_id") or "")
             has_history = bool(list(getattr(state, "history", []) or [])) or bool(
                 int(getattr(state, "agent_remote_history_size", 0) or 0) > 0
             )
@@ -3134,23 +3177,40 @@ class MusicPlayerView(discord.ui.LayoutView):
             self.router, "music_worker_only_enabled", lambda: False
         )()
 
+    async def _ignore_empty_stop(self, interaction: discord.Interaction) -> bool:
+        if has_music_activity(self.router, self.guild_id):
+            return False
+        if not interaction.response.is_done():
+            # A component update acknowledges a stale click without creating
+            # an ephemeral thinking response, a follow-up or a new panel.
+            with contextlib.suppress(Exception):
+                await interaction.response.defer(thinking=False)
+        return True
+
     async def _send_agent_control(self, interaction: discord.Interaction, action: str, message: str) -> bool:
+        if action == "stop" and await self._ignore_empty_stop(interaction):
+            return True
         if not self._music_agent_default_enabled():
             return False
         if not interaction.response.is_done():
             with contextlib.suppress(Exception):
-                await interaction.response.defer(ephemeral=True, thinking=True)
+                if action == "stop":
+                    await interaction.response.defer(thinking=False)
+                else:
+                    await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            await enviar_controle_remoto(
+            result = await enviar_controle_remoto(
                 self.router,
                 action,
                 guild_id=self.guild_id,
                 requester_id=getattr(interaction.user, "id", 0),
                 requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
-                create_panel=True,
+                create_panel=action != "stop",
             )
         except Exception as exc:
             await self._ack(interaction, f"`⚠️` O player não respondeu: `{str(exc)[:180]}`")
+            return True
+        if isinstance(result, dict) and result.get("ignored") is True:
             return True
         await self._ack(interaction, message)
         return True
@@ -3183,11 +3243,18 @@ class MusicPlayerView(discord.ui.LayoutView):
         await self._ack(interaction, message)
 
     async def stop(self, interaction: discord.Interaction):
-        await self._defer_control(interaction)
+        if await self._ignore_empty_stop(interaction):
+            return
+        if not interaction.response.is_done():
+            with contextlib.suppress(Exception):
+                await interaction.response.defer(thinking=False)
+        if await self._ignore_empty_stop(interaction):
+            return
         if await self._send_agent_control(interaction, "stop", "`⏹️` Player encerrado e desconectado."):
             return
         _ok, message = await self.router.request_stop(self.guild_id, interaction.user, disconnect=True)
-        await self._ack(interaction, message)
+        if message:
+            await self._ack(interaction, message)
 
     async def queue(self, interaction: discord.Interaction):
         try:

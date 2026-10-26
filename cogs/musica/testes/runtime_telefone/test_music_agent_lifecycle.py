@@ -1018,6 +1018,7 @@ def test_music_agent_source_has_no_wavelink_or_lavalink_runtime_dependency():
 def test_cmd_stop_clears_player_before_disconnect_await(music):
     async def scenario():
         agent=music.MusicAgent(); gid=12; st=music.GuildMusicState(guild_id=gid)
+        st.current=music.AgentTrack(title="Current", query="Current"); st.status="playing"
         seen=[]
         class Player:
             def is_playing(self): return False

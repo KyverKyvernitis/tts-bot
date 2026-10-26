@@ -37,6 +37,7 @@ from ..reproducao.inicio import (
     prepare_music_channel, finish_music_channel_preparation, channel_bitrate_hints,
 )
 from ..reproducao.estimativa_fila import queue_wait_line
+from ..reproducao.atividade import begin_music_request, end_music_request
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,17 @@ class FluxoTocar:
         return bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)()
 
     async def _run_play_discord_attachment(self, ctx: commands.Context, selection: VideoRespondido | None = None) -> None:
+        request_owner = begin_music_request(self.router, ctx.guild.id)
+        try:
+            await self._run_owned_discord_attachment(ctx, selection, request_owner=request_owner)
+        finally:
+            end_music_request(self.router, ctx.guild.id, request_owner)
+
+    async def _run_owned_discord_attachment(self, ctx: commands.Context, selection: VideoRespondido | None = None, *, request_owner: object = None) -> None:
+        generation = self.router.current_music_operation_generation(ctx.guild.id)
         selected = selection or await midia_respondida(ctx.message)
+        if generation != self.router.current_music_operation_generation(ctx.guild.id):
+            return
         if selected.status == "inacessivel":
             await self._reply(ctx, "Não consegui ler a mensagem respondida. Confira o acesso ao canal e tente novamente.")
             return
@@ -80,13 +91,14 @@ class FluxoTocar:
             await self._reply(ctx, "Reprodução de anexos indisponível neste modo de música.")
             return
         voice = await self._voice_channel_from_ctx(ctx)
+        if generation != self.router.current_music_operation_generation(ctx.guild.id):
+            return
         if voice is None:
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return
         metadata = metadados_midia(selected, ctx.message)
         attachment_id = metadata["attachment_ref"]["attachment_id"]
         request_id = f"discord-media:{ctx.guild.id}:{ctx.message.id}:{attachment_id}"
-        generation = self.router.current_music_operation_generation(ctx.guild.id)
         loading = MusicLoadingReaction(getattr(ctx, "message", None))
         loading.start_background()
         play_delivered = False
@@ -125,6 +137,9 @@ class FluxoTocar:
             track = faixa_do_payload(payload)
             if track is None or track.duration is None:
                 raise RuntimeError("o anexo não retornou metadados de áudio confirmados")
+            # O ACK entrega a responsabilidade ao estado do agente. Uma faixa
+            # curta já pode ter terminado antes de sincronizarmos o painel.
+            end_music_request(self.router, ctx.guild.id, request_owner)
             confirmation = (self._music_agent_play_message(
                 track, result, duration_state=self.router.get_state(ctx.guild.id))
                 if result.get("queued") else self._music_agent_play_message(track, result))
@@ -400,7 +415,8 @@ class FluxoTocar:
             # Older callers can still preserve a displayed estimate. Never
             # recalculate an old confirmation from a newer queue snapshot.
             wait_line = next((line for line in str(getattr(message, "content", "") or "").splitlines()
-                              if line.startswith(("⏳ ", "⏸️ "))), "⏳ Previsão indisponível")
+                              if line.startswith(("-# ⏳ ", "-# ⏸️ ", "⏳ ", "⏸️ "))),
+                             "-# ⏳ Previsão indisponível")
         limit = float(getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
         deadline = asyncio.get_running_loop().time() + max(5.0, limit)
         while asyncio.get_running_loop().time() < deadline:
@@ -640,6 +656,7 @@ class FluxoTocar:
         loading_reaction = MusicLoadingReaction(getattr(ctx, "message", None))
         loading_reaction.start_background()
         finish_loading_reaction = True
+        request_owner = begin_music_request(self.router, ctx.guild.id)
         try:
             if getattr(self.router, "music_worker_only_enabled", lambda: False)():
                 worker_check_started = time.monotonic()
@@ -1009,6 +1026,9 @@ class FluxoTocar:
                         return
                     await self._reply(ctx, self._music_error_message(exc))
                     return
+                if self.router.current_music_operation_generation(ctx.guild.id) != operation_generation:
+                    return
+                end_music_request(self.router, ctx.guild.id, request_owner)
                 if virtual_active:
                     # O comando do worker só retorna após iniciar/enfileirar a
                     # primeira faixa. A partir daqui podemos preencher o restante
@@ -1085,6 +1105,7 @@ class FluxoTocar:
                 or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
             )
             added, dropped = await self.router.enqueue(ctx.guild, voice_channel, ctx.channel, batch.tracks)
+            end_music_request(self.router, ctx.guild.id, request_owner)
             if added <= 0:
                 await self._reply(ctx, "`⚠️` Não adicionei nada: o queue está cheio ou essa música já está no queue/tocando.")
                 return
@@ -1118,6 +1139,7 @@ class FluxoTocar:
             trace.finish("cancelled")
             raise
         finally:
+            end_music_request(self.router, ctx.guild.id, request_owner)
             trace.finish()
             if prepare_task is not None and not play_delivered:
                 retain_music_task(self.router, self._cancel_voice_preparation(ctx.guild.id, prepare_id, prepare_task),

@@ -83,7 +83,7 @@ class QueueWaitCommandMessageTests(unittest.TestCase):
         self.assertIn("Adicionada à fila:", message)
         self.assertIn("Labyrinth", message)
         self.assertIn("`2:33`", message)
-        self.assertIn("Começa em aproximadamente **4:20**", message)
+        self.assertIn("Vai começar em: 4 minutos e 20 segundos", message)
         self.assertNotIn("CURRENT must not be acknowledged", message)
         self.assertNotIn("16:39", message)
         self.assertEqual(result, before)
@@ -95,7 +95,7 @@ class QueueWaitCommandMessageTests(unittest.TestCase):
         result["state"]["queue_layout"][0]["track"]["title"] = "Labyrinth"
         result["state"]["queue_layout"].append({
             "kind": "track", "track": {"queue_item_id": "after", "title": "Labyrinth", "duration": 900}})
-        self.assertIn("**4:20**", self.render(result))
+        self.assertIn("4 minutos e 20 segundos", self.render(result))
 
     def test_full_layout_is_used_for_target_beyond_the_queue_preview(self):
         result = queued_result()
@@ -107,14 +107,14 @@ class QueueWaitCommandMessageTests(unittest.TestCase):
             *({"kind": "track", "track": value} for value in leading),
             {"kind": "track", "track": result["track"]},
         ]
-        self.assertIn("**2:10**", self.render(result))
+        self.assertIn("2 minutos e 10 segundos", self.render(result))
 
     def test_preexisting_preview_fallback_still_uses_the_queued_entry(self):
         result = queued_result()
         result.pop("track")
         message = self.render(result)
         self.assertIn("Labyrinth", message)
-        self.assertIn("**4:20**", message)
+        self.assertIn("4 minutos e 20 segundos", message)
 
     def test_preview_last_other_identity_cannot_replace_selected_track_title(self):
         result = queued_result()
@@ -123,7 +123,7 @@ class QueueWaitCommandMessageTests(unittest.TestCase):
             "queue_item_id": "different", "title": "WRONG preview last entry", "duration": 999}]
         message = self.render(result)
         self.assertIn("Local fallback", message)
-        self.assertIn("**4:20**", message)
+        self.assertIn("4 minutos e 20 segundos", message)
         self.assertNotIn("WRONG", message)
         self.assertNotIn("CURRENT must not be acknowledged", message)
 
@@ -133,7 +133,7 @@ class QueueWaitCommandMessageTests(unittest.TestCase):
                                 queue_item_id="target")
         message = self.render(result)
         self.assertIn("Carregando detalhes...", message)
-        self.assertIn("**4:20**", message)
+        self.assertIn("4 minutos e 20 segundos", message)
         self.assertNotIn("CURRENT must not be acknowledged", message)
 
     def test_missing_previous_duration_produces_unavailable_instead_of_a_partial_number(self):
@@ -141,19 +141,19 @@ class QueueWaitCommandMessageTests(unittest.TestCase):
         result["state"]["queue_layout"][0]["track"]["duration"] = None
         message = self.render(result)
         self.assertIn("Previsão indisponível", message)
-        self.assertNotIn("**1:10**", message)
+        self.assertNotIn("1 minuto e 10 segundos", message)
 
     def test_wait_line_override_preserves_the_original_snapshot(self):
         result = queued_result()
         result["state"]["position_ms"] = 175000
         result["state"]["queue_layout"] = [{"kind": "track", "track": result["track"]}]
-        original_line = "⏳ Começa em aproximadamente **4:20**"
+        original_line = "-# ⏳ Vai começar em: 4 minutos e 20 segundos"
         message = self.render(result, wait_line=original_line)
         self.assertTrue(message.endswith(original_line))
-        self.assertNotIn("**0:05**", message)
+        self.assertNotIn("0 minutos e 5 segundos", message)
 
     def test_optional_local_duration_cache_reaches_the_shared_estimator(self):
-        helper = mock.Mock(return_value="⏳ Previsão indisponível")
+        helper = mock.Mock(return_value="-# ⏳ Previsão indisponível")
         self.namespace["queue_wait_line"] = helper
         cache = SimpleNamespace(agent_virtual_duration_cache={})
         result = queued_result()
@@ -200,7 +200,7 @@ class QueueTitleWatcherMessageTests(unittest.IsolatedAsyncioTestCase):
         self.namespace["asyncio"] = SimpleNamespace(
             get_running_loop=lambda: SimpleNamespace(time=lambda: self.clock),
             sleep=step_sleep)
-        self.wait_line = "⏳ Começa em aproximadamente **4:20**"
+        self.wait_line = "-# ⏳ Vai começar em: 4 minutos e 20 segundos"
         # Title enrichment may read newer metadata, but cannot recalculate an
         # acknowledgement's inclusion-time estimate.
         self.namespace["queue_wait_line"] = mock.Mock(side_effect=AssertionError("ETA was recalculated"))
@@ -223,7 +223,7 @@ class QueueTitleWatcherMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Actual resolved title", content)
         self.assertIn("`2:33`", content)
         self.assertTrue(content.endswith(self.wait_line))
-        self.assertNotIn("**0:05**", content)
+        self.assertNotIn("0 minutos e 5 segundos", content)
         self.message.edit.assert_awaited_once()
         self.namespace["music_agent_status"].assert_not_called()
 

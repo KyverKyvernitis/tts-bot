@@ -12,6 +12,9 @@ async def test_skip_remoto_nao_cancela_refill_da_playlist(monkeypatch: pytest.Mo
     cancelled: list[str] = []
 
     class Router:
+        def get_state(self, guild_id: int):
+            return SimpleNamespace(last_voice_channel_id=0)
+
         def cancel_pending_music_operations(self, guild_id: int, *, reason: str):
             cancelled.append(reason)
 
@@ -28,8 +31,12 @@ async def test_skip_remoto_nao_cancela_refill_da_playlist(monkeypatch: pytest.Mo
 @pytest.mark.asyncio
 async def test_stop_remoto_cancela_pipeline_uma_unica_vez(monkeypatch: pytest.MonkeyPatch) -> None:
     cancelled: list[str] = []
+    active = SimpleNamespace(current=object(), current_status="playing", music_stop_owner=None)
 
     class Router:
+        def get_state(self, guild_id: int):
+            return active
+
         def cancel_pending_music_operations(self, guild_id: int, *, reason: str):
             cancelled.append(reason)
 

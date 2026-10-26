@@ -91,6 +91,12 @@ class MusicGuildState:
     music_idle_disconnect_task: Optional[asyncio.Task] = None
     music_afk_expired: bool = False
     music_operation_generation: int = 0
+    music_pending_requests: set[Any] = field(default_factory=set)
+    music_request_serial: int = 0
+    music_stop_owner: Any = None
+    panel_finished: bool = False
+    panel_finished_message_id: int = 0
+    panel_finished_generation: int = -1
     control_votes: dict[str, ControlVote] = field(default_factory=dict)
     control_vote_cleanup_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     volume_loaded: bool = False

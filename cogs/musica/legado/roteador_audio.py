@@ -41,6 +41,9 @@ from ..reproducao.fila_remota import (
     voltar_historico_worker,
 )
 from ..reproducao.controle_remoto import ajustar_efeito, ajustar_volume, buscar_momento
+from ..reproducao.atividade import (
+    claim_music_stop, has_music_activity, owns_music_stop, release_music_stop,
+)
 from ..agente_telefone.monitor import iniciar_monitor_music_agent
 from ..runtime_telefone.agente.efeitos import payload_efeitos_tts
 from ..agente_telefone.estado import atualizar_estado_controle_remoto, usar_controles_fila_remota
@@ -3991,19 +3994,79 @@ class AudioRouter:
         if channel is None:
             return
         try:
-            from ..interface.componentes import build_player_embeds, MusicPlayerView, StaticMusicMessageView
-
-            has_player_content = bool(state.current or self._has_pending_track(state))
-            if has_player_content:
-                self._reactivate_panel_controls_now(int(guild_id))
-            state.panel_vote_summary = self.pending_vote_summary(guild_id)
-            # O painel mantém a mesma estrutura de controles mesmo quando a música acaba,
-            # é parada ou o bot é desconectado. Os botões ficam visíveis e a view decide
-            # quais ações ainda fazem sentido.
-            view = MusicPlayerView(self, guild_id)
-            current_panel_key = self._panel_key_for_track(state.current)
+            from ..interface.componentes import FinishedMusicMessageView, MusicPlayerView, StaticMusicMessageView
 
             async with state.panel_lock:
+                # Snapshot decisions belong inside the same lock as message
+                # updates. An enqueued play may have become current while this
+                # coroutine waited for a previous Discord edit.
+                has_player_content = has_music_activity(self, guild_id, state=state)
+                terminal = not has_player_content and (
+                    str(getattr(state, "idle_reason", "") or "") == "queue_finished"
+                    or bool(getattr(state, "panel_finished", False))
+                )
+                if terminal:
+                    message = state.now_message
+                    message_id = int(getattr(message, "id", 0) or 0)
+                    already_finished = bool(
+                        getattr(state, "panel_finished", False) and message_id
+                        and int(getattr(state, "panel_finished_message_id", 0) or 0) == message_id
+                    )
+                    generation = (int(getattr(state, "music_operation_generation", 0) or 0),
+                                  int(getattr(state, "agent_playback_token", -1)),
+                                  int(getattr(state, "music_request_serial", 0) or 0))
+                    state.panel_finished = True
+                    if already_finished:
+                        return  # Idle timers do not edit an unchanged terminal message again.
+                    state.panel_finished_message_id = 0  # Mark success only after HTTP acknowledgement.
+                    state.panel_finished_generation = generation[0]
+                    if message is None:
+                        return  # Finishing is edit-only, including after restart/deletion.
+                    edited = False
+                    try:
+                        await message.edit(content=None, embeds=[], attachments=[],
+                                           view=FinishedMusicMessageView())
+                        edited = True
+                    except discord.NotFound:
+                        if state.now_message is message:
+                            state.now_message = None
+                            state.panel_track_key = None
+                    except Exception:
+                        # A transient failure keeps the reference for an
+                        # ordinary later update. Never repost a finished panel.
+                        logger.debug("[music] falha ao editar mensagem de fila concluída | guild=%s",
+                                     guild_id, exc_info=True)
+                    has_player_content = has_music_activity(self, guild_id, state=state)
+                    current_generation = (int(getattr(state, "music_operation_generation", 0) or 0),
+                                          int(getattr(state, "agent_playback_token", -1)),
+                                          int(getattr(state, "music_request_serial", 0) or 0))
+                    if not has_player_content:
+                        if state.now_message is message and current_generation == generation:
+                            state.panel_track_key = None
+                            if edited:
+                                state.panel_finished_message_id = message_id
+                        elif (current_generation != generation
+                              and int(getattr(state, "panel_finished_generation", -1)) == generation[0]
+                              and not getattr(state, "panel_finished_message_id", 0)):
+                            # A request started and finished while HTTP was in
+                            # flight. Its next update determines its own state.
+                            state.panel_finished = False
+                            state.panel_finished_generation = -1
+                        return
+                    # A real new request arrived during the HTTP edit. Render
+                    # its fresh state now; do not stamp that session as finished.
+
+                if has_player_content:
+                    state.panel_finished = False
+                    state.panel_finished_message_id = 0
+                    state.panel_finished_generation = -1
+                    self._reactivate_panel_controls_now(int(guild_id))
+                else:
+                    # STOP/idle/status refreshes cannot create a new empty card.
+                    create = False
+                state.panel_vote_summary = self.pending_vote_summary(guild_id)
+                view = MusicPlayerView(self, guild_id)
+                current_panel_key = self._panel_key_for_track(state.current)
                 track_changed = bool(
                     has_player_content
                     and state.now_message is not None
@@ -5286,74 +5349,85 @@ class AudioRouter:
         self._schedule_panel_update(guild_id, create=bool(state.now_message))
         return did_anything
 
-    async def stop(self, guild_id: int, *, disconnect: bool = True) -> bool:
+    async def stop(self, guild_id: int, *, disconnect: bool = True, _stop_owner: Any = None) -> bool:
         state = self.get_state(guild_id)
-        state.stop_requested = True
-        state.skip_requested = True
-        self._cancel_next_prefetch(state)
-        self._set_idle_reason(state, "manual_stop")
-        self._invalidate_panel_controls_now(guild_id)
-        for _vote_action in ("skip", "stop"):
-            state.control_votes.pop(_vote_action, None)
-            _vote_task = state.control_vote_cleanup_tasks.pop(_vote_action, None)
-            if _vote_task is not None and not _vote_task.done():
-                _vote_task.cancel()
-        if state.current_resolve_task is not None and not state.current_resolve_task.done():
-            state.current_resolve_task.cancel()
-        if state.current_source is not None:
-            with contextlib.suppress(Exception):
-                state.current_source.cleanup()
-        while not state.queue.empty():
-            with contextlib.suppress(Exception):
-                state.queue.get_nowait()
-                state.queue.task_done()
-        state.forward_queue.clear()
-        guild = self.bot.get_guild(int(guild_id))
-        vc = guild.voice_client if guild else None
-        channel_hint = getattr(vc, "channel", None) if vc is not None else None
-        if channel_hint is None and guild is not None and getattr(state, "last_voice_channel_id", None):
-            channel_hint = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
-        if vc:
-            # Stop manual precisa limpar também estados presos de TTS/Lavalink. Antes,
-            # se o TTS já tinha tocado/encostado na voz, o botão não desconectava e
-            # deixava o bot preso na call.
-            with contextlib.suppress(Exception):
-                if self._vc_is_playing_or_paused(vc):
-                    await self._vc_stop_audio(vc)
-        # Restaura antes de desconectar. O endpoint de status pode exigir
-        # MANAGE_CHANNELS adicional quando o bot já não está no canal.
-        await self._restore_music_session_side_effects(
-            guild, state, reason="manual_stop", channel_hint=channel_hint
-        )
-        if vc and disconnect:
-            with contextlib.suppress(Exception):
-                self._mark_internal_voice_disconnect(guild_id, seconds=8.0)
-                await vc.disconnect(force=True)
-            state.music_owns_voice = False
-        state.current = None
-        state.current_started_at_monotonic = 0.0
-        state.current_source = None
-        state.current_resolve_task = None
-        state.current_backend = "local"
-        state.current_lavalink_player = None
-        state.current_lavalink_playable = None
-        state.lavalink_tts_until = 0.0
-        state.lavalink_resume_grace_until = 0.0
-        state.tts_session_active_until = 0.0
-        state.tts_session_last_error = ""
-        state.skip_transition_active = False
-        state.skip_history_suppressed_once = False
-        self._set_current_status(state, "idle")
-        state.paused = False
-        state.music_session_active = False
-        self._cancel_music_idle_disconnect(state)
-        state.control_votes.clear()
-        for _vote_task in list(state.control_vote_cleanup_tasks.values()):
-            if _vote_task is not None and not _vote_task.done():
-                _vote_task.cancel()
-        state.control_vote_cleanup_tasks.clear()
-        await self.update_panel(guild_id, create=bool(state.now_message))
-        return True
+        claimed_here = _stop_owner is None
+        owner = claim_music_stop(self, guild_id) if claimed_here else _stop_owner
+        if owner is None:
+            return False
+        try:
+            if not owns_music_stop(self, guild_id, owner) or not has_music_activity(self, guild_id, state=state):
+                return False
+            self.cancel_pending_music_operations(guild_id, reason="stop")
+            state.stop_requested = True
+            state.skip_requested = True
+            self._cancel_next_prefetch(state)
+            self._set_idle_reason(state, "manual_stop")
+            self._invalidate_panel_controls_now(guild_id)
+            for _vote_action in ("skip", "stop"):
+                state.control_votes.pop(_vote_action, None)
+                _vote_task = state.control_vote_cleanup_tasks.pop(_vote_action, None)
+                if _vote_task is not None and not _vote_task.done():
+                    _vote_task.cancel()
+            if state.current_resolve_task is not None and not state.current_resolve_task.done():
+                state.current_resolve_task.cancel()
+            if state.current_source is not None:
+                with contextlib.suppress(Exception):
+                    state.current_source.cleanup()
+            while not state.queue.empty():
+                with contextlib.suppress(Exception):
+                    state.queue.get_nowait()
+                    state.queue.task_done()
+            state.forward_queue.clear()
+            guild = self.bot.get_guild(int(guild_id))
+            vc = guild.voice_client if guild else None
+            channel_hint = getattr(vc, "channel", None) if vc is not None else None
+            if channel_hint is None and guild is not None and getattr(state, "last_voice_channel_id", None):
+                channel_hint = guild.get_channel(int(state.last_voice_channel_id)) or self.bot.get_channel(int(state.last_voice_channel_id))
+            if vc:
+                # Stop manual precisa limpar também estados presos de TTS/Lavalink. Antes,
+                # se o TTS já tinha tocado/encostado na voz, o botão não desconectava e
+                # deixava o bot preso na call.
+                with contextlib.suppress(Exception):
+                    if self._vc_is_playing_or_paused(vc):
+                        await self._vc_stop_audio(vc)
+            # Restaura antes de desconectar. O endpoint de status pode exigir
+            # MANAGE_CHANNELS adicional quando o bot já não está no canal.
+            await self._restore_music_session_side_effects(
+                guild, state, reason="manual_stop", channel_hint=channel_hint
+            )
+            if vc and disconnect:
+                with contextlib.suppress(Exception):
+                    self._mark_internal_voice_disconnect(guild_id, seconds=8.0)
+                    await vc.disconnect(force=True)
+                state.music_owns_voice = False
+            state.current = None
+            state.current_started_at_monotonic = 0.0
+            state.current_source = None
+            state.current_resolve_task = None
+            state.current_backend = "local"
+            state.current_lavalink_player = None
+            state.current_lavalink_playable = None
+            state.lavalink_tts_until = 0.0
+            state.lavalink_resume_grace_until = 0.0
+            state.tts_session_active_until = 0.0
+            state.tts_session_last_error = ""
+            state.skip_transition_active = False
+            state.skip_history_suppressed_once = False
+            self._set_current_status(state, "idle")
+            state.paused = False
+            state.music_session_active = False
+            self._cancel_music_idle_disconnect(state)
+            state.control_votes.clear()
+            for _vote_task in list(state.control_vote_cleanup_tasks.values()):
+                if _vote_task is not None and not _vote_task.done():
+                    _vote_task.cancel()
+            state.control_vote_cleanup_tasks.clear()
+            await self.update_panel(guild_id, create=False)
+            return True
+        finally:
+            if claimed_here:
+                release_music_stop(self, guild_id, owner)
 
     async def _seek_lavalink_current(self, guild_id: int, state: MusicGuildState, position_seconds: float) -> bool:
         player = state.current_lavalink_player
@@ -5569,15 +5643,31 @@ class AudioRouter:
             return ok, "`⏭️` Votação concluída: pulando música." if ok else "Não havia música para pular."
         return ok, "`⏭️` Pulando música." if ok else "Não havia música para pular."
 
-    async def request_stop(self, guild_id: int, member, *, disconnect: bool = True) -> tuple[bool, str]:
-        allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "stop")
-        if not allowed:
-            return False, pending_message
-        self.cancel_pending_music_operations(guild_id, reason="stop")
-        ok = await self.stop(guild_id, disconnect=disconnect)
-        if completed_by_vote:
-            return ok, "`⏹️` Votação concluída: player encerrado e queue limpo."
-        return ok, "`⏹️` Player encerrado e queue limpo."
+    async def request_stop(
+        self, guild_id: int, member, *, disconnect: bool = True, _stop_owner: Any = None,
+    ) -> tuple[bool, str]:
+        state = self.get_state(guild_id)
+        claimed_here = _stop_owner is None
+        owner = claim_music_stop(self, guild_id) if claimed_here else _stop_owner
+        if owner is None:
+            return False, ""
+        try:
+            if not owns_music_stop(self, guild_id, owner) or not has_music_activity(self, guild_id, state=state):
+                return False, ""
+            allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "stop")
+            if not has_music_activity(self, guild_id, state=state):
+                return False, ""
+            if not allowed:
+                return False, pending_message
+            ok = await self.stop(guild_id, disconnect=disconnect, _stop_owner=owner)
+            if not ok:
+                return False, ""
+            if completed_by_vote:
+                return True, "`⏹️` Votação concluída: player encerrado e queue limpo."
+            return True, "`⏹️` Player encerrado e queue limpo."
+        finally:
+            if claimed_here:
+                release_music_stop(self, guild_id, owner)
 
     async def request_shuffle(self, guild_id: int, member) -> tuple[bool, str]:
         state = self.get_state(guild_id)

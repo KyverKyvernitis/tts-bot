@@ -48,20 +48,34 @@ def cached(info, durations):
 
 class QueueWaitLabelTests(unittest.TestCase):
     def test_chosen_public_formats_and_unknown(self):
-        self.assertEqual(QueueWaitEstimate(260).label(), "⏳ Começa em aproximadamente **4:20**")
-        self.assertEqual(QueueWaitEstimate(260, True).label(), "⏸️ Após retomar: aproximadamente **4:20**")
-        self.assertEqual(QueueWaitEstimate(None).label(), "⏳ Previsão indisponível")
+        self.assertEqual(QueueWaitEstimate(260).label(), "-# ⏳ Vai começar em: 4 minutos e 20 segundos")
+        self.assertEqual(QueueWaitEstimate(260, True).label(), "-# ⏸️ Após retomar: 4 minutos e 20 segundos")
+        self.assertEqual(QueueWaitEstimate(None).label(), "-# ⏳ Previsão indisponível")
         self.assertEqual(QueueWaitEstimate(260).metadata_label(), "⏳ aproximadamente **4:20**")
 
     def test_seconds_round_up_and_hours_keep_the_full_wait(self):
-        self.assertIn("**0:01**", QueueWaitEstimate(.001).label())
-        self.assertIn("**1:00:01**", QueueWaitEstimate(3600.001).label())
-        self.assertIn("**0:00**", QueueWaitEstimate(0).label())
+        self.assertIn("0 minutos e 1 segundo", QueueWaitEstimate(.001).label())
+        self.assertIn("60 minutos e 1 segundo", QueueWaitEstimate(3600.001).label())
+        self.assertIn("0 minutos e 0 segundos", QueueWaitEstimate(0).label())
+
+    def test_acknowledgement_uses_small_text_words_and_correct_singular_plural(self):
+        for seconds, expected in (
+            (1, "0 minutos e 1 segundo"),
+            (60, "1 minuto e 0 segundos"),
+            (61, "1 minuto e 1 segundo"),
+            (187, "3 minutos e 7 segundos"),
+            (3900, "65 minutos e 0 segundos"),
+        ):
+            with self.subTest(seconds=seconds):
+                line = QueueWaitEstimate(seconds).label()
+                self.assertEqual(line, "-# ⏳ Vai começar em: " + expected)
+                self.assertNotIn("**", line)
+                self.assertNotIn("aproximadamente", line)
 
     def test_invalid_diagnostic_values_cannot_break_the_formatter(self):
         for value in (float("inf"), float("nan"), -1, True, "invalid"):
             with self.subTest(value=value):
-                self.assertEqual(QueueWaitEstimate(value).label(), "⏳ Previsão indisponível")
+                self.assertEqual(QueueWaitEstimate(value).label(), "-# ⏳ Previsão indisponível")
 
     def test_estimate_is_a_frozen_snapshot(self):
         estimate = QueueWaitEstimate(260)
@@ -151,7 +165,7 @@ class RawQueueWaitTests(unittest.TestCase):
         estimate = estimate_queue_wait(raw(current=track("current", 1e308), position=0,
                                            speed_multiplier=.4), "target")
         self.assertIsNone(estimate.seconds)
-        self.assertEqual(estimate.label(), "⏳ Previsão indisponível")
+        self.assertEqual(estimate.label(), "-# ⏳ Previsão indisponível")
 
     def test_old_snapshot_preview_requires_complete_proven_queue(self):
         state = raw(track("prior", 190))
@@ -170,7 +184,7 @@ class RawQueueWaitTests(unittest.TestCase):
     def test_zero_prior_duration_is_known_and_inputs_are_not_modified(self):
         state = raw(track("prior", 0))
         before = deepcopy(state)
-        self.assertEqual(queue_wait_line(state, "target"), "⏳ Começa em aproximadamente **1:10**")
+        self.assertEqual(queue_wait_line(state, "target"), "-# ⏳ Vai começar em: 1 minuto e 10 segundos")
         self.assertEqual(state, before)
 
     def test_reorder_and_removal_are_reflected_on_each_new_estimate(self):

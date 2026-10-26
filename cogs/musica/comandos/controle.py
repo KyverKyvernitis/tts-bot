@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from discord.ext import commands
 
+from ..reproducao.atividade import (
+    claim_music_stop, has_music_activity, release_music_stop,
+)
+
 
 class FluxoControle:
     """Lógica dos comandos que controlam a sessão musical remota."""
@@ -39,12 +43,29 @@ class FluxoControle:
         await self._reply(ctx, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
 
     async def _run_stop(self, ctx: commands.Context) -> None:
-        if not await self._ensure_music_action_voice(ctx):
+        guild_id = ctx.guild.id
+        if not has_music_activity(self.router, guild_id):
             return
-        if await self._send_music_agent_control(ctx, "stop", "`⏹️` Player encerrado e desconectado."):
+        owner = claim_music_stop(self.router, guild_id)
+        if owner is None:
             return
-        _ok, message = await self.router.request_stop(ctx.guild.id, ctx.author, disconnect=True)
-        await self._reply(ctx, message)
+        try:
+            if not await self._ensure_music_action_voice(ctx, ignore_idle_stop=True):
+                return
+            # The last track can finish while admission is awaiting the worker.
+            if not has_music_activity(self.router, guild_id):
+                return
+            if await self._send_music_agent_control(
+                ctx, "stop", "`⏹️` Player encerrado e desconectado.", _stop_owner=owner,
+            ):
+                return
+            _ok, message = await self.router.request_stop(
+                guild_id, ctx.author, disconnect=True, _stop_owner=owner,
+            )
+            if message:
+                await self._reply(ctx, message)
+        finally:
+            release_music_stop(self.router, guild_id, owner)
 
     async def _run_volume(self, ctx: commands.Context, value: int | None = None) -> None:
         if not await self._ensure_music_action_voice(ctx):

@@ -708,7 +708,26 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             accepted += 1
         return {"ok": True, "accepted": accepted, "cache_size": len(self._resolve_cache), "metadata_cache_size": len(self._metadata_cache)}
 
+    async def _run_music_start_request(self, body: dict[str, Any], handler: Any) -> dict[str, Any]:
+        """Own accepted start work even before a probe publishes a queue item."""
+        guild_id = safe_id(body.get("guild_id"))
+        registry = getattr(self, "_music_start_requests", None)
+        if registry is None:
+            registry = self._music_start_requests = {}
+        owners = registry.setdefault(guild_id, set())
+        owner = object()
+        owners.add(owner)
+        try:
+            return await handler(body)
+        finally:
+            owners.discard(owner)
+            if not owners and registry.get(guild_id) is owners:
+                registry.pop(guild_id, None)
+
     async def cmd_enqueue_discord_attachment(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._run_music_start_request(body, self._enqueue_discord_attachment)
+
+    async def _enqueue_discord_attachment(self, body: dict[str, Any]) -> dict[str, Any]:
         """Confirma áudio e duração por ffprobe ou metadados de voz do Discord.
 
         O lock por guild preserva a ordem de chegada também quando um probe
@@ -728,8 +747,14 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             self._discord_enqueue_locks = {}
             self._discord_seen_requests = {}
         lock = self._discord_enqueue_locks.setdefault(guild_id, asyncio.Lock())
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        queue_generation = int(st.queue_reset_generation)
         async with lock:
-            st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+            # A second accepted attachment can wait here while the previous
+            # probe is running. STOP must also cancel work already waiting for
+            # that probe, instead of letting it join the next music session.
+            if self.states.get(guild_id) is not st or st.queue_reset_generation != queue_generation:
+                return {"ok": False, "cancelled": True, "queued": False, "error": "operação cancelada"}
             existing = next((item for item in ([st.current] if st.current else []) + st.queue + st.history
                              if item.queue_item_id == request_id), None)
             if existing:
@@ -744,7 +769,6 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                     seen.pop(key, None)
             if request_id in seen:
                 return {"ok": False, "error": "Essa mídia já foi processada. Envie um novo comando para repetir."}
-            queue_generation = int(st.queue_reset_generation)
             prepare_started = time.monotonic()
             url_hint = initial_discord_cdn_url(body.get("attachment_url_hint"), ref)
             voice_prepare_task: asyncio.Task | None = None
@@ -923,6 +947,9 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             return result
 
     async def cmd_play(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._run_music_start_request(body, self._play_request)
+
+    async def _play_request(self, body: dict[str, Any]) -> dict[str, Any]:
         received_monotonic = time.monotonic()
         guild_id = safe_id(body.get("guild_id"))
         voice_channel_id = safe_id(body.get("voice_channel_id"))
@@ -941,7 +968,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             raise ValueError("query/url vazia")
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         self._update_auto_leave_from_body(st, body)
+        request_generation = st.queue_reset_generation
         voice_preparation = await self._adopt_voice_preparation(guild_id, body)
+        if self.states.get(guild_id) is not st or st.queue_reset_generation != request_generation:
+            return {"ok": False, "cancelled": True, "queued": False, "error": "operação cancelada"}
         st.voice_channel_id = voice_channel_id
         st.text_channel_id = text_channel_id
         if not st.normal_volume_percent:
@@ -1316,34 +1346,86 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             st.player = None
         await self._stop_player_instance(player, disconnect=disconnect)
 
-    async def cmd_stop(self, body: dict[str, Any]) -> dict[str, Any]:
+    def _music_stop_has_activity(
+        self, guild_id: int, st: GuildMusicState | None = None, *, include_voice_preparation: bool = True,
+    ) -> bool:
+        """Music work only: an idle voice connection may belong entirely to TTS."""
+        st = self.states.get(guild_id) if st is None else st
+        if st is not None and (
+            st.current is not None or bool(st.queue)
+            or str(st.status or "").lower() in {"resolving", "preparing", "starting", "queued", "skipping"}
+        ):
+            return True
+        if getattr(self, "_music_start_requests", {}).get(guild_id):
+            return True
+        resolving = getattr(self, "_active_resolve_tasks", {}).get(guild_id)
+        if resolving is not None and not resolving.done():
+            return True
+        if guild_id in getattr(self, "_starting_pcm", {}) or guild_id in getattr(self, "_initial_audio", {}):
+            return True
+        if include_voice_preparation:
+            lease = getattr(self, "_voice_prepare_leases", {}).get(guild_id)
+            if (lease is not None and not getattr(lease, "adopted", False)
+                    and float(getattr(lease, "expires_monotonic", 0.0)) > time.monotonic()):
+                return True
+        return False
+
+    async def cmd_stop(self, body: dict[str, Any], *, force_disconnect: bool = False) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
-        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
-        st.queue_reset_generation += 1
-        st.last_action = "stop"
-        await self._cancel_voice_preparation(guild_id, reason="manual_stop")
-        self._cancel_youtube_queue_metadata(guild_id)
-        self._cancel_prefetch_tasks(guild_id)
-        self._cancel_idle_disconnect(guild_id)
-        self._cancel_voice_presence_disconnect(guild_id)
-        st.queue.clear()
-        st.history.clear()
-        st.virtual_shuffle_active = False
-        st.virtual_shuffle_seed = 0
-        st.apply_effect_signature((0, 0, 0))
-        st.effects_revision += 1
-        player = st.player
-        st.player = None
-        st.current = None
-        self._set_status(st, "idle", event="stop")
-        recorder = getattr(self, "_record_voice_disconnect", None)
-        if callable(recorder):
-            recorder(st, reason="manual_stop", event="stop", humans=self._voice_human_count(st))
-        self._set_voice_session_mode(st, "disconnected", reason="manual_stop")
-        st.paused = False
-        self._bump_playback_generation(st, reason="stop")
-        await self._stop_player_instance(player, disconnect=True)
-        return {"ok": True, "state": st.public()}
+        st = self.states.get(guild_id)
+        owners = getattr(self, "_music_stop_owners", None)
+        if owners is not None and guild_id in owners:
+            return {"ok": True, "ignored": True}
+        if not force_disconnect and not self._music_stop_has_activity(guild_id, st):
+            # Do not create state, alter history/effects, disconnect TTS or even
+            # change the playback revision for an already empty music session.
+            return {"ok": True, "ignored": True}
+        if st is None:
+            st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        if owners is None:
+            owners = self._music_stop_owners = {}
+        owner = object()
+        owners[guild_id] = owner
+        token, reset_generation = st.playback_token, st.queue_reset_generation
+        try:
+            cancelled_preparation = await self._cancel_voice_preparation(guild_id, reason="manual_stop")
+            if not force_disconnect:
+                if (self.states.get(guild_id) is not st or st.playback_token != token
+                        or st.queue_reset_generation != reset_generation):
+                    return {"ok": True, "ignored": True}
+                if not self._music_stop_has_activity(guild_id, st, include_voice_preparation=False):
+                    if cancelled_preparation:
+                        # A preparation-only stop did real work, but there is
+                        # no music player/history/effect state to tear down.
+                        return {"ok": True, "cancelled_preparation": True, "state": st.public()}
+                    return {"ok": True, "ignored": True}
+            st.queue_reset_generation += 1
+            st.last_action = "stop"
+            self._cancel_youtube_queue_metadata(guild_id)
+            self._cancel_prefetch_tasks(guild_id)
+            self._cancel_idle_disconnect(guild_id)
+            self._cancel_voice_presence_disconnect(guild_id)
+            st.queue.clear()
+            st.history.clear()
+            st.virtual_shuffle_active = False
+            st.virtual_shuffle_seed = 0
+            st.apply_effect_signature((0, 0, 0))
+            st.effects_revision += 1
+            player = st.player
+            st.player = None
+            st.current = None
+            self._set_status(st, "idle", event="stop")
+            recorder = getattr(self, "_record_voice_disconnect", None)
+            if callable(recorder):
+                recorder(st, reason="manual_stop", event="stop", humans=self._voice_human_count(st))
+            self._set_voice_session_mode(st, "disconnected", reason="manual_stop")
+            st.paused = False
+            self._bump_playback_generation(st, reason="stop")
+            await self._stop_player_instance(player, disconnect=True)
+            return {"ok": True, "state": st.public()}
+        finally:
+            if owners.get(guild_id) is owner:
+                owners.pop(guild_id, None)
 
     async def cmd_skip(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))

@@ -8,6 +8,9 @@ from cogs.musica import configuracao as config
 from ..agente_telefone.comandos import music_agent_command
 from ..nucleo.modelos import MusicTrack
 from .inicio import prepare_music_channel, finish_music_channel_preparation, channel_bitrate_hints
+from .atividade import (
+    claim_music_stop, has_music_activity, owns_music_stop, release_music_stop,
+)
 
 
 async def enviar_controle_remoto(
@@ -22,6 +25,7 @@ async def enviar_controle_remoto(
     track: MusicTrack | dict[str, Any] | None = None,
     query: str = "",
     create_panel: bool = True,
+    _stop_owner: Any = None,
     **extra: Any,
 ) -> dict[str, Any]:
     """Envia um controle ao Phone Worker e espelha o estado retornado na VPS.
@@ -32,77 +36,93 @@ async def enviar_controle_remoto(
     """
 
     action = str(action or "").strip().lower()
-    # Só STOP invalida o pipeline local inteiro. Skip/previous/shuffle são
-    # controles da sessão já ativa no Phone Worker e NÃO podem cancelar o
-    # refill da playlist virtual; isso fazia skips rápidos matarem a playlist.
+    claimed_stop = False
     if action == "stop":
-        cancel = getattr(router, "cancel_pending_music_operations", None)
-        if callable(cancel):
-            cancel(int(guild_id), reason="agent_stop")
+        if not has_music_activity(router, int(guild_id)):
+            return {"ok": True, "ignored": True}
+        if _stop_owner is None:
+            _stop_owner = claim_music_stop(router, int(guild_id))
+            claimed_stop = _stop_owner is not None
+        if _stop_owner is None or not owns_music_stop(router, int(guild_id), _stop_owner):
+            return {"ok": True, "ignored": True}
 
-    start_actions = {"skip", "next", "previous", "back", "prev", "queue_play_now",
-                     "play_queue_position", "queue_jump"}
-    starts_playback = action in start_actions or (
-        action in {"queue_virtual_action", "virtual_queue_action"}
-        and str(extra.get("virtual_action") or extra.get("operation") or "").strip().lower() == "play_now"
-    )
-    operation_id = str(extra.get("command_id") or uuid.uuid4().hex)
-    prepared_channel_id = 0
-    committed = False
     try:
-        if starts_playback:
-            state = router.get_state(int(guild_id))
-            prepared_channel_id = int(voice_channel_id or getattr(state, "last_voice_channel_id", 0) or 0)
-            current_generation = getattr(router, "current_music_operation_generation", None)
-            generation = current_generation(int(guild_id)) if callable(current_generation) else None
-            prepared = await prepare_music_channel(
-                router, guild_id=int(guild_id), voice_channel_id=prepared_channel_id,
-                generation=generation, operation_id=operation_id)
-            if prepared.get("state") == "cancelled":
-                return {"ok": True, "cancelled": True}
-            extra.update(channel_bitrate_hints(prepared))
-        # A transport exception may lose only the ACK after successful play.
-        # Never restore an allegedly idle channel based on that ambiguity.
-        committed = True
-        result = await music_agent_command(
-            action,
-            guild_id=int(guild_id),
-            voice_channel_id=int(voice_channel_id or prepared_channel_id or 0),
-            text_channel_id=int(text_channel_id or 0),
-            query=str(query or ""),
-            track=track,
-            requester_id=int(requester_id or 0),
-            requester_name=str(requester_name or ""),
-            timeout_seconds=extra.pop(
-                "timeout_seconds",
-                getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0),
-            ),
-            **extra,
-        )
-        committed = not (result.get("ok") is False or result.get("cancelled"))
-    finally:
-        if prepared_channel_id:
-            await finish_music_channel_preparation(
-                router, guild_id=int(guild_id), voice_channel_id=prepared_channel_id,
-                operation_id=operation_id, committed=committed)
+        # Only an admitted STOP invalidates the local pipeline. Its ownership
+        # is shared across command admission, direct calls and the button.
+        if action == "stop":
+            if not has_music_activity(router, int(guild_id)):
+                return {"ok": True, "ignored": True}
+            create_panel = False
+            cancel = getattr(router, "cancel_pending_music_operations", None)
+            if callable(cancel):
+                cancel(int(guild_id), reason="agent_stop")
 
-    remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-    if remote:
-        sync = getattr(router, "sync_music_agent_state", None)
-        if callable(sync):
-            # Ações virtuais enviam um dict da faixa selecionada em `track`.
-            # O espelho local deve usar o `current` autoritativo do Worker,
-            # nunca esse dict como fallback da música atual.
-            await sync(
-                int(guild_id),
-                track if isinstance(track, MusicTrack) else None,
-                remote,
-                voice_channel_id=int(remote.get("voice_channel_id") or voice_channel_id or 0) or None,
-                text_channel_id=int(remote.get("text_channel_id") or text_channel_id or 0) or None,
-                queued=False,
-                create_panel=bool(create_panel),
+        start_actions = {"skip", "next", "previous", "back", "prev", "queue_play_now",
+                         "play_queue_position", "queue_jump"}
+        starts_playback = action in start_actions or (
+            action in {"queue_virtual_action", "virtual_queue_action"}
+            and str(extra.get("virtual_action") or extra.get("operation") or "").strip().lower() == "play_now"
+        )
+        operation_id = str(extra.get("command_id") or uuid.uuid4().hex)
+        prepared_channel_id = 0
+        committed = False
+        try:
+            if starts_playback:
+                state = router.get_state(int(guild_id))
+                prepared_channel_id = int(voice_channel_id or getattr(state, "last_voice_channel_id", 0) or 0)
+                current_generation = getattr(router, "current_music_operation_generation", None)
+                generation = current_generation(int(guild_id)) if callable(current_generation) else None
+                prepared = await prepare_music_channel(
+                    router, guild_id=int(guild_id), voice_channel_id=prepared_channel_id,
+                    generation=generation, operation_id=operation_id)
+                if prepared.get("state") == "cancelled":
+                    return {"ok": True, "cancelled": True}
+                extra.update(channel_bitrate_hints(prepared))
+            # A transport exception can lose only the ACK after successful play.
+            committed = True
+            result = await music_agent_command(
+                action,
+                guild_id=int(guild_id),
+                voice_channel_id=int(voice_channel_id or prepared_channel_id or 0),
+                text_channel_id=int(text_channel_id or 0),
+                query=str(query or ""),
+                track=track,
+                requester_id=int(requester_id or 0),
+                requester_name=str(requester_name or ""),
+                timeout_seconds=extra.pop(
+                    "timeout_seconds",
+                    getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0),
+                ),
+                **extra,
             )
-    return result
+            committed = not (result.get("ok") is False or result.get("cancelled"))
+        finally:
+            if prepared_channel_id:
+                await finish_music_channel_preparation(
+                    router, guild_id=int(guild_id), voice_channel_id=prepared_channel_id,
+                    operation_id=operation_id, committed=committed)
+
+        # An authoritative no-op must not mutate the mirror or resurrect an
+        # idle panel. Callers also suppress the normal success confirmation.
+        if isinstance(result, dict) and result.get("ignored"):
+            return result
+        remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+        if remote:
+            sync = getattr(router, "sync_music_agent_state", None)
+            if callable(sync):
+                await sync(
+                    int(guild_id),
+                    track if isinstance(track, MusicTrack) else None,
+                    remote,
+                    voice_channel_id=int(remote.get("voice_channel_id") or voice_channel_id or 0) or None,
+                    text_channel_id=int(remote.get("text_channel_id") or text_channel_id or 0) or None,
+                    queued=False,
+                    create_panel=bool(create_panel),
+                )
+        return result
+    finally:
+        if claimed_stop:
+            release_music_stop(router, int(guild_id), _stop_owner)
 
 
 async def pausar(router: Any, guild_id: int, **kwargs: Any) -> dict[str, Any]:

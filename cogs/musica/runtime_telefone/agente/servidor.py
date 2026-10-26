@@ -102,7 +102,7 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.96"
+AGENT_VERSION = "0.3.97"
 try:
     ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
@@ -1275,7 +1275,21 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             body.pop("_channel_bitrate_wait_ms", None)
             body.pop("_channel_bitrate_received_monotonic", None)
             received = time.monotonic()
-            readiness = await self._wait_channel_bitrate_hint(body, action=action)
+            # STOP must also see a start waiting for the gateway's bitrate
+            # event, before cmd_play/attachment owns its request wrapper.
+            registry = getattr(self, "_music_start_requests", None)
+            if registry is None:
+                registry = self._music_start_requests = {}
+            guild_id = safe_id(body.get("guild_id"))
+            owners = registry.setdefault(guild_id, set())
+            owner = object()
+            owners.add(owner)
+            try:
+                readiness = await self._wait_channel_bitrate_hint(body, action=action)
+            finally:
+                owners.discard(owner)
+                if not owners and registry.get(guild_id) is owners:
+                    registry.pop(guild_id, None)
             if readiness["state"] == "cancelled":
                 return {"ok": False, "cancelled": True, "error": "a reprodução mudou durante a preparação do canal"}
             if readiness["wait_ms"] >= 1:
@@ -1313,7 +1327,9 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         if action in {"resume", "unpause"}:
             return await self.cmd_resume(body)
         if action in {"stop", "disconnect"}:
-            return await self.cmd_stop(body)
+            # This distinction is trusted dispatch metadata, never a payload
+            # override that could turn an idle STOP into a TTS disconnect.
+            return await self.cmd_stop(body, force_disconnect=action == "disconnect")
         if action in {"skip", "next"}:
             return await self.cmd_skip(body)
         if action in {"previous", "back", "prev", "anterior", "voltar"}:

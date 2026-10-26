@@ -51,6 +51,11 @@ class AudioDiscordTests(unittest.IsolatedAsyncioTestCase):
         )
 
         class Router:
+            def __init__(self):
+                self.state = types.SimpleNamespace(music_operation_generation=0,
+                                                   music_pending_requests=set(),
+                                                   music_request_serial=0)
+            def get_state(self, _guild_id): return self.state
             def music_worker_only_enabled(self): return True
             def current_music_operation_generation(self, _guild_id): return 0
 
