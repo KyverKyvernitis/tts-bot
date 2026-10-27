@@ -176,7 +176,8 @@ class ProgressiveRenderTests(unittest.TestCase):
         self.assertEqual(default,explicit)
         short=automatic_render_plan(adapted,text,first_request_ms=500,request_ms=1000)
         lead=[request for chunk in short['chunks'] for request in chunk['parts'] if request['role']=='lead']
-        self.assertEqual(lead[0]['adaptive_text'],'a ~ ~ ~')
+        self.assertEqual(lead[0]['adaptive_text'],'a ~ ~ ~ ~ ~ ~')
+        self.assertEqual(lead[0]['score']['duration_ms'],3500)
         self.assertTrue(all(not request['adaptive_text'].startswith('~') for request in lead))
 
     def test_cancellation_and_native_failure_do_not_emit_incomplete_initial_mix(self):

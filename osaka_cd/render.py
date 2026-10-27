@@ -476,7 +476,9 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
     # An empty fingerprint deliberately disables cross-request stem reuse:
     # a version number alone cannot identify a changed voicebank/resampler.
     cache = Path(cache_dir) if cache_dir is not None and render_profile_fingerprint else None
-    automatic = arrangement.get('message_lyrics_mode') in {'automatic-lyrics-v1','automatic-lyrics-v2'}
+    automatic = arrangement.get('message_lyrics_mode') in {
+        'automatic-lyrics-v1', 'automatic-lyrics-v2', 'automatic-lyrics-v3',
+    }
     if automatic:
         from .lyrics import automatic_render_plan
         plan = automatic_render_plan(arrangement, text, segments, language=language)

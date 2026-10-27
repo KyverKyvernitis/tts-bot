@@ -330,7 +330,8 @@ class ProductionFlowTests(unittest.IsolatedAsyncioTestCase):
             author=SimpleNamespace(id=2, voice=SimpleNamespace(channel=SimpleNamespace(id=3))), attachments=[])
         result = await preparation['preparar_payload_tts_mensagem'](
             MessageOwner(), message, guild_defaults={}, active_prefix="'", forced_engine='teto')
-        self.assertEqual(result.queue_item.ttv_arrangement['duration_ms'], 6000)
+        self.assertEqual(result.queue_item.ttv_arrangement['duration_ms'], 7000)
+        self.assertEqual(result.queue_item.ttv_arrangement['lyrics_adaptation']['requested_hold_ms'], 1000)
         self.assertEqual(len(result.queue_item.ttv_arrangement['parts']), 2)
         self.assertEqual(result.queue_item.ttv_score['duration_ms'], 500)
         self.assertEqual(result.queue_item.ttv_pitch_semitones, '+0.0')

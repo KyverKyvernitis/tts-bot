@@ -38,6 +38,37 @@ def default_melody_score(count: int, *, boundaries=()) -> dict:
             "lyrics_source": "message", "notes": notes}
 
 
+def speech_effect_segments(segments: list[dict]) -> list[dict]:
+    """Collect each explicit speech hold on its preceding spoken word.
+
+    Hold counts are internal planning data. The wire format retains its boolean
+    ``hold`` flag, and MIDI's ``~`` tokens keep their note-by-note meaning.
+    """
+    spoken = []
+    anchor = None
+    for segment in segments:
+        token = segment["text"].strip()
+        if token == "|":
+            # Active speech boundaries live in pause_after_ms. A neutral bar
+            # may instead be an escaped literal, which must not end the hold.
+            continue
+        if token == "~":
+            if segment["hold"]:
+                if anchor is None:
+                    raise ValueError("~ precisa vir depois de uma sílaba, sem atravessar uma pausa")
+                anchor["hold_count"] += 1
+                anchor["fade_in"] = anchor["fade_in"] or segment["fade_in"]
+                anchor["fade_out"] = anchor["fade_out"] or segment["fade_out"]
+                if segment["pause_after_ms"]:
+                    anchor["pause_after_ms"] = segment["pause_after_ms"]
+                    anchor = None
+            continue
+        current = dict(segment, hold_count=int(segment["hold"]))
+        spoken.append(current)
+        anchor = None if current["pause_after_ms"] else current
+    return spoken
+
+
 def validate_performance(text: str, *, score=None, segments=None) -> None:
     """Bound untrusted musical/effect requests before caches or native processes."""
     if not isinstance(text, str) or len(text) > (2048 if score is not None else 180):
@@ -90,11 +121,11 @@ def validate_performance(text: str, *, score=None, segments=None) -> None:
                 raise ValueError("efeito TTV inválido")
             if type(segment["pause_after_ms"]) is not int or segment["pause_after_ms"] not in {0, 180}:
                 raise ValueError("pausa TTV inválida")
-            if segment["text"].strip() == "~" and segment["hold"] and score is None:
-                raise ValueError("~ separado exige uma nota MIDI; na fala use aaa~")
         joined = " ".join(" ".join(segment["text"].split()) for segment in segments)
         if joined != " ".join(text.split()):
             raise ValueError("trechos de efeitos TTV não correspondem ao texto")
+        if score is None:
+            speech_effect_segments(segments)
     if not text.strip() and score is None:
         raise ValueError("texto TTV vazio")
 

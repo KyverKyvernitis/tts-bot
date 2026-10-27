@@ -75,11 +75,12 @@ async def test_catalog_message_retains_voice_language_and_neutralizes_speech_con
     payload = await preparar_payload_tts_mensagem(cog, msg, guild_defaults={"announce_author": True},
                                                  active_prefix="'", forced_engine="teto")
     queued = payload.queue_item
-    assert queued.text == "hello Miku"
+    assert queued.text == "hello Miku ~"
     assert queued.ttv_voice_id == "hatsune-miku" and queued.ttv_language == "en-US"
     assert queued.ttv_pitch_semitones == "+0.0" and queued.ttv_speech_rate == 1.0
     assert queued.ttv_score == score_for_melody()
-    assert queued.ttv_performance_hash == performance_hash(text=queued.text, score=queued.ttv_score)
+    assert queued.ttv_performance_hash == performance_hash(
+        text=queued.text, score=queued.ttv_score, segments=queued.ttv_segments)
     msg.attachments[0].read.assert_not_awaited()
 
 

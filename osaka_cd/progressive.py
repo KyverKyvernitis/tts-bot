@@ -81,13 +81,15 @@ class DecodedPCMCache:
 
 
 def _requests(arrangement, text, segments, language, first_window_ms, later_window_ms):
-    automatic = arrangement.get('message_lyrics_mode') in {'automatic-lyrics-v1', 'automatic-lyrics-v2'}
+    automatic = arrangement.get('message_lyrics_mode') in {
+        'automatic-lyrics-v1', 'automatic-lyrics-v2', 'automatic-lyrics-v3',
+    }
     if automatic:
         plan = automatic_render_plan(arrangement, text, segments, language=language,
             first_request_ms=first_window_ms, request_ms=later_window_ms)
     else:
         # Old fixed-score callers keep their exact lyric allocation. Message
-        # preparation normally upgrades free lyrics to automatic-lyrics-v2.
+        # Preparation freezes the current automatic lyric allocation policy.
         plan = arrangement_render_plan(arrangement)
     words = {}
     for part in arrangement['parts'] if not automatic else ():

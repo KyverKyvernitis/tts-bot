@@ -113,7 +113,7 @@ def test_escaped_symbols_remain_literal_and_do_not_request_a_performance():
 
 
 @pytest.mark.parametrize("text", [
-    "<", ">", "<>", "<<aaa", "aaa>>", "aaa~~", "~aaa", "<aaa>bbb", "aaa>bbb>",
+    "<", ">", "<>", "<<aaa", "aaa>>", "~aaa", "<aaa>bbb", "aaa>bbb>",
     "| olá", "olá |", "olá || tudo", "olá | | tudo", "<!!!", "!!!>", "~",
 ])
 def test_malformed_effects_are_actionable_errors_instead_of_spoken_operators(text):

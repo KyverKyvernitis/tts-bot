@@ -1,7 +1,8 @@
 """Adapt free lyrics to a CD while retaining the immutable musical template.
 
-Words stay intact for the existing phonemizer. Each syllable and explicit hold
-consumes one musical note. All voices stop together when the utterance ends.
+Words stay intact for the existing phonemizer. Syllables consume musical notes;
+each explicit hold continues the final vowel for about one voiced second.
+All voices stop together when the utterance ends.
 Physical v1 requests still respect 128 notes and legal continuous vowel spans.
 """
 from __future__ import annotations
@@ -12,7 +13,8 @@ import math
 from .arrangement import validate_arrangement, arrangement_sha256
 from .phonetics.phonemizer import phonemize
 
-POLICY = 'automatic-lyrics-v2'
+POLICY = 'automatic-lyrics-v3'
+HOLD_MILLISECONDS = 1000
 NOTE_FLOOR = 120
 
 
@@ -179,6 +181,60 @@ def _allocate(notes, units, *, build=False):
     return cursor,spans
 
 
+def _timed_message_notes(original, period, units):
+    """Allocate lyrics on an unchanged repeating melody, splitting hold edges.
+
+    A cursor retains unused note material for the next syllable. Holds count
+    voiced time, so a MIDI rest remains silent rather than becoming a vowel.
+    The 40 ms physical note floor permits at most 39 ms rounding at an edge.
+    """
+    cursor = offset = 0
+    cycles = 1
+    notes, groups = [], []
+
+    def current():
+        source = original[cursor % len(original)]
+        return dict(source, start_ms=source['start_ms'] + period * (cursor // len(original)) + offset,
+                    duration_ms=source['duration_ms'] - offset)
+
+    def take(length=None):
+        nonlocal cursor, offset, cycles
+        note = current()
+        if length is not None:
+            note['duration_ms'] = length
+        if note['start_ms'] + note['duration_ms'] > 600000:
+            raise ValueError('A letra ultrapassa a duração máxima de execução do CD.')
+        cycles = max(cycles, cursor // len(original) + 1)
+        offset += note['duration_ms']
+        if offset == original[cursor % len(original)]['duration_ms']:
+            cursor += 1
+            offset = 0
+        notes.append(note)
+
+    for unit in units:
+        for _ in range(unit['nuclei']):
+            take()
+        first_hold = len(notes)
+        remaining = HOLD_MILLISECONDS * unit['holds']
+        while remaining > 0:
+            length = current()['duration_ms']
+            if remaining >= length:
+                chosen = length
+            elif remaining >= 40:
+                chosen = remaining if length - remaining >= 40 else length
+            else:
+                # Do not create an unrenderable tiny final hold or leave an
+                # unrenderable remainder for the next word. Pick the nearest
+                # legal edge, keeping the requested second approximately exact.
+                chosen = 40 if length >= 80 else length
+                if remaining < chosen / 2:
+                    break
+            take(chosen)
+            remaining -= chosen
+        groups.append({'core': unit['nuclei'], 'hold': len(notes) - first_hold})
+    return notes, groups, cycles
+
+
 def prepare_message_arrangement(value, text, segments=None, *, language='pt-BR'):
     """Consume only the requested notes, repeating the motif when necessary."""
     template=validate_arrangement(value)
@@ -186,19 +242,17 @@ def prepare_message_arrangement(value, text, segments=None, *, language='pt-BR')
     messages=[part for part in template['parts'] if part.get('lyrics_source')=='message']
     if not messages:
         return template
-    slots=sum(unit['nuclei']+unit['holds'] for unit in units)
     period=template['duration_ms']
     selected={}
+    note_groups={}
     end=0
     cycles=1
     for part in messages:
-        original=part['notes']
-        notes=[dict(original[i%len(original)],
-                    start_ms=original[i%len(original)]['start_ms']+period*(i//len(original)))
-               for i in range(slots)]
+        notes, groups, used_cycles = _timed_message_notes(part['notes'], period, units)
         selected[part['id']]=notes
+        note_groups[part['id']]=groups
         end=max(end,notes[-1]['start_ms']+notes[-1]['duration_ms'])
-        cycles=max(cycles,math.ceil(slots/len(original)))
+        cycles=max(cycles,used_cycles)
     if end>600000:
         raise ValueError('A letra ultrapassa a duração máxima de execução do CD.')
     result=copy.deepcopy(template)
@@ -236,7 +290,10 @@ def prepare_message_arrangement(value, text, segments=None, *, language='pt-BR')
     result['message_lyrics_mode']=POLICY
     result['lyrics_adaptation']={'template_sha256':arrangement_sha256(template),
         'words':len(units),'nuclei':sum(unit['nuclei'] for unit in units),
-        'requested_note_slots':slots,'motif_repeats':cycles,'tempo_stretch':1,
+        'requested_note_slots':max(len(notes) for notes in selected.values()),
+        'requested_hold_ms':sum(unit['holds'] for unit in units)*HOLD_MILLISECONDS,
+        'hold_milliseconds':HOLD_MILLISECONDS,'note_groups':note_groups,
+        'motif_repeats':cycles,'tempo_stretch':1,
         'template_duration_ms':template['duration_ms']}
     return validate_arrangement(result)
 
@@ -265,7 +322,7 @@ def automatic_render_plan(arrangement, text, segments=None, *, language='pt-BR',
     for value in (first_request_ms, request_ms):
         if value is not None and (type(value) is not int or not 40 <= value <= 16000):
             raise ValueError('invalid_lyrics_request_duration')
-    if arrangement.get('message_lyrics_mode')==POLICY:
+    if arrangement.get('message_lyrics_mode') in {POLICY, 'automatic-lyrics-v2'}:
         return _finite_render_plan(arrangement,text,segments,language=language,
                                    first_request_ms=first_request_ms, request_ms=request_ms)
     units=_units(text,segments,language)
@@ -317,12 +374,24 @@ def _finite_render_plan(arrangement,text,segments,*,language,
                         first_request_ms=None, request_ms=None):
     """Pack complete words and their finite holds into unchanged v1 requests."""
     units=_units(text,segments,language)
-    slots=sum(unit['nuclei']+unit['holds'] for unit in units)
     calls=[]
     for part in arrangement['parts']:
         if part.get('lyrics_source')!='message':
             continue
-        if len(part['notes'])!=slots:
+        if arrangement.get('message_lyrics_mode') == POLICY:
+            groups = (arrangement.get('lyrics_adaptation') or {}).get('note_groups', {}).get(part['id'])
+            if (not isinstance(groups, list) or len(groups) != len(units)
+                    or any(not isinstance(group, dict) or set(group) != {'core', 'hold'}
+                           or type(group['core']) is not int or group['core'] != unit['nuclei']
+                           or type(group['hold']) is not int or group['hold'] < 0
+                           or bool(group['hold']) != bool(unit['holds'])
+                           for group, unit in zip(groups, units))):
+                raise ValueError('A execução musical não corresponde às sustentações da letra.')
+        else:
+            # Already prepared v2 snapshots retain their original physical
+            # one-note hold mapping while new messages use the timed policy.
+            groups = [{'core': unit['nuclei'], 'hold': unit['holds']} for unit in units]
+        if len(part['notes']) != sum(group['core'] + group['hold'] for group in groups):
             raise ValueError('A execução musical não corresponde à quantidade de notas da letra.')
         pending_notes,pending_segments=[],[]
         pending_moras=0
@@ -392,9 +461,9 @@ def _finite_render_plan(arrangement,text,segments,*,language,
                 else:
                     add([piece],unit['vowel'],unit['vowel_moras'],fade_out=fade_out)
         cursor=0
-        for unit in units:
-            core=part['notes'][cursor:cursor+unit['nuclei']]
-            cursor+=unit['nuclei']
+        for unit, group in zip(units, groups):
+            core=part['notes'][cursor:cursor+group['core']]
+            cursor+=group['core']
             if len(core)==1 and core[0]['duration_ms']>16000:
                 pieces=[item for span in _spans(core) for item in span]
                 add([pieces[0]],unit['text'],unit['moras'],fade_in=unit['fade_in'])
@@ -405,8 +474,8 @@ def _finite_render_plan(arrangement,text,segments,*,language,
                     raise ValueError('Uma palavra ultrapassa a duração física de um trecho de canto.')
                 add(core,unit['text'],unit['moras'],fade_in=unit['fade_in'],
                     fade_out=unit['fade_out'] and not unit['holds'])
-            for index in range(unit['holds']):
-                sustain(part['notes'][cursor],unit,last=index==unit['holds']-1)
+            for index in range(group['hold']):
+                sustain(part['notes'][cursor],unit,last=index==group['hold']-1)
                 cursor+=1
             if unit['boundary']:
                 finish()

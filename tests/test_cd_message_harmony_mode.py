@@ -102,7 +102,7 @@ class MessageHarmonyModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_singing_on_default_cd_is_automatically_adapted(self):
         item=await self.prepare('/cantar porra ~ ~ ~ ~',selected=False)
         self.assertIsNotNone(item.ttv_arrangement)
-        self.assertEqual(item.ttv_arrangement['message_lyrics_mode'],'automatic-lyrics-v2')
+        self.assertEqual(item.ttv_arrangement['message_lyrics_mode'],'automatic-lyrics-v3')
 
     async def test_selected_message_with_final_marker_generates_verified_full_live_mix(self):
         item=await self.prepare('olá mundo ~')
@@ -118,13 +118,20 @@ class MessageHarmonyModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(child.ttv_arrangement is None for child in owner.calls))
             self.assertEqual({child.ttv_score['lyrics_source'] for child in owner.calls},{'message','midi'})
 
-    async def test_final_marker_uses_selected_cd_and_removes_only_the_trigger(self):
-        for text in ('olá mundo~', 'olá mundo ~', 'olá mundo ~ \n\t'):
+    async def test_final_marker_uses_selected_cd_and_keeps_every_requested_second(self):
+        for text, expected_text, holds in (
+                ('olá mundo~', 'olá mundo', 1),
+                ('olá mundo ~', 'olá mundo ~', 1),
+                ('olá mundo ~ \n\t', 'olá mundo ~', 1),
+                ('olá mundo~~', 'olá mundo ~', 2),
+                ('olá mundo ~ ~', 'olá mundo ~ ~', 2)):
             with self.subTest(text=text):
                 item=await self.prepare(text)
                 self.assertIsNotNone(item.ttv_arrangement)
                 self.assertEqual(len(item.ttv_arrangement['parts']),2)
-                self.assertEqual(item.text,'olá mundo')
+                self.assertEqual(item.text,expected_text)
+                self.assertEqual(sum(segment['hold'] for segment in item.ttv_segments), holds)
+                self.assertEqual(item.ttv_arrangement['lyrics_adaptation']['requested_hold_ms'], holds * 1000)
                 self.lookup.assert_called_once_with('test-song',preview=True)
 
     async def test_missing_selected_cd_cannot_block_plain_speech(self):

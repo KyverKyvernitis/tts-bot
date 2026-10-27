@@ -999,7 +999,7 @@ class SettingsDB:
             upsert=False,
         )
 
-    def get_user_tts(self, guild_id: int, user_id: int) -> Dict[str, str]:
+    def get_user_tts(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         u = self.user_cache.get((guild_id, user_id), {})
         tts = u.get("tts", {}) or {}
         return {
@@ -1017,6 +1017,7 @@ class SettingsDB:
             ),
             "ttv_voice_id": str(tts.get("ttv_voice_id", "") or ""),
             "ttv_melody_id": str(tts.get("ttv_melody_id", "") or ""),
+            "ttv_random_cd": tts.get("ttv_random_cd") is True,
             "ttv_language": str(tts.get("ttv_language", "") or ""),
             "ttv_pitch_semitones": str(
                 tts.get("ttv_pitch_semitones", "") if tts.get("ttv_pitch_semitones") is not None else ""
@@ -1047,6 +1048,7 @@ class SettingsDB:
         teto_pitch_semitones: Optional[str] = None,
         ttv_voice_id: Optional[str] = None,
         ttv_melody_id: Optional[str] = None,
+        ttv_random_cd: Optional[bool] = None,
         ttv_language: Optional[str] = None,
         ttv_pitch_semitones: Optional[str] = None,
         ttv_speech_rate: Optional[float] = None,
@@ -1061,6 +1063,10 @@ class SettingsDB:
         if ttv_melody_id is not None:
             from cogs.tts.melodies import normalize_melody_id
             ttv_updates["ttv_melody_id"] = normalize_melody_id(ttv_melody_id)
+        if ttv_random_cd is not None:
+            if type(ttv_random_cd) is not bool:
+                raise ValueError("O modo de CD aleatório deve estar ligado ou desligado.")
+            ttv_updates["ttv_random_cd"] = ttv_random_cd
         if ttv_voice_id is not None:
             ttv_updates["ttv_voice_id"] = normalize_voice_id(ttv_voice_id)
         if ttv_language is not None:
@@ -1076,6 +1082,10 @@ class SettingsDB:
         key = (guild_id, user_id)
         doc = dict(self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id}))
         tts = dict(doc.get("tts", {}) or {})
+        # A manually selected CD restores the user's fixed choice. Random draws
+        # are frozen only in their synthesis payload and never write this field.
+        if ttv_melody_id is not None and ttv_random_cd is None and tts.get("ttv_random_cd") is True:
+            ttv_updates["ttv_random_cd"] = False
 
         if engine is not None:
             tts["engine"] = engine
@@ -1114,13 +1124,13 @@ class SettingsDB:
         doc["guild_id"] = guild_id
         doc["user_id"] = user_id
         doc["tts"] = tts
-        self.user_cache[key] = doc
-        self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
         await self.coll.update_one(
             {"type": "user", "guild_id": guild_id, "user_id": user_id},
             {"$set": doc},
             upsert=True,
         )
+        self.user_cache[key] = doc
+        self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
 
     async def reset_user_tts(self, guild_id: int, user_id: int) -> bool:
         key = (guild_id, user_id)
@@ -1228,6 +1238,7 @@ class SettingsDB:
         # Keep a removed or retired melody value observable to the panel.
         # Message preparation handles unknown values without changing speech.
         resolved["ttv_melody_id"] = str(user.get("ttv_melody_id") or "").strip()
+        resolved["ttv_random_cd"] = user.get("ttv_random_cd") is True
         # Both contracts report the same effective pitch during migration.
         resolved["teto_pitch_semitones"] = ttv_preferences["ttv_pitch_semitones"]
         self._resolved_tts_cache[cache_key] = dict(resolved)

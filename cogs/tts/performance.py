@@ -1,12 +1,12 @@
 """Comandos curtos do TTV e identidade de uma apresentação.
 
-O ``~`` ativo no final da mensagem solicita canto e é removido antes de
-processar a letra. Sem esse marcador, a melodia salva não muda a fala.
+O ``~`` ativo no final da mensagem solicita canto e também sustenta a vogal.
+Sem esse marcador, a melodia salva não muda a fala.
 
 Os efeitos valem para palavras: ``<olá`` entra suavemente, ``olá>`` sai
 suavemente e, dentro do texto, ``olá~ mundo`` sustenta a última vogal de
-``olá``. ``|`` separa trechos. No canto, ``~`` separado dentro da letra
-ocupa a próxima nota com a vogal anterior.
+``olá``. ``|`` separa trechos. ``~`` pode aparecer entre sílabas, junto
+de outros ``~`` ou separado: cada símbolo preserva sua sustentação.
 
 Texto sem comandos mantém a rota de fala existente. Menções, URLs, código,
 trechos entre aspas duplas e símbolos escapados não viram comandos.
@@ -28,16 +28,16 @@ DEFAULT_MELODY_PRESET = "ttv-demo-v1"
 def singing_request(text: str) -> tuple[str, bool]:
     """Only an active final ~ opts a message into singing.
 
-    The suffix is a mode marker, not a lyric or a held note. Keep the original
-    escaping for the later performance parser; the literal mask is used only
-    to decide whether the final character is an active command. A saved melody
-    chooses the song after this opt-in, never the message's speaking mode.
+    The suffix both selects singing and requests its own vowel continuation.
+    Keep it and the original escaping for the later performance parser; the
+    literal mask is used only to decide whether the final character is active.
+    A saved melody chooses the song after this opt-in, never speaking mode.
     """
     normalized = _normalize(text)
     literal_text, mask = _literal_characters(normalized)
     if not literal_text.endswith("~") or mask[-1]:
         return text, False
-    clean = normalized[:-1].rstrip()
+    clean = normalized
     # Keep the old directive as optional wording, but it cannot activate
     # singing without the terminal marker.
     directive = re.match(r"(?i)^/cantar(?:\s+|$)", literal_text)
@@ -156,12 +156,10 @@ def parse_performance_text(text: str, *, singing: bool = False
             has_effects = True
             continue
 
-        if token == "~" and active:
-            if not singing:
-                raise ValueError("Na fala, coloque ~ depois da palavra, como: olá~.")
+        if token and set(token) == {"~"} and len(active) == len(token):
             if not result or boundary_pending:
-                raise ValueError("No canto, use ~ depois de uma sílaba para continuar sua vogal.")
-            result.append(_segment("~", hold=True))
+                raise ValueError("Use ~ depois de uma sílaba para continuar sua vogal.")
+            result.extend(_segment("~", hold=True) for _ in token)
             has_effects = True
             continue
 
@@ -185,7 +183,7 @@ def parse_performance_text(text: str, *, singing: bool = False
         if fade_in:
             left += 1
         fade_out = False
-        hold = False
+        holds = 0
         while right > left and right - 1 in active and token[right - 1] in ">~":
             marker = token[right - 1]
             if marker == ">":
@@ -193,20 +191,49 @@ def parse_performance_text(text: str, *, singing: bool = False
                     raise ValueError("Use apenas um > no final da palavra, como: olá>.")
                 fade_out = True
             else:
-                if hold:
-                    raise ValueError("Use apenas um ~ no final da palavra, como: olá~.")
-                hold = True
+                holds += 1
             right -= 1
 
-        if any(left <= offset < right for offset in active):
+        if any(left <= offset < right and token[offset] != "~" for offset in active):
             raise ValueError("Use < antes da palavra, > ou ~ depois, e | entre palavras.")
-        clean_word = token[left:right] + punctuation
-        if not clean_word and (fade_in or fade_out or hold or active):
+
+        # Keep the first attached hold on its word for the existing wire
+        # format. Extra symbols become ordinary held segments, so compact
+        # and spaced runs retain the same number of requested continuations.
+        pieces: list[list[Any]] = []
+        part_start = left
+        for offset in range(left, right):
+            if offset not in active or token[offset] != "~":
+                continue
+            if part_start < offset:
+                pieces.append([token[part_start:offset], 0])
+            if pieces:
+                pieces[-1][1] += 1
+            else:
+                # ``a ~mor`` is as valid as ``a~mor``; a leading marker
+                # still needs a preceding syllable and cannot cross ``|``.
+                if not result or boundary_pending:
+                    raise ValueError("Use ~ depois de uma sílaba para continuar sua vogal.")
+                result.append(_segment("~", hold=True))
+                has_effects = True
+            part_start = offset + 1
+        if part_start < right:
+            pieces.append([token[part_start:right], 0])
+        if not pieces:
+            if fade_in or fade_out or holds or active:
+                raise ValueError("O efeito precisa de uma palavra: <olá, olá> ou olá~.")
+            pieces.append(["", 0])
+        pieces[-1][0] += punctuation
+        pieces[-1][1] += holds
+        if (fade_in or fade_out or holds or active) and not any(
+                char.isalnum() for word, _ in pieces for char in word):
             raise ValueError("O efeito precisa de uma palavra: <olá, olá> ou olá~.")
-        if (fade_in or fade_out or hold) and not any(char.isalnum() for char in clean_word):
-            raise ValueError("O efeito precisa de uma palavra: <olá, olá> ou olá~.")
-        result.append(_segment(clean_word, fade_in=fade_in, fade_out=fade_out, hold=hold))
-        has_effects = has_effects or fade_in or fade_out or hold
+        for number, (word, count) in enumerate(pieces):
+            result.append(_segment(word, fade_in=fade_in and number == 0,
+                                   fade_out=fade_out and number == len(pieces) - 1,
+                                   hold=bool(count)))
+            result.extend(_segment("~", hold=True) for _ in range(max(0, count - 1)))
+        has_effects = has_effects or fade_in or fade_out or any(count for _, count in pieces)
         boundary_pending = False
 
     clean_text = " ".join(segment["text"] for segment in result)

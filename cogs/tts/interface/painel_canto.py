@@ -243,6 +243,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self.active_melody_id = DEFAULT_MELODY_ID
         self.selected_melody_id = DEFAULT_MELODY_ID
         self._preferences = resolve_preferences({})
+        self._random_cd_enabled = False
         self._settings_available = False
         self._preview_available = False
         self._availability_note = ""
@@ -289,6 +290,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
                             settings = await _maybe_await(db.resolve_tts(self.guild_id, self.owner_id))
                             settings = settings if isinstance(settings, dict) else {}
                             self._preferences = resolve_preferences(settings)
+                            self._random_cd_enabled = settings.get('ttv_random_cd') is True
                             saved_id = settings.get('ttv_melody_id') or DEFAULT_MELODY_ID
                             try:
                                 self.active_melody_id = get_melody(saved_id).id
@@ -384,6 +386,9 @@ class CDPanelView(VisaoLayoutBaseTTS):
                 fallback=_AVATAR_COLORS.get(_avatar_asset_id(getattr(self.cog, 'bot', None)) or '', DEFAULT_COLOR)
                 if melody.id == DEFAULT_MELODY_ID else DEFAULT_COLOR)),
         )
+        if self._random_cd_enabled:
+            container.add_item(discord.ui.TextDisplay(
+                "-# 🎲 Aleatório ligado · usar um CD fixa sua escolha."))
         cover = (cover_attachment_url(melody.id) or remote_thumbnail_url(melody.id)
                  or str(getattr(melody, "thumbnail_url", "") or ""))
         cover_description = melody.name
@@ -428,7 +433,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
             disabled=not self._preview_available or self._preview_running or self._is_expired(),
         )
         self.preview_button.callback = self.preview_melody
-        already_active = self.selected_melody_id == self.active_melody_id
+        already_active = self.selected_melody_id == self.active_melody_id and not self._random_cd_enabled
         self.apply_button = discord.ui.Button(
             custom_id="ttv:cd:apply", label="CD já em uso" if already_active else "Usar esse CD",
             emoji=_ACTIVE_EMOJI if already_active else _APPLY_EMOJI,
@@ -572,7 +577,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
         if not self._settings_available:
             await _reply(interaction, "Não consegui acessar seus ajustes agora. Tente novamente.")
             return
-        if self.selected_melody_id == self.active_melody_id:
+        if self.selected_melody_id == self.active_melody_id and not self._random_cd_enabled:
             await _reply(interaction, "Essa melodia já está em uso.")
             return
         melody_id = get_melody(self.selected_melody_id).id

@@ -27,7 +27,7 @@ def test_plain_speech_or_literal_marks_never_enable_music(text):
 
 
 def test_directive_preserves_remaining_escapes():
-    assert singing_request(r"/cantar a \~ a ~") == (r"a \~ a", True)
+    assert singing_request(r"/cantar a \~ a ~") == (r"a \~ a ~", True)
 
 
 @pytest.mark.asyncio

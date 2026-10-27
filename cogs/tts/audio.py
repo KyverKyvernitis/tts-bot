@@ -924,8 +924,13 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, duration + TTS_PLAYBACK_TIMEOUT_BASE_SECONDS))
         text_len = len((getattr(item, "text", "") or "").strip()) if item is not None else 0
         speech_seconds = min(text_len, 1600) * TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS
-        timeout = TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + speech_seconds
         engine = str(getattr(item, "_tts_actual_engine", "") or getattr(item, "engine", "")).lower()
+        if engine == "teto":
+            speech_seconds += sum(
+                segment.get("hold") is True
+                for segment in (getattr(item, "ttv_segments", None) or [])
+            )
+        timeout = TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + speech_seconds
         if item is not None and engine in TTS_EFFECT_ENGINES:
             night, slow, reverb = normalizar_efeitos_tts(
                 item.advanced_nightcore_level, item.advanced_slowed_level, item.advanced_reverb_level,
@@ -3848,7 +3853,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 fingerprint = "singing-v5|" + (voice_state.get("singing_fingerprints") or {}).get(preferences["ttv_language"], fingerprint)
             payload = f"ttv-v2|worker|{fingerprint}|{preferences['ttv_voice_id']}|{preferences['ttv_pitch_semitones']}|{preferences['ttv_speech_rate']!r}|{preferences['ttv_language']}|{text}"
             if item.ttv_performance_hash:
-                payload += f"|performance-v1:{item.ttv_performance_hash}"
+                payload += f"|performance-v2-second-holds:{item.ttv_performance_hash}"
             if getattr(item, 'ttv_arrangement', None) is not None:
                 payload += f"|arrangement-v1:{arrangement_cache_identity(item)}"
                 profile = arrangement_profile_identity(item, self._tts_agent_route_state())

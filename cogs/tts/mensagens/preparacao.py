@@ -47,7 +47,7 @@ async def _reply_ttv_error(message, error: str, *, view=None):
     if callable(sender):
         try:
             content = (
-                "-# No modo de canto, use ~ depois de uma sílaba para continuar sua vogal, com espaçamento"
+                "-# Use ~ depois de uma sílaba para prolongar sua vogal."
                 if error == "No canto, use ~ depois de uma sílaba para continuar sua vogal."
                 else f"TTV: {error}"
             )
@@ -201,6 +201,11 @@ async def preparar_payload_tts_mensagem(
             text = cog._render_tts_text(_WithoutAttachments(message), clean_text).strip()
             try:
                 with pin_snapshot():
+                    if resolved.get("ttv_random_cd") is True:
+                        from cogs.tts.random_cd import choose_synthesis_melody
+                        resolved["ttv_melody_id"] = choose_synthesis_melody(
+                            cog, message.guild.id, message.author.id, resolved,
+                        )
                     score = score_for_melody(resolved.get("ttv_melody_id"))
                     arrangement = execution_arrangement(
                         arrangement_for_melody(resolved.get('ttv_melody_id'), preview=True),

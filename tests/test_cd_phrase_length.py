@@ -57,19 +57,23 @@ class FiniteCDPhraseTests(unittest.TestCase):
         prepared = prepare_message_arrangement(value, text, segments)
         plan = automatic_render_plan(prepared, text, segments)
         self.assertEqual(value, before, 'Message preparation must not alter a published CD')
-        self.assertEqual(prepared['message_lyrics_mode'], 'automatic-lyrics-v2')
+        self.assertEqual(prepared['message_lyrics_mode'], 'automatic-lyrics-v3')
         for chunk in plan['chunks']:
             for request in chunk['parts']:
                 assert_worker_accepts(self, request, self.align)
         return text, segments, prepared, plan
 
-    def test_single_vowel_and_each_explicit_hold_consume_exactly_one_note(self):
+    def test_single_vowel_consumes_one_note_and_each_explicit_hold_consumes_one_second(self):
         value = template(duration=250)
         source = copy.deepcopy(lead_notes(value))
-        for raw, expected in [('a', 1), ('a ~', 2), ('a ~ ~', 3), ('a~', 2)]:
+        for raw, expected in [('a', 1), ('a ~', 5), ('a ~ ~', 9), ('a~', 5)]:
             with self.subTest(raw=raw):
                 _, _, prepared, plan = self.phrase(raw, value)
-                self.assertEqual(lead_notes(prepared), source[:expected])
+                expected_notes = [dict(source[index % len(source)],
+                                       start_ms=source[index % len(source)]['start_ms']
+                                       + value['duration_ms'] * (index // len(source)))
+                                  for index in range(expected)]
+                self.assertEqual(lead_notes(prepared), expected_notes)
                 self.assertEqual(sum(len(request['score']['notes']) for request in lead_requests(plan)), expected)
                 self.assertEqual(prepared['duration_ms'], expected * 250)
 
@@ -106,7 +110,7 @@ class FiniteCDPhraseTests(unittest.TestCase):
         # A voice that begins after this utterance ends must not be rendered.
         value['parts'][2]['notes'] = [{'midi_note': 48, 'start_ms': 900,
                                       'duration_ms': 100, 'velocity': 90}]
-        _, _, prepared, plan = self.phrase('a ~', value)
+        _, _, prepared, plan = self.phrase('porra', value)
         self.assertEqual(prepared['duration_ms'], 500)
         self.assertEqual({part['role'] for part in prepared['parts']}, {'lead', 'harmony'})
         harmony = next(part for part in prepared['parts'] if part['role'] == 'harmony')
@@ -119,10 +123,11 @@ class FiniteCDPhraseTests(unittest.TestCase):
     def test_hold_crossing_a_rest_reattacks_a_vowel_without_extra_notes(self):
         value = template(rests=True, duration=250)
         _, _, prepared, plan = self.phrase('a ~', value)
-        self.assertEqual(lead_notes(prepared), lead_notes(value)[:2])
+        source = lead_notes(value)
+        self.assertEqual(lead_notes(prepared), source + [dict(source[0], start_ms=value['duration_ms'])])
         requests = lead_requests(plan)
-        self.assertEqual(sum(len(request['score']['notes']) for request in requests), 2)
-        self.assertEqual(prepared['duration_ms'], 1000)
+        self.assertEqual(sum(len(request['score']['notes']) for request in requests), 5)
+        self.assertEqual(prepared['duration_ms'], 2750)
         # The original physical aligner is exercised by phrase(); no request
         # may sustain one nucleus over the 500 ms MIDI rest.
         self.assertTrue(any('a' in request['adaptive_text'] for request in requests))
@@ -144,22 +149,23 @@ class FiniteCDPhraseTests(unittest.TestCase):
 
     def test_effects_survive_the_finite_cut_and_preserve_the_word(self):
         _, _, prepared, plan = self.phrase('<porra~>')
-        self.assertEqual(len(lead_notes(prepared)), 3)
+        self.assertEqual(len(lead_notes(prepared)), 6)
         emitted = [segment for request in lead_requests(plan)
                    for segment in request.get('adaptive_segments', [])]
         self.assertEqual([segment['text'] for segment in emitted if segment['text'] != '~'], ['porra'])
         self.assertTrue(emitted[0]['fade_in'])
         self.assertTrue(emitted[-1]['fade_out'])
 
-    def test_v1_and_v2_message_audio_never_share_the_outer_cache_identity(self):
+    def test_previous_lyric_policies_and_timed_holds_never_share_the_outer_cache_identity(self):
         _, segments, prepared, _ = self.phrase('a ~')
         legacy = copy.deepcopy(prepared)
-        legacy['message_lyrics_mode'] = 'automatic-lyrics-v1'
         def item(arrangement):
             return SimpleNamespace(ttv_arrangement=arrangement, ttv_arrangement_hash='',
                                    engine='teto', text='a ~', ttv_segments=segments)
-        self.assertNotEqual(arrangement_cache_identity(item(legacy)),
-                            arrangement_cache_identity(item(prepared)))
+        for policy in ('automatic-lyrics-v1', 'automatic-lyrics-v2'):
+            legacy['message_lyrics_mode'] = policy
+            self.assertNotEqual(arrangement_cache_identity(item(legacy)),
+                                arrangement_cache_identity(item(prepared)))
 
 
 @unittest.skipUnless(shutil.which('ffmpeg'), 'FFmpeg required for controlled PCM mixing')
@@ -167,7 +173,7 @@ class FiniteCDPhraseAudioTests(unittest.TestCase):
     def test_real_mix_has_only_the_consumed_phrase_and_no_full_cd_silent_tail(self):
         text, segments = parse_performance_text('a ~', singing=True)
         prepared = prepare_message_arrangement(template(duration=250), text, segments)
-        self.assertEqual(prepared['duration_ms'], 500)
+        self.assertEqual(prepared['duration_ms'], 1250)
         calls = []
         align = worker_aligner()
         def renderer(**request):
@@ -180,11 +186,11 @@ class FiniteCDPhraseAudioTests(unittest.TestCase):
                                         cache_dir=cache, render_profile_fingerprint='finite-test-bank')
             with wave.open(io.BytesIO(result['audio']), 'rb') as decoded:
                 self.assertEqual(decoded.getnchannels(), 2)
-                self.assertAlmostEqual(decoded.getnframes() / decoded.getframerate(), 0.580, places=3)
-                self.assertLess(decoded.getnframes() / decoded.getframerate(), 1)
-            self.assertEqual(result['duration_ms'], 500)
+                self.assertAlmostEqual(decoded.getnframes() / decoded.getframerate(), 1.330, places=3)
+                self.assertLess(decoded.getnframes() / decoded.getframerate(), 2)
+            self.assertEqual(result['duration_ms'], 1250)
             self.assertEqual({request['role'] for request in calls}, {'lead', 'harmony', 'bass'})
-            self.assertEqual(sum(len(request['score']['notes']) for request in calls if request['role'] == 'lead'), 2)
+            self.assertEqual(sum(len(request['score']['notes']) for request in calls if request['role'] == 'lead'), 5)
 
 
 if __name__ == '__main__':

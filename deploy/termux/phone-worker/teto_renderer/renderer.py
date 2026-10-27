@@ -29,7 +29,7 @@ from .phonemizer import phonemize
 from .prosody import (
     RenderNote, align_pitch_to_timeline, build_notes, validate_performance,
     performance_hash, align_singing_syllables, align_singing_pitch, _relative_pitch,
-    is_default_score, default_melody_score,
+    is_default_score, default_melody_score, speech_effect_segments,
 )
 from .voicebank import OtoEntry, VoicebankIndex
 
@@ -41,7 +41,7 @@ class TetoRenderer:
     ENGLISH_PHONEMIZER_VERSION = "en-us-cmudict-xsampa-cvvc-v2"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v4-timeline-pitch"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
-    PERFORMANCE_VERSION = "ttv-performance-5-default-melody"
+    PERFORMANCE_VERSION = "ttv-performance-6-second-holds"
     PERFORMANCE_PROTOCOL = 2
     SUPPORTS_BACKGROUND_CANCELLATION = True
     # This bridge closes/waits for its ESPER supervisor on KeyboardInterrupt.
@@ -1598,7 +1598,7 @@ class TetoRenderer:
                     moras, groups = self._singing_lyrics(text, score, index, language, segments)
                 notes, spans = self._singing_notes(moras, groups, score)
             else:
-                spoken = [segment for segment in segments if segment['text'].strip() not in {'|', '~'}]
+                spoken = speech_effect_segments(segments)
                 moras = self._performance_phonemize(' '.join(segment['text'] for segment in spoken), index, language)
                 word_offset = 0
                 for segment in spoken:
@@ -1615,10 +1615,10 @@ class TetoRenderer:
                 notes = build_notes(moras, base_pitch=str(self._getenv('PHONE_WORKER_TETO_BASE_PITCH') or 'C4'),
                                     speech_rate=rate, tempo=tempo, pitch_offset_semitones=pitch)
                 for first, end, segment in effect_ranges:
-                    if segment['hold']:
+                    if segment['hold_count']:
                         nucleus = next((number for number in range(end - 1, first - 1, -1) if notes[number].role == 'nucleus'), None)
                         if nucleus is not None:
-                            notes[nucleus] = replace(notes[nucleus], duration_ms=min(1200, notes[nucleus].duration_ms + round(280 / rate)))
+                            notes[nucleus] = replace(notes[nucleus], duration_ms=notes[nucleus].duration_ms + 1000 * segment['hold_count'])
             if not notes:
                 raise TetoSynthesisError('texto não gerou vogais compatíveis')
             entries = [index.resolve(note.candidates) for note in notes]

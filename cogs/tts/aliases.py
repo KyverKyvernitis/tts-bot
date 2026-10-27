@@ -20,6 +20,11 @@ _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
         "display": ("cd",),
         "accepts_argument": False,
     },
+    "rcd": {
+        "aliases": ("rcd",),
+        "display": ("rcd",),
+        "accepts_argument": False,
+    },
     "advanced": {
         "aliases": ("advanced",),
         "display": ("advanced",),

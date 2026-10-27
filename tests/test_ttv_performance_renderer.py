@@ -191,7 +191,7 @@ def test_hold_extends_voiced_vowel_and_pause_is_silence(renderer):
     held, hold_meta = renderer.synthesize_performance('a', segments=[segment('a', hold=True)])
     clean, rate = pcm(plain)
     extended, _ = pcm(held)
-    assert len(extended) - len(clean) == pytest.approx(rate * .280, abs=1)
+    assert len(extended) - len(clean) == pytest.approx(rate, abs=1)
     assert any(extended[len(clean):])
     paused, _ = renderer.synthesize_performance('a | a', segments=[segment('a', pause_after_ms=180), segment('|'), segment('a')])
     values, _ = pcm(paused)
