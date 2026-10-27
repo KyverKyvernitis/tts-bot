@@ -221,14 +221,16 @@ class ShufflePersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("embeds", on)
             self.assertIsInstance(on["content"], str)
             self.assertLess(len(on["content"]), 200)
-            self.assertIn("repete", on["content"].lower())
+            self.assertEqual(on["content"],
+                "-# <a:Vinyl_Music_loading:1559374199133315122> CDs aleatórios ativados para você")
             self.assertEqual(on["allowed_mentions"], "no-mentions")
             self.assertIs(on["mention_author"], False)
             self.assertTrue(await random_cd.toggle_random_cd(cog, message))
             off = message.reply.await_args.kwargs
             self.assertNotIn("embed", off)
             self.assertLess(len(off["content"]), 200)
-            self.assertIn("desativados", off["content"].lower())
+            self.assertEqual(off["content"],
+                "-# <a:Vinyl_Music_loading:1559374199133315122> CDs aleatórios desativados")
         self.assertIs(self.db.resolve_tts(1, 2)["ttv_random_cd"], False)
         self.assertNotIn((1, 3), self.db.user_cache)
         self.assertEqual(message.reply.await_count, 2)
@@ -266,7 +268,8 @@ class ShufflePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.db.resolve_tts(1, 2)["ttv_random_cd"], False)
         response = message.reply.await_args.kwargs
         self.assertNotIn("embed", response)
-        self.assertIn("desativados", response["content"].lower())
+        self.assertEqual(response["content"],
+            "-# <a:Vinyl_Music_loading:1559374199133315122> CDs aleatórios desativados")
         self.assertLess(len(response["content"]), 200)
 
     async def test_plain_text_reply_falls_back_to_channel_without_mentions(self):

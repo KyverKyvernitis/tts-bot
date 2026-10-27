@@ -126,9 +126,9 @@ async def toggle_random_cd(cog, message) -> bool:
             await _reply(message, "Não consegui alterar o CD aleatório agora. Tente novamente.")
             return True
         if enabled:
-            content = "🎲 CDs aleatórios ativados. Só repete depois de tocar todos."
+            content = "-# <a:Vinyl_Music_loading:1559374199133315122> CDs aleatórios ativados para você"
         else:
-            content = "💿 CDs aleatórios desativados."
+            content = "-# <a:Vinyl_Music_loading:1559374199133315122> CDs aleatórios desativados"
         await _reply(message, content)
     await _refresh_open_panels(cog, guild_id, user_id)
     return True
