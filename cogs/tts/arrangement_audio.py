@@ -82,9 +82,8 @@ def arrangement_profile_identity(item, route):
     return hashlib.sha256(json.dumps(profiles, sort_keys=True).encode()).hexdigest()
 
 
-class ArrangementAudioMixin(CDStreamingMixin):
-    async def _request_cd_stem(self, item, request, *, background=False, progressive=False):
-        child = replace(item, text=request['text'], voice=request['voice_id'],
+def _stem_child(item, request, *, background=False, progressive=False):
+    child = replace(item, text=request['text'], voice=request['voice_id'],
                         ttv_voice_id=request['voice_id'], ttv_score=request['score'],
                         language=request['language'], ttv_language=request['language'],
                         rate='1.0', pitch='+0Hz', ttv_pitch_semitones='+0.0',
@@ -92,12 +91,29 @@ class ArrangementAudioMixin(CDStreamingMixin):
                         ttv_segments=request.get('segments'), ttv_performance_hash='',
                         ttv_arrangement=None, ttv_arrangement_hash='',
                         _normalized_cache_text=None, _cache_key_value=None, _dedup_signature=None)
-        for key in ('_tts_settings_frozen', '_tts_route_decision', '_tts_agent_render_metadata'):
-            child.__dict__.pop(key, None)
-        if background:
-            child._cd_background = True
-        if progressive:
-            child._cd_progressive_request = True
+    for key in ('_tts_settings_frozen', '_tts_route_decision', '_tts_agent_render_metadata'):
+        child.__dict__.pop(key, None)
+    if background:
+        child._cd_background = True
+    if progressive:
+        child._cd_progressive_request = True
+    return child
+
+
+class ArrangementAudioMixin(CDStreamingMixin):
+    async def _request_cd_stem_stream(self, item, request, *, on_pcm):
+        if self._tts_agent_route_state().get('ttv_pcm_stream_protocol') != 1:
+            return await self._request_cd_stem(item, request, progressive=True)
+        from .cd_worker_stream import request_pcm_stream
+        return await request_pcm_stream(
+            self, _stem_child(item, request, progressive=True), on_pcm)
+
+    async def _request_cd_stem(self, item, request, *, background=False, progressive=False):
+        child = _stem_child(item, request, background=background, progressive=progressive)
+        request_bytes = getattr(self, '_generate_tts_agent_worker_bytes', None)
+        if callable(request_bytes):
+            raw, metadata = await request_bytes(child)
+            return raw, dict(metadata)
         path = ''
         try:
             path = await self._generate_tts_agent_worker_file(child)
@@ -122,7 +138,14 @@ class ArrangementAudioMixin(CDStreamingMixin):
                        or not state.queue.empty()
                        for state in getattr(self, 'guild_states', {}).values())
 
-    def _schedule_cd_accompaniment_warmup(self, guild_id, user_id, *, melody_id, settings):
+    def _schedule_cd_random_warmup(self, guild_id, user_id, *, settings):
+        """Warm future random choices without drawing or changing their cycle."""
+        return self._schedule_cd_accompaniment_warmup(
+            guild_id, user_id, melody_id=settings.get('ttv_melody_id'),
+            settings=settings, random_choices=settings.get('ttv_random_cd') is True)
+
+    def _schedule_cd_accompaniment_warmup(self, guild_id, user_id, *, melody_id, settings,
+                                          random_choices=False):
         owner = (int(guild_id), int(user_id))
         tasks = getattr(self, '_cd_warmup_tasks', None)
         if tasks is None:
@@ -135,7 +158,7 @@ class ArrangementAudioMixin(CDStreamingMixin):
         if os.getenv('OSAKA_CD_WARMUP_ENABLED', 'true').strip().lower() in {'0', 'false', 'no', 'off'}:
             return None
         from .melodies import DEFAULT_MELODY_ID
-        if melody_id == DEFAULT_MELODY_ID:
+        if not random_choices and melody_id == DEFAULT_MELODY_ID:
             return None
         if len(tasks) >= 16 and owner not in tasks:
             return None
@@ -147,34 +170,55 @@ class ArrangementAudioMixin(CDStreamingMixin):
             from .ttv import resolve_preferences
             from osaka_cd.runtime import pin_snapshot
             preferences = resolve_preferences(frozen_settings)
-            with pin_snapshot():
-                arrangement = execution_arrangement(arrangement_for_melody(melody_id, preview=True),
-                                                    preferences['ttv_voice_id'])
-            if arrangement is None or not any(part.get('lyrics_source') != 'message'
-                                               for part in arrangement['parts']):
-                return
             idle_since, deadline = None, time.monotonic() + 300
             while time.monotonic() < deadline:
                 if self._cd_warmup_idle():
                     idle_since = idle_since or time.monotonic()
-                    if time.monotonic() - idle_since >= 5:
+                    if time.monotonic() - idle_since >= 1:
                         break
                 else:
                     idle_since = None
-                await asyncio.sleep(1)
+                await asyncio.sleep(.25)
             else:
                 return
             route = self._tts_agent_route_state()
             if route.get('ttv_background_protocol') != 1:
                 return
-            item = QueueItem(guild_id=int(guild_id), channel_id=0, author_id=int(user_id),
-                text='a', engine='teto', voice=preferences['ttv_voice_id'],
-                language=preferences['ttv_language'], rate='1.0', pitch='+0Hz',
-                teto_pitch_semitones='+0.0', ttv_arrangement=arrangement, **preferences)
-            profile = arrangement_profile_identity(item, route)
-            if not profile:
-                return
-            await self._warm_cd_accompaniment(item, profile)
+            if random_choices:
+                from .random_cd import remaining_random_melodies
+                candidates = tuple(entry.id for entry in remaining_random_melodies(
+                    self, guild_id, user_id))
+            else:
+                candidates = (melody_id,)
+            gate = getattr(self, '_cd_warmup_gate', None)
+            if gate is None:
+                gate = self._cd_warmup_gate = asyncio.Lock()
+            await asyncio.wait_for(gate.acquire(), timeout=max(.01, deadline-time.monotonic()))
+            try:
+                for identity in candidates:
+                    if time.monotonic() >= deadline or not self._cd_warmup_idle():
+                        break
+                    try:
+                        with pin_snapshot():
+                            arrangement = execution_arrangement(
+                                arrangement_for_melody(identity, preview=True), preferences['ttv_voice_id'])
+                    except ValueError:
+                        # A catalog activation can retire a speculative choice.
+                        continue
+                    if arrangement is None or not any(part.get('lyrics_source') != 'message'
+                                                       for part in arrangement['parts']):
+                        continue
+                    item = QueueItem(guild_id=int(guild_id), channel_id=0, author_id=int(user_id),
+                        text='a', engine='teto', voice=preferences['ttv_voice_id'],
+                        language=preferences['ttv_language'], rate='1.0', pitch='+0Hz',
+                        teto_pitch_semitones='+0.0', ttv_arrangement=arrangement, **preferences)
+                    profile = arrangement_profile_identity(item, self._tts_agent_route_state())
+                    if not profile:
+                        continue
+                    await self._warm_cd_accompaniment(
+                        item, profile, timeout_seconds=max(.01, min(300, deadline-time.monotonic())))
+            finally:
+                gate.release()
 
         async def guarded():
             try:
@@ -195,14 +239,18 @@ class ArrangementAudioMixin(CDStreamingMixin):
             tasks[owner] = task
         return task
 
-    async def _warm_cd_accompaniment(self, item, profile):
+    async def _warm_cd_accompaniment(self, item, profile, *, timeout_seconds=300):
+        from osaka_cd.progressive import DecodedPCMCache, FIRST_WINDOW_MS, LATER_WINDOW_MS
         loop = asyncio.get_running_loop()
         cancelled = threading.Event()
+        cache = getattr(self, '_cd_decoded_pcm_cache', None)
+        if cache is None:
+            cache = self._cd_decoded_pcm_cache = DecodedPCMCache()
 
         async def request(request):
             if not self._cd_warmup_idle():
                 raise RuntimeError('cd_warmup_foreground_pending')
-            return await self._request_cd_stem(item, request, background=True)
+            return await self._request_cd_stem(item, request, background=True, progressive=True)
 
         def render_part(**call):
             return asyncio.run_coroutine_threadsafe(request(call), loop).result()
@@ -213,7 +261,9 @@ class ArrangementAudioMixin(CDStreamingMixin):
         task = asyncio.create_task(asyncio.to_thread(warm_arrangement_stems,
             frozen_arrangement(item), render_part, cache_dir=data_root / 'audio-cache',
             render_profile_fingerprint=profile, language=item.ttv_language,
-            cancelled=cancelled.is_set, timeout_seconds=300, max_stems=8))
+            cancelled=cancelled.is_set, timeout_seconds=timeout_seconds, max_stems=8,
+            first_request_ms=FIRST_WINDOW_MS, request_ms=LATER_WINDOW_MS,
+            first_only=True, memory_cache=cache))
         try:
             result = await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -225,6 +275,7 @@ class ArrangementAudioMixin(CDStreamingMixin):
         metrics = self._get_metrics_store()
         metrics['cd_warmup_last_stems'] = len(result['stems'])
         metrics['cd_warmup_last_rendered'] = sum(not stem['cache_hit'] for stem in result['stems'])
+        metrics['cd_pcm_cache_bytes'] = cache.size_bytes
         return result
 
     async def _generate_arrangement_worker_file(self, item):

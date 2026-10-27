@@ -155,7 +155,7 @@ class ProgressiveRenderTests(unittest.TestCase):
             calls.clear()
             result=stream_arrangement(adapted,text,renderer(calls),lambda raw:None,
                 render_profile_fingerprint='bank',cache_dir=temporary)
-            self.assertEqual([call['role'] for call in calls],['lead'])
+            self.assertEqual([call['role'] for call in calls],['lead', 'lead'])
             harmony=next(stem for stem in result['stems'] if stem['part_id']=='harmony')
             self.assertEqual(harmony['cache_kind'],'disk')
 

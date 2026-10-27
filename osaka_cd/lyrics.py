@@ -317,6 +317,15 @@ def _tokens(notes, units):
     return segments
 
 
+def _request_target(first_request_ms, request_ms, completed):
+    """Grow early requests gradually so a short prefix is not followed by 8 s."""
+    if completed == 0:
+        return first_request_ms
+    if first_request_ms is not None and request_ms is not None:
+        return min(request_ms, first_request_ms * 2 ** min(completed, 4))
+    return request_ms
+
+
 def automatic_render_plan(arrangement, text, segments=None, *, language='pt-BR',
                           first_request_ms=None, request_ms=None):
     for value in (first_request_ms, request_ms):
@@ -365,7 +374,8 @@ def automatic_render_plan(arrangement, text, segments=None, *, language='pt-BR',
             group_segments.extend(effects)
             group_moras+=moras
         finish()
-    calls.extend(accompaniment_render_chunks(arrangement))
+    calls.extend(accompaniment_render_chunks(arrangement,
+        first_request_ms=first_request_ms, request_ms=request_ms))
     calls.sort(key=lambda chunk:chunk['start_ms'])
     return {'chunks':calls,'warnings':['lyrics_automatically_adapted']}
 
@@ -427,7 +437,7 @@ def _finite_render_plan(arrangement,text,segments,*,language,
             # Latency targets are soft and only close a request before a whole
             # new word. Sustained vowels keep their original phoneme anchor;
             # splitting a hold just to meet the target adds an audible attack.
-            target=(first_request_ms if completed_requests==0 else request_ms)
+            target=_request_target(first_request_ms, request_ms, completed_requests)
             if (not hold and pending_notes and target is not None
                     and notes[-1]['start_ms']+notes[-1]['duration_ms']-pending_notes[0]['start_ms']>target):
                 finish()
@@ -480,18 +490,24 @@ def _finite_render_plan(arrangement,text,segments,*,language,
             if unit['boundary']:
                 finish()
         finish()
-    calls.extend(accompaniment_render_chunks(arrangement))
+    calls.extend(accompaniment_render_chunks(arrangement,
+        first_request_ms=first_request_ms, request_ms=request_ms))
     calls.sort(key=lambda chunk:chunk['start_ms'])
     return {'chunks':calls,'warnings':['lyrics_automatically_adapted']}
 
 
-def accompaniment_render_chunks(arrangement):
+def accompaniment_render_chunks(arrangement, *, first_request_ms=None, request_ms=None):
     """Use exactly the guide windows of message singing, then omit its lyrics.
 
     Keeping the lead while planning is essential: removing it first changes
     shared chunk boundaries and makes warmed stems unusable by real messages.
     """
     from .arrangement import arrangement_render_plan
+    for value in (first_request_ms, request_ms):
+        if value is not None and (type(value) is not int or not 40 <= value <= 16000):
+            raise ValueError('invalid_lyrics_request_duration')
+    if first_request_ms is not None or request_ms is not None:
+        return _short_accompaniment_chunks(arrangement, first_request_ms, request_ms)
     guides = copy.deepcopy(arrangement)
     sources = {part['id']: part.get('lyrics_source') for part in guides['parts']}
     for part in guides['parts']:
@@ -504,4 +520,80 @@ def accompaniment_render_chunks(arrangement):
         parts = [request for request in chunk['parts'] if sources[request['id']] != 'message']
         if parts:
             chunks.append(dict(chunk, parts=parts))
+    return chunks
+
+
+def _short_accompaniment_chunks(arrangement, first_request_ms, request_ms):
+    """Close requests at actual phoneme anchors, preserving sustained vowels.
+
+    Latency targets never create a new vowel attack. A continuous long guide
+    is rendered once and can instead publish partial PCM through the streaming
+    renderer. Independent parts retain their exact absolute MIDI offsets.
+    """
+    from .arrangement import vowel_guide_score, _restart_midi_holds, minimum_syllables
+    chunks = []
+    for part in arrangement['parts']:
+        source = part.get('lyrics_source')
+        if source == 'message':
+            continue
+        notes = [note for span in _spans(part['notes']) for note in span]
+        score = dict(version=1, track_index=part.get('track_index', 0),
+                     duration_ms=arrangement['duration_ms'], lyrics_source=source,
+                     notes=notes)
+        if source != 'midi':
+            notes = vowel_guide_score(score)['notes']
+        else:
+            _restart_midi_holds(score)
+        # Each syllable and all following ties form one indivisible group.
+        phrases, phrase = [], []
+        for note in notes:
+            lyric = str(note.get('lyric', '')).strip()
+            if phrase and lyric not in {'', '~', '-', '_'}:
+                phrases.append(phrase)
+                phrase = []
+            phrase.append(note)
+        if phrase:
+            phrases.append(phrase)
+        pending = []
+        completed = 0
+
+        def finish():
+            nonlocal completed
+            if not pending:
+                return
+            start = pending[0]['start_ms']
+            end = pending[-1]['start_ms'] + pending[-1]['duration_ms']
+            physical = dict(version=1, track_index=part.get('track_index', 0),
+                duration_ms=end-start, lyrics_source='midi',
+                notes=[dict(note, start_ms=note['start_ms']-start) for note in pending])
+            chunks.append(dict(index=0, start_ms=start, end_ms=end, duration_ms=end-start,
+                parts=[dict(id=part['id'], part_id=part['id'], role=part['role'],
+                    voice_id=part.get('voice_id', 'kasane-teto'), score=physical,
+                    minimum_syllables=minimum_syllables(physical),
+                    continuations=[], carried_lyric=None, lyrics_reattacked=False,
+                    gain=part.get('gain', 1.0), pan=part.get('pan', 0.0))]))
+            pending.clear()
+            completed += 1
+
+        for phrase in phrases:
+            target = _request_target(first_request_ms, request_ms, completed)
+            if pending and (len(pending)+len(phrase)>128
+                    or phrase[-1]['start_ms']+phrase[-1]['duration_ms']-pending[0]['start_ms']>18000
+                    or target is not None and phrase[-1]['start_ms']+phrase[-1]['duration_ms']-pending[0]['start_ms']>target):
+                finish()
+            # The legacy physical limits can require a new vowel anchor even
+            # without a latency target. Retain that established limit explicitly.
+            for note in phrase:
+                if pending and (len(pending)>=128
+                        or note['start_ms']+note['duration_ms']-pending[0]['start_ms']>18000):
+                    previous_lyric = next((str(item.get('lyric', '')).strip() for item in reversed(pending)
+                        if str(item.get('lyric', '')).strip() not in {'', '~', '-', '_'}), 'a')
+                    finish()
+                    if str(note.get('lyric', '')).strip() in {'', '~', '-', '_'}:
+                        note = dict(note, lyric=previous_lyric)
+                pending.append(note)
+        finish()
+    chunks.sort(key=lambda chunk: chunk['start_ms'])
+    for index, chunk in enumerate(chunks):
+        chunk['index'] = index
     return chunks

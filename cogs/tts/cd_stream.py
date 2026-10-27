@@ -26,7 +26,7 @@ class PCMStreamBuffer:
     BYTES_PER_MS = 192
 
     def __init__(self, total_duration_ms, *, max_bytes=512 * 1024 * 1024,
-                 prebuffer_ms=500, safety_ms=250, read_timeout_seconds=120,
+                 prebuffer_ms=500, safety_ms=200, read_timeout_seconds=120,
                  clock=time.monotonic):
         self.total_duration_ms = self._number(total_duration_ms, 'total_duration_ms', positive=True)
         self.prebuffer_ms = self._number(prebuffer_ms, 'prebuffer_ms')
@@ -45,6 +45,19 @@ class PCMStreamBuffer:
         self._produced_bytes = 0
         self._consumed_bytes = 0
         self._generation_ms = 0.0
+        self._generation_windows = 0
+        self._initial_generation_ms = None
+        self._generation_samples = deque(maxlen=4)
+        self._first_generation_sample = None
+        self._generation_group_id = None
+        self._group_audio_ms = 0.0
+        self._group_generation_ms = 0.0
+        self._group_observations = False
+        self._next_window_ms = 0.0
+        self._explicit_generation_windows = False
+        self._read_waits = 0
+        self._read_wait_ms = 0.0
+        self._max_read_wait_ms = 0.0
         self._done = False
         self._closed = False
         self._cancelled = False
@@ -69,18 +82,103 @@ class PCMStreamBuffer:
             raise ValueError(label + ' must be finite and nonnegative')
         return number
 
+    def _generation_ratio_locked(self):
+        # A cold renderer includes process startup in its first completed
+        # window. Keep that first measurement as a conservative provisional
+        # rate, then predict future work from actual subsequent windows.
+        if self._group_observations:
+            samples = list(self._generation_samples)
+            if self._group_audio_ms:
+                samples.append((self._group_audio_ms, self._group_generation_ms))
+            if not samples and self._first_generation_sample is not None:
+                samples.append(self._first_generation_sample)
+        else:
+            samples = self._generation_samples or (
+                (self._first_generation_sample,) if self._first_generation_sample else ())
+        return max((elapsed / duration for duration, elapsed in samples), default=0.0)
+
+    def begin_generation(self, group_id):
+        """Keep native PCM fragments inside their real physical work group.
+
+        Repeated callbacks from one streaming stem do not establish a second
+        warm generation window. Their elapsed time and useful PCM accumulate
+        until a genuinely new chronological group starts.
+        """
+        with self._condition:
+            if self._closed or self._cancelled:
+                raise PCMStreamCancelled('progressive CD stream stopped')
+            if self._done:
+                raise RuntimeError('cannot observe a finished PCM stream')
+            if self._group_observations and group_id == self._generation_group_id:
+                return
+            if self._group_audio_ms:
+                sample = (self._group_audio_ms, self._group_generation_ms)
+                if self._first_generation_sample is None:
+                    self._first_generation_sample = sample
+                else:
+                    self._generation_samples.append(sample)
+            self._group_observations = self._explicit_generation_windows = True
+            self._generation_group_id = group_id
+            self._group_audio_ms = self._group_generation_ms = 0.0
+            self._generation_windows += 1
+
+    def _observe_generation_locked(self, audio_ms, generation_ms, next_window_ms):
+        self._generation_ms += generation_ms
+        if self._group_observations:
+            if self._initial_generation_ms is None:
+                self._initial_generation_ms = generation_ms
+            self._group_audio_ms += audio_ms
+            self._group_generation_ms += generation_ms
+            self._next_window_ms = next_window_ms
+            return
+        self._generation_windows += 1
+        sample = (audio_ms, generation_ms)
+        if self._first_generation_sample is None:
+            self._first_generation_sample = sample
+            self._initial_generation_ms = generation_ms
+        else:
+            self._generation_samples.append(sample)
+        self._next_window_ms = next_window_ms
+
+    def observe_generation(self, audio_ms, generation_ms, next_window_ms=0):
+        """Observe one completed generation window, before its PCM slices.
+
+        A compositor may publish one window in several small PCM appends.
+        Those appends must not appear to be independent, instant synthesis
+        measurements. ``next_window_ms`` describes the next complete window
+        that must arrive before playback can consume its first sample.
+        """
+        duration = self._number(audio_ms, 'audio_ms', positive=True)
+        elapsed = self._number(generation_ms, 'generation_ms')
+        following = self._number(next_window_ms, 'next_window_ms')
+        with self._condition:
+            if self._closed or self._cancelled:
+                raise PCMStreamCancelled('progressive CD stream stopped')
+            if self._done:
+                raise RuntimeError('cannot observe a finished PCM stream')
+            self._explicit_generation_windows = True
+            self._observe_generation_locked(duration, elapsed, following)
+
     def _required_prebuffer_locked(self):
         produced_ms = self._produced_bytes / self.BYTES_PER_MS
         if not produced_ms:
             return min(self.total_duration_ms, self.prebuffer_ms + self.safety_ms)
-        ratio = self._generation_ms / produced_ms
+        ratio = self._generation_ratio_locked()
         remaining_ms = max(0.0, self.total_duration_ms - produced_ms)
         # If production is slower than playback, accumulate its estimated
         # remaining deficit before starting. Extra RAM stores that head start;
         # it cannot make missing future samples arrive faster.
+        next_ms = min(self._next_window_ms, remaining_ms)
         deficit_ms = max(0.0, ratio - 1.0) * remaining_ms
+        # Audio arrives in complete windows rather than a continuous fluid
+        # stream. Cover the next window's production delay as well as the
+        # remaining deficit; otherwise a fast average producer can still
+        # starve a short prefix while generating a long second window.
+        runway_ms = ratio * next_ms
+        if ratio >= 1.0:
+            deficit_ms += next_ms
         return min(self.total_duration_ms,
-                   max(self.prebuffer_ms, deficit_ms) + self.safety_ms)
+                   max(self.prebuffer_ms, deficit_ms, runway_ms) + self.safety_ms)
 
     def _update_ready_locked(self):
         if (not self._ready and self._buffered_bytes and not self._error
@@ -116,7 +214,9 @@ class PCMStreamBuffer:
                 raise error
             now = self._clock()
             elapsed_ms = max(0.0, (now - self._last_append_at) * 1000)
-            self._generation_ms += elapsed_ms if supplied_ms is None else supplied_ms
+            if not self._explicit_generation_windows:
+                self._observe_generation_locked(len(pcm) / self.BYTES_PER_MS,
+                    elapsed_ms if supplied_ms is None else supplied_ms, 0.0)
             self._last_append_at = now
             chunk = bytes(pcm)
             self._chunks.append(chunk)
@@ -206,6 +306,7 @@ class PCMStreamBuffer:
         """Read one Discord PCM frame, padding only a true final short frame."""
         deadline = time.monotonic() + self.read_timeout_seconds
         with self._condition:
+            wait_started, waited_ms = None, 0.0
             while self._buffered_bytes < self.FRAME_BYTES and not self._done:
                 if self._closed:
                     return b''
@@ -218,7 +319,15 @@ class PCMStreamBuffer:
                     self.stop.set()
                     self._condition.notify_all()
                     raise error
+                if wait_started is None:
+                    wait_started = time.monotonic()
+                    self._read_waits += 1
+                before_wait = time.monotonic()
                 self._condition.wait(remaining)
+                duration_ms = (time.monotonic() - before_wait) * 1000
+                waited_ms += duration_ms
+                self._read_wait_ms += duration_ms
+                self._max_read_wait_ms = max(self._max_read_wait_ms, waited_ms)
             if self._closed:
                 return b''
             if self._error is not None:
@@ -336,9 +445,26 @@ class PCMStreamBuffer:
     @property
     def generation_ratio(self):
         with self._condition:
-            return self._generation_ms / (self._produced_bytes / self.BYTES_PER_MS) if self._produced_bytes else 0.0
+            return self._generation_ratio_locked()
 
     @property
     def required_prebuffer_ms(self):
         with self._condition:
             return self._required_prebuffer_locked()
+
+    def admission_snapshot(self):
+        """Small non-sensitive timing snapshot for runtime latency metrics."""
+        with self._condition:
+            return {
+                'initial_generation_ms': self._initial_generation_ms,
+                'generation_windows': self._generation_windows,
+                'generation_ms': round(self._generation_ms, 3),
+                'sustained_generation_ratio': round(self._generation_ratio_locked(), 6),
+                'next_window_ms': self._next_window_ms,
+                'required_prebuffer_ms': round(self._required_prebuffer_locked(), 3),
+                'ready_after_ms': round((self.ready_at-self.started_at)*1000, 3)
+                    if self.ready_at is not None else None,
+                'read_waits': self._read_waits,
+                'read_wait_ms': round(self._read_wait_ms, 3),
+                'max_read_wait_ms': round(self._max_read_wait_ms, 3),
+            }

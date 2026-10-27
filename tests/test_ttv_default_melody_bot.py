@@ -67,7 +67,10 @@ def test_performance_budget_does_not_inherit_twenty_five_second_speech_limit(mon
     probe = Probe()
     assert probe._tts_agent_payload_for_item(item())["timeout_seconds"] == 25
     assert probe._tts_agent_payload_for_item(music_item())["timeout_seconds"] == 120
-    assert probe._estimate_playback_timeout(music_item()) >= 70
+    fixed = music_item()
+    assert probe._estimate_playback_timeout(fixed) >= fixed.ttv_score['duration_ms'] / 1000 + 10
+    adaptive = item(ttv_score={"version": 1, "preset": "ttv-demo-v1"})
+    assert probe._estimate_playback_timeout(adaptive) >= 70
 
 
 @pytest.mark.asyncio

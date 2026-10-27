@@ -2939,6 +2939,7 @@ def _tts_agent_snapshot() -> dict[str, Any]:
         "stream_cache_only_protocol": 1 if getattr(_tts_transport_module(), "STREAM_CACHE_ONLY_PROTOCOL", 0) == 1 else 0,
         "ttv_performance_protocol": 2,
         "ttv_background_protocol": 1,
+        "ttv_pcm_stream_protocol": 1 if callable(getattr(_tts_transport_module(), "serve_singing_stream", None)) else 0,
         "cache_binary_protocol": 2 if _tts_transport_module() is not None else 0,
         "total": total,
         "failed": failed,
@@ -4343,6 +4344,62 @@ def _apply_local_core_worker_profile(profile: Any) -> dict[str, Any]:
 
 class WorkerHandler(BaseHTTPRequestHandler):
     server_version = "PhoneWorker/1.2"
+    protocol_version = "HTTP/1.1"
+
+    def handle_one_request(self) -> None:
+        # A handler can serve several framed syntheses over one TCP socket.
+        # Rejected uploads and EOF-delimited legacy streams must close it.
+        if getattr(self, "_http_completed_request", False):
+            # Bound idle persistent connections; native rendering itself does
+            # not read from this socket and retains its own synthesis deadline.
+            self.connection.settimeout(30.0)
+        self._request_body_consumed = True
+        self._response_status_code = None
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # A caller may leave while native work is finishing. The physical
+            # render has already drained; another response cannot reach it.
+            self.close_connection = True
+        finally:
+            self._http_completed_request = True
+
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        lengths = self.headers.get_all("Content-Length", [])
+        transfer = self.headers.get("Transfer-Encoding")
+        if transfer or len(lengths) > 1:
+            self.close_connection = True
+            self.send_error(HTTPStatus.BAD_REQUEST, "unsupported or ambiguous request framing")
+            return False
+        try:
+            length = int(lengths[0]) if lengths else 0
+        except (ValueError, TypeError):
+            length = -1
+        if length < 0:
+            self.close_connection = True
+            self.send_error(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
+            return False
+        self._request_body_consumed = length == 0
+        return True
+
+    def send_response_only(self, code: int, message: str | None = None) -> None:
+        self._response_status_code = code
+        super().send_response_only(code, message)
+
+    def end_headers(self) -> None:
+        code = getattr(self, "_response_status_code", None)
+        if code is not None and code >= 200:
+            headers = b"".join(getattr(self, "_headers_buffer", ())).lower()
+            framed = (b"\r\ncontent-length:" in headers
+                      or b"\r\ntransfer-encoding:" in headers
+                      or self.command == "HEAD" or code in {204, 304})
+            if not framed or not getattr(self, "_request_body_consumed", True):
+                self.close_connection = True
+            if self.close_connection and b"\r\nconnection:" not in headers:
+                self.send_header("Connection", "close")
+        super().end_headers()
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quiet default HTTP noise
         if _env_bool("PHONE_WORKER_HTTP_LOGS", False):
@@ -4408,11 +4465,16 @@ class WorkerHandler(BaseHTTPRequestHandler):
             _error(self, HTTPStatus.LENGTH_REQUIRED, "Content-Length inválido")
             return None
         if length <= 0:
+            self._request_body_consumed = True
             return {}
         if length > self.max_body_bytes:
             _error(self, HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "requisição grande demais")
             return None
         raw = self.rfile.read(length)
+        self._request_body_consumed = len(raw) == length
+        if not self._request_body_consumed:
+            _error(self, HTTPStatus.BAD_REQUEST, "corpo JSON incompleto")
+            return None
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except Exception as exc:
@@ -4546,6 +4608,23 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 _json_response(self, HTTPStatus.OK, result)
             except Exception as exc:
                 _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
+            return
+        if path == "/tts-agent/singing.pcm":
+            if not self._require_auth():
+                return
+            transport = _tts_transport_module()
+            serve = getattr(transport, "serve_singing_stream", None)
+            if not callable(serve):
+                _error(self, HTTPStatus.NOT_FOUND, "stream PCM de canto indisponível")
+                return
+            body = self._read_json()
+            if body is None:
+                return
+            try:
+                serve(self, body, sys.modules[__name__])
+            except Exception as exc:
+                self.close_connection = True
+                _error(self, HTTPStatus.BAD_GATEWAY, f"{type(exc).__name__}: {_short_text(exc, limit=220)}")
             return
         if path in {"/tts-agent/synthesize.stream", "/tts-agent/cache.raw"}:
             if not self._require_auth():
@@ -5272,11 +5351,15 @@ class WorkerHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logs.append(f"standard-cache store falhou: {type(exc).__name__}: {_short_text(exc, limit=90)}")
 
-    def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int, available_engines: list[str] | None = None, raw_response: bool = False) -> dict[str, Any]:
+    def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int, available_engines: list[str] | None = None, raw_response: bool = False, emit_pcm=None) -> dict[str, Any]:
         normalized = str(engine or "gtts").strip().lower().replace("-", "_") or "gtts"
         engine = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto"}.get(normalized, normalized)
         text = str(body.get("text") or "").strip()
         performance = _phone_worker_tts_policy_module().performance_request(body, engine=engine)
+        if emit_pcm is not None:
+            if not callable(emit_pcm) or engine != "teto" or performance.get("score") is None:
+                raise ValueError("stream PCM exige uma partitura TTV")
+            body = dict(body, cache_mode="bypass")
         if not text and performance.get("score") is None:
             raise ValueError("texto vazio")
         ttv_settings = _ttv_request_settings(body) if engine == "teto" else {}
@@ -5336,6 +5419,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 pitch_offset_semitones=ttv_settings["ttv_pitch_semitones"],
                 speech_rate=ttv_settings["ttv_speech_rate"] if "ttv_speech_rate" in body or performance else None,
                 **({"reading_language": ttv_settings["ttv_language"]} if "ttv_language" in body or performance else {}),
+                **({"emit_pcm": emit_pcm} if emit_pcm is not None else {}),
                 **({"score": performance["score"], "segments": performance["segments"],
                     "performance_hash": performance["hash"]} if performance else {}))
         elif engine == "android_native":
@@ -5449,7 +5533,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             result["ttv_language"] = teto_meta.get("reading_language", ttv_settings["ttv_language"])
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
-    def _task_tts_agent_synthesize(self, body: dict[str, Any], *, raw_response: bool = False) -> dict[str, Any]:
+    def _task_tts_agent_synthesize(self, body: dict[str, Any], *, raw_response: bool = False, emit_pcm=None) -> dict[str, Any]:
         request_started = time.monotonic()
         roles, capabilities = self._ensure_tts_piper_turbo_allowed()
         if not _env_bool("PHONE_WORKER_TTS_AGENT_ENABLED", True):
@@ -5457,6 +5541,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
         text = str(body.get("text") or "").strip()
         requested_engine = _tts_agent_normalize_engine(body.get("engine"))
         performance = _phone_worker_tts_policy_module().performance_request(body, engine=requested_engine)
+        if emit_pcm is not None:
+            if not callable(emit_pcm) or requested_engine != "teto" or performance.get("score") is None:
+                raise ValueError("stream PCM exige uma partitura TTV")
+            body = dict(body, cache_mode="bypass")
         background = body.get("priority") == "background"
         if background and (requested_engine != "teto" or performance.get("score") is None):
             raise ValueError("aquecimento de fundo exige uma partitura TTV")
@@ -5567,6 +5655,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         timeout=remaining,
                         available_engines=available,
                         raw_response=raw_response,
+                        **({"emit_pcm": emit_pcm} if emit_pcm is not None else {}),
                     )
                     if errors:
                         result["fallback_errors"] = errors[:4]

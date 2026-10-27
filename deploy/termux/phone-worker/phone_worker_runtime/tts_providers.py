@@ -85,7 +85,7 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
                     heavy_lock, get_renderer, monotonic, normalize_format,
                     pitch_offset_semitones=0.0, speech_rate=None, reading_language=None,
                     score=None, segments=None, performance_hash=None,
-                    background_state=None, priority="foreground"):
+                    background_state=None, priority="foreground", emit_pcm=None):
     admission_started = monotonic()
     event = _acquire_teto_render(heavy_lock, background_state, background=priority == "background")
     teto_started = monotonic()
@@ -97,6 +97,10 @@ def synthesize_teto(*, text, timeout, max_audio_bytes, logs, stage_ms,
         if reading_language is not None:
             controls["reading_language"] = reading_language
         renderer = get_renderer()
+        if emit_pcm is not None:
+            if score is None or not callable(emit_pcm):
+                raise ValueError("stream PCM exige uma partitura TTV")
+            controls["emit_pcm"] = emit_pcm
         if event is not None:
             supported = getattr(renderer, "supports_background_cancellation", None)
             if (not getattr(renderer, "SUPPORTS_BACKGROUND_CANCELLATION", False)

@@ -118,7 +118,7 @@ def _wav_info(raw):
         raise RenderError("invalid_stem_audio") from exc
 
 
-def _result_audio(result):
+def _result_audio(result, *, verify_audio=True):
     if isinstance(result, tuple) and len(result) == 2:
         audio, meta = result
     elif isinstance(result, dict):
@@ -128,15 +128,18 @@ def _result_audio(result):
         raise RenderError("invalid_renderer_result")
     if not isinstance(meta, dict):
         raise RenderError("invalid_renderer_metadata")
-    _wav_info(audio)
+    if verify_audio:
+        _wav_info(audio)
+    elif not isinstance(audio, bytes) or not 44 < len(audio) <= MAX_AUDIO_BYTES:
+        raise RenderError("invalid_stem_audio")
     declared = meta.get("sha256")
     if declared and declared != hashlib.sha256(audio).hexdigest():
         raise RenderError("renderer_audio_hash_mismatch")
     return audio, meta
 
 
-def _preroll(audio, metadata, score):
-    rate, frames, _ = _wav_info(audio)
+def _preroll(audio, metadata, score, *, wav_info=None):
+    rate, frames, _ = _wav_info(audio) if wav_info is None else wav_info
     actual = frames * 1000 / rate - score["duration_ms"]
     supplied = metadata.get("midi_preroll_ms")
     if supplied is None:
@@ -408,7 +411,9 @@ def render_arrangement(arrangement, text, render_part, *, segments=None, cache_d
 
 def warm_arrangement_stems(arrangement, render_part, *, cache_dir,
                            render_profile_fingerprint, language='pt-BR',
-                           cancelled=None, timeout_seconds=300, max_stems=8):
+                           cancelled=None, timeout_seconds=300, max_stems=8,
+                           memory_cache=None, first_request_ms=None, request_ms=None,
+                           first_only=False):
     """Warm fixed accompaniment only, without synthesizing lyrics or a mix.
 
     The caller provides low-priority admission at the physical worker. This
@@ -420,6 +425,7 @@ def warm_arrangement_stems(arrangement, render_part, *, cache_dir,
     if language not in {'pt-BR', 'en-US'}:
         raise RenderError('invalid_render_text_or_language')
     if (type(max_stems) is not int or not 1 <= max_stems <= 64
+            or type(first_only) is not bool
             or type(timeout_seconds) not in (int, float)
             or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 3600):
         raise RenderError('invalid_warmup_limits')
@@ -427,7 +433,15 @@ def warm_arrangement_stems(arrangement, render_part, *, cache_dir,
         return {'stems': [], 'skipped': 'missing_render_profile'}
     cache, deadline = Path(cache_dir), time.monotonic() + timeout_seconds
     stems = []
-    for chunk in accompaniment_render_chunks(arrangement):
+    if first_request_ms is None and request_ms is None:
+        chunks = accompaniment_render_chunks(arrangement)
+    else:
+        chunks = accompaniment_render_chunks(arrangement,
+            first_request_ms=first_request_ms, request_ms=request_ms)
+    first_start = chunks[0]['start_ms'] if chunks else None
+    for chunk in chunks:
+        if first_only and chunk['start_ms'] != first_start:
+            break
         for request in chunk['parts']:
             _check(cancelled, deadline)
             score = request['score']
@@ -435,14 +449,33 @@ def warm_arrangement_stems(arrangement, render_part, *, cache_dir,
                     'language': language, 'pitch': 0.0, 'rate': 1.0,
                     'part_id': request['id'], 'role': request['role']}
             key = _stem_key(call, render_profile_fingerprint)
-            hit = _cached_stem(cache, key, score) is not None
+            if memory_cache is not None:
+                from .progressive import (DECODED_CACHE_POLICY, _normalization_gain,
+                    remember_decoded_stem)
+                decoded = memory_cache.get(key + DECODED_CACHE_POLICY)
+                if decoded is not None and decoded.normalization_gain is not None:
+                    stems.append({'part_id': request['id'], 'key': key, 'cache_hit': True,
+                                  'pcm_cache_hit': True})
+                    if len(stems) >= max_stems:
+                        return {'stems': stems}
+                    continue
+            saved = _cached_stem(cache, key, score)
+            if memory_cache is not None and saved is not None and _normalization_gain(saved[1]) is None:
+                saved = None
+            hit = saved is not None
+            audio, meta = saved if hit else _result_audio(render_part(**call))
+            _check(cancelled, deadline)
+            if len(audio) > MAX_STEM_BYTES:
+                raise RenderError('stem_size_limit')
             if not hit:
-                audio, meta = _result_audio(render_part(**call))
                 _check(cancelled, deadline)
                 preroll = _preroll(audio, meta, score)
-                if len(audio) > MAX_STEM_BYTES:
-                    raise RenderError('stem_size_limit')
                 _remember_stem(cache, key, audio, meta, preroll)
+            # Legacy workers may omit the gain. Their private fragment caches
+            # still benefit from warmup, but unverified PCM never enters L1.
+            if memory_cache is not None and _normalization_gain(meta) is not None:
+                remember_decoded_stem(memory_cache, call, render_profile_fingerprint,
+                    audio, meta, require_normalization=True)
             stems.append({'part_id': request['id'], 'key': key, 'cache_hit': hit})
             if len(stems) >= max_stems:
                 return {'stems': stems}

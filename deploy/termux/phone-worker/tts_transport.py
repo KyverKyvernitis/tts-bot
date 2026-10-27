@@ -20,6 +20,7 @@ PROTOCOL_VERSION = 2
 # A cache-only stream is guaranteed to stop before constructing a provider on
 # every miss. Consumers may use this capability for repeated transport probes.
 STREAM_CACHE_ONLY_PROTOCOL = 1
+TTV_PCM_STREAM_PROTOCOL = 1
 _AUDIO_LINE = re.compile(r'jQ1olc","\[\\"(.*?)\\"\]')
 _LOCAL = threading.local()
 _LOCK = threading.Lock()
@@ -416,6 +417,122 @@ def serve_stream(handler, body, api):
             with contextlib.suppress(OSError):
                 Path(staging.name).unlink()
         api._tts_agent_record_done(ok=ok, engine=engine, elapsed_ms=(time.monotonic() - started) * 1000, error=error)
+
+
+def serve_singing_stream(handler, body, api):
+    """Publish immutable native singing prefixes with an explicit end receipt.
+
+    Records are one ASCII kind and an unsigned 32-bit network-order length.
+    Metadata precedes PCM. Only a complete render has an E record and HTTP
+    terminator; disconnection never turns a partial presentation into a hit.
+    The synchronous renderer retains its physical resource lease throughout.
+    """
+    import hashlib
+    import json
+    import math
+    import struct
+
+    if str(body.get('engine') or '').lower() != 'teto' or not isinstance(body.get('ttv_score'), dict):
+        raise ValueError('stream PCM exige uma partitura TTV')
+    performance = body.get('ttv_performance_hash')
+    if not isinstance(performance, str) or not re.fullmatch(r'[0-9a-f]{64}', performance):
+        raise ValueError('stream PCM exige a identidade da performance')
+    request = dict(body, cache_mode='bypass')
+    limit = min(handler.max_output_bytes, int(body.get('max_audio_bytes') or handler.max_output_bytes))
+    if limit < 1024:
+        raise ValueError('limite de PCM inválido')
+    configured_timeout = float(body.get('timeout_seconds') or 120)
+    if not math.isfinite(configured_timeout) or not 0 < configured_timeout <= 120:
+        raise ValueError('prazo do stream PCM inválido')
+    started = time.monotonic()
+    deadline = started + configured_timeout
+    sent_headers, metadata, pcm_bytes = False, None, 0
+    digest = hashlib.sha256()
+
+    def record(kind, data):
+        if time.monotonic() >= deadline:
+            raise TimeoutError('prazo do stream PCM esgotado')
+        framed = kind + struct.pack('!I', len(data)) + data
+        handler.wfile.write(('%x\r\n' % len(framed)).encode('ascii') + framed + b'\r\n')
+        handler.wfile.flush()
+
+    def emit(pcm, config):
+        nonlocal sent_headers, metadata, pcm_bytes
+        if not isinstance(pcm, bytes) or len(pcm) % 2 or not isinstance(config, dict):
+            raise ValueError('bloco PCM nativo inválido')
+        projected = {key: config[key] for key in (
+            'voice_id', 'reading_language', 'ttv_performance_hash', 'sample_rate',
+            'channels', 'sample_width_bytes', 'normalization_gain', 'midi_preroll_ms',
+            'expected_frames', 'duration_seconds',
+        ) if key in config}
+        if (type(projected.get('sample_rate')) is not int or projected['sample_rate'] != 44100
+                or type(projected.get('channels')) is not int or projected['channels'] != 1
+                or type(projected.get('sample_width_bytes')) is not int or projected['sample_width_bytes'] != 2
+                or type(projected.get('normalization_gain')) not in (int, float)
+                or projected['normalization_gain'] != 1.0):
+            raise ValueError('formato PCM nativo incompatível')
+        if metadata is None:
+            if projected.get('voice_id') != body.get('ttv_voice_id', 'kasane-teto'):
+                raise ValueError('stream PCM retornou outra vocaloid')
+            if (projected.get('reading_language') != body.get('ttv_language')
+                    or projected.get('ttv_performance_hash') != performance):
+                raise ValueError('stream PCM retornou outro idioma ou performance')
+            preroll = projected.get('midi_preroll_ms')
+            if type(preroll) not in (int, float) or not math.isfinite(preroll) or not 0 <= preroll <= 350:
+                raise ValueError('preroll PCM inválido')
+            expected = projected.get('expected_frames')
+            planned = round((body['ttv_score']['duration_ms'] + preroll) * 44.1)
+            if (type(expected) is not int or expected <= 0 or expected * 2 + 44 > limit
+                    or abs(expected - planned) > 2):
+                raise ValueError('duração PCM inválida')
+            metadata = projected
+            handler.connection.settimeout(min(10, configured_timeout))
+            handler.protocol_version = 'HTTP/1.1'
+            handler.close_connection = True
+            handler.send_response(200)
+            for key, value in {
+                'Content-Type': 'application/x-osaka-ttv-pcm',
+                'Transfer-Encoding': 'chunked', 'Connection': 'close',
+                'Cache-Control': 'no-store', 'X-Core-Worker-TTV-PCM-Protocol': '1',
+            }.items():
+                handler.send_header(key, value)
+            handler.end_headers()
+            sent_headers = True
+            record(b'M', json.dumps(metadata, separators=(',', ':'), allow_nan=False).encode())
+        elif projected != metadata:
+            raise ValueError('metadados PCM mudaram durante a síntese')
+        if pcm_bytes + len(pcm) > metadata['expected_frames'] * 2:
+            raise ValueError('stream PCM excedeu a duração planejada')
+        for offset in range(0, len(pcm), 32768):
+            chunk = pcm[offset:offset + 32768]
+            record(b'P', chunk)
+            digest.update(chunk)
+            pcm_bytes += len(chunk)
+
+    try:
+        result = handler._task_tts_agent_synthesize(request, raw_response=True, emit_pcm=emit)
+        if metadata is None or pcm_bytes != metadata['expected_frames'] * 2:
+            raise RuntimeError('stream PCM terminou incompleto')
+        # The metadata projection excludes encoded audio and private paths.
+        receipt = {key: value for key, value in result.items()
+                   if isinstance(value, (str, int, float, bool, type(None)))
+                   and key not in {'data_b64', 'audio_path', 'raw_audio', 'audio_bytes', 'audio'}}
+        receipt.update(ok=True, normalization_gain=1.0,
+                       midi_preroll_ms=metadata['midi_preroll_ms'],
+                       sample_rate=44100, channels=1, sample_width_bytes=2,
+                       pcm_bytes=pcm_bytes, pcm_sha256=digest.hexdigest())
+        payload = json.dumps(receipt, separators=(',', ':'), allow_nan=False).encode()
+        if len(payload) > 65536:
+            raise ValueError('recibo PCM grande demais')
+        record(b'E', payload)
+        handler.wfile.write(b'0\r\n\r\n')
+        handler.wfile.flush()
+    except Exception:
+        if not sent_headers:
+            raise
+        # Headers/PCM are already on the wire. Never append a JSON response or
+        # restart the phrase. Missing receipt/terminator signals truncation.
+        handler.close_connection = True
 
 
 def store_binary_cache(handler, api):

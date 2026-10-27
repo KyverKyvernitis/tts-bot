@@ -31,6 +31,27 @@ def available_random_melodies():
     return songs or catalog
 
 
+def remaining_random_melodies(cog, guild_id: int, user_id: int):
+    """Read the unfinished cycle for speculation, without consuming a draw."""
+    pool = available_random_melodies()
+    history = getattr(cog, '_random_cd_cycles', {})
+    cycle = history.get((int(guild_id), int(user_id)))
+    if cycle is None:
+        return pool
+    remaining = tuple(melody for melody in pool if melody.id not in cycle.played)
+    return remaining or pool
+
+
+def _schedule_warmup(cog, guild_id, user_id, preferences):
+    schedule = getattr(cog, '_schedule_cd_random_warmup', None)
+    if callable(schedule):
+        try:
+            schedule(guild_id, user_id, settings=dict(preferences))
+        except Exception:
+            # Optional speculation must never interrupt a draw or a saved mode.
+            log.debug('[random_cd] warmup deferred')
+
+
 def choose_synthesis_melody(cog, guild_id: int, user_id: int, preferences) -> str:
     """Freeze one choice in the caller's new payload, never in saved settings."""
     fixed = str(preferences.get("ttv_melody_id") or DEFAULT_MELODY_ID)
@@ -60,6 +81,7 @@ def choose_synthesis_melody(cog, guild_id: int, user_id: int, preferences) -> st
     history.move_to_end(key)
     while len(history) > _HISTORY_LIMIT:
         history.popitem(last=False)
+    _schedule_warmup(cog, guild_id, user_id, preferences)
     return selected
 
 
@@ -130,5 +152,6 @@ async def toggle_random_cd(cog, message) -> bool:
         else:
             content = "-# <a:Vinyl_Music_loading:1559374199133315122> CDs aleatórios desativados"
         await _reply(message, content)
+        _schedule_warmup(cog, guild_id, user_id, {**settings, 'ttv_random_cd': enabled})
     await _refresh_open_panels(cog, guild_id, user_id)
     return True

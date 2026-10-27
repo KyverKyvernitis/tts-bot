@@ -192,7 +192,7 @@ class ProgressiveOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await asyncio.to_thread(self.probe.started.wait, 1))
             first = self.probe.calls[:2]
             self.assertEqual({call.ttv_score['notes'][0]['midi_note'] for call in first}, {60, 64})
-            self.assertEqual(first[0].ttv_score['duration_ms'], 3000)
+            self.assertLessEqual(first[0].ttv_score['duration_ms'], 1000)
             self.assertFalse(handle.producer_task.done())
             # Both equal-amplitude fixture voices contribute to the stable
             # mixture: normalized part weights sum to the global0.92 headroom.
@@ -226,6 +226,80 @@ class ProgressiveOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.probe._finalize_cd_pcm_stream(handle, cancel=True)
             self.assertIsNone(self.probe._cd_stream_for_path(handle.path))
             self.assertFalse(Path(handle.path).exists())
+
+    async def test_native_stream_adapter_requires_capability_and_keeps_physical_gate(self):
+        route = self.probe._tts_agent_route_state()
+        events = []
+
+        async def native(item, call, *, on_pcm):
+            self.assertTrue(self.probe._cd_composition_gate.locked())
+            self.assertEqual(self.probe._cd_foreground_compositions, 1)
+            on_pcm(b'prefix')
+            return b'complete-wav', {'normalization_gain': 1.0}
+
+        self.probe._request_cd_stem_stream = AsyncMock(side_effect=native)
+
+        for capability in (None, 1):
+            with self.subTest(capability=capability):
+                self.probe._tts_agent_route_state = lambda: {
+                    **route, 'ttv_pcm_stream_protocol': capability}
+
+                def compositor(arrangement, text, render_part, emit_pcm, **options):
+                    owner_thread = threading.get_ident()
+                    adapter = options.get('render_part_stream')
+                    self.assertEqual(callable(adapter), capability == 1)
+                    if adapter is not None:
+                        def receive(value):
+                            self.assertEqual(threading.get_ident(), owner_thread)
+                            events.append(value)
+                        result = adapter(on_pcm=receive, text='a', score={},
+                            voice_id='kasane-teto', language='pt-BR',
+                            part_id='lead', role='lead', pitch=0.0, rate=1.0)
+                        self.assertEqual(result[0], b'complete-wav')
+                    options['on_generation'](1000, 100, 0)
+                    emit_pcm(struct.pack('<hh', 1000, 1000) * (1000 * 48))
+                    return {'timing_ms': {}}
+
+                with patch('cogs.tts.cd_audio.stream_arrangement', side_effect=compositor):
+                    handle = await asyncio.wait_for(self.probe._prepare_cd_pcm_stream(
+                        SimpleNamespace(queue=asyncio.Queue()), long_item()), 3)
+                await self.probe._finalize_cd_pcm_stream(handle)
+                self.assertFalse(self.probe._cd_composition_gate.locked())
+        self.probe._request_cd_stem_stream.assert_awaited_once()
+        self.assertEqual(events, [b'prefix'])
+
+    async def test_native_callback_failure_drains_physical_request_before_releasing_gate(self):
+        route = self.probe._tts_agent_route_state()
+        self.probe._tts_agent_route_state = lambda: {**route, 'ttv_pcm_stream_protocol': 1}
+
+        async def native(item, call, *, on_pcm):
+            self.assertIs(on_pcm._cd_enqueue_only, True)
+            on_pcm(b'prefix')
+            self.probe.started.set()
+            await asyncio.to_thread(self.probe.release.wait, 5)
+            return b'complete-wav', {'normalization_gain': 1.0}
+
+        self.probe._request_cd_stem_stream = AsyncMock(side_effect=native)
+
+        def compositor(arrangement, text, render_part, emit_pcm, **options):
+            def reject(value):
+                raise RuntimeError('invalid native prefix')
+            options['render_part_stream'](on_pcm=reject, text='a', score={},
+                voice_id='kasane-teto', language='pt-BR', part_id='lead',
+                role='lead', pitch=0.0, rate=1.0)
+
+        with patch('cogs.tts.cd_audio.stream_arrangement', side_effect=compositor):
+            task = asyncio.create_task(self.probe._prepare_cd_pcm_stream(
+                SimpleNamespace(queue=asyncio.Queue()), long_item()))
+            self.assertTrue(await asyncio.to_thread(self.probe.started.wait, 1))
+            await asyncio.sleep(.03)
+            self.assertFalse(task.done())
+            self.assertTrue(self.probe._cd_composition_gate.locked())
+            self.probe.release.set()
+            with self.assertRaisesRegex(RuntimeError, 'invalid native prefix'):
+                await asyncio.wait_for(task, 3)
+        self.assertFalse(self.probe._cd_composition_gate.locked())
+        self.assertEqual(self.probe._cd_foreground_compositions, 0)
 
     async def test_cancellation_retains_gate_until_native_request_drains(self):
         self.probe.block_call = 2

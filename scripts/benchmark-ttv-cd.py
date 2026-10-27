@@ -35,7 +35,8 @@ TELEMETRY_KEYS = ('render_workers', 'source_groups', 'fragment_cache_hits',
                   'worker_synth_ms', 'compose_ms', 'postprocess_ms',
                   'cache_maintenance_ms', 'cache_scans', 'cache_evictions',
                   'cache_size_bytes', 'rendered_phonemes', 'pcm_cache_hits',
-                  'pcm_cache_misses', 'pcm_cache_bytes', 'normalization_gain')
+                  'pcm_cache_misses', 'pcm_cache_bytes', 'normalization_gain',
+                  'first_pcm_ms', 'streamed_frames')
 NOTE = ('Local UTAU/ESPER singing and composition only; excludes HTTP, bot queue and Discord playback. '
         'Cold means empty temporary ESPER analysis cache, not a cold OS/filesystem. '
         'Production caches are not measured. Temperature and other apps affect results.')
@@ -167,11 +168,13 @@ def measure(arrangement, text, *, renderer, voice_id, language, cache, timeout,
             raise ValueError('singing voicebank/resampler unavailable')
 
         def render_part(**request):
+            on_pcm = request.pop('_native_pcm_consumer', None)
             part_start = time.perf_counter()
             raw, meta = renderer.synthesize_performance(request['text'],
                 score=request['score'], segments=request.get('segments'),
                 reading_language=request['language'], pitch_offset_semitones=0.0,
-                speech_rate=1.0, timeout_seconds=timeout, max_audio_bytes=16 * 1024 * 1024)
+                speech_rate=1.0, timeout_seconds=timeout, max_audio_bytes=16 * 1024 * 1024,
+                **({'emit_pcm': on_pcm} if on_pcm is not None else {}))
             if (meta.get('voice_id') != voice_id or meta.get('reading_language') != language
                     or meta.get('pitch_offset_semitones') != 0.0 or meta.get('speech_rate') != 1.0):
                 raise ValueError('renderer changed requested voice/language/controls')
@@ -184,12 +187,15 @@ def measure(arrangement, text, *, renderer, voice_id, language, cache, timeout,
                 'metrics': {key: meta[key] for key in TELEMETRY_KEYS if key in meta}})
             return raw, meta
 
+        def render_part_stream(*, on_pcm, **request):
+            return render_part(_native_pcm_consumer=on_pcm, **request)
+
         render_start = time.perf_counter()
         if progressive:
             from cogs.tts.cd_stream import PCMStreamBuffer
             from osaka_cd.progressive import PREROLL_MS, stream_arrangement
             buffer = PCMStreamBuffer(adapted['duration_ms'] + PREROLL_MS,
-                                     prebuffer_ms=1000, safety_ms=500)
+                                     prebuffer_ms=500, safety_ms=200)
             output_hash = hashlib.sha256()
             output_bytes = 0
             record.update(first_pcm_available_ms=None, first_nonzero_pcm_available_ms=None,
@@ -212,14 +218,20 @@ def measure(arrangement, text, *, renderer, voice_id, language, cache, timeout,
                 # This is a readiness probe, not a simulated Discord player.
                 # Retain only the runway needed to observe its first readiness.
                 if record['buffer_ready_ms'] is None:
-                    buffer.append(pcm)
+                    buffer.append(pcm, generation_ms=0)
                     capture_ready()
 
             try:
+                native_options = ({'render_part_stream': render_part_stream}
+                    if getattr(renderer, 'SINGING_PCM_PROTOCOL', 0) == 1 else {})
                 result = stream_arrangement(adapted, clean, render_part, emit,
                     segments=segments, cache_dir=cache, memory_cache=memory_cache,
                     render_profile_fingerprint=profile, language=language,
-                    timeout_seconds=1200, require_normalization=True)
+                    timeout_seconds=1200, require_normalization=True,
+                    **native_options,
+                    on_generation_boundary=buffer.begin_generation,
+                    on_generation=lambda *values: (
+                        buffer.observe_generation(*values) if record['buffer_ready_ms'] is None else None))
                 buffer.finish()
                 capture_ready()
                 if output_hash.hexdigest() != result['pcm_sha256'] or output_bytes != result['audio_bytes']:

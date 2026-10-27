@@ -167,6 +167,13 @@ class LatencyTelemetryTests(WorkerFixture):
             class Response:
                 status = 200
                 headers = capture.headers
+                @property
+                def content(self):
+                    return self
+                async def iter_chunked(self, size):
+                    raw = capture.wfile.getvalue()
+                    for offset in range(0, len(raw), size):
+                        yield raw[offset:offset + size]
                 async def __aenter__(self):
                     return self
                 async def __aexit__(self, *args):

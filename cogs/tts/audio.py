@@ -2118,6 +2118,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "ttv_personal_settings": bool(state.get("ttv_personal_settings")),
             "ttv_performance_protocol": int(state.get("ttv_performance_protocol") or 0),
             "ttv_background_protocol": int(state.get("ttv_background_protocol") or 0),
+            "ttv_pcm_stream_protocol": int(state.get("ttv_pcm_stream_protocol") or 0),
             "ttv_voices": list(state.get("ttv_voices") or [])[:25],
             "ttv_languages": list(state.get("ttv_languages") or [])[:2],
             "last_ok_age_seconds": round(now - last_ok, 1) if last_ok else None,
@@ -2535,6 +2536,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             route["ttv_personal_settings"] = bool(teto_state.get("ttv_personal_settings"))
             route["ttv_performance_protocol"] = int(teto_state.get("ttv_performance_protocol") or agent.get("ttv_performance_protocol") or 0)
             route["ttv_background_protocol"] = int(agent.get("ttv_background_protocol") or 0)
+            route["ttv_pcm_stream_protocol"] = int(agent.get("ttv_pcm_stream_protocol") or 0)
             route["ttv_languages"] = [code for code in (teto_state.get("ttv_languages") or [])
                                       if code in {"pt-BR", "en-US"}]
             route["ttv_language_fingerprints"] = {
@@ -4358,18 +4360,25 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     if audio_size <= 0:
                         raise RuntimeError("worker raw não retornou áudio")
                     actual_hash = hasher.hexdigest()
-                except Exception:
+                except BaseException:
                     with contextlib.suppress(FileNotFoundError, OSError):
                         os.remove(audio_path)
                     raise
             else:
-                raw = await response.read()
-                audio_size = len(raw)
-                if not raw:
+                chunks = bytearray()
+                hasher = hashlib.sha256()
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    if not chunk:
+                        continue
+                    audio_size += len(chunk)
+                    if audio_size > max_audio_bytes:
+                        raise RuntimeError(f"worker raw retornou áudio grande demais: {audio_size} bytes")
+                    chunks.extend(chunk)
+                    hasher.update(chunk)
+                raw = bytes(chunks)
+                if not audio_size:
                     raise RuntimeError("worker raw não retornou áudio")
-                if audio_size > max_audio_bytes:
-                    raise RuntimeError(f"worker raw retornou áudio grande demais: {audio_size} bytes")
-                actual_hash = hashlib.sha256(raw).hexdigest()
+                actual_hash = hasher.hexdigest()
 
             request_ms = (time.monotonic() - started) * 1000.0
             if expected_hash and expected_hash != actual_hash:
@@ -6240,7 +6249,6 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             **preferences,
             **performance,
             **({"priority": "background"} if is_teto and getattr(item, "_cd_background", False) else {}),
-            **({"cache_mode": "bypass"} if is_teto and getattr(item, "_cd_progressive_request", False) else {}),
             # Uma requisição explícita da Teto não pode ser desviada pela engine
             # global preferida do worker; o fallback continua separado abaixo.
             "preferred_engine": "edge" if engine == "edge" else "teto" if is_teto else TTS_WORKER_AGENT_PREFERRED_ENGINE,
@@ -6251,7 +6259,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "fallback_pitch": str(getattr(item, "piper_fallback_pitch", "") or item.pitch or "+0Hz"),
             "model_name": str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME),
             "cache_key": self._cache_key(item),
-            "cache_mode": "prefer",
+            "cache_mode": "bypass" if is_teto and getattr(item, "_cd_progressive_request", False) else "prefer",
             "timeout_seconds": timeout_seconds,
             "max_audio_bytes": max_audio_mb * 1024 * 1024,
             "guild_id": int(item.guild_id or 0),
@@ -6273,8 +6281,14 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "temporarily unavailable",
         ))
 
-    async def _generate_tts_agent_worker_file(self, item: QueueItem) -> str:
+    async def _generate_tts_agent_worker_bytes(self, item: QueueItem) -> tuple[bytes, dict[str, Any]]:
+        """Use the same verified worker route without a temporary stem file."""
+        return await self._generate_tts_agent_worker_file(item, _return_audio=True)
+
+    async def _generate_tts_agent_worker_file(self, item: QueueItem, *, _return_audio: bool = False):
         if frozen_arrangement(item) is not None:
+            if _return_audio:
+                raise ValueError("O áudio direto exige uma parte musical, não um arranjo completo.")
             return await self._generate_arrangement_worker_file(item)
         setattr(item, "_tts_agent_selected_engine", "")
         if not self._tts_agent_route_available():
@@ -6323,7 +6337,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     payload=self._tts_agent_payload_for_item(item),
                     timeout_seconds=124.0 if performance else TTS_TETO_WORKER_TIMEOUT_SECONDS + 4.0 if engine == "teto" else TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
                     max_audio_mb=max(8, TTS_TETO_MAX_AUDIO_MB) if getattr(item, "ttv_score", None) is not None else TTS_TETO_MAX_AUDIO_MB if engine == "teto" else TTS_WORKER_AGENT_MAX_AUDIO_MB,
-                    stream_to_file=True,
+                    stream_to_file=not _return_audio,
                 )
                 request_ms = (time.monotonic() - request_started) * 1000.0
                 data["requested_engine"] = str(item.engine or "").strip().lower()
@@ -6348,7 +6362,21 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                             raise RuntimeError("O worker retornou áudio com ajustes de TTV diferentes dos solicitados.")
                 write_ms = 0.0
                 raw = data.get("raw_audio") or data.get("audio_bytes")
-                if path:
+                if _return_audio:
+                    if path:
+                        # Older adapters may still return a file. Drain it once
+                        # and remove it even if the caller cancels during I/O.
+                        try:
+                            raw = await asyncio.to_thread(Path(path).read_bytes)
+                        finally:
+                            with contextlib.suppress(FileNotFoundError, OSError):
+                                os.remove(path)
+                            path = ""
+                    if not isinstance(raw, (bytes, bytearray)) or not raw:
+                        raise RuntimeError("TTS Agent não retornou áudio")
+                    raw = bytes(raw)
+                    data["audio_bytes_len"] = len(raw)
+                elif path:
                     if not os.path.isfile(path) or os.path.getsize(path) <= 0:
                         raise RuntimeError("TTS Agent retornou arquivo de áudio inválido")
                     data["audio_bytes_len"] = int(data.get("audio_bytes_len") or os.path.getsize(path))
@@ -6370,7 +6398,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 selected_engine = str(data.get("selected_engine") or data.get("engine") or "").strip().lower()
                 if engine == "edge" and selected_engine != "edge":
                     raise RuntimeError("Phone Worker não retornou áudio Edge")
-                item._tts_agent_render_metadata = dict(data)
+                # A decoded stem cache owns the PCM. Metadata must never keep
+                # another encoded audio copy alive for the entire queue item.
+                metadata = {key: value for key, value in data.items()
+                            if key not in {"raw_audio", "audio_bytes", "data_b64"}}
+                item._tts_agent_render_metadata = metadata
                 self._record_tts_agent_synth_success(total_ms=total_ms, data=data)
                 setattr(item, "_tts_agent_selected_engine", selected_engine or str(item.engine or "gtts"))
                 if selected_engine and selected_engine != item.engine:
@@ -6413,7 +6445,12 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 )
                 if bool(data.get("cache_hit")) or worker_timing:
                     setattr(item, "_tts_agent_inline_cache", True)
-                return path
+                return (raw, metadata) if _return_audio else path
+            except asyncio.CancelledError:
+                if path:
+                    with contextlib.suppress(FileNotFoundError, OSError):
+                        os.remove(path)
+                raise
             except Exception as exc:
                 if path:
                     with contextlib.suppress(FileNotFoundError, OSError):

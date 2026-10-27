@@ -6,6 +6,7 @@ import contextlib
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import queue
 import threading
 import time
 
@@ -80,7 +81,8 @@ class CDStreamingMixin:
     async def _prepare_cd_pcm_stream(self, state, item):
         from .arrangement_audio import arrangement_profile_identity, frozen_arrangement
         arrangement = frozen_arrangement(item)
-        profile = arrangement_profile_identity(item, self._tts_agent_route_state())
+        route = self._tts_agent_route_state()
+        profile = arrangement_profile_identity(item, route)
         if not profile:
             raise RuntimeError('identidade do banco de canto indisponível')
         cache = getattr(self, '_cd_decoded_pcm_cache', None)
@@ -88,7 +90,7 @@ class CDStreamingMixin:
             cache = self._cd_decoded_pcm_cache = DecodedPCMCache()
         path = self._make_runtime_temp_file(suffix='.cdpcm')
         buffer = PCMStreamBuffer(arrangement['duration_ms'] + PREROLL_MS,
-                                 prebuffer_ms=1000, safety_ms=500)
+                                 prebuffer_ms=500, safety_ms=200)
         if not getattr(item, '_tts_prefetch', False):
             buffer.promote()
         handle = CDPCMHandle(path, item, buffer)
@@ -107,7 +109,7 @@ class CDStreamingMixin:
         def stopped():
             return handle.cancelled.is_set() or buffer.stop.is_set()
 
-        async def request(call):
+        async def request(call, *, on_pcm=None):
             await self._wait_cd_prefetch_turn(item)
             if stopped():
                 raise RuntimeError('cd_pcm_cancelled')
@@ -116,6 +118,8 @@ class CDStreamingMixin:
                 async with gate:
                     if stopped():
                         raise RuntimeError('cd_pcm_cancelled')
+                    if on_pcm is not None:
+                        return await self._request_cd_stem_stream(item, call, on_pcm=on_pcm)
                     return await self._request_cd_stem(item, call, progressive=True)
             finally:
                 self._cd_foreground_compositions -= 1
@@ -123,28 +127,71 @@ class CDStreamingMixin:
         def render_part(**call):
             return asyncio.run_coroutine_threadsafe(request(call), loop).result()
 
+        def render_part_stream(*, on_pcm, **call):
+            # HTTP callbacks run outside this compositor thread. Marshal PCM
+            # back here so one thread owns the resampler, timelines and mix.
+            # The wire reader bounds the full stem size; a queue also avoids
+            # blocking the bot loop when the HTTP layer invokes callbacks.
+            incoming = queue.Queue()
+            discard = threading.Event()
+
+            def receive(*values):
+                if not discard.is_set():
+                    incoming.put(values)
+            receive._cd_enqueue_only = True
+
+            future = asyncio.run_coroutine_threadsafe(request(call, on_pcm=receive), loop)
+            try:
+                while not future.done() or not incoming.empty():
+                    if stopped():
+                        raise RuntimeError('cd_pcm_cancelled')
+                    try:
+                        values = incoming.get(timeout=.01)
+                    except queue.Empty:
+                        continue
+                    on_pcm(*values)
+                return future.result()
+            except BaseException:
+                # Do not cancel the HTTP coroutine or release its gate while
+                # native work is alive. Drain the physical response, dropping
+                # future PCM after consumer cancellation or validation error.
+                discard.set()
+                while not incoming.empty():
+                    with contextlib.suppress(queue.Empty):
+                        incoming.get_nowait()
+                with contextlib.suppress(BaseException):
+                    future.result()
+                raise
+
+        native_stream_options = {}
+        if (route.get('ttv_pcm_stream_protocol') == 1
+                and callable(getattr(self, '_request_cd_stem_stream', None))):
+            native_stream_options['render_part_stream'] = render_part_stream
+
         async def produce():
             physical = None
             try:
                 await self._wait_cd_prefetch_turn(item)
                 if stopped():
                     raise asyncio.CancelledError()
-                last_publication = time.monotonic()
-
                 def emit(pcm):
-                    nonlocal last_publication
-                    now = time.monotonic()
-                    buffer.append(pcm, generation_ms=max(0.0, (now - last_publication) * 1000))
-                    last_publication = now
+                    # One synthesized window may be delivered in several
+                    # slices. Throughput is observed once by on_generation,
+                    # before those slices, rather than treating slices as
+                    # independent near-instant rendering measurements.
+                    buffer.append(pcm, generation_ms=0)
 
                 physical = asyncio.create_task(asyncio.to_thread(stream_arrangement,
                     arrangement, item.text, render_part, emit,
                     segments=getattr(item, 'ttv_segments', None), language=item.ttv_language,
                     render_profile_fingerprint=profile, memory_cache=cache,
                     cache_dir=root / 'audio-cache', cancelled=stopped,
-                    first_window_ms=3000, later_window_ms=8000, timeout_seconds=1200,
-                    require_normalization=True))
+                    first_window_ms=1000, later_window_ms=8000, timeout_seconds=1200,
+                    require_normalization=True, on_generation=buffer.observe_generation,
+                    on_generation_boundary=buffer.begin_generation,
+                    **native_stream_options))
                 handle.metadata = await asyncio.shield(physical)
+                handle.metadata['buffer_admission'] = buffer.admission_snapshot()
                 item._tts_agent_render_metadata = handle.metadata
                 metrics = self._get_metrics_store()
                 metrics['cd_pcm_last_first_pcm_ms'] = handle.metadata.get('first_pcm_ms')
@@ -164,6 +211,14 @@ class CDStreamingMixin:
         handle.producer_task = asyncio.create_task(produce())
         try:
             await buffer.wait_ready(timeout=1200)
+            admission = buffer.admission_snapshot()
+            item._cd_buffer_admission = admission
+            metrics = self._get_metrics_store()
+            metrics['cd_pcm_last_admission'] = admission
+            record = getattr(self, '_record_latency_sample', None)
+            if callable(record):
+                record('cd_buffer_ready', admission['ready_after_ms'])
+                record('cd_initial_generation', admission['initial_generation_ms'])
             return handle
         except BaseException:
             await self._finalize_cd_pcm_stream(handle, cancel=True)
@@ -183,6 +238,9 @@ class CDStreamingMixin:
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     await await_physical_completion(handle.producer_task)
         finally:
+            admission = handle.buffer.admission_snapshot()
+            handle.item._cd_buffer_admission = admission
+            handle.metadata['buffer_admission'] = admission
             handle.buffer.cleanup()
             getattr(self, '_cd_pcm_handles', {}).pop(os.path.abspath(handle.path), None)
             with contextlib.suppress(OSError):

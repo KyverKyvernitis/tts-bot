@@ -19,6 +19,7 @@ TOOLKIT_ROOT = Path(__file__).resolve().parent
 COMMAND_KEYS = frozenset({"PHONE_WORKER_TETO_RESAMPLER_COMMAND",
                           "PHONE_WORKER_MIKU_RESAMPLER_COMMAND"})
 KNOWN_PREVIOUS_SHA256 = frozenset({
+    "b80dc4c34717611a6f7dd7056dcc6c31f1e59b3b0d660b9fe746773ce16e4f74",
     "49fac2cae6396f3ee8dda7bc6e2ccbe2ae3835d48b9e25b6eeedffb5b955b43b",
 })
 # These quoting forms include shell quoting nested in a JSON-quoted .env value.
