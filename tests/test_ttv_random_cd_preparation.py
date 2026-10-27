@@ -101,12 +101,14 @@ class RandomCDPreparationTests(unittest.IsolatedAsyncioTestCase):
              patch.object(random_cd.random, "choice", side_effect=lambda candidates: candidates[0]) as draw:
             first = await self.payload(owner, "a~")
             second = await self.payload(owner, "a~")
-            self.assertEqual(draw.call_count, 2)
+            third = await self.payload(owner, "a~")
+            self.assertEqual(draw.call_count, 3)
             self.assertEqual([call.args[0] for call in self.score_lookup.call_args_list],
-                             ["song-b", "song-a"])
-            self.assertEqual(first.resolved["ttv_melody_id"], "song-b")
-            self.assertEqual(second.resolved["ttv_melody_id"], "song-a")
-            for result, identity in ((first, "song-b"), (second, "song-a")):
+                             ["song-a", "song-b", "song-a"])
+            self.assertEqual(first.resolved["ttv_melody_id"], "song-a")
+            self.assertEqual(second.resolved["ttv_melody_id"], "song-b")
+            self.assertEqual(third.resolved["ttv_melody_id"], "song-a")
+            for result, identity in ((first, "song-a"), (second, "song-b"), (third, "song-a")):
                 queued = result.queue_item
                 self.assertEqual(queued.ttv_voice_id, "hatsune-miku")
                 self.assertEqual(queued.ttv_score, self.scores[identity])
@@ -116,7 +118,7 @@ class RandomCDPreparationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(plan["chunks"])
                 self.assertEqual(queued.ttv_arrangement_hash,
                                  arrangement_sha256(queued.ttv_arrangement))
-            self.assertEqual(draw.call_count, 2, "Physical chunks must reuse their frozen CD")
+            self.assertEqual(draw.call_count, 3, "Physical chunks must reuse their frozen CD")
         self.assertEqual(owner.values, before, "Shuffle must preserve the saved fixed CD")
 
     async def test_random_mode_does_not_turn_ordinary_speech_into_singing(self):

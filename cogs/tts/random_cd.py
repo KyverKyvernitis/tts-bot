@@ -3,17 +3,24 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from dataclasses import dataclass, field
 import inspect
 import logging
 import random
 import sys
 import weakref
 
-from .melodies import DEFAULT_MELODY_ID, get_melody, list_melodies
+from .melodies import DEFAULT_MELODY_ID, list_melodies
 from osaka_cd.runtime import pin_snapshot
 
 log = logging.getLogger(__name__)
 _HISTORY_LIMIT = 2048
+
+
+@dataclass
+class _RandomCDCycle:
+    played: set[str] = field(default_factory=set)
+    last: str | None = None
 
 
 def available_random_melodies():
@@ -33,13 +40,23 @@ def choose_synthesis_melody(cog, guild_id: int, user_id: int, preferences) -> st
     if not pool:
         raise ValueError("Nenhum CD está disponível agora. Tente novamente em instantes.")
     key = (int(guild_id), int(user_id))
-    history = getattr(cog, "_random_cd_last", None)
+    history = getattr(cog, "_random_cd_cycles", None)
     if not isinstance(history, OrderedDict):
-        history = cog._random_cd_last = OrderedDict()
-    previous = history.get(key, fixed)
-    candidates = tuple(melody for melody in pool if melody.id != previous)
-    selected = random.choice(candidates or pool).id
-    history[key] = selected
+        history = cog._random_cd_cycles = OrderedDict()
+    cycle = history.get(key)
+    if cycle is None:
+        cycle = _RandomCDCycle()
+    # New CDs join the current cycle; retired ones cannot prevent its reset.
+    cycle.played.intersection_update(melody.id for melody in pool)
+    candidates = tuple(melody for melody in pool if melody.id not in cycle.played)
+    if not candidates:
+        cycle.played.clear()
+        # Keep consecutive cycles from repeating at their boundary when possible.
+        candidates = tuple(melody for melody in pool if melody.id != cycle.last) or pool
+    selected = random.choice(candidates).id
+    cycle.played.add(selected)
+    cycle.last = selected
+    history[key] = cycle
     history.move_to_end(key)
     while len(history) > _HISTORY_LIMIT:
         history.popitem(last=False)
@@ -50,10 +67,10 @@ async def _maybe_await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-async def _reply(message, embed):
+async def _reply(message, content):
     import discord
     sender = getattr(message, "reply", None)
-    kwargs = {"embed": embed, "allowed_mentions": discord.AllowedMentions.none()}
+    kwargs = {"content": content, "allowed_mentions": discord.AllowedMentions.none()}
     if callable(sender):
         kwargs["mention_author"] = False
     else:
@@ -81,7 +98,6 @@ async def _refresh_open_panels(cog, guild_id, user_id):
 
 async def toggle_random_cd(cog, message) -> bool:
     """Toggle the invoking person's persisted shuffle mode in this server."""
-    import discord
     if not getattr(message, "guild", None):
         return False
     guild_id, user_id = message.guild.id, message.author.id
@@ -107,34 +123,12 @@ async def toggle_random_cd(cog, message) -> bool:
                 guild_id, user_id, ttv_random_cd=enabled)), timeout=12)
         except Exception as exc:
             log.warning("[random_cd] mode save failed type=%s", type(exc).__name__)
-            await _reply(message, discord.Embed(
-                title="💿 Ajuste indisponível",
-                description="Não consegui confirmar essa mudança agora. Tente novamente em instantes.",
-                color=0xED7D8A))
+            await _reply(message, "Não consegui alterar o CD aleatório agora. Tente novamente.")
             return True
-        history = getattr(cog, "_random_cd_last", None)
-        if history is not None:
-            history.pop(key, None)
-        prefix = str(settings.get("bot_prefix") or "_")
         if enabled:
-            embed = discord.Embed(
-                title="🎲 CDs aleatórios ligados",
-                description=f"Um CD novo a cada canto com `~`.\n-# Use `{prefix}rcd` novamente para desligar.",
-                color=0x9B7BF5)
-            label = "CD disponível" if len(pool) == 1 else "CDs disponíveis"
-            embed.set_footer(text=f"{len(pool)} {label} · só para você")
+            content = "🎲 CDs aleatórios ativados. Só repete depois de tocar todos."
         else:
-            try:
-                melody = get_melody(settings.get("ttv_melody_id"))
-                name = discord.utils.escape_markdown(melody.name)
-                description = f"**{name}** voltou a ser seu CD fixo."
-            except (ValueError, TypeError):
-                description = "O sorteio foi desligado."
-            embed = discord.Embed(
-                title="💿 CD fixo restaurado",
-                description=f"{description}\n-# Escolha outro com `{prefix}cd`.",
-                color=0x75C7D4)
-            embed.set_footer(text="Só para você neste servidor")
-        await _reply(message, embed)
+            content = "💿 CDs aleatórios desativados."
+        await _reply(message, content)
     await _refresh_open_panels(cog, guild_id, user_id)
     return True

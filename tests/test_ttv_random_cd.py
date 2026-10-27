@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-from collections import OrderedDict
 from copy import deepcopy
 import importlib.util
 from pathlib import Path
@@ -35,16 +34,7 @@ def settings_db():
     return db
 
 
-class Embed:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-    def set_footer(self, **kwargs):
-        self.footer = kwargs
-
-
-DISCORD = SimpleNamespace(Embed=Embed,
-    AllowedMentions=SimpleNamespace(none=lambda: "no-mentions"),
+DISCORD = SimpleNamespace(AllowedMentions=SimpleNamespace(none=lambda: "no-mentions"),
     utils=SimpleNamespace(escape_markdown=lambda text: text))
 
 
@@ -61,19 +51,43 @@ class ShuffleSelectionTests(unittest.TestCase):
         with patch.object(random_cd, "available_random_melodies", side_effect=AssertionError("unneeded draw")):
             self.assertEqual(self.choose(ttv_random_cd=False), "one")
             self.assertEqual(self.choose(ttv_random_cd="true"), "one")
-        self.assertFalse(hasattr(self.cog, "_random_cd_last"))
+        self.assertFalse(hasattr(self.cog, "_random_cd_cycles"))
 
-    def test_each_new_payload_draws_again_without_immediate_repeats(self):
+    def test_every_cd_plays_once_before_a_new_cycle_without_changing_settings(self):
         values = {"ttv_random_cd": True, "ttv_melody_id": "one", "voice": "unchanged"}
         before = deepcopy(values)
         with patch.object(random_cd, "list_melodies", return_value=self.pool), \
              patch.object(random_cd.random, "choice", side_effect=lambda pool: pool[0]) as draw:
-            chosen = [random_cd.choose_synthesis_melody(self.cog, 1, 2, values) for _ in range(6)]
-        self.assertEqual(draw.call_count, 6)
+            chosen = [random_cd.choose_synthesis_melody(self.cog, 1, 2, values) for _ in range(9)]
+        self.assertEqual(draw.call_count, 9)
         self.assertNotIn(DEFAULT_MELODY_ID, chosen)
-        self.assertNotEqual(chosen[0], "one")
+        self.assertEqual(chosen[0], "one", "A saved CD has not already played in the random cycle")
+        for start in range(0, 9, 3):
+            self.assertEqual(set(chosen[start:start + 3]), {"one", "two", "three"})
         self.assertTrue(all(left != right for left, right in zip(chosen, chosen[1:])))
         self.assertEqual(values, before)
+
+    def test_random_draw_only_receives_remaining_cds_in_the_cycle(self):
+        offered = []
+        def draw(pool):
+            offered.append(tuple(item.id for item in pool))
+            return pool[-1]
+        with patch.object(random_cd, "available_random_melodies", return_value=self.pool[1:]), \
+             patch.object(random_cd.random, "choice", side_effect=draw):
+            chosen = [self.choose() for _ in range(3)]
+        self.assertEqual(chosen, ["three", "two", "one"])
+        self.assertEqual(offered, [("one", "two", "three"), ("one", "two"), ("one",)])
+
+    def test_cycle_boundary_does_not_immediately_repeat_its_last_cd(self):
+        def draw(pool):
+            return pool[-1] if any(item.id == "one" for item in pool) else pool[0]
+        with patch.object(random_cd, "available_random_melodies", return_value=self.pool[1:]), \
+             patch.object(random_cd.random, "choice", side_effect=draw):
+            first_cycle = [self.choose() for _ in range(3)]
+            second_cycle = [self.choose() for _ in range(3)]
+        self.assertEqual(first_cycle[-1], "one")
+        self.assertNotEqual(second_cycle[0], first_cycle[-1])
+        self.assertEqual(set(second_cycle), {"one", "two", "three"})
 
     def test_draw_history_is_personal_to_user_and_server(self):
         with patch.object(random_cd, "available_random_melodies", return_value=self.pool[1:]), \
@@ -91,6 +105,24 @@ class ShuffleSelectionTests(unittest.TestCase):
         with patch.object(random_cd, "available_random_melodies", return_value=surviving):
             self.assertIn(self.choose(), {item.id for item in surviving})
 
+    def test_newly_installed_cd_joins_the_current_cycle_before_any_repeat(self):
+        with patch.object(random_cd, "available_random_melodies", return_value=self.pool[1:]), \
+             patch.object(random_cd.random, "choice", side_effect=lambda pool: pool[0]):
+            self.assertEqual(self.choose(), "one")
+        expanded = self.pool[1:] + (SimpleNamespace(id="four"),)
+        with patch.object(random_cd, "available_random_melodies", return_value=expanded), \
+             patch.object(random_cd.random, "choice", side_effect=lambda pool: pool[0]):
+            self.assertEqual([self.choose() for _ in range(4)], ["two", "three", "four", "one"])
+
+    def test_catalog_removal_can_finish_the_cycle_and_never_blocks_reset(self):
+        with patch.object(random_cd, "available_random_melodies", return_value=self.pool[1:]), \
+             patch.object(random_cd.random, "choice", side_effect=lambda pool: pool[0]):
+            self.assertEqual([self.choose(), self.choose()], ["one", "two"])
+        remaining = self.pool[1:3]
+        with patch.object(random_cd, "available_random_melodies", return_value=remaining), \
+             patch.object(random_cd.random, "choice", side_effect=lambda pool: pool[0]):
+            self.assertEqual([self.choose(), self.choose()], ["one", "two"])
+
     def test_single_available_cd_and_default_fallback_are_valid(self):
         with patch.object(random_cd, "list_melodies", return_value=self.pool[:1]):
             self.assertEqual(self.choose(), DEFAULT_MELODY_ID)
@@ -106,7 +138,7 @@ class ShuffleSelectionTests(unittest.TestCase):
              patch.object(random_cd, "available_random_melodies", return_value=self.pool[1:]):
             for user in (2, 3, 4):
                 self.choose(user=user)
-        self.assertEqual(set(self.cog._random_cd_last), {(1, 3), (1, 4)})
+        self.assertEqual(set(self.cog._random_cd_cycles), {(1, 3), (1, 4)})
 
     def test_prefix_honors_custom_prefix_and_rejects_arguments(self):
         for prefix in ("_", "!", "os!"):
@@ -185,10 +217,18 @@ class ShufflePersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await random_cd.toggle_random_cd(cog, message))
             self.assertIs(self.db.resolve_tts(1, 2)["ttv_random_cd"], True)
             on = message.reply.await_args.kwargs
-            self.assertLess(len(on["embed"].description), 180)
+            self.assertNotIn("embed", on)
+            self.assertNotIn("embeds", on)
+            self.assertIsInstance(on["content"], str)
+            self.assertLess(len(on["content"]), 200)
+            self.assertIn("repete", on["content"].lower())
             self.assertEqual(on["allowed_mentions"], "no-mentions")
             self.assertIs(on["mention_author"], False)
             self.assertTrue(await random_cd.toggle_random_cd(cog, message))
+            off = message.reply.await_args.kwargs
+            self.assertNotIn("embed", off)
+            self.assertLess(len(off["content"]), 200)
+            self.assertIn("desativados", off["content"].lower())
         self.assertIs(self.db.resolve_tts(1, 2)["ttv_random_cd"], False)
         self.assertNotIn((1, 3), self.db.user_cache)
         self.assertEqual(message.reply.await_count, 2)
@@ -199,7 +239,42 @@ class ShufflePersistenceTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(sys.modules, {"discord": DISCORD}):
             self.assertTrue(await random_cd.toggle_random_cd(cog, message))
         self.assertIs(self.db.resolve_tts(1, 2)["ttv_random_cd"], False)
-        self.assertIn("indisponível", message.reply.await_args.kwargs["embed"].title)
+        failed = message.reply.await_args.kwargs
+        self.assertNotIn("embed", failed)
+        self.assertIn("Não consegui", failed["content"])
+
+    async def test_toggling_off_and_on_keeps_the_unfinished_cycle(self):
+        cog, message = self.cog_and_message()
+        pool = tuple(SimpleNamespace(id=key) for key in ("one", "two", "three"))
+        def draw():
+            return random_cd.choose_synthesis_melody(cog, 1, 2, self.db.resolve_tts(1, 2))
+        with patch.dict(sys.modules, {"discord": DISCORD}), \
+             patch.object(random_cd, "available_random_melodies", return_value=pool), \
+             patch.object(random_cd.random, "choice", side_effect=lambda choices: choices[0]):
+            await random_cd.toggle_random_cd(cog, message)
+            self.assertEqual(draw(), "one")
+            await random_cd.toggle_random_cd(cog, message)
+            await random_cd.toggle_random_cd(cog, message)
+            self.assertEqual([draw(), draw(), draw()], ["two", "three", "one"])
+
+    async def test_missing_fixed_cd_still_gets_a_short_text_confirmation(self):
+        cog, message = self.cog_and_message()
+        self.db.user_cache[(1, 2)] = {"tts": {
+            "ttv_random_cd": True, "ttv_melody_id": "removed"}}
+        with patch.dict(sys.modules, {"discord": DISCORD}):
+            await random_cd.toggle_random_cd(cog, message)
+        self.assertIs(self.db.resolve_tts(1, 2)["ttv_random_cd"], False)
+        response = message.reply.await_args.kwargs
+        self.assertNotIn("embed", response)
+        self.assertIn("desativados", response["content"].lower())
+        self.assertLess(len(response["content"]), 200)
+
+    async def test_plain_text_reply_falls_back_to_channel_without_mentions(self):
+        message = SimpleNamespace(channel=SimpleNamespace(send=AsyncMock()))
+        with patch.dict(sys.modules, {"discord": DISCORD}):
+            await random_cd._reply(message, "🎲 CDs aleatórios ligados.")
+        message.channel.send.assert_awaited_once_with(
+            content="🎲 CDs aleatórios ligados.", allowed_mentions="no-mentions")
 
     async def test_concurrent_commands_serialize_toggles_for_one_person(self):
         cog, message = self.cog_and_message()
