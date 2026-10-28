@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import sys
 import unittest
 from unittest.mock import AsyncMock, patch
 import zipfile
@@ -17,6 +18,16 @@ from PIL import Image
 
 from osaka_cd import discord_import as service
 from osaka_cd.store import RuntimeStore, _contract
+
+
+async def offline_importer(directory):
+    """Run the actual import pipeline with only its metadata provider offline."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deploy/ttv-cd'))
+    import catalog_import
+    from cd_metadata import MetadataSearchError
+    with patch.object(catalog_import, '_search', side_effect=MetadataSearchError('offline')):
+        await service._prepare_importer(directory)
+    return json.loads((directory / 'report.json').read_text())
 
 
 def midi():
@@ -117,17 +128,22 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_midi_subprocess_publishes_music_and_reports_pending_without_network(self):
         self.seed()
-        phases = []
-        async def progress(phase):
-            phases.append(phase)
         prepared = service.prepare_input('New Song.midi', midi())
         before = self.store.snapshot()['versions']['other']
-        result = await service.import_cd(prepared, store=self.store, progress=progress)
+        original = self.store.snapshot(strict=True, advertise_legacy=True)
+        directory = self.root / 'child'
+        directory.mkdir()
+        (directory / 'source.mid').write_bytes(prepared.data)
+        service._dump(directory / 'source.json', service.inspect_input(prepared))
+        service._seed_catalog(original, directory / 'catalog', 'new-song')
+        child = await service._run_importer(directory)
+        self.assertTrue(child['ok'])
+        result = service._publish(self.store, directory / 'package.zip', original,
+            service._request_hash(prepared, service.inspect_input(prepared)))
         self.assertTrue(result.applied)
         self.assertEqual(result.state, 'applied')
         self.assertEqual(result.songs[0]['id'], 'new-song')
         self.assertEqual(set(result.pending), {'metadata', 'thumbnail'})
-        self.assertEqual(phases, ['preparing', 'importing', 'installing', 'activating'])
         self.assertEqual(self.store.snapshot()['versions']['other'], before)
         _contract().validate_cd_tree(self.store.snapshot()['root'], ['new-song'])
         score = next(row for row in json.loads((Path(self.store.snapshot()['root']) / _contract().SCORES).read_text()) if row['id'] == 'new-song')
@@ -158,7 +174,7 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.store.snapshot()['generation'], before)
 
     async def test_ready_midi_repeat_skips_provider_and_keeps_generation(self):
-        prepared = service.prepare_input('Demo.mid', midi())
+        prepared = service.prepare_input('Demo - Demo.mid', midi())
         metadata = service.inspect_input(prepared)
         marker = service._request_hash(prepared, metadata)
         self.seed('demo', marker=marker)
@@ -169,7 +185,7 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.snapshot()['generation'], before)
 
     async def test_pending_cover_allows_a_new_metadata_attempt(self):
-        prepared = service.prepare_input('Demo.mid', midi())
+        prepared = service.prepare_input('Demo - Demo.mid', midi())
         metadata = service.inspect_input(prepared)
         marker = service._request_hash(prepared, metadata)
         self.seed('demo', marker=marker, cover=False)
@@ -189,7 +205,7 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
             self.seed('demo', pitch=65)
         with patch.object(service, '_run_importer', side_effect=imported):
             with self.assertRaises(service.ImportCDError) as caught:
-                await service.import_cd(service.prepare_input('Demo.mid', midi()), store=self.store)
+                await service.import_cd(service.prepare_input('Demo - Demo.mid', midi()), store=self.store)
         self.assertEqual(caught.exception.code, 'conflict')
         scores = json.loads((Path(self.store.snapshot()['root']) / _contract().SCORES).read_text())
         self.assertEqual(next(row for row in scores if row['id'] == 'demo')['notes'][0]['midi_note'], 65)
@@ -265,7 +281,7 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
             package(directory / 'package.zip', 'demo')
             return {'pending': ['metadata']}
         with patch.object(service, '_run_importer', side_effect=imported):
-            result = await service.import_cd(service.prepare_input('Demo.mid', midi()), store=self.store)
+            result = await service.import_cd(service.prepare_input('Demo - Demo.mid', midi()), store=self.store)
         self.assertEqual(result.pending, ('metadata',))
 
     async def test_automatic_same_title_other_artist_does_not_replace_another_cd(self):
@@ -285,7 +301,7 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.applied)
 
     async def test_marker_cannot_skip_music_edited_after_the_original_import(self):
-        prepared = service.prepare_input('Demo.mid', midi())
+        prepared = service.prepare_input('Demo - Demo.mid', midi())
         metadata = service.inspect_input(prepared)
         marker = service._request_hash(prepared, metadata)
         path = package(self.root / 'edited.zip', 'demo', marker=marker)
@@ -301,8 +317,9 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
         self.store.process(self.store.receive(path)['job_id'])
         self.assertIsNone(service._existing_midi(self.store.snapshot(), metadata, marker))
 
+    @patch.object(service, '_run_importer', new=offline_importer)
     async def test_real_midi_reimport_preserves_matching_generated_sample_and_old_generation(self):
-        prepared = service.prepare_input('Demo.mid', midi())
+        prepared = service.prepare_input('Demo - Demo.mid', midi())
         initial = await service.import_cd(prepared, store=self.store)
         initial_root = Path(self.store.snapshot()['root'])
         score = json.loads((initial_root / _contract().SCORES).read_text())[0]

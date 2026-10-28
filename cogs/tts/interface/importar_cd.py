@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import dataclass, field
 import logging
 import re
+import json
 from pathlib import PurePosixPath
 
 import discord
@@ -16,6 +17,7 @@ _DOWNLOAD_TIMEOUT = 30
 _DISCORD_TIMEOUT = 10
 _LEASE_ATTRIBUTE = '_osaka_cd_import_session'
 _PROGRESS = {
+    'discovering': ('Identificando música', 'Buscando o artista e a gravação pelo nome.'),
     'preparing': ('Preparando CD', 'Conferindo as notas e os dados do arquivo.'),
     'importing': ('Preparando CD', 'Buscando os metadados e importando a capa.'),
     'installing': ('Salvando CD', 'Atualizando o catálogo com segurança.'),
@@ -78,6 +80,7 @@ class _Session:
     submitted: bool = False
     cancelled: bool = False
     finished: bool = False
+    title: str = ''
 
     async def edit(self, title, body, *, color=None, view=None):
         if self.response is None:
@@ -185,7 +188,7 @@ class _DetailsView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay('## Complete o CD\n'
                 f'**{_text(session.metadata.get("title") or "Novo CD")}**\n'
-                'Informe o artista para buscar os metadados e a capa.'),
+                'A busca não identificou uma única música. Informe o artista para continuar.'),
             discord.ui.ActionRow(
                 discord.ui.Button(label='Completar dados', style=discord.ButtonStyle.primary,
                                   custom_id='cd-import:details'),
@@ -310,27 +313,42 @@ async def _run_import(session, primary, sidecar):
         data = await _read_attachment(primary, limit)
         metadata = await _read_attachment(sidecar, MAX_SIDECAR_BYTES) if sidecar is not None else None
         prepared = await asyncio.to_thread(prepare_input, primary.filename, data, metadata)
-        session.metadata = await asyncio.to_thread(inspect_input, prepared)
-        if prepared.kind == 'midi' and (not session.metadata.get('title') or not session.metadata.get('artist')):
-            session.waiting = True
-            session.view = _DetailsView(session)
-            if not await session.edit('', '', view=session.view):
-                return
-            try:
-                await asyncio.wait_for(session.resume.wait(), timeout=_FORM_TIMEOUT)
-            except asyncio.TimeoutError:
-                session.cancelled = True
-            session.waiting = False
-            session.view.stop()
-            if session.cancelled:
-                await session.edit('Importação encerrada', 'Envie o comando com o anexo quando quiser tentar novamente.')
-                return
+        if session.title:
+            if prepared.kind != 'midi':
+                raise ImportCDError('invalid_metadata', 'O nome informado junto do comando vale para arquivos MIDI.')
+            session.overrides = {'title': session.title}
+            explicit_artist = json.loads(metadata).get('artist') if metadata else None
+            if not explicit_artist:
+                # A caption identifies the requested song, not an upload's filename prefix.
+                session.overrides['artist'] = ''
+        session.metadata = await asyncio.to_thread(inspect_input, prepared, session.overrides)
 
         async def progress(stage):
             if stage in _PROGRESS:
                 await session.edit(*_PROGRESS[stage])
 
-        result = await import_cd(prepared, overrides=session.overrides, progress=progress)
+        for attempt in range(2):
+            try:
+                result = await import_cd(prepared, overrides=session.overrides, progress=progress)
+                break
+            except ImportCDError as exc:
+                if (attempt or prepared.kind != 'midi' or session.metadata.get('artist')
+                        or exc.code not in {'metadata_ambiguous', 'metadata_unavailable'}):
+                    raise
+                session.waiting = True
+                session.view = _DetailsView(session)
+                if not await session.edit('', '', view=session.view):
+                    return
+                try:
+                    await asyncio.wait_for(session.resume.wait(), timeout=_FORM_TIMEOUT)
+                except asyncio.TimeoutError:
+                    session.cancelled = True
+                session.waiting = False
+                session.view.stop()
+                if session.cancelled:
+                    await session.edit('Importação encerrada', 'Envie o comando com o anexo quando quiser tentar novamente.')
+                    return
+                session.metadata = await asyncio.to_thread(inspect_input, prepared, session.overrides)
         await session.edit(*_result_text(result), color=discord.Color.green())
     except asyncio.CancelledError:
         raise
@@ -344,7 +362,7 @@ async def _run_import(session, primary, sidecar):
         session.release()
 
 
-async def handle_import_cd(cog, message):
+async def handle_import_cd(cog, message, *, title=''):
     """Consume the exact command; only attachments on this message are inputs."""
     bot = cog.bot
     if not await _owned(bot, message.author):
@@ -357,11 +375,14 @@ async def handle_import_cd(cog, message):
         return True
     from osaka_cd.discord_import import ImportCDError
     try:
+        if (not isinstance(title, str) or len(title.strip()) > 100
+                or any(ord(char) < 32 for char in title)):
+            raise ImportCDError('invalid_metadata', 'Use um nome de música de até 100 caracteres.')
         primary, sidecar = _select_attachments(tuple(getattr(message, 'attachments', ()) or ()))
     except ImportCDError as exc:
         await _send(message.channel, 'Importar CD', exc.public_message)
         return True
-    session = _Session(cog, message)
+    session = _Session(cog, message, title=title.strip())
     setattr(bot, _LEASE_ATTRIBUTE, session)
     scheduled = False
     try:

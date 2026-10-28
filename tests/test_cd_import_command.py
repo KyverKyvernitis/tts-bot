@@ -76,9 +76,14 @@ def test_import_command_uses_exact_configured_prefix(content, prefix):
     assert get_prefixed_aliases(prefix, 'importcd') == (prefix + 'importcd',)
 
 
-@pytest.mark.parametrize('content', ['_importcdmore', '_importcd outra', 'importcd', '_impotcd'])
+@pytest.mark.parametrize('content', ['_importcdmore', 'importcd', '_impotcd'])
 def test_import_command_does_not_consume_other_messages(content):
     assert match_prefix_control_command(content, '_') is None
+
+
+def test_import_command_accepts_a_song_name_without_a_json():
+    command = match_prefix_control_command('_importcd Tetoris', '_')
+    assert command.kind == 'importcd' and command.argument == 'Tetoris'
 
 
 @pytest.mark.asyncio
@@ -169,6 +174,45 @@ async def test_midi_auto_import_edits_one_real_v2_card_with_no_mentions():
 
 
 @pytest.mark.asyncio
+async def test_title_only_attachment_attempts_discovery_without_requiring_a_form_or_json():
+    cog, message, response, tasks = _setup(attachments=[_attachment('Tetoris.mid')])
+    async def importing(prepared, **options):
+        assert prepared.sidecar is None
+        await options['progress']('discovering')
+        return _result()
+    with patch.object(service, 'import_cd', new=AsyncMock(side_effect=importing)) as imported, \
+         patch.object(ui, '_DetailsView', side_effect=AssertionError('No form before discovery')):
+        assert await ui.handle_import_cd(cog, message)
+        await tasks[0]
+    imported.assert_awaited_once()
+    assert 'CD importado' in _contents(response.edit.await_args.kwargs['view'])
+    assert not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
+
+
+@pytest.mark.asyncio
+async def test_caption_name_ignores_upload_prefix_and_preserves_explicit_sidecar_artist():
+    for sidecar, expected_artist in [(None, ''), (b'{"artist":"Known Artist"}', None)]:
+        attachments = [_attachment('Unknown Uploader - recording.mid')]
+        if sidecar:
+            attachments.append(_attachment('recording.json', sidecar))
+        cog, message, response, tasks = _setup(attachments=attachments)
+        with patch.object(service, 'import_cd', new=AsyncMock(return_value=_result())) as imported:
+            await ui.handle_import_cd(cog, message, title='Tetoris')
+            await tasks[0]
+        overrides = imported.await_args.kwargs['overrides']
+        assert overrides['title'] == 'Tetoris'
+        assert overrides.get('artist') == expected_artist
+
+
+@pytest.mark.asyncio
+async def test_caption_is_validated_before_attachment_download():
+    cog, message, response, tasks = _setup(attachments=[_attachment()])
+    assert await ui.handle_import_cd(cog, message, title='x' * 101)
+    message.attachments[0].read.assert_not_awaited()
+    assert not tasks
+
+
+@pytest.mark.asyncio
 async def test_global_busy_is_reserved_before_downloading_and_released_after_cancel():
     entered, release = asyncio.Event(), asyncio.Event()
     attachment = _attachment()
@@ -198,12 +242,12 @@ async def test_missing_artist_waits_for_owner_modal_then_runs_once():
     cog, message, response, tasks = _setup(attachments=[_attachment('song.mid')])
     with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
          patch.object(service, 'inspect_input', return_value={'title': 'Song', 'artist': '', 'start_ms': None}), \
-         patch.object(service, 'import_cd', new=AsyncMock(return_value=_result())) as imported:
+         patch.object(service, 'import_cd', new=AsyncMock(side_effect=[service.ImportCDError('metadata_ambiguous'), _result()])) as imported:
         await ui.handle_import_cd(cog, message)
         await _tick_until(lambda: getattr(cog.bot, ui._LEASE_ATTRIBUTE).waiting)
         session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
         assert isinstance(session.view, ui._DetailsView)
-        imported.assert_not_awaited()
+        imported.assert_awaited_once()
         unauthorized = _interaction(999)
         await session.view.details(unauthorized)
         unauthorized.response.send_modal.assert_not_awaited()
@@ -219,10 +263,10 @@ async def test_missing_artist_waits_for_owner_modal_then_runs_once():
         await tasks[0]
         assert imported.await_args.kwargs['overrides'] == {
             'title': 'Song', 'artist': 'Artist', 'start_ms': 95600, 'max_duration_ms': 29500}
-        assert imported.await_count == 1
+        assert imported.await_count == 2
         repeat = _interaction()
         await modal.on_submit(repeat)
-        assert imported.await_count == 1
+        assert imported.await_count == 2
         assert 'encerrada' in _contents(repeat.response.send_message.await_args.kwargs['view'])
 
 
@@ -231,7 +275,7 @@ async def test_invalid_modal_times_can_be_fixed_without_publishing():
     cog, message, response, tasks = _setup(attachments=[_attachment('song.mid')])
     with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
          patch.object(service, 'inspect_input', return_value={'title': 'Song', 'artist': ''}), \
-         patch.object(service, 'import_cd', new=AsyncMock(return_value=_result())) as imported:
+         patch.object(service, 'import_cd', new=AsyncMock(side_effect=[service.ImportCDError('metadata_ambiguous'), _result()])) as imported:
         await ui.handle_import_cd(cog, message)
         await _tick_until(lambda: getattr(cog.bot, ui._LEASE_ATTRIBUTE).waiting)
         session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
@@ -240,7 +284,7 @@ async def test_invalid_modal_times_can_be_fixed_without_publishing():
         modal.start._value, modal.end._value = '50', '10'
         invalid = _interaction()
         await modal.on_submit(invalid)
-        imported.assert_not_awaited()
+        imported.assert_awaited_once()
         assert session.waiting and not session.submitted
         assert 'Confira os dados' in _contents(invalid.response.send_message.await_args.kwargs['view'])
         modal.stop()
@@ -254,13 +298,13 @@ async def test_waiting_form_timeout_releases_global_busy():
     cog, message, response, tasks = _setup(attachments=[_attachment('song.mid')])
     with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
          patch.object(service, 'inspect_input', return_value={'title': 'Song', 'artist': ''}), \
-         patch.object(service, 'import_cd', new=AsyncMock()) as imported:
+         patch.object(service, 'import_cd', new=AsyncMock(side_effect=service.ImportCDError('metadata_unavailable'))) as imported:
         await ui.handle_import_cd(cog, message)
         await _tick_until(lambda: getattr(cog.bot, ui._LEASE_ATTRIBUTE).waiting)
         session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
         await session.view.on_timeout()
         await tasks[0]
-    imported.assert_not_awaited()
+    imported.assert_awaited_once()
     assert session.view.is_finished() and not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
 
 
@@ -270,10 +314,10 @@ async def test_failed_form_card_releases_busy_instead_of_waiting_for_invisible_m
     response.edit.side_effect = RuntimeError('simulated unreachable card')
     with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
          patch.object(service, 'inspect_input', return_value={'title': 'Song', 'artist': ''}), \
-         patch.object(service, 'import_cd', new=AsyncMock()) as imported:
+         patch.object(service, 'import_cd', new=AsyncMock(side_effect=service.ImportCDError('metadata_unavailable'))) as imported:
         await ui.handle_import_cd(cog, message)
         await asyncio.wait_for(tasks[0], 1)
-    imported.assert_not_awaited()
+    assert imported.await_count == 1
     assert not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
 
 
@@ -282,7 +326,7 @@ async def test_modal_ack_failure_does_not_strand_valid_submission():
     cog, message, response, tasks = _setup(attachments=[_attachment('song.mid')])
     with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
          patch.object(service, 'inspect_input', return_value={'title': 'Song', 'artist': ''}), \
-         patch.object(service, 'import_cd', new=AsyncMock(return_value=_result())) as imported:
+         patch.object(service, 'import_cd', new=AsyncMock(side_effect=[service.ImportCDError('metadata_ambiguous'), _result()])) as imported:
         await ui.handle_import_cd(cog, message)
         await _tick_until(lambda: getattr(cog.bot, ui._LEASE_ATTRIBUTE).waiting)
         session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
@@ -293,7 +337,7 @@ async def test_modal_ack_failure_does_not_strand_valid_submission():
         await modal.on_submit(submit)
         await asyncio.wait_for(tasks[0], 1)
         modal.stop()
-    imported.assert_awaited_once()
+    assert imported.await_count == 2
     assert not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
 
 

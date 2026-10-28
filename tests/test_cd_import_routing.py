@@ -78,7 +78,7 @@ async def test_import_routes_without_synthesis_or_attachment_even_when_tts_disab
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", ["mensagem comum", "_cd", "_rcd", "_importcd outra", "'canto~"])
+@pytest.mark.parametrize("content", ["mensagem comum", "_cd", "_rcd", "_importcdmore outra", "'canto~"])
 async def test_disabled_ordinary_paths_keep_their_zero_database_cost(monkeypatch, content):
     monkeypatch.setattr(config, "TTS_ENABLED", False)
     cog = _cog()
@@ -96,7 +96,7 @@ async def test_direct_messages_use_only_the_default_prefix_and_never_read_guild_
     cog._get_db.side_effect = AssertionError("DM has no guild defaults")
     accepted = await analisar_mensagem_para_tts(cog, _message(guild=False))
     assert accepted.should_dispatch_prefix_command and accepted.prefix_command.kind == "importcd"
-    for content in ("!importcd", "_cd", "'olá~", "_importcd outra"):
+    for content in ("!importcd", "_cd", "'olá~", "_importcdmore outra"):
         ignored = await analisar_mensagem_para_tts(cog, _message(content, guild=False))
         assert ignored.reason == "no_guild" and not ignored.should_dispatch_prefix_command
 
@@ -135,7 +135,7 @@ async def test_update_channel_import_skips_code_updater_and_registered_commands(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", ["", "Atualização", "_importcd outra", "!importcd"])
+@pytest.mark.parametrize("content", ["", "Atualização", "_importcdmore outra", "!importcd"])
 async def test_other_update_attachments_keep_the_existing_updater_path(content):
     bot = _BotEntry()
     bot.ZIP_UPDATE_CHANNEL_ID = 123
@@ -191,6 +191,51 @@ async def test_normal_guild_import_stays_a_control_command_with_no_speech(monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content,prefix,title", [
+    ("_importcd Tetoris", "_", "Tetoris"),
+    (" !IMPORTCD\tLooping the Rooms  ", "!", "Looping the Rooms"),
+    ("os!importcd\nテトリス", "os!", "テトリス"),
+])
+async def test_title_caption_is_routed_before_speech_even_when_disabled(monkeypatch, content, prefix, title):
+    monkeypatch.setattr(config, "TTS_ENABLED", False)
+    decision = await analisar_mensagem_para_tts(_cog(prefix), _message(content))
+    assert decision.should_dispatch_prefix_command and not decision.should_process_tts
+    assert decision.prefix_command.kind == "importcd"
+    assert decision.prefix_command.argument == title
+
+
+@pytest.mark.asyncio
+async def test_title_caption_in_update_channel_cannot_become_a_code_update(monkeypatch):
+    monkeypatch.setattr(config, "TTS_ENABLED", False)
+    bot = _BotEntry()
+    bot.ZIP_UPDATE_CHANNEL_ID = 123
+    cog = _cog()
+    cog.handle_message_from_bot_on_message = AsyncMock()
+    bot.get_cog = Mock(return_value=cog)
+    bot._handle_zip_update_message = AsyncMock()
+    bot.process_commands = AsyncMock()
+    message = _message("_importcd Looping the Rooms")
+    message.attachments = [SimpleNamespace(filename="download.zip", read=AsyncMock())]
+    await bot.on_message(message)
+    cog.handle_message_from_bot_on_message.assert_awaited_once_with(message)
+    bot._handle_zip_update_message.assert_not_awaited()
+    bot.process_commands.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_title_caption_with_missing_cog_is_never_sent_to_code_updater():
+    bot = _BotEntry()
+    bot.ZIP_UPDATE_CHANNEL_ID = 123
+    bot.get_cog = Mock(return_value=None)
+    bot._handle_zip_update_message = AsyncMock()
+    message = _message("_importcd Tetoris")
+    message.channel.send = AsyncMock()
+    await bot.on_message(message)
+    message.channel.send.assert_awaited_once()
+    bot._handle_zip_update_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("prefix", ["_", "!", "os!", "12345678"])
 async def test_missing_tts_cog_never_delivers_explicit_import_zip_to_code_updater(prefix):
     bot = _BotEntry()
@@ -231,7 +276,7 @@ async def test_missing_cog_notice_timeout_still_cannot_reach_updater():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", ["importcd", "123456789importcd", "texto com importcd", "_importcd outra"])
+@pytest.mark.parametrize("content", ["importcd", "123456789importcd", "texto com importcd", "_importcdmore outra"])
 async def test_missing_cog_fallback_does_not_capture_update_prose(content):
     bot = _BotEntry()
     bot.ZIP_UPDATE_CHANNEL_ID = 123

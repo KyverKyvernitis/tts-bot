@@ -44,6 +44,9 @@ _ERRORS = {
     'storage_unavailable': 'Não consegui salvar o CD agora. O catálogo anterior foi preservado.',
     'storage_quota': 'Não há espaço disponível para salvar esse CD.',
     'superseded': 'Uma versão mais recente desse CD já foi publicada. Envie o comando novamente.',
+    'metadata_ambiguous': 'Encontrei músicas diferentes com esse nome. Informe o artista para escolher a certa.',
+    'metadata_unavailable': 'Não consegui identificar o artista agora. Você pode informá-lo para continuar.',
+    'metadata_invalid': 'Confira o nome da música e tente novamente.',
 }
 
 
@@ -225,11 +228,14 @@ def _resolve_identity(snapshot, prepared, metadata, overrides):
     return metadata
 
 
-def _marker(score, request_hash):
-    return {'version': 1, 'request_sha256': request_hash,
+def _marker(score, request_hash, lookup=None):
+    marker = {'version': 1, 'request_sha256': request_hash,
         'source_sha256': score.get('source_sha256'), 'score_sha256': _contract().score_sha256(score),
         'arrangement_sha256': score.get('arrangement_sha256'),
         'name': score.get('name'), 'artist': score.get('artist')}
+    if lookup is not None:
+        marker['title_lookup'] = lookup
+    return marker
 
 
 def _existing_midi(snapshot, metadata, request_hash):
@@ -237,7 +243,8 @@ def _existing_midi(snapshot, metadata, request_hash):
     root = Path(snapshot['root'])
     score = next((row for row in _read(root / contract.SCORES, []) if row.get('id') == metadata['id']), None)
     if (not score or not isinstance(score.get('discord_import'), dict)
-            or score['discord_import'] != _marker(score, request_hash)):
+            or score['discord_import'] != _marker(score, request_hash,
+                score['discord_import'].get('title_lookup'))):
         return None
     try:
         report = contract.validate_cd_tree(root, [metadata['id']], audio_probe=False)
@@ -248,6 +255,79 @@ def _existing_midi(snapshot, metadata, request_hash):
     except (ValueError, OSError, KeyError, TypeError):
         return None
     return score
+
+
+def _cached_title_metadata(snapshot, prepared, metadata):
+    """Reuse a verified title lookup only while its source and music still match."""
+    expected = _request_hash(prepared, metadata)
+    root = Path(snapshot['root'])
+    for score in _read(root / _contract().SCORES, []):
+        marker = score.get('discord_import')
+        lookup = marker.get('title_lookup') if isinstance(marker, dict) else None
+        if not isinstance(lookup, dict) or lookup.get('input_sha256') != expected:
+            continue
+        resolved = lookup.get('metadata')
+        if not isinstance(resolved, dict):
+            continue
+        try:
+            resolved = inspect_input(prepared, {key: value for key, value in resolved.items() if key != 'kind'})
+            request = _request_hash(prepared, resolved)
+            if (resolved.get('artist') and resolved['id'] == score['id']
+                    and marker.get('request_sha256') == request
+                    and _existing_midi(snapshot, resolved, request) is not None):
+                return resolved, score
+        except (ImportCDError, ValueError, KeyError, TypeError):
+            continue
+    return None
+
+
+def _catalog_title_metadata(snapshot, prepared, metadata):
+    """An exact, uniquely credited installed title is useful local evidence."""
+    root = Path(snapshot['root'])
+    contract = _contract()
+    videos = _read(root / contract.VIDEOS, {}).get('songs', {})
+    def key(value):
+        value = unicodedata.normalize('NFKC', str(value or '')).casefold()
+        return ' '.join(''.join(c if c.isalnum() else ' ' for c in value).split())
+    matches = []
+    for score in _read(root / contract.SCORES, []):
+        video = videos.get(score['id'], {})
+        names = [score.get('name'), *video.get('title_aliases', [])]
+        artist = score.get('artist')
+        if (key(metadata['title']) in {key(name) for name in names if name}
+                and isinstance(artist, str) and artist.strip()
+                and key(artist) not in {'artista não identificado', 'unknown', 'unknown artist'}):
+            matches.append((score, video))
+    if len({key(row[0]['artist']) for row in matches}) != 1:
+        return None
+    score, video = matches[0]
+    return _merge_title_metadata(prepared, metadata, {
+        'artist': score['artist'], 'aliases': video.get('title_aliases', []),
+        'artist_aliases': video.get('artist_aliases', []),
+        'seed_video_ids': [video['video_id']] if _VIDEO.fullmatch(str(video.get('video_id') or '')) else [],
+        'search_query': f"{metadata['title']} {score['artist']}",
+    })
+
+
+def _merge_title_metadata(prepared, metadata, found):
+    if not isinstance(found, dict):
+        raise ImportCDError('metadata_unavailable')
+    update = dict(metadata)
+    artist = found.get('artist')
+    if not isinstance(artist, str) or not artist.strip():
+        raise ImportCDError('metadata_unavailable')
+    update['artist'] = artist
+    for field in ('aliases', 'artist_aliases', 'seed_video_ids'):
+        incoming = found.get(field, [])
+        if not isinstance(incoming, list):
+            raise ImportCDError('metadata_invalid')
+        values = [*metadata.get(field, []), *incoming]
+        if field == 'aliases' and found.get('title') and found['title'] != metadata['title']:
+            values.append(found['title'])
+        update[field] = list(dict.fromkeys(value for value in values if isinstance(value, str)))[:12]
+    if found.get('search_query'):
+        update['search_query'] = found['search_query']
+    return inspect_input(prepared, {key: value for key, value in update.items() if key != 'kind'})
 
 
 def _seed_catalog(snapshot, destination, identity):
@@ -316,16 +396,19 @@ async def _stop_process(process):
         await process.wait()
 
 
-async def _run_importer(directory, *, timeout_seconds=180):
+async def _run_child(directory, mode, report_name, *, timeout_seconds):
     process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'osaka_cd.discord_import',
-        '--prepare', str(directory), cwd=str(_ROOT), stdout=asyncio.subprocess.DEVNULL,
+        mode, str(directory), cwd=str(_ROOT), stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
     try:
         try:
             await asyncio.wait_for(process.wait(), timeout_seconds)
         except asyncio.TimeoutError:
             raise ImportCDError('import_timeout') from None
-        result = _read(directory / 'report.json', {})
+        path = directory / report_name
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= MAX_SIDECAR_BYTES:
+            raise ImportCDError('import_unavailable')
+        result = _read(path, {})
         if process.returncode != 0 or not result.get('ok'):
             raise ImportCDError(result.get('code', 'import_unavailable'))
         return result
@@ -340,6 +423,29 @@ async def _run_importer(directory, *, timeout_seconds=180):
         cleanup.result()
         if cancelled:
             raise asyncio.CancelledError
+
+
+async def _run_importer(directory, *, timeout_seconds=180):
+    return await _run_child(directory, '--prepare', 'report.json', timeout_seconds=timeout_seconds)
+
+
+async def _run_discovery(directory, *, timeout_seconds=45):
+    try:
+        return await _run_child(directory, '--discover', 'discovery.json', timeout_seconds=timeout_seconds)
+    except ImportCDError as exc:
+        if exc.code in {'import_timeout', 'import_unavailable'}:
+            raise ImportCDError('metadata_unavailable') from None
+        raise
+
+
+def _discover_metadata(directory):
+    sys.path.insert(0, str(_ROOT / 'deploy/ttv-cd'))
+    from .title_metadata import resolve_title_metadata
+    metadata = _read(directory / 'source.json', {})
+    result = resolve_title_metadata(metadata.get('title', ''))
+    allowed = {'title', 'artist', 'aliases', 'artist_aliases', 'seed_video_ids', 'search_query'}
+    _dump(directory / 'discovery.json', {'ok': True,
+        'metadata': {key: value for key, value in result.items() if key in allowed}})
 
 
 async def _prepare_importer(directory):
@@ -368,12 +474,12 @@ def _package_info(package, base):
     return report, scores, videos
 
 
-def _stamp_package(package, snapshot, scores, request_hash=None, identities=None):
+def _stamp_package(package, snapshot, scores, request_hash=None, identities=None, lookup=None):
     contract = _contract()
     with zipfile.ZipFile(package) as archive:
         contents = {rel: archive.read(info) for info, rel in contract._zip_members(archive)}
     if request_hash:
-        scores = [dict(score, discord_import=_marker(score, request_hash)) for score in scores]
+        scores = [dict(score, discord_import=_marker(score, request_hash, lookup)) for score in scores]
         contents[contract.SCORES] = json.dumps(scores, ensure_ascii=False, allow_nan=False).encode()
     videos = _json(contents.get(contract.VIDEOS, b'{"version":1,"songs":{}}'), 'invalid_package')
     videos['discord_import_request'] = {'base_generation': snapshot.get('generation'),
@@ -433,14 +539,14 @@ def _pending_artifacts(report, scores, videos, base):
     return tuple(sorted(pending))
 
 
-def _publish(store, package, snapshot, request_hash=None):
+def _publish(store, package, snapshot, request_hash=None, lookup=None):
     report, scores, videos = _package_info(package, snapshot['root'])
     identities = report['songs']
     pending = _pending_artifacts(report, scores, videos, snapshot['root'])
     if not request_hash and _package_matches(package, snapshot):
         return ImportResult(tuple(_song_summary(score) for score in scores), pending, True, True,
             snapshot.get('generation'), 'activated' if snapshot.get('generation') and snapshot.get('activated_generation') == snapshot.get('generation') else 'applied')
-    scores = _stamp_package(package, snapshot, scores, request_hash, identities)
+    scores = _stamp_package(package, snapshot, scores, request_hash, identities, lookup)
     expected = {identity: snapshot['versions'].get(identity) for identity in identities}
     receipt = store.receive(package, expected_versions=expected, retry_failed=True)
     result = store.process(receipt['job_id'])
@@ -486,19 +592,39 @@ async def import_cd(prepared, *, overrides=None, progress=None, store=None):
     try:
         store = store or await _off_loop(get_store)
         snapshot = await _off_loop(store.snapshot, strict=True, advertise_legacy=True)
-        if prepared.kind == 'midi':
-            metadata = await _off_loop(_resolve_identity, snapshot, prepared, metadata, overrides)
-        request_hash = await _off_loop(_request_hash, prepared, metadata) if prepared.kind == 'midi' else None
-        if request_hash:
-            existing = await _off_loop(_existing_midi, snapshot, metadata, request_hash)
-            if existing:
+        needs_discovery = prepared.kind == 'midi' and not metadata.get('artist')
+        input_metadata = metadata
+        if needs_discovery:
+            cached = await _off_loop(_cached_title_metadata, snapshot, prepared, metadata)
+            if cached is not None:
+                resolved, existing = cached
                 return ImportResult((_song_summary(existing),), (), True, True,
                     snapshot.get('generation'), 'activated' if snapshot.get('generation') and snapshot.get('activated_generation') == snapshot.get('generation') else 'applied')
         with tempfile.TemporaryDirectory(prefix='osaka-discord-cd-') as temporary:
             directory = Path(temporary)
             package = directory / 'package.zip'
             importer_pending = ()
+            lookup = None
             if prepared.kind == 'midi':
+                if needs_discovery:
+                    known = await _off_loop(_catalog_title_metadata, snapshot, prepared, metadata)
+                    if known is None:
+                        await _progress(progress, 'discovering')
+                        await _off_loop(_dump, directory / 'source.json', metadata)
+                        discovered = await _run_discovery(directory)
+                        metadata = await _off_loop(_merge_title_metadata, prepared, metadata,
+                            discovered.get('metadata'))
+                    else:
+                        metadata = known
+                metadata = await _off_loop(_resolve_identity, snapshot, prepared, metadata, overrides)
+                request_hash = await _off_loop(_request_hash, prepared, metadata)
+                existing = await _off_loop(_existing_midi, snapshot, metadata, request_hash)
+                if existing:
+                    return ImportResult((_song_summary(existing),), (), True, True,
+                        snapshot.get('generation'), 'activated' if snapshot.get('generation') and snapshot.get('activated_generation') == snapshot.get('generation') else 'applied')
+                if needs_discovery:
+                    lookup = {'input_sha256': await _off_loop(_request_hash, prepared, input_metadata),
+                              'metadata': metadata}
                 await _off_loop(_seed_catalog, snapshot, directory / 'catalog', metadata['id'])
                 await _off_loop((directory / 'source.mid').write_bytes, prepared.data)
                 await _off_loop(_dump, directory / 'source.json', {key: value for key, value in metadata.items() if key != 'kind'})
@@ -506,9 +632,13 @@ async def import_cd(prepared, *, overrides=None, progress=None, store=None):
                 imported = await _run_importer(directory)
                 importer_pending = tuple((imported or {}).get('pending', ()))
             else:
+                request_hash = None
                 await _off_loop(package.write_bytes, prepared.data)
             await _progress(progress, 'installing')
-            result = await _off_loop(_publish, store, package, snapshot, request_hash)
+            if lookup is None:
+                result = await _off_loop(_publish, store, package, snapshot, request_hash)
+            else:
+                result = await _off_loop(_publish, store, package, snapshot, request_hash, lookup=lookup)
         if importer_pending:
             result = replace(result, pending=tuple(sorted(set(result.pending) | set(importer_pending))))
         await _progress(progress, 'activating')
@@ -527,14 +657,27 @@ async def import_cd(prepared, *, overrides=None, progress=None, store=None):
 
 def _main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--prepare', required=True, type=Path)
-    directory = parser.parse_args().prepare
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--prepare', type=Path)
+    mode.add_argument('--discover', type=Path)
+    arguments = parser.parse_args()
+    directory = arguments.prepare or arguments.discover
     try:
-        asyncio.run(_prepare_importer(directory))
+        if arguments.discover is not None:
+            _discover_metadata(directory)
+        else:
+            asyncio.run(_prepare_importer(directory))
         return 0
     except Exception as exc:
-        code = 'invalid_midi' if type(exc).__name__ in {'MidiExtractionError', 'ImportInputError'} else 'import_unavailable'
-        _dump(directory / 'report.json', {'ok': False, 'code': code})
+        if arguments.discover is not None:
+            code = getattr(exc, 'code', 'metadata_unavailable')
+            if code not in {'metadata_invalid', 'metadata_ambiguous', 'metadata_unavailable'}:
+                code = 'metadata_unavailable'
+            report_name = 'discovery.json'
+        else:
+            code = 'invalid_midi' if type(exc).__name__ in {'MidiExtractionError', 'ImportInputError'} else 'import_unavailable'
+            report_name = 'report.json'
+        _dump(directory / report_name, {'ok': False, 'code': code})
         return 1
 
 

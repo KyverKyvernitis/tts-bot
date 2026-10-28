@@ -1250,7 +1250,8 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                 # neste canal. Nunca entregar esse anexo ao updater de código.
                 # A checagem barata não consulta configuração para ZIPs comuns.
                 import_text = str(getattr(message, "content", "") or "").strip()
-                if import_text.casefold().endswith("importcd"):
+                import_head = import_text.split(None, 1)[0] if import_text else ""
+                if import_head.casefold().endswith("importcd"):
                     tts_cog = self.get_cog("TTSVoice")
                     if tts_cog is not None:
                         from cogs.tts.mensagens.triagem import match_import_cd_message
@@ -1258,7 +1259,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                             await self._dispatch_tts_message_bridge(message)
                             return
                     else:
-                        prefix_fragment = import_text[:-len("importcd")]
+                        prefix_fragment = import_head[:-len("importcd")]
                         if (0 < len(prefix_fragment) <= 8
                                 and not any(char.isspace() or ord(char) < 33 or ord(char) == 127
                                             for char in prefix_fragment)):

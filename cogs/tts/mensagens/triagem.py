@@ -48,12 +48,13 @@ def _prefixos_unicos(*values: object) -> list[str]:
 async def match_import_cd_message(cog: Any, message: Any):
     """Recognize CD imports independently of speech, including owner DMs.
 
-    The suffix check keeps disabled-TTS and updater paths free of configuration
+    The command-head check keeps disabled-TTS and updater paths free of configuration
     reads for ordinary messages. Permission and attachment checks belong to the
     command handler; this helper never downloads or imports an attachment.
     """
     raw = str(getattr(message, "content", "") or "").strip()
-    if not raw.casefold().endswith("importcd"):
+    head = raw.split(None, 1)[0] if raw else ""
+    if not head.casefold().endswith("importcd"):
         return None
     if getattr(getattr(message, "author", None), "bot", False):
         return None
