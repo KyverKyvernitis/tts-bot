@@ -372,8 +372,10 @@ class CDPanelView(VisaoLayoutBaseTTS):
         self._page = min(max(0, self._page), pages - 1)
         visible_catalog = catalog[self._page * 25:(self._page + 1) * 25]
         duration = f"{melody.duration_ms / 1000:g}".replace(".", ",")
+        artist = str(getattr(melody, 'artist', '') or '').strip()
+        artist_line = f"-# {discord.utils.escape_markdown(artist)}\n" if artist else ''
         card = discord.ui.TextDisplay(
-            f"**{melody.name}**\n-# {melody.note_count} notas · {duration} s\n"
+            f"**{melody.name}**\n{artist_line}-# {melody.note_count} notas · {duration} s\n"
             f"{format_score_notes(melody)}"
         )
         container = discord.ui.Container(

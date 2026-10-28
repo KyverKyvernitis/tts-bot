@@ -231,6 +231,8 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         self._ensure_voice_incident_report_worker()
         from .interface.painel_canto import start_catalog_watch
         start_catalog_watch(self)
+        from osaka_cd.bundled import refresh_bundled_cd_artwork
+        self._schedule_tts_background(refresh_bundled_cd_artwork())
         if TTS_BOOT_WARMUP_ENABLED:
             self._schedule_tts_background(self._boot_warmup())
         if self._voice_auto_restore_enabled:

@@ -1,0 +1,33 @@
+{
+  "id": "ievan-polkka",
+  "title": "Ievan Polkka",
+  "artist": "Otomania feat. Hatsune Miku",
+  "aliases": [
+    "Ievan polkka",
+    "Levan Polkka",
+    "Ieva's Polka"
+  ],
+  "artist_aliases": [
+    "Otomania",
+    "Hatsune Miku"
+  ],
+  "search_query": "Ievan Polkka Otomania Hatsune Miku",
+  "allow_versions": [
+    "cover"
+  ],
+  "start_ms": 0,
+  "max_duration_ms": 16135,
+  "max_notes": 128,
+  "max_parts": 3,
+  "include_bass": true,
+  "source_is_full_song": false,
+  "source_lead_track_index": 3,
+  "midi_arranger": "aregan",
+  "midi_source_url": "https://www.aregan.net/2021/01/Ievan%20Polkka.html",
+  "original_recording_url": "https://www.otomania.net/index.php?c=6",
+  "composition_credit": "Traditional Finnish melody; Miku arrangement by Otomania; piano MIDI transcription by aregan.",
+  "midi_original_excerpt_start_ms": 16008,
+  "midi_original_excerpt_end_ms": 32143,
+  "audio_original_excerpt_start_ms": 33134,
+  "audio_original_excerpt_end_ms": 49269
+}
