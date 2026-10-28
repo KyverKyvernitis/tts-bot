@@ -223,6 +223,8 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
     async def cog_load(self):
         self._voice_incident_shutdown = False
         await asyncio.to_thread(self._prime_tts_runtime)
+        from osaka_cd.bundled import initialize_bundled_cds
+        await initialize_bundled_cds()
         await self._load_cached_edge_voices()
         self._edge_voice_refresh_task = self._schedule_tts_background(self._load_edge_voices())
         self._ensure_tts_agent_health_task()
