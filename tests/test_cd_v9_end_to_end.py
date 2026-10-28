@@ -383,7 +383,9 @@ class RuntimePublicationIntegration(RealMediaFixtures):
             with runtime.pin_snapshot() as old:
                 self.assertEqual(melodies.get_melody("demo-song").name, "First")
                 self.assertEqual(cd_covers._cover_bytes("demo-song"), self.image)
-                self.assertEqual(cd_previews.prepared_sample("demo-song", preferences), self.audio)
+                # The immutable package still contains mono audio; the effective
+                # catalog now adds harmony, so this sample must be regenerated.
+                self.assertIsNone(cd_previews.prepared_sample("demo-song", preferences))
                 changed = package_members("demo-song", self.audio, self.other_image, name="Second")
                 job = self.store.receive(write_zip(self.folder / "second-revision.zip", changed),
                                          expected_versions={"demo-song": old["versions"]["demo-song"]})
@@ -392,7 +394,7 @@ class RuntimePublicationIntegration(RealMediaFixtures):
                 self.assertEqual(cd_covers._cover_bytes("demo-song"), self.image)
             self.assertEqual(melodies.get_melody("demo-song").name, "Second")
             self.assertEqual(cd_covers._cover_bytes("demo-song"), self.other_image)
-            self.assertEqual(cd_previews.prepared_sample("demo-song", preferences), self.audio)
+            self.assertIsNone(cd_previews.prepared_sample("demo-song", preferences))
             selected = runtime.snapshot()
             self.assertTrue(runtime.acknowledge(selected))
             # External storage corruption is refused by the readers; it does

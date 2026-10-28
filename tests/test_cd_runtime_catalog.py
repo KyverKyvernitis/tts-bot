@@ -70,6 +70,14 @@ class RuntimeCatalogTests(unittest.TestCase):
                          preview_arrangement_sha256=arrangement_sha256(
                              preview_arrangement(arrangement, start_ms=0, end_ms=1000)['arrangement']))
         (data / 'cd_song_scores.json').write_text(json.dumps([score]))
+        if arrangement is None:
+            effective = melodies._read_song_melodies(data / 'cd_song_scores.json')[0]
+            preview.update(manifest_version=3,
+                arrangement_sha256=effective.arrangement_preview_sha256,
+                source_arrangement_sha256=effective.arrangement_sha256,
+                arrangement_performance_sha256=effective.arrangement_preview_performance_sha256,
+                rendering_profile={'mode': 'multipart-utau',
+                    'configuration_fingerprint': 'b' * 64, 'render_fingerprint': 'c' * 64})
         output = io.BytesIO()
         Image.new('RGB', (64, 64), color).save(output, format='JPEG')
         cover = output.getvalue()

@@ -40,8 +40,14 @@ class OfflineCDArtifacts(unittest.TestCase):
     def install_audio(self, audio):
         cd_previews._ROOT.mkdir(parents=True)
         (cd_previews._ROOT / 'test-song.mp3').write_bytes(audio)
-        self.index = {'test-song': {'manifest_version': 2,
+        melody = melodies.get_melody('test-song')
+        self.index = {'test-song': {'manifest_version': 3,
             'score_sha256': melodies.score_sha256(melodies.catalog_score(self.song)),
+            'arrangement_sha256': melody.arrangement_preview_sha256,
+            'source_arrangement_sha256': melody.arrangement_sha256,
+            'arrangement_performance_sha256': melody.arrangement_preview_performance_sha256,
+            'rendering_profile': {'mode': 'multipart-utau',
+                'configuration_fingerprint': 'b' * 64, 'render_fingerprint': 'c' * 64},
             'mp3_sha256': hashlib.sha256(audio).hexdigest(), 'voice_id': 'kasane-teto',
             'language': 'pt-BR', 'pitch_semitones': 0, 'speech_rate': 1}}
         self.write_index()
@@ -84,7 +90,7 @@ class OfflineCDArtifacts(unittest.TestCase):
         (self.root / 'cd_song_videos.json').write_text('{"songs":{}}')
         self.assertIsNotNone(cd_previews.prepared_sample('test-song', self.preferences))
 
-    def test_legacy_source_hash_requires_explicit_score_migration(self):
+    def test_legacy_mono_audio_requires_a_new_harmonized_sample(self):
         self.install_audio(self.real_audio())
         meta = self.index['test-song']
         digest = meta['score_sha256']
@@ -93,6 +99,9 @@ class OfflineCDArtifacts(unittest.TestCase):
         self.write_index()
         self.assertIsNone(cd_previews.prepared_sample('test-song', self.preferences))
         meta['score_content_sha256'] = digest
+        self.write_index()
+        self.assertIsNone(cd_previews.prepared_sample('test-song', self.preferences))
+        meta.update(manifest_version=3, score_sha256=digest)
         self.write_index()
         self.assertIsNotNone(cd_previews.prepared_sample('test-song', self.preferences))
 

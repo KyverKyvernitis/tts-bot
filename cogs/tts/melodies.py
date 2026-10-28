@@ -1,7 +1,7 @@
 """Catálogo de canto do bot; a escolha vira uma partitura antes de entrar na fila."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections import OrderedDict
 from functools import lru_cache
 import hashlib
@@ -101,6 +101,35 @@ def _score_path() -> Path:
     return _SCORE_FILE if root == _SCORE_FILE.parent else root / "cd_song_scores.json"
 
 
+def _harmonized_arrangement_fields(score, *, arrangement=None, source_sha256="",
+                                  preview_start_ms=0, preview_end_ms=None):
+    """Derive playback music after validating the immutable source catalog.
+
+    Imported multipart music is handled by the original validation path. Mono
+    sources receive a separate generated voice without rewriting their files,
+    source notes or lead score. Effective hashes invalidate old mono samples.
+    """
+    from osaka_cd.arrangement import (arrangement_sha256,
+        arrangement_performance_sha256, preview_arrangement)
+    from osaka_cd.harmony import harmonize_monophonic
+    if arrangement is None:
+        arrangement = {'score_schema': 2, 'duration_ms': score['duration_ms'],
+            'parts': [{'id': 'lead', 'role': 'lead', 'voice_id': 'kasane-teto',
+                       'lyrics_source': 'message', 'notes': score['notes']}],
+            'source': {'sha256': source_sha256} if source_sha256 else {}}
+    effective = harmonize_monophonic(arrangement)
+    preview = preview_arrangement(effective, start_ms=preview_start_ms,
+        end_ms=preview_end_ms if preview_end_ms is not None else score['duration_ms'])['arrangement']
+    return {
+        'arrangement_json': json.dumps(effective, ensure_ascii=False, separators=(',', ':'), allow_nan=False),
+        'arrangement_sha256': arrangement_sha256(effective),
+        'arrangement_version': 2,
+        'arrangement_preview_json': json.dumps(preview, ensure_ascii=False, separators=(',', ':'), allow_nan=False),
+        'arrangement_preview_sha256': arrangement_sha256(preview),
+        'arrangement_preview_performance_sha256': arrangement_performance_sha256(preview),
+    }
+
+
 def _read_song_melodies(path) -> tuple[Melody, ...]:
     entries = json.loads(Path(path or _score_path()).read_text(encoding="utf-8"))
     if not isinstance(entries, list) or len(entries) > 500:
@@ -143,6 +172,7 @@ def _read_song_melodies(path) -> tuple[Melody, ...]:
                 raise ValueError("invalid_cd_arrangement_file")
             arrangement = json.loads(target.read_text(encoding="utf-8"))
         arrangement_fields = {}
+        preview_start, preview_end = 0, entry['duration_ms']
         if arrangement is not None:
             from osaka_cd.arrangement import (validate_arrangement, arrangement_sha256,
                 arrangement_performance_sha256, preview_arrangement)
@@ -178,6 +208,10 @@ def _read_song_melodies(path) -> tuple[Melody, ...]:
                 "arrangement_preview_sha256": preview_digest,
                 "arrangement_preview_performance_sha256": preview_performance,
             }
+        if arrangement is None or len(arrangement['parts']) == 1:
+            arrangement_fields = _harmonized_arrangement_fields(
+                score, arrangement=arrangement, source_sha256=source_hash,
+                preview_start_ms=preview_start, preview_end_ms=preview_end)
         melody = Melody(
             id=entry["id"], name=entry["name"],
             description=f"{entry['artist']} · {entry['excerpt']}",
@@ -242,6 +276,8 @@ _DEFAULT_MELODY = Melody(
     duration_ms=4000,
     note_count=4,
 )
+_DEFAULT_MELODY = replace(_DEFAULT_MELODY, **_harmonized_arrangement_fields(
+    json.loads(_DEFAULT_MELODY.score_json)))
 try:
     _MELODIES = (_DEFAULT_MELODY, *_song_melodies())
 except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -334,7 +370,7 @@ def score_for_melody(value: object = None) -> dict:
 
 
 def arrangement_for_melody(value: object = None, *, preview: bool = False) -> dict | None:
-    """Each request owns a fresh composition; legacy CDs remain monophonic."""
+    """Each request owns the effective authored or automatically harmonized music."""
     identity = value.get("ttv_melody_id") if isinstance(value, dict) else value
     melody = get_melody(identity)
     payload = melody.arrangement_preview_json if preview else melody.arrangement_json

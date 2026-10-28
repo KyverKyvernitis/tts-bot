@@ -65,8 +65,14 @@ def install_preview(root, song, audio):
     target = root / "cd" / "previews"
     target.mkdir(parents=True, exist_ok=True)
     (target / f"{song['id']}.mp3").write_bytes(audio)
-    index = {song["id"]: {"manifest_version": 2, "id": song["id"],
+    melody = melodies.get_melody(song['id'])
+    index = {song["id"]: {"manifest_version": 3, "id": song["id"],
                          "score_sha256": melodies.score_sha256(melodies.catalog_score(song)),
+                         "arrangement_sha256": melody.arrangement_preview_sha256,
+                         "source_arrangement_sha256": melody.arrangement_sha256,
+                         "arrangement_performance_sha256": melody.arrangement_preview_performance_sha256,
+                         "rendering_profile": {"mode": "multipart-utau",
+                             "configuration_fingerprint": "b" * 64, "render_fingerprint": "c" * 64},
                          "source_sha256": song["source_sha256"],
                          "mp3_sha256": hashlib.sha256(audio).hexdigest(),
                          "voice_id": "kasane-teto", "language": "pt-BR",
@@ -115,8 +121,11 @@ def test_legacy_source_hash_cannot_bind_an_unknown_score(isolated_catalog, real_
     target = isolated_catalog / "cd" / "previews" / "index.json"
     target.write_text(json.dumps(index))
     assert cd_previews.prepared_sample(song["id"], PREFERENCES) is None
-    # Explicit migration requires the canonical content identity as well.
+    # A score-only migration cannot reuse a mono sample after harmonization.
     metadata["score_content_sha256"] = digest
+    target.write_text(json.dumps(index))
+    assert cd_previews.prepared_sample(song["id"], PREFERENCES) is None
+    metadata.update(manifest_version=3, score_sha256=digest)
     target.write_text(json.dumps(index))
     assert cd_previews.prepared_sample(song["id"], PREFERENCES) == real_mp3
 
