@@ -1246,6 +1246,35 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
             if getattr(message.author, "bot", False):
                 return
             if int(getattr(message.channel, "id", 0)) == self.ZIP_UPDATE_CHANNEL_ID:
+                # Um pacote enviado com _importcd pertence ao catálogo, mesmo
+                # neste canal. Nunca entregar esse anexo ao updater de código.
+                # A checagem barata não consulta configuração para ZIPs comuns.
+                import_text = str(getattr(message, "content", "") or "").strip()
+                if import_text.casefold().endswith("importcd"):
+                    tts_cog = self.get_cog("TTSVoice")
+                    if tts_cog is not None:
+                        from cogs.tts.mensagens.triagem import match_import_cd_message
+                        if await match_import_cd_message(tts_cog, message) is not None:
+                            await self._dispatch_tts_message_bridge(message)
+                            return
+                    else:
+                        prefix_fragment = import_text[:-len("importcd")]
+                        if (0 < len(prefix_fragment) <= 8
+                                and not any(char.isspace() or ord(char) < 33 or ord(char) == 127
+                                            for char in prefix_fragment)):
+                            # A cog pode ainda estar iniciando. Um comando
+                            # explícito de importação nunca vira update de código.
+                            view = discord.ui.LayoutView(timeout=None)
+                            view.add_item(discord.ui.Container(discord.ui.TextDisplay(
+                                "## Importação indisponível\n"
+                                "Tente novamente quando o bot terminar de iniciar."
+                            ), accent_color=discord.Color.blurple()))
+                            try:
+                                await asyncio.wait_for(message.channel.send(
+                                    view=view, allowed_mentions=discord.AllowedMentions.none()), timeout=10)
+                            except (discord.HTTPException, asyncio.TimeoutError):
+                                pass
+                            return
                 await self._handle_zip_update_message(message)
                 return
             await self._dispatch_tts_message_bridge(message)

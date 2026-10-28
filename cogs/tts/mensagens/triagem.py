@@ -45,8 +45,41 @@ def _prefixos_unicos(*values: object) -> list[str]:
     return prefixes
 
 
+async def match_import_cd_message(cog: Any, message: Any):
+    """Recognize CD imports independently of speech, including owner DMs.
+
+    The suffix check keeps disabled-TTS and updater paths free of configuration
+    reads for ordinary messages. Permission and attachment checks belong to the
+    command handler; this helper never downloads or imports an attachment.
+    """
+    raw = str(getattr(message, "content", "") or "").strip()
+    if not raw.casefold().endswith("importcd"):
+        return None
+    if getattr(getattr(message, "author", None), "bot", False):
+        return None
+    guard = getattr(getattr(cog, "bot", None), "antibot_should_block_message", None)
+    if callable(guard) and bool(guard(message)):
+        return None
+    guild = getattr(message, "guild", None)
+    defaults = {}
+    if guild is not None:
+        db = cog._get_db()
+        defaults = (await cog._maybe_await(db.get_guild_tts_defaults(guild.id)) if db else {}) or {}
+    prefix = str(defaults.get("bot_prefix") or getattr(config, "BOT_PREFIX", "_") or "_")
+    command = match_prefix_control_command(raw, prefix)
+    return command if command is not None and command.kind == "importcd" else None
+
+
 async def analisar_mensagem_para_tts(cog: Any, message: Any) -> DecisaoTriagemMensagem:
     # Filtros baratos primeiro — evita tocar o DB por mensagem de bot ou DM.
+    # Importar um CD administra dados do catálogo e não depende da síntese.
+    # Os demais comandos e mensagens mantêm os filtros históricos abaixo.
+    if (not getattr(config, "TTS_ENABLED", True)
+            or getattr(message, "guild", None) is None):
+        import_command = await match_import_cd_message(cog, message)
+        if import_command is not None:
+            return DecisaoTriagemMensagem(False, True, {},
+                prefix_command=import_command, reason="prefix_command")
     if not getattr(config, "TTS_ENABLED", True):
         return DecisaoTriagemMensagem(False, False, {}, reason="tts_disabled")
     if getattr(getattr(message, "author", None), "bot", False):

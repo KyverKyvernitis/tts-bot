@@ -102,6 +102,8 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
         return PrefixControlCommand("cd")
     if matches_prefixed_command(raw, bot_prefix, kind="rcd"):
         return PrefixControlCommand("rcd")
+    if matches_prefixed_command(raw, bot_prefix, kind="importcd"):
+        return PrefixControlCommand("importcd")
     if matches_prefixed_command(raw, bot_prefix, kind="advanced"):
         return PrefixControlCommand("advanced")
     if matches_prefixed_command(raw, bot_prefix, kind="clear"):
@@ -199,6 +201,9 @@ async def dispatch_prefix_control_command(cog: Any, message: Any, command: Prefi
     if kind == "rcd":
         from .random_cd import toggle_random_cd
         return bool(await toggle_random_cd(cog, message))
+    if kind == "importcd":
+        from .interface.importar_cd import handle_import_cd
+        return bool(await handle_import_cd(cog, message))
     if kind == "advanced":
         await cog._prefix_advanced(message)
         return True
