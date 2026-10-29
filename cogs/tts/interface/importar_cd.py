@@ -92,6 +92,7 @@ class _Session:
     progress_last_edit: float = 0
     progress_epoch: int = 0
     progress_active: bool = False
+    work_task: object = None
 
     async def stop_progress(self):
         self.progress_active = False
@@ -195,6 +196,44 @@ class _Session:
             self.view.stop()
         if getattr(self.cog.bot, _LEASE_ATTRIBUTE, None) is self:
             delattr(self.cog.bot, _LEASE_ATTRIBUTE)
+
+
+def _lease_has_active_task(session):
+    for name in ('work_task', 'save_task'):
+        task = getattr(session, name, None)
+        if task is not None and callable(getattr(task, 'done', None)) and not task.done():
+            return True
+    return False
+
+
+async def _accept_cd_command(cog, message):
+    """Reuse an idle editor, while real imports/saves retain the shared lease.
+
+    Callers must check bot ownership before calling this helper. Retirement is
+    synchronous, so a new authorized command cannot race an old modal into a
+    second publication while its previous view is being closed.
+    """
+    session = getattr(cog.bot, _LEASE_ATTRIBUTE, None)
+    if session is None:
+        return True
+    active = _lease_has_active_task(session)
+    replace = getattr(session, 'can_replace_for_command', None)
+    if not active and callable(replace) and replace():
+        session.retire_for_command()
+        return True
+    if not active and getattr(session, 'finished', False):
+        release = getattr(session, 'release', None)
+        if callable(release):
+            release()
+        if getattr(cog.bot, _LEASE_ATTRIBUTE, None) is session:
+            delattr(cog.bot, _LEASE_ATTRIBUTE)
+        return True
+    if callable(replace):
+        await _send(message.channel, 'Salvando CD' if active or session.submitted else 'Abrindo CDs',
+                    'Espere esta atualização terminar para continuar.')
+    else:
+        await _send(message.channel, 'Importação em andamento', 'Espere o CD atual terminar para enviar outro.')
+    return False
 
 
 def _milliseconds(value):
@@ -567,8 +606,7 @@ async def handle_import_cd(cog, message, *, title=''):
         return True
     # The bot-wide lease is acquired before the first await after validation.
     # It covers downloading, recording selection, conversion and the commit.
-    if getattr(bot, _LEASE_ATTRIBUTE, None) is not None:
-        await _send(message.channel, 'Importação em andamento', 'Espere o CD atual terminar para enviar outro.')
+    if not await _accept_cd_command(cog, message):
         return True
     from osaka_cd.discord_import import ImportCDError
     try:
@@ -600,9 +638,12 @@ async def handle_import_cd(cog, message, *, title=''):
             coroutine.close()
             await session.edit('Importação indisponível', 'Tente novamente em alguns instantes.')
         else:
+            session.work_task = task
             # cancel() before a coroutine's first instruction skips its finally.
             # The done callback owns that pre-start edge as well.
             def finished(done):
+                if session.work_task is done:
+                    session.work_task = None
                 session.release()
                 if not done.cancelled():
                     error = done.exception()

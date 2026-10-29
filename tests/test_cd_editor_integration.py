@@ -187,8 +187,9 @@ async def test_standalone_owner_selects_label_modal_exact_video_and_preserves_in
     await session.view.edit_cd(opening)
     modal = opening.response.send_modal.await_args.args[0]
     modal_json = modal.to_dict()
-    assert [row['type'] for row in modal_json['components']] == [10, 18, 18, 18]
-    assert all(row['component']['type'] == 4 for row in modal_json['components'][1:])
+    assert [row['type'] for row in modal_json['components']] == [18, 18, 18]
+    assert all(row['component']['type'] == 4 and 'description' not in row
+               for row in modal_json['components'])
     modal.name._value = 'Example Song — Main Chorus'
     modal.artist._value = 'Correct Composer'
     modal.video._value = f'https://youtu.be/{NEW_VIDEO}?si=shared-link&t=30'

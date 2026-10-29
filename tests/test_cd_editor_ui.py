@@ -11,6 +11,7 @@ from discord.http import handle_message_parameters
 import pytest
 
 from cogs.tts.interface import editar_cd as ui
+from cogs.tts.interface import painel_canto
 from osaka_cd import discord_edit
 from osaka_cd.discord_import import ImportCDError
 
@@ -100,9 +101,13 @@ async def test_actual_v2_picker_and_new_label_modal_have_valid_payloads(monkeypa
     view = session.view.to_components()[0]
     assert any(item['type'] == 9 and item['accessory']['type'] == 11 for item in view['components'])
     components = modal.to_dict()['components']
-    assert [item['type'] for item in components] == [10, 18, 18, 18]
-    assert all(item['component']['type'] == 4 for item in components[1:])
+    assert [item['type'] for item in components] == [18, 18, 18]
+    assert all(item['component']['type'] == 4 for item in components)
+    assert not any('description' in item for item in components)
     assert not any(item['type'] == 1 for item in components)
+    content = _text(session.view)
+    assert 'Escolha um CD para editar o nome' not in content
+    assert 'só o dono do bot pode editar' not in content
     assert modal.video.default == 'https://www.youtube.com/watch?v=kbNdx0yqbZE'
     await session.view.close(_interaction())
     assert not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
@@ -221,3 +226,89 @@ async def test_cancelled_interaction_ack_does_not_leave_editor_reserved(monkeypa
     assert not tasks
     assert session.finished and not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
     service.edit_cd.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_editor_reuses_regular_cd_registry_and_refreshes_missing_song_emoji(monkeypatch):
+    known = {}
+    registry = SimpleNamespace(emoji=Mock(side_effect=lambda identity: known.get(identity)), schedule=Mock())
+    monkeypatch.setattr(painel_canto, '_CD_EMOJIS', registry)
+    cog, message, response, _, _ = _context(monkeypatch)
+    await ui.handle_edit_cd(cog, message)
+    session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
+    view = session.view
+    registry.schedule.assert_called_with(cog.bot, view)
+    registry.emoji.assert_called_with('song-0')
+    assert view.select.options[0].emoji is None
+    known['song-0'] = discord.PartialEmoji(name='osakacd_song_0', id=1559374199133315122)
+    calls = response.edit.await_count
+    await view.refresh(force=True)
+    assert await view._edit_panel()
+    assert response.edit.await_count == calls + 1
+    assert view.select.options[0].emoji is known['song-0']
+    assert not await view._edit_panel()  # No duplicate network edit for the same emoji.
+    await view.close(_interaction())
+
+
+@pytest.mark.asyncio
+async def test_emoji_update_checks_current_editor_after_waiting_for_message_lock(monkeypatch):
+    known = {}
+    registry = SimpleNamespace(emoji=lambda identity: known.get(identity), schedule=Mock())
+    monkeypatch.setattr(painel_canto, '_CD_EMOJIS', registry)
+    cog, message, response, _, _ = _context(monkeypatch)
+    await ui.handle_edit_cd(cog, message)
+    session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
+    view = session.view
+    known['song-0'] = discord.PartialEmoji(name='osakacd_song_0', id=1559374199133315122)
+    response.edit.reset_mock()
+    await session.edit_lock.acquire()
+    refresh = asyncio.create_task(view._edit_panel())
+    await asyncio.sleep(0)
+    session.release()
+    session.edit_lock.release()
+    assert not await refresh
+    response.edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_emoji_arriving_after_commit_updates_waiting_picker_before_task_finishes(monkeypatch):
+    known = {}
+    registry = SimpleNamespace(emoji=lambda identity: known.get(identity), schedule=Mock())
+    monkeypatch.setattr(painel_canto, '_CD_EMOJIS', registry)
+    cog, message, response, _, _ = _context(monkeypatch)
+    await ui.handle_edit_cd(cog, message)
+    session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
+    view = session.view
+    known['song-0'] = discord.PartialEmoji(name='osakacd_song_0', id=1559374199133315122)
+    response.edit.reset_mock()
+    task = asyncio.create_task(asyncio.sleep(.01))
+    session.save_task = task
+    # The service is already committed and this picker is waiting; a task's
+    # pending return/done callback must not discard the only emoji notification.
+    assert await view._edit_panel()
+    assert response.edit.await_count == 1
+    await task
+    session.save_task = None
+    assert view.select.options[0].emoji is known['song-0']
+    assert not session.progress_active
+    await view.close(_interaction())
+
+
+@pytest.mark.asyncio
+async def test_late_emoji_never_stops_or_overwrites_active_save_progress(monkeypatch):
+    known = {}
+    registry = SimpleNamespace(emoji=lambda identity: known.get(identity), schedule=Mock())
+    monkeypatch.setattr(painel_canto, '_CD_EMOJIS', registry)
+    cog, message, response, _, _ = _context(monkeypatch)
+    await ui.handle_edit_cd(cog, message)
+    session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
+    view = session.view
+    known['song-0'] = discord.PartialEmoji(name='osakacd_song_0', id=1559374199133315122)
+    response.edit.reset_mock()
+    session.waiting, session.submitted, session.progress_active = False, True, True
+    await view.refresh(force=True)
+    assert not await view._edit_panel()
+    response.edit.assert_not_awaited()
+    assert session.progress_active
+    assert view.select.options[0].emoji is None
+    session.release()

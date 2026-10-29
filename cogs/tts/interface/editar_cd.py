@@ -9,7 +9,8 @@ import unicodedata
 import discord
 
 from .importar_cd import (_Session, _DISCORD_TIMEOUT, _FORM_TIMEOUT,
-    _LEASE_ATTRIBUTE, _VINYL, _defer, _interaction_notice, _owned, _send, _text)
+    _LEASE_ATTRIBUTE, _VINYL, _accept_cd_command, _defer, _interaction_notice,
+    _owned, _send, _text)
 
 
 _LOG = logging.getLogger(__name__)
@@ -46,6 +47,16 @@ class _EditorSession(_Session):
     def current(self):
         return next((row for row in self.rows if row.get('id') == self.selected), None)
 
+    def can_replace_for_command(self):
+        return (not self.finished and self.waiting and not self.submitted
+                and not self.progress_active
+                and (self.save_task is None or self.save_task.done()))
+
+    def retire_for_command(self):
+        self.modal_epoch += 1
+        self.cancelled = True
+        self.release()
+
     async def show(self, *, note=''):
         if self.finished:
             return False
@@ -64,13 +75,15 @@ class _EditorView(discord.ui.LayoutView):
     def __init__(self, session, *, note=''):
         super().__init__(timeout=_FORM_TIMEOUT)
         self.session = session
+        self.message = session.response
+        self._emoji_dirty = False
+        self._emoji_ids = ()
         count = len(session.rows)
         pages = max(1, (count + _PAGE_SIZE - 1) // _PAGE_SIZE)
         session.page = max(0, min(session.page, pages - 1))
         start = session.page * _PAGE_SIZE
         page = session.rows[start:start + _PAGE_SIZE]
-        items = [discord.ui.TextDisplay('## 💿 Editar CDs\n'
-            'Escolha um CD para editar o nome, o artista e o vídeo da capa.')]
+        items = [discord.ui.TextDisplay('## 💿 Editar CDs')]
         if note:
             items.append(discord.ui.TextDisplay(f'-# {note}'))
         selected = session.current()
@@ -89,7 +102,10 @@ class _EditorView(discord.ui.LayoutView):
             options=[discord.SelectOption(label=_row_name(row)[:100],
                 description=str(row.get('artist') or 'Artista não identificado')[:100],
                 value=str(start + index), default=row.get('id') == session.selected,
-                emoji='💿') for index, row in enumerate(page)])
+                emoji=self._registry().emoji(row.get('id'))) for index, row in enumerate(page)])
+        self._emoji_ids = tuple(row.get('id') for row in page)
+        self._emoji_signature = tuple(str(option.emoji) if option.emoji is not None else None
+                                      for option in self.select.options)
         self.select.callback = self.choose
         items.append(discord.ui.ActionRow(self.select))
         edit = discord.ui.Button(label='Editar CD', style=discord.ButtonStyle.primary,
@@ -107,8 +123,68 @@ class _EditorView(discord.ui.LayoutView):
             items.append(discord.ui.TextDisplay(f'-# Página {session.page + 1}/{pages} · {count} CDs'))
         else:
             items.append(discord.ui.ActionRow(edit, close))
-            items.append(discord.ui.TextDisplay(f'-# {count} CDs · só o dono do bot pode editar'))
+            items.append(discord.ui.TextDisplay(f'-# {count} CD' + ('s' if count != 1 else '')))
         self.add_item(discord.ui.Container(*items, accent_color=discord.Color.blurple()))
+        # Reuse the very same application-emoji registry as the regular CD menu.
+        # Missing images remain omitted until the registry refreshes this view.
+        self._registry().schedule(getattr(session.cog, 'bot', None), self)
+
+    @staticmethod
+    def _registry():
+        from .painel_canto import _CD_EMOJIS
+        return _CD_EMOJIS
+
+    def _emoji_current(self):
+        session = self.session
+        return (session.view is self and session.waiting and not session.finished
+                and not session.submitted and not session.progress_active
+                and not self.is_finished()
+                and getattr(session.cog.bot, _LEASE_ATTRIBUTE, None) is session)
+
+    def _is_expired(self):
+        # A just-built picker may already be idle while its save task is still
+        # returning. Its actual waiting/progress state controls safe editing.
+        session = self.session
+        return (session.finished or session.view is not self or self.is_finished()
+                or getattr(session.cog.bot, _LEASE_ATTRIBUTE, None) is not session)
+
+    def _refresh_emojis(self):
+        registry = self._registry()
+        emojis = tuple(registry.emoji(identity) for identity in self._emoji_ids)
+        signature = tuple(str(emoji) if emoji is not None else None for emoji in emojis)
+        if signature != self._emoji_signature:
+            for option, emoji in zip(self.select.options, emojis):
+                option.emoji = emoji
+            self._emoji_signature = signature
+            self._emoji_dirty = True
+
+    async def refresh(self, *, force=False, rebuild=True):
+        # Compatibility with registry versions that refresh before editing.
+        if self._emoji_current():
+            self._refresh_emojis()
+
+    def _rebuild(self):
+        if self._emoji_current():
+            self._refresh_emojis()
+
+    async def _edit_panel(self):
+        session = self.session
+        async with session.edit_lock:
+            if not self._emoji_current() or session.response is None:
+                return False
+            self._refresh_emojis()
+            if not self._emoji_dirty:
+                return False
+            try:
+                await asyncio.wait_for(session.response.edit(view=self,
+                    allowed_mentions=discord.AllowedMentions.none()), timeout=_DISCORD_TIMEOUT)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOG.info('[cd_editor_emoji] type=%s', type(exc).__name__)
+                return False
+            self._emoji_dirty = False
+            return True
 
     async def active(self, interaction):
         if not await self.session.check(interaction):
@@ -203,13 +279,12 @@ class _EditModal(discord.ui.Modal):
                                           max_length=160, custom_id='cd-editor:artist')
         self.video = discord.ui.TextInput(default=reference, required=False, max_length=800,
             placeholder='https://www.youtube.com/watch?v=...', custom_id='cd-editor:video')
-        self.add_item(discord.ui.TextDisplay('O vídeo informado será usado exatamente para buscar a capa.'))
-        for label, description, component in [
-            ('Nome do CD', 'Como o CD aparece no menu.', self.name),
-            ('Artista', 'Deixe em branco para manter o artista atual.', self.artist),
-            ('Vídeo da capa', 'Cole o link do YouTube. Em branco, mantém a referência atual.', self.video),
+        for label, component in [
+            ('Nome do CD', self.name),
+            ('Artista', self.artist),
+            ('Vídeo da capa', self.video),
         ]:
-            self.add_item(discord.ui.Label(text=label, description=description, component=component))
+            self.add_item(discord.ui.Label(text=label, component=component))
 
     async def on_submit(self, interaction):
         session = self.session
@@ -313,8 +388,7 @@ async def handle_edit_cd(cog, message):
     if not await _owned(cog.bot, message.author):
         await _send(message.channel, 'Acesso restrito', 'Só o dono do bot pode editar CDs.')
         return True
-    if getattr(cog.bot, _LEASE_ATTRIBUTE, None) is not None:
-        await _send(message.channel, 'Importação em andamento', 'Feche o editor ou espere o CD atual terminar.')
+    if not await _accept_cd_command(cog, message):
         return True
     session = _EditorSession(cog, message)
     setattr(cog.bot, _LEASE_ATTRIBUTE, session)
