@@ -359,6 +359,89 @@ class YouTubePlayerAdapter:
     def search(self, query: str, *, seed_video_ids=()) -> list[dict]:
         return asyncio.run(self.search_async(query, seed_video_ids=seed_video_ids))
 
+    async def video_async(self, video_id: str) -> dict:
+        """Resolve exactly one owner-selected recording, without a search."""
+        item = await self.provider.youtube_video_metadata(video_id)
+        if item is None:
+            raise MetadataSearchError('selected_video_unavailable')
+        actual = str((parse_qs(urlparse(item.webpage_url).query).get('v') or [''])[0])
+        if actual != video_id:
+            raise MetadataSearchError('selected_video_identity_mismatch')
+        return _candidate({'video_id': actual, 'title': item.title,
+                           'channel': item.artist, 'thumbnail': item.thumbnail,
+                           'duration': item.duration,
+                           'view_count': self.statistics.get(video_id)},
+                          source='youtube-player-api-direct')
+
+    def video(self, video_id: str) -> dict:
+        return asyncio.run(self.video_async(video_id))
+
+
+def _yt_dlp_video(video_id: str) -> dict:
+    """Read public metadata for a fixed YouTube ID; never request ytsearch."""
+    import yt_dlp
+
+    class SilentLogger:
+        def debug(self, message): pass
+        def warning(self, message): pass
+        def error(self, message): pass
+
+    options = {'quiet': True, 'no_warnings': True, 'skip_download': True,
+               'logger': SilentLogger(), 'extract_flat': False,
+               'socket_timeout': 12, 'retries': 1, 'noplaylist': True,
+               'ignoreerrors': False}
+    proxy = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
+    if proxy:
+        options['proxy'] = proxy
+    with yt_dlp.YoutubeDL(options) as extractor:
+        raw = extractor.extract_info('https://www.youtube.com/watch?v=' + video_id,
+                                     download=False)
+    if not isinstance(raw, dict):
+        raise MetadataSearchError('selected_video_unavailable')
+    return _candidate(raw, source='yt-dlp-public-metadata-direct')
+
+
+def video_metadata(video_id: str, *, candidates=None, youtube_api_key=None) -> dict:
+    """Return the exact recording chosen by the owner, regardless of popularity.
+
+    A cover reference is an explicit image source, not an automatic claim about
+    the CD's composer or language. Its real ID and public title are verified;
+    missing statistics remain unavailable rather than blocking cover editing.
+    """
+    if not isinstance(video_id, str) or not VIDEO_ID.fullmatch(video_id):
+        raise ValueError('invalid_selected_video_id')
+    candidate = None
+    if candidates is not None:
+        if not isinstance(candidates, (list, tuple)) or len(candidates) > 5000:
+            raise ValueError('invalid_metadata_candidates')
+        candidate = next((_candidate(row, source='provided-direct-candidates')
+                          for row in candidates if isinstance(row, dict)
+                          and str(row.get('video_id') or row.get('id') or '') == video_id), None)
+    else:
+        key = youtube_api_key or os.getenv('YOUTUBE_API_KEY') or os.getenv('GOOGLE_YOUTUBE_API_KEY')
+        if key:
+            try:
+                candidate = YouTubePlayerAdapter(key, limit=1).video(video_id)
+            except Exception:
+                candidate = None
+        if candidate is None:
+            try:
+                candidate = _yt_dlp_video(video_id)
+            except Exception:
+                raise MetadataSearchError('selected_video_unavailable') from None
+    if (not candidate or candidate.get('video_id') != video_id
+            or not str(candidate.get('title') or '').strip()):
+        raise MetadataSearchError('selected_video_unavailable')
+    checked = datetime.now(timezone.utc).isoformat()
+    selected = dict(candidate, checked_at=checked, selection_basis='owner-selected-video')
+    audit = {'checked_at': checked, 'scope': 'owner-selected-video',
+             'selected_video_id': video_id, 'inspected_candidates': 1,
+             'accepted_candidates': 1, 'provider': candidate['source'],
+             'queries': [], 'owner_selected': True,
+             'view_count_observed': type(candidate.get('view_count')) is int,
+             'global_youtube_maximum_claimed': False}
+    return {'selected': selected, 'audit': audit, 'candidates': [selected]}
+
 
 def _yt_dlp_search(query: str, *, limit: int, seed_video_ids=(), candidate_filter=None) -> list[dict]:
     import yt_dlp

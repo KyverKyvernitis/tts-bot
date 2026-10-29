@@ -32,6 +32,23 @@ _CHILD_TIMEOUT = 180
 # Recover the metadata supplied with this exact earlier attachment. This is a
 # one-file migration hint, not a title-based shortcut around provider checks.
 _PREVIOUS_VAMPIRE_SOURCE = '41f8081e6c4d0ef424a18df0dc2de4d1ca919a9beb741b48c60f79d845072709'
+# These two source attachments were previously delivered with the correct song
+# identity, but a general video search selected a namesake's image. The source
+# digest limits this correction to those files; newly chosen covers remain the
+# owner's choice and are never migrated by title alone.
+_PREVIOUS_COVER_CORRECTIONS = {
+    'monitoring': {
+        'source_sha256': '82d91c16dcc66f23092b47b82a9f879c564b5ffb6d0de7dfeb21aac934ff8510',
+        'title': 'Monitoring', 'artist': 'DECO*27', 'artist_aliases': [],
+        'aliases': ['モニタリング'], 'video_id': 'kbNdx0yqbZE',
+    },
+    'tetoris': {
+        'source_sha256': '2a5c6c7a4fde1335abe4314bb01b6c8db749fafe67c572ac15270123cedf3e21',
+        'title': 'Tetoris', 'artist': 'Hiiragi Magnetite',
+        'artist_aliases': ['柊マグネタイト'], 'aliases': ['テトリス'],
+        'video_id': 'Soy4jGPHr3g',
+    },
+}
 
 
 def _key(value):
@@ -49,6 +66,10 @@ def _pending(snapshot, score):
     from .bundled import _has_valid_cover
     root = Path(snapshot['root'])
     video = _read(root / _contract().VIDEOS, {}).get('songs', {}).get(score['id'], {})
+    correction = _previous_cover_correction(score, video)
+    if (correction is not None and (not isinstance(video, dict)
+                                   or video.get('video_id') != correction['cover_video_id'])):
+        return True
     return (not _known_artist(score.get('artist')) or not isinstance(video, dict)
             or not isinstance(video.get('selection_audit'), dict)
             or not _has_valid_cover(root, video, score['id']))
@@ -97,6 +118,29 @@ def _merge_strings(*groups):
     return result[:12]
 
 
+def _previous_cover_correction(score, video):
+    """Recover the verified recording for two exact earlier attachments only."""
+    correction = _PREVIOUS_COVER_CORRECTIONS.get(score.get('id'))
+    marker = score.get('discord_import')
+    source = video.get('cover_source') if isinstance(video, dict) else None
+    if (correction is None or not isinstance(marker, dict)
+            or score.get('source_sha256') != correction['source_sha256']
+            or marker.get('source_sha256') != correction['source_sha256']
+            or _key(score.get('name')) != _key(correction['title'])
+            or isinstance(source, dict) and source.get('selection') == 'owner'
+            or isinstance(video, dict) and isinstance(video.get('owner_edit'), dict)):
+        return None
+    return {
+        'title': correction['title'], 'artist': correction['artist'],
+        'aliases': list(correction['aliases']),
+        'artist_aliases': list(correction['artist_aliases']),
+        'seed_video_ids': [correction['video_id']],
+        'cover_video_id': correction['video_id'],
+        'cover_selection': 'official-correction',
+        'search_query': f"{correction['artist']} {correction['aliases'][0]}",
+    }
+
+
 def _previous_attachment_metadata(score, video):
     marker = score.get('discord_import')
     if (score.get('id') != 'the-vampire' or _key(score.get('name')) != 'the vampire'
@@ -136,7 +180,8 @@ async def _prepare(directory):
     aliases = video.get('title_aliases', []) if isinstance(video, dict) else []
     artist_aliases = video.get('artist_aliases', []) if isinstance(video, dict) else []
     seeds = [video['video_id']] if isinstance(video, dict) and _VIDEO.fullmatch(str(video.get('video_id') or '')) else []
-    found = _previous_attachment_metadata(score, video)
+    correction = _previous_cover_correction(score, video)
+    found = correction or _previous_attachment_metadata(score, video)
     if found is None:
         try:
             found = resolve_title_metadata(title)
@@ -146,7 +191,9 @@ async def _prepare(directory):
             found = {}
     if found:
         found_artists = [found.get('artist'), *found.get('artist_aliases', [])]
-        if _known_artist(artist) and _key(artist) not in {_key(name) for name in found_artists}:
+        if correction is not None:
+            artist = correction['artist']
+        elif _known_artist(artist) and _key(artist) not in {_key(name) for name in found_artists}:
             found = {}  # Keep an installed author authoritative over a namesake.
         else:
             artist = artist if _known_artist(artist) else found['artist']
@@ -158,6 +205,9 @@ async def _prepare(directory):
     metadata = {'id': identity, 'title': title, 'artist': artist,
                 'aliases': aliases, 'artist_aliases': artist_aliases,
                 'seed_video_ids': seeds, 'search_query': found.get('search_query') or f'{title} {artist}'}
+    if correction is not None:
+        metadata.update(cover_video_id=correction['cover_video_id'],
+                        cover_selection=correction['cover_selection'])
     result = await repair_metadata(identity, root=directory / 'catalog', metadata=metadata,
         cache_dir=directory / 'covers', export_zip=directory / 'package.zip')
     if not result.get('ok') or any(row.get('artifact') in {'metadata', 'thumbnail'}

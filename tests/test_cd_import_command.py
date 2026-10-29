@@ -125,10 +125,23 @@ async def test_missing_owner_check_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_attachment_must_be_on_command_not_a_replied_message():
+async def test_standalone_command_opens_editor_without_importing_replied_attachment():
     cog, message, response, tasks = _setup()
-    assert await ui.handle_import_cd(cog, message)
+    with patch('cogs.tts.interface.editar_cd.handle_edit_cd', new=AsyncMock(return_value=True)) as editor:
+        assert await ui.handle_import_cd(cog, message)
+    editor.assert_awaited_once_with(cog, message)
+    message.reference.resolved.attachments[0].read.assert_not_awaited()
+    assert not tasks and not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
+
+
+@pytest.mark.asyncio
+async def test_caption_without_attachment_still_does_not_import_a_replied_file():
+    cog, message, response, tasks = _setup()
+    with patch('cogs.tts.interface.editar_cd.handle_edit_cd', new=AsyncMock()) as editor:
+        assert await ui.handle_import_cd(cog, message, title='Example Song')
+    editor.assert_not_awaited()
     assert 'junto' in _contents(message.channel.send.await_args.kwargs['view'])
+    message.reference.resolved.attachments[0].read.assert_not_awaited()
     assert not tasks and not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
 
 

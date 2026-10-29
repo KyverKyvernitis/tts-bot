@@ -136,11 +136,19 @@ def _meta_from_path(path: Path) -> dict:
     full_song = meta.get('source_is_full_song', False)
     if type(full_song) is not bool:
         raise ImportInputError('invalid_source_is_full_song')
+    cover_video = meta.get('cover_video_id')
+    if cover_video is not None and (not isinstance(cover_video, str) or not VIDEO.fullmatch(cover_video)):
+        raise ImportInputError('invalid_cover_video_id')
+    cover_selection = meta.get('cover_selection', 'owner')
+    if not isinstance(cover_selection, str) or cover_selection not in {'owner', 'official-correction'}:
+        raise ImportInputError('invalid_cover_selection')
     return {'id': slug, 'title': title, 'artist': artist, 'search_query': query,
             'aliases': _strings(meta, 'aliases'), 'artist_aliases': _strings(meta, 'artist_aliases'),
             'allow_versions': _strings(meta, 'allow_versions'), 'seed_video_ids': seeds,
             'expected_song_duration_seconds': expected_duration, 'source_is_full_song': full_song,
             'max_parts': max_parts, 'include_bass': include_bass,
+            'cover_video_id': cover_video,
+            'cover_selection': cover_selection,
             '_explicit_fields': frozenset(meta), **selection}
 
 
@@ -217,6 +225,31 @@ def _search(meta: dict, *, candidate_file: Path | None = None, duration: float |
                            seed_video_ids=meta['seed_video_ids'], queries=(meta['search_query'],))
 
 
+def _pinned_cover(video: dict | None) -> str | None:
+    pin = video.get('cover_source') if isinstance(video, dict) else None
+    identity = pin.get('video_id') if isinstance(pin, dict) and pin.get('selection') in {'owner', 'official-correction'} else None
+    return identity if isinstance(identity, str) and VIDEO.fullmatch(identity) and video.get('video_id') == identity else None
+
+
+def _search_cover(meta: dict, *, candidate_file: Path | None = None,
+                  duration: float | None = None) -> dict:
+    if not meta.get('cover_video_id'):
+        return _search(meta, candidate_file=candidate_file, duration=duration)
+    from cd_metadata import video_metadata
+    candidates = None
+    if candidate_file is not None:
+        try:
+            candidates = _read_json(candidate_file)
+        except (OSError, ValueError) as exc:
+            raise ImportInputError('invalid_candidates_file') from exc
+        if not isinstance(candidates, list):
+            raise ImportInputError('candidates_file_must_be_list')
+    from worker_config import load_environment
+    environment = load_environment(include_search_credentials=True) if candidates is None else {}
+    return video_metadata(meta['cover_video_id'], candidates=candidates,
+        youtube_api_key=environment.get('YOUTUBE_API_KEY') or environment.get('GOOGLE_YOUTUBE_API_KEY'))
+
+
 def _verify_cover(image: bytes) -> str:
     if len(image) > 2 * 1024 * 1024 or not image.startswith(b'\xff\xd8\xff') or not image.endswith(b'\xff\xd9'):
         raise ImportInputError('invalid_override_cover')
@@ -248,7 +281,7 @@ async def _cover_for(meta: dict, chosen: dict, cache_dir: Path) -> tuple[bytes, 
 
 def _selected_video(meta: dict, selected: dict, audit: dict) -> dict:
     """One recording/cover contract shared by MIDI imports and artwork repair."""
-    return {'video_id': selected['video_id'], 'title': clean_metadata_title(selected['title']),
+    result = {'video_id': selected['video_id'], 'title': clean_metadata_title(selected['title']),
             'artist': meta['artist'], 'search_query': meta['search_query'],
             'title_aliases': [meta['title'], *meta['aliases']],
             'artist_aliases': list(meta['artist_aliases']), 'channel': selected.get('channel', ''),
@@ -259,8 +292,15 @@ def _selected_video(meta: dict, selected: dict, audit: dict) -> dict:
             'view_count_source': selected.get('source', 'verified-candidates'),
             'checked_at': selected.get('checked_at') or datetime.now(timezone.utc).isoformat(),
             'inspected_candidates': audit.get('inspected_candidates', 0),
-            'selection_basis': 'highest-view-count-among-matching-verified-candidates',
+            'selection_basis': 'owner-selected-video' if meta.get('cover_video_id') else 'highest-view-count-among-matching-verified-candidates',
             'selection_audit': audit, 'source_url': f"https://www.youtube.com/watch?v={selected['video_id']}"}
+    if meta.get('cover_video_id'):
+        selection = meta.get('cover_selection', 'owner')
+        result['cover_source'] = {'selection': selection, 'video_id': meta['cover_video_id']}
+        if selection == 'official-correction':
+            result['selection_basis'] = 'official-source-correction'
+            result['selection_audit'] = dict(audit, scope='official-source-correction', owner_selected=False)
+    return result
 
 
 def _metadata_overlay(root: Path, melody: dict, video: dict, image: bytes,
@@ -306,7 +346,7 @@ def _metadata_overlay(root: Path, melody: dict, video: dict, image: bytes,
 
 async def repair_metadata(identity: str, *, root: Path, metadata: dict,
                           cache_dir: Path = THUMB_ROOT, candidates: Path | None = None,
-                          export_zip: Path | None = None) -> dict:
+                          export_zip: Path | None = None, edit_display: bool = False) -> dict:
     """Repair an installed CD through the normal recording and cover importer.
 
     No source MIDI is required. The installed English/display name, notes,
@@ -318,23 +358,45 @@ async def repair_metadata(identity: str, *, root: Path, metadata: dict,
         raise ImportInputError('invalid_cd_id')
     if not isinstance(metadata, dict):
         raise ImportInputError('invalid_metadata')
+    if type(edit_display) is not bool:
+        raise ImportInputError('invalid_edit_display')
     root, cache_dir = Path(root).expanduser(), Path(cache_dir).expanduser()
     songs, videos = open_catalog(root)
     original = next((song for song in songs if song.get('id') == identity), None)
     if original is None:
         raise ImportInputError('song_not_in_local_catalog')
+    title = metadata.get('title', original['name']) if edit_display else original['name']
+    if (not isinstance(title, str) or not 0 < len(title.strip()) <= 100
+            or any(ord(char) < 32 for char in title)):
+        raise ImportInputError('invalid_midi_title')
+    previous_video = videos['songs'].get(identity)
+    prepared_metadata = {'artist': original.get('artist', ''), **metadata,
+                         'id': identity, 'title': title.strip()}
+    if (not edit_display and isinstance(previous_video, dict)
+            and isinstance(previous_video.get('owner_edit'), dict)
+            and previous_video['owner_edit'].get('display') is True):
+        prepared_metadata['artist'] = original['artist']
+    if 'cover_video_id' not in prepared_metadata:
+        pinned = _pinned_cover(previous_video)
+        if pinned:
+            prepared_metadata['cover_video_id'] = pinned
+            prepared_metadata['cover_selection'] = previous_video['cover_source']['selection']
     # Reuse the sidecar validator; no source MIDI or uploaded executable exists.
     with tempfile.TemporaryDirectory(prefix='osaka-repair-input-') as temporary:
         path = Path(temporary) / (identity + '.mid')
-        _atomic(path.with_suffix('.json'), _json_bytes({**metadata, 'id': identity, 'title': original['name']}))
+        _atomic(path.with_suffix('.json'), _json_bytes(prepared_metadata))
         meta = _meta_from_path(path)
     pending = []
     try:
-        if not meta['artist'] or normalize_text(meta['artist']) in {'artista nao identificado', 'unknown artist', 'unknown'}:
+        if not meta.get('cover_video_id') and (not meta['artist'] or normalize_text(meta['artist']) in {'artista nao identificado', 'unknown artist', 'unknown'}):
             raise ImportInputError('artist_unspecified')
-        search = await asyncio.to_thread(_search, meta, candidate_file=candidates,
+        search = await asyncio.to_thread(_search_cover, meta, candidate_file=candidates,
                                         duration=meta['expected_song_duration_seconds'])
         video = _selected_video(meta, search['selected'], search['audit'])
+        if isinstance(previous_video, dict) and isinstance(previous_video.get('owner_edit'), dict):
+            video['owner_edit'] = dict(previous_video['owner_edit'])
+        if edit_display:
+            video['owner_edit'] = {'display': True}
     except Exception as exc:
         pending.extend([{'artifact': 'metadata', 'reason': type(exc).__name__},
                         {'artifact': 'thumbnail', 'reason': 'pending_metadata'}])
@@ -345,7 +407,7 @@ async def repair_metadata(identity: str, *, root: Path, metadata: dict,
     except Exception as exc:
         return {'ok': False, 'id': identity,
                 'pending_artifacts': [{'artifact': 'thumbnail', 'reason': type(exc).__name__}]}
-    melody = dict(original, artist=meta['artist'], source_url=video['source_url'])
+    melody = dict(original, name=meta['title'], artist=meta['artist'] or original['artist'], source_url=video['source_url'])
     video.update(id=identity, revision=original.get('revision', 1),
                  source_sha256=original['source_sha256'], score_sha256=score_sha256(original),
                  thumbnail_sha256=checksum)
@@ -609,7 +671,18 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
     songs, videos = open_catalog(root)
     original = next((entry for entry in songs if entry.get('id') == meta['id']), None)
     previous_video = videos['songs'].get(meta['id'])
+    if (original is not None and isinstance(previous_video, dict)
+            and isinstance(previous_video.get('owner_edit'), dict)
+            and previous_video['owner_edit'].get('display') is True):
+        # A corrected display identity belongs to the owner, not to a later
+        # MIDI filename or an automatic provider refresh for the same CD ID.
+        meta['title'], meta['artist'] = original['name'], original['artist']
     meta = _inherit_aliases(meta, original, previous_video)
+    if not meta.get('cover_video_id'):
+        pinned = _pinned_cover(previous_video)
+        if pinned:
+            meta['cover_video_id'] = pinned
+            meta['cover_selection'] = previous_video['cover_source']['selection']
     if original is None and len(songs) >= 500:
         raise ImportInputError('catalog_full')
     melody = {'id': meta['id'], 'name': meta['title'], 'artist': meta['artist'] or 'Artista não identificado',
@@ -639,8 +712,10 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
     video = dict(previous_video) if isinstance(previous_video, dict) else None
     if video:
         from cd_metadata import match_candidate
-        compatible, _ = match_candidate(meta['title'], meta['artist'], video, aliases=meta['aliases'],
-                                         artist_aliases=meta['artist_aliases'], allow_versions=meta['allow_versions'])
+        compatible = bool(meta.get('cover_video_id') == video.get('video_id'))
+        if not compatible:
+            compatible, _ = match_candidate(meta['title'], meta['artist'], video, aliases=meta['aliases'],
+                                             artist_aliases=meta['artist_aliases'], allow_versions=meta['allow_versions'])
         if not compatible:
             video = None
         elif video['video_id'] not in meta['seed_video_ids']:
@@ -651,9 +726,11 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
         expected_duration = meta['expected_song_duration_seconds']
         if expected_duration is None and meta['source_is_full_song']:
             expected_duration = extraction.get('source_duration_ms', 0) / 1000
-        search = await asyncio.to_thread(_search, meta, candidate_file=candidates, duration=expected_duration)
+        search = await asyncio.to_thread(_search_cover, meta, candidate_file=candidates, duration=expected_duration)
         selected, selection_audit = search['selected'], search['audit']
         video = _selected_video(meta, selected, selection_audit)
+        if isinstance(previous_video, dict) and isinstance(previous_video.get('owner_edit'), dict):
+            video['owner_edit'] = dict(previous_video['owner_edit'])
         if previous_video and previous_video.get('video_id') == video['video_id']:
             if previous_video.get('thumbnail_sha256'):
                 video['thumbnail_sha256'] = previous_video['thumbnail_sha256']

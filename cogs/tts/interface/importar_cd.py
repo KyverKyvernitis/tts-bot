@@ -560,7 +560,7 @@ async def _run_import(session, primary, sidecar):
 
 
 async def handle_import_cd(cog, message, *, title=''):
-    """Consume the exact command; only attachments on this message are inputs."""
+    """Edit installed CDs alone, or import attachments on this exact message."""
     bot = cog.bot
     if not await _owned(bot, message.author):
         await _send(message.channel, 'Acesso restrito', 'Só o dono do bot pode importar CDs.')
@@ -575,7 +575,11 @@ async def handle_import_cd(cog, message, *, title=''):
         if (not isinstance(title, str) or len(title.strip()) > 100
                 or any(ord(char) < 32 for char in title)):
             raise ImportCDError('invalid_metadata', 'Use um nome de música de até 100 caracteres.')
-        primary, sidecar = _select_attachments(tuple(getattr(message, 'attachments', ()) or ()))
+        attachments = tuple(getattr(message, 'attachments', ()) or ())
+        if not attachments and not title.strip():
+            from .editar_cd import handle_edit_cd
+            return await handle_edit_cd(cog, message)
+        primary, sidecar = _select_attachments(attachments)
     except ImportCDError as exc:
         await _send(message.channel, 'Importar CD', exc.public_message)
         return True
