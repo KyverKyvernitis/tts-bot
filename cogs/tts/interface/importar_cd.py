@@ -15,13 +15,17 @@ _LOG = logging.getLogger(__name__)
 _FORM_TIMEOUT = 180
 _DOWNLOAD_TIMEOUT = 30
 _DISCORD_TIMEOUT = 10
+_PROGRESS_INTERVAL = 4.0
+_VINYL = '<a:Vinyl_Music_loading:1559374199133315122>'
 _LEASE_ATTRIBUTE = '_osaka_cd_import_session'
 _PROGRESS = {
-    'discovering': ('Identificando música', 'Buscando o artista e a gravação pelo nome.'),
-    'preparing': ('Preparando CD', 'Conferindo as notas e os dados do arquivo.'),
-    'importing': ('Preparando CD', 'Buscando os metadados e importando a capa.'),
-    'installing': ('Salvando CD', 'Atualizando o catálogo com segurança.'),
-    'activating': ('Finalizando CD', 'Atualizando o menu de CDs.'),
+    'downloading': ('Recebendo o arquivo', 'Baixando seu MIDI ou pacote de CD.', 0),
+    'preparing': ('Conferindo a melodia', 'Lendo as notas e o trecho escolhido.', 1),
+    'discovering': ('Encontrando a música', 'Buscando o artista e a gravação.', 2),
+    'importing': ('Preparando a capa', 'Importando os dados e a imagem do CD.', 3),
+    'artwork': ('Preparando a capa', 'Convertendo a imagem para o menu de CDs.', 3),
+    'installing': ('Salvando seu CD', 'Guardando a melodia e a capa.', 4),
+    'activating': ('Quase pronto', 'Atualizando o menu de CDs.', 5),
 }
 
 
@@ -81,20 +85,92 @@ class _Session:
     cancelled: bool = False
     finished: bool = False
     title: str = ''
+    edit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    progress_task: object = None
+    progress_stage: str = 'downloading'
+    progress_started: float = 0
+    progress_last_edit: float = 0
+    progress_epoch: int = 0
+    progress_active: bool = False
+
+    async def stop_progress(self):
+        self.progress_active = False
+        self.progress_epoch += 1
+        task, self.progress_task = self.progress_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def start_progress(self, stage='downloading'):
+        await self.stop_progress()
+        if self.finished:
+            return
+        self.progress_stage = stage
+        loop = asyncio.get_running_loop()
+        if not self.progress_started:
+            self.progress_started = loop.time()
+        self.progress_active = True
+        epoch = self.progress_epoch
+        self.progress_task = asyncio.create_task(self._animate_progress(epoch))
+
+    async def progress(self, stage):
+        if stage not in _PROGRESS or self.finished or not self.progress_active:
+            return
+        self.progress_stage = stage
+        await self._render_progress(self.progress_epoch)
+
+    async def _animate_progress(self, epoch):
+        try:
+            while self.progress_active and epoch == self.progress_epoch:
+                await asyncio.sleep(_PROGRESS_INTERVAL)
+                await self._render_progress(epoch)
+        except asyncio.CancelledError:
+            return
+
+    async def _render_progress(self, epoch):
+        # Network writes share one lock. Stopping the heartbeat then editing a
+        # choice/final card cannot be followed by an older progress response.
+        async with self.edit_lock:
+            if (not self.progress_active or epoch != self.progress_epoch
+                    or self.waiting or self.finished or self.response is None):
+                return
+            now = asyncio.get_running_loop().time()
+            if now - self.progress_last_edit < _PROGRESS_INTERVAL:
+                return
+            self.progress_last_edit = now
+            title, detail, position = _PROGRESS[self.progress_stage]
+            elapsed = max(0, int(now - self.progress_started))
+            timer = f'{elapsed // 60}:{elapsed % 60:02d}'
+            steps = ' '.join('●' if index < position else '◉' if index == position else '○'
+                             for index in range(6))
+            attachments = getattr(self.source, 'attachments', ()) or ()
+            filename = str(getattr(attachments[0], 'filename', '')) if attachments else ''
+            name = self.metadata.get('title') or self.title or PurePosixPath(filename).stem or 'Seu CD'
+            body = f'**{_text(name, 100)}**\n{detail}\n-# {steps} · {timer}'
+            try:
+                await asyncio.wait_for(self.response.edit(
+                    view=_notice(f'{_VINYL} {title}', body),
+                    allowed_mentions=discord.AllowedMentions.none()), timeout=_DISCORD_TIMEOUT)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOG.info('[cd_import_progress] type=%s', type(exc).__name__)
 
     async def edit(self, title, body, *, color=None, view=None):
+        await self.stop_progress()
         if self.response is None:
             return False
-        try:
-            await asyncio.wait_for(self.response.edit(view=view or _notice(title, body, color=color),
-                                     allowed_mentions=discord.AllowedMentions.none()), timeout=_DISCORD_TIMEOUT)
-            return True
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # A removed card does not roll back an already published CD.
-            _LOG.info('[cd_import_card] type=%s', type(exc).__name__)
-            return False
+        async with self.edit_lock:
+            try:
+                await asyncio.wait_for(self.response.edit(view=view or _notice(title, body, color=color),
+                                         allowed_mentions=discord.AllowedMentions.none()), timeout=_DISCORD_TIMEOUT)
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A removed card does not roll back an already published CD.
+                _LOG.info('[cd_import_card] type=%s', type(exc).__name__)
+                return False
 
     async def check(self, interaction):
         if (int(getattr(interaction.user, 'id', 0)) != int(self.source.author.id)
@@ -110,6 +186,11 @@ class _Session:
     def release(self):
         self.finished = True
         self.waiting = False
+        self.progress_active = False
+        self.progress_epoch += 1
+        if self.progress_task is not None:
+            self.progress_task.cancel()
+            self.progress_task = None
         if self.view is not None:
             self.view.stop()
         if getattr(self.cog.bot, _LEASE_ATTRIBUTE, None) is self:
@@ -226,6 +307,108 @@ class _DetailsView(discord.ui.LayoutView):
         self.session.resume.set()
 
 
+class _ChoicesView(discord.ui.LayoutView):
+    """Choose public recording evidence without asking the owner to type credits."""
+
+    def __init__(self, session, candidates=(), *, artwork=False):
+        super().__init__(timeout=_FORM_TIMEOUT)
+        self.session = session
+        # Values identify these server-side rows, never client-supplied metadata.
+        self.candidates = tuple(dict(row) for row in tuple(candidates)[:5]
+                                if isinstance(row, dict) and row.get('title') and row.get('artist'))
+        name = _text(session.metadata.get('title') or 'Seu CD', 100)
+        if self.candidates:
+            heading = 'Escolha a música'
+            detail = 'Selecione a gravação certa para buscar os dados e a capa.'
+            if artwork:
+                detail = 'A capa não ficou pronta. Escolha outra gravação ou tente novamente.'
+        else:
+            heading = 'Vamos tentar outra busca'
+            detail = 'A busca não retornou opções agora. Seu arquivo continua aqui.'
+        rows = [discord.ui.TextDisplay(f'## 💿 {heading}\n**{name}**\n{detail}')]
+        self.select = None
+        if self.candidates:
+            self.select = discord.ui.Select(
+                placeholder='Escolha uma das músicas encontradas', min_values=1, max_values=1,
+                custom_id='cd-import:choice', options=[
+                    discord.SelectOption(label=str(row['title'])[:100],
+                        description=str(row['artist'])[:100], value=str(index), emoji='💿')
+                    for index, row in enumerate(self.candidates)])
+            self.select.callback = self.choose
+            rows.append(discord.ui.ActionRow(self.select))
+        retry = discord.ui.Button(label='Buscar novamente', style=discord.ButtonStyle.secondary,
+                                  custom_id='cd-import:retry')
+        cancel = discord.ui.Button(label='Cancelar', style=discord.ButtonStyle.secondary,
+                                   custom_id='cd-import:cancel')
+        retry.callback, cancel.callback = self.retry, self.cancel
+        rows.append(discord.ui.ActionRow(retry, cancel))
+        self.add_item(discord.ui.Container(*rows, accent_color=discord.Color.blurple()))
+
+    async def _active(self, interaction):
+        if not await self.session.check(interaction):
+            return False
+        if self.session.view is not self:
+            await _interaction_notice(interaction, 'Lista atualizada', 'Escolha uma opção na lista mais recente.')
+            return False
+        return True
+
+    async def choose(self, interaction):
+        if not await self._active(interaction):
+            return
+        data = getattr(interaction, 'data', None)
+        values = data.get('values') if isinstance(data, dict) else (
+            self.select.values if self.select is not None else ())
+        if (not isinstance(values, (list, tuple)) or len(values) != 1
+                or not isinstance(values[0], str)
+                or values[0] not in {str(index) for index in range(len(self.candidates))}):
+            await _interaction_notice(interaction, 'Escolha uma música', 'Selecione uma das opções da lista.')
+            return
+        choice = self.candidates[int(values[0])]
+        metadata = self.session.metadata
+        overrides = dict(self.session.overrides or {})
+        # Keep an English upload name and its musical crop. A translated public
+        # title is an alias for matching, not a new catalog identity.
+        title = metadata.get('title') or choice['title']
+        overrides.update(title=title, artist=choice['artist'])
+        for field in ('aliases', 'artist_aliases'):
+            values = [*metadata.get(field, []), *choice.get(field, [])]
+            if field == 'aliases' and choice['title'] != title:
+                values.append(choice['title'])
+            overrides[field] = list(dict.fromkeys(values))[:12]
+        overrides['seed_video_ids'] = list(choice.get('seed_video_ids', []))[:12]
+        if choice.get('search_query'):
+            overrides['search_query'] = choice['search_query']
+        self.session.overrides = overrides
+        self._resume()
+        await _defer(interaction)
+
+    def _resume(self):
+        # No await between the permission/state check and this latch: duplicate
+        # interaction deliveries cannot schedule a second publication.
+        self.session.submitted = True
+        self.session.waiting = False
+        self.session.resume.set()
+        self.stop()
+
+    async def retry(self, interaction):
+        if not await self._active(interaction):
+            return
+        self._resume()
+        await _defer(interaction)
+
+    async def cancel(self, interaction):
+        if not await self._active(interaction):
+            return
+        self.session.cancelled = True
+        self._resume()
+        await _defer(interaction)
+
+    async def on_timeout(self):
+        if self.session.view is self and self.session.waiting and not self.session.submitted:
+            self.session.cancelled = True
+            self._resume()
+
+
 def _select_attachments(attachments):
     from osaka_cd.discord_import import MAX_MIDI_BYTES, MAX_ZIP_BYTES, MAX_SIDECAR_BYTES, ImportCDError
     if not attachments:
@@ -287,7 +470,10 @@ def _result_text(result):
         duration = (float(song.get('duration_ms') or 0) / 1000)
         notes = song.get('notes') or 0
         name = _text(song.get('name') or song.get('id') or 'CD')
-        lines.append(f'**{name}** · {notes} notas · {duration:g} s')
+        artist = str(song.get('artist') or '').strip()
+        credit = f' · {_text(artist)}' if artist and artist.casefold() not in {
+            'artista não identificado', 'unknown', 'unknown artist'} else ''
+        lines.append(f'**{name}**{credit}\n-# {notes} notas · {duration:g} s')
     if len(songs) > 3:
         lines.append(f'-# Mais {len(songs) - 3} CDs no catálogo.')
     missing = set(result.pending)
@@ -297,7 +483,10 @@ def _result_text(result):
     if 'thumbnail' in missing or 'cover' in missing:
         pending.append('capa')
     if pending:
-        lines.append('-# Ainda pendente: ' + ' e '.join(pending) + '.')
+        lines.append('-# Falta concluir: ' + ' e '.join(pending) + '.')
+    else:
+        lines.append('-# Capa pronta · no menu de CDs.' if result.state == 'activated'
+                     else '-# Capa pronta.')
     if result.state != 'activated' and not result.already_installed:
         lines.append('-# Aguardando a atualização do menu de CDs.')
     return title, '\n'.join(lines) or 'O catálogo de CDs foi atualizado.'
@@ -309,6 +498,7 @@ async def _run_import(session, primary, sidecar):
         ImportCDError, prepare_input, inspect_input, import_cd,
     )
     try:
+        await session.start_progress()
         limit = MAX_ZIP_BYTES if PurePosixPath(primary.filename).suffix.casefold() == '.zip' else MAX_MIDI_BYTES
         data = await _read_attachment(primary, limit)
         metadata = await _read_attachment(sidecar, MAX_SIDECAR_BYTES) if sidecar is not None else None
@@ -325,18 +515,23 @@ async def _run_import(session, primary, sidecar):
 
         async def progress(stage):
             if stage in _PROGRESS:
-                await session.edit(*_PROGRESS[stage])
+                await session.progress(stage)
 
-        for attempt in range(2):
+        while True:
             try:
                 result = await import_cd(prepared, overrides=session.overrides, progress=progress)
                 break
             except ImportCDError as exc:
-                if (attempt or prepared.kind != 'midi' or session.metadata.get('artist')
-                        or exc.code not in {'metadata_ambiguous', 'metadata_unavailable'}):
+                if (prepared.kind != 'midi' or exc.code not in {
+                        'metadata_ambiguous', 'metadata_unavailable', 'artwork_unavailable'}):
                     raise
+                await session.stop_progress()
+                session.resume.clear()
+                session.submitted = False
+                session.cancelled = False
                 session.waiting = True
-                session.view = _DetailsView(session)
+                session.view = _ChoicesView(session, getattr(exc, 'candidates', ()),
+                                           artwork=exc.code == 'artwork_unavailable')
                 if not await session.edit('', '', view=session.view):
                     return
                 try:
@@ -346,10 +541,11 @@ async def _run_import(session, primary, sidecar):
                 session.waiting = False
                 session.view.stop()
                 if session.cancelled:
-                    await session.edit('Importação encerrada', 'Envie o comando com o anexo quando quiser tentar novamente.')
+                    await session.edit('Importação encerrada', 'Você pode enviar o MIDI novamente quando quiser.')
                     return
                 session.metadata = await asyncio.to_thread(inspect_input, prepared, session.overrides)
-        await session.edit(*_result_text(result), color=discord.Color.green())
+                await session.start_progress('discovering')
+        await session.edit(*_result_text(result), color=discord.Color.orange() if result.pending else discord.Color.green())
     except asyncio.CancelledError:
         raise
     except ImportCDError as exc:
@@ -359,6 +555,7 @@ async def _run_import(session, primary, sidecar):
         await session.edit('Não foi possível importar',
             'A importação foi interrompida. Tente novamente com o mesmo anexo.', color=discord.Color.orange())
     finally:
+        await session.stop_progress()
         session.release()
 
 
@@ -369,7 +566,7 @@ async def handle_import_cd(cog, message, *, title=''):
         await _send(message.channel, 'Acesso restrito', 'Só o dono do bot pode importar CDs.')
         return True
     # The bot-wide lease is acquired before the first await after validation.
-    # It covers downloading, an optional modal, conversion and the commit.
+    # It covers downloading, recording selection, conversion and the commit.
     if getattr(bot, _LEASE_ATTRIBUTE, None) is not None:
         await _send(message.channel, 'Importação em andamento', 'Espere o CD atual terminar para enviar outro.')
         return True
@@ -386,7 +583,9 @@ async def handle_import_cd(cog, message, *, title=''):
     setattr(bot, _LEASE_ATTRIBUTE, session)
     scheduled = False
     try:
-        session.response = await _send(message.channel, 'Importando CD', 'Recebendo o anexo e conferindo o arquivo.')
+        session.response = await _send(message.channel, f'{_VINYL} Importando CD',
+            f'**{_text(title or PurePosixPath(primary.filename).stem, 100)}**\nRecebendo seu arquivo…')
+        session.progress_last_edit = asyncio.get_running_loop().time()
         scheduler = getattr(cog, '_schedule_tts_background', None)
         if not callable(scheduler):
             await session.edit('Importação indisponível', 'Tente novamente em alguns instantes.')

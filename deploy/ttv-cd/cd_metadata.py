@@ -330,12 +330,23 @@ class YouTubePlayerAdapter:
         return data
 
     async def search_async(self, query: str, *, seed_video_ids=()) -> list[dict]:
-        found = await self.provider.youtube_search(query, limit=self.limit, include_details=True)
+        # A known original recording is independently useful evidence. A search
+        # quota/provider failure must not prevent its direct metadata lookup.
+        search_error = None
+        try:
+            found = list(await self.provider.youtube_search(query, limit=self.limit, include_details=True))
+        except Exception as error:
+            search_error, found = error, []
         for video_id in seed_video_ids:
             if VIDEO_ID.fullmatch(str(video_id)):
-                item = await self.provider.youtube_video_metadata(video_id)
+                try:
+                    item = await self.provider.youtube_video_metadata(video_id)
+                except Exception:
+                    continue
                 if item:
                     found.append(item)
+        if not found and search_error is not None:
+            raise search_error
         result = []
         for item in found:
             video_id = str((parse_qs(urlparse(item.webpage_url).query).get("v") or [""])[0])
@@ -363,10 +374,16 @@ def _yt_dlp_search(query: str, *, limit: int, seed_video_ids=(), candidate_filte
     proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
     if proxy:
         options["proxy"] = proxy
-    with yt_dlp.YoutubeDL(options) as extractor:
-        found = extractor.extract_info(f"ytsearch{limit}:{query}", download=False) or {}
-    rows = [item for item in found.get("entries", []) if isinstance(item, dict)]
     ids = list(dict.fromkeys(str(item) for item in seed_video_ids if VIDEO_ID.fullmatch(str(item))))
+    search_error = None
+    try:
+        with yt_dlp.YoutubeDL(options) as extractor:
+            found = extractor.extract_info(f"ytsearch{limit}:{query}", download=False) or {}
+        rows = [item for item in found.get("entries", []) if isinstance(item, dict)]
+    except Exception as error:
+        if not ids:
+            raise
+        search_error, rows = error, []
     # Flat search statistics can be unavailable; resolve those entries directly.
     missing = [str(row.get("id")) for row in rows if type(row.get("view_count")) is not int
                and (candidate_filter is None or candidate_filter(row))
@@ -382,6 +399,8 @@ def _yt_dlp_search(query: str, *, limit: int, seed_video_ids=(), candidate_filte
                 if isinstance(detailed, dict):
                     rows = [row for row in rows if row.get("id") != video_id]
                     rows.append(detailed)
+    if not rows and search_error is not None:
+        raise search_error
     return [_candidate(row, source="yt-dlp-public-metadata", query=query) for row in rows]
 
 

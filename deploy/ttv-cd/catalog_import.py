@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -243,6 +244,124 @@ async def _cover_for(meta: dict, chosen: dict, cache_dir: Path) -> tuple[bytes, 
         raise RuntimeError('cover_preparation_failed')
     image = (cache_dir / f"{chosen['video_id']}.jpg").read_bytes()
     return image, _verify_cover(image)
+
+
+def _selected_video(meta: dict, selected: dict, audit: dict) -> dict:
+    """One recording/cover contract shared by MIDI imports and artwork repair."""
+    return {'video_id': selected['video_id'], 'title': clean_metadata_title(selected['title']),
+            'artist': meta['artist'], 'search_query': meta['search_query'],
+            'title_aliases': [meta['title'], *meta['aliases']],
+            'artist_aliases': list(meta['artist_aliases']), 'channel': selected.get('channel', ''),
+            'duration': selected.get('duration'),
+            'webpage_url': f"https://www.youtube.com/watch?v={selected['video_id']}",
+            'thumbnail_url': selected.get('thumbnail') or f"https://i.ytimg.com/vi/{selected['video_id']}/hqdefault.jpg",
+            'view_count': selected['view_count'],
+            'view_count_source': selected.get('source', 'verified-candidates'),
+            'checked_at': selected.get('checked_at') or datetime.now(timezone.utc).isoformat(),
+            'inspected_candidates': audit.get('inspected_candidates', 0),
+            'selection_basis': 'highest-view-count-among-matching-verified-candidates',
+            'selection_audit': audit, 'source_url': f"https://www.youtube.com/watch?v={selected['video_id']}"}
+
+
+def _metadata_overlay(root: Path, melody: dict, video: dict, image: bytes,
+                      destination: Path) -> dict:
+    """Export only display metadata and its verified cover, inheriting all music.
+
+    A small private validation base models the existing CD. Its arrangement and
+    audio are copied byte for byte for validation and are never included in the
+    overlay, so a metadata repair cannot replace their original representations.
+    """
+    identity = melody['id']
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='osaka-metadata-overlay-') as temporary:
+        base = Path(temporary) / 'base'
+        _atomic(base / 'cogs/tts/cd_song_scores.json', _json_bytes([melody]))
+        _atomic(base / 'cogs/tts/cd_song_videos.json', _json_bytes({'version': 1, 'songs': {}}))
+        preview = _manifest(root).get(identity)
+        _atomic(base / 'cogs/tts/cd/previews/index.json', _json_bytes({identity: preview} if preview else {}))
+        relatives = [('arrangements', 'json'), ('previews', 'mp3')]
+        for folder, extension in relatives:
+            source = root / folder / f'{identity}.{extension}'
+            if source.is_file() and not source.is_symlink():
+                target = base / 'cogs/tts/cd' / folder / source.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+        manifest_melody = dict(melody)
+        arrangement_file = base / f'cogs/tts/cd/arrangements/{identity}.json'
+        if melody.get('arrangement_path') and arrangement_file.is_file():
+            manifest_melody['_arrangement_file_sha256'] = hashlib.sha256(arrangement_file.read_bytes()).hexdigest()
+        _atomic(base / f'cogs/tts/cd/packages/{identity}.json', _json_bytes(
+            _package_manifest(manifest_melody, video, preview, 'ready' if preview else 'pending_sample')))
+        package = Path(temporary) / 'metadata.zip'
+        with zipfile.ZipFile(package, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('cogs/tts/cd_song_scores.json', _json_bytes([melody]))
+            archive.writestr('cogs/tts/cd_song_videos.json', _json_bytes({'version': 1, 'songs': {identity: video}}))
+            archive.writestr(f"cogs/tts/cd/thumbnails/{video['video_id']}.jpg", image)
+        report = validate_package(package, base_dir=base, require_cd_only=True, audio_probe=False)
+        _atomic(destination, package.read_bytes())
+    report.update(zip_path=str(destination), zip_sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
+                  zip_bytes=destination.stat().st_size)
+    return report
+
+
+async def repair_metadata(identity: str, *, root: Path, metadata: dict,
+                          cache_dir: Path = THUMB_ROOT, candidates: Path | None = None,
+                          export_zip: Path | None = None) -> dict:
+    """Repair an installed CD through the normal recording and cover importer.
+
+    No source MIDI is required. The installed English/display name, notes,
+    revision, hashes, arrangement bytes and audio remain unchanged. Only artist,
+    source URL, verified recording metadata and cover can change. A provider or
+    image failure writes nothing and exports no package.
+    """
+    if not isinstance(identity, str) or len(identity) > 90 or not SLUG.fullmatch(identity):
+        raise ImportInputError('invalid_cd_id')
+    if not isinstance(metadata, dict):
+        raise ImportInputError('invalid_metadata')
+    root, cache_dir = Path(root).expanduser(), Path(cache_dir).expanduser()
+    songs, videos = open_catalog(root)
+    original = next((song for song in songs if song.get('id') == identity), None)
+    if original is None:
+        raise ImportInputError('song_not_in_local_catalog')
+    # Reuse the sidecar validator; no source MIDI or uploaded executable exists.
+    with tempfile.TemporaryDirectory(prefix='osaka-repair-input-') as temporary:
+        path = Path(temporary) / (identity + '.mid')
+        _atomic(path.with_suffix('.json'), _json_bytes({**metadata, 'id': identity, 'title': original['name']}))
+        meta = _meta_from_path(path)
+    pending = []
+    try:
+        if not meta['artist'] or normalize_text(meta['artist']) in {'artista nao identificado', 'unknown artist', 'unknown'}:
+            raise ImportInputError('artist_unspecified')
+        search = await asyncio.to_thread(_search, meta, candidate_file=candidates,
+                                        duration=meta['expected_song_duration_seconds'])
+        video = _selected_video(meta, search['selected'], search['audit'])
+    except Exception as exc:
+        pending.extend([{'artifact': 'metadata', 'reason': type(exc).__name__},
+                        {'artifact': 'thumbnail', 'reason': 'pending_metadata'}])
+        return {'ok': False, 'id': identity, 'pending_artifacts': pending}
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        image, checksum = await _cover_for(meta, video, cache_dir)
+    except Exception as exc:
+        return {'ok': False, 'id': identity,
+                'pending_artifacts': [{'artifact': 'thumbnail', 'reason': type(exc).__name__}]}
+    melody = dict(original, artist=meta['artist'], source_url=video['source_url'])
+    video.update(id=identity, revision=original.get('revision', 1),
+                 source_sha256=original['source_sha256'], score_sha256=score_sha256(original),
+                 thumbnail_sha256=checksum)
+    destination = Path(export_zip).expanduser() if export_zip else root / 'exports' / f'{identity}-metadata.zip'
+    verification = _metadata_overlay(root, melody, video, image, destination)
+    # Only a completely validated metadata+cover overlay becomes local truth.
+    songs = [melody if song.get('id') == identity else song for song in songs]
+    videos['songs'][identity] = video
+    _atomic(root / 'thumbnails' / f"{video['video_id']}.jpg", image)
+    _atomic(root / 'cd_song_scores.json', _json_bytes(songs))
+    _atomic(root / 'cd_song_videos.json', _json_bytes(videos))
+    return {'ok': True, 'id': identity, 'pending_artifacts': [],
+            'video_id': video['video_id'], 'source_sha256': original['source_sha256'],
+            'score_sha256': score_sha256(original), 'revision': original.get('revision', 1),
+            'zip': verification['zip_path'], 'zip_sha256': verification['zip_sha256'],
+            'zip_bytes': verification['zip_bytes'], 'validation': verification}
 
 
 def _resource_ready() -> bool:
@@ -534,17 +653,7 @@ async def import_midi(path: Path, *, root: Path = DATA_ROOT, cache_dir: Path = T
             expected_duration = extraction.get('source_duration_ms', 0) / 1000
         search = await asyncio.to_thread(_search, meta, candidate_file=candidates, duration=expected_duration)
         selected, selection_audit = search['selected'], search['audit']
-        video = {'video_id': selected['video_id'], 'title': clean_metadata_title(selected['title']),
-                 'artist': meta['artist'], 'search_query': meta['search_query'], 'title_aliases': [meta['title'], *meta['aliases']],
-                 'artist_aliases': list(meta['artist_aliases']), 'channel': selected.get('channel', ''),
-                 'duration': selected.get('duration'),
-                 'webpage_url': f"https://www.youtube.com/watch?v={selected['video_id']}",
-                 'thumbnail_url': selected.get('thumbnail') or f"https://i.ytimg.com/vi/{selected['video_id']}/hqdefault.jpg",
-                 'view_count': selected['view_count'], 'view_count_source': selected.get('source', 'verified-candidates'),
-                 'checked_at': selected.get('checked_at') or datetime.now(timezone.utc).isoformat(),
-                 'inspected_candidates': selection_audit.get('inspected_candidates', 0),
-                 'selection_basis': 'highest-view-count-among-matching-verified-candidates', 'selection_audit': selection_audit,
-                 'source_url': f"https://www.youtube.com/watch?v={selected['video_id']}"}
+        video = _selected_video(meta, selected, selection_audit)
         if previous_video and previous_video.get('video_id') == video['video_id']:
             if previous_video.get('thumbnail_sha256'):
                 video['thumbnail_sha256'] = previous_video['thumbnail_sha256']

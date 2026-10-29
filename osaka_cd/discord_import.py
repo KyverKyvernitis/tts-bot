@@ -44,16 +44,20 @@ _ERRORS = {
     'storage_unavailable': 'Não consegui salvar o CD agora. O catálogo anterior foi preservado.',
     'storage_quota': 'Não há espaço disponível para salvar esse CD.',
     'superseded': 'Uma versão mais recente desse CD já foi publicada. Envie o comando novamente.',
-    'metadata_ambiguous': 'Encontrei músicas diferentes com esse nome. Informe o artista para escolher a certa.',
-    'metadata_unavailable': 'Não consegui identificar o artista agora. Você pode informá-lo para continuar.',
+    'metadata_ambiguous': 'Escolha a música certa para continuar a importação.',
+    'metadata_unavailable': 'A busca não encontrou uma gravação agora. Tente buscar novamente.',
+    'artwork_unavailable': 'A capa ainda não ficou pronta. Escolha outra gravação ou tente novamente.',
     'metadata_invalid': 'Confira o nome da música e tente novamente.',
 }
 
 
 class ImportCDError(ValueError):
-    def __init__(self, code='invalid_input', public_message=None):
-        self.code = code if code in _ERRORS or public_message else 'import_unavailable'
+    def __init__(self, code='invalid_input', public_message=None, *, candidates=()):
+        self.code = code if isinstance(code, str) and (code in _ERRORS or public_message) else 'import_unavailable'
         self.public_message = public_message or _ERRORS[self.code]
+        # Provider objects never reach Discord. Only bounded music identities
+        # cross the child-process and component-selection boundary.
+        self.candidates = _safe_metadata_choices(candidates)
         super().__init__(self.public_message)
 
 
@@ -74,6 +78,56 @@ class ImportResult:
     generation: str | None = None
     state: str = 'applied'
     job_id: str | None = None
+
+
+def _safe_metadata_choices(rows):
+    """Copy at most five import choices, dropping paths, URLs and extra fields."""
+    if not isinstance(rows, (list, tuple)):
+        return ()
+    result, seen = [], set()
+
+    def text(value, limit):
+        if (not isinstance(value, str) or not 0 < len(value.strip()) <= limit
+                or any(unicodedata.category(character).startswith('C') for character in value)):
+            return None
+        return value.strip()
+
+    for raw in rows[:50]:
+        if not isinstance(raw, dict):
+            continue
+        title, artist = text(raw.get('title'), 100), text(raw.get('artist'), 160)
+        if not title or not artist or re.search(r'https?://|www\.', title + artist, re.IGNORECASE):
+            continue
+        choice = {'title': title, 'artist': artist}
+        valid = True
+        for field in ('aliases', 'artist_aliases', 'seed_video_ids'):
+            values = raw.get(field, [])
+            if not isinstance(values, (list, tuple)) or len(values) > 12:
+                valid = False
+                break
+            copied = []
+            for value in values:
+                value = text(value, 160)
+                if value is None or field == 'seed_video_ids' and not _VIDEO.fullmatch(value):
+                    valid = False
+                    break
+                if value not in copied:
+                    copied.append(value)
+            if not valid:
+                break
+            choice[field] = copied
+        query = text(raw.get('search_query', f'{title} {artist}'), 320)
+        if not valid or query is None:
+            continue
+        choice['search_query'] = query
+        key = (unicodedata.normalize('NFKC', title).casefold(),
+               unicodedata.normalize('NFKC', artist).casefold(), tuple(choice['seed_video_ids']))
+        if key not in seen:
+            seen.add(key)
+            result.append(choice)
+        if len(result) == 5:
+            break
+    return tuple(result)
 
 
 def _json(data, code='invalid_sidecar'):
@@ -409,8 +463,11 @@ async def _run_child(directory, mode, report_name, *, timeout_seconds):
         if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= MAX_SIDECAR_BYTES:
             raise ImportCDError('import_unavailable')
         result = _read(path, {})
+        if not isinstance(result, dict):
+            raise ImportCDError('import_unavailable')
         if process.returncode != 0 or not result.get('ok'):
-            raise ImportCDError(result.get('code', 'import_unavailable'))
+            raise ImportCDError(result.get('code', 'import_unavailable'),
+                                candidates=result.get('candidates', ()))
         return result
     finally:
         cleanup = asyncio.create_task(_stop_process(process))
@@ -434,18 +491,35 @@ async def _run_discovery(directory, *, timeout_seconds=45):
         return await _run_child(directory, '--discover', 'discovery.json', timeout_seconds=timeout_seconds)
     except ImportCDError as exc:
         if exc.code in {'import_timeout', 'import_unavailable'}:
-            raise ImportCDError('metadata_unavailable') from None
+            raise ImportCDError('metadata_unavailable', candidates=exc.candidates) from None
         raise
 
 
 def _discover_metadata(directory):
     sys.path.insert(0, str(_ROOT / 'deploy/ttv-cd'))
-    from .title_metadata import resolve_title_metadata
+    from .title_metadata import discover_title_candidates, resolve_title_metadata
     metadata = _read(directory / 'source.json', {})
+    if metadata.get('choices_only') is True:
+        choices = discover_title_candidates(metadata.get('title', ''),
+                                             artist=metadata.get('artist', ''))
+        _dump(directory / 'discovery.json', {'ok': True,
+            'candidates': _safe_metadata_choices(choices)})
+        return
     result = resolve_title_metadata(metadata.get('title', ''))
     allowed = {'title', 'artist', 'aliases', 'artist_aliases', 'seed_video_ids', 'search_query'}
     _dump(directory / 'discovery.json', {'ok': True,
         'metadata': {key: value for key, value in result.items() if key in allowed}})
+
+
+async def _choices_for_pending(directory, metadata):
+    """A failed cover/recording match remains reviewable before publication."""
+    await _off_loop(_dump, directory / 'source.json', {
+        'title': metadata['title'], 'artist': metadata.get('artist', ''), 'choices_only': True})
+    try:
+        found = await _run_discovery(directory)
+    except ImportCDError as exc:
+        return exc.candidates
+    return _safe_metadata_choices(found.get('candidates', ()))
 
 
 async def _prepare_importer(directory):
@@ -631,6 +705,18 @@ async def import_cd(prepared, *, overrides=None, progress=None, store=None):
                 await _progress(progress, 'importing')
                 imported = await _run_importer(directory)
                 importer_pending = tuple((imported or {}).get('pending', ()))
+                package_report, package_scores, package_videos = await _off_loop(
+                    _package_info, package, snapshot['root'])
+                missing = set(importer_pending) | set(await _off_loop(_pending_artifacts,
+                    package_report, package_scores, package_videos, snapshot['root']))
+                if missing & {'metadata', 'thumbnail', 'cover'}:
+                    # Do not turn an unsuccessful recording/cover search into
+                    # a successful import with no way to pick another match.
+                    # The old catalog is untouched while Discord shows choices.
+                    await _progress(progress, 'artwork')
+                    choices = await _choices_for_pending(directory, metadata)
+                    raise ImportCDError('metadata_ambiguous' if 'metadata' in missing
+                                        else 'artwork_unavailable', candidates=choices)
             else:
                 request_hash = None
                 await _off_loop(package.write_bytes, prepared.data)
@@ -677,7 +763,8 @@ def _main():
         else:
             code = 'invalid_midi' if type(exc).__name__ in {'MidiExtractionError', 'ImportInputError'} else 'import_unavailable'
             report_name = 'report.json'
-        _dump(directory / report_name, {'ok': False, 'code': code})
+        _dump(directory / report_name, {'ok': False, 'code': code,
+            'candidates': _safe_metadata_choices(getattr(exc, 'candidates', ()))})
         return 1
 
 

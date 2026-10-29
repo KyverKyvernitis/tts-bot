@@ -20,12 +20,22 @@ from osaka_cd import discord_import as service
 from osaka_cd.store import RuntimeStore, _contract
 
 
-async def offline_importer(directory):
-    """Run the actual import pipeline with only its metadata provider offline."""
+async def verified_importer(directory):
+    """Run the real importer with deterministic, ready external music artwork."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deploy/ttv-cd'))
     import catalog_import
-    from cd_metadata import MetadataSearchError
-    with patch.object(catalog_import, '_search', side_effect=MetadataSearchError('offline')):
+    metadata = json.loads((directory / 'source.json').read_text())
+    output = io.BytesIO()
+    Image.new('RGB', (32, 32), 'red').save(output, 'JPEG')
+    image = output.getvalue()
+    search = {'selected': {'video_id': 'abcdefghijk',
+        'title': f"{metadata['artist']} - {metadata['title']}",
+        'channel': metadata['artist'], 'view_count': 1234,
+        'duration': 180, 'source': 'controlled-provider'},
+        'audit': {'accepted_candidates': 1, 'inspected_candidates': 1}}
+    with patch.object(catalog_import, '_search', return_value=search), \
+         patch.object(catalog_import, '_cover_for', new=AsyncMock(return_value=(
+             image, hashlib.sha256(image).hexdigest()))):
         await service._prepare_importer(directory)
     return json.loads((directory / 'report.json').read_text())
 
@@ -275,14 +285,24 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, 'activated')
         self.assertTrue(self.store.job(result.job_id)['installed'])
 
-    async def test_importer_metadata_outage_is_reported_even_when_old_cover_is_valid(self):
+    async def test_importer_metadata_outage_preserves_old_cover_and_catalog_until_a_choice(self):
         self.seed('demo')
+        before = self.store.snapshot()
+        old_root = Path(before['root'])
+        old_cover = (old_root / 'cogs/tts/cd/thumbnails/abcdefghijk.jpg').read_bytes()
         async def imported(directory):
             package(directory / 'package.zip', 'demo')
             return {'pending': ['metadata']}
-        with patch.object(service, '_run_importer', side_effect=imported):
-            result = await service.import_cd(service.prepare_input('Demo - Demo.mid', midi()), store=self.store)
-        self.assertEqual(result.pending, ('metadata',))
+        choices = [{'title': 'Demo', 'artist': 'Demo', 'seed_video_ids': ['abcdefghijk']}]
+        with patch.object(service, '_run_importer', side_effect=imported), \
+             patch.object(service, '_choices_for_pending', new=AsyncMock(return_value=choices)):
+            with self.assertRaises(service.ImportCDError) as caught:
+                await service.import_cd(service.prepare_input('Demo - Demo.mid', midi()), store=self.store)
+        self.assertEqual(caught.exception.code, 'metadata_ambiguous')
+        self.assertEqual(caught.exception.candidates[0]['artist'], 'Demo')
+        self.assertEqual(self.store.snapshot()['generation'], before['generation'])
+        self.assertEqual(self.store.snapshot()['versions'], before['versions'])
+        self.assertEqual((old_root / 'cogs/tts/cd/thumbnails/abcdefghijk.jpg').read_bytes(), old_cover)
 
     async def test_automatic_same_title_other_artist_does_not_replace_another_cd(self):
         self.seed('demo')
@@ -317,7 +337,7 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
         self.store.process(self.store.receive(path)['job_id'])
         self.assertIsNone(service._existing_midi(self.store.snapshot(), metadata, marker))
 
-    @patch.object(service, '_run_importer', new=offline_importer)
+    @patch.object(service, '_run_importer', new=verified_importer)
     async def test_real_midi_reimport_preserves_matching_generated_sample_and_old_generation(self):
         prepared = service.prepare_input('Demo - Demo.mid', midi())
         initial = await service.import_cd(prepared, store=self.store)
@@ -346,9 +366,14 @@ class PublicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(published['applied'], published)
         old_root = Path(self.store.snapshot()['root'])
         old_index = (old_root / _contract().PREVIEWS).read_bytes()
-        again = await service.import_cd(prepared, store=self.store)
+        # A metadata-only adjustment forces actual preparation again instead
+        # of taking the ready-import cache, while keeping the same music.
+        updated = service.prepare_input('Demo - Demo.mid', midi(), b'{"aliases":["Demo Alias"]}')
+        again = await service.import_cd(updated, store=self.store)
         self.assertTrue(again.applied)
+        self.assertFalse(again.already_installed)
         latest_root = Path(self.store.snapshot()['root'])
+        self.assertNotEqual(latest_root, old_root)
         self.assertEqual((latest_root / 'cogs/tts/cd/previews/demo.mp3').read_bytes(), audio)
         self.assertEqual((old_root / 'cogs/tts/cd/previews/demo.mp3').read_bytes(), audio)
         self.assertEqual((old_root / _contract().PREVIEWS).read_bytes(), old_index)

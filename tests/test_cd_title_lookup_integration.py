@@ -76,7 +76,7 @@ def pipeline(tmp_path, monkeypatch):
             result = title_metadata.resolve_title_metadata(requested['title'],
                 candidates=rows, vocadb_candidates=[])
         except title_metadata.TitleMetadataError as exc:
-            raise service.ImportCDError(exc.code) from None
+            raise service.ImportCDError(exc.code, candidates=exc.candidates) from None
         return {'ok': True, 'metadata': result}
 
     async def prepare(directory, **kwargs):
@@ -178,7 +178,7 @@ async def test_name_alone_imports_real_cover_and_reuses_verified_lookup(pipeline
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_title_opens_form_only_after_discovery_and_keeps_catalog(pipeline):
+async def test_ambiguous_title_waits_for_a_real_choice_before_importing_its_cover(pipeline):
     pipeline.rows.extend(_candidates('Other Composer', '12345678901'))
     pipeline.rows[1]['view_count'] = 999999
     cog, message, _response, _attachment, tasks = _context()
@@ -193,11 +193,26 @@ async def test_ambiguous_title_opens_form_only_after_discovery_and_keeps_catalog
     assert pipeline.discovery_titles == ['Circling Rooms']
     assert not pipeline.image_requests and not pipeline.provider_queries
     assert pipeline.store.snapshot()['generation'] == before
+    assert isinstance(session.view, ui._ChoicesView)
+    assert len(session.view.select.options) == 2
+    assert {row['artist'] for row in session.view.candidates} == {'Circuit Composer', 'Other Composer'}
     interaction = SimpleNamespace(user=message.author, response=SimpleNamespace(
         defer=AsyncMock(), send_message=AsyncMock()))
-    await session.view.cancel(interaction)
-    await asyncio.wait_for(asyncio.gather(*tasks), 3)
-    assert pipeline.store.snapshot()['generation'] == before
+    # A view count does not choose a different composer on the owner's behalf.
+    # The server-side selection is then fed through the real importer/converter.
+    selected = next(index for index, row in enumerate(session.view.candidates)
+                    if row['artist'] == 'Circuit Composer')
+    session.view.select._values = [str(selected)]
+    await session.view.choose(interaction)
+    await asyncio.wait_for(asyncio.gather(*tasks), 10)
+    current = Path(pipeline.store.snapshot()['root'])
+    score = json.loads((current / _contract().SCORES).read_text())[0]
+    video = json.loads((current / _contract().VIDEOS).read_text())['songs'][score['id']]
+    assert score['artist'] == 'Circuit Composer'
+    assert video['video_id'] == 'abcdefghijk'
+    assert pipeline.image_requests and pipeline.provider_queries
+    assert _contract().validate_cd_tree(current, [score['id']])['artifacts'][score['id']]['thumbnail'] == 'ready'
+    interaction.response.defer.assert_awaited_once()
     assert not hasattr(cog.bot, '_osaka_cd_import_session')
 
 

@@ -233,6 +233,8 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         start_catalog_watch(self)
         from osaka_cd.bundled import refresh_bundled_cd_artwork
         self._schedule_tts_background(refresh_bundled_cd_artwork())
+        from osaka_cd.import_artwork_repair import refresh_imported_cd_artwork
+        self._schedule_tts_background(refresh_imported_cd_artwork())
         if TTS_BOOT_WARMUP_ENABLED:
             self._schedule_tts_background(self._boot_warmup())
         if self._voice_auto_restore_enabled:

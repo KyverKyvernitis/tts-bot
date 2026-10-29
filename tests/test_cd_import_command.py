@@ -56,6 +56,14 @@ def _result(**updates):
     return SimpleNamespace(**values)
 
 
+def _choices(count=5):
+    return [{'title': f'Song {index + 1}', 'artist': f'Artist {index + 1}',
+             'aliases': [], 'artist_aliases': [],
+             'seed_video_ids': [f'{index:011d}'],
+             'search_query': f'Song {index + 1} Artist {index + 1}'}
+            for index in range(count)]
+
+
 def _interaction(user_id=42):
     return SimpleNamespace(user=SimpleNamespace(id=user_id),
         response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock(), defer=AsyncMock()))
@@ -157,7 +165,7 @@ async def test_midi_auto_import_edits_one_real_v2_card_with_no_mentions():
         await tasks[0]
     assert imported.await_count == 1
     assert message.channel.send.await_count == 1
-    assert response.edit.await_count == 3
+    assert 1 <= response.edit.await_count <= 3
     assert not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
     payloads = [message.channel.send.await_args.kwargs, *[call.kwargs for call in response.edit.await_args_list]]
     for kwargs in payloads:
@@ -171,6 +179,8 @@ async def test_midi_auto_import_edits_one_real_v2_card_with_no_mentions():
         assert payload['allowed_mentions']['parse'] == []
     final = _contents(response.edit.await_args.kwargs['view'])
     assert 'CD importado' in final and '86 notas' in final and '16.008 s' in final
+    assert 'Vinyl_Music_loading' in _contents(message.channel.send.await_args.kwargs['view'])
+    assert 'Vinyl_Music_loading' not in final
 
 
 @pytest.mark.asyncio
@@ -238,63 +248,67 @@ async def test_global_busy_is_reserved_before_downloading_and_released_after_can
 
 
 @pytest.mark.asyncio
-async def test_missing_artist_waits_for_owner_modal_then_runs_once():
-    cog, message, response, tasks = _setup(attachments=[_attachment('song.mid')])
-    with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
-         patch.object(service, 'inspect_input', return_value={'title': 'Song', 'artist': '', 'start_ms': None}), \
-         patch.object(service, 'import_cd', new=AsyncMock(side_effect=[service.ImportCDError('metadata_ambiguous'), _result()])) as imported:
+async def test_missing_artist_waits_for_five_owner_choices_and_keeps_crop_then_runs_once():
+    cog, message, response, tasks = _setup(attachments=[_attachment('Song.mid'),
+        _attachment('Song.json', b'{"start_ms":95600,"max_duration_ms":29500}')])
+    with patch.object(service, 'import_cd', new=AsyncMock(side_effect=[
+            service.ImportCDError('metadata_ambiguous', candidates=_choices()), _result()])) as imported:
         await ui.handle_import_cd(cog, message)
         await _tick_until(lambda: getattr(cog.bot, ui._LEASE_ATTRIBUTE).waiting)
         session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
-        assert isinstance(session.view, ui._DetailsView)
+        view = session.view
+        assert isinstance(view, ui._ChoicesView)
+        assert len(view.select.options) == 5
         imported.assert_awaited_once()
+        view.select._values = ['0']
         unauthorized = _interaction(999)
-        await session.view.details(unauthorized)
+        await view.choose(unauthorized)
         unauthorized.response.send_modal.assert_not_awaited()
+        assert session.waiting and not session.submitted
         authorized = _interaction()
-        await session.view.details(authorized)
-        modal = authorized.response.send_modal.await_args.args[0]
-        modal.song._value = 'Song'
-        modal.artist._value = 'Artist'
-        modal.start._value = '1:35.6'
-        modal.end._value = '2:05.1'
-        submit = _interaction()
-        await modal.on_submit(submit)
+        await view.choose(authorized)
+        authorized.response.send_modal.assert_not_awaited()
         await tasks[0]
-        assert imported.await_args.kwargs['overrides'] == {
-            'title': 'Song', 'artist': 'Artist', 'start_ms': 95600, 'max_duration_ms': 29500}
+        overrides = imported.await_args.kwargs['overrides']
+        assert overrides['title'] == 'Song' and overrides['artist'] == 'Artist 1'
+        retried = service.inspect_input(imported.await_args.args[0], overrides)
+        assert retried['start_ms'] == 95600 and retried['max_duration_ms'] == 29500
+        assert overrides['aliases'] == ['Song 1']
+        assert overrides['seed_video_ids'] == ['00000000000']
         assert imported.await_count == 2
         repeat = _interaction()
-        await modal.on_submit(repeat)
+        await view.choose(repeat)
         assert imported.await_count == 2
         assert 'encerrada' in _contents(repeat.response.send_message.await_args.kwargs['view'])
 
 
 @pytest.mark.asyncio
-async def test_invalid_modal_times_can_be_fixed_without_publishing():
+async def test_invalid_choice_can_be_fixed_without_publishing():
     cog, message, response, tasks = _setup(attachments=[_attachment('song.mid')])
     with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
          patch.object(service, 'inspect_input', return_value={'title': 'Song', 'artist': ''}), \
-         patch.object(service, 'import_cd', new=AsyncMock(side_effect=[service.ImportCDError('metadata_ambiguous'), _result()])) as imported:
+         patch.object(service, 'import_cd', new=AsyncMock(side_effect=[
+             service.ImportCDError('metadata_ambiguous', candidates=_choices(2)), _result()])) as imported:
         await ui.handle_import_cd(cog, message)
         await _tick_until(lambda: getattr(cog.bot, ui._LEASE_ATTRIBUTE).waiting)
         session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
-        modal = ui._DetailsModal(session)
-        modal.song._value, modal.artist._value = 'Song', 'Artist'
-        modal.start._value, modal.end._value = '50', '10'
+        view = session.view
+        view.select._values = ['99']
         invalid = _interaction()
-        await modal.on_submit(invalid)
+        await view.choose(invalid)
         imported.assert_awaited_once()
         assert session.waiting and not session.submitted
-        assert 'Confira os dados' in _contents(invalid.response.send_message.await_args.kwargs['view'])
-        modal.stop()
-        await session.view.cancel(_interaction())
+        assert 'Escolha uma música' in _contents(invalid.response.send_message.await_args.kwargs['view'])
+        view.select._values = ['1']
+        await view.choose(_interaction())
         await tasks[0]
+        assert imported.await_count == 2
+        assert imported.await_args.kwargs['overrides']['artist'] == 'Artist 2'
     assert not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
 
 
 @pytest.mark.asyncio
-async def test_waiting_form_timeout_releases_global_busy():
+async def test_waiting_choices_timeout_releases_global_busy():
     cog, message, response, tasks = _setup(attachments=[_attachment('song.mid')])
     with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
          patch.object(service, 'inspect_input', return_value={'title': 'Song', 'artist': ''}), \
@@ -309,7 +323,7 @@ async def test_waiting_form_timeout_releases_global_busy():
 
 
 @pytest.mark.asyncio
-async def test_failed_form_card_releases_busy_instead_of_waiting_for_invisible_modal():
+async def test_failed_choice_card_releases_busy_instead_of_waiting_for_invisible_select():
     cog, message, response, tasks = _setup(attachments=[_attachment('song.mid')])
     response.edit.side_effect = RuntimeError('simulated unreachable card')
     with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
@@ -322,21 +336,22 @@ async def test_failed_form_card_releases_busy_instead_of_waiting_for_invisible_m
 
 
 @pytest.mark.asyncio
-async def test_modal_ack_failure_does_not_strand_valid_submission():
+async def test_choice_ack_failure_does_not_strand_valid_submission():
     cog, message, response, tasks = _setup(attachments=[_attachment('song.mid')])
     with patch.object(service, 'prepare_input', return_value=SimpleNamespace(kind='midi')), \
          patch.object(service, 'inspect_input', return_value={'title': 'Song', 'artist': ''}), \
-         patch.object(service, 'import_cd', new=AsyncMock(side_effect=[service.ImportCDError('metadata_ambiguous'), _result()])) as imported:
+         patch.object(service, 'import_cd', new=AsyncMock(side_effect=[
+             service.ImportCDError('metadata_ambiguous', candidates=_choices(1)), _result()])) as imported:
         await ui.handle_import_cd(cog, message)
         await _tick_until(lambda: getattr(cog.bot, ui._LEASE_ATTRIBUTE).waiting)
         session = getattr(cog.bot, ui._LEASE_ATTRIBUTE)
-        modal = ui._DetailsModal(session)
-        modal.song._value, modal.artist._value = 'Song', 'Artist'
+        view = session.view
+        view.select._values = ['0']
         submit = _interaction()
         submit.response.defer.side_effect = RuntimeError('simulated expired interaction')
-        await modal.on_submit(submit)
+        await view.choose(submit)
         await asyncio.wait_for(tasks[0], 1)
-        modal.stop()
+        view.stop()
     assert imported.await_count == 2
     assert not hasattr(cog.bot, ui._LEASE_ATTRIBUTE)
 
