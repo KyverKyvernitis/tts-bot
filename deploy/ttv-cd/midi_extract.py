@@ -32,6 +32,9 @@ MAX_DURATION_MS = 60_000
 MAX_NOTES = 128
 MIN_NOTE_MS = 40
 MIN_PITCH, MAX_PITCH = 36, 96
+# An author can explicitly retain one voice without supplying an import sidecar.
+# Only an exact text meta event at the beginning of a valid SMF is recognized.
+MONO_PLAYBACK_MARKER = b"OSAKA_CD_MONO=1"
 
 
 class MidiExtractionError(ValueError):
@@ -67,6 +70,7 @@ class _Track:
     sustain_events: list[tuple[int, int, int]] = field(default_factory=list)
     key_signatures: list[tuple[int, int, int]] = field(default_factory=list)
     time_signatures: list[tuple[int, int, int, int, int]] = field(default_factory=list)
+    monophonic_playback: bool = False
 
 
 class _Reader:
@@ -118,6 +122,7 @@ def _read_track(data: bytes, index: int, counter: list[int]) -> _Track:
     program_changes, sustain_events, keys, meters = [], [], [], []
     issues: dict[str, int] = defaultdict(int)
     ended = False
+    monophonic_playback = False
 
     def finish(key: tuple[int, int], end: int) -> None:
         start, velocity, serial = active[key].popleft()
@@ -195,6 +200,8 @@ def _read_track(data: bytes, index: int, counter: list[int]) -> _Track:
                 tempos.append((tick, tempo))
             elif kind == 0x03:
                 name = _text(payload)
+            elif kind == 0x01 and tick == 0 and payload == MONO_PLAYBACK_MARKER:
+                monophonic_playback = True
             elif kind == 0x05:
                 text = _text(payload, lyric=True)
                 if text:
@@ -227,7 +234,7 @@ def _read_track(data: bytes, index: int, counter: list[int]) -> _Track:
             issues["unclosed_notes_at_track_end"] += 1
     notes.sort(key=lambda n: (n.start, n.pitch, n.end, n.serial))
     return _Track(index, name, notes, lyrics, tempos, programs, tick, dict(issues),
-                  program_changes, sustain_events, keys, meters)
+                  program_changes, sustain_events, keys, meters, monophonic_playback)
 
 
 class _Timeline:
@@ -716,6 +723,9 @@ def extract_arrangement(path: str | Path, *, track: int | None = None,
         raise MidiExtractionError("O MIDI ultrapassa 8 MiB.", code="midi_too_large")
     data = path.read_bytes()
     tracks, timeline = _read_midi(data)
+    monophonic_playback = any(item.monophonic_playback for item in tracks)
+    if monophonic_playback:
+        max_parts = 1
     if track is not None and track >= len(tracks):
         raise MidiExtractionError("A faixa escolhida não existe.", code="invalid_selection")
     if channel == 9:
@@ -848,6 +858,8 @@ def extract_arrangement(path: str | Path, *, track: int | None = None,
                                  "max_parts": max_parts, "selection_ambiguous": len(semantic_peers) > 1,
                                  "generated_harmonies": False, "vocal_transcription_confirmed": False},
                    "warnings": warnings}
+    if monophonic_playback:
+        arrangement["source"]["monophonic_playback"] = True
     arrangement = validate_arrangement(arrangement)
     extraction = {"version": 2, "algorithm": ARRANGEMENT_ALGORITHM_VERSION,
                   "source_sha256": arrangement["source"]["sha256"], "source_duration_ms": duration,

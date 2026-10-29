@@ -9,6 +9,7 @@ import re
 from .melodies import DEFAULT_MELODY_ID, get_melody, score_sha256
 from .cd_assets import FILES, file_signature
 from osaka_cd.runtime import data_root, pin_snapshot, register_validator
+from osaka_cd.catalog_policy import is_retired_cd
 
 _ROOT = Path(__file__).parent / 'cd' / 'previews'
 _ID = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*\Z')
@@ -64,7 +65,8 @@ def prepared_sample(melody_id: str, preferences: dict) -> bytes | None:
 
 def _prepared_sample(melody_id: str, preferences: dict) -> bytes | None:
     if (not isinstance(melody_id, str) or not _ID.fullmatch(melody_id)
-            or melody_id == DEFAULT_MELODY_ID or not isinstance(preferences, dict)):
+            or melody_id == DEFAULT_MELODY_ID or is_retired_cd(melody_id)
+            or not isinstance(preferences, dict)):
         return None
     try:
         # _cd_preview_mp3 sings absolute score pitches/timing and always forces

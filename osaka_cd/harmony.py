@@ -111,9 +111,10 @@ def _phrase_guides(notes):
 
 
 def harmonize_monophonic(value: dict) -> dict:
-    """Return a fresh validated arrangement, adding one voice only to mono CDs."""
+    """Add one voice unless the MIDI explicitly requests monophonic playback."""
     result = validate_arrangement(value)
-    if len(result["parts"]) != 1:
+    if (len(result["parts"]) != 1
+            or result.get("source", {}).get("monophonic_playback") is True):
         return result
     lead = result["parts"][0]
     notes = lead["notes"]

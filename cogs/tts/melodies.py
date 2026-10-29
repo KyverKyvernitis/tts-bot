@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import threading
 from osaka_cd.runtime import data_root, pin_snapshot, register_validator
+from osaka_cd.catalog_policy import is_retired_cd
 
 DEFAULT_MELODY_ID = "ttv-demo-v1"
 _LOG = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ _SCORE_CACHE_BYTES = 0
 _SCORE_CACHE_LIMIT = 8 * 1024 * 1024
 _CATALOG_MUSIC_LIMIT = 32 * 1024 * 1024
 _MUSIC_LOCK = threading.RLock()
+_AVAILABLE_SOURCE = None
+_AVAILABLE_MELODIES = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,9 +295,17 @@ except OSError:
     _CATALOG_SIGNATURE = (0, 0, 0, 0)
 
 def list_melodies() -> tuple[Melody, ...]:
+    global _AVAILABLE_SOURCE, _AVAILABLE_MELODIES
     path = _score_path()
     with _MUSIC_LOCK:
-        return _list_melodies_current(path)
+        # Validate the complete immutable source before applying availability.
+        # A runtime generation cannot restore an explicitly removed CD, and a
+        # malformed retired record must not bypass the normal reader checks.
+        catalog = _list_melodies_current(path)
+        if catalog is not _AVAILABLE_SOURCE:
+            _AVAILABLE_MELODIES = tuple(melody for melody in catalog if not is_retired_cd(melody.id))
+            _AVAILABLE_SOURCE = catalog
+        return _AVAILABLE_MELODIES
 
 
 def _list_melodies_current(path) -> tuple[Melody, ...]:
@@ -353,6 +364,9 @@ def get_melody(value: object = None) -> Melody:
     if value is not None and not isinstance(value, str):
         raise ValueError("Escolha uma melodia disponível no painel de canto.")
     identity = str(value or "").strip() or DEFAULT_MELODY_ID
+    # Old personal preferences remain usable after a requested CD removal.
+    if is_retired_cd(identity):
+        identity = DEFAULT_MELODY_ID
     snapshot = list_melodies()
     with _MUSIC_LOCK:
         if snapshot is not _LOOKUP_SNAPSHOT:
