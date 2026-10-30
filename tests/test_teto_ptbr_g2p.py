@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import sys
+import unicodedata
 from pathlib import Path
+
+import pytest
 
 WORKER_DIR = Path(__file__).resolve().parents[1] / "deploy" / "termux" / "phone-worker"
 if str(WORKER_DIR) not in sys.path:
@@ -70,3 +73,94 @@ def test_tilde_participates_in_stress_when_it_is_the_only_written_mark():
     # An earlier acute/circumflex still wins when the word has both marks.
     assert g2p_word("órgão").syllables[0].stressed
     assert not g2p_word("órgão").syllables[-1].stressed
+
+
+@pytest.mark.parametrize(
+    ("word", "phonemes", "syllables", "stress", "glide_syllable"),
+    [
+        ("água", ("a", "g", "w", "a"), 2, 0, 1),
+        ("agua", ("a", "g", "w", "a"), 2, 0, 1),
+        ("quase", ("k", "w", "a", "z", "i"), 2, 0, 0),
+        ("tranquilo", ("t", "r", "a~", "k", "w", "i", "l", "u"), 3, 1, 1),
+        ("linguiça", ("l", "i~", "g", "w", "i", "s", "a"), 3, 1, 1),
+        ("quatro", ("k", "w", "a", "t", "r", "u"), 2, 0, 0),
+    ],
+)
+def test_velar_glides_do_not_add_syllables_or_displace_stress(
+    word, phonemes, syllables, stress, glide_syllable,
+):
+    result = g2p_word(word)
+    assert result.phonemes == phonemes
+    assert len(result.syllables) == syllables
+    assert [index for index, syllable in enumerate(result.syllables) if syllable.stressed] == [stress]
+    assert result.syllables[glide_syllable].onset[-1] == "w"
+    assert all("w" not in syllable.coda for syllable in result.syllables)
+
+
+@pytest.mark.parametrize("word", ["tranquila", "tranquilos", "tranquilas", "linguiças", "tranqüilo", "lingüiça"])
+def test_modern_inflections_and_explicit_diaeresis_keep_pronounced_u(word):
+    result = g2p_word(word)
+    assert "w" in result.phonemes
+    assert len(result.syllables) == 3
+    assert result.syllables[1].stressed
+
+
+@pytest.mark.parametrize(
+    ("word", "count", "stress"),
+    [("queijo", 2, 0), ("guerra", 2, 0), ("guitarra", 3, 1), ("guia", 2, 0)],
+)
+def test_silent_u_does_not_become_a_glide_or_change_written_stress(word, count, stress):
+    result = g2p_word(word)
+    assert "w" not in result.phonemes
+    assert len(result.syllables) == count
+    assert result.syllables[stress].stressed
+
+
+@pytest.mark.parametrize(
+    ("word", "phonemes"),
+    [
+        ("táxi", ("t", "a", "k", "s", "i")),
+        ("fixo", ("f", "i", "k", "s", "u")),
+        ("tóxico", ("t", "O", "k", "s", "i", "k", "u")),
+        ("próximo", ("p", "r", "O", "s", "i", "m", "u")),
+    ],
+)
+def test_lexical_x_exceptions_preserve_accent_and_do_not_guess_other_words(word, phonemes):
+    assert g2p_word(word).phonemes == phonemes
+    assert g2p_word(unicodedata.normalize("NFD", word.upper())).phonemes == phonemes
+    assert g2p_word(word).syllables[0].stressed
+    assert "S" in g2p_word("caixa").phonemes
+    assert g2p_word("xícara").phonemes[0] == "S"
+    assert g2p_word("exame").phonemes[1] == "z"
+
+
+@pytest.mark.parametrize("word", ["muito", "muita", "muitos", "muitas"])
+def test_muito_family_keeps_nasal_diphthong_and_two_syllables(word):
+    result = g2p_word(word)
+    assert result.phonemes[:3] == ("m", "u~", "j")
+    assert len(result.syllables) == 2
+    assert result.syllables[0].coda == ("j",)
+    assert result.syllables[0].stressed
+
+
+def test_lexicon_keeps_pode_pode_accent_distinction_and_explicit_deaccenting():
+    assert g2p_word("pode").syllables[0].vowel == "O"
+    assert g2p_word("pôde").syllables[0].vowel == "o"
+    assert not any(syllable.stressed for syllable in g2p_word("muito", deaccented=True).syllables)
+
+
+def test_vps_and_phone_share_identical_portuguese_pronunciation_source():
+    shared = WORKER_DIR.parents[2] / "osaka_cd" / "phonetics" / "ptbr_g2p.py"
+    assert shared.read_bytes() == (WORKER_DIR / "teto_renderer" / "ptbr_g2p.py").read_bytes()
+
+
+@pytest.mark.parametrize("word", ["água", "quase", "tranquilo", "linguiça", "táxi", "fixo", "tóxico", "próximo", "muito"])
+def test_pronunciation_changes_keep_vps_and_worker_nucleus_planning_in_sync(word):
+    from osaka_cd.phonetics.phonemizer import phonemize as shared_phonemize
+    from teto_renderer.phonemizer import phonemize
+
+    for profile in ("standard", "english-cvvc"):
+        shared = shared_phonemize(word, voicebank_profile=profile, reading_language="pt-BR")
+        worker = phonemize(word, voicebank_profile=profile, reading_language="pt-BR")
+        assert [mora.source_phonemes for mora in shared] == [mora.source_phonemes for mora in worker]
+        assert sum(mora.role == "nucleus" for mora in worker) == len(g2p_word(word).syllables)

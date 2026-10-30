@@ -26,6 +26,14 @@ _ONSET_CLUSTERS = frozenset({
     ("p", "r"), ("b", "r"), ("t", "r"), ("d", "r"), ("k", "r"), ("g", "r"),
     ("f", "r"), ("v", "r"), ("p", "l"), ("b", "l"), ("k", "l"), ("g", "l"),
     ("f", "l"), ("v", "l"),
+    ("k", "w"), ("g", "w"),
+})
+
+# Modern spelling omits the diaeresis. These common forms retain a pronounced
+# /w/ before e/i, unlike the silent u in queijo, guerra or guitarra.
+_PRONOUNCED_FRONT_U_WORDS = frozenset({
+    "tranquilo", "tranquila", "tranquilos", "tranquilas",
+    "linguiça", "linguiças",
 })
 
 # These exact spellings need lexical information that a spelling-only G2P
@@ -35,6 +43,14 @@ _PT_PRONUNCIATIONS = {
     "miku": (("m", "i", "k", "u"), 0),
     "pode": (("p", "O", "dZ", "i"), 0),
     "nossa": (("n", "O", "s", "a"), 0),
+    "táxi": (("t", "a", "k", "s", "i"), 0),
+    "fixo": (("f", "i", "k", "s", "u"), 0),
+    "tóxico": (("t", "O", "k", "s", "i", "k", "u"), 0),
+    "próximo": (("p", "r", "O", "s", "i", "m", "u"), 0),
+    "muito": (("m", "u~", "j", "t", "u"), 0),
+    "muita": (("m", "u~", "j", "t", "a"), 0),
+    "muitos": (("m", "u~", "j", "t", "u", "s"), 0),
+    "muitas": (("m", "u~", "j", "t", "a", "s"), 0),
 }
 
 
@@ -122,6 +138,12 @@ def _orthographic_nuclei(value: str) -> list[int]:
     while index < len(value):
         char = value[index]
         if not _is_vowel_char(char):
+            index += 1
+            continue
+        # In gu/qu + vowel, u is either silent or the onset glide /w/.
+        # Counting it as a nucleus also shifts unaccented word stress.
+        if (char in "uü" and index > 0 and value[index - 1] in "gq"
+                and _is_vowel_char(_next_letter(value, index))):
             index += 1
             continue
         starts.append(index)
@@ -243,12 +265,11 @@ def _scan_phones(word: str) -> list[str]:
             phones.append("s")
             index += 2
             continue
-        if pair == "qu" and nxt2 and nxt2 in "eiéêí":
-            phones.append("k")
-            index += 2
-            continue
-        if pair == "gu" and nxt2 and nxt2 in "eiéêí":
-            phones.append("g")
+        if char in "qg" and nxt in {"u", "ü"} and _is_vowel_char(nxt2):
+            phones.append("k" if char == "q" else "g")
+            if (nxt == "ü" or nxt2 not in "eiéêí"
+                    or value in _PRONOUNCED_FRONT_U_WORDS):
+                phones.append("w")
             index += 2
             continue
         if pair in {"sc", "sç", "xc"} and nxt2 and nxt2 in "eiéêí":

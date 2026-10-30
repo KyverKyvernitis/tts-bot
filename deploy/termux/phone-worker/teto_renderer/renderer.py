@@ -62,11 +62,11 @@ def _numpy_dsp():
 class TetoRenderer:
     SAMPLE_RATE = 44100
     RENDER_VERSION = "speech-4g-cvvc-pauses"
-    PHONEMIZER_VERSION = "ptbr-g2p-xsampa-cvvc-v3"
+    PHONEMIZER_VERSION = "ptbr-g2p-xsampa-cvvc-v4"
     ENGLISH_PHONEMIZER_VERSION = "en-us-cmudict-xsampa-cvvc-v2"
     FRAGMENT_CACHE_SCHEMA = "teto-fragment-v4-timeline-pitch"
     LEGACY_FRAGMENT_RENDER_VERSION = "speech-3-natural"
-    PERFORMANCE_VERSION = "ttv-performance-7-sealed-pcm"
+    PERFORMANCE_VERSION = "ttv-performance-8-ordered-articulation"
     PERFORMANCE_PROTOCOL = 2
     SINGING_PCM_PROTOCOL = 1
     SUPPORTS_BACKGROUND_CANCELLATION = True
@@ -339,8 +339,6 @@ class TetoRenderer:
 
     def _reading_fingerprint(self, index: VoicebankIndex, language: str) -> str:
         renderer = self._render_fingerprint(index)
-        if language == "pt-BR":
-            return renderer
         source_hash = getattr(self, "_english_phonemizer_sha", "")
         if not source_hash:
             digest = hashlib.sha256()
@@ -351,7 +349,9 @@ class TetoRenderer:
             self._english_phonemizer_sha = source_hash
         return hashlib.sha256(json.dumps({
             "renderer": renderer, "reading_language": language,
-            "phonemizer": self.ENGLISH_PHONEMIZER_VERSION, "phonemizer_sha256": source_hash,
+            "phonemizer": (self.PHONEMIZER_VERSION if language == "pt-BR"
+                           else self.ENGLISH_PHONEMIZER_VERSION),
+            "phonemizer_sha256": source_hash,
         }, sort_keys=True).encode()).hexdigest()
 
     def _request_fingerprint(
@@ -1628,26 +1628,134 @@ class TetoRenderer:
         return notes, spans
 
     def _singing_placements(self, notes, entries, spans, score):
+        """Fit ordered articulation around fixed MIDI vowel anchors.
+
+        Auxiliary recordings include an old vowel before their consonant.
+        Placing every tail at ``end - duration`` lets a later recording erase
+        the previous nasal/coda while still playing that old vowel. Reserve
+        separate consonant bodies, and trim only redundant recorded lead.
+        Unlike speech, the musical clock must never move to make room.
+        """
+        leads = [self._english_lead_ms(entry, note) if entry else 0.0
+                 for note, entry in zip(notes, entries)]
+        fades = [self._english_fade_ms(entry, lead)
+                 for entry, lead in zip(entries, leads)]
+        groups = {}
         placements = []
-        for note, entry, (start, end, group) in zip(notes, entries, spans):
-            lead = self._english_lead_ms(entry, note) if entry else 0.0
-            nucleus_number = next(number for number, (other, span) in enumerate(zip(notes, spans))
-                                  if other.role == 'nucleus' and span[2] == group)
-            nucleus_entry = entries[nucleus_number]
-            nucleus_lead = self._english_lead_ms(nucleus_entry, notes[nucleus_number]) if nucleus_entry else 0.0
+        for number, (note, (start, end, group)) in enumerate(zip(notes, spans)):
+            item = groups.setdefault(tuple(group), {'start': start, 'end': end,
+                                                    'onsets': [], 'tails': [], 'exits': []})
             if note.role == 'nucleus':
-                anchor = start
-            elif note.role == 'vowel-exit':
-                anchor = start - nucleus_lead
-            elif note.role in {'transition', 'cluster', 'epenthetic'}:
-                anchor = start - nucleus_lead - min(45.0, note.duration_ms * 0.6)
-            else:
-                anchor = end - note.duration_ms
-            placements.append({'anchor_ms': anchor, 'start_ms': anchor - lead,
-                               'lead_ms': lead, 'fade_ms': self._english_fade_ms(entry, lead),
+                item['nucleus'] = number
+            elif entries[number] is not None:
+                role = ('onsets' if note.role in {'transition', 'cluster', 'epenthetic'}
+                        else 'exits' if note.role == 'vowel-exit' else 'tails')
+                item[role].append(number)
+            placements.append({'anchor_ms': start, 'start_ms': start - leads[number],
+                               'lead_ms': leads[number], 'fade_ms': fades[number],
                                'score_group': group})
-        preroll = max(0.0, -min((placement['start_ms'] for placement in placements), default=0.0))
-        if preroll > 350:
+
+        ordered = sorted(groups.values(), key=lambda item: item['start'])
+        for item in ordered:
+            nucleus = item['nucleus']
+            attack = leads[nucleus]
+            next_fade = fades[nucleus]
+            for number in reversed(item['onsets']):
+                overlap = min(next_fade, notes[number].duration_ms * .35)
+                attack += leads[number] + notes[number].duration_ms - overlap
+                next_fade = fades[number]
+            item['attack'] = attack
+            item['attack_scale'] = 1.0
+            item['protected'] = item['start'] + min(45.0, (item['end'] - item['start']) * .40)
+            tail = sum(notes[number].duration_ms for number in item['tails'])
+            item['tail'] = tail
+            item['tail_scale'] = min(1.0, (item['end'] - item['protected']) / tail) if tail else 1.0
+
+        for position, item in enumerate(ordered):
+            if position == 0:
+                # Keep the existing 350 ms musical preroll bound, even for
+                # clusters with several authored preutterances.
+                available = item['start'] + 350.0
+                if item['attack']:
+                    item['attack_scale'] = min(1.0, available / item['attack'])
+                continue
+            previous = ordered[position - 1]
+            gap = item['start'] - previous['end']
+            if gap > 20:
+                # A rest provides room for the incoming attack; do not steal
+                # the preceding word's nasal/coda across that musical break.
+                if item['attack']:
+                    item['attack_scale'] = min(1.0, gap / item['attack'])
+            else:
+                tail = previous['tail'] * previous['tail_scale']
+                required = tail + item['attack']
+                available = max(0.0, item['start'] - previous['protected'])
+                scale = min(1.0, available / required) if required else 1.0
+                previous['tail_scale'] *= scale
+                item['attack_scale'] = scale
+
+        def place(number, anchor, *, audible_start, duration=None, fade=None):
+            placement = placements[number]
+            placement['anchor_ms'] = anchor
+            placement['start_ms'] = anchor - leads[number]
+            placement['trim_lead_ms'] = max(0.0, min(leads[number],
+                audible_start - placement['start_ms']))
+            if duration is not None:
+                placement['duration_ms'] = duration
+            if fade is not None:
+                placement['fade_ms'] = fade
+
+        # Establish incoming attacks first so the previous tail can end before
+        # the next recording starts replacing it in the compositor.
+        for item in ordered:
+            nucleus = item['nucleus']
+            scale = item['attack_scale']
+            cursor = item['start'] - leads[nucleus] * scale
+            place(nucleus, item['start'], audible_start=cursor,
+                  fade=fades[nucleus] * scale)
+            next_fade = fades[nucleus] * scale
+            for number in reversed(item['onsets']):
+                duration = max(1, math.floor(notes[number].duration_ms * scale))
+                fade = min(fades[number] * scale, duration * .35)
+                overlap = min(next_fade, duration * .35)
+                anchor = cursor + overlap - duration
+                cursor = anchor - leads[number] * scale
+                place(number, anchor, audible_start=cursor, duration=duration, fade=fade)
+                next_fade = fade
+            item['attack_start'] = cursor
+            for number in item['exits']:
+                # VC and CV articulate the SAME consonant boundary. Discard
+                # the VC's old vowel instead of replaying it over the last
+                # word's nasal or glide.
+                boundary = item['start'] - leads[nucleus] * scale
+                fade = fades[number] * scale
+                place(number, boundary, audible_start=cursor - fade, fade=fade)
+
+        for position, item in enumerate(ordered):
+            end = item['end']
+            if position + 1 < len(ordered):
+                incoming = ordered[position + 1]
+                if incoming['start'] - end <= 20:
+                    end = min(end, incoming['attack_start'])
+            durations = [max(1, math.floor(notes[number].duration_ms * item['tail_scale']))
+                         for number in item['tails']]
+            cursor = end - sum(durations)
+            protected = item['protected']
+            previous_duration = None
+            for number, duration in zip(item['tails'], durations):
+                fade = min(fades[number], duration * .35)
+                if previous_duration is not None:
+                    fade = min(fade, previous_duration * .35)
+                place(number, cursor, audible_start=max(cursor - leads[number], protected - fade),
+                      duration=duration, fade=fade)
+                protected = cursor + duration
+                previous_duration = duration
+                cursor += duration
+
+        preroll = max(0.0, -min((placement['start_ms'] + placement.get('trim_lead_ms', 0.0)
+                                for placement, entry in zip(placements, entries) if entry is not None),
+                               default=0.0))
+        if preroll > 350.0 + 1e-6:
             raise TetoSynthesisError('ataque consonantal longo demais para o MIDI')
         for placement in placements:
             placement['anchor_ms'] += preroll
@@ -1885,6 +1993,8 @@ class TetoRenderer:
                 entries = [self._english_render_entry(entry, note) if entry else None for note, entry in zip(notes, entries)]
             if score is not None:
                 placements, preroll = self._singing_placements(notes, entries, spans, score)
+                notes = [replace(note, duration_ms=placement.get('duration_ms', note.duration_ms))
+                         for note, placement in zip(notes, placements)]
                 planned_ms = float(score['duration_ms']) + preroll
                 notes = align_singing_pitch(notes, placements, score, preroll_ms=preroll, tempo=tempo)
             else:
@@ -1937,7 +2047,8 @@ class TetoRenderer:
             future_starts = [target_frames] * (len(notes) + 1)
             for number in range(len(notes) - 1, -1, -1):
                 future_starts[number] = min(future_starts[number + 1],
-                    round(placements[number]['start_ms'] * self.SAMPLE_RATE / 1000)
+                    round((placements[number]['start_ms'] + placements[number].get('trim_lead_ms', 0.0))
+                          * self.SAMPLE_RATE / 1000)
                     if entries[number] is not None else target_frames)
 
             def publish_pcm(samples):

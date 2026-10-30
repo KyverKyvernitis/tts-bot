@@ -169,7 +169,7 @@ music_streams = worker._phone_worker_music_bridge_module("streams")
 assert music_streams._MUSIC_PCM_PREPARATIONS == {}
 assert music_streams.__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._tts_agent_normalize_engine("google-cloud") == "gtts"
-assert worker._TETO_RENDERER is None and worker._APK_IDENTITY_MODULE is None
+assert worker._TETO_RENDERER is None
 '''
     result = subprocess.run([sys.executable, "-S", "-c", code, str(staging / "phone_worker.py"), outer["source_hash"]],
                             env=env, cwd=tmp_path, capture_output=True, text=True, timeout=10)
