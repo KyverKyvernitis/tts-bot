@@ -6312,7 +6312,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             if performance and voice_protocol is not None and voice_protocol < required_protocol:
                 raise TTVSingingError("Atualize o worker para usar canto com essa voz.", code="ttv_worker_outdated")
             if item.ttv_score is not None and voice_state.get("singing_available") is False:
-                raise TTVSingingError(f"O canto da {voice_state['name']} precisa da voicebank English-CVVC instalada no worker.", code="ttv_singing_bank_missing")
+                raise TTVSingingError(f"O canto da {voice_state['name']} precisa do banco de voz para canto instalado no worker.", code="ttv_singing_bank_missing")
             if ((voice_state["advertised"] and not voice_state["ready"])
                     or (preferences["ttv_voice_id"] != DEFAULT_VOICE_ID
                         and (not voice_state["advertised"] or not voice_state["available"]))):

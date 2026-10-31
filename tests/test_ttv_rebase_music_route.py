@@ -84,7 +84,7 @@ def test_failed_or_unverified_prebuild_never_calls_text_only_agent(monkeypatch, 
 
 
 @pytest.mark.parametrize("field", ["ttv_score", "ttv_segments"])
-def test_verified_prebuilt_audio_keeps_performance_identity_in_music_route(monkeypatch, field):
+def test_verified_prebuilt_audio_is_checked_locally_before_calling_the_audio_only_music_route(monkeypatch, field):
     calls = []
 
     async def prepare(payload, item, **kwargs):
@@ -101,8 +101,11 @@ def test_verified_prebuilt_audio_keeps_performance_identity_in_music_route(monke
     assert result == (True, None)
     assert len(calls) == 1
     assert base64.b64decode(calls[0]["audio_b64"], validate=True) == b"verified-rendered-audio"
-    assert calls[0]["ttv_performance_hash"] == item.ttv_performance_hash
-    assert calls[0][field] is getattr(item, field)
+    assert calls[0]["prebuilt_audio"] is True
+    assert calls[0]["audio_format"] == "mp3"
+    assert not {"ttv_score", "ttv_segments", "ttv_performance_hash"} & calls[0].keys()
+    assert item.ttv_performance_hash == "verified-performance"
+    assert getattr(item, field) is not None
     assert calls[0]["engine"] == "teto"
     assert item._tts_remote_active is False
 

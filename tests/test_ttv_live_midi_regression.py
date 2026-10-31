@@ -49,7 +49,7 @@ class LiveRenderCog(FakeCog):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("voice", ["kasane-teto", "hatsune-miku"])
+@pytest.mark.parametrize("voice", ["kasane-teto", "hatsune-miku", "anna-nyui"])
 @pytest.mark.parametrize("language", ["pt-BR", "en-US"])
 async def test_real_discord_render_keeps_demo_holds_and_exact_worker_identity(voice, language):
     assert len(DEMO_MIDI) == 89
@@ -71,19 +71,26 @@ async def test_real_discord_render_keeps_demo_holds_and_exact_worker_identity(vo
     )
     assert result.enqueued and len(cog.enqueue_calls) == 1
     queued = cog.enqueue_calls[0][1]
-    assert queued.text == "a ~ ~ a"
-    assert [segment["hold"] for segment in queued.ttv_segments] == [False, True, True, False]
+    assert queued.text == "a ~ ~ ~ a ~"
+    assert [segment["hold"] for segment in queued.ttv_segments] == [False, True, True, True, False, True]
     assert [(note["midi_note"], note["start_ms"], note["duration_ms"])
             for note in queued.ttv_score["notes"]] == [
         (60, 0, 1000), (64, 1000, 1000), (67, 2000, 1000),
         (64, 3000, 1000),
     ]
+    # Every marker survives Discord rendering, including the terminal marker
+    # that also opts into singing. Holds consume voiced seconds on a repeated
+    # motif while the captured catalog score stays unchanged.
+    assert queued.ttv_arrangement["duration_ms"] == 6000
+    adaptation = queued.ttv_arrangement["lyrics_adaptation"]
+    assert adaptation["requested_hold_ms"] == 4000
+    assert adaptation["note_groups"]["lead"] == [{"core": 1, "hold": 3}, {"core": 1, "hold": 1}]
     assert queued.ttv_voice_id == voice and queued.ttv_language == language
     assert queued.ttv_pitch_semitones == "+0.0" and queued.ttv_speech_rate == 1.0
     expected = performance_hash(text=queued.text, score=queued.ttv_score, segments=queued.ttv_segments)
     probe = Probe()
     payload = probe._tts_agent_payload_for_item(queued)
-    assert payload["text"] == "a ~ ~ a"
+    assert payload["text"] == "a ~ ~ ~ a ~"
     assert payload["ttv_performance_hash"] == expected
     assert payload["ttv_score"] == queued.ttv_score and payload["ttv_segments"] == queued.ttv_segments
     assert payload["ttv_voice_id"] == voice and payload["ttv_language"] == language

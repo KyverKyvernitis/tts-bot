@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -67,21 +68,77 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _pitch_number(value: str) -> int | None:
+    match = re.fullmatch(r"([A-Ga-g])([#b]?)(-?[0-9]{1,2})", str(value or "").strip())
+    if match is None:
+        return None
+    semitone = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}[match[1].upper()]
+    semitone += 1 if match[2] == "#" else -1 if match[2] == "b" else 0
+    number = (int(match[3]) + 1) * 12 + semitone
+    return number if 0 <= number <= 127 else None
+
+
+def _read_pitch_map(base: Path, digest) -> dict[int, tuple[str, str]]:
+    path = base / "prefix.map"
+    if not path.is_file():
+        candidates = [candidate for candidate in sorted(base.rglob("prefix.map"))
+                      if _is_within(candidate.resolve(), base)]
+        if len(candidates) > 1:
+            raise TetoVoicebankError("voicebank contém vários prefix.map; selecione a pasta do banco")
+        path = candidates[0] if candidates else path
+    if not path.is_file():
+        raise TetoVoicebankError("voicebank multipitch sem prefix.map")
+    if not _is_within(path.resolve(), base):
+        raise TetoVoicebankError("prefix.map fora da pasta da voicebank")
+    try:
+        contents = path.read_bytes()
+        text = _decode_text(path)
+    except OSError as exc:
+        raise TetoVoicebankError(f"não foi possível ler {path}: {exc}") from exc
+    digest.update(b"pitch-map-v1\x00")
+    digest.update(str(path.relative_to(base)).encode("utf-8", errors="replace"))
+    digest.update(contents)
+    result = {}
+    for line in text.splitlines():
+        fields = line.lstrip("\ufeff").split("\t")
+        if len(fields) < 3:
+            continue
+        number = _pitch_number(fields[0])
+        if number is None:
+            continue
+        # Affix spaces are meaningful in UTAU: unlike an alias, a prefix may
+        # intentionally end with a space before the canonical phoneme.
+        prefix, suffix = (unicodedata.normalize("NFKC", part) for part in fields[1:3])
+        if any("\x00" in part or len(part) > 120 for part in (prefix, suffix)):
+            raise TetoVoicebankError("prefix.map contém um prefixo ou sufixo inválido")
+        result[number] = (prefix, suffix)
+    if not result:
+        raise TetoVoicebankError("prefix.map sem notas válidas")
+    return result
+
+
 class VoicebankIndex:
     def __init__(
         self, root: Path, entries: dict[str, OtoEntry], folded_entries: dict[str, OtoEntry],
-        fingerprint: str, name: str,
+        fingerprint: str, name: str, *, pitch_map: dict[int, tuple[str, str]] | None = None,
     ):
         self.root = root
         self.entries = entries
         self.folded_entries = folded_entries
         self.fingerprint = fingerprint
         self.name = name
+        self.pitch_map = dict(pitch_map or {})
+        registers: dict[tuple[str, str], list[int]] = {}
+        for number, affixes in self.pitch_map.items():
+            registers.setdefault(affixes, []).append(number)
+        self._pitch_registers = {affixes: tuple(sorted(numbers))
+                                 for affixes, numbers in registers.items()}
 
     @classmethod
     def load(
         cls, root: str | Path, *, minimum_aliases: int = 10,
         alias_suffix: str = "", case_sensitive: bool = False,
+        pitch_map: bool = False,
     ) -> "VoicebankIndex":
         base = Path(root).expanduser().resolve()
         if not base.is_dir():
@@ -100,6 +157,7 @@ class VoicebankIndex:
             suffix = "_" + suffix
         if suffix or case_sensitive:
             digest.update(f"alias-map-v1:{suffix}:{int(case_sensitive)}".encode("utf-8"))
+        mapped_pitches = _read_pitch_map(base, digest) if pitch_map else None
 
         for oto_path in oto_files:
             resolved_oto = oto_path.resolve()
@@ -180,20 +238,61 @@ class VoicebankIndex:
         folded_entries = {} if case_sensitive else {
             key: entry for key, entry in folded_candidates.items() if entry is not None
         }
-        return cls(base, entries, folded_entries, digest.hexdigest(), name)
+        return cls(base, entries, folded_entries, digest.hexdigest(), name, pitch_map=mapped_pitches)
 
     @property
     def alias_count(self) -> int:
         return len({id(entry) for entry in self.entries.values()})
 
-    def resolve(self, candidates: Iterable[str]) -> OtoEntry | None:
+    def _lookup(self, key: str) -> OtoEntry | None:
+        return self.entries.get(key) or self.folded_entries.get(key.casefold())
+
+    def _canonical_pitch_alias(self, key: str) -> str:
+        # Lexical inventory probes normally pass an unsuffixed alias. Also
+        # tolerate a previously resolved alias without permanently pinning its
+        # register. Strip only authored affixes with a real phonetic family.
+        affixes = sorted(self._pitch_registers, key=lambda pair: -(len(pair[0]) + len(pair[1])))
+        for prefix, suffix in affixes:
+            if not (prefix or suffix) or not key.startswith(prefix) or not key.endswith(suffix):
+                continue
+            end = len(key) - len(suffix) if suffix else len(key)
+            canonical = key[len(prefix):end]
+            if canonical and any(self._lookup(left + canonical + right) is not None
+                                 for left, right in self._pitch_registers):
+                return canonical
+        return key
+
+    def resolve(self, candidates: Iterable[str], *, pitch: str | None = None) -> OtoEntry | None:
+        number = _pitch_number(pitch) if pitch is not None else None
+        if pitch is not None and self.pitch_map and number is None:
+            raise TetoVoicebankError("nota inválida para escolher o registro da voicebank")
+        register_order = ()
+        if self.pitch_map:
+            if number is None:
+                # A lexical probe uses the ordinary unmarked recording when
+                # present. Return its canonical spelling below, never a B3/A4
+                # suffix that would freeze every subsequent rendered note.
+                register_order = sorted(self._pitch_registers,
+                                        key=lambda pair: (bool(pair[0] or pair[1]), pair))
+            else:
+                target = self.pitch_map.get(number)
+                register_order = sorted(self._pitch_registers, key=lambda pair: (
+                    pair != target if target is not None else False,
+                    min(abs(number - reference) for reference in self._pitch_registers[pair]),
+                    pair,
+                ))
         for candidate in candidates:
             key = _normalized_alias(candidate)
             if not key:
                 continue
-            entry = self.entries.get(key)
-            if entry is None:
-                entry = self.folded_entries.get(key.casefold())
+            if self.pitch_map:
+                canonical = self._canonical_pitch_alias(key)
+                for prefix, suffix in register_order:
+                    entry = self._lookup(prefix + canonical + suffix)
+                    if entry is not None:
+                        return replace(entry, alias=canonical) if number is None and entry.alias != canonical else entry
+                continue
+            entry = self._lookup(key)
             if entry is not None:
                 return entry
         return None

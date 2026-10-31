@@ -107,6 +107,8 @@ def test_normalized_controls_share_cache_and_voice_implementation_separates_it(t
 def test_catalog_health_reports_actual_renderer_and_resource_readiness(tts, monkeypatch, state):
     monkeypatch.setenv("PHONE_WORKER_TETO_ENABLED", "false" if state == "disabled" else "true")
     monkeypatch.setenv("PHONE_WORKER_MIKU_ENABLED", "false")
+    monkeypatch.setenv("PHONE_WORKER_ANNA_ENABLED", "false")
+    monkeypatch.setattr(tts.worker, "_get_anna_renderer", lambda: pytest.fail("disabled Anna assets were probed"))
     monkeypatch.setattr(tts.worker, "_get_teto_renderer", lambda: SimpleNamespace(
         status=lambda **kw: {"ready": state != "broken", "available": state != "broken"}))
     monkeypatch.setattr(tts.worker, "_teto_resource_snapshot", lambda: {"ok": state != "resource-blocked"})
@@ -123,6 +125,10 @@ def test_catalog_health_reports_actual_renderer_and_resource_readiness(tts, monk
          "enabled": False, "supports_personal_rate": True, "languages": [], "fingerprint": "",
          "language_fingerprints": {}, "ttv_language_fingerprints": {}, "backend": "utau",
          "renderer_version": "", "voicebank_profile": "", "last_error": "PHONE_WORKER_MIKU_ENABLED=false"},
+        {"id": "anna-nyui", "name": "Anna Nyui", "ready": False, "available": False,
+         "enabled": False, "supports_personal_rate": True, "languages": [], "fingerprint": "",
+         "language_fingerprints": {}, "ttv_language_fingerprints": {}, "backend": "utau",
+         "renderer_version": "", "voicebank_profile": "", "last_error": "PHONE_WORKER_ANNA_ENABLED=false"},
     ]
 
 

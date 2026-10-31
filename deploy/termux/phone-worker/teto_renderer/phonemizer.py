@@ -355,15 +355,48 @@ _MIKU_V4_VOWELS = {
     "o": "O:", "O": "O:", "oU": "@U", "3": "@r",
 }
 
+# Cz VCCV uses its own case-sensitive alphabet, not Delta/X-SAMPA. These
+# correspondences follow the English VCCV phonemizer's ARPAbet dictionary
+# replacements. Keep the adaptation opt-in; e.g. native Cz ``o`` is /u:/,
+# while native ``u`` is /\u028c/. Portuguese closed e/o have no exact monophthong
+# recordings in this English bank and use the nearest e/9 recordings.
+_ANNA_DIVA_VOWELS = {
+    "A": "a", "{": "@", "V": "u", "O": "9", "aU": "8", "aI": "I",
+    "E": "e", "3": "3", "eI": "A", "I": "i", "i": "E", "oU": "O",
+    "OI": "Q", "U": "6", "u": "o", "@": "x", "o": "9",
+}
+_ANNA_DIVA_CONSONANTS = {
+    "dZ": "j", "tS": "ch", "D": "dh", "T": "th", "S": "sh", "Z": "zh",
+    "j": "y", "N": "ng", "4": "r",
+}
+_ANNA_DIVA_VC_EXCEPTIONS = {
+    "ing": "1ng", "9r": "0r", "er": "Ar", "ir": "Er", "6r": "or",
+    "@m": "&m", "@n": "&n", "@ng": "Ang", "ang": "9ng", "al": "9l", "Ol": "0l",
+}
+
 
 def _bank_vowel(phone: str, inventory_profile: str) -> str:
     if inventory_profile == "miku-v4-english":
         return _MIKU_V4_VOWELS.get(phone, phone)
+    if inventory_profile == "anna-nyui-diva":
+        return _ANNA_DIVA_VOWELS.get(phone, phone)
+    return phone
+
+
+def _bank_consonant(phone: str, inventory_profile: str) -> str:
+    if inventory_profile == "anna-nyui-diva":
+        return _ANNA_DIVA_CONSONANTS.get(phone, phone)
     return phone
 
 
 def _bank_cc(left: str, right: str, inventory_profile: str) -> tuple[str, ...]:
     variants = [f"{left} {right}", f"{left}{right}"]
+    if inventory_profile == "anna-nyui-diva":
+        # Authored Cz vowel/consonant exceptions are contextual aliases, not
+        # spelling substitutions (e.g. /i\u014b/ is recorded as ``1ng``).
+        exceptional = _ANNA_DIVA_VC_EXCEPTIONS.get(left + right)
+        if exceptional:
+            variants.insert(0, exceptional)
     if inventory_profile == "miku-v4-english":
         # This port separates aspirated stops and lateral allophones. Probe
         # those recorded variants only after the ordinary CC spelling.
@@ -403,6 +436,34 @@ def _xsampa_onset(phones: Iterable[str], *, dedicated_palatal: bool = False) -> 
 
 def _xsampa_vowel(phone: str) -> str:
     return _XSAMPA_VOWELS.get(phone, phone.rstrip("~") or "@")
+
+
+def english_vowel_source(source_phonemes: Iterable[str] | str) -> tuple[str, ...]:
+    """Keep the lexical vowel and its absorbed glide, without a CV onset."""
+    phones = (source_phonemes,) if isinstance(source_phonemes, str) else tuple(source_phonemes)
+    vowels = set(_XSAMPA_VOWELS) | set(_ANNA_DIVA_VOWELS) | {"aI", "aU", "eI", "oU", "OI"}
+    for number in range(len(phones) - 1, -1, -1):
+        if phones[number] in vowels:
+            return phones[number:]
+    return ()
+
+
+def english_vowel_candidates(
+    source_phonemes: Iterable[str] | str, *, inventory_profile: str = "",
+) -> tuple[str, ...]:
+    """Return a bank's steady vowel from lexical phones, without CV attacks.
+
+    Joined VV and native Cz ``-V`` aliases cannot safely be split on spaces.
+    Use the original vowel instead, preserving an absorbed oral diphthong and
+    leaving a Portuguese nasal tail to its separately scheduled fragment.
+    """
+    phones = english_vowel_source(source_phonemes)
+    if not phones:
+        return ()
+    vowel = _xsampa_vowel(phones[0])
+    if not phones[0].endswith("~") and len(phones) > 1:
+        vowel = _XSAMPA_DIPHTHONGS.get((vowel, phones[1]), vowel)
+    return (_bank_vowel(vowel, inventory_profile),)
 
 
 def _english_alias_score(kind: str, alias: str, entry: object | None, rank: int) -> float:
@@ -520,11 +581,15 @@ def _english_nucleus_candidates(
     tiers: list[tuple[str, tuple[str, ...]]] = []
     if word_start:
         if cluster:
-            tiers.append(("cvvc-direct", (f"- {cluster}{vowel}",)))
+            attack = f"-{cluster}{vowel}" if inventory_profile == "anna-nyui-diva" else f"- {cluster}{vowel}"
+            if inventory_profile == "anna-nyui-diva" and cluster == "h" and vowel == "E":
+                tiers.append(("cvvc-direct", ("-hhE",)))
+            tiers.append(("cvvc-direct", (attack,)))
             if last == "r":
                 tiers.append(("cvvc-direct", (f"- {cluster[:-1]}4{vowel}",)))
         else:
-            tiers.append(("cvvc-direct", (f"- {vowel}",)))
+            attack = f"-{vowel}" if inventory_profile == "anna-nyui-diva" else f"- {vowel}"
+            tiers.append(("cvvc-direct", (attack,)))
         if inventory_profile == "miku-v4-english" and not cluster:
             tiers.append(("cvvc-direct", (f"Sil {vowel}",)))
     elif previous_vowel:
@@ -536,7 +601,14 @@ def _english_nucleus_candidates(
         else:
             tiers.append(("cvvc-direct", (f"{previous_vowel} {vowel}", f"{previous_vowel}{vowel}")))
     if cluster:
-        base = [f"{cluster}{vowel}", f"{last}{vowel}", f"{last} {vowel}"]
+        base = [f"{cluster}{vowel}"]
+        if inventory_profile == "anna-nyui-diva" and cluster == "h" and vowel == "E":
+            base.insert(0, "hhE")
+        if inventory_profile == "anna-nyui-diva" and len(onset) > 1:
+            # The short liquid/glide attack is authored for a preceding CC
+            # fragment; using the ordinary rV/lV would repeat its consonant.
+            base.append(f"_{last}{vowel}")
+        base.extend((f"{last}{vowel}", f"{last} {vowel}"))
         if last == "r":
             base.extend((f"4{vowel}", f"4 {vowel}"))
         tiers.append(("cvvc-direct", tuple(base)))
@@ -561,7 +633,8 @@ def _english_cluster_units(
         initial_pairs = _bank_cc(onset[0], onset[1], inventory_profile) if inventory_profile == "miku-v4-english" else ()
         units.append(_english_mora(
             [
-                ("cluster-hit", (f"- {cluster}", *initial_pairs)),
+                ("cluster-hit", ((f"-{cluster}", cluster) if inventory_profile == "anna-nyui-diva"
+                                 else (f"- {cluster}", *initial_pairs))),
                 ("cvvc-transition", (f"- {first}", f"Sil {first}", first))
                 if inventory_profile == "miku-v4-english" else ("cvvc-transition", (f"- {first}", first)),
                 ("approximation", (f"@ {first}", f"e {first}"))
@@ -585,7 +658,8 @@ def _english_cluster_units(
     elif previous_vowel:
         # A VC/VCC transition retains the previous vowel's exit into the onset.
         prefix2 = "".join(onset[:2])
-        fallback_clusters = (f"- {cluster}", cluster) if len(onset) > 1 else ()
+        fallback_clusters = ((f"-{cluster}", cluster) if inventory_profile == "anna-nyui-diva"
+                             else (f"- {cluster}", cluster)) if len(onset) > 1 else ()
         try:
             full_fallback = bool(
                 fallback_clusters and resolve_alias is not None and resolve_alias(fallback_clusters) is not None
@@ -645,7 +719,7 @@ def _english_cluster_units(
                     cc_source = (left,)
             if (
                 compositional_palatal_cv and not word_start and previous_vowel
-                and onset in {("n", "j"), ("l", "j")}
+                and onset in {("n", "j"), ("l", "j"), ("n", "y"), ("l", "y")}
                 and units and units[0].coverage == "cvvc-transition"
                 and resolve_alias is not None
             ):
@@ -684,6 +758,7 @@ def _english_coda_units(
         phones.extend(_xsampa_phone_sequence(phone))
     for raw in phones:
         phone = "4" if raw == "r" and inventory_profile != "miku-v4-english" else raw
+        phone = _bank_consonant(phone, inventory_profile)
         role = "nasal" if raw == "N" else "glide" if raw in {"j", "w"} else "coda"
         contextual = list(_bank_cc(previous, phone, inventory_profile))
         if raw == "r":
@@ -691,7 +766,12 @@ def _english_coda_units(
             # without tap recordings must retain this contextual rhotic.
             contextual.extend((f"{previous} {raw}", f"{previous}{raw}"))
         fallback = [phone, raw]
-        if previous == "N" and role == "glide" and resolve_alias is not None:
+        if raw == "N" and inventory_profile == "anna-nyui-diva":
+            # Portuguese /i~/ has no English /i\u014b/ recording in DIVA. Retain
+            # a recorded same-vowel nasal exit instead of dropping nasalization
+            # or replaying a different vowel's lead. This remains approximate.
+            fallback[:0] = [f"{vowel}n", f"{vowel} n"]
+        if previous == _bank_consonant("N", inventory_profile) and role == "glide" and resolve_alias is not None:
             try:
                 standalone = resolve_alias(_unique(fallback))
             except Exception:
@@ -751,9 +831,12 @@ def _english_vc_before_simple_cv(
     if not previous_vowel or len(onset) != 1 or resolve_alias is None:
         return None
     consonant = onset[0]
+    native_consonant = "hh" if (inventory_profile == "anna-nyui-diva"
+                                 and consonant == "h" and vowel == "E") else consonant
     if not (
         selected_alias.startswith(f"{consonant}{vowel}")
         or selected_alias.startswith(f"{consonant} {vowel}")
+        or selected_alias.startswith(f"{native_consonant}{vowel}")
     ):
         return None
     candidates = _bank_cc(previous_vowel, consonant, inventory_profile)
@@ -780,8 +863,10 @@ def _english_word_to_moras(
     previous_vowel = ""
     word_syllables = max(1, len(word.syllables))
     for syllable_index, syllable in enumerate(word.syllables):
-        fallback_onset = _xsampa_onset(syllable.onset)
-        dedicated_onset = _xsampa_onset(syllable.onset, dedicated_palatal=True)
+        fallback_onset = tuple(_bank_consonant(phone, inventory_profile)
+                               for phone in _xsampa_onset(syllable.onset))
+        dedicated_onset = tuple(_bank_consonant(phone, inventory_profile)
+                                for phone in _xsampa_onset(syllable.onset, dedicated_palatal=True))
         canonical_vowel = _xsampa_vowel(syllable.vowel)
         base_vowel = _bank_vowel(canonical_vowel, inventory_profile)
         coda_source = list(syllable.coda)

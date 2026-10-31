@@ -124,6 +124,8 @@ _TETO_RENDERER_ERROR = ""
 _TETO_RENDERER_CONFIG = ""
 _MIKU_RENDERER: Any = None
 _MIKU_RENDERER_CONFIG = ""
+_ANNA_RENDERER: Any = None
+_ANNA_RENDERER_CONFIG = ""
 _TETO_BATTERY_CACHE_LOCK = threading.RLock()
 _TETO_BATTERY_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 _TETO_BATTERY_MONITOR_STARTED = False
@@ -133,7 +135,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.44"
+PHONE_WORKER_VERSION = "1.11.45"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "termux"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -827,7 +829,7 @@ def _teto_cached_battery_snapshot() -> tuple[dict[str, Any], float | None]:
 def _start_teto_battery_monitor() -> bool:
     """Start one daemon refresher so Teto admission never blocks on Termux API."""
     global _TETO_BATTERY_MONITOR_STARTED
-    if not (_env_bool("PHONE_WORKER_TETO_ENABLED", False) or _env_bool("PHONE_WORKER_MIKU_ENABLED", False)):
+    if not any(_env_bool(f"PHONE_WORKER_{prefix}_ENABLED", False) for prefix in ("TETO", "MIKU", "ANNA")):
         return False
     with _TETO_BATTERY_CACHE_LOCK:
         if _TETO_BATTERY_MONITOR_STARTED:
@@ -2512,21 +2514,81 @@ def _get_miku_renderer():
         return renderer
 
 
+def _anna_renderer_environment() -> dict[str, str]:
+    """Keep Anna's sampled DIVA bank and caches independent of other voices."""
+    bank = str(os.getenv("PHONE_WORKER_ANNA_VOICEBANK_DIR") or "").strip()
+    english_bank = str(os.getenv("PHONE_WORKER_ANNA_ENGLISH_VOICEBANK_DIR") or bank).strip()
+    command = str(os.getenv("PHONE_WORKER_ANNA_RESAMPLER_COMMAND") or "").strip()
+    if not command:
+        installed_esper = Path.home() / ".esper-utau/bin/resampler.py"
+        if installed_esper.is_file():
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(installed_esper))}"
+    defaults = {
+        "ENABLED": "true" if _env_bool("PHONE_WORKER_ANNA_ENABLED", False) else "false",
+        "VOICEBANK_DIR": bank,
+        "ENGLISH_VOICEBANK_DIR": english_bank or str(Path.home() / "voicebanks/anna-nyui-diva"),
+        "VOICEBANK_MODE": "english", "ALIAS_SUFFIX": "",
+        "RESAMPLER_COMMAND": command,
+        "BASE_PITCH": "C4", "SPEECH_RATE": "1.0", "FLAGS": "", "VELOCITY": "100",
+        "MODULATION": "15", "TEMPO": "140", "LENGTH_MODE": "total",
+        "FRAGMENT_CACHE_DIR": str(Path.home() / "phone-worker/cache/anna-fragments"),
+        "FRAGMENT_CACHE_MB": "256", "PCM_CACHE_MB": "256", "STATUS_CACHE_SECONDS": "15",
+        "MIN_ALIASES": "500", "ENGLISH_MIN_ALIASES": "500", "MAX_CHARACTERS": "180",
+        "MAX_PHONEMES": "240", "MAX_AUDIO_SECONDS": "20", "RENDER_THREADS": "4",
+    }
+    fixed = {"ENABLED", "VOICEBANK_DIR", "ENGLISH_VOICEBANK_DIR", "VOICEBANK_MODE", "ALIAS_SUFFIX",
+             "RESAMPLER_COMMAND"}
+    return {f"PHONE_WORKER_TETO_{suffix}": default if suffix in fixed else str(
+            os.getenv(f"PHONE_WORKER_ANNA_{suffix}") or default)
+            for suffix, default in defaults.items()}
+
+
+def _get_anna_renderer():
+    global _ANNA_RENDERER, _ANNA_RENDERER_CONFIG
+    environment = _anna_renderer_environment()
+    configuration = hashlib.sha256(json.dumps(environment, sort_keys=True).encode("utf-8")).hexdigest()
+    with _TETO_RENDERER_LOCK:
+        if _ANNA_RENDERER is not None and _ANNA_RENDERER_CONFIG == configuration:
+            return _ANNA_RENDERER
+        _ANNA_RENDERER = None
+        _ANNA_RENDERER_CONFIG = ""
+        try:
+            from teto_renderer import TetoRenderer
+            renderer = TetoRenderer(resource_guard=_teto_resource_snapshot,
+                                    environment=environment, voice_id="anna-nyui")
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {_short_text(exc, limit=180)}"
+            raise RuntimeError(f"renderer Anna Nyui indisponível: {reason}") from exc
+        _ANNA_RENDERER = renderer
+        _ANNA_RENDERER_CONFIG = configuration
+        return renderer
+
+
+def _ttv_voice_prefix(voice_id: str) -> str:
+    return {"kasane-teto": "TETO", "hatsune-miku": "MIKU", "anna-nyui": "ANNA"}[voice_id]
+
+
+def _ttv_voice_name(voice_id: str) -> str:
+    return {"kasane-teto": "Kasane Teto", "hatsune-miku": "Hatsune Miku", "anna-nyui": "Anna Nyui"}[voice_id]
+
+
 def _get_ttv_renderer(voice_id: str = "kasane-teto"):
     voice_id = _phone_worker_tts_policy_module().normalize_ttv_voice_id(voice_id)
+    if voice_id == "anna-nyui":
+        return _get_anna_renderer()
     return _get_miku_renderer() if voice_id == "hatsune-miku" else _get_teto_renderer()
 
 
 def _ttv_request_settings(body: dict[str, Any]) -> dict[str, Any]:
     policy = _phone_worker_tts_policy_module()
     voice_id = policy.normalize_ttv_voice_id(body.get("ttv_voice_id", "kasane-teto"))
-    prefix = "MIKU" if voice_id == "hatsune-miku" else "TETO"
+    prefix = _ttv_voice_prefix(voice_id)
     return policy.effective_ttv_settings(
         body, default_speech_rate=os.getenv(f"PHONE_WORKER_{prefix}_SPEECH_RATE", "1.0"))
 
 
 def _ttv_voice_state(status: dict[str, Any], voice_id: str) -> dict[str, Any]:
-    """Select one voice; a missing Miku advertisement never inherits Teto."""
+    """Select one voice; a missing character advertisement never inherits Teto."""
     voice_id = _phone_worker_tts_policy_module().normalize_ttv_voice_id(voice_id)
     voices = status.get("ttv_voices")
     if isinstance(voices, list):
@@ -2547,12 +2609,12 @@ def _ttv_voice_state(status: dict[str, Any], voice_id: str) -> dict[str, Any]:
     if voice_id == "kasane-teto":
         return dict(status)  # Established single-voice worker/test contract.
     return {"ready": False, "available": False, "enabled": False,
-            "last_error": "Hatsune Miku não instalada no worker", "resources": status.get("resources", {})}
+            "last_error": f"{_ttv_voice_name(voice_id)} não instalada no worker", "resources": status.get("resources", {})}
 
 
 def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str, Any]:
-    is_miku = voice_id == "hatsune-miku"
-    prefix = "MIKU" if is_miku else "TETO"
+    is_teto = voice_id == "kasane-teto"
+    prefix = _ttv_voice_prefix(voice_id)
     enabled = _env_bool(f"PHONE_WORKER_{prefix}_ENABLED", False)
     result: dict[str, Any] = {
         "ok": False, "available": False, "ready": False, "enabled": enabled,
@@ -2562,7 +2624,7 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
     try:
         # A broken character configuration must not prevent the other voice
         # from appearing in aggregate health or accepting synthesis requests.
-        if not is_miku:
+        if is_teto:
             result["backend"] = _teto_backend()
         if not enabled:
             result["last_error"] = f"PHONE_WORKER_{prefix}_ENABLED=false"
@@ -2577,7 +2639,7 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
             result["ttv_language_fingerprints"] = {
                 language: renderer.fingerprint(reading_language=language)
                 for language in result.get("ttv_languages", [])
-                if language == "en-US" or is_miku
+                if language == "en-US" or not is_teto
             }
         if callable(getattr(renderer, "singing_fingerprint", None)):
             result["singing_fingerprints"] = {
@@ -2593,7 +2655,7 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
 def _teto_status(*, force: bool = False) -> dict[str, Any]:
     # Keep legacy Teto fields while advertising independent TTV voices.
     states = {voice_id: _ttv_single_voice_status(voice_id, force=force)
-              for voice_id in ("kasane-teto", "hatsune-miku")}
+              for voice_id in ("kasane-teto", "hatsune-miku", "anna-nyui")}
     result = dict(states["kasane-teto"])
     enabled = any(state.get("enabled") for state in states.values())
     resources = {"ok": False, "reason": "engine desativada"}
@@ -2607,7 +2669,7 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
     result["ttv_voices"] = []
     for voice_id, state in states.items():
         result["ttv_voices"].append({
-            "id": voice_id, "name": "Hatsune Miku" if voice_id == "hatsune-miku" else "Kasane Teto",
+            "id": voice_id, "name": _ttv_voice_name(voice_id),
             "ready": bool(state.get("ready") and resources.get("ok", True)),
             "available": bool(state.get("available")), "enabled": bool(state.get("enabled")),
             "supports_personal_rate": True, "languages": list(state.get("ttv_languages") or []),
@@ -5248,7 +5310,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             status = _ttv_voice_state(_teto_status(), controls["ttv_voice_id"])
             fingerprint = str(status.get("fingerprint") or "unavailable")
             language = controls["ttv_language"]
-            if language == "en-US" or controls["ttv_voice_id"] == "hatsune-miku":
+            if language == "en-US" or controls["ttv_voice_id"] != "kasane-teto":
                 fingerprint = str((status.get("ttv_language_fingerprints") or {}).get(language) or "unavailable")
             if body.get("ttv_score") is not None:
                 fingerprint = str((status.get("singing_fingerprints") or {}).get(language) or fingerprint)
@@ -5259,7 +5321,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 identity = ["worldline-r", status.get("renderer_version", ""),
                             _teto_renderer_config_fingerprint(), fingerprint]
                 fingerprint = hashlib.sha256(json.dumps(identity).encode("utf-8")).hexdigest()
-            prefix = "MIKU" if controls["ttv_voice_id"] == "hatsune-miku" else "TETO"
+            prefix = _ttv_voice_prefix(controls["ttv_voice_id"])
             base_pitch = str(os.getenv(f"PHONE_WORKER_{prefix}_BASE_PITCH") or "C4")
         return _phone_worker_tts_policy_module().standard_cache_key(
             body, engine=normalized_engine, sanitize_key=self._sanitize_tts_cache_key,
@@ -5326,7 +5388,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 default_speech_rate=os.getenv("PHONE_WORKER_TETO_SPEECH_RATE", "1.0"))
             status = _ttv_voice_state(_teto_status(), controls["ttv_voice_id"])
             result.update({
-                "teto_backend": status.get("backend") or ("utau" if controls["ttv_voice_id"] == "hatsune-miku" else _teto_backend()),
+                "teto_backend": status.get("backend") or ("utau" if controls["ttv_voice_id"] != "kasane-teto" else _teto_backend()),
                 "teto_renderer_version": status.get("renderer_version", ""),
                 "teto_voicebank_profile": "english-cvvc" if (
                     controls["ttv_language"] == "en-US" or controls.get("ttv_mode") == "singing"
@@ -5485,7 +5547,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "android_voice": response.get("voice") if engine == "android_native" and isinstance(response, dict) else "",
             "android_locale": response.get("locale") if engine == "android_native" and isinstance(response, dict) else "",
             "teto_voicebank": teto_meta.get("voicebank") if engine == "teto" else "",
-            "teto_backend": (teto_meta.get("backend") or ("utau" if ttv_settings["ttv_voice_id"] == "hatsune-miku" else _teto_backend())) if engine == "teto" else "",
+            "teto_backend": (teto_meta.get("backend") or ("utau" if ttv_settings["ttv_voice_id"] != "kasane-teto" else _teto_backend())) if engine == "teto" else "",
             "teto_pitch_mode": "utau-semitones" if engine == "teto" else "",
             "teto_fingerprint": teto_meta.get("voicebank_fingerprint") if engine == "teto" else "",
             "teto_renderer_version": teto_meta.get("renderer_version") if engine == "teto" else "",
@@ -5557,10 +5619,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
             controls = _ttv_request_settings(body)
             if performance.get("score") is not None and controls["ttv_voice_id"] == "kasane-teto" and _teto_backend() == "worldline-r":
                 raise ValueError("canto MIDI exige ESPER; selecione o backend utau/ESPER da Teto")
-            prefix = "MIKU" if controls["ttv_voice_id"] == "hatsune-miku" else "TETO"
+            prefix = _ttv_voice_prefix(controls["ttv_voice_id"])
             teto_max_chars = 2048 if performance.get("score") is not None else max(16, _env_int(f"PHONE_WORKER_{prefix}_MAX_CHARACTERS", 180))
             if len(text) > teto_max_chars:
-                raise ValueError(f"texto grande demais para Teto ({len(text)} > {teto_max_chars})")
+                raise ValueError(f"texto grande demais para {_ttv_voice_name(controls['ttv_voice_id'])} ({len(text)} > {teto_max_chars})")
         timeout_limit = 120 if performance else self.job_timeout
         timeout = max(2, min(timeout_limit, int(float(body.get("timeout_seconds") or
             (120 if performance else os.getenv("PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS") or self.job_timeout)))))
@@ -5575,7 +5637,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             voice_ready = bool(teto_state.get("ready") and (teto_state.get("resources") or {}).get("ok", True))
             if not voice_ready:
                 reason = teto_state.get("last_error") or (teto_state.get("resources") or {}).get("reason") or "voicebank ou resampler indisponível"
-                name = "Miku" if controls["ttv_voice_id"] == "hatsune-miku" else "Teto"
+                name = _ttv_voice_name(controls["ttv_voice_id"])
                 raise RuntimeError(f"{name} indisponível: {_short_text(reason, limit=180)}")
             required_protocol = 2 if isinstance(performance.get("score"), dict) and "preset" in performance["score"] else 1
             if performance and isinstance((deps.get("teto") or {}).get("ttv_voices"), list) and int(teto_state.get("ttv_performance_protocol") or 0) < required_protocol:

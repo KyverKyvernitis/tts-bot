@@ -30,7 +30,7 @@ from typing import Any, Callable, Mapping
 
 from .cache import FragmentCache
 from .errors import TetoConfigurationError, TetoResourceError, TetoSynthesisError
-from .phonemizer import phonemize
+from .phonemizer import phonemize, english_vowel_candidates, english_vowel_source
 from .prosody import (
     RenderNote, align_pitch_to_timeline, build_notes, validate_performance,
     performance_hash, align_singing_syllables, align_singing_pitch, _relative_pitch,
@@ -94,7 +94,8 @@ class TetoRenderer:
         self._voicebank_fallback_reason = ""
         self._last_status_at = 0.0
         self._last_status: dict[str, Any] = {}
-        cache_root = self._getenv("PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / ("miku-fragments" if self.voice_id == "hatsune-miku" else "teto-fragments"))
+        cache_name = {"hatsune-miku": "miku-fragments", "anna-nyui": "anna-fragments"}.get(self.voice_id, "teto-fragments")
+        cache_root = self._getenv("PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / cache_name)
         self._cache = FragmentCache(cache_root, max_mb=self._env_int("PHONE_WORKER_TETO_FRAGMENT_CACHE_MB", 256))
         # A decoded fragment can be reused by many successive short singing
         # windows. Keep immutable native PCM, not a mutable array later edited
@@ -110,10 +111,11 @@ class TetoRenderer:
         self._esper_client_lock = threading.Lock()
 
     def _configure_voice(self, *, environment: Mapping[str, str] | None, voice_id: str) -> None:
-        if voice_id not in {"kasane-teto", "hatsune-miku"}:
+        if voice_id not in {"kasane-teto", "hatsune-miku", "anna-nyui"}:
             raise ValueError("voz TTV desconhecida")
-        if voice_id == "hatsune-miku" and environment is None:
-            raise TetoConfigurationError("Hatsune Miku exige configuração independente da Teto")
+        if voice_id != "kasane-teto" and environment is None:
+            label = "Hatsune Miku" if voice_id == "hatsune-miku" else "Anna Nyui"
+            raise TetoConfigurationError(f"{label} exige configuração independente da Teto")
         self.voice_id = voice_id
         # A per-voice snapshot is authoritative. Falling back to os.environ here
         # could silently render Teto for an incompletely configured Miku request.
@@ -129,7 +131,7 @@ class TetoRenderer:
         # available. Explicit per-instance bridge settings override them, while
         # unrelated Teto voice settings never leak into a Miku child process.
         child = {key: value for key, value in os.environ.items()
-                 if not key.startswith(("PHONE_WORKER_TETO_", "PHONE_WORKER_MIKU_"))}
+                 if not key.startswith(("PHONE_WORKER_TETO_", "PHONE_WORKER_MIKU_", "PHONE_WORKER_ANNA_"))}
         child.update(self._environment)
         return child
 
@@ -137,14 +139,30 @@ class TetoRenderer:
         return str(self._getenv("PHONE_WORKER_TETO_ALIAS_SUFFIX") or "").strip()
 
     def _voice_label(self) -> str:
-        return "Hatsune Miku" if self.voice_id == "hatsune-miku" else "Teto"
+        return {"hatsune-miku": "Hatsune Miku", "anna-nyui": "Anna Nyui"}.get(self.voice_id, "Teto")
 
     def _status_voice(self) -> str:
         profile = "english-cvvc" if self._index_profile == "english-cvvc" else "standard"
+        if self.voice_id == "anna-nyui" and profile == "english-cvvc":
+            profile = "english-vccv-diva"
         return f"{self.voice_id}-{profile}"
 
     def _phonemizer_options(self) -> dict[str, str]:
-        return {"inventory_profile": "miku-v4-english"} if self.voice_id == "hatsune-miku" else {}
+        profile = {"hatsune-miku": "miku-v4-english", "anna-nyui": "anna-nyui-diva"}.get(self.voice_id)
+        return {"inventory_profile": profile} if profile else {}
+
+    def _resolve_note_entry(self, index: VoicebankIndex, note: RenderNote,
+                            candidates: tuple[str, ...] | None = None) -> OtoEntry | None:
+        aliases = note.candidates if candidates is None else candidates
+        if self.voice_id == "anna-nyui":
+            return index.resolve(aliases, pitch=note.pitch)
+        return index.resolve(aliases)
+
+    def _steady_vowel_candidates(self, nucleus) -> tuple[str, ...]:
+        if self.voice_id == "anna-nyui":
+            return english_vowel_candidates(nucleus.source_phonemes,
+                                            inventory_profile="anna-nyui-diva")
+        return tuple(dict.fromkeys(candidate.split()[-1] for candidate in nucleus.candidates))
 
     @property
     def _index_profile(self) -> str:
@@ -169,7 +187,7 @@ class TetoRenderer:
     def _load_english_index(self) -> VoicebankIndex:
         path = Path(self._english_voicebank_dir()).expanduser()
         if not path.is_dir():
-            raise TetoConfigurationError(f"Inglês exige a voicebank English-CVVC da {self._voice_label()} instalada")
+            raise TetoConfigurationError(f"Inglês exige o banco de voz inglês da {self._voice_label()} instalado")
         resolved = str(path.resolve())
         with self._english_index_lock:
             if self._english_index is None or self._english_index_path != resolved:
@@ -177,9 +195,10 @@ class TetoRenderer:
                 try:
                     index = VoicebankIndex.load(resolved, minimum_aliases=minimum,
                                                 alias_suffix=self._alias_suffix(),
-                                                case_sensitive=self.voice_id == "hatsune-miku")
+                                                case_sensitive=self.voice_id != "kasane-teto",
+                                                **({'pitch_map': True} if self.voice_id == 'anna-nyui' else {}))
                 except Exception as exc:
-                    raise TetoConfigurationError(f"voicebank English-CVVC indisponível: {exc}") from exc
+                    raise TetoConfigurationError(f"banco de voz inglês indisponível: {exc}") from exc
                 self._english_index = index
                 self._english_index_path = resolved
             return self._english_index
@@ -251,13 +270,13 @@ class TetoRenderer:
         configured = str(self._getenv("PHONE_WORKER_TETO_ENGLISH_VOICEBANK_DIR") or "").strip()
         if configured:
             return configured
-        if self.voice_id == "hatsune-miku":
+        if self.voice_id in {"hatsune-miku", "anna-nyui"}:
             return self._voicebank_dir()
         return str(Path.home() / "voicebanks" / "kasane-teto-english")
 
     def _voicebank_mode(self) -> str:
         mode = str(self._getenv("PHONE_WORKER_TETO_VOICEBANK_MODE") or "auto").strip().lower()
-        if self.voice_id == "hatsune-miku":
+        if self.voice_id in {"hatsune-miku", "anna-nyui"}:
             return "english"
         return mode if mode in {"auto", "english", "standard"} else "auto"
 
@@ -330,8 +349,8 @@ class TetoRenderer:
             "tempo": max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
             "length_mode": self._length_mode(),
         }
-        if self.voice_id == "hatsune-miku":
-            profile.update(voice_id=self.voice_id, inventory_profile="miku-v4-english")
+        if self.voice_id != "kasane-teto":
+            profile.update(voice_id=self.voice_id, **self._phonemizer_options())
         return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
     def _render_fingerprint(self, index: VoicebankIndex) -> str:
@@ -539,7 +558,8 @@ class TetoRenderer:
             try:
                 index = VoicebankIndex.load(resolved, minimum_aliases=minimum_aliases,
                                             alias_suffix=self._alias_suffix(),
-                                            case_sensitive=self.voice_id == "hatsune-miku")
+                                            case_sensitive=self.voice_id != "kasane-teto",
+                                            **({'pitch_map': True} if self.voice_id == 'anna-nyui' else {}))
             except Exception as exc:
                 errors.append(f"{profile}: {type(exc).__name__}: {exc}")
                 if self._voicebank_mode() != "auto":
@@ -1567,14 +1587,16 @@ class TetoRenderer:
                         else:
                             # A rest ends the sustain. Restart the same vowel
                             # from its steady alias, never its old consonant.
-                            candidates = tuple(dict.fromkeys(candidate.split()[-1] for candidate in nucleus.candidates))
+                            candidates = self._steady_vowel_candidates(nucleus)
                             if index.resolve(candidates) is None:
                                 raise ValueError('a voicebank não contém a vogal isolada depois da pausa; escreva a sílaba nessa nota MIDI')
                             first = sum(item.role == 'nucleus' for item in moras)
+                            vowel_source = (english_vowel_source(nucleus.source_phonemes)
+                                            if self.voice_id == 'anna-nyui' else nucleus.source_phonemes[-1:])
                             moras.append(replace(nucleus, candidates=candidates, word_index=word_offset,
                                                  syllable_index=0, word_moras=1, mora_index=0,
                                                  word_end=True, pause_after_ms=0, phrase_end='',
-                                                 source_phonemes=nucleus.source_phonemes[-1:]))
+                                                 source_phonemes=vowel_source))
                             word_offset += 1
                             slots.append(first)
                             continue
@@ -1952,17 +1974,20 @@ class TetoRenderer:
                             notes[nucleus] = replace(notes[nucleus], duration_ms=notes[nucleus].duration_ms + 1000 * segment['hold_count'])
             if not notes:
                 raise TetoSynthesisError('texto não gerou vogais compatíveis')
-            entries = [index.resolve(note.candidates) for note in notes]
+            entries = [self._resolve_note_entry(index, note) for note in notes]
             if score is not None:
                 for number, (note, entry) in enumerate(zip(notes, entries)):
                     if entry is None or note.role != 'nucleus':
                         continue
-                    if len(note.source_phonemes) == 1:
+                    pure_vowel = (len(note.source_phonemes) == 1 or
+                                  (self.voice_id == 'anna-nyui' and
+                                   english_vowel_source(note.source_phonemes) == note.source_phonemes))
+                    if pure_vowel:
                         # Attack aliases can contain mostly silence (notably
                         # Miku Sil V). A long sustain uses the authored steady
                         # vowel instead of stretching that silent attack.
-                        candidates = tuple(dict.fromkeys(candidate.split()[-1] for candidate in note.candidates))
-                        vowel_entry = index.resolve(candidates)
+                        candidates = self._steady_vowel_candidates(note)
+                        vowel_entry = self._resolve_note_entry(index, note, candidates)
                         if vowel_entry is not None:
                             # ESPER's cut-combine needs a nonempty fixed head,
                             # even for an OTO vowel authored with consonant=0.
@@ -2336,7 +2361,7 @@ class TetoRenderer:
             rendered = 0
             with tempfile.TemporaryDirectory(prefix="phone-worker-teto-") as temp:
                 workdir = Path(temp)
-                entries = [index.resolve(note.candidates) for note in notes]
+                entries = [self._resolve_note_entry(index, note) for note in notes]
                 placements = None
                 planned_end_ms = None
                 if self._index_profile == "english-cvvc":

@@ -43,6 +43,12 @@ VOICE_CATALOG = (
         engine="teto",
         description="A voz da Hatsune Miku, com síntese no phone worker.",
     ),
+    TTVVoice(
+        id="anna-nyui",
+        name="Anna Nyui",
+        engine="teto",
+        description="A voz da Anna Nyui, com síntese ESPER no phone worker.",
+    ),
 )
 VOICES = VOICE_CATALOG
 _VOICES_BY_ID = {voice.id: voice for voice in VOICE_CATALOG}
@@ -75,8 +81,8 @@ def worker_voice_details(state: Mapping[str, Any], voice_id: object = DEFAULT_VO
     """Resolve a character's advertised bank without borrowing another voice.
 
     Older workers advertise Teto fingerprints/languages at the top level.
-    That compatibility path applies only to Teto; a missing Miku row always
-    stays unavailable, even when the worker can synthesize Teto.
+    That compatibility path applies only to Teto; another character's missing
+    row stays unavailable, even when the worker can synthesize Teto.
     """
     voice = get_voice(voice_id)
     entry = next((row for row in (state.get("ttv_voices") or [])

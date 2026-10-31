@@ -499,7 +499,8 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
         return True
 
     def _build_text_fallback(self) -> None:
-        adicionar_entrada_texto_modal(self, "ttv_voice_id", label="Escolha sua vocaloid", placeholder="Kasane Teto: kasane-teto · Hatsune Miku: hatsune-miku", current=self.current_voice, max_length=100)
+        voices = " · ".join(f"{voice.name}: {voice.id}" for voice in VOICE_CATALOG)
+        adicionar_entrada_texto_modal(self, "ttv_voice_id", label="Escolha sua vocaloid", placeholder=voices[:100], current=self.current_voice, max_length=100)
         adicionar_entrada_texto_modal(self, "ttv_language", label="Idioma", placeholder="Português adaptado: pt-BR · Inglês: en-US", current=self.current_language, max_length=16)
         adicionar_entrada_texto_modal(self, "ttv_speech_rate", label="Velocidade da fala", placeholder="0.5 / 0.75 / 1.0 / 1.25 / 1.5", current=str(self.current_rate), max_length=32)
         adicionar_entrada_texto_modal(self, "ttv_pitch_semitones", label="Tom da voz (semitons)", placeholder="0.0 = tom original · passos de 0.5", current=self.current_pitch, max_length=8)

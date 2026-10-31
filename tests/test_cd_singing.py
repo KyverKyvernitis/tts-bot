@@ -58,7 +58,7 @@ async def test_message_freezes_selected_catalog_score_before_later_edits(monkeyp
         guild_defaults={}, active_prefix="'", forced_engine="teto")
     queued = payload.queue_item
     assert queued.ttv_score == score
-    digest = performance_hash(text=queued.text, score=score)
+    digest = performance_hash(text=queued.text, score=score, segments=queued.ttv_segments)
     assert queued.ttv_performance_hash == digest
     monkeypatch.setattr(catalog, "_MELODIES", (list_melodies()[0],))
     assert queued.ttv_score == score and queued.ttv_performance_hash == digest
