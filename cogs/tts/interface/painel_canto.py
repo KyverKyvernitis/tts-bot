@@ -621,7 +621,7 @@ class CDPanelView(VisaoLayoutBaseTTS):
                 melody_id = self.selected_melody_id
                 melody_name = get_melody(melody_id).name
                 preview_voice = voice_label(self._preferences["ttv_voice_id"])
-                preview_language = language_label(self._preferences["ttv_language"])
+                preview_language = language_label(self._preferences["ttv_language"], voice_id=self._preferences["ttv_voice_id"])
                 preview_settings = dict(self._preferences)
                 await self._edit_panel(interaction)
                 mp3 = prepared_sample(melody_id, preview_settings)

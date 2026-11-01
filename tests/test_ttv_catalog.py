@@ -5,11 +5,12 @@ import pytest
 from cogs.tts import ttv
 
 
-def test_catalog_has_teto_miku_and_anna_routes_and_is_immutable():
+def test_catalog_has_teto_miku_anna_and_pururu_routes_and_is_immutable():
     assert [(voice.id, voice.name, voice.engine) for voice in ttv.VOICE_CATALOG] == [
         ("kasane-teto", "Kasane Teto", "teto"),
         ("hatsune-miku", "Hatsune Miku", "teto"),
         ("anna-nyui", "Anna Nyui", "teto"),
+        ("pururu-purpura", "Pururu Púrpura", "teto"),
     ]
     with pytest.raises(FrozenInstanceError):
         ttv.get_voice().name = "Outra voz"

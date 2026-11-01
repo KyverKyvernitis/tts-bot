@@ -12,7 +12,7 @@ from .operacoes_painel import DESCRICAO_LANCADOR_TTS
 
 def resumo_ttv(settings: dict) -> str:
     voice = voice_label(settings.get("ttv_voice_id"))
-    language = language_label(settings.get("ttv_language"))
+    language = language_label(settings.get("ttv_language"), voice_id=settings.get("ttv_voice_id"))
     pitch = float(settings.get("ttv_pitch_semitones", 0))
     tone = "Original" if pitch == 0 else f"{pitch:+g} semitons".replace(".", ",")
     rate = float(settings.get("ttv_speech_rate", 1.0))

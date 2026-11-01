@@ -1027,6 +1027,89 @@ def _kana_word_to_moras(
     return output
 
 
+def _pururu_phone(phone: str) -> str:
+    # The author's native PT-BR reclist uses central nasal /6~/ and tap /4/.
+    # Palatals and the strong R are real recordings, not English n+j/l+j/h.
+    return {"a~": "6~", "r": "4"}.get(phone, phone)
+
+
+def pururu_vowel_candidates(source_phonemes: Iterable[str] | str) -> tuple[str, ...]:
+    """Authored steady vowels use *V; bare vowels do not exist in this bank."""
+    source = english_vowel_source(source_phonemes)
+    return ("*" + _pururu_phone(source[0]),) if source else ()
+
+
+def _pururu_word_to_moras(
+    word: PhoneticWord, *, deaccented: bool,
+    resolve_alias: Callable[[Iterable[str]], object | None] | None = None,
+) -> list[Mora]:
+    """Plan the original CV-VC PT-BR recordings without foreign substitutions.
+
+    The source README specifies casa -> ka az za. A nasal vowel is already
+    nasal in its CV; adding an English N would speak the nasal twice.
+    """
+    result: list[Mora] = []
+    previous = ""
+    syllable_count = max(1, len(word.syllables))
+
+    def available(candidates):
+        return resolve_alias is None or resolve_alias(candidates) is not None
+
+    def unit(candidates, *, role, source, duration, syllable, index):
+        mora = _english_mora(
+            [("cvvc-direct" if role == "nucleus" else "cvvc-transition", candidates)],
+            duration_ms=duration, role=role, source=tuple(source),
+            stressed=bool(syllable.stressed and not deaccented and role == "nucleus"),
+            deaccented=deaccented or role != "nucleus", resolve_alias=resolve_alias,
+        )
+        return replace(mora, syllable_index=index, word_syllables=syllable_count)
+
+    for number, syllable in enumerate(word.syllables):
+        onset = tuple(_pururu_phone(phone) for phone in syllable.onset)
+        vowel = _pururu_phone(syllable.vowel)
+        if onset:
+            full = "".join(onset) + vowel
+            full_onset = available((full,))
+            candidates = (full,) if full_onset else (onset[-1] + vowel,)
+            if previous:
+                exits = (previous + onset[0], previous + " " + onset[0])
+                if available(exits):
+                    result.append(unit(exits, role="vowel-exit", source=(previous, onset[0]),
+                                       duration=58, syllable=syllable, index=number))
+            if not full_onset:
+                for left, right in zip(onset, onset[1:]):
+                    result.append(unit((left + " " + right, left + right), role="cluster",
+                                       source=(left, right), duration=54,
+                                       syllable=syllable, index=number))
+        elif previous:
+            candidates = (previous + " " + vowel, "*" + vowel)
+        else:
+            candidates = ("-" + vowel, "*" + vowel)
+
+        result.append(unit(
+            candidates, role="nucleus", source=(*syllable.onset, syllable.vowel),
+            duration=_english_nucleus_duration(syllable, deaccented=deaccented,
+                syllable_index=number, word_syllables=syllable_count,
+                diphthong=bool(syllable.coda and syllable.coda[0] in {"j", "w"})),
+            syllable=syllable, index=number))
+        previous = vowel
+        last_phone = vowel
+        for raw in syllable.coda:
+            phone = _pururu_phone(raw)
+            # After a diphthong, a V+C alias may be the only authored coda
+            # (bens: e~j then e~s). The compositor trims its old vowel lead,
+            # preserving the glide while still articulating the final /s/.
+            tails = _unique((previous + phone, last_phone + " " + phone,
+                             last_phone + phone, vowel + phone))
+            role = "glide" if raw in {"j", "w"} else "coda"
+            result.append(unit(tails, role=role, source=(raw,),
+                               duration=_ENGLISH_ROLE_DURATIONS[role],
+                               syllable=syllable, index=number))
+            previous += phone
+            last_phone = phone
+    return result
+
+
 def phonemize(
     text: str,
     *,
@@ -1040,11 +1123,15 @@ def phonemize(
     if language not in {"pt-br", "pt", "en-us", "en"}:
         raise ValueError("idioma TTV deve ser pt-BR ou en-US")
     english_reading = language in {"en-us", "en"}
+    if inventory_profile == "pururu-purpura" and english_reading:
+        raise ValueError("Pururu Púrpura oferece leitura em português brasileiro")
     if english_reading and not str(voicebank_profile).lower().startswith("english"):
         raise ValueError("a leitura em inglês requer a voicebank English-CVVC")
     normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
     if not normalized:
         return []
+    if inventory_profile == "pururu-purpura" and re.search(r"[ぁ-ゖァ-ヺー]", normalized):
+        raise ValueError("Pururu Púrpura oferece leitura em português brasileiro")
     if english_reading:
         normalized = expand_english_numbers(normalized)
         tokens = re.findall(r"[A-Za-zÀ-ÿ]+(?:['’][A-Za-zÀ-ÿ]+)*|[ぁ-ゖァ-ヺー]+|[,.!?:;\n]", normalized)
@@ -1068,7 +1155,10 @@ def phonemize(
             word_moras = _kana_word_to_moras(token, deaccented=deaccented, resolve_alias=resolve_alias)
         else:
             phonetic = (g2p_english_word if english_reading else g2p_word)(token, deaccented=deaccented)
-            if str(voicebank_profile).lower().startswith("english"):
+            if inventory_profile == "pururu-purpura":
+                word_moras = _pururu_word_to_moras(
+                    phonetic, deaccented=deaccented, resolve_alias=resolve_alias)
+            elif str(voicebank_profile).lower().startswith("english"):
                 word_moras = _english_word_to_moras(
                     phonetic, deaccented=deaccented, resolve_alias=resolve_alias,
                     inventory_profile=inventory_profile,

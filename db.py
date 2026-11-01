@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 from datetime import datetime, timezone, timedelta
 from copy import deepcopy
@@ -13,7 +14,7 @@ import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
 
 import config
-from cogs.tts.ttv import normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id, resolve_preferences
+from cogs.tts.ttv import normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id, normalize_voice_language, resolve_preferences
 
 
 def _tts_effect_level(value: object) -> int:
@@ -32,6 +33,8 @@ class SettingsDB:
         self.guild_cache: Dict[int, Dict[str, Any]] = {}
         self.user_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
         self._resolved_tts_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
+        self._user_tts_locks: Dict[tuple[int, int], asyncio.Lock] = {}
+        self._user_tts_lock_users: Dict[tuple[int, int], int] = {}
         self._truco_history_lock = asyncio.Lock()
         self._chip_change_listeners: list[Any] = []
 
@@ -1031,6 +1034,32 @@ class SettingsDB:
             "speaker_name": str(tts.get("speaker_name", "") or ""),
         }
 
+    @asynccontextmanager
+    async def _user_tts_write_lock(self, guild_id: int, user_id: int):
+        # Register both the holder and queued callers before the first await.
+        # Removing a lock merely because its holder finished would let a new
+        # caller bypass an already queued edit for the same user.
+        locks = getattr(self, "_user_tts_locks", None)
+        if locks is None:
+            locks = self._user_tts_locks = {}
+        users = getattr(self, "_user_tts_lock_users", None)
+        if users is None:
+            users = self._user_tts_lock_users = {}
+        key = (guild_id, user_id)
+        lock = locks.setdefault(key, asyncio.Lock())
+        users[key] = users.get(key, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            remaining = users[key] - 1
+            if remaining:
+                users[key] = remaining
+            else:
+                users.pop(key, None)
+                if locks.get(key) is lock:
+                    locks.pop(key, None)
+
     async def set_user_tts(
         self,
         guild_id: int,
@@ -1057,121 +1086,127 @@ class SettingsDB:
         advanced_reverb_level: Optional[int] = None,
         speaker_name: Optional[str] = None,
     ):
-        # Validate the complete TTV edit before mutating caches or calling Mongo.
-        # The legacy argument remains accepted during the gradual UI migration.
-        ttv_updates: Dict[str, Any] = {}
-        if ttv_melody_id is not None:
-            from cogs.tts.melodies import normalize_melody_id
-            ttv_updates["ttv_melody_id"] = normalize_melody_id(ttv_melody_id)
-        if ttv_random_cd is not None:
-            if type(ttv_random_cd) is not bool:
-                raise ValueError("O modo de CD aleatório deve estar ligado ou desligado.")
-            ttv_updates["ttv_random_cd"] = ttv_random_cd
-        if ttv_voice_id is not None:
-            ttv_updates["ttv_voice_id"] = normalize_voice_id(ttv_voice_id)
-        if ttv_language is not None:
-            ttv_updates["ttv_language"] = normalize_language(ttv_language)
-        pitch_update = ttv_pitch_semitones if ttv_pitch_semitones is not None else teto_pitch_semitones
-        if pitch_update is not None:
-            normalized_pitch = normalize_pitch(pitch_update) if str(pitch_update).strip() else ""
-            ttv_updates["ttv_pitch_semitones"] = normalized_pitch
-            ttv_updates["teto_pitch_semitones"] = normalized_pitch
-        if ttv_speech_rate is not None:
-            ttv_updates["ttv_speech_rate"] = normalize_speech_rate(ttv_speech_rate)
+        async with self._user_tts_write_lock(guild_id, user_id):
+            # Validate the complete TTV edit before mutating caches or calling Mongo.
+            # The legacy argument remains accepted during the gradual UI migration.
+            ttv_updates: Dict[str, Any] = {}
+            if ttv_melody_id is not None:
+                from cogs.tts.melodies import normalize_melody_id
+                ttv_updates["ttv_melody_id"] = normalize_melody_id(ttv_melody_id)
+            if ttv_random_cd is not None:
+                if type(ttv_random_cd) is not bool:
+                    raise ValueError("O modo de CD aleatório deve estar ligado ou desligado.")
+                ttv_updates["ttv_random_cd"] = ttv_random_cd
+            if ttv_voice_id is not None:
+                ttv_updates["ttv_voice_id"] = normalize_voice_id(ttv_voice_id)
+            if ttv_language is not None:
+                ttv_updates["ttv_language"] = normalize_language(ttv_language)
+            pitch_update = ttv_pitch_semitones if ttv_pitch_semitones is not None else teto_pitch_semitones
+            if pitch_update is not None:
+                normalized_pitch = normalize_pitch(pitch_update) if str(pitch_update).strip() else ""
+                ttv_updates["ttv_pitch_semitones"] = normalized_pitch
+                ttv_updates["teto_pitch_semitones"] = normalized_pitch
+            if ttv_speech_rate is not None:
+                ttv_updates["ttv_speech_rate"] = normalize_speech_rate(ttv_speech_rate)
 
-        key = (guild_id, user_id)
-        doc = dict(self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id}))
-        tts = dict(doc.get("tts", {}) or {})
-        # A manually selected CD restores the user's fixed choice. Random draws
-        # are frozen only in their synthesis payload and never write this field.
-        if ttv_melody_id is not None and ttv_random_cd is None and tts.get("ttv_random_cd") is True:
-            ttv_updates["ttv_random_cd"] = False
+            key = (guild_id, user_id)
+            doc = dict(self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id}))
+            tts = dict(doc.get("tts", {}) or {})
+            if ttv_voice_id is not None or ttv_language is not None:
+                # Validate the merged pair before saving any part of a personal
+                # edit. Native Portuguese recordings cannot inherit English.
+                normalize_voice_language(ttv_updates.get("ttv_voice_id", tts.get("ttv_voice_id")),
+                                         ttv_updates.get("ttv_language", tts.get("ttv_language")))
+            # A manually selected CD restores the user's fixed choice. Random draws
+            # are frozen only in their synthesis payload and never write this field.
+            if ttv_melody_id is not None and ttv_random_cd is None and tts.get("ttv_random_cd") is True:
+                ttv_updates["ttv_random_cd"] = False
 
-        if engine is not None:
-            tts["engine"] = engine
-        if voice is not None:
-            tts["voice"] = voice
-        if language is not None:
-            tts["language"] = language
-        if rate is not None:
-            tts["rate"] = rate
-        if pitch is not None:
-            tts["pitch"] = pitch
-        if android_voice is not None:
-            tts["android_voice"] = android_voice
-        if android_language is not None:
-            tts["android_language"] = android_language
-        if android_rate is not None:
-            tts["android_rate"] = android_rate
-        if android_pitch is not None:
-            tts["android_pitch"] = android_pitch
-        tts.update(ttv_updates)
+            if engine is not None:
+                tts["engine"] = engine
+            if voice is not None:
+                tts["voice"] = voice
+            if language is not None:
+                tts["language"] = language
+            if rate is not None:
+                tts["rate"] = rate
+            if pitch is not None:
+                tts["pitch"] = pitch
+            if android_voice is not None:
+                tts["android_voice"] = android_voice
+            if android_language is not None:
+                tts["android_language"] = android_language
+            if android_rate is not None:
+                tts["android_rate"] = android_rate
+            if android_pitch is not None:
+                tts["android_pitch"] = android_pitch
+            tts.update(ttv_updates)
 
-        if advanced_nightcore_level is not None:
-            tts["advanced_nightcore_level"] = _tts_effect_level(advanced_nightcore_level)
-        if advanced_slowed_level is not None:
-            tts["advanced_slowed_level"] = _tts_effect_level(advanced_slowed_level)
-        if advanced_reverb_level is not None:
-            tts["advanced_reverb_level"] = _tts_effect_level(advanced_reverb_level)
-        if speaker_name is not None:
-            cleaned_speaker_name = str(speaker_name or "").strip()
-            if cleaned_speaker_name:
-                tts["speaker_name"] = cleaned_speaker_name
-            else:
-                tts.pop("speaker_name", None)
+            if advanced_nightcore_level is not None:
+                tts["advanced_nightcore_level"] = _tts_effect_level(advanced_nightcore_level)
+            if advanced_slowed_level is not None:
+                tts["advanced_slowed_level"] = _tts_effect_level(advanced_slowed_level)
+            if advanced_reverb_level is not None:
+                tts["advanced_reverb_level"] = _tts_effect_level(advanced_reverb_level)
+            if speaker_name is not None:
+                cleaned_speaker_name = str(speaker_name or "").strip()
+                if cleaned_speaker_name:
+                    tts["speaker_name"] = cleaned_speaker_name
+                else:
+                    tts.pop("speaker_name", None)
 
-        doc["type"] = "user"
-        doc["guild_id"] = guild_id
-        doc["user_id"] = user_id
-        doc["tts"] = tts
-        await self.coll.update_one(
-            {"type": "user", "guild_id": guild_id, "user_id": user_id},
-            {"$set": doc},
-            upsert=True,
-        )
-        self.user_cache[key] = doc
-        self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
-
-    async def reset_user_tts(self, guild_id: int, user_id: int) -> bool:
-        key = (guild_id, user_id)
-        doc = dict(self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id}))
-        had_tts = bool((doc.get("tts", {}) or {}))
-        doc.pop("tts", None)
-
-        def _has_meaningful_value(value: Any) -> bool:
-            if value in (None, "", [], {}):
-                return False
-            if isinstance(value, dict):
-                return any(_has_meaningful_value(v) for v in value.values())
-            if isinstance(value, (list, tuple, set)):
-                return any(_has_meaningful_value(v) for v in value)
-            return True
-
-        keep_doc = False
-        for field, value in doc.items():
-            if field in {"type", "guild_id", "user_id"}:
-                continue
-            if _has_meaningful_value(value):
-                keep_doc = True
-                break
-
-        if keep_doc:
             doc["type"] = "user"
             doc["guild_id"] = guild_id
             doc["user_id"] = user_id
-            self.user_cache[key] = doc
-            self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
+            doc["tts"] = tts
             await self.coll.update_one(
                 {"type": "user", "guild_id": guild_id, "user_id": user_id},
-                {"$unset": {"tts": ""}, "$set": doc},
+                {"$set": doc},
                 upsert=True,
             )
-        else:
-            self.user_cache.pop(key, None)
+            self.user_cache[key] = doc
             self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
-            await self.coll.delete_one({"type": "user", "guild_id": guild_id, "user_id": user_id})
 
-        return had_tts
+    async def reset_user_tts(self, guild_id: int, user_id: int) -> bool:
+        async with self._user_tts_write_lock(guild_id, user_id):
+            key = (guild_id, user_id)
+            doc = dict(self.user_cache.get(key, {"type": "user", "guild_id": guild_id, "user_id": user_id}))
+            had_tts = bool((doc.get("tts", {}) or {}))
+            doc.pop("tts", None)
+
+            def _has_meaningful_value(value: Any) -> bool:
+                if value in (None, "", [], {}):
+                    return False
+                if isinstance(value, dict):
+                    return any(_has_meaningful_value(v) for v in value.values())
+                if isinstance(value, (list, tuple, set)):
+                    return any(_has_meaningful_value(v) for v in value)
+                return True
+
+            keep_doc = False
+            for field, value in doc.items():
+                if field in {"type", "guild_id", "user_id"}:
+                    continue
+                if _has_meaningful_value(value):
+                    keep_doc = True
+                    break
+
+            if keep_doc:
+                doc["type"] = "user"
+                doc["guild_id"] = guild_id
+                doc["user_id"] = user_id
+                await self.coll.update_one(
+                    {"type": "user", "guild_id": guild_id, "user_id": user_id},
+                    {"$unset": {"tts": ""}, "$set": doc},
+                    upsert=True,
+                )
+                self.user_cache[key] = doc
+            else:
+                await self.coll.delete_one({"type": "user", "guild_id": guild_id, "user_id": user_id})
+                self.user_cache.pop(key, None)
+
+            self._invalidate_resolved_tts_cache(guild_id=guild_id, user_id=user_id)
+            return had_tts
 
     def resolve_tts(self, guild_id: int, user_id: int) -> Dict[str, Any]:
         cache_key = (guild_id, user_id)

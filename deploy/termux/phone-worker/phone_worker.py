@@ -126,6 +126,8 @@ _MIKU_RENDERER: Any = None
 _MIKU_RENDERER_CONFIG = ""
 _ANNA_RENDERER: Any = None
 _ANNA_RENDERER_CONFIG = ""
+_PURURU_RENDERER: Any = None
+_PURURU_RENDERER_CONFIG = ""
 _TETO_BATTERY_CACHE_LOCK = threading.RLock()
 _TETO_BATTERY_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 _TETO_BATTERY_MONITOR_STARTED = False
@@ -135,7 +137,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.45"
+PHONE_WORKER_VERSION = "1.11.46"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "termux"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2564,18 +2566,70 @@ def _get_anna_renderer():
         return renderer
 
 
+def _pururu_renderer_environment() -> dict[str, str]:
+    """Use Pururu's native Portuguese samples without borrowing another bank."""
+    bank = str(os.getenv("PHONE_WORKER_PURURU_VOICEBANK_DIR") or
+               Path.home() / "voicebanks/pururu-purpura").strip()
+    command = str(os.getenv("PHONE_WORKER_PURURU_RESAMPLER_COMMAND") or "").strip()
+    if not command:
+        installed_esper = Path.home() / ".esper-utau/bin/resampler.py"
+        if installed_esper.is_file():
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(installed_esper))}"
+    defaults = {
+        "ENABLED": "true" if _env_bool("PHONE_WORKER_PURURU_ENABLED", False) else "false",
+        "VOICEBANK_DIR": bank, "ENGLISH_VOICEBANK_DIR": "",
+        "VOICEBANK_MODE": "standard", "ALIAS_SUFFIX": "", "RESAMPLER_COMMAND": command,
+        "BASE_PITCH": "C4", "SPEECH_RATE": "1.0", "FLAGS": "", "VELOCITY": "100",
+        "MODULATION": "15", "TEMPO": "140", "LENGTH_MODE": "total",
+        "FRAGMENT_CACHE_DIR": str(Path.home() / "phone-worker/cache/pururu-fragments"),
+        "FRAGMENT_CACHE_MB": "256", "PCM_CACHE_MB": "256", "STATUS_CACHE_SECONDS": "15",
+        "MIN_ALIASES": "100", "ENGLISH_MIN_ALIASES": "100", "MAX_CHARACTERS": "180",
+        "MAX_PHONEMES": "240", "MAX_AUDIO_SECONDS": "20", "RENDER_THREADS": "2",
+    }
+    fixed = {"ENABLED", "VOICEBANK_DIR", "ENGLISH_VOICEBANK_DIR", "VOICEBANK_MODE", "ALIAS_SUFFIX",
+             "RESAMPLER_COMMAND"}
+    return {f"PHONE_WORKER_TETO_{suffix}": default if suffix in fixed else str(
+            os.getenv(f"PHONE_WORKER_PURURU_{suffix}") or default)
+            for suffix, default in defaults.items()}
+
+
+def _get_pururu_renderer():
+    global _PURURU_RENDERER, _PURURU_RENDERER_CONFIG
+    environment = _pururu_renderer_environment()
+    configuration = hashlib.sha256(json.dumps(environment, sort_keys=True).encode("utf-8")).hexdigest()
+    with _TETO_RENDERER_LOCK:
+        if _PURURU_RENDERER is not None and _PURURU_RENDERER_CONFIG == configuration:
+            return _PURURU_RENDERER
+        _PURURU_RENDERER = None
+        _PURURU_RENDERER_CONFIG = ""
+        try:
+            from teto_renderer import TetoRenderer
+            renderer = TetoRenderer(resource_guard=_teto_resource_snapshot,
+                                    environment=environment, voice_id="pururu-purpura")
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {_short_text(exc, limit=180)}"
+            raise RuntimeError(f"renderer Pururu Púrpura indisponível: {reason}") from exc
+        _PURURU_RENDERER = renderer
+        _PURURU_RENDERER_CONFIG = configuration
+        return renderer
+
+
 def _ttv_voice_prefix(voice_id: str) -> str:
-    return {"kasane-teto": "TETO", "hatsune-miku": "MIKU", "anna-nyui": "ANNA"}[voice_id]
+    return {"kasane-teto": "TETO", "hatsune-miku": "MIKU", "anna-nyui": "ANNA",
+            "pururu-purpura": "PURURU"}[voice_id]
 
 
 def _ttv_voice_name(voice_id: str) -> str:
-    return {"kasane-teto": "Kasane Teto", "hatsune-miku": "Hatsune Miku", "anna-nyui": "Anna Nyui"}[voice_id]
+    return {"kasane-teto": "Kasane Teto", "hatsune-miku": "Hatsune Miku", "anna-nyui": "Anna Nyui",
+            "pururu-purpura": "Pururu Púrpura"}[voice_id]
 
 
 def _get_ttv_renderer(voice_id: str = "kasane-teto"):
     voice_id = _phone_worker_tts_policy_module().normalize_ttv_voice_id(voice_id)
     if voice_id == "anna-nyui":
         return _get_anna_renderer()
+    if voice_id == "pururu-purpura":
+        return _get_pururu_renderer()
     return _get_miku_renderer() if voice_id == "hatsune-miku" else _get_teto_renderer()
 
 
@@ -2631,6 +2685,9 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
             return result
         renderer = _get_ttv_renderer(voice_id)
         result.update(renderer.status(force=force))
+        if voice_id == "pururu-purpura":
+            result["ttv_languages"] = [language for language in result.get("ttv_languages", [])
+                                       if language == "pt-BR"]
         if callable(getattr(renderer, "synthesize_performance", None)):
             result["ttv_performance_protocol"] = max(1, min(2, int(getattr(renderer, "PERFORMANCE_PROTOCOL", 1))))
         else:
@@ -2644,7 +2701,7 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
         if callable(getattr(renderer, "singing_fingerprint", None)):
             result["singing_fingerprints"] = {
                 language: renderer.singing_fingerprint(reading_language=language)
-                for language in ("pt-BR", "en-US")
+                for language in (("pt-BR",) if voice_id == "pururu-purpura" else ("pt-BR", "en-US"))
             }
             result["singing_available"] = any(value != "unavailable" for value in result["singing_fingerprints"].values())
     except Exception as exc:
@@ -2655,7 +2712,7 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
 def _teto_status(*, force: bool = False) -> dict[str, Any]:
     # Keep legacy Teto fields while advertising independent TTV voices.
     states = {voice_id: _ttv_single_voice_status(voice_id, force=force)
-              for voice_id in ("kasane-teto", "hatsune-miku", "anna-nyui")}
+              for voice_id in ("kasane-teto", "hatsune-miku", "anna-nyui", "pururu-purpura")}
     result = dict(states["kasane-teto"])
     enabled = any(state.get("enabled") for state in states.values())
     resources = {"ok": False, "reason": "engine desativada"}

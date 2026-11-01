@@ -131,6 +131,7 @@ def test_anna_status_independent_of_invalid_teto_backend(tts, monkeypatch):
     monkeypatch.setenv('PHONE_WORKER_TETO_ENABLED', 'false')
     monkeypatch.setenv('PHONE_WORKER_TETO_BACKEND', 'invalid')
     monkeypatch.setenv('PHONE_WORKER_MIKU_ENABLED', 'false')
+    monkeypatch.setenv('PHONE_WORKER_PURURU_ENABLED', 'false')
     monkeypatch.setenv('PHONE_WORKER_ANNA_ENABLED', 'true')
     monkeypatch.setattr(tts.worker, '_get_anna_renderer', lambda: SimpleNamespace(
         status=lambda **_: dict(ok=True, ready=True, available=True, ttv_languages=['pt-BR','en-US']),
@@ -140,7 +141,7 @@ def test_anna_status_independent_of_invalid_teto_backend(tts, monkeypatch):
     monkeypatch.setattr(tts.worker, '_teto_resource_snapshot', lambda: {'ok':True})
     status = tts.teto_status(force=True)
     rows = {row['id']: row for row in status['ttv_voices']}
-    assert set(rows) == {'kasane-teto', 'hatsune-miku', 'anna-nyui'}
+    assert set(rows) == {'kasane-teto', 'hatsune-miku', 'anna-nyui', 'pururu-purpura'}
     assert status['ready'] and status['available'] and status['enabled']
     assert rows['anna-nyui']['ready'] and rows['anna-nyui']['backend'] == 'utau'
     assert rows['anna-nyui']['name'] == 'Anna Nyui'

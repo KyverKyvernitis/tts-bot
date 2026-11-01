@@ -13,7 +13,7 @@ DEFAULT_MELODY = "ttv-demo-v1"
 
 def test_default_melody_read_does_not_create_a_user_or_write(settings):
     assert settings.get_user_tts(1, 2)["ttv_melody_id"] == ""
-    assert settings.resolve_tts(1, 2)["ttv_melody_id"] == DEFAULT_MELODY
+    assert settings.resolve_tts(1, 2)["ttv_melody_id"] == ""
     assert settings.user_cache == {}
     settings.coll.update_one.assert_not_awaited()
 
@@ -141,7 +141,7 @@ async def test_failed_first_melody_save_does_not_create_user(settings):
     with pytest.raises(RuntimeError, match="database unavailable"):
         await settings.set_user_tts(1, 2, ttv_melody_id=DEFAULT_MELODY)
     assert settings.user_cache == {}
-    assert settings.resolve_tts(1, 2)["ttv_melody_id"] == DEFAULT_MELODY
+    assert settings.resolve_tts(1, 2)["ttv_melody_id"] == ""
 
 
 @pytest.mark.asyncio
@@ -149,7 +149,7 @@ async def test_general_tts_reset_also_clears_personal_melody(settings):
     await settings.set_user_tts(1, 2, ttv_melody_id=DEFAULT_MELODY)
     assert await settings.reset_user_tts(1, 2)
     assert settings.get_user_tts(1, 2)["ttv_melody_id"] == ""
-    assert settings.resolve_tts(1, 2)["ttv_melody_id"] == DEFAULT_MELODY
+    assert settings.resolve_tts(1, 2)["ttv_melody_id"] == ""
 
 
 @pytest.mark.asyncio
@@ -245,4 +245,132 @@ async def test_failed_first_save_releases_same_user_for_next_edit(settings):
     assert settings.resolve_tts(1, 2)["ttv_melody_id"] == "old-song"
     # The retained exception traceback may still reference its released lock.
     assert all(not lock.locked() for lock in settings._user_tts_locks.values())
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_does_not_allow_an_edit_to_bypass_an_unacknowledged_save(settings):
+    settings.user_cache[(1, 2)] = {"tts": {"voice": "OldEdgeVoice"}}
+    started = asyncio.Event()
+    acknowledged = asyncio.Event()
+
+    async def update(_query, update_doc, **_kwargs):
+        if update_doc["$set"]["tts"].get("ttv_melody_id") == DEFAULT_MELODY:
+            started.set()
+            await acknowledged.wait()
+
+    settings.coll.update_one.side_effect = update
+    first = asyncio.create_task(settings.set_user_tts(1, 2, ttv_melody_id=DEFAULT_MELODY))
+    await started.wait()
+    cancelled = asyncio.create_task(settings.set_user_tts(1, 2, voice="CancelledVoice"))
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    last = asyncio.create_task(settings.set_user_tts(1, 2, ttv_language="en-US"))
+    try:
+        await asyncio.sleep(0)
+        assert settings.coll.update_one.await_count == 1
+        assert settings.user_cache[(1, 2)]["tts"] == {"voice": "OldEdgeVoice"}
+    finally:
+        acknowledged.set()
+        await asyncio.gather(first, last)
+    assert settings.user_cache[(1, 2)]["tts"] == {
+        "voice": "OldEdgeVoice", "ttv_melody_id": DEFAULT_MELODY, "ttv_language": "en-US",
+    }
+    assert not settings._user_tts_locks
+    assert not settings._user_tts_lock_users
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_edit", ["save", "reset"])
+@pytest.mark.parametrize("keep_doc", [False, True])
+async def test_reset_and_save_serialize_using_the_last_acknowledged_preferences(settings, first_edit, keep_doc):
+    original = {"tts": {"voice": "OldEdgeVoice", "ttv_melody_id": DEFAULT_MELODY}}
+    if keep_doc:
+        original["chips"] = 150
+    settings.user_cache[(1, 2)] = deepcopy(original)
+    started = asyncio.Event()
+    acknowledged = asyncio.Event()
+    stored = deepcopy(original)
+
+    async def gate():
+        if not started.is_set():
+            started.set()
+            await acknowledged.wait()
+
+    async def update(_query, changes, **_kwargs):
+        await gate()
+        for key in changes.get("$unset", {}):
+            stored.pop(key, None)
+        stored.update(deepcopy(changes.get("$set", {})))
+
+    async def delete(*_args):
+        await gate()
+        stored.clear()
+
+    settings.coll.update_one.side_effect = update
+    settings.coll.delete_one.side_effect = delete
+
+    def edit(kind):
+        return (settings.reset_user_tts(1, 2) if kind == "reset" else
+                settings.set_user_tts(1, 2, ttv_voice_id="hatsune-miku", ttv_language="en-US"))
+
+    first = asyncio.create_task(edit(first_edit))
+    await started.wait()
+    last = asyncio.create_task(edit("reset" if first_edit == "save" else "save"))
+    try:
+        await asyncio.sleep(0)
+        assert settings.coll.update_one.await_count + settings.coll.delete_one.await_count == 1
+        assert settings.user_cache[(1, 2)] == original
+    finally:
+        acknowledged.set()
+        await asyncio.gather(first, last)
+    assert settings.user_cache.get((1, 2), {}) == stored
+    if first_edit == "save":
+        assert "tts" not in stored
+    else:
+        assert stored["tts"] == {"ttv_voice_id": "hatsune-miku", "ttv_language": "en-US"}
+    assert (stored.get("chips") == 150) is keep_doc
+    assert not settings._user_tts_locks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep_doc", [False, True])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_failed_or_cancelled_reset_preserves_caches_and_allows_the_next_edit(settings, keep_doc, cancelled):
+    original = {"tts": {"voice": "OldEdgeVoice", "ttv_melody_id": DEFAULT_MELODY}}
+    if keep_doc:
+        original["chips"] = 150
+    settings.user_cache[(1, 2)] = deepcopy(original)
+    settings.resolve_tts(1, 2)
+    before_resolved = deepcopy(settings._resolved_tts_cache)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def fail_reset(*_args, **_kwargs):
+        started.set()
+        await finish.wait()
+        raise RuntimeError("database unavailable")
+
+    operation = settings.coll.update_one if keep_doc else settings.coll.delete_one
+    operation.side_effect = fail_reset
+    reset = asyncio.create_task(settings.reset_user_tts(1, 2))
+    await started.wait()
+    try:
+        assert settings.user_cache[(1, 2)] == original
+        assert settings._resolved_tts_cache == before_resolved
+    finally:
+        if cancelled:
+            reset.cancel()
+        else:
+            finish.set()
+        with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+            await reset
+    assert settings.user_cache[(1, 2)] == original
+    assert settings._resolved_tts_cache == before_resolved
+    assert not settings._user_tts_locks
+    operation.side_effect = None
+    await asyncio.wait_for(settings.set_user_tts(1, 2, voice="NewEdgeVoice"), timeout=1)
+    assert settings.user_cache[(1, 2)]["tts"] == {**original["tts"], "voice": "NewEdgeVoice"}
+    assert not settings._user_tts_locks
 

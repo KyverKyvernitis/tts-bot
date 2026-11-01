@@ -139,7 +139,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         parts = [f"Voz: {self._codigo(voice)}"]
         if preferences["ttv_language"] != DEFAULT_LANGUAGE:
             try:
-                language = language_label(preferences["ttv_language"])
+                language = language_label(preferences["ttv_language"], voice_id=preferences["ttv_voice_id"])
             except ValueError:
                 language = "Idioma indisponível"
             parts.append(f"Idioma: {self._codigo(language)}")

@@ -38,7 +38,7 @@ def normalize_teto_pitch_semitones(raw: Any, *, default: float = 0.0) -> float:
 
 def normalize_ttv_voice_id(raw: Any = "kasane-teto") -> str:
     voice_id = str(raw).strip().lower()
-    if voice_id not in {"kasane-teto", "hatsune-miku", "anna-nyui"}:
+    if voice_id not in {"kasane-teto", "hatsune-miku", "anna-nyui", "pururu-purpura"}:
         raise ValueError("vocaloid TTV desconhecida ou indisponível")
     return voice_id
 
@@ -77,13 +77,17 @@ def effective_ttv_settings(body: dict[str, Any], *, default_speech_rate: Any = 1
     # Imported music keeps its key and tempo independently of speech preferences.
     if body.get("ttv_score") is not None:
         body = {**body, "ttv_pitch_semitones": 0.0, "ttv_speech_rate": 1.0}
+    voice_id = normalize_ttv_voice_id(body.get("ttv_voice_id", "kasane-teto"))
+    language = normalize_ttv_language(body.get("ttv_language", "pt-BR"))
+    if voice_id == "pururu-purpura" and language != "pt-BR":
+        raise ValueError("Pururu Púrpura aceita somente português brasileiro (pt-BR)")
     return {
-        "ttv_voice_id": normalize_ttv_voice_id(body.get("ttv_voice_id", "kasane-teto")),
+        "ttv_voice_id": voice_id,
         "ttv_pitch_semitones": normalize_teto_pitch_semitones(
             body.get("ttv_pitch_semitones", body.get("teto_pitch_semitones")), default=0.0),
         "ttv_speech_rate": normalize_ttv_speech_rate(body["ttv_speech_rate"])
         if "ttv_speech_rate" in body else global_rate,
-        "ttv_language": normalize_ttv_language(body.get("ttv_language", "pt-BR")),
+        "ttv_language": language,
     }
 
 

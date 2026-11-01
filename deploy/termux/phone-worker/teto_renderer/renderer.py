@@ -30,7 +30,7 @@ from typing import Any, Callable, Mapping
 
 from .cache import FragmentCache
 from .errors import TetoConfigurationError, TetoResourceError, TetoSynthesisError
-from .phonemizer import phonemize, english_vowel_candidates, english_vowel_source
+from .phonemizer import phonemize, english_vowel_candidates, english_vowel_source, pururu_vowel_candidates
 from .prosody import (
     RenderNote, align_pitch_to_timeline, build_notes, validate_performance,
     performance_hash, align_singing_syllables, align_singing_pitch, _relative_pitch,
@@ -94,7 +94,8 @@ class TetoRenderer:
         self._voicebank_fallback_reason = ""
         self._last_status_at = 0.0
         self._last_status: dict[str, Any] = {}
-        cache_name = {"hatsune-miku": "miku-fragments", "anna-nyui": "anna-fragments"}.get(self.voice_id, "teto-fragments")
+        cache_name = {"hatsune-miku": "miku-fragments", "anna-nyui": "anna-fragments",
+                      "pururu-purpura": "pururu-fragments"}.get(self.voice_id, "teto-fragments")
         cache_root = self._getenv("PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / cache_name)
         self._cache = FragmentCache(cache_root, max_mb=self._env_int("PHONE_WORKER_TETO_FRAGMENT_CACHE_MB", 256))
         # A decoded fragment can be reused by many successive short singing
@@ -111,10 +112,11 @@ class TetoRenderer:
         self._esper_client_lock = threading.Lock()
 
     def _configure_voice(self, *, environment: Mapping[str, str] | None, voice_id: str) -> None:
-        if voice_id not in {"kasane-teto", "hatsune-miku", "anna-nyui"}:
+        if voice_id not in {"kasane-teto", "hatsune-miku", "anna-nyui", "pururu-purpura"}:
             raise ValueError("voz TTV desconhecida")
         if voice_id != "kasane-teto" and environment is None:
-            label = "Hatsune Miku" if voice_id == "hatsune-miku" else "Anna Nyui"
+            label = {"hatsune-miku": "Hatsune Miku", "anna-nyui": "Anna Nyui",
+                     "pururu-purpura": "Pururu Púrpura"}[voice_id]
             raise TetoConfigurationError(f"{label} exige configuração independente da Teto")
         self.voice_id = voice_id
         # A per-voice snapshot is authoritative. Falling back to os.environ here
@@ -131,7 +133,8 @@ class TetoRenderer:
         # available. Explicit per-instance bridge settings override them, while
         # unrelated Teto voice settings never leak into a Miku child process.
         child = {key: value for key, value in os.environ.items()
-                 if not key.startswith(("PHONE_WORKER_TETO_", "PHONE_WORKER_MIKU_", "PHONE_WORKER_ANNA_"))}
+                 if not key.startswith(("PHONE_WORKER_TETO_", "PHONE_WORKER_MIKU_", "PHONE_WORKER_ANNA_",
+                                        "PHONE_WORKER_PURURU_"))}
         child.update(self._environment)
         return child
 
@@ -139,16 +142,25 @@ class TetoRenderer:
         return str(self._getenv("PHONE_WORKER_TETO_ALIAS_SUFFIX") or "").strip()
 
     def _voice_label(self) -> str:
-        return {"hatsune-miku": "Hatsune Miku", "anna-nyui": "Anna Nyui"}.get(self.voice_id, "Teto")
+        return {"hatsune-miku": "Hatsune Miku", "anna-nyui": "Anna Nyui",
+                "pururu-purpura": "Pururu Púrpura"}.get(self.voice_id, "Teto")
 
     def _status_voice(self) -> str:
         profile = "english-cvvc" if self._index_profile == "english-cvvc" else "standard"
         if self.voice_id == "anna-nyui" and profile == "english-cvvc":
             profile = "english-vccv-diva"
+        if self.voice_id == "pururu-purpura":
+            profile = "portuguese-cvvc"
         return f"{self.voice_id}-{profile}"
 
+    def _bank_profile_label(self) -> str:
+        # The native bank shares the CVVC articulation clock, not an English
+        # recording inventory. Keep public diagnostics accurate.
+        return "portuguese-cvvc" if self.voice_id == "pururu-purpura" else self._index_profile
+
     def _phonemizer_options(self) -> dict[str, str]:
-        profile = {"hatsune-miku": "miku-v4-english", "anna-nyui": "anna-nyui-diva"}.get(self.voice_id)
+        profile = {"hatsune-miku": "miku-v4-english", "anna-nyui": "anna-nyui-diva",
+                   "pururu-purpura": "pururu-purpura"}.get(self.voice_id)
         return {"inventory_profile": profile} if profile else {}
 
     def _resolve_note_entry(self, index: VoicebankIndex, note: RenderNote,
@@ -159,6 +171,8 @@ class TetoRenderer:
         return index.resolve(aliases)
 
     def _steady_vowel_candidates(self, nucleus) -> tuple[str, ...]:
+        if self.voice_id == "pururu-purpura":
+            return pururu_vowel_candidates(nucleus.source_phonemes)
         if self.voice_id == "anna-nyui":
             return english_vowel_candidates(nucleus.source_phonemes,
                                             inventory_profile="anna-nyui-diva")
@@ -185,6 +199,8 @@ class TetoRenderer:
         raise ValueError("idioma TTV deve ser Português adaptado ou Inglês")
 
     def _load_english_index(self) -> VoicebankIndex:
+        if self.voice_id == "pururu-purpura":
+            raise TetoConfigurationError("Pururu Púrpura oferece leitura em português brasileiro")
         path = Path(self._english_voicebank_dir()).expanduser()
         if not path.is_dir():
             raise TetoConfigurationError(f"Inglês exige o banco de voz inglês da {self._voice_label()} instalado")
@@ -204,6 +220,7 @@ class TetoRenderer:
             return self._english_index
 
     def _load_reading_index(self, language: str) -> VoicebankIndex:
+        self._validate_voice_language(language)
         if language == "pt-BR":
             return self._load_index()
         index = self._load_english_index()
@@ -213,6 +230,8 @@ class TetoRenderer:
         return index
 
     def reading_languages(self) -> list[str]:
+        if self.voice_id == "pururu-purpura":
+            return ["pt-BR"]
         languages = ["pt-BR"]
         try:
             self._load_english_index()
@@ -222,17 +241,25 @@ class TetoRenderer:
             languages.append("en-US")
         return languages
 
+    def _validate_voice_language(self, language: str) -> None:
+        if self.voice_id == "pururu-purpura" and language != "pt-BR":
+            raise ValueError("Pururu Púrpura oferece leitura em português brasileiro")
+
+    def _load_singing_index(self) -> VoicebankIndex:
+        return self._load_index() if self.voice_id == "pururu-purpura" else self._load_english_index()
+
     def singing_fingerprint(self, *, reading_language="pt-BR") -> str:
-        """Music depends on the English-CVVC bank even for Portuguese lyrics."""
+        """Bind music to the character's actual CVVC recording inventory."""
         if self.RENDER_VERSION.startswith('worldline'):
             return 'unavailable'
         try:
-            index = self._load_english_index()
-            self._reading_context.profile = "english-cvvc"
             language = self._effective_reading_language(reading_language)
+            self._validate_voice_language(language)
+            index = self._load_singing_index()
+            self._reading_context.profile = "english-cvvc"
             return hashlib.sha256((self._reading_fingerprint(index, language)
                 + self.PERFORMANCE_VERSION).encode()).hexdigest()
-        except TetoConfigurationError:
+        except (TetoConfigurationError, ValueError):
             return "unavailable"
         finally:
             self._clear_reading_context()
@@ -281,6 +308,11 @@ class TetoRenderer:
         return mode if mode in {"auto", "english", "standard"} else "auto"
 
     def _voicebank_candidates(self) -> list[tuple[str, str, int]]:
+        if self.voice_id == "pururu-purpura":
+            path = self._voicebank_dir()
+            # Reuse the OTO CVVC timeline with native Portuguese phonemes.
+            # No foreign recording directory participates in this selection.
+            return [(path, "english-cvvc", max(1, self._env_int("PHONE_WORKER_TETO_MIN_ALIASES", 500)))] if path else []
         mode = self._voicebank_mode()
         standard = self._voicebank_dir()
         english = self._english_voicebank_dir()
@@ -600,7 +632,7 @@ class TetoRenderer:
                 result.update(index.snapshot())
                 result.update({
                     "voice": self._status_voice(),
-                    "voicebank_profile": self._index_profile,
+                    "voicebank_profile": self._bank_profile_label(),
                     "voicebank_mode": self._voicebank_mode(),
                     "voicebank_fallback": bool(self._voicebank_fallback_reason),
                     "voicebank_fallback_reason": self._voicebank_fallback_reason,
@@ -1592,7 +1624,8 @@ class TetoRenderer:
                                 raise ValueError('a voicebank não contém a vogal isolada depois da pausa; escreva a sílaba nessa nota MIDI')
                             first = sum(item.role == 'nucleus' for item in moras)
                             vowel_source = (english_vowel_source(nucleus.source_phonemes)
-                                            if self.voice_id == 'anna-nyui' else nucleus.source_phonemes[-1:])
+                                            if self.voice_id in {'anna-nyui', 'pururu-purpura'}
+                                            else nucleus.source_phonemes[-1:])
                             moras.append(replace(nucleus, candidates=candidates, word_index=word_offset,
                                                  syllable_index=0, word_moras=1, mora_index=0,
                                                  word_end=True, pause_after_ms=0, phrase_end='',
@@ -1895,6 +1928,7 @@ class TetoRenderer:
         validate_performance(text, score=score, segments=segments)
         digest = performance_hash(text, score=score, segments=segments)
         language = self._effective_reading_language(reading_language)
+        self._validate_voice_language(language)
         rate = self._effective_speech_rate(speech_rate)
         if not math.isfinite(float(timeout_seconds)) or not 0 < float(timeout_seconds) <= 120:
             raise ValueError('timeout TTV deve estar entre 0 e 120 segundos')
@@ -1937,7 +1971,7 @@ class TetoRenderer:
             if score is not None:
                 # Singing always uses this character's CVVC bank. Its spoken
                 # Portuguese voicebank may independently remain Standard.
-                index = self._load_english_index()
+                index = self._load_singing_index()
                 self._reading_context.profile = 'english-cvvc'
             else:
                 index = self._load_reading_index(language)
@@ -2002,7 +2036,8 @@ class TetoRenderer:
                             # for its sustain model; leave attacks and source
                             # files intact. Both voices use one nucleus render.
                             cutoff = -250.0 if useful_ms > 500.0 else vowel_entry.cutoff_ms
-                            entries[number] = replace(vowel_entry, consonant_ms=max(45.0, vowel_entry.consonant_ms), cutoff_ms=cutoff)
+                            fixed = 45.0 if self.voice_id == 'pururu-purpura' else max(45.0, vowel_entry.consonant_ms)
+                            entries[number] = replace(vowel_entry, consonant_ms=fixed, cutoff_ms=cutoff)
                     elif note.duration_ms >= 400:
                         # Preserve the recorded consonant and a short stable
                         # vowel head. The stretch region then starts in voicing
@@ -2014,6 +2049,8 @@ class TetoRenderer:
                         entries[number] = replace(entry, consonant_ms=fixed_ms)
             if any(entry is None and note.role == 'nucleus' for note, entry in zip(notes, entries)):
                 raise TetoSynthesisError('a voicebank não contém uma vogal necessária para esta apresentação')
+            if self.voice_id == 'pururu-purpura' and any(entry is None for entry in entries):
+                raise TetoSynthesisError('o banco da Pururu não contém um fonema necessário para esta apresentação')
             if self._index_profile == 'english-cvvc':
                 entries = [self._english_render_entry(entry, note) if entry else None for note, entry in zip(notes, entries)]
             if score is not None:
@@ -2249,7 +2286,7 @@ class TetoRenderer:
                         'performance_mode': 'singing' if score is not None else 'speech-effects',
                         'phonemizer_version': self.ENGLISH_PHONEMIZER_VERSION if language == 'en-US' else self.PHONEMIZER_VERSION,
                         'reading_language': language, 'pitch_offset_semitones': pitch, 'speech_rate': rate,
-                        'ttv_performance_hash': digest, 'aliases': index.alias_count, 'voicebank_profile': self._index_profile,
+                        'ttv_performance_hash': digest, 'aliases': index.alias_count, 'voicebank_profile': self._bank_profile_label(),
                         'rendered_phonemes': rendered, 'missing_phonemes': missing, 'pitchbend_fallbacks': fallback,
                         'legacy_fragment_hits': legacy, 'render_workers': workers, 'source_groups': len(source_groups),
                         'resample_ms': round(resample_ms, 2), **metrics,
@@ -2297,6 +2334,7 @@ class TetoRenderer:
     ) -> dict[str, Any]:
         effective_rate = self._effective_speech_rate(speech_rate)
         language = self._effective_reading_language(reading_language)
+        self._validate_voice_language(language)
         if language == "pt-BR":
             if not self.status().get("ready"):
                 raise TetoConfigurationError(str(self.status().get("last_error") or "Teto indisponível"))
@@ -2362,6 +2400,8 @@ class TetoRenderer:
             with tempfile.TemporaryDirectory(prefix="phone-worker-teto-") as temp:
                 workdir = Path(temp)
                 entries = [self._resolve_note_entry(index, note) for note in notes]
+                if self.voice_id == 'pururu-purpura' and any(entry is None for entry in entries):
+                    raise TetoSynthesisError('o banco da Pururu não contém um fonema necessário para esta frase')
                 placements = None
                 planned_end_ms = None
                 if self._index_profile == "english-cvvc":
@@ -2521,7 +2561,7 @@ class TetoRenderer:
                 "speech_rate": effective_rate,
                 "pitch_offset_semitones": pitch_offset,
                 "aliases": index.alias_count,
-                "voicebank_profile": self._index_profile,
+                "voicebank_profile": self._bank_profile_label(),
                 "rendered_phonemes": rendered,
                 "missing_phonemes": missing[:12],
                 "phonetic_units": sum(len(note.source_phonemes) for note in notes),

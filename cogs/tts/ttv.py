@@ -28,6 +28,8 @@ class TTVVoice:
     name: str
     engine: str
     description: str
+    languages: tuple[str, ...] = ("pt-BR", "en-US")
+    native_portuguese: bool = False
 
 
 VOICE_CATALOG = (
@@ -48,6 +50,14 @@ VOICE_CATALOG = (
         name="Anna Nyui",
         engine="teto",
         description="A voz da Anna Nyui, com síntese ESPER no phone worker.",
+    ),
+    TTVVoice(
+        id="pururu-purpura",
+        name="Pururu Púrpura",
+        engine="teto",
+        description="A voz da Pururu Púrpura, gravada em português brasileiro, com síntese ESPER.",
+        languages=("pt-BR",),
+        native_portuguese=True,
     ),
 )
 VOICES = VOICE_CATALOG
@@ -106,15 +116,15 @@ def worker_voice_details(state: Mapping[str, Any], voice_id: object = DEFAULT_VO
         "supports_personal_rate": bool(state.get("ttv_personal_settings") and entry.get("supports_personal_rate")),
         "singing_available": entry.get("singing_available") if type(entry.get("singing_available")) is bool else None,
         "performance_protocol": entry.get("ttv_performance_protocol") if type(entry.get("ttv_performance_protocol")) is int else None,
-        "languages": [code for code in languages if code in _LANGUAGE_LABELS] if isinstance(languages, (list, tuple)) else [],
+        "languages": [code for code in languages if code in voice.languages] if isinstance(languages, (list, tuple)) else [],
         "fingerprint": str(entry.get("fingerprint") or (state.get("teto_fingerprint") if legacy else "") or "unavailable"),
         "singing_fingerprints": {
             code: value for code, value in (singing_fingerprints or {}).items()
-            if code in _LANGUAGE_LABELS and isinstance(value, str) and value
+            if code in voice.languages and isinstance(value, str) and value
         } if isinstance(singing_fingerprints, dict) else {},
         "language_fingerprints": {
             code: value for code, value in (fingerprints or {}).items()
-            if code in _LANGUAGE_LABELS and isinstance(value, str) and value
+            if code in voice.languages and isinstance(value, str) and value
         } if isinstance(fingerprints, dict) else {},
     }
 
@@ -129,8 +139,22 @@ def normalize_language(value: object) -> str:
     raise ValueError("Escolha Português adaptado ou Inglês para o idioma do TTV.")
 
 
-def language_label(value: object = DEFAULT_LANGUAGE) -> str:
-    return _LANGUAGE_LABELS[normalize_language(value)]
+def voice_language_choices(voice_id: object = DEFAULT_VOICE_ID) -> tuple[tuple[str, str], ...]:
+    voice = get_voice(voice_id)
+    return tuple((code, "Português brasileiro" if code == "pt-BR" and voice.native_portuguese
+                  else _LANGUAGE_LABELS[code]) for code in voice.languages)
+
+
+def normalize_voice_language(voice_id: object, value: object = DEFAULT_LANGUAGE) -> str:
+    voice = get_voice(voice_id)
+    language = normalize_language(value)
+    if language not in voice.languages:
+        raise ValueError(f"{voice.name} está disponível somente em Português brasileiro. Escolha pt-BR.")
+    return language
+
+
+def language_label(value: object = DEFAULT_LANGUAGE, *, voice_id: object = DEFAULT_VOICE_ID) -> str:
+    return dict(voice_language_choices(voice_id))[normalize_voice_language(voice_id, value)]
 
 
 def normalize_pitch(value: object) -> str:
@@ -174,6 +198,8 @@ def resolve_preferences(mapping: Mapping[str, Any] | None, default_pitch: object
     The separate Edge/gTTS language never changes the TTV reading language.
     """
     values = mapping or {}
+    voice_id = normalize_voice_id(values.get("ttv_voice_id"))
+    language = normalize_voice_language(voice_id, values.get("ttv_language"))
     pitch = None
     for candidate in (
         values.get("ttv_pitch_semitones"),
@@ -192,8 +218,8 @@ def resolve_preferences(mapping: Mapping[str, Any] | None, default_pitch: object
     except ValueError:
         rate = DEFAULT_SPEECH_RATE
     return {
-        "ttv_voice_id": normalize_voice_id(values.get("ttv_voice_id")),
-        "ttv_language": normalize_language(values.get("ttv_language")),
+        "ttv_voice_id": voice_id,
+        "ttv_language": language,
         "ttv_pitch_semitones": pitch or DEFAULT_PITCH_SEMITONES,
         "ttv_speech_rate": rate,
     }

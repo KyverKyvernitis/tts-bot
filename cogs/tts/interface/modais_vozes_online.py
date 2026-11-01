@@ -3,7 +3,7 @@ from __future__ import annotations
 import discord
 
 import config
-from ..ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, LANGUAGE_CHOICES, VOICE_CATALOG, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id
+from ..ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, VOICE_CATALOG, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id, normalize_voice_language, voice_language_choices
 from ..utils.embed import human_language_name, human_pitch, human_rate, human_voice_name
 from .catalogos_de_vozes import (
     idioma_edge_da_voz,
@@ -436,7 +436,7 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
             ok = adicionar_item_rotulo_modal(self, "ttv_voice_id", text="Escolha sua vocaloid", description="", component=voice_select)
             ok = ok and adicionar_radio_modal(
                 self, "ttv_language", text="Idioma", description="", current=self.current_language,
-                options=[(label, value, "") for value, label in LANGUAGE_CHOICES],
+                options=[(label, value, "") for value, label in self._language_choices()],
             )
             ok = ok and self._adicionar_radio_ttv(
                 "ttv_speech_rate", text="Velocidade da fala", current=self.current_rate,
@@ -499,17 +499,38 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
         return True
 
     def _build_text_fallback(self) -> None:
-        voices = " · ".join(f"{voice.name}: {voice.id}" for voice in VOICE_CATALOG)
+        try:
+            current_voice = get_voice(self.current_voice)
+        except ValueError:
+            voices = " · ".join(voice.id for voice in VOICE_CATALOG)
+        else:
+            voices = " · ".join([f"{current_voice.name}: {current_voice.id}"] +
+                                [voice.id for voice in VOICE_CATALOG if voice.id != current_voice.id])
         adicionar_entrada_texto_modal(self, "ttv_voice_id", label="Escolha sua vocaloid", placeholder=voices[:100], current=self.current_voice, max_length=100)
-        adicionar_entrada_texto_modal(self, "ttv_language", label="Idioma", placeholder="Português adaptado: pt-BR · Inglês: en-US", current=self.current_language, max_length=16)
+        languages = " · ".join(f"{label}: {value}" for value, label in self._language_choices())
+        adicionar_entrada_texto_modal(self, "ttv_language", label="Idioma", placeholder=languages, current=self.current_language, max_length=16)
         adicionar_entrada_texto_modal(self, "ttv_speech_rate", label="Velocidade da fala", placeholder="0.5 / 0.75 / 1.0 / 1.25 / 1.5", current=str(self.current_rate), max_length=32)
         adicionar_entrada_texto_modal(self, "ttv_pitch_semitones", label="Tom da voz (semitons)", placeholder="0.0 = tom original · passos de 0.5", current=self.current_pitch, max_length=8)
+
+    def _language_choices(self):
+        try:
+            return voice_language_choices(self.current_voice)
+        except ValueError:
+            # An unknown saved character remains visible for a deliberate edit.
+            return voice_language_choices(DEFAULT_VOICE_ID)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             normalized = normalize_pitch(valor_unico_componente(self.ttv_pitch_semitones, self.current_pitch) or self.current_pitch)
             voice_id = normalize_voice_id(valor_unico_componente(self.ttv_voice_id, self.current_voice) or self.current_voice)
             language = normalize_language(valor_unico_componente(self.ttv_language, self.current_language) or self.current_language)
+            voice = get_voice(voice_id)
+            if (voice_id != self.current_voice and language == self.current_language
+                    and language not in voice.languages and len(voice.languages) == 1):
+                # A new native-only voice receives its language together with
+                # the voice selection, instead of inheriting unusable English.
+                language = voice.languages[0]
+            language = normalize_voice_language(voice_id, language)
             rate = normalize_speech_rate(valor_unico_componente(self.ttv_speech_rate, str(self.current_rate)) or str(self.current_rate))
             if voice_id != DEFAULT_VOICE_ID and voice_id not in {voice.id for voice in self._vozes_disponiveis()}:
                 raise ValueError(f"{get_voice(voice_id).name} está indisponível agora. Confira a instalação dessa voz no worker.")
