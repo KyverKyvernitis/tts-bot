@@ -40,6 +40,8 @@ MAX_UNPACKED_BYTES = 256 * 1024 * 1024
 MAX_ENV_BYTES = 256 * 1024
 MARKER = ".pururu-purpura-install.json"
 WORKER_DIR = Path(__file__).resolve().parents[2] / "termux" / "phone-worker"
+BUNDLED_BRIDGE = Path(__file__).resolve().parents[2] / "esper-utau" / "termux" / "resampler.py"
+BRIDGE_SHA256 = "75a256a704afca3b835fd2fc8e273f3a6f488fd37c1f180291992aa2289a5698"
 KEY = re.compile(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=")
 ALLOWED_ENV_KEYS = frozenset({
     "PHONE_WORKER_TETO_RESAMPLER_COMMAND", "PHONE_WORKER_PURURU_ENABLED",
@@ -285,7 +287,11 @@ def configuration(directory: Path, values: dict[str, str], *, container: str | N
         else:
             raise InstallError("comando ESPER não reconhecido; use a ponte resampler.py ou esper-utau-resampler")
         wrapper = Path(command[1]).expanduser().absolute()
-        wrapper_bytes = regular_bytes(wrapper, MAX_ENV_BYTES)
+        if not (wrapper.parent.name == BRIDGE_SHA256
+                and wrapper.parent.parent.name == "pururu"
+                and wrapper.parent.parent.parent.name == "bridges"
+                and not wrapper.exists() and not wrapper.is_symlink()):
+            regular_bytes(wrapper, MAX_ENV_BYTES)
         if shutil.which(command[0]) is None and not Path(command[0]).is_file():
             raise InstallError("Python da ponte ESPER não encontrado")
         command[1] = str(wrapper)
@@ -327,34 +333,39 @@ def configuration(directory: Path, values: dict[str, str], *, container: str | N
                  or values.get("PHONE_WORKER_ESPER_CONTAINER") or "voicepeak-arm64")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", container):
         raise InstallError("nome do container inválido")
-    # Old ESPER bridges reject --implementation-id. Keep the bridge digest in
-    # the accepted cache-directory argument instead so both phrase and fragment
-    # fingerprints still change after a bridge update. Teto's argv stays intact.
-    digest = hashlib.sha256(wrapper_bytes).hexdigest()
-    supports_identity = "--implementation-id" in bridge_options(wrapper_bytes)
-    replacements = {"--container": container,
-                    "--implementation-id": digest if supports_identity else None}
-    if not supports_identity:
-        cache = Path(values.get("PHONE_WORKER_ESPER_CACHE_DIR") or wrapper.parent.parent / "cache").expanduser().absolute()
-        replacements["--cache-dir"] = str(cache / "pururu-bridge" / digest)
-    clean, position = command[:2], 2
+    # A native-only voice must not silently inherit an older CLI bridge that
+    # the renderer cannot recognize. Publish the shipped, pinned resident bridge
+    # in a voice-owned path; the configured bridges of other voices stay intact.
+    bundled_bridge_bytes()
+    options = {}
+    position = 2
     while position < len(command):
-        argument = command[position]
-        if argument in replacements:
-            if position + 1 >= len(command) or command[position + 1].startswith("--"):
+        name, equal, value = command[position].partition("=")
+        if name not in {"--root", "--cache-dir", "--container", "--timeout", "--implementation-id"} or name in options:
+            raise InstallError("opção ESPER desconhecida ou duplicada no comando existente")
+        position += 1
+        if not equal:
+            if position >= len(command) or command[position].startswith("--"):
                 raise InstallError("opção ESPER sem valor no comando existente")
-            position += 2
-        elif argument.partition("=")[0] in replacements:
-            if not argument.partition("=")[2]:
-                raise InstallError("opção ESPER sem valor no comando existente")
+            value = command[position]
             position += 1
-        else:
-            clean.append(argument)
-            position += 1
-    command = clean
-    for option, value in replacements.items():
-        if value is not None:
-            command.extend((option, value))
+        if not value:
+            raise InstallError("opção ESPER sem valor no comando existente")
+        options[name] = value
+    root = Path(esper_root or options.get("--root") or values.get("PHONE_WORKER_ESPER_ROOT")
+                or wrapper.parent.parent).expanduser().absolute()
+    cache = Path(options.get("--cache-dir") or values.get("PHONE_WORKER_ESPER_CACHE_DIR")
+                 or root / "cache").expanduser().absolute()
+    timeout = options.get("--timeout") or values.get("PHONE_WORKER_ESPER_TIMEOUT") or "60"
+    try:
+        if not 1 <= float(timeout) <= 120:
+            raise ValueError()
+    except (ValueError, OverflowError):
+        raise InstallError("timeout ESPER deve ficar entre 1 e 120 segundos")
+    owned_bridge = root / "bridges" / "pururu" / BRIDGE_SHA256 / "resampler.py"
+    real_directories(owned_bridge.parent)
+    command = [command[0], str(owned_bridge), "--root", str(root), "--cache-dir", str(cache),
+               "--container", container, "--timeout", timeout, "--implementation-id", BRIDGE_SHA256]
     threads = values.get("PHONE_WORKER_PURURU_RENDER_THREADS") or "2"
     if not threads.isdigit() or not 1 <= int(threads) <= 4:
         raise InstallError("Pururu Púrpura exige entre 1 e 4 threads de renderização")
@@ -366,6 +377,30 @@ def configuration(directory: Path, values: dict[str, str], *, container: str | N
         "PHONE_WORKER_PURURU_RENDER_THREADS": threads,
         "PHONE_WORKER_PURURU_RESAMPLER_COMMAND": shlex.join(command),
     }
+
+
+def bundled_bridge_bytes() -> bytes:
+    data = regular_bytes(BUNDLED_BRIDGE, 128 * 1024)
+    if hashlib.sha256(data).hexdigest() != BRIDGE_SHA256:
+        raise InstallError("ponte ESPER do kit não corresponde à versão fixada")
+    if "--implementation-id" not in bridge_options(data):
+        raise InstallError("ponte ESPER do kit não oferece identidade verificável")
+    return data
+
+
+def publish_runtime_bridge(configured: dict[str, str]) -> tuple[Path, int | None]:
+    command = shlex.split(configured["PHONE_WORKER_PURURU_RESAMPLER_COMMAND"])
+    path = Path(command[1])
+    data = bundled_bridge_bytes()
+    real_directories(path.parent)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    real_directories(path.parent)
+    if path.exists() or path.is_symlink():
+        if regular_bytes(path, 128 * 1024) != data:
+            raise InstallError("ponte Pururu existente foi alterada; arquivo preservado")
+        return path, None
+    atomic_write(path, data)
+    return path, path.stat().st_ino
 
 
 def updated_environment(original: bytes, values: dict[str, str]) -> bytes:
@@ -680,8 +715,8 @@ def check_existing(directory: Path) -> dict | None:
     return inspect_bank(directory)
 
 
-def install_voicebank(*, archive: Path, directory: Path, env: Path, container: str | None = None,
-                      esper_root: Path | None = None, dry_run: bool = False) -> dict:
+def install_voicebank(*, archive: Path | None, directory: Path, env: Path, container: str | None = None,
+                      esper_root: Path | None = None, dry_run: bool = False, repair_runtime: bool = False) -> dict:
     report = {"ok": False, "installed": False, "voicebank_ready": False, "voice_id": "pururu-purpura",
               "voicebank_profile": "pururu-purpura", "source_url": SOURCE_URL, "author_url": AUTHOR_URL,
               "terms_url": TERMS_URL, "dry_run": dry_run,
@@ -689,17 +724,24 @@ def install_voicebank(*, archive: Path, directory: Path, env: Path, container: s
               "production_voice_changed": False, "pururu_synthesis_verified": False,
               "portuguese_quality_verified": False, "checks": {},
               "note": "Banco oficial de Juliana Plu. Instala em pasta própria, sem alterar a voz selecionada; não redistribua os arquivos do banco."}
-    lock, published = None, None
+    lock, published, runtime_bridge = None, None, None
     try:
         directory = Path(os.path.abspath(directory.expanduser()))
         env = Path(os.path.abspath(env.expanduser()))
-        archive = Path(os.path.abspath(archive.expanduser()))
+        archive = Path(os.path.abspath(archive.expanduser())) if archive is not None else None
         report["directory"] = str(directory)
         original, settings = read_environment(env)
         configured = configuration(directory, settings, container=container, esper_root=esper_root)
         updated = updated_environment(original, configured)
         real_directories(directory)
         existing = check_existing(directory)
+        if repair_runtime and existing is None:
+            raise InstallError("Pururu Púrpura ainda não está instalada; instale o banco antes de reparar o runtime")
+        if existing is None and archive is None:
+            raise InstallError("RAR oficial ausente para instalar o banco")
+        report["runtime_repair"] = repair_runtime
+        report["bank_reused"] = existing is not None
+        report["bank_downloaded"] = False
         if dry_run:
             if existing is None:
                 with tempfile.TemporaryDirectory(prefix="pururu-check-") as temporary:
@@ -747,13 +789,27 @@ def install_voicebank(*, archive: Path, directory: Path, env: Path, container: s
                 report["checks"]["publication"] = {"ok": True, "atomic": True}
         else:
             report["checks"]["existing_installation"] = {"ok": True, "inventory_verified": True}
+        runtime_bridge = publish_runtime_bridge(configured)
+        report["checks"]["runtime_bridge"] = {"ok": True, "sha256": BRIDGE_SHA256,
+            "path": str(runtime_bridge[0]), "published": runtime_bridge[1] is not None,
+            "resident_bridge_compatible": True}
         change = publish_environment(env, original, updated)
         report["worker_configuration_changed"] = change["changed"]
         if "backup" in change:
             report["configuration_backup"] = change["backup"]
-        report.update(ok=True, voicebank_ready=True, voicebank=existing, restart_required=change["changed"])
+        report.update(ok=True, voicebank_ready=True, voicebank=existing,
+                      restart_required=change["changed"] or runtime_bridge[1] is not None)
     except (OSError, ValueError, UnicodeError, NotImplementedError, wave.Error, EOFError) as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
+        if runtime_bridge is not None and runtime_bridge[1] is not None:
+            try:
+                path, inode = runtime_bridge
+                if (stat.S_ISREG(path.lstat().st_mode) and path.stat().st_ino == inode
+                        and regular_bytes(path, 128 * 1024) == bundled_bridge_bytes()):
+                    path.unlink()
+                    report["checks"]["runtime_rollback"] = {"ok": True}
+            except OSError:
+                report["checks"]["runtime_rollback"] = {"ok": False}
         if published is not None:
             try:
                 if stat.S_ISDIR(directory.lstat().st_mode) and directory.stat().st_ino == published:
@@ -782,6 +838,7 @@ def main(argv: list[str] | None = None) -> int:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--source", "--archive", dest="archive", type=Path, help="RAR oficial já baixado")
     source.add_argument("--download", action="store_true", help="baixar os 92 MB diretamente do link oficial de Juliana Plu")
+    source.add_argument("--repair-runtime", action="store_true", help="reparar a ponte ESPER do banco já instalado sem baixar o banco novamente")
     parser.add_argument("--timeout", type=float, default=900, help="prazo total do download em segundos")
     parser.add_argument("--dry-run", action="store_true", help="validar o banco sem instalar nem alterar a configuração")
     parser.add_argument("--directory", type=Path, default=Path.home() / "voicebanks/pururu-purpura")
@@ -798,7 +855,8 @@ def main(argv: list[str] | None = None) -> int:
                 download_archive(archive, timeout=options.timeout)
             report = install_voicebank(archive=archive, directory=options.directory, env=options.env,
                                       container=options.container, esper_root=options.esper_root,
-                                      dry_run=options.dry_run)
+                                      dry_run=options.dry_run, repair_runtime=options.repair_runtime)
+            report["bank_downloaded"] = bool(options.download)
     except (OSError, ValueError, urllib.error.URLError) as exc:
         report = {"ok": False, "installed": False, "voice_id": "pururu-purpura", "error": str(exc)}
     print(json.dumps(report, ensure_ascii=False, indent=2))

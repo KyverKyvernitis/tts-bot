@@ -117,7 +117,8 @@ def test_installs_the_verified_bank_atomically_without_touching_other_voices(ins
     assert values['PHONE_WORKER_PURURU_VOICEBANK_DIR'] == str(directory)
     assert 'PHONE_WORKER_PURURU_ENGLISH_VOICEBANK_DIR' not in values
     command = shlex.split(values['PHONE_WORKER_PURURU_RESAMPLER_COMMAND'])
-    assert command[:2] == [sys.executable, str(sample['esper_root'] / 'bin/resampler.py')]
+    assert command[:2] == [sys.executable, str(sample['esper_root'] / 'bridges/pururu' / installer.BRIDGE_SHA256 / 'resampler.py')]
+    assert Path(command[1]).read_bytes() == installer.BUNDLED_BRIDGE.read_bytes()
     assert Path(report['configuration_backup']).read_bytes() == sample['original']
     assert not list(directory.parent.glob('.*pururu-install.lock'))
 
@@ -355,3 +356,105 @@ def test_cli_without_container_preserves_custom_container_and_other_voices(insta
     _, settings = installer.read_environment(sample['env'])
     command = shlex.split(settings['PHONE_WORKER_PURURU_RESAMPLER_COMMAND'])
     assert command[command.index('--container') + 1] == 'custom-existing-container'
+
+
+def test_runtime_repair_replaces_unrecognized_bridge_without_downloading_the_bank(installer, sample, monkeypatch):
+    assert _install(installer, sample)['ok']
+    before = installer.inventory(sample['directory'])
+    old_bridge = sample['esper_root'] / 'bin/resampler.py'
+    old_bytes = old_bridge.read_bytes()
+    cache = sample['esper_root'] / 'private analysis cache'
+    old_command = shlex.join([sys.executable, str(old_bridge), '--root', str(sample['esper_root']),
+        '--cache-dir', str(cache), '--container', 'custom-native-engine', '--timeout', '75'])
+    original = sample['original'] + ('PHONE_WORKER_PURURU_RESAMPLER_COMMAND=' +
+                                     installer.shell_value(old_command) + '\n').encode()
+    sample['env'].write_bytes(original)
+    for name in ('download_archive', 'open_archive', 'archive_library'):
+        monkeypatch.setattr(installer, name, lambda *a, **k: pytest.fail('repair must not download or extract'))
+    report = installer.install_voicebank(archive=None, directory=sample['directory'],
+        env=sample['env'], repair_runtime=True)
+    assert report['ok'] and report['runtime_repair'] and not report['installed'], report
+    assert installer.inventory(sample['directory']) == before
+    assert old_bridge.read_bytes() == old_bytes
+    _, values = installer.read_environment(sample['env'])
+    command = shlex.split(values['PHONE_WORKER_PURURU_RESAMPLER_COMMAND'])
+    assert hashlib.sha256(Path(command[1]).read_bytes()).hexdigest() == installer.BRIDGE_SHA256
+    assert command[command.index('--root') + 1] == str(sample['esper_root'])
+    assert command[command.index('--cache-dir') + 1] == str(cache)
+    assert command[command.index('--container') + 1] == 'custom-native-engine'
+    assert command[command.index('--timeout') + 1] == '75'
+    assert command[command.index('--implementation-id') + 1] == installer.BRIDGE_SHA256
+    assert all(line in sample['env'].read_text() for line in sample['original'].decode().splitlines())
+    settings = sample['env'].read_bytes()
+    again = installer.install_voicebank(archive=None, directory=sample['directory'], env=sample['env'], repair_runtime=True)
+    assert again['ok'] and not again['worker_configuration_changed']
+    assert sample['env'].read_bytes() == settings
+
+
+def test_runtime_repair_cli_does_not_require_archive_or_download(installer, sample, monkeypatch, capsys):
+    assert _install(installer, sample)['ok']
+    monkeypatch.setattr(installer, 'download_archive', lambda *a, **k: pytest.fail('unexpected download'))
+    assert installer.main(['--repair-runtime', '--directory', str(sample['directory']),
+        '--env', str(sample['env'])]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['ok'] and report['runtime_repair'] and not report['installed']
+
+
+def test_runtime_repair_requires_an_existing_verified_bank(installer, sample):
+    report = _install(installer, sample, archive=None, repair_runtime=True)
+    assert not report['ok'] and 'ainda não está instalada' in report['error']
+    assert not sample['directory'].exists()
+    assert sample['env'].read_bytes() == sample['original']
+
+
+def test_runtime_repair_environment_race_rolls_back_only_new_bridge(installer, sample, monkeypatch):
+    assert _install(installer, sample)['ok']
+    _, values = installer.read_environment(sample['env'])
+    command = shlex.split(values['PHONE_WORKER_PURURU_RESAMPLER_COMMAND'])
+    runtime = Path(command[1])
+    runtime.unlink()
+    before = installer.inventory(sample['directory'])
+    original = sample['env'].read_bytes()
+    latest = original + b'LOCAL_SETTING=changed\n'
+    publish = installer.publish_environment
+    def raced(path, original, updated):
+        path.write_bytes(latest)
+        return publish(path, original, updated)
+    monkeypatch.setattr(installer, 'publish_environment', raced)
+    report = installer.install_voicebank(archive=None, directory=sample['directory'], env=sample['env'], repair_runtime=True)
+    assert not report['ok'] and report['checks']['runtime_rollback']['ok'], report
+    assert not runtime.exists()
+    assert installer.inventory(sample['directory']) == before
+    assert sample['env'].read_bytes() == latest
+
+
+def test_changed_shipped_bridge_is_rejected_before_any_publication(installer, sample, monkeypatch, tmp_path):
+    fake = tmp_path / 'changed-bridge.py'
+    fake.write_bytes(installer.BUNDLED_BRIDGE.read_bytes() + b'\n# changed\n')
+    monkeypatch.setattr(installer, 'BUNDLED_BRIDGE', fake)
+    report = _install(installer, sample)
+    assert not report['ok'] and 'versão fixada' in report['error']
+    assert sample['env'].read_bytes() == sample['original']
+    assert not sample['directory'].exists()
+
+
+def test_changed_owned_bridge_is_preserved_and_not_executed(installer, sample):
+    assert _install(installer, sample)['ok']
+    _, values = installer.read_environment(sample['env'])
+    path = Path(shlex.split(values['PHONE_WORKER_PURURU_RESAMPLER_COMMAND'])[1])
+    path.write_bytes(b'raise RuntimeError("user changed bridge")\n')
+    before = sample['env'].read_bytes()
+    report = installer.install_voicebank(archive=None, directory=sample['directory'], env=sample['env'], repair_runtime=True)
+    assert not report['ok'] and 'existente foi alterada' in report['error']
+    assert path.read_bytes() == b'raise RuntimeError("user changed bridge")\n'
+    assert sample['env'].read_bytes() == before
+
+
+def test_pinned_bridge_is_recognized_by_the_shipped_renderer(installer):
+    import ast
+    tree = ast.parse((ROOT / 'deploy/termux/phone-worker/teto_renderer/renderer.py').read_text())
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'TetoRenderer')
+    identity = next(ast.literal_eval(node.value) for node in cls.body if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == 'BACKGROUND_BRIDGE_SHA256' for target in node.targets))
+    assert installer.BRIDGE_SHA256 == identity
+    assert hashlib.sha256(installer.bundled_bridge_bytes()).hexdigest() == identity

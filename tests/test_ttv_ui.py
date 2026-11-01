@@ -227,13 +227,40 @@ def test_two_clicks_during_discord_defer_generate_only_one_sample():
     asyncio.run(run())
 
 
-def test_partial_component_failure_clears_items_before_four_field_fallback():
+def test_missing_radio_support_keeps_four_modern_modal_selectors():
     async def run():
         module, _, _ = modules()
-        with patch.object(module, "adicionar_radio_modal", return_value=False):
+        with patch.object(discord.ui, "RadioGroup", None):
             modal = module.ModalConfiguracaoTeto(cog_for(), None)
         assert len(modal.children) == 4
-        assert all(isinstance(child, discord.ui.TextInput) for child in modal.children)
+        payload = modal.to_components()
+        assert all(component["type"] == 18 and component["component"]["type"] == 3 for component in payload)
+        assert [option["value"] for option in payload[1]["component"]["options"]] == ["pt-BR", "en-US"]
+    asyncio.run(run())
+
+
+def test_select_fallback_preserves_nonpreset_speed_and_pitch_on_submission():
+    async def run():
+        module, _, _ = modules()
+        cog = cog_for({"ttv_speech_rate": .85, "ttv_pitch_semitones": "-1.5"})
+        with patch.object(discord.ui, "RadioGroup", None):
+            modal = module.ModalConfiguracaoTeto(cog, None, target_user_id=10)
+        modal.owner_id, modal.guild_id = 10, 20
+        for index in (2, 3):
+            field = modal.to_components()[index]["component"]
+            assert field["type"] == 3 and field["required"] is False and field["min_values"] == 0
+            assert not any(option["default"] for option in field["options"])
+        await modal.on_submit(interaction())
+        cog._set_user_tts_and_refresh.assert_awaited_once_with(
+            20, 10, ttv_voice_id="kasane-teto", ttv_language="pt-BR",
+            ttv_pitch_semitones="-1.5", ttv_speech_rate=.85)
+        modal.ttv_language._values = ["en-US"]
+        modal.ttv_speech_rate._values = ["1.25"]
+        modal.ttv_pitch_semitones._values = ["-2.0"]
+        await modal.on_submit(interaction())
+        cog._set_user_tts_and_refresh.assert_awaited_with(
+            20, 10, ttv_voice_id="kasane-teto", ttv_language="en-US",
+            ttv_pitch_semitones="-2.0", ttv_speech_rate=1.25)
     asyncio.run(run())
 
 

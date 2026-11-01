@@ -2288,6 +2288,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                          engine="teto", voice=preferences["ttv_voice_id"],
                          language=language, rate="1.0", pitch="+0Hz",
                          teto_pitch_semitones=preferences["ttv_pitch_semitones"], **preferences)
+        # A newly installed bank needs one cold native analysis. Keep this
+        # larger budget private to the preview, outside ordinary voice queues.
+        item._ttv_preview = True
         path = ""
         process = None
         try:
@@ -6230,9 +6233,10 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             engine = "gtts"
         is_teto = engine == "teto"
         performance = _ttv_performance_payload(item)
+        preview = is_teto and getattr(item, "_ttv_preview", False) is True
         preferences = _ttv_item_preferences(item) if is_teto else {}
         max_text_length = 2048 if getattr(item, "ttv_score", None) is not None else TTS_TETO_MAX_TEXT_LENGTH if is_teto else TTS_WORKER_AGENT_MAX_TEXT_LENGTH
-        timeout_seconds = 120.0 if performance else TTS_TETO_WORKER_TIMEOUT_SECONDS if is_teto else TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS
+        timeout_seconds = 120.0 if performance or preview else TTS_TETO_WORKER_TIMEOUT_SECONDS if is_teto else TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS
         max_audio_mb = max(8, TTS_TETO_MAX_AUDIO_MB) if getattr(item, "ttv_score", None) is not None else TTS_TETO_MAX_AUDIO_MB if is_teto else TTS_WORKER_AGENT_MAX_AUDIO_MB
         fallback_engine = str(getattr(item, "piper_fallback_engine", "") or "gtts").strip().lower().replace("-", "_") or "gtts"
         if fallback_engine in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"}:
@@ -6248,6 +6252,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "teto_pitch_semitones": preferences.get("ttv_pitch_semitones", ""),
             **preferences,
             **performance,
+            **({"ttv_preview": True} if preview else {}),
             **({"priority": "background"} if is_teto and getattr(item, "_cd_background", False) else {}),
             # Uma requisição explícita da Teto não pode ser desviada pela engine
             # global preferida do worker; o fallback continua separado abaixo.
@@ -6298,6 +6303,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if not text and getattr(item, "ttv_score", None) is None:
             raise RuntimeError("texto vazio para TTS Agent")
         engine = str(item.engine or "gtts").strip().lower().replace("-", "_") or "gtts"
+        preview = engine == "teto" and getattr(item, "_ttv_preview", False) is True
         route_reader = getattr(self, "_tts_agent_route_state", None)
         route = route_reader() if callable(route_reader) else {}
         required_protocol = 2 if isinstance(getattr(item, "ttv_score", None), dict) and "preset" in item.ttv_score else 1
@@ -6327,7 +6333,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         metrics["tts_agent_synth_attempts"] = int(metrics.get("tts_agent_synth_attempts", 0) or 0) + 1
         started = time.monotonic()
         last_error: Exception | None = None
-        max_attempts = 1 if getattr(item, "_edge_phone_recovery", False) or getattr(item, "_cd_background", False) else max(1, int(TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS or 0) + 1)
+        max_attempts = 1 if preview or getattr(item, "_edge_phone_recovery", False) or getattr(item, "_cd_background", False) else max(1, int(TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS or 0) + 1)
         for attempt in range(max_attempts):
             path = ""
             try:
@@ -6335,7 +6341,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 data = await self._request_phone_worker_tts_audio(
                     task="tts_agent_synthesize",
                     payload=self._tts_agent_payload_for_item(item),
-                    timeout_seconds=124.0 if performance else TTS_TETO_WORKER_TIMEOUT_SECONDS + 4.0 if engine == "teto" else TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
+                    timeout_seconds=124.0 if performance or preview else TTS_TETO_WORKER_TIMEOUT_SECONDS + 4.0 if engine == "teto" else TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
                     max_audio_mb=max(8, TTS_TETO_MAX_AUDIO_MB) if getattr(item, "ttv_score", None) is not None else TTS_TETO_MAX_AUDIO_MB if engine == "teto" else TTS_WORKER_AGENT_MAX_AUDIO_MB,
                     stream_to_file=not _return_audio,
                 )

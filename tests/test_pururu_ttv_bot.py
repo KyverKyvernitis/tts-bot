@@ -6,6 +6,7 @@ from copy import deepcopy
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import discord
 
 from cogs.tts import ttv
 from test_ttv_audio import Probe, item
@@ -121,6 +122,9 @@ def test_current_pururu_modal_has_native_portuguese_only_and_saves_controls():
         cog._ttv_voice_status = pururu_probe()._ttv_voice_status
         modal = module.ModalConfiguracaoTeto(cog, None, target_user_id=10)
         language = modal.to_components()[1]['component']
+        assert [item['type'] for item in modal.to_components()] == [18, 18, 18, 18]
+        assert [item['component']['type'] for item in modal.to_components()] == [3, 3, 21, 21]
+        assert language['required'] is True and language['min_values'] == 1
         assert [(option['label'], option['value'], option['default'])
                 for option in language['options']] == [('Português brasileiro', 'pt-BR', True)]
         modal.owner_id, modal.guild_id = 10, 20
@@ -133,6 +137,35 @@ def test_current_pururu_modal_has_native_portuguese_only_and_saves_controls():
         fallback = module.ModalConfiguracaoTeto(cog, None, target_user_id=10, force_text_fallback=True)
         assert 'Pururu Púrpura: pururu-purpura' in fallback.ttv_voice_id.placeholder
         assert fallback.ttv_language.placeholder == 'Português brasileiro: pt-BR'
+    asyncio.run(run())
+
+
+def test_pururu_launcher_opens_valid_new_modal_without_retrying_text_fields():
+    async def run():
+        _, _, launcher_module = modules()
+        cog = cog_for(dict(ttv_voice_id='pururu-purpura', ttv_language='pt-BR'), ready=True)
+        cog._tts_phone_worker_online_for_ui = lambda: True
+        cog._ttv_voice_status = pururu_probe()._ttv_voice_status
+        view = launcher_module.VisaoLancadorPublicoTTS(cog, 10, 20)
+        event = interaction()
+
+        async def validate_discord_modal(modal):
+            # The client library serializes a one-option RadioGroup, but the
+            # Discord API rejects it (a radio group must have 2–10 options).
+            for field in modal.to_components():
+                child = field.get('component', {})
+                if child.get('type') == 21 and not 2 <= len(child['options']) <= 10:
+                    response = type('Response', (), {'status': 400, 'reason': 'Bad Request'})()
+                    raise discord.HTTPException(response, {'code': 50035, 'message': 'Invalid Form Body'})
+
+        event.response.send_modal.side_effect = validate_discord_modal
+        await view._abrir_acao(event, 'teto')
+        event.response.send_modal.assert_awaited_once()
+        modal = event.response.send_modal.await_args.args[0]
+        assert not modal.force_text_fallback
+        assert [item['component']['type'] for item in modal.to_components()] == [3, 3, 21, 21]
+        assert modal.owner_id == 10 and modal.guild_id == 20
+        cog._set_user_tts_and_refresh.assert_not_awaited()
     asyncio.run(run())
 
 

@@ -137,7 +137,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.46"
+PHONE_WORKER_VERSION = "1.11.47"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "termux"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -5680,9 +5680,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
             teto_max_chars = 2048 if performance.get("score") is not None else max(16, _env_int(f"PHONE_WORKER_{prefix}_MAX_CHARACTERS", 180))
             if len(text) > teto_max_chars:
                 raise ValueError(f"texto grande demais para {_ttv_voice_name(controls['ttv_voice_id'])} ({len(text)} > {teto_max_chars})")
-        timeout_limit = 120 if performance else self.job_timeout
+        # Private voice previews may perform the bank's first native analysis.
+        # Do not extend ordinary speech or another engine's job deadline.
+        preview = requested_engine == "teto" and body.get("ttv_preview") is True
+        extended_ttv_budget = bool(performance) or preview
+        timeout_limit = 120 if extended_ttv_budget else self.job_timeout
         timeout = max(2, min(timeout_limit, int(float(body.get("timeout_seconds") or
-            (120 if performance else os.getenv("PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS") or self.job_timeout)))))
+            (120 if extended_ttv_budget else os.getenv("PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS") or self.job_timeout)))))
         max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
         teto_request = requested_engine == "teto"
         dependency_started = time.monotonic()

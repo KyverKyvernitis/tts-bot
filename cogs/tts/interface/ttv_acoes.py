@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import subprocess
 
 import discord
 
@@ -18,6 +19,20 @@ def resumo_ttv(settings: dict) -> str:
     rate = float(settings.get("ttv_speech_rate", 1.0))
     speed = "Normal" if rate == 1 else f"{rate * 100:g}%".replace(".", ",")
     return f"Voz: **{voice}** · Idioma: **{language}** · Tom: **{tone}** · Velocidade: **{speed}**"
+
+
+def _erro_amostra(error: Exception) -> str:
+    """Keep diagnostics in the logs rather than exposing worker commands."""
+    detail = str(error).casefold()
+    if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)) or any(
+        marker in detail for marker in ("timeoutexpired", "timed out", "timeout", "tempo esgotado", "prazo total")
+    ):
+        return "A síntese excedeu o tempo de espera. Tente novamente; seus ajustes continuam salvos."
+    if "indisponível" in detail:
+        return "A voz está indisponível agora. Seus ajustes continuam salvos."
+    if "fonema" in detail:
+        return "O banco da voz não conseguiu pronunciar esta amostra. Seus ajustes continuam salvos."
+    return "Não consegui gerar a amostra agora. Seus ajustes continuam salvos."
 
 
 async def _responder(interaction: discord.Interaction, *, content: str, view=None, file=None) -> None:
@@ -131,17 +146,15 @@ class VisaoConfirmacaoTTV(discord.ui.View):
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
             settings = self._settings()
-            mp3 = await asyncio.wait_for(self.cog._ttv_preview_mp3(self.guild_id, self.target_user_id, settings=settings), timeout=130)
+            # The preview allows 120 s for a cold bank, HTTP transfer grace,
+            # and its separate bounded MP3 conversion before this outer guard.
+            mp3 = await asyncio.wait_for(self.cog._ttv_preview_mp3(self.guild_id, self.target_user_id, settings=settings), timeout=150)
             if not isinstance(mp3, bytes) or not mp3:
                 raise RuntimeError("O motor não devolveu a amostra de áudio.")
             await _responder(interaction, content=f"**Amostra de TTV**\n{resumo_ttv(settings)}", file=discord.File(io.BytesIO(mp3), filename="ttv-amostra.mp3"))
-        except (RuntimeError, ValueError) as error:
-            await _responder(interaction, content=f"Não consegui gerar a amostra. {error}")
-        except asyncio.TimeoutError:
-            await _responder(interaction, content="A amostra demorou demais. Tente novamente quando o dispositivo de síntese estiver disponível.")
         except Exception as error:
             print(f"[ttv_preview] geração falhou: {error!r}")
-            await _responder(interaction, content="Não consegui gerar a amostra agora. Seus ajustes continuam salvos.")
+            await _responder(interaction, content=_erro_amostra(error))
         finally:
             self._preview_running = False
 

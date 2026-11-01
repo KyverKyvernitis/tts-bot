@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.parametrize('arguments,status,restarts', [([], 0, True),
     (['--download', '--dry-run'], 0, False), (['--fail'], 7, False),
-    (['--help'], 0, False), (['--check-archive-library'], 0, False)])
+    (['--help'], 0, False), (['--repair-runtime'], 0, True),
+    (['--repair-runtime', '--dry-run'], 0, False), (['--check-archive-library'], 0, False)])
 def test_kit_launcher_preserves_arguments_and_does_not_restart_after_failure(tmp_path, arguments, status, restarts):
     launcher = tmp_path / 'instalar-pururu.sh'
     shutil.copyfile(ROOT / 'deploy/pururu-utau/termux/install-pururu.sh', launcher)
@@ -36,3 +37,14 @@ raise SystemExit(7 if '--fail' in sys.argv else 0)
     assert restarted.exists() == restarts
     if restarts:
         assert restarted.read_text() == '--restart'
+
+
+def test_runtime_repair_never_requires_the_archive_library(tmp_path):
+    launcher = tmp_path / 'instalar-pururu.sh'
+    shutil.copyfile(ROOT / 'deploy/pururu-utau/termux/install-pururu.sh', launcher)
+    installer = tmp_path / 'install-voicebank.py'
+    installer.write_text("import sys\nassert sys.argv[1:] == ['--repair-runtime']\n")
+    env = dict(os.environ, PHONE_WORKER_DIR=str(tmp_path / 'not-installed'))
+    result = subprocess.run(['bash', str(launcher), '--repair-runtime'], env=env,
+                            capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr.decode()

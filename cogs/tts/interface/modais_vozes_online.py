@@ -434,8 +434,8 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
                 voices.insert(0, discord.SelectOption(label=unavailable_label, value=self.current_voice, default=True))
             voice_select = criar_seletor_modal("ttv_voice_id", placeholder="Escolha sua vocaloid", options=voices)
             ok = adicionar_item_rotulo_modal(self, "ttv_voice_id", text="Escolha sua vocaloid", description="", component=voice_select)
-            ok = ok and adicionar_radio_modal(
-                self, "ttv_language", text="Idioma", description="", current=self.current_language,
+            ok = ok and self._adicionar_escolha_ttv(
+                "ttv_language", text="Idioma", current=self.current_language,
                 options=[(label, value, "") for value, label in self._language_choices()],
             )
             ok = ok and self._adicionar_radio_ttv(
@@ -485,15 +485,33 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
                 available.append(voice)
         return available
 
+    def _adicionar_escolha_ttv(self, attr_name, *, text, current, options) -> bool:
+        # Discord requires 2–10 choices in a RadioGroup. Native-only voices
+        # have one language, so use a valid modal Select for that fixed choice.
+        # A Label-capable library without RadioGroup can keep the guided UI too.
+        if 2 <= len(options) <= 10 and adicionar_radio_modal(
+            self, attr_name, text=text, description="", current=str(current), options=options,
+        ):
+            return True
+        select = criar_seletor_modal(
+            attr_name, placeholder=text,
+            options=[discord.SelectOption(label=label, value=str(value),
+                                          default=str(value) == str(current))
+                     for label, value, _ in options],
+        )
+        return adicionar_item_rotulo_modal(self, attr_name, text=text, description="", component=select)
+
     def _adicionar_radio_ttv(self, attr_name, *, text, current, current_label, options) -> bool:
         is_preset = any(float(value) == float(current) for _, value, _ in options)
         if not is_preset:
             # Cinco opções fixas; não trocar uma preferência antiga por um preset.
             text = f"{text} (atual: {current_label})"
-        if not adicionar_radio_modal(self, attr_name, text=text, description="", current=str(current), options=options):
+        if not self._adicionar_escolha_ttv(attr_name, text=text, current=str(current), options=options):
             return False
         group = getattr(self, attr_name)
         group.required = is_preset
+        if isinstance(group, discord.ui.Select):
+            group.min_values = 1 if is_preset else 0
         for option in group.options:
             option.default = float(option.value) == float(current)
         return True

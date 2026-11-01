@@ -18,10 +18,12 @@ for pururu_argument in "$@"; do
   esac
 done
 pururu_dry_run=0
+pururu_repair=0
 for pururu_argument in "$@"; do
   [[ "$pururu_argument" != "--dry-run" ]] || pururu_dry_run=1
+  [[ "$pururu_argument" != "--repair-runtime" ]] || pururu_repair=1
 done
-if ! python "$pururu_installer" --check-archive-library; then
+if [[ "$pururu_repair" != "1" ]] && ! python "$pururu_installer" --check-archive-library; then
   if [[ "$pururu_dry_run" == "1" ]]; then
     exit 1
   fi
