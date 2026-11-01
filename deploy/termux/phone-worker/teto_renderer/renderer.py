@@ -3,6 +3,7 @@ from __future__ import annotations
 import array
 import base64
 import contextlib
+import fcntl
 import hashlib
 import io
 import importlib.machinery
@@ -10,11 +11,14 @@ import importlib.util
 import json
 import math
 import os
+import platform
 import queue
 import re
 import shlex
 import shutil
 import signal
+import stat
+import struct
 import subprocess
 import tempfile
 import threading
@@ -110,6 +114,11 @@ class TetoRenderer:
         self._bridge_identity_cache = {}
         self._esper_client_cache = None
         self._esper_client_lock = threading.Lock()
+        self._native_cache_lock = threading.RLock()
+        self._native_identity_cache = {}
+        self._native_sources = OrderedDict()
+        self._native_verified_sources = OrderedDict()
+        self._native_pruned_at = 0.0
 
     def _configure_voice(self, *, environment: Mapping[str, str] | None, voice_id: str) -> None:
         if voice_id not in {"kasane-teto", "hatsune-miku", "anna-nyui", "pururu-purpura"}:
@@ -360,7 +369,8 @@ class TetoRenderer:
         if mode in {"total", "post-consonant"}:
             return mode
         executable = Path(self._resampler_command()[0]).name.lower()
-        return "post-consonant" if executable.startswith("straycat") else "total"
+        return "post-consonant" if (executable.startswith("straycat") or
+                                    self._verified_native_straycat() is not None) else "total"
 
     def _render_fingerprint_for_version(self, index: VoicebankIndex, version: str) -> str:
         # Whole-utterance caches must change when the prosody implementation
@@ -489,7 +499,253 @@ class TetoRenderer:
         return None
 
     def supports_background_cancellation(self) -> bool:
-        return not self.RENDER_VERSION.startswith('worldline') and self._verified_esper_bridge() is not None
+        return not self.RENDER_VERSION.startswith('worldline') and (
+            self._verified_esper_bridge() is not None or self._verified_native_straycat() is not None)
+
+    @staticmethod
+    def _native_stamp(info):
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def _verified_native_straycat(self, command=None):
+        """Only an explicitly pinned, directly executed native engine can warm."""
+        expected = str(self._getenv('PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256') or '').lower()
+        if not re.fullmatch(r'[a-f0-9]{64}', expected):
+            return None
+        try:
+            command = command or self._resampler_command()
+            if len(command) != 1:
+                return None
+            path = Path(shutil.which(command[0]) or command[0]).expanduser().resolve(strict=True)
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or not 64 <= info.st_size <= 64 * 1024 * 1024 or not os.access(path, os.X_OK):
+                return None
+            stamp = self._native_stamp(info)
+            key = (str(path), stamp, expected)
+            with self._native_cache_lock:
+                if key in self._native_identity_cache:
+                    return self._native_identity_cache[key]
+            raw = path.read_bytes()
+            if self._native_stamp(path.stat()) != stamp:
+                return None
+            machines = {'aarch64': 183, 'arm64': 183, 'x86_64': 62, 'amd64': 62,
+                        'armv7l': 40, 'armv8l': 40, 'i386': 3, 'i686': 3}
+            machine = machines.get(platform.machine().lower())
+            valid = (raw[:4] == b'\x7fELF' and raw[4] in (1, 2) and raw[5] == 1
+                     and machine is not None and struct.unpack_from('<H', raw, 18)[0] == machine
+                     and hashlib.sha256(raw).hexdigest() == expected)
+            result = (path, expected) if valid else None
+            with self._native_cache_lock:
+                self._native_identity_cache[key] = result
+                while len(self._native_identity_cache) > 4:
+                    self._native_identity_cache.pop(next(iter(self._native_identity_cache)))
+            return result
+        except (OSError, ValueError, struct.error, TetoConfigurationError):
+            return None
+
+    @staticmethod
+    def _native_real_directories(path):
+        for parent in reversed((path, *path.parents)):
+            try:
+                mode = parent.lstat().st_mode
+            except FileNotFoundError:
+                try:
+                    parent.mkdir(mode=0o700)
+                except FileExistsError:
+                    if not stat.S_ISDIR(parent.lstat().st_mode):
+                        raise TetoConfigurationError('cache nativo deve usar pastas reais')
+            else:
+                if not stat.S_ISDIR(mode):
+                    raise TetoConfigurationError('cache nativo deve usar pastas reais')
+
+    @staticmethod
+    def _native_regular_bytes(path, maximum):
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        with os.fdopen(descriptor, 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or not 1 <= before.st_size <= maximum:
+                raise TetoSynthesisError('arquivo de análise nativa inválido ou grande demais')
+            raw = stream.read(maximum + 1)
+            if (len(raw) != before.st_size or
+                    TetoRenderer._native_stamp(os.fstat(stream.fileno())) != TetoRenderer._native_stamp(before)):
+                raise TetoSynthesisError('arquivo nativo mudou durante a leitura')
+        return raw, TetoRenderer._native_stamp(before)
+
+    def _native_analysis_root(self):
+        return self._cache.root.parent / (self._cache.root.name + '-straycat-analysis')
+
+    @contextlib.contextmanager
+    def _native_source_lease(self, source, identity, deadline):
+        """Keep WORLD sidecars private, persistent, and single-writer per source."""
+        self._check_render_cancelled()
+        source = Path(source)
+        stamp = self._native_stamp(source.stat())
+        source_key = (str(source.absolute()), stamp)
+        with self._native_cache_lock:
+            saved = self._native_sources.get(source_key)
+        data = None
+        if saved is None:
+            data, opened_stamp = self._native_regular_bytes(source, 64 * 1024 * 1024)
+            if opened_stamp != stamp:
+                raise TetoSynthesisError('gravação nativa mudou durante a leitura')
+            saved = hashlib.sha256(data).hexdigest()
+            with self._native_cache_lock:
+                self._native_sources[source_key] = saved
+                while len(self._native_sources) > 2048:
+                    self._native_sources.popitem(last=False)
+        key = hashlib.sha256(json.dumps([saved, identity[1],
+            str(self._getenv('PHONE_WORKER_TETO_FLAGS') or '')]).encode()).hexdigest()
+        root = self._native_analysis_root()
+        locks = root / '.locks'
+        self._native_real_directories(locks)
+        descriptor = os.open(locks / (key + '.lock'), os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        acquired = False
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise TetoConfigurationError('lock de análise nativa inválido')
+            while not acquired:
+                self._check_render_cancelled()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('prazo esgotado aguardando análise nativa')
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                except BlockingIOError:
+                    time.sleep(min(.02, max(0, deadline - time.monotonic())))
+            directory = root / key
+            self._native_real_directories(directory)
+            private = directory / 'source.wav'
+            analysis = directory / 'source_wav.sc'
+            complete = directory / 'analysis-ready.json'
+            valid = False
+            if private.exists() or private.is_symlink():
+                private_stamp = self._native_stamp(private.lstat())
+                with self._native_cache_lock:
+                    valid = self._native_verified_sources.get(str(private)) == private_stamp
+                if not valid:
+                    raw, _ = self._native_regular_bytes(private, 64 * 1024 * 1024)
+                    valid = hashlib.sha256(raw).hexdigest() == saved
+            if not valid:
+                if data is None:
+                    data, current = self._native_regular_bytes(source, 64 * 1024 * 1024)
+                    if current != stamp or hashlib.sha256(data).hexdigest() != saved:
+                        raise TetoSynthesisError('gravação nativa mudou durante preparação')
+                fd, name = tempfile.mkstemp(prefix='.source-', dir=directory)
+                try:
+                    with os.fdopen(fd, 'wb') as output:
+                        output.write(data)
+                    os.replace(name, private)
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(name)
+                analysis.unlink(missing_ok=True)
+                complete.unlink(missing_ok=True)
+            with self._native_cache_lock:
+                self._native_verified_sources[str(private)] = self._native_stamp(private.stat())
+                self._native_verified_sources.move_to_end(str(private))
+                while len(self._native_verified_sources) > 2048:
+                    self._native_verified_sources.popitem(last=False)
+            if analysis.exists() or analysis.is_symlink():
+                info = analysis.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 256 * 1024 * 1024:
+                    raise TetoSynthesisError('cache WORLD nativo inválido')
+                try:
+                    marker, _ = self._native_regular_bytes(complete, 4096)
+                    intact = json.loads(marker) == list(self._native_stamp(info))
+                except (OSError, ValueError, TetoSynthesisError):
+                    intact = False
+                if not intact:
+                    analysis.unlink()
+                    complete.unlink(missing_ok=True)
+            try:
+                yield private, descriptor
+                self._check_render_cancelled()
+                if analysis.exists():
+                    info = analysis.lstat()
+                    if not stat.S_ISREG(info.st_mode) or not 1 <= info.st_size <= 256 * 1024 * 1024:
+                        raise TetoSynthesisError('cache WORLD nativo inválido')
+                    fd, name = tempfile.mkstemp(prefix='.ready-', dir=directory)
+                    try:
+                        with os.fdopen(fd, 'w') as output:
+                            json.dump(list(self._native_stamp(info)), output)
+                        os.replace(name, complete)
+                    finally:
+                        with contextlib.suppress(FileNotFoundError):
+                            os.unlink(name)
+                os.utime(directory, None)
+            except BaseException:
+                # Straycat writes its WORLD cache non-atomically. A cancelled
+                # or failed process must be drained before its lease is freed.
+                with contextlib.suppress(FileNotFoundError):
+                    analysis.unlink()
+                complete.unlink(missing_ok=True)
+                raise
+        finally:
+            if acquired:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        self._prune_native_analysis()
+
+    def _prune_native_analysis(self):
+        now = time.monotonic()
+        with self._native_cache_lock:
+            if now - self._native_pruned_at < 60:
+                return
+            self._native_pruned_at = now
+        root = self._native_analysis_root()
+        budget = max(8, min(4096, self._env_int('PHONE_WORKER_TETO_NATIVE_ANALYSIS_CACHE_MB', 256))) * 1024 * 1024
+        try:
+            entries = []
+            for path in root.iterdir():
+                if re.fullmatch('[a-f0-9]{64}', path.name) and stat.S_ISDIR(path.lstat().st_mode):
+                    size = sum(item.lstat().st_size for item in path.iterdir() if item.is_file())
+                    entries.append((path.stat().st_mtime_ns, path, size))
+            total = sum(item[2] for item in entries)
+            for _, path, size in sorted(entries):
+                if total <= budget:
+                    break
+                fd = os.open(root / '.locks' / (path.name + '.lock'), os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+                try:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue
+                    shutil.rmtree(path)
+                    total -= size
+                finally:
+                    os.close(fd)
+        except OSError:
+            # Cache maintenance cannot turn a completed phrase into a failure.
+            pass
+
+    def _run_native_resampler(self, command, deadline, lease_fd):
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   env=self._subprocess_environment(), start_new_session=True,
+                                   pass_fds=(lease_fd,))
+        try:
+            while True:
+                self._check_render_cancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('prazo da síntese nativa esgotado')
+                try:
+                    stdout, stderr = process.communicate(timeout=min(.05, remaining))
+                    self._check_render_cancelled()
+                    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            if process.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.communicate(timeout=.5)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
 
     def _esper_inprocess_client(self, command):
         """Load a trusted bridge in-process; custom commands retain subprocesses."""
@@ -626,6 +882,8 @@ class TetoRenderer:
         else:
             try:
                 command = self._resampler_command()
+                if self._getenv('PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256') and self._verified_native_straycat(command) is None:
+                    raise TetoConfigurationError('o Straycat mudou ou não é nativo; execute a configuração do Straycat novamente')
                 if not shutil.which("ffmpeg"):
                     raise TetoConfigurationError("ffmpeg não encontrado")
                 index = self._load_index()
@@ -640,6 +898,14 @@ class TetoRenderer:
                     "available": True,
                     "ready": True,
                     "resampler": " ".join(command[:2]),
+                    "native_resampler_verified": self._verified_native_straycat(command) is not None,
+                    "resampler_backend": "straycat-rs" if (
+                        Path(command[0]).name.startswith("straycat") or
+                        self._verified_native_straycat(command) is not None) else (
+                        "esper" if any(Path(item).name in {"resampler.py", "esper-utau-resampler"}
+                                       for item in command[:2]) else "custom"),
+                    "length_mode": self._length_mode(),
+                    "render_threads": max(1, min(4, self._env_int("PHONE_WORKER_TETO_RENDER_THREADS", 2))),
                     "voicebank_fingerprint": index.fingerprint,
                     "fingerprint": self._render_fingerprint(index),
                     "renderer_version": self.RENDER_VERSION,
@@ -814,7 +1080,10 @@ class TetoRenderer:
             performance_sources = getattr(self._reading_context, "performance_sources", None)
             resampler_command = self._resampler_command()
             bridge = self._esper_inprocess_client(resampler_command)
-            if performance_sources is not None and self._verified_esper_bridge(resampler_command) is None:
+            native = self._verified_native_straycat(resampler_command)
+            if self._getenv('PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256') and native is None:
+                raise TetoConfigurationError('o Straycat mudou ou não é nativo; execute a configuração do Straycat novamente')
+            if performance_sources is not None and native is None and self._verified_esper_bridge(resampler_command) is None:
                 # The legacy bridge discovers FRQ by adjacent filename. Give
                 # it a private WAV without the original FRQ; its own analysis
                 # cache is content-addressed and therefore remains reusable
@@ -845,7 +1114,15 @@ class TetoRenderer:
             ]
             self._record_render_metric("resampler_calls")
             cancelled = getattr(self._reading_context, "cancelled", None)
-            if bridge is not None:
+            if native is not None:
+                with self._native_source_lease(source, native, deadline) as (private, lease_fd):
+                    command[0] = str(native[0])
+                    command[len(resampler_command)] = str(private)
+                    proc = self._run_native_resampler(command, deadline, lease_fd)
+                    if proc.returncode != 0 or not raw_output.is_file() or raw_output.stat().st_size <= 44:
+                        (private.parent / 'source_wav.sc').unlink(missing_ok=True)
+                        (private.parent / 'analysis-ready.json').unlink(missing_ok=True)
+            elif bridge is not None:
                 try:
                     result = bridge.synthesize(command[-13:], deadline=deadline,
                                                cancelled=cancelled, environment=self._subprocess_environment())
@@ -2195,7 +2472,7 @@ class TetoRenderer:
                                             identity.result()
                                         else:
                                             if score is not None and value[1]:
-                                                raise TetoSynthesisError('o resampler não aceitou a curva de notas MIDI; atualize o ESPER antes de cantar')
+                                                raise TetoSynthesisError('o resampler não aceitou a curva de notas MIDI; confira o motor configurado para essa voz')
                                             self[identity] = value
                                     return super().__getitem__(number)
 
@@ -2217,7 +2494,7 @@ class TetoRenderer:
                         raise
                 resample_ms = (time.monotonic() - resample_start) * 1000
                 if score is not None and any(fragment[1] for fragment in fragments.values()):
-                    raise TetoSynthesisError('o resampler não aceitou a curva de notas MIDI; atualize o ESPER antes de cantar')
+                    raise TetoSynthesisError('o resampler não aceitou a curva de notas MIDI; confira o motor configurado para essa voz')
                 self._check_render_cancelled()
                 if emit_pcm is None:
                     compose_started = time.monotonic()

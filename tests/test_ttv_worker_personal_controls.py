@@ -116,7 +116,7 @@ def test_catalog_health_reports_actual_renderer_and_resource_readiness(tts, monk
     monkeypatch.setattr(tts.worker, "_teto_resource_snapshot", lambda: {"ok": state != "resource-blocked"})
     status = tts.teto_status(force=True)
     assert status["ttv_personal_settings"] is True
-    assert status["ttv_voices"] == [
+    expected_voices = [
         {"id": "kasane-teto", "name": "Kasane Teto", "ready": state == "ready",
          "available": state in {"ready", "resource-blocked"}, "enabled": state != "disabled",
          "supports_personal_rate": True, "languages": [], "fingerprint": "",
@@ -136,6 +136,12 @@ def test_catalog_health_reports_actual_renderer_and_resource_readiness(tts, monk
          "language_fingerprints": {}, "ttv_language_fingerprints": {}, "backend": "utau",
          "renderer_version": "", "voicebank_profile": "", "last_error": "PHONE_WORKER_PURURU_ENABLED=false"},
     ]
+    # Old/fake renderers do not supply the optional native diagnostics, but
+    # aggregate health still publishes the same stable schema for every voice.
+    for row in expected_voices:
+        row.update(resampler="", resampler_backend="", native_resampler_verified=False,
+                   length_mode="", render_threads=None)
+    assert status["ttv_voices"] == expected_voices
 
 
 def test_raw_transport_preserves_effective_control_headers(tts):

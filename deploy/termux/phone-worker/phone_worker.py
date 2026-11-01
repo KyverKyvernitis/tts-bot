@@ -137,7 +137,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.47"
+PHONE_WORKER_VERSION = "1.11.48"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "termux"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2417,6 +2417,7 @@ def _teto_renderer_config_fingerprint(*, backend: str | None = None) -> str:
         "PHONE_WORKER_TETO_TEMPO", "PHONE_WORKER_TETO_VELOCITY",
         "PHONE_WORKER_TETO_MODULATION", "PHONE_WORKER_TETO_FLAGS",
         "PHONE_WORKER_TETO_LENGTH_MODE", "PHONE_WORKER_TETO_RESAMPLER_COMMAND",
+        "PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256", "PHONE_WORKER_TETO_NATIVE_ANALYSIS_CACHE_MB",
         "PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR", "PHONE_WORKER_TETO_FRAGMENT_CACHE_MB",
         "PHONE_WORKER_TETO_PCM_CACHE_MB",
         "PHONE_WORKER_TETO_STATUS_CACHE_SECONDS", "PHONE_WORKER_TETO_WORLDLINE_CONTAINER",
@@ -2453,6 +2454,58 @@ def _get_teto_renderer():
             raise RuntimeError(f"renderer Teto indisponível: {_TETO_RENDERER_ERROR}") from exc
 
 
+_TTV_SHARED_RENDER_SETTINGS = frozenset({
+    "BASE_PITCH", "SPEECH_RATE", "FLAGS", "VELOCITY", "MODULATION", "TEMPO",
+    "RENDER_THREADS", "FRAGMENT_CACHE_MB", "PCM_CACHE_MB", "STATUS_CACHE_SECONDS",
+    "NATIVE_ANALYSIS_CACHE_MB",
+})
+
+
+def _ttv_voice_render_value(prefix: str, suffix: str, default: str) -> str:
+    value = os.getenv(f"PHONE_WORKER_{prefix}_{suffix}")
+    if value is not None and (value.strip() or suffix == "FLAGS"):
+        return value
+    if suffix in _TTV_SHARED_RENDER_SETTINGS:
+        value = os.getenv(f"PHONE_WORKER_TETO_{suffix}")
+        if value is not None and (value.strip() or suffix == "FLAGS"):
+            return value
+    return default
+
+
+def _ttv_voice_resampler_command(prefix: str) -> str:
+    explicit = str(os.getenv(f"PHONE_WORKER_{prefix}_RESAMPLER_COMMAND") or "").strip()
+    if explicit:
+        return explicit
+    baseline = str(os.getenv("PHONE_WORKER_TETO_RESAMPLER_COMMAND") or "").strip()
+    candidates = [baseline, shlex.quote(str(Path.home() / "bin/straycat-rs"))]
+    for raw in candidates:
+        try:
+            command = shlex.split(raw)
+            if len(command) != 1 or not Path(command[0]).name.startswith("straycat"):
+                continue
+            path = Path(shutil.which(command[0]) or command[0]).expanduser()
+            if path.is_file() and os.access(path, os.X_OK):
+                with path.open("rb") as source:
+                    if source.read(4) == b"\x7fELF":
+                        return raw
+        except (OSError, ValueError):
+            continue
+    installed = Path.home() / ".esper-utau/bin/resampler.py"
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(installed))}" if installed.is_file() else ""
+
+
+def _ttv_voice_native_digest(prefix: str, command: str) -> str:
+    own = str(os.getenv(f"PHONE_WORKER_{prefix}_NATIVE_RESAMPLER_SHA256") or "").strip()
+    if own:
+        return own
+    try:
+        if shlex.split(command) == shlex.split(os.getenv("PHONE_WORKER_TETO_RESAMPLER_COMMAND") or ""):
+            return str(os.getenv("PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256") or "")
+    except ValueError:
+        pass
+    return ""
+
+
 def _miku_renderer_environment() -> dict[str, str]:
     """Give Miku her own renderer settings without mutating process globals."""
     # The existing renderer uses TETO-prefixed keys internally, but this is an
@@ -2460,11 +2513,7 @@ def _miku_renderer_environment() -> dict[str, str]:
     environment: dict[str, str] = {}
     bank = str(os.getenv("PHONE_WORKER_MIKU_VOICEBANK_DIR") or "").strip()
     english_bank = str(os.getenv("PHONE_WORKER_MIKU_ENGLISH_VOICEBANK_DIR") or bank).strip()
-    command = str(os.getenv("PHONE_WORKER_MIKU_RESAMPLER_COMMAND") or "").strip()
-    if not command:
-        installed_esper = Path.home() / ".esper-utau/bin/resampler.py"
-        if installed_esper.is_file():
-            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(installed_esper))}"
+    command = _ttv_voice_resampler_command("MIKU")
     environment.update({
         "PHONE_WORKER_TETO_ENABLED": "true" if _env_bool("PHONE_WORKER_MIKU_ENABLED", False) else "false",
         "PHONE_WORKER_TETO_VOICEBANK_DIR": bank,
@@ -2472,22 +2521,23 @@ def _miku_renderer_environment() -> dict[str, str]:
         "PHONE_WORKER_TETO_VOICEBANK_MODE": "english",
         "PHONE_WORKER_TETO_RESAMPLER_COMMAND": command,
         "PHONE_WORKER_TETO_ALIAS_SUFFIX": str(os.getenv("PHONE_WORKER_MIKU_ALIAS_SUFFIX") or "_D4").strip(),
-        "PHONE_WORKER_TETO_BASE_PITCH": str(os.getenv("PHONE_WORKER_MIKU_BASE_PITCH") or "C4"),
-        "PHONE_WORKER_TETO_SPEECH_RATE": str(os.getenv("PHONE_WORKER_MIKU_SPEECH_RATE") or "1.0"),
-        "PHONE_WORKER_TETO_FLAGS": str(os.getenv("PHONE_WORKER_MIKU_FLAGS") or ""),
-        "PHONE_WORKER_TETO_VELOCITY": str(os.getenv("PHONE_WORKER_MIKU_VELOCITY") or "100"),
-        "PHONE_WORKER_TETO_MODULATION": str(os.getenv("PHONE_WORKER_MIKU_MODULATION") or "15"),
-        "PHONE_WORKER_TETO_TEMPO": str(os.getenv("PHONE_WORKER_MIKU_TEMPO") or "140"),
+        "PHONE_WORKER_TETO_BASE_PITCH": _ttv_voice_render_value("MIKU", "BASE_PITCH", "C4"),
+        "PHONE_WORKER_TETO_SPEECH_RATE": _ttv_voice_render_value("MIKU", "SPEECH_RATE", "1.0"),
+        "PHONE_WORKER_TETO_FLAGS": _ttv_voice_render_value("MIKU", "FLAGS", ""),
+        "PHONE_WORKER_TETO_VELOCITY": _ttv_voice_render_value("MIKU", "VELOCITY", "100"),
+        "PHONE_WORKER_TETO_MODULATION": _ttv_voice_render_value("MIKU", "MODULATION", "15"),
+        "PHONE_WORKER_TETO_TEMPO": _ttv_voice_render_value("MIKU", "TEMPO", "140"),
         "PHONE_WORKER_TETO_FRAGMENT_CACHE_DIR": str(os.getenv("PHONE_WORKER_MIKU_FRAGMENT_CACHE_DIR") or
                                                    Path.home() / "phone-worker/cache/miku-fragments"),
     })
     defaults = {
-        "LENGTH_MODE": "total", "FRAGMENT_CACHE_MB": "256", "PCM_CACHE_MB": "256", "STATUS_CACHE_SECONDS": "15",
+        "LENGTH_MODE": "auto", "NATIVE_ANALYSIS_CACHE_MB": "256", "FRAGMENT_CACHE_MB": "256", "PCM_CACHE_MB": "256", "STATUS_CACHE_SECONDS": "15",
         "MIN_ALIASES": "500", "ENGLISH_MIN_ALIASES": "500", "MAX_CHARACTERS": "180",
         "MAX_PHONEMES": "240", "MAX_AUDIO_SECONDS": "20", "RENDER_THREADS": "4",
     }
-    environment.update({f"PHONE_WORKER_TETO_{suffix}": str(os.getenv(f"PHONE_WORKER_MIKU_{suffix}") or default)
+    environment.update({f"PHONE_WORKER_TETO_{suffix}": _ttv_voice_render_value("MIKU", suffix, default)
                         for suffix, default in defaults.items()})
+    environment["PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256"] = _ttv_voice_native_digest("MIKU", command)
     # An English CVVC bank is required for both supported reading languages.
     # Empty/missing Miku paths must never discover a Kasane Teto default bank.
     if not english_bank:
@@ -2520,11 +2570,7 @@ def _anna_renderer_environment() -> dict[str, str]:
     """Keep Anna's sampled DIVA bank and caches independent of other voices."""
     bank = str(os.getenv("PHONE_WORKER_ANNA_VOICEBANK_DIR") or "").strip()
     english_bank = str(os.getenv("PHONE_WORKER_ANNA_ENGLISH_VOICEBANK_DIR") or bank).strip()
-    command = str(os.getenv("PHONE_WORKER_ANNA_RESAMPLER_COMMAND") or "").strip()
-    if not command:
-        installed_esper = Path.home() / ".esper-utau/bin/resampler.py"
-        if installed_esper.is_file():
-            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(installed_esper))}"
+    command = _ttv_voice_resampler_command("ANNA")
     defaults = {
         "ENABLED": "true" if _env_bool("PHONE_WORKER_ANNA_ENABLED", False) else "false",
         "VOICEBANK_DIR": bank,
@@ -2532,7 +2578,7 @@ def _anna_renderer_environment() -> dict[str, str]:
         "VOICEBANK_MODE": "english", "ALIAS_SUFFIX": "",
         "RESAMPLER_COMMAND": command,
         "BASE_PITCH": "C4", "SPEECH_RATE": "1.0", "FLAGS": "", "VELOCITY": "100",
-        "MODULATION": "15", "TEMPO": "140", "LENGTH_MODE": "total",
+        "MODULATION": "15", "TEMPO": "140", "LENGTH_MODE": "auto", "NATIVE_ANALYSIS_CACHE_MB": "256",
         "FRAGMENT_CACHE_DIR": str(Path.home() / "phone-worker/cache/anna-fragments"),
         "FRAGMENT_CACHE_MB": "256", "PCM_CACHE_MB": "256", "STATUS_CACHE_SECONDS": "15",
         "MIN_ALIASES": "500", "ENGLISH_MIN_ALIASES": "500", "MAX_CHARACTERS": "180",
@@ -2540,9 +2586,11 @@ def _anna_renderer_environment() -> dict[str, str]:
     }
     fixed = {"ENABLED", "VOICEBANK_DIR", "ENGLISH_VOICEBANK_DIR", "VOICEBANK_MODE", "ALIAS_SUFFIX",
              "RESAMPLER_COMMAND"}
-    return {f"PHONE_WORKER_TETO_{suffix}": default if suffix in fixed else str(
-            os.getenv(f"PHONE_WORKER_ANNA_{suffix}") or default)
-            for suffix, default in defaults.items()}
+    environment = {f"PHONE_WORKER_TETO_{suffix}": default if suffix in fixed else
+                   _ttv_voice_render_value("ANNA", suffix, default)
+                   for suffix, default in defaults.items()}
+    environment["PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256"] = _ttv_voice_native_digest("ANNA", command)
+    return environment
 
 
 def _get_anna_renderer():
@@ -2570,17 +2618,13 @@ def _pururu_renderer_environment() -> dict[str, str]:
     """Use Pururu's native Portuguese samples without borrowing another bank."""
     bank = str(os.getenv("PHONE_WORKER_PURURU_VOICEBANK_DIR") or
                Path.home() / "voicebanks/pururu-purpura").strip()
-    command = str(os.getenv("PHONE_WORKER_PURURU_RESAMPLER_COMMAND") or "").strip()
-    if not command:
-        installed_esper = Path.home() / ".esper-utau/bin/resampler.py"
-        if installed_esper.is_file():
-            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(installed_esper))}"
+    command = _ttv_voice_resampler_command("PURURU")
     defaults = {
         "ENABLED": "true" if _env_bool("PHONE_WORKER_PURURU_ENABLED", False) else "false",
         "VOICEBANK_DIR": bank, "ENGLISH_VOICEBANK_DIR": "",
         "VOICEBANK_MODE": "standard", "ALIAS_SUFFIX": "", "RESAMPLER_COMMAND": command,
         "BASE_PITCH": "C4", "SPEECH_RATE": "1.0", "FLAGS": "", "VELOCITY": "100",
-        "MODULATION": "15", "TEMPO": "140", "LENGTH_MODE": "total",
+        "MODULATION": "15", "TEMPO": "140", "LENGTH_MODE": "auto", "NATIVE_ANALYSIS_CACHE_MB": "256",
         "FRAGMENT_CACHE_DIR": str(Path.home() / "phone-worker/cache/pururu-fragments"),
         "FRAGMENT_CACHE_MB": "256", "PCM_CACHE_MB": "256", "STATUS_CACHE_SECONDS": "15",
         "MIN_ALIASES": "100", "ENGLISH_MIN_ALIASES": "100", "MAX_CHARACTERS": "180",
@@ -2588,9 +2632,11 @@ def _pururu_renderer_environment() -> dict[str, str]:
     }
     fixed = {"ENABLED", "VOICEBANK_DIR", "ENGLISH_VOICEBANK_DIR", "VOICEBANK_MODE", "ALIAS_SUFFIX",
              "RESAMPLER_COMMAND"}
-    return {f"PHONE_WORKER_TETO_{suffix}": default if suffix in fixed else str(
-            os.getenv(f"PHONE_WORKER_PURURU_{suffix}") or default)
-            for suffix, default in defaults.items()}
+    environment = {f"PHONE_WORKER_TETO_{suffix}": default if suffix in fixed else
+                   _ttv_voice_render_value("PURURU", suffix, default)
+                   for suffix, default in defaults.items()}
+    environment["PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256"] = _ttv_voice_native_digest("PURURU", command)
+    return environment
 
 
 def _get_pururu_renderer():
@@ -2638,7 +2684,7 @@ def _ttv_request_settings(body: dict[str, Any]) -> dict[str, Any]:
     voice_id = policy.normalize_ttv_voice_id(body.get("ttv_voice_id", "kasane-teto"))
     prefix = _ttv_voice_prefix(voice_id)
     return policy.effective_ttv_settings(
-        body, default_speech_rate=os.getenv(f"PHONE_WORKER_{prefix}_SPEECH_RATE", "1.0"))
+        body, default_speech_rate=_ttv_voice_render_value(prefix, "SPEECH_RATE", "1.0"))
 
 
 def _ttv_voice_state(status: dict[str, Any], voice_id: str) -> dict[str, Any]:
@@ -2734,6 +2780,11 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
             "language_fingerprints": dict(state.get("ttv_language_fingerprints") or {}),
             "ttv_language_fingerprints": dict(state.get("ttv_language_fingerprints") or {}),
             "backend": state.get("backend", "utau"), "renderer_version": state.get("renderer_version", ""),
+            "resampler": state.get("resampler", ""),
+            "resampler_backend": state.get("resampler_backend", ""),
+            "native_resampler_verified": bool(state.get("native_resampler_verified")),
+            "length_mode": state.get("length_mode", ""),
+            "render_threads": state.get("render_threads"),
             "voicebank_profile": state.get("voicebank_profile", ""), "last_error": state.get("last_error", ""),
             **({"ttv_performance_protocol": state["ttv_performance_protocol"]} if state.get("ttv_performance_protocol") else {}),
             **({"singing_fingerprints": dict(state["singing_fingerprints"]),

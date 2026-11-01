@@ -143,6 +143,9 @@ def test_miku_factory_is_concurrent_singleton_without_global_bank_mutation(tts, 
     monkeypatch.setenv("PHONE_WORKER_MIKU_ENABLED", "true")
     monkeypatch.setenv("PHONE_WORKER_MIKU_VOICEBANK_DIR", str(tmp_path / "miku"))
     monkeypatch.setenv("PHONE_WORKER_MIKU_RESAMPLER_COMMAND", "python /installed/.esper-utau/bin/resampler.py")
+    # Explicit character adjustments override the shared acoustic baseline.
+    monkeypatch.setenv("PHONE_WORKER_MIKU_BASE_PITCH", "C4")
+    monkeypatch.setenv("PHONE_WORKER_MIKU_FLAGS", "")
     before = dict(os.environ)
     created = []
     def construct(**kwargs):
@@ -179,7 +182,7 @@ def test_miku_empty_paths_do_not_use_teto_default_bank(tts, monkeypatch):
     assert "/installed/teto" not in environment.values()
 
 
-def test_teto_controls_cannot_change_miku_environment_or_factory_identity(tts, monkeypatch):
+def test_teto_bank_controls_cannot_change_miku_environment_or_factory_identity(tts, monkeypatch):
     created = []
     monkeypatch.setitem(sys.modules, "teto_renderer", SimpleNamespace(
         TetoRenderer=lambda **kw: created.append(kw) or SimpleNamespace(**kw)))
@@ -187,16 +190,15 @@ def test_teto_controls_cannot_change_miku_environment_or_factory_identity(tts, m
     renderer = tts.worker._get_miku_renderer()
     other_settings = {
         "BACKEND": "worldline-r", "LENGTH_MODE": "post-consonant", "ALIAS_SUFFIX": "_F5",
-        "STATUS_CACHE_SECONDS": "300", "FRAGMENT_CACHE_MB": "1", "MIN_ALIASES": "2",
+        "VOICEBANK_DIR": "/foreign/teto", "FRAGMENT_CACHE_DIR": "/foreign/teto-cache", "MIN_ALIASES": "2",
         "ENGLISH_MIN_ALIASES": "3", "MAX_CHARACTERS": "50", "MAX_PHONEMES": "60",
-        "MAX_AUDIO_SECONDS": "4", "RENDER_THREADS": "20", "FLAGS": "B100", "BASE_PITCH": "F3",
-        "SPEECH_RATE": "1.5", "RESAMPLER_COMMAND": "unrelated-resampler",
+        "MAX_AUDIO_SECONDS": "4", "RESAMPLER_COMMAND": "unrelated-resampler",
     }
     for suffix, value in other_settings.items():
         monkeypatch.setenv("PHONE_WORKER_TETO_" + suffix, value)
     assert tts.worker._miku_renderer_environment() == before
     assert tts.worker._get_miku_renderer() is renderer and len(created) == 1
-    assert before["PHONE_WORKER_TETO_LENGTH_MODE"] == "total"
+    assert before["PHONE_WORKER_TETO_LENGTH_MODE"] == "auto"
     assert before["PHONE_WORKER_TETO_MIN_ALIASES"] == "500"
     assert before["PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES"] == "500"
     assert before["PHONE_WORKER_TETO_FRAGMENT_CACHE_MB"] == "256"
