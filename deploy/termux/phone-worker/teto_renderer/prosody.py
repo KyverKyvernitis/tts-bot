@@ -567,6 +567,48 @@ def _centers(moras: list[Mora]) -> list[int]:
     return [max(-limit, min(limit, value)) for value in values]
 
 
+def _pururu_pitch_targets(moras: list[Mora]) -> tuple[list[int], list[int], list[int]]:
+    """Place Portuguese accents on syllables without changing CVVC layout.
+
+    A consonant may occupy one or several authored aliases. It must not move
+    lexical pitch targets or add another beat to the phrase. The virtual
+    syllables reuse the established Portuguese contour; their original CVVC
+    tags and physical timings remain intact in the returned RenderNotes.
+    """
+    centers = [0 for _ in moras]
+    starts = list(centers)
+    ends = list(centers)
+    for first, last in _phrase_spans(moras):
+        anchors = [index for index in range(first, last + 1) if moras[index].role == "nucleus"]
+        if not anchors:
+            continue
+        syllables = [replace(
+            moras[index], profile="standard", word_moras=max(1, moras[index].word_syllables),
+            word_end=(number == len(anchors) - 1 or
+                      moras[anchors[number + 1]].word_index != moras[index].word_index),
+            phrase_end=moras[last].phrase_end if number == len(anchors) - 1 else "",
+        ) for number, index in enumerate(anchors)]
+        targets = _centers(syllables)
+        for number, index in enumerate(anchors):
+            center = targets[number]
+            previous = targets[max(0, number - 1)]
+            following = targets[min(len(targets) - 1, number + 1)]
+            centers[index] = center
+            starts[index] = round((previous + center) / 2)
+            ends[index] = round((center + following) / 2)
+        for index in range(first, last + 1):
+            if moras[index].role == "nucleus":
+                continue
+            right = bisect_right(anchors, index)
+            previous = targets[max(0, right - 1)]
+            following = targets[min(len(targets) - 1, right)]
+            # Auxiliary consonants articulate the shared syllable boundary.
+            # Their absolute-time curve is sampled later by the CVVC mixer.
+            boundary = round((previous + following) / 2)
+            centers[index] = starts[index] = ends[index] = boundary
+    return centers, starts, ends
+
+
 def _duration_for(moras: list[Mora], index: int) -> int:
     mora = moras[index]
     duration = float(mora.duration_ms)
@@ -633,10 +675,13 @@ def _contour_name(mora: Mora, *, terminal_ending: str = "") -> str:
 
 def build_notes(
     moras: list[Mora], *, base_pitch: str = "C4", speech_rate: float = 1.0, tempo: int = 140,
-    pitch_offset_semitones: float = 0.0,
+    pitch_offset_semitones: float = 0.0, speech_profile: str = "",
 ) -> list[RenderNote]:
+    if speech_profile not in {"", "pururu-ptbr-v1"}:
+        raise ValueError("perfil de prosódia TTV desconhecido")
     if not moras:
         return []
+    pururu_speech = speech_profile == "pururu-ptbr-v1"
     rate = _speech_rate(speech_rate)
     tempo_value = _tempo(tempo)
     try:
@@ -649,7 +694,10 @@ def build_notes(
     coarse_offset = math.trunc(pitch_offset)
     residual_cents = int(round((pitch_offset - coarse_offset) * 100.0))
     coarse_pitch = _relative_pitch(base_pitch, coarse_offset)
-    centers = _centers(moras)
+    if pururu_speech:
+        centers, starts, ends = _pururu_pitch_targets(moras)
+    else:
+        centers = _centers(moras)
     terminal_endings = _phrase_terminal_nuclei(moras)
     notes: list[RenderNote] = []
 
@@ -665,8 +713,10 @@ def build_notes(
         following = centers[following_index] if following_index is not None and not mora.phrase_end else center
         start = round((previous + center) / 2)
         end = round((center + following) / 2)
+        if pururu_speech:
+            start, end = starts[index], ends[index]
         terminal_ending = terminal_endings.get(index, "")
-        if mora.profile == "english-cvvc":
+        if mora.profile == "english-cvvc" and not pururu_speech:
             peak = center + (0 if mora.role != "nucleus" else (7 if mora.stressed else (1 if mora.deaccented else 2)))
             if terminal_ending == "?":
                 peak = max(peak, 42)
@@ -676,6 +726,8 @@ def build_notes(
                 peak = max(peak, 68)
         if terminal_ending in {".", "\n"}:
             peak = min(peak, center + 1)
+        if pururu_speech:
+            start, peak, end = [max(-84, min(84, value)) for value in (start, peak, end)]
         continuous_cvvc_aux = (
             mora.profile == "english-cvvc"
             and mora.role != "nucleus"
@@ -717,16 +769,17 @@ def build_notes(
             gain = 0.87 if continuous_cvvc_aux else 0.86
         elif mora.role == "nasal":
             gain = 0.89 if continuous_cvvc_aux else 0.90
-        elif mora.profile == "english-cvvc" and mora.stressed:
+        elif mora.profile == "english-cvvc" and not pururu_speech and mora.stressed:
             gain = 1.035
-        elif mora.profile == "english-cvvc" and mora.deaccented:
+        elif mora.profile == "english-cvvc" and not pururu_speech and mora.deaccented:
             gain = 0.97
         elif mora.stressed:
             gain = 1.055
         elif mora.deaccented:
             gain = 0.955
         else:
-            gain = 0.99 if mora.word_moras > 1 else 1.0
+            word_units = mora.word_syllables if pururu_speech else mora.word_moras
+            gain = 0.99 if word_units > 1 else 1.0
         if mora.phrase_end in {".", "?", "!", "\n"}:
             gain *= 0.985
 

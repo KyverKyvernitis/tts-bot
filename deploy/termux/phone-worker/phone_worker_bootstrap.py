@@ -72,7 +72,7 @@ LEGACY_SOURCE_HASH_TARGETS = (
     "teto_renderer/OPENUTAU_LICENSE.txt",
     "scripts/validate-teto-assets.py",
 )
-LEGACY_OPTIONAL_SNAPSHOT_TARGETS = ("README.md", "phone-worker.env.example")
+LEGACY_OPTIONAL_SNAPSHOT_TARGETS = ("README.md", "phone-worker.env.example", "teto_renderer/pururu_profile.py")
 
 SECRET_KEY_RE = re.compile(r"(?:token|secret|password|keystore|google|credential|authorization)", re.I)
 SAFE_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

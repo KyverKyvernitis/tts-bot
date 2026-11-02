@@ -100,7 +100,7 @@ def test_database_default_does_not_overwrite_personal_or_operator_pitch(monkeypa
 def test_legacy_teto_modal_saves_neutral_pitch_as_ttv_controls():
     module, save = _carregar_modulo()
     module.config.TTS_TETO_DEFAULT_PITCH_SEMITONES = 0.0
-    modal = module.ModalConfiguracaoTeto(SimpleNamespace(valores={"teto_pitch_semitones": "-1.5"}), None)
+    modal = module.ModalConfiguracaoTeto(SimpleNamespace(valores={"ttv_voice_id": "kasane-teto", "teto_pitch_semitones": "-1.5"}), None)
     modal.teto_pitch_semitones.value = "0.0"
     asyncio.run(modal.on_submit(SimpleNamespace(response=SimpleNamespace(send_message=AsyncMock()))))
     assert save.await_args.kwargs["settings"] == {

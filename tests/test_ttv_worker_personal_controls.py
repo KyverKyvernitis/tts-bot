@@ -141,6 +141,8 @@ def test_catalog_health_reports_actual_renderer_and_resource_readiness(tts, monk
     for row in expected_voices:
         row.update(resampler="", resampler_backend="", native_resampler_verified=False,
                    length_mode="", render_threads=None)
+        if row["id"] == "pururu-purpura":
+            row["voice_profile"] = "legacy"
     assert status["ttv_voices"] == expected_voices
 
 

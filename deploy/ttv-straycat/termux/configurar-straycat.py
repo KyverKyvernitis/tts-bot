@@ -23,6 +23,12 @@ import urllib.error
 import urllib.request
 
 MINIMUM_WORKER = (1, 11, 49)
+PURURU_PROFILE_MINIMUM_WORKER = (1, 11, 51)
+PURURU_PROFILE = 'pururu-ptbr-v1'
+PURURU_PROFILE_DEFAULTS = {'FLAGS': 'g5 B50', 'MODULATION': '0', 'BASE_PITCH': 'C4',
+                           'SPEECH_RATE': '1.0', 'VELOCITY': '100', 'TEMPO': '125'}
+PURURU_PROFILE_KEYS = frozenset({'PHONE_WORKER_PURURU_PROFILE', *(
+    'PHONE_WORKER_PURURU_' + suffix for suffix in PURURU_PROFILE_DEFAULTS)})
 MAX_ENV = 256 * 1024
 VOICES = {
     'MIKU': ('hatsune-miku', 'hatsune-miku-english'),
@@ -79,11 +85,13 @@ def literal(value):
     return json.dumps(str(value), ensure_ascii=False).replace('$', '\\$').replace('`', '\\`')
 
 
-def updated_environment(original, updates):
+def updated_environment(original, updates, *, remove_keys=()):
     lines, seen = [], set()
     for line in original.decode('utf-8').splitlines(keepends=True):
         match = KEY.match(line)
         key = match[1] if match else None
+        if key in remove_keys:
+            continue
         if key in updates:
             if key not in seen:
                 lines.append(key + '=' + literal(updates[key]) + '\n')
@@ -123,7 +131,7 @@ def baseline_engine(values):
     return engine, hashlib.sha256(data).hexdigest(), version
 
 
-def installed_runtime(values, explicit=None):
+def installed_runtime(values, explicit=None, *, minimum=MINIMUM_WORKER):
     candidates = [explicit] if explicit else [
         phone_path(values.get('PHONE_WORKER_RUNTIME_ROOT') or Path.home() / '.core-worker-runtime') / 'current',
         phone_path(values.get('PHONE_WORKER_DIR') or Path.home() / 'phone-worker'),
@@ -134,19 +142,20 @@ def installed_runtime(values, explicit=None):
             continue
         source = regular_bytes(path, 2 * 1024 * 1024).decode('utf-8')
         version = re.search(r'PHONE_WORKER_VERSION\s*=\s*[\'\"](\d+)\.(\d+)\.(\d+)', source)
-        if version and tuple(map(int, version.groups())) >= MINIMUM_WORKER:
+        if version and tuple(map(int, version.groups())) >= minimum:
             renderer = Path(directory) / 'teto_renderer/renderer.py'
             if renderer.is_file() and '_native_source_lease' in regular_bytes(renderer, 2 * 1024 * 1024).decode('utf-8'):
                 return str(directory)
-    raise MigrationError('aplique o patch do bot e aguarde o worker 1.11.49 antes desta migração')
+    wanted = '.'.join(map(str, minimum))
+    raise MigrationError(f'aplique o patch do bot e aguarde o worker {wanted} antes desta migração')
 
 
-def publish_environment(path, original, updated):
+def publish_environment(path, original, updated, *, backup_label='straycat'):
     if original == updated:
         return None
     if regular_bytes(path, MAX_ENV) != original:
         raise MigrationError('a configuração mudou durante a preparação; execute novamente')
-    backup = path.with_name(path.name + '.bak-straycat-' + str(time.time_ns()))
+    backup = path.with_name(path.name + '.bak-' + backup_label + '-' + str(time.time_ns()))
     with backup.open('xb') as target:
         os.chmod(backup, 0o600)
         target.write(original)
@@ -175,7 +184,11 @@ def migrate(path, *, dry_run=False, runtime_dir=None):
         except BlockingIOError as error:
             raise MigrationError('já existe uma configuração do Straycat em andamento') from error
         original, values = read_environment(path)
-        runtime = installed_runtime(values, runtime_dir)
+        profile = str(values.get('PHONE_WORKER_PURURU_PROFILE') or '').strip()
+        if profile not in ('', 'legacy', PURURU_PROFILE):
+            raise MigrationError('perfil da Pururu desconhecido; configuração preservada')
+        runtime = installed_runtime(values, runtime_dir, minimum=(
+            PURURU_PROFILE_MINIMUM_WORKER if profile == PURURU_PROFILE else MINIMUM_WORKER))
         engine, digest, version = baseline_engine(values)
         if values.get('PHONE_WORKER_TETO_BACKEND', 'utau') not in ('utau', 'voicepeak', ''):
             raise MigrationError('a Teto precisa estar usando o backend UTAU/Straycat')
@@ -195,7 +208,14 @@ def migrate(path, *, dry_run=False, runtime_dir=None):
             updates['PHONE_WORKER_' + prefix + '_NATIVE_RESAMPLER_SHA256'] = digest
             updates['PHONE_WORKER_' + prefix + '_LENGTH_MODE'] = 'post-consonant'
             for suffix, default in BASELINE.items():
-                updates['PHONE_WORKER_' + prefix + '_' + suffix] = values.get('PHONE_WORKER_TETO_' + suffix) or default
+                key = 'PHONE_WORKER_' + prefix + '_' + suffix
+                if prefix == 'PURURU' and profile == PURURU_PROFILE and suffix in PURURU_PROFILE_DEFAULTS:
+                    # An already activated profile owns its acoustic settings.
+                    # Future shared-engine migrations must not replace them.
+                    if key not in values:
+                        updates[key] = PURURU_PROFILE_DEFAULTS[suffix]
+                else:
+                    updates[key] = values.get('PHONE_WORKER_TETO_' + suffix) or default
             voices.append(voice_id)
         if not voices:
             raise MigrationError('nenhuma das novas vozes está habilitada; configuração preservada')
@@ -210,13 +230,88 @@ def migrate(path, *, dry_run=False, runtime_dir=None):
         os.close(descriptor)
 
 
+def migrate_pururu_profile(path, *, dry_run=False, runtime_dir=None, restore_backup=None):
+    """Activate/restore only Pururu's seven acoustic profile keys."""
+    path = Path(path).expanduser().absolute()
+    lock_path = path.with_name(path.name + '.ttv-straycat.lock')
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise MigrationError('já existe uma configuração do Straycat em andamento') from error
+        original, values = read_environment(path)
+        runtime = installed_runtime(values, runtime_dir, minimum=PURURU_PROFILE_MINIMUM_WORKER)
+        if values.get('PHONE_WORKER_PURURU_ENABLED', '').lower() not in ('true', '1', 'yes', 'on', 'sim'):
+            raise MigrationError('a Pururu precisa estar habilitada; configuração preservada')
+        bank = phone_path(values.get('PHONE_WORKER_PURURU_VOICEBANK_DIR') or
+                          Path.home() / 'voicebanks/pururu-purpura')
+        if not bank.is_dir():
+            raise MigrationError('o banco da Pururu não está disponível na pasta configurada')
+        engine, digest, version = baseline_engine(values)
+        try:
+            command = shlex.split(values.get('PHONE_WORKER_PURURU_RESAMPLER_COMMAND') or
+                                  values.get('PHONE_WORKER_TETO_RESAMPLER_COMMAND') or str(engine))
+        except ValueError as error:
+            raise MigrationError('comando da Pururu inválido; configuração preservada') from error
+        if len(command) != 1:
+            raise MigrationError('a Pururu precisa usar diretamente o Straycat nativo já configurado')
+        candidate = phone_path(shutil.which(command[0]) or command[0]).resolve(strict=True)
+        pin = (values.get('PHONE_WORKER_PURURU_NATIVE_RESAMPLER_SHA256') or
+               values.get('PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256') or '').lower()
+        if candidate != engine or pin != digest:
+            raise MigrationError('o motor e o SHA-256 da Pururu precisam confirmar o Straycat já instalado')
+        previous = str(values.get('PHONE_WORKER_PURURU_PROFILE') or '').strip() or 'legacy'
+        if previous not in ('legacy', PURURU_PROFILE) and restore_backup is None:
+            raise MigrationError('perfil da Pururu desconhecido; configuração preservada')
+        remove = set()
+        if restore_backup is None:
+            updates = {'PHONE_WORKER_PURURU_PROFILE': PURURU_PROFILE}
+            for suffix, default in PURURU_PROFILE_DEFAULTS.items():
+                key = 'PHONE_WORKER_PURURU_' + suffix
+                if previous != PURURU_PROFILE or key not in values:
+                    updates[key] = default
+            target_profile = PURURU_PROFILE
+        else:
+            backup_path = Path(restore_backup).expanduser().absolute()
+            if backup_path == path:
+                raise MigrationError('escolha o backup anterior, não a configuração atual')
+            _, prior = read_environment(backup_path)
+            if not any(key.startswith('PHONE_WORKER_PURURU_') for key in prior):
+                raise MigrationError('o backup não contém uma configuração da Pururu')
+            target_profile = str(prior.get('PHONE_WORKER_PURURU_PROFILE') or '').strip() or 'legacy'
+            if target_profile not in ('legacy', PURURU_PROFILE):
+                raise MigrationError('o backup contém um perfil da Pururu desconhecido')
+            updates = {key: prior[key] for key in sorted(PURURU_PROFILE_KEYS) if key in prior}
+            remove = PURURU_PROFILE_KEYS.difference(updates)
+        updated = updated_environment(original, updates, remove_keys=remove)
+        backup = None if dry_run else publish_environment(
+            path, original, updated, backup_label='pururu-profile')
+        report = {'ok': True, 'dry_run': dry_run, 'mode': 'pururu_profile',
+                  'profile_action': 'restore' if restore_backup is not None else 'activate',
+                  'voice_profile': target_profile, 'previous_voice_profile': previous,
+                  'configuration_changed': updated != original, 'configuration_backup': backup,
+                  'engine': str(engine), 'engine_sha256': digest, 'engine_version': version,
+                  'runtime': runtime, 'voices': ['pururu-purpura'],
+                  'bank_downloaded': False, 'bank_files_changed': False,
+                  'teto_settings_preserved': True, 'other_voice_settings_preserved': True,
+                  'personal_settings_preserved': True, 'pururu_language': 'pt-BR'}
+        if restore_backup is not None:
+            report['restored_from'] = str(backup_path)
+        return report, values
+    finally:
+        os.close(descriptor)
+
+
 def phone_path(value):
     return Path(str(value).replace('${HOME}', str(Path.home())).replace('$HOME', str(Path.home()))).expanduser()
 
 
-def renderer_configuration_digest(values):
+def renderer_configuration_digest(values, *, include_profiles=True):
     suffixes = {'ENABLED', 'VOICEBANK_DIR', 'ENGLISH_VOICEBANK_DIR', 'RESAMPLER_COMMAND',
                 'NATIVE_RESAMPLER_SHA256', 'LENGTH_MODE', *BASELINE}
+    if include_profiles:
+        suffixes.add('PROFILE')
     selected = {f'PHONE_WORKER_{prefix}_{suffix}': str(values.get(f'PHONE_WORKER_{prefix}_{suffix}',
         os.getenv(f'PHONE_WORKER_{prefix}_{suffix}', '')))
         .replace('${HOME}', str(Path.home())).replace('$HOME', str(Path.home()))
@@ -266,11 +361,13 @@ def process_snapshot(values, expected_runtime=None):
             if separator:
                 actual[key.decode('utf-8', errors='replace')] = value.decode('utf-8', errors='replace')
         suffixes = {'ENABLED', 'VOICEBANK_DIR', 'ENGLISH_VOICEBANK_DIR', 'RESAMPLER_COMMAND',
-                    'NATIVE_RESAMPLER_SHA256', 'LENGTH_MODE', *BASELINE}
+                    'NATIVE_RESAMPLER_SHA256', 'LENGTH_MODE', 'PROFILE', *BASELINE}
         keys = {f'PHONE_WORKER_{prefix}_{suffix}' for prefix in ('TETO', *VOICES) for suffix in suffixes}
         mismatches = []
-        for key in sorted(keys.intersection(values)):
-            expected = values[key].replace('${HOME}', str(Path.home())).replace('$HOME', str(Path.home()))
+        for key in sorted(keys):
+            expected = values.get(key, os.getenv(key))
+            if expected is not None:
+                expected = expected.replace('${HOME}', str(Path.home())).replace('$HOME', str(Path.home()))
             if actual.get(key) != expected:
                 mismatches.append(key)
         result['configuration_mismatches'] = mismatches
@@ -412,13 +509,16 @@ def local_configuration(values, process):
 def confirm_configuration(health, values, process):
     if health.get('pid') != process.get('pid') or health.get('process_started_at') != process.get('started_at'):
         raise MigrationError('o processo mudou durante a verificação; execute novamente')
-    if health.get('renderer_configuration_sha256') != renderer_configuration_digest(values):
+    version = tuple(int(number) for number in str(health.get('version') or '1.11.51').split('.')[:3])
+    if health.get('renderer_configuration_sha256') != renderer_configuration_digest(
+            values, include_profiles=version >= PURURU_PROFILE_MINIMUM_WORKER):
         raise MigrationError('o processo ativo não carregou a configuração salva')
     if process.get('expected_runtime') and health.get('runtime_directory') != process['expected_runtime']:
         raise MigrationError('o processo ativo não está usando o runtime atualizado')
 
 
-def warmup(values, voices, *, timeout=124, expected_process=None, engine_sha=None, diagnostics=None):
+def warmup(values, voices, *, timeout=124, expected_process=None, engine_sha=None, diagnostics=None,
+           minimum_worker=MINIMUM_WORKER, expected_voice_profiles=None):
     diagnostics = diagnostics if diagnostics is not None else {}
     diagnostics['stage'] = 'checking_voices'
     port = int(values.get('PHONE_WORKER_PORT') or 8766)
@@ -436,17 +536,21 @@ def warmup(values, voices, *, timeout=124, expected_process=None, engine_sha=Non
     with opener.open(urllib.request.Request(base + '/tts-agent/health', headers=headers), timeout=60) as response:
         health = json.loads(response.read(2 * 1024 * 1024))
     version = tuple(int(number) for number in str(health.get('version', '')).split('.')[:3])
-    if version < MINIMUM_WORKER:
-        raise MigrationError('o processo ativo ainda não é o worker 1.11.49; aguarde a atualização')
+    if version < minimum_worker:
+        wanted = '.'.join(map(str, minimum_worker))
+        raise MigrationError(f'o processo ativo ainda não é o worker {wanted}; aguarde a atualização')
     if expected_process:
         confirm_configuration(health, values, expected_process)
     rows = {row['id']: row for row in ((health.get('tts_agent') or {}).get('teto') or {}).get('ttv_voices', [])}
     diagnostics['voices'] = [{key: rows.get(voice, {}).get(key) for key in (
         'id', 'ready', 'available', 'enabled', 'native_resampler_verified', 'native_resampler_sha256',
-        'resampler', 'resampler_backend', 'length_mode', 'last_error')} for voice in voices]
+        'resampler', 'resampler_backend', 'length_mode', 'voice_profile', 'last_error')} for voice in voices]
     for voice, row in zip(voices, diagnostics['voices']):
         row['id'] = voice
     diagnostics['resources'] = ((health.get('tts_agent') or {}).get('teto') or {}).get('resources', {})
+    profiles = dict(expected_voice_profiles or {})
+    if values.get('PHONE_WORKER_PURURU_PROFILE') == PURURU_PROFILE:
+        profiles.setdefault('pururu-purpura', PURURU_PROFILE)
     pending = []
     for voice in voices:
         row = rows.get(voice, {})
@@ -454,7 +558,8 @@ def warmup(values, voices, *, timeout=124, expected_process=None, engine_sha=Non
         if length not in ('post-consonant', 'total'):
             length = 'post-consonant'
         if (not row.get('ready') or not row.get('native_resampler_verified') or row.get('length_mode') != length
-                or (engine_sha and row.get('native_resampler_sha256') and row['native_resampler_sha256'] != engine_sha)):
+                or (engine_sha and row.get('native_resampler_sha256') and row['native_resampler_sha256'] != engine_sha)
+                or (voice in profiles and row.get('voice_profile') != profiles[voice])):
             pending.append(voice)
     if pending:
         diagnostics['stage'] = 'voices_not_ready'
@@ -475,9 +580,13 @@ def warmup(values, voices, *, timeout=124, expected_process=None, engine_sha=Non
             if (not 44 < len(data) <= 8 * 1024 * 1024 or
                     response.headers.get('X-Core-Worker-Selected-Engine') != 'teto' or
                     response.headers.get('X-Core-Worker-TTV-Voice-Id') != voice or
-                    response.headers.get('X-Core-Worker-TTV-Language') != 'pt-BR'):
+                    response.headers.get('X-Core-Worker-TTV-Language') != 'pt-BR' or
+                    (voice in profiles and response.headers.get('X-Core-Worker-TTV-Voice-Profile') != profiles[voice])):
                 raise MigrationError(f'o worker não confirmou a amostra de {voice}')
-        results.append({'voice_id': voice, 'ok': True, 'seconds': round(time.monotonic() - started, 3)})
+        result = {'voice_id': voice, 'ok': True, 'seconds': round(time.monotonic() - started, 3)}
+        if voice in profiles:
+            result['voice_profile'] = profiles[voice]
+        results.append(result)
     diagnostics.update(stage='verified', completed_warmup=list(results))
     diagnostics.pop('warming_voice', None)
     return results
@@ -491,11 +600,19 @@ def main(argv=None):
     parser.add_argument('--no-restart', action='store_true')
     parser.add_argument('--no-warmup', action='store_true')
     parser.add_argument('--report', type=Path, default=report_path())
+    profile_options = parser.add_mutually_exclusive_group()
+    profile_options.add_argument('--pururu-profile', choices=[PURURU_PROFILE])
+    profile_options.add_argument('--restore-pururu-profile', type=Path, metavar='BACKUP')
     options = parser.parse_args(argv)
     report = {'ok': False, 'configuration_changed': False, 'phone_synthesis_verified': False}
     values = {}
     try:
-        report, values = migrate(options.env, dry_run=options.dry_run, runtime_dir=options.runtime_dir)
+        profile_only = bool(options.pururu_profile or options.restore_pururu_profile is not None)
+        if profile_only:
+            report, values = migrate_pururu_profile(options.env, dry_run=options.dry_run,
+                runtime_dir=options.runtime_dir, restore_backup=options.restore_pururu_profile)
+        else:
+            report, values = migrate(options.env, dry_run=options.dry_run, runtime_dir=options.runtime_dir)
         report['phone_synthesis_verified'] = False
         diagnostics = report.setdefault('diagnostics', {})
         if not options.dry_run and not options.no_restart:
@@ -504,9 +621,16 @@ def main(argv=None):
             print('Reiniciando o worker com o Straycat...', file=sys.stderr, flush=True)
             process = restart_worker(values, report['runtime'], diagnostics)
         if not options.dry_run and not options.no_warmup and not options.no_restart:
-            print('Conferindo as quatro vozes no processo ativo...', file=sys.stderr, flush=True)
-            report['warmup'] = warmup(values, ['kasane-teto', *report['voices']],
-                expected_process=process, engine_sha=report['engine_sha256'], diagnostics=diagnostics)
+            if profile_only:
+                print('Conferindo o perfil da Pururu no processo ativo...', file=sys.stderr, flush=True)
+                report['warmup'] = warmup(values, report['voices'], expected_process=process,
+                    engine_sha=report['engine_sha256'], diagnostics=diagnostics,
+                    minimum_worker=PURURU_PROFILE_MINIMUM_WORKER,
+                    expected_voice_profiles={'pururu-purpura': report['voice_profile']})
+            else:
+                print('Conferindo as quatro vozes no processo ativo...', file=sys.stderr, flush=True)
+                report['warmup'] = warmup(values, ['kasane-teto', *report['voices']],
+                    expected_process=process, engine_sha=report['engine_sha256'], diagnostics=diagnostics)
         report['phone_synthesis_verified'] = bool(report.get('warmup'))
     except (OSError, ValueError, subprocess.SubprocessError, urllib.error.URLError) as error:
         report['ok'] = False

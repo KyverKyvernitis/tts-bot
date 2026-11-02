@@ -14,6 +14,7 @@ def queue_item(engine="teto", pitch="-1.0"):
     item = QueueItem(
         guild_id=1, channel_id=2, author_id=3, text="Olá.", engine=engine,
         voice="kasane-teto-standard", language="pt-br", rate="+0%", pitch="+0Hz",
+        ttv_voice_id="kasane-teto",
     )
     item.teto_pitch_semitones = pitch
     return item
@@ -75,7 +76,7 @@ def test_launcher_restores_pitch_controls_even_with_stale_backend_state():
         _member_panel_name=lambda member: "Usuário",
     )
     view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
-    assert "Voz: `Kasane Teto`" in view._texto_motor(motor="teto")
+    assert "Voz: `Pururu Púrpura`" in view._texto_motor(motor="teto")
     assert view.children[-1].label == "Configurar TTV"
     response = SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock())
     interaction = SimpleNamespace(
@@ -94,7 +95,7 @@ def test_modal_saves_pitch_even_with_stale_backend_state():
     response = SimpleNamespace(send_message=AsyncMock())
     asyncio.run(modal.on_submit(SimpleNamespace(response=response)))
     save.assert_awaited_once()
-    assert save.await_args.kwargs["settings"] == {"ttv_voice_id": "kasane-teto", "ttv_language": "pt-BR", "ttv_pitch_semitones": "+2.0", "ttv_speech_rate": 1.0}
+    assert save.await_args.kwargs["settings"] == {"ttv_voice_id": "pururu-purpura", "ttv_language": "pt-BR", "ttv_pitch_semitones": "+2.0", "ttv_speech_rate": 1.0}
     response.send_message.assert_not_awaited()
 
 

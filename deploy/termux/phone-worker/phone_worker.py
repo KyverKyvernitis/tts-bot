@@ -137,7 +137,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.50"
+PHONE_WORKER_VERSION = "1.11.51"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "termux"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2088,6 +2088,7 @@ def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, m
         ("ttv_pitch_semitones", "X-Core-Worker-TTV-Pitch-Semitones"),
         ("ttv_speech_rate", "X-Core-Worker-TTV-Speech-Rate"),
         ("ttv_language", "X-Core-Worker-TTV-Language"),
+        ("voice_profile", "X-Core-Worker-TTV-Voice-Profile"),
         ("ttv_performance_hash", "X-Core-Worker-TTV-Performance-Hash"),
     ):
         if meta.get(key) not in (None, ""):
@@ -2467,7 +2468,7 @@ def _ttv_renderer_configuration_digest() -> str:
     suffixes = {"ENABLED", "VOICEBANK_DIR", "ENGLISH_VOICEBANK_DIR", "RESAMPLER_COMMAND",
                 "NATIVE_RESAMPLER_SHA256", "LENGTH_MODE", "BASE_PITCH", "SPEECH_RATE", "FLAGS",
                 "VELOCITY", "MODULATION", "TEMPO", "RENDER_THREADS", "FRAGMENT_CACHE_MB",
-                "PCM_CACHE_MB", "NATIVE_ANALYSIS_CACHE_MB"}
+                "PCM_CACHE_MB", "NATIVE_ANALYSIS_CACHE_MB", "PROFILE"}
     selected = {f"PHONE_WORKER_{prefix}_{suffix}": os.getenv(f"PHONE_WORKER_{prefix}_{suffix}", "")
         for prefix in ("TETO", "MIKU", "ANNA", "PURURU") for suffix in suffixes}
     return hashlib.sha256(json.dumps(selected, sort_keys=True).encode("utf-8")).hexdigest()
@@ -2626,10 +2627,36 @@ def _get_anna_renderer():
         return renderer
 
 
+_PURURU_VOICE_PROFILE = "pururu-ptbr-v1"
+_PURURU_PROFILE_ACOUSTICS = {
+    "BASE_PITCH": "C4", "SPEECH_RATE": "1.0", "FLAGS": "g5 B50", "VELOCITY": "100",
+    "MODULATION": "0", "TEMPO": "125",
+}
+
+
+def _pururu_voice_profile() -> str:
+    profile = str(os.getenv("PHONE_WORKER_PURURU_PROFILE") or "").strip().lower()
+    if profile in {"", "legacy"}:
+        return "legacy"
+    if profile != _PURURU_VOICE_PROFILE:
+        raise ValueError("perfil da Pururu desconhecido; use legacy ou pururu-ptbr-v1")
+    return profile
+
+
+def _pururu_render_value(suffix: str, default: str) -> str:
+    if _pururu_voice_profile() == _PURURU_VOICE_PROFILE and suffix in _PURURU_PROFILE_ACOUSTICS:
+        explicit = os.getenv(f"PHONE_WORKER_PURURU_{suffix}")
+        if explicit is not None and (explicit.strip() or suffix == "FLAGS"):
+            return explicit
+        return _PURURU_PROFILE_ACOUSTICS[suffix]
+    return _ttv_voice_render_value("PURURU", suffix, default)
+
+
 def _pururu_renderer_environment() -> dict[str, str]:
     """Use Pururu's native Portuguese samples without borrowing another bank."""
     bank = str(os.getenv("PHONE_WORKER_PURURU_VOICEBANK_DIR") or
                Path.home() / "voicebanks/pururu-purpura").strip()
+    profile = _pururu_voice_profile()
     command = _ttv_voice_resampler_command("PURURU")
     defaults = {
         "ENABLED": "true" if _env_bool("PHONE_WORKER_PURURU_ENABLED", False) else "false",
@@ -2645,9 +2672,11 @@ def _pururu_renderer_environment() -> dict[str, str]:
     fixed = {"ENABLED", "VOICEBANK_DIR", "ENGLISH_VOICEBANK_DIR", "VOICEBANK_MODE", "ALIAS_SUFFIX",
              "RESAMPLER_COMMAND"}
     environment = {f"PHONE_WORKER_TETO_{suffix}": default if suffix in fixed else
-                   _ttv_voice_render_value("PURURU", suffix, default)
+                   _pururu_render_value(suffix, default)
                    for suffix, default in defaults.items()}
     environment["PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256"] = _ttv_voice_native_digest("PURURU", command)
+    if profile != "legacy":
+        environment["PHONE_WORKER_TETO_VOICE_PROFILE"] = profile
     return environment
 
 
@@ -2695,8 +2724,9 @@ def _ttv_request_settings(body: dict[str, Any]) -> dict[str, Any]:
     policy = _phone_worker_tts_policy_module()
     voice_id = policy.normalize_ttv_voice_id(body.get("ttv_voice_id", "kasane-teto"))
     prefix = _ttv_voice_prefix(voice_id)
-    return policy.effective_ttv_settings(
-        body, default_speech_rate=_ttv_voice_render_value(prefix, "SPEECH_RATE", "1.0"))
+    default_rate = (_pururu_render_value("SPEECH_RATE", "1.0") if prefix == "PURURU" else
+                    _ttv_voice_render_value(prefix, "SPEECH_RATE", "1.0"))
+    return policy.effective_ttv_settings(body, default_speech_rate=default_rate)
 
 
 def _ttv_voice_state(status: dict[str, Any], voice_id: str) -> dict[str, Any]:
@@ -2736,6 +2766,8 @@ def _ttv_single_voice_status(voice_id: str, *, force: bool = False) -> dict[str,
     try:
         # A broken character configuration must not prevent the other voice
         # from appearing in aggregate health or accepting synthesis requests.
+        if voice_id == "pururu-purpura":
+            result["voice_profile"] = _pururu_voice_profile()
         if is_teto:
             result["backend"] = _teto_backend()
         if not enabled:
@@ -2800,6 +2832,8 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
             "length_mode": state.get("length_mode", ""),
             "render_threads": state.get("render_threads"),
             "voicebank_profile": state.get("voicebank_profile", ""), "last_error": state.get("last_error", ""),
+            **({"voice_profile": state["voice_profile"]} if voice_id == "pururu-purpura" and
+               state.get("voice_profile") else {}),
             **({"ttv_performance_protocol": state["ttv_performance_protocol"]} if state.get("ttv_performance_protocol") else {}),
             **({"singing_fingerprints": dict(state["singing_fingerprints"]),
                 "singing_available": bool(state.get("singing_available"))}
@@ -5448,6 +5482,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             if body.get("ttv_score") is not None:
                 fingerprint = str((status.get("singing_fingerprints") or {}).get(language) or fingerprint)
                 fingerprint = "singing-v5|" + fingerprint
+            if controls["ttv_voice_id"] == "pururu-purpura" and _pururu_voice_profile() != "legacy":
+                fingerprint = _pururu_voice_profile() + "|" + fingerprint
             if controls["ttv_voice_id"] == "kasane-teto" and _teto_backend() == "worldline-r":
                 # Keep the established UTAU cache contract while isolating the
                 # native phrase renderer, including when no fingerprint exists.
@@ -5531,6 +5567,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 "teto_speech_rate": controls["ttv_speech_rate"],
                 **controls,
             })
+            if controls["ttv_voice_id"] == "pururu-purpura":
+                result["voice_profile"] = _pururu_voice_profile()
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _store_tts_agent_standard_cache(self, *, key: str, data: bytes, audio_format: str, logs: list[str]) -> None:
@@ -5646,6 +5684,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
             source_voice = teto_meta.get("voice_id", teto_meta.get("ttv_voice_id"))
             if (performance or source_voice is not None) and source_voice != ttv_settings["ttv_voice_id"]:
                 raise RuntimeError("renderer retornou áudio de outra vocaloid TTV")
+            if ttv_settings["ttv_voice_id"] == "pururu-purpura":
+                expected_profile = _pururu_voice_profile()
+                source_profile = teto_meta.get("voice_profile")
+                if ((source_profile is not None and source_profile != expected_profile) or
+                        (expected_profile != "legacy" and source_profile != expected_profile)):
+                    raise RuntimeError("renderer retornou áudio com outro perfil da Pururu")
             if performance and (
                 teto_meta.get("pitch_offset_semitones") != ttv_settings["ttv_pitch_semitones"] or
                 teto_meta.get("speech_rate") != ttv_settings["ttv_speech_rate"] or
@@ -5722,6 +5766,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
         }
         if engine == "teto":
             result.update(ttv_settings)
+            if ttv_settings["ttv_voice_id"] == "pururu-purpura":
+                result["voice_profile"] = teto_meta.get("voice_profile", "legacy")
             result.update(_phone_worker_tts_providers_module().render_telemetry(teto_meta))
             result["ttv_speech_rate"] = result["teto_speech_rate"]
             result["ttv_pitch_semitones"] = teto_meta.get("pitch_offset_semitones", ttv_settings["ttv_pitch_semitones"])
@@ -7851,7 +7897,6 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "cogs/musica/runtime_telefone/ponte_worker/telemetria.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/telemetria.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/voz_compartilhada.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/voz_compartilhada.py", 0o644),
     "cogs/musica/runtime_telefone/ponte_worker/servico.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/servico.py", 0o644),
-    "cogs/musica/runtime_telefone/termux/__init__.py": ("worker", "cogs/musica/runtime_telefone/termux/__init__.py", 0o644),
     "cogs/musica/runtime_telefone/termux/integracao-worker.sh": ("worker", "cogs/musica/runtime_telefone/termux/integracao-worker.sh", 0o755),
     "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh": ("worker", "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh", 0o755),
     "cogs/musica/runtime_telefone/termux/musica.env.example": ("worker", "cogs/musica/runtime_telefone/termux/musica.env.example", 0o600),
@@ -7870,6 +7915,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "teto_renderer/phonemizer.py": ("worker", "teto_renderer/phonemizer.py", 0o644),
     "teto_renderer/ptbr_g2p.py": ("worker", "teto_renderer/ptbr_g2p.py", 0o644),
     "teto_renderer/prosody.py": ("worker", "teto_renderer/prosody.py", 0o644),
+    "teto_renderer/pururu_profile.py": ("worker", "teto_renderer/pururu_profile.py", 0o644),
     "teto_renderer/renderer.py": ("worker", "teto_renderer/renderer.py", 0o644),
     "teto_renderer/worldline.py": ("worker", "teto_renderer/worldline.py", 0o644),
     "teto_renderer/worldline_native.py": ("worker", "teto_renderer/worldline_native.py", 0o644),

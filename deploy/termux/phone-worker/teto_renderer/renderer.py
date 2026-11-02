@@ -174,6 +174,24 @@ class TetoRenderer:
                    "pururu-purpura": "pururu-purpura"}.get(self.voice_id)
         return {"inventory_profile": profile} if profile else {}
 
+    def _voice_profile(self) -> str:
+        if self.voice_id != "pururu-purpura":
+            return "legacy"
+        profile = str(self._getenv("PHONE_WORKER_TETO_VOICE_PROFILE") or "legacy").strip()
+        if profile not in {"legacy", "pururu-ptbr-v1"}:
+            raise TetoConfigurationError("perfil de voz da Pururu desconhecido")
+        return profile
+
+    def _speech_profile(self) -> str:
+        profile = self._voice_profile()
+        return profile if profile == "pururu-ptbr-v1" else ""
+
+    def _speech_phonemize(self, text, **options):
+        if self._speech_profile():
+            from .pururu_profile import phonemize_profile
+            return phonemize_profile(text, **options)
+        return phonemize(text, **options)
+
     def _resolve_note_entry(self, index: VoicebankIndex, note: RenderNote,
                             candidates: tuple[str, ...] | None = None) -> OtoEntry | None:
         aliases = note.candidates if candidates is None else candidates
@@ -399,6 +417,18 @@ class TetoRenderer:
         }
         if self.voice_id != "kasane-teto":
             profile.update(voice_id=self.voice_id, **self._phonemizer_options())
+        if self._speech_profile():
+            # Only the new Pururu profile includes its companion/prosody
+            # sources. Existing characters retain their exact cache identity.
+            source_hash = getattr(self, "_pururu_profile_source_sha", "")
+            if not source_hash:
+                digest = hashlib.sha256()
+                for name in ("pururu_profile.py", "prosody.py"):
+                    digest.update(name.encode("ascii"))
+                    digest.update(Path(__file__).with_name(name).read_bytes())
+                source_hash = digest.hexdigest()
+                self._pururu_profile_source_sha = source_hash
+            profile.update(voice_profile=self._voice_profile(), voice_profile_sha256=source_hash)
         return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
     def _render_fingerprint(self, index: VoicebankIndex) -> str:
@@ -901,6 +931,8 @@ class TetoRenderer:
             result["last_error"] = "PHONE_WORKER_TETO_ENABLED=false"
         else:
             try:
+                if self.voice_id == "pururu-purpura":
+                    result["voice_profile"] = self._voice_profile()
                 command = self._resampler_command()
                 native = self._verified_native_straycat(command)
                 if self._getenv('PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256') and native is None:
@@ -1797,9 +1829,10 @@ class TetoRenderer:
                 samples[outgoing] = round(samples[outgoing] * gain)
 
     def _performance_phonemize(self, text, index, language):
-        return phonemize(text, max_moras=1025, resolve_alias=index.resolve,
-                         voicebank_profile=self._index_profile,
-                         reading_language=language, **self._phonemizer_options())
+        planner = phonemize if getattr(self._reading_context, "performance_singing", False) else self._speech_phonemize
+        return planner(text, max_moras=1025, resolve_alias=index.resolve,
+                       voicebank_profile=self._index_profile,
+                       reading_language=language, **self._phonemizer_options())
 
     @classmethod
     def _apply_midi_velocity(cls, samples: array.array, notes, preroll: float, *, check_cancelled=None,
@@ -2285,7 +2318,9 @@ class TetoRenderer:
                 notes, spans = self._singing_notes(moras, groups, score)
             else:
                 spoken = speech_effect_segments(segments)
-                moras = self._performance_phonemize(' '.join(segment['text'] for segment in spoken), index, language)
+                plan_text = ' '.join(segment['text'] + (' |' if self._speech_profile() and segment['pause_after_ms'] else '')
+                                     for segment in spoken)
+                moras = self._performance_phonemize(plan_text, index, language)
                 word_offset = 0
                 for segment in spoken:
                     chunk = self._performance_phonemize(segment['text'], index, language)
@@ -2299,7 +2334,8 @@ class TetoRenderer:
                         effect_ranges.append((first, end, segment))
                     word_offset += count
                 notes = build_notes(moras, base_pitch=str(self._getenv('PHONE_WORKER_TETO_BASE_PITCH') or 'C4'),
-                                    speech_rate=rate, tempo=tempo, pitch_offset_semitones=pitch)
+                                    speech_rate=rate, tempo=tempo, pitch_offset_semitones=pitch,
+                                    **({'speech_profile': self._speech_profile()} if self._speech_profile() else {}))
                 for first, end, segment in effect_ranges:
                     if segment['hold_count']:
                         nucleus = next((number for number in range(end - 1, first - 1, -1) if notes[number].role == 'nucleus'), None)
@@ -2600,6 +2636,8 @@ class TetoRenderer:
                         'melisma_notes': sum(max(0, len(group) - 1) for group in groups) if groups is not None else 0,
                         'duration_seconds': len(combined) / self.SAMPLE_RATE, 'sample_rate': self.SAMPLE_RATE,
                         'channels': 1, 'sample_width_bytes': 2, 'sha256': hashlib.sha256(raw).hexdigest()}
+            if self.voice_id == 'pururu-purpura':
+                metadata['voice_profile'] = self._voice_profile()
             cache_after = self._cache.statistics()
             metadata.update({key: round(cache_after[key] - cache_before[key], 2)
                              for key in ('cache_scans', 'cache_evictions', 'cache_maintenance_ms')})
@@ -2661,7 +2699,7 @@ class TetoRenderer:
             cache_started = True
             index = self._load_reading_index(language)
             max_moras = max(8, self._env_int("PHONE_WORKER_TETO_MAX_PHONEMES", 240))
-            moras = phonemize(
+            moras = self._speech_phonemize(
                 clean_text,
                 max_moras=max_moras,
                 resolve_alias=index.resolve,
@@ -2682,6 +2720,7 @@ class TetoRenderer:
                 speech_rate=effective_rate,
                 tempo=max(60, min(240, self._env_int("PHONE_WORKER_TETO_TEMPO", 140))),
                 pitch_offset_semitones=pitch_offset,
+                **({"speech_profile": self._speech_profile()} if self._speech_profile() else {}),
             )
             if not notes:
                 raise TetoSynthesisError("texto não gerou fonemas compatíveis")
@@ -2847,6 +2886,7 @@ class TetoRenderer:
             return {
                 "audio": raw,
                 "voice_id": self.voice_id,
+                **({"voice_profile": self._voice_profile()} if self.voice_id == "pururu-purpura" else {}),
                 "audio_format": "wav",
                 "voicebank": index.name,
                 "voicebank_fingerprint": index.fingerprint,

@@ -75,7 +75,9 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("cogs/musica/runtime_telefone/ponte_worker/telemetria.py", 0o644),
     ("cogs/musica/runtime_telefone/ponte_worker/voz_compartilhada.py", 0o644),
     ("cogs/musica/runtime_telefone/ponte_worker/servico.py", 0o644),
-    ("cogs/musica/runtime_telefone/termux/__init__.py", 0o644),
+    # The Termux directory contains shell launchers and is a valid Python 3
+    # namespace package. Keep its comment-only __init__ in the checkout while
+    # reserving the immutable bootstrap's 64th ZIP slot for the manifest.
     ("cogs/musica/runtime_telefone/termux/integracao-worker.sh", 0o755),
     ("cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh", 0o755),
     ("start-phone-worker.sh", 0o755),
@@ -88,6 +90,7 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("teto_renderer/phonemizer.py", 0o644),
     ("teto_renderer/ptbr_g2p.py", 0o644),
     ("teto_renderer/prosody.py", 0o644),
+    ("teto_renderer/pururu_profile.py", 0o644),
     ("teto_renderer/renderer.py", 0o644),
     ("teto_renderer/worldline.py", 0o644),
     ("teto_renderer/worldline_native.py", 0o644),

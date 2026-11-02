@@ -358,7 +358,7 @@ def test_warmup_preserves_tetos_total_length_mode_and_verifies_all_four_voices(
     values = {'PHONE_WORKER_TETO_LENGTH_MODE': 'total', 'PHONE_WORKER_PORT': '8766'}
     original_values = dict(values)
     process = _process('/approved/release')
-    health = _health(voices, **_configuration(migration, values, process))
+    health = _health(voices, version='1.11.51', **_configuration(migration, values, process))
     health['tts_agent']['teto']['ttv_voices'][0]['length_mode'] = 'total'
     requests, _ = _mock_worker(migration, monkeypatch, health)
     diagnostics = {}

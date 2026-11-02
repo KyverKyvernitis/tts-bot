@@ -51,10 +51,9 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/ponte_worker/telemetria.py",
              "cogs/musica/runtime_telefone/ponte_worker/voz_compartilhada.py",
              "cogs/musica/runtime_telefone/ponte_worker/servico.py",
-             "cogs/musica/runtime_telefone/termux/__init__.py",
              "cogs/musica/runtime_telefone/termux/integracao-worker.sh",
              "cogs/musica/runtime_telefone/termux/iniciar-agente-musica.sh",
-             "teto_renderer/ptbr_g2p.py"}
+             "teto_renderer/ptbr_g2p.py", "teto_renderer/pururu_profile.py"}
 
 
 def load(name, path):
@@ -122,6 +121,7 @@ def test_complete_modular_release_is_accepted_by_original_bootstrap(publisher, t
     with zipfile.ZipFile(archive) as z:
         members = set(z.namelist())
         assert NEW_FILES <= members
+        assert "cogs/musica/runtime_telefone/termux/__init__.py" not in members
         assert members == {name for name, _ in publisher.PHONE_WORKER_FILES} | {"phone-worker-release.json"}
         assert len(z.infolist()) == len(publisher.PHONE_WORKER_FILES) + 1 <= bootstrap.DEFAULT_MAX_MEMBERS
         assert sum(info.file_size for info in z.infolist()) <= bootstrap.DEFAULT_MAX_EXPANDED_BYTES
@@ -170,6 +170,11 @@ assert music_streams._MUSIC_PCM_PREPARATIONS == {}
 assert music_streams.__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._tts_agent_normalize_engine("google-cloud") == "gtts"
 assert worker._TETO_RENDERER is None
+import importlib
+termux = importlib.import_module("cogs.musica.runtime_telefone.termux")
+assert termux.__file__ is None
+assert (worker.Path(next(iter(termux.__path__))) / "iniciar-agente-musica.sh").is_file()
+assert (worker.Path(next(iter(termux.__path__))) / "integracao-worker.sh").is_file()
 '''
     result = subprocess.run([sys.executable, "-S", "-c", code, str(staging / "phone_worker.py"), outer["source_hash"]],
                             env=env, cwd=tmp_path, capture_output=True, text=True, timeout=10)
@@ -187,9 +192,16 @@ from cogs.musica.runtime_telefone.agente.resolucao import ResolucaoMixin
 from cogs.musica.runtime_telefone.agente.correspondencia import avaliar_correspondencia
 from cogs.musica.runtime_telefone.agente.efeitos import velocidade
 from cogs.musica.runtime_telefone.agente import archive_manifest, archive_ogg, archive_staging, archive_pipeline, audio_segmentado
+import cogs.musica.runtime_telefone.termux as termux_launchers
 assert ResolucaoMixin is not None and callable(avaliar_correspondencia)
 assert velocidade(nightcore=True) == 1.25
 from pathlib import Path
+assert termux_launchers.__file__ is None
+launcher_root = Path(next(iter(termux_launchers.__path__)))
+assert launcher_root.is_relative_to(Path(sys.argv[1]))
+for filename in ("integracao-worker.sh", "iniciar-agente-musica.sh"):
+    assert (launcher_root / filename).is_file()
+    assert (launcher_root / filename).stat().st_mode & 0o777 == 0o755
 for module in (archive_manifest, archive_ogg, archive_staging, archive_pipeline, audio_segmentado):
     assert Path(module.__file__).is_relative_to(Path(sys.argv[1]))
 '''
