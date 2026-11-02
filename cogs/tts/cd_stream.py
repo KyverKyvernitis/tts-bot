@@ -27,8 +27,9 @@ class PCMStreamBuffer:
 
     def __init__(self, total_duration_ms, *, max_bytes=512 * 1024 * 1024,
                  prebuffer_ms=500, safety_ms=200, read_timeout_seconds=120,
-                 clock=time.monotonic):
+                 clock=time.monotonic, playback_rate=1.0):
         self.total_duration_ms = self._number(total_duration_ms, 'total_duration_ms', positive=True)
+        self.playback_rate = self._number(playback_rate, 'playback_rate', positive=True)
         self.prebuffer_ms = self._number(prebuffer_ms, 'prebuffer_ms')
         self.safety_ms = self._number(safety_ms, 'safety_ms')
         self.read_timeout_seconds = self._number(read_timeout_seconds, 'read_timeout_seconds', positive=True)
@@ -95,7 +96,10 @@ class PCMStreamBuffer:
         else:
             samples = self._generation_samples or (
                 (self._first_generation_sample,) if self._first_generation_sample else ())
-        return max((elapsed / duration for duration, elapsed in samples), default=0.0)
+        # Generation is measured against the original song timeline. Playback
+        # effects consume that timeline faster/slower, which changes the head
+        # start needed to keep progressive singing supplied with real audio.
+        return self.playback_rate * max((elapsed / duration for duration, elapsed in samples), default=0.0)
 
     def begin_generation(self, group_id):
         """Keep native PCM fragments inside their real physical work group.
@@ -460,6 +464,7 @@ class PCMStreamBuffer:
                 'generation_windows': self._generation_windows,
                 'generation_ms': round(self._generation_ms, 3),
                 'sustained_generation_ratio': round(self._generation_ratio_locked(), 6),
+                'playback_rate': self.playback_rate,
                 'next_window_ms': self._next_window_ms,
                 'required_prebuffer_ms': round(self._required_prebuffer_locked(), 3),
                 'ready_after_ms': round((self.ready_at-self.started_at)*1000, 3)

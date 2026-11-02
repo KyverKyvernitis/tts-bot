@@ -38,7 +38,7 @@ def test_legacy_minus_two_is_migrated_by_read_only_and_other_engines_stay_isolat
     }}
     before = deepcopy(settings.user_cache)
     resolved = settings.resolve_tts(1, 2)
-    assert resolved["ttv_voice_id"] == "kasane-teto"
+    assert resolved["ttv_voice_id"] == "pururu-purpura"
     assert resolved["ttv_pitch_semitones"] == resolved["teto_pitch_semitones"] == "-2.0"
     assert resolved["ttv_speech_rate"] == 1.0
     assert resolved["ttv_language"] == "pt-BR"
@@ -114,7 +114,7 @@ async def test_restore_ttv_controls_keeps_voice_and_edge_choices(settings):
 async def test_ttv_language_persists_canonical_value_without_mutating_edge_gtts_or_other_user(settings):
     settings.user_cache[(1, 2)] = {"tts": {
         "language": "pt-br", "android_language": "ja-JP", "engine": "edge", "voice": "EdgeVoice",
-        "rate": "+25%", "pitch": "+35Hz", "teto_pitch_semitones": "-2.0",
+        "rate": "+25%", "pitch": "+35Hz", "teto_pitch_semitones": "-2.0", "ttv_voice_id": "kasane-teto",
     }}
     settings.user_cache[(1, 3)] = {"tts": {"ttv_language": "pt-BR"}}
     other = deepcopy(settings.user_cache[(1, 3)])
@@ -173,7 +173,7 @@ async def test_message_preparation_transports_language_and_keeps_original_messag
     from test_tts_message_flow import FakeCog, FakeDB, make_message
     from cogs.tts.mensagens.preparacao import preparar_payload_tts_mensagem
     cog = FakeCog(db=FakeDB(resolved={
-        "engine": "edge", "voice": "EdgeVoice", "language": "pt-br", "ttv_language": ttv_language,
+        "engine": "edge", "voice": "EdgeVoice", "language": "pt-br", "ttv_voice_id": "kasane-teto", "ttv_language": ttv_language,
     }))
     payload = await preparar_payload_tts_mensagem(cog, make_message("'" + text), guild_defaults={}, active_prefix="'", forced_engine="teto")
     assert payload.queue_item.ttv_language == payload.queue_item.language == (ttv_language or "pt-BR")
@@ -191,3 +191,17 @@ async def test_unknown_ttv_language_rejects_ttv_but_does_not_block_other_engines
     assert teto is None
     independent = await preparar_payload_tts_mensagem(cog, make_message(",olá"), guild_defaults={}, active_prefix=",", forced_engine=independent_engine)
     assert independent.queue_item.engine == independent_engine
+
+
+def test_missing_voice_uses_pururu_without_overwriting_explicit_choices_or_storage(settings):
+    settings.user_cache[(1, 2)] = {"tts": {"ttv_pitch_semitones": "-1.5", "advanced_reverb_level": 2}}
+    settings.user_cache[(1, 3)] = {"tts": {"ttv_voice_id": "kasane-teto", "ttv_language": "en-US"}}
+    settings.user_cache[(1, 4)] = {"tts": {"ttv_voice_id": "hatsune-miku", "ttv_language": "en-US"}}
+    before = deepcopy(settings.user_cache)
+    defaults = settings.resolve_tts(1, 2)
+    assert defaults["ttv_voice_id"] == "pururu-purpura" and defaults["ttv_language"] == "pt-BR"
+    assert defaults["ttv_pitch_semitones"] == "-1.5" and defaults["advanced_reverb_level"] == "2"
+    assert settings.resolve_tts(1, 3)["ttv_voice_id"] == "kasane-teto"
+    assert settings.resolve_tts(1, 4)["ttv_voice_id"] == "hatsune-miku"
+    assert settings.user_cache == before
+    settings.coll.update_one.assert_not_awaited()

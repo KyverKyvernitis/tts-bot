@@ -222,7 +222,7 @@ async def test_slow_melody_save_does_not_block_different_user(settings):
 
 @pytest.mark.asyncio
 async def test_failed_first_save_releases_same_user_for_next_edit(settings):
-    settings.user_cache[(1, 2)] = {"tts": {"ttv_melody_id": "old-song"}}
+    settings.user_cache[(1, 2)] = {"tts": {"ttv_melody_id": "old-song", "ttv_voice_id": "kasane-teto"}}
     first_started = asyncio.Event()
     first_finished = asyncio.Event()
 
@@ -241,7 +241,7 @@ async def test_failed_first_save_releases_same_user_for_next_edit(settings):
     results = await asyncio.gather(first, second, return_exceptions=True)
     assert isinstance(results[0], RuntimeError)
     assert results[1] is None
-    assert settings.user_cache[(1, 2)]["tts"] == {"ttv_melody_id": "old-song", "ttv_language": "en-US"}
+    assert settings.user_cache[(1, 2)]["tts"] == {"ttv_melody_id": "old-song", "ttv_voice_id": "kasane-teto", "ttv_language": "en-US"}
     assert settings.resolve_tts(1, 2)["ttv_melody_id"] == "old-song"
     # The retained exception traceback may still reference its released lock.
     assert all(not lock.locked() for lock in settings._user_tts_locks.values())
@@ -249,7 +249,7 @@ async def test_failed_first_save_releases_same_user_for_next_edit(settings):
 
 @pytest.mark.asyncio
 async def test_cancelled_waiter_does_not_allow_an_edit_to_bypass_an_unacknowledged_save(settings):
-    settings.user_cache[(1, 2)] = {"tts": {"voice": "OldEdgeVoice"}}
+    settings.user_cache[(1, 2)] = {"tts": {"voice": "OldEdgeVoice", "ttv_voice_id": "kasane-teto"}}
     started = asyncio.Event()
     acknowledged = asyncio.Event()
 
@@ -270,12 +270,12 @@ async def test_cancelled_waiter_does_not_allow_an_edit_to_bypass_an_unacknowledg
     try:
         await asyncio.sleep(0)
         assert settings.coll.update_one.await_count == 1
-        assert settings.user_cache[(1, 2)]["tts"] == {"voice": "OldEdgeVoice"}
+        assert settings.user_cache[(1, 2)]["tts"] == {"voice": "OldEdgeVoice", "ttv_voice_id": "kasane-teto"}
     finally:
         acknowledged.set()
         await asyncio.gather(first, last)
     assert settings.user_cache[(1, 2)]["tts"] == {
-        "voice": "OldEdgeVoice", "ttv_melody_id": DEFAULT_MELODY, "ttv_language": "en-US",
+        "voice": "OldEdgeVoice", "ttv_voice_id": "kasane-teto", "ttv_melody_id": DEFAULT_MELODY, "ttv_language": "en-US",
     }
     assert not settings._user_tts_locks
     assert not settings._user_tts_lock_users

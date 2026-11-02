@@ -16,7 +16,7 @@ def test_catalog_has_teto_miku_anna_and_pururu_routes_and_is_immutable():
         ttv.get_voice().name = "Outra voz"
 
 
-@pytest.mark.parametrize("value", [None, "", "kasane-teto", " KASANE_TETO ", "teto", "kasane-teto-standard", "kasane-teto-english-cvvc"])
+@pytest.mark.parametrize("value", ["kasane-teto", " KASANE_TETO ", "teto", "kasane-teto-standard", "kasane-teto-english-cvvc"])
 def test_legacy_bank_profiles_resolve_to_one_character(value):
     assert ttv.normalize_voice_id(value) == "kasane-teto"
     assert ttv.voice_label(value) == "Kasane Teto"
@@ -56,7 +56,7 @@ def test_new_preferences_win_over_legacy_and_do_not_read_edge_controls():
     assert ttv.resolve_preferences({
         "ttv_pitch_semitones": "-1.5", "teto_pitch_semitones": "-2.0",
         "ttv_speech_rate": "1.07", "voice": "EdgeVoice", "rate": "+25%", "pitch": "+35Hz",
-    }) == {"ttv_voice_id": "kasane-teto", "ttv_language": "pt-BR", "ttv_pitch_semitones": "-1.5", "ttv_speech_rate": 1.07}
+    }) == {"ttv_voice_id": "pururu-purpura", "ttv_language": "pt-BR", "ttv_pitch_semitones": "-1.5", "ttv_speech_rate": 1.07}
 
 
 def test_missing_new_fields_use_legacy_minus_two_without_mutation():
@@ -67,23 +67,24 @@ def test_missing_new_fields_use_legacy_minus_two_without_mutation():
 
 def test_malformed_saved_controls_recover_without_changing_the_voice():
     assert ttv.resolve_preferences({"ttv_pitch_semitones": "nan", "teto_pitch_semitones": "-2", "ttv_speech_rate": "inf"}) == {
-        "ttv_voice_id": "kasane-teto", "ttv_language": "pt-BR", "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.0,
+        "ttv_voice_id": "pururu-purpura", "ttv_language": "pt-BR", "ttv_pitch_semitones": "-2.0", "ttv_speech_rate": 1.0,
     }
     assert ttv.resolve_preferences({}, default_pitch=-1.5)["ttv_pitch_semitones"] == "-1.5"
     assert ttv.resolve_preferences({"ttv_pitch_semitones": 0}, default_pitch=-2)["ttv_pitch_semitones"] == "+0.0"
 
 
 @pytest.mark.parametrize("value", [None, "", "  ", "pt", "PT-br", "pt_BR"])
-def test_portuguese_adapted_is_default_and_language_label_is_canonical(value):
+def test_native_portuguese_is_default_and_legacy_teto_label_stays_adapted(value):
     assert ttv.normalize_language(value) == "pt-BR"
-    assert ttv.language_label(value) == "Português adaptado"
+    assert ttv.language_label(value) == "Português brasileiro"
+    assert ttv.language_label(value, voice_id="kasane-teto") == "Português adaptado"
 
 
 @pytest.mark.parametrize("value", ["en", "en-US", " EN_us "])
 def test_english_language_has_its_own_canonical_selection(value):
     assert ttv.normalize_language(value) == "en-US"
-    assert ttv.language_label(value) == "Inglês"
-    assert ttv.resolve_preferences({"ttv_language": value})["ttv_language"] == "en-US"
+    assert ttv.language_label(value, voice_id="kasane-teto") == "Inglês"
+    assert ttv.resolve_preferences({"ttv_voice_id": "kasane-teto", "ttv_language": value})["ttv_language"] == "en-US"
 
 
 @pytest.mark.parametrize("value", ["ja-JP", "en-GB", "português", "../../en", 123, True])
@@ -99,3 +100,28 @@ def test_language_choices_and_legacy_default_are_isolated_from_edge_language():
     legacy = {"language": "en", "android_language": "en-US", "teto_pitch_semitones": "-2.0"}
     assert ttv.resolve_preferences(legacy)["ttv_language"] == "pt-BR"
     assert legacy == {"language": "en", "android_language": "en-US", "teto_pitch_semitones": "-2.0"}
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_missing_voice_uses_native_portuguese_pururu(value):
+    assert ttv.DEFAULT_VOICE_ID == "pururu-purpura"
+    assert ttv.normalize_voice_id(value) == "pururu-purpura"
+    assert ttv.voice_label(value) == "Pururu Púrpura"
+    assert ttv.resolve_preferences({"ttv_voice_id": value}) == {
+        "ttv_voice_id": "pururu-purpura", "ttv_language": "pt-BR",
+        "ttv_pitch_semitones": "+0.0", "ttv_speech_rate": 1.0,
+    }
+
+
+def test_default_pururu_never_borrows_legacy_teto_advertisement():
+    legacy = {"teto_fingerprint": "teto-only", "ttv_languages": ["pt-BR", "en-US"],
+              "ttv_language_fingerprints": {"pt-BR": "teto-pt"},
+              "ttv_singing_fingerprints": {"pt-BR": "teto-song"}}
+    pururu = ttv.worker_voice_details(legacy)
+    assert pururu["id"] == "pururu-purpura"
+    assert not pururu["ready"] and not pururu["advertised"]
+    assert pururu["fingerprint"] == "unavailable"
+    assert pururu["languages"] == [] and pururu["singing_fingerprints"] == {}
+    teto = ttv.worker_voice_details(legacy, "teto")
+    assert teto["id"] == "kasane-teto" and teto["fingerprint"] == "teto-only"
+    assert teto["languages"] == ["pt-BR", "en-US"]

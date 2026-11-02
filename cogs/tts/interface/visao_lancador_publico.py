@@ -290,15 +290,6 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                     discord.ui.TextDisplay(self._texto_motor(motor="teto")),
                     accessory=botao_teto,
                 ))
-            if not self._painel_de_outro_usuario():
-                prefixo_bot = self._configuracao_servidor(
-                    "bot_prefix",
-                    str(getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_")) or "_"),
-                )
-                container.add_item(self._separador())
-                container.add_item(discord.ui.TextDisplay(
-                    f"-# Dica: {self._codigo(prefixo_bot + 'advanced')} ajusta Edge e gTTS."
-                ))
             self.add_item(container)
             return
 

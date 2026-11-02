@@ -29,8 +29,8 @@ def miku_probe(**changes):
     return probe
 
 
-def test_miku_preferences_keep_character_and_controls_without_changing_teto_default():
-    assert ttv.resolve_preferences({})["ttv_voice_id"] == "kasane-teto"
+def test_miku_preferences_keep_character_and_controls_without_changing_pururu_default():
+    assert ttv.resolve_preferences({})["ttv_voice_id"] == "pururu-purpura"
     settings = {"ttv_voice_id": "hatsune-miku", "ttv_language": "en-US",
                 "ttv_pitch_semitones": "-1.5", "ttv_speech_rate": .85}
     assert ttv.resolve_preferences(settings) == settings
@@ -66,7 +66,7 @@ def test_missing_miku_never_inherits_teto_languages_fingerprints_or_readiness():
     assert not state["ready"] and not state["available"]
     assert state["languages"] == [] and state["language_fingerprints"] == {}
     assert state["fingerprint"] == "unavailable"
-    assert probe._ttv_voice_status()["languages"] == ["pt-BR", "en-US"]
+    assert probe._ttv_voice_status("kasane-teto")["languages"] == ["pt-BR", "en-US"]
 
 
 @pytest.mark.parametrize("fingerprint_key", ["language_fingerprints", "ttv_language_fingerprints"])
@@ -76,7 +76,7 @@ def test_cache_tracks_selected_voice_bank_and_language_only(fingerprint_key):
     row[fingerprint_key] = row.pop("language_fingerprints") if fingerprint_key != "language_fingerprints" else row[fingerprint_key]
     english = probe._cache_key(item(ttv_voice_id="hatsune-miku", ttv_language="en-US"))
     portuguese = probe._cache_key(item(ttv_voice_id="hatsune-miku"))
-    teto = probe._cache_key(item())
+    teto = probe._cache_key(item(ttv_voice_id="kasane-teto"))
     probe.route.update(teto_fingerprint="teto-new", ttv_language_fingerprints={"en-US": "teto-new-en"})
     assert probe._cache_key(item(ttv_voice_id="hatsune-miku", ttv_language="en-US")) == english
     assert probe._cache_key(item(ttv_voice_id="hatsune-miku")) == portuguese
@@ -85,7 +85,7 @@ def test_cache_tracks_selected_voice_bank_and_language_only(fingerprint_key):
     assert probe._cache_key(item(ttv_voice_id="hatsune-miku")) == portuguese
     row["fingerprint"] = "miku-bank-b"
     assert probe._cache_key(item(ttv_voice_id="hatsune-miku")) != portuguese
-    assert teto != probe._cache_key(item())
+    assert teto != probe._cache_key(item(ttv_voice_id="kasane-teto"))
 
 
 @pytest.mark.parametrize("changes", [{"ready": False}, {"available": False}, None])

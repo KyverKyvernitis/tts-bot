@@ -916,12 +916,19 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             return TTS_PLAYBACK_TIMEOUT_MAX_SECONDS
         if getattr(item, "ttv_arrangement", None) is not None:
             duration = float(frozen_arrangement(item)['duration_ms']) / 1000
-            return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(650.0, duration + TTS_PLAYBACK_TIMEOUT_BASE_SECONDS))
+            speed, tail = self._tts_effect_timing(item)
+            slowdown = min(1.0, speed)
+            return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(650.0 / slowdown + tail,
+                duration / slowdown + TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + tail))
         if getattr(item, "ttv_score", None) is not None:
+            speed, tail = self._tts_effect_timing(item)
+            slowdown = min(1.0, speed)
             if "preset" in item.ttv_score:
-                return max(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, 70.0)
+                return max(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, 70.0) / slowdown + tail
             duration = float(item.ttv_score.get("duration_ms", 0)) / 1000.0
-            return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS, duration + TTS_PLAYBACK_TIMEOUT_BASE_SECONDS))
+            return max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS,
+                min(TTS_PLAYBACK_TIMEOUT_MAX_SECONDS / slowdown + tail,
+                    duration / slowdown + TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + tail))
         text_len = len((getattr(item, "text", "") or "").strip()) if item is not None else 0
         speech_seconds = min(text_len, 1600) * TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS
         engine = str(getattr(item, "_tts_actual_engine", "") or getattr(item, "engine", "")).lower()
@@ -939,6 +946,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             if engine == "edge":
                 rate = self._normalize_edge_rate(item.rate)
                 speed *= max(0.05, 1.0 + int(rate[:-1]) / 100.0)
+            elif engine == "teto":
+                speed *= _ttv_item_preferences(item)["ttv_speech_rate"]
             # Keep the previous safety margin even when playback is faster.
             timeout = max(timeout, TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + speech_seconds / speed)
             if reverb:
@@ -2287,7 +2296,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                          text="Hello. How are you?" if language == "en-US" else "Olá. Como você está?",
                          engine="teto", voice=preferences["ttv_voice_id"],
                          language=language, rate="1.0", pitch="+0Hz",
-                         teto_pitch_semitones=preferences["ttv_pitch_semitones"], **preferences)
+                         teto_pitch_semitones=preferences["ttv_pitch_semitones"], **preferences,
+                         **payload_efeitos_tts(settings.get('advanced_nightcore_level', 0),
+                             settings.get('advanced_slowed_level', 0), settings.get('advanced_reverb_level', 0)))
+        self._snapshot_tts_item(item)
+        effect_filter = self._tts_effect_filter(item)
         # A newly installed bank needs one cold native analysis. Keep this
         # larger budget private to the preview, outside ordinary voice queues.
         item._ttv_preview = True
@@ -2297,13 +2310,14 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             path = await self._generate_tts_agent_worker_file(item)
             if not os.path.isfile(path) or not 0 < os.path.getsize(path) <= TTS_TETO_MAX_AUDIO_MB * 1024 * 1024:
                 raise RuntimeError("A amostra retornou um arquivo de áudio inválido.")
-            if os.path.splitext(path)[1].lower() == ".mp3":
+            if os.path.splitext(path)[1].lower() == ".mp3" and not effect_filter:
                 def read_mp3():
                     with open(path, "rb") as audio:
                         return audio.read()
                 return await asyncio.to_thread(read_mp3)
             process = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", path,
+                *(["-af", effect_filter] if effect_filter else []),
                 "-t", "15", "-vn", "-ac", "1", "-ar", "44100", "-codec:a", "libmp3lame",
                 "-b:a", "192k", "-f", "mp3", "pipe:1",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -2349,13 +2363,17 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             text=text, engine="teto", voice=preferences["ttv_voice_id"], language=language,
             rate="1.0", pitch="+0Hz", teto_pitch_semitones="+0.0", **preferences,
             ttv_score=score, ttv_performance_hash=performance_hash(text=text, score=score),
-            ttv_arrangement=arrangement)
+            ttv_arrangement=arrangement,
+            **payload_efeitos_tts(settings.get('advanced_nightcore_level', 0),
+                settings.get('advanced_slowed_level', 0), settings.get('advanced_reverb_level', 0)))
+        self._snapshot_tts_item(item)
+        effect_filter = self._tts_effect_filter(item)
         path, process = "", None
         try:
             path = await self._generate_tts_agent_worker_file(item)
             if not os.path.isfile(path) or not 0 < os.path.getsize(path) <= 8 * 1024 * 1024:
                 raise TTVSingingError("A amostra retornou um arquivo de áudio inválido.")
-            if arrangement is not None and os.path.splitext(path)[1].lower() == '.mp3':
+            if arrangement is not None and os.path.splitext(path)[1].lower() == '.mp3' and not effect_filter:
                 # The composition renderer already encoded the synchronized
                 # stereo mix. Re-encoding delays delivery and loses quality.
                 data = await asyncio.to_thread(Path(path).read_bytes)
@@ -2364,6 +2382,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 return data
             process = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", path,
+                *(["-af", effect_filter] if effect_filter else []),
                 "-vn", "-ac", "2" if arrangement is not None else "1", "-ar", "44100", "-codec:a", "libmp3lame",
                 "-b:a", "128k", "-f", "mp3", "pipe:1",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -5296,13 +5315,20 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return filtros_tts(
             # Se a síntese precisou cair para outra engine, a elegibilidade do
             # DSP acompanha a engine que realmente gerou o áudio. Isso impede
-            # um fallback ATTS/Teto/Piper de receber efeitos destinados apenas
-            # a Edge/gTTS.
+            # um fallback ATTS/Piper de receber os efeitos pessoais de TTS.
             engine=getattr(item, "_tts_actual_engine", "") or getattr(item, "engine", ""),
             nightcore_level=getattr(item, "advanced_nightcore_level", 0),
             slowed_level=getattr(item, "advanced_slowed_level", 0),
             reverb_level=getattr(item, "advanced_reverb_level", 0),
         )
+
+    def _tts_effect_timing(self, item: QueueItem | None) -> tuple[float, float]:
+        if item is None or str(getattr(item, '_tts_actual_engine', '') or item.engine).lower() not in TTS_EFFECT_ENGINES:
+            return 1.0, 0.0
+        night, slow, reverb = normalizar_efeitos_tts(
+            item.advanced_nightcore_level, item.advanced_slowed_level, item.advanced_reverb_level)
+        return (TTS_NIGHTCORE_MULTIPLIERS[night] if night else TTS_SLOWED_MULTIPLIERS[slow],
+                .25 if reverb else 0.0)
 
     def _tts_ffmpeg_options_for_item(self, item: QueueItem | None) -> tuple[str, str]:
         return compose_audio_filters(TTS_FFMPEG_OPTIONS, self._tts_effect_filter(item))
@@ -5310,6 +5336,10 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     def _make_discord_tts_source_for_item(self, path: str, item: QueueItem | None) -> tuple[Any, str]:
         cd_handle = getattr(self, '_cd_stream_for_path', lambda _: None)(path)
         if cd_handle is not None:
+            effect_filter = self._tts_effect_filter(item)
+            if effect_filter:
+                from .pcm_effects import filtered_pcm_source
+                return filtered_pcm_source(cd_handle.buffer, _DiscordAudioSourceBase, effect_filter), 'cd_pcm_effects'
             return cd_handle.buffer.as_audio_source(_DiscordAudioSourceBase), 'cd_pcm_ram'
         factory = self._make_discord_tts_source
         try:
@@ -6320,7 +6350,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             if item.ttv_score is not None and voice_state.get("singing_available") is False:
                 raise TTVSingingError(f"O canto da {voice_state['name']} precisa do banco de voz para canto instalado no worker.", code="ttv_singing_bank_missing")
             if ((voice_state["advertised"] and not voice_state["ready"])
-                    or (preferences["ttv_voice_id"] != DEFAULT_VOICE_ID
+                    or (preferences["ttv_voice_id"] != "kasane-teto"
                         and (not voice_state["advertised"] or not voice_state["available"]))):
                 raise RuntimeError(f"{voice_state['name']} está indisponível agora. Seus ajustes continuam salvos.")
             if preferences["ttv_language"] not in voice_state["languages"]:
@@ -6363,7 +6393,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                                 or str(data.get("ttv_voice_id") or "") != preferences["ttv_voice_id"]
                                 or normalize_pitch(data.get("ttv_pitch_semitones")) != preferences["ttv_pitch_semitones"]
                                 or abs(normalize_speech_rate(data.get("ttv_speech_rate")) - preferences["ttv_speech_rate"]) > 1e-8
-                                or ((bool(route.get("ttv_languages")) or preferences["ttv_voice_id"] != DEFAULT_VOICE_ID) and data.get("ttv_language") in (None, ""))
+                                or ((bool(route.get("ttv_languages")) or preferences["ttv_voice_id"] != "kasane-teto") and data.get("ttv_language") in (None, ""))
                                 or normalize_language(data.get("ttv_language")) != preferences["ttv_language"]):
                             raise RuntimeError("O worker retornou áudio com ajustes de TTV diferentes dos solicitados.")
                 write_ms = 0.0

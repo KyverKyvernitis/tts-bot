@@ -35,6 +35,7 @@ class Probe(tts_audio.TTSAudioMixin):
 
 
 def item(**kwargs):
+    kwargs.setdefault("ttv_voice_id", "kasane-teto")
     return QueueItem(1, 2, 3, "Olá.", "teto", "kasane-teto-standard", "pt-br", "+0%", "+0Hz", **kwargs)
 
 
@@ -86,11 +87,11 @@ def test_cache_includes_actual_english_voicebank_fingerprint():
 
 def test_voice_readiness_requires_actual_renderer_and_support_not_only_phone_online():
     probe = Probe()
-    assert probe._ttv_voice_status()["ready"]
+    assert probe._ttv_voice_status("kasane-teto")["ready"]
     probe.route["ttv_voices"][0]["ready"] = False
-    assert not probe._ttv_voice_status()["ready"]
+    assert not probe._ttv_voice_status("kasane-teto")["ready"]
     probe.route.pop("ttv_personal_settings")
-    assert not probe._ttv_voice_status()["supports_personal_rate"]
+    assert not probe._ttv_voice_status("kasane-teto")["supports_personal_rate"]
 
 
 def test_preview_offline_preserves_preferences_without_synthesizing():
@@ -98,7 +99,7 @@ def test_preview_offline_preserves_preferences_without_synthesizing():
     probe.route["ttv_voices"][0]["ready"] = False
     probe._generate_tts_agent_worker_file = AsyncMock()
     with pytest.raises(RuntimeError, match="continuam salvos"):
-        asyncio.run(probe._ttv_preview_mp3(1, 3, {"teto_pitch_semitones": "-2.0"}))
+        asyncio.run(probe._ttv_preview_mp3(1, 3, {"ttv_voice_id": "kasane-teto", "teto_pitch_semitones": "-2.0"}))
     probe._generate_tts_agent_worker_file.assert_not_awaited()
 
 
@@ -112,7 +113,7 @@ def test_private_preview_encodes_real_wav_and_cleans_temp_file(tmp_path):
                                  for n in range(22050)))
     probe = Probe()
     probe._generate_tts_agent_worker_file = AsyncMock(return_value=str(source))
-    data = asyncio.run(probe._ttv_preview_mp3(1, 3, {"ttv_speech_rate": 1.15, "teto_pitch_semitones": "-2.0"}))
+    data = asyncio.run(probe._ttv_preview_mp3(1, 3, {"ttv_voice_id": "kasane-teto", "ttv_speech_rate": 1.15, "teto_pitch_semitones": "-2.0"}))
     queued = probe._generate_tts_agent_worker_file.await_args.args[0]
     assert queued.author_id == 3 and queued.channel_id == 0
     assert queued.ttv_speech_rate == 1.15 and queued.ttv_pitch_semitones == "-2.0"
@@ -180,10 +181,18 @@ def test_english_preview_reads_english_text_and_preserves_private_controls(tmp_p
     probe = Probe()
     probe.route["ttv_languages"] = ["pt-BR", "en-US"]
     probe._generate_tts_agent_worker_file = AsyncMock(return_value=str(source))
-    data = asyncio.run(probe._ttv_preview_mp3(1, 3, {"ttv_language": "en-US", "ttv_pitch_semitones": "-2.0"}))
+    data = asyncio.run(probe._ttv_preview_mp3(1, 3, {"ttv_voice_id": "kasane-teto", "ttv_language": "en-US", "ttv_pitch_semitones": "-2.0"}))
     queued = probe._generate_tts_agent_worker_file.await_args.args[0]
     assert queued.text == "Hello. How are you?"
     assert queued.language == queued.ttv_language == "en-US"
     assert queued.ttv_pitch_semitones == "-2.0"
     assert queued.channel_id == 0 and queued.author_id == 3
     assert data == b"test mp3 passthrough" and not source.exists()
+
+
+def test_default_queue_uses_pururu_without_borrowing_legacy_teto_readiness():
+    probe = Probe()
+    queued = QueueItem(1, 2, 3, "Olá.", "teto", "", "pt-br", "+0%", "+0Hz")
+    assert queued.ttv_voice_id == "pururu-purpura"
+    assert probe._tts_agent_payload_for_item(queued)["ttv_voice_id"] == "pururu-purpura"
+    assert not probe._ttv_voice_status()["ready"]

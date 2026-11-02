@@ -20,7 +20,7 @@ def test_private_preview_marks_its_item_without_changing_ordinary_ttv(tmp_path, 
     source.write_bytes(b'ID3-native-preview')
     probe._generate_tts_agent_worker_file = AsyncMock(return_value=str(source))
     monkeypatch.setattr(tts_audio, 'TTS_TETO_WORKER_TIMEOUT_SECONDS', 25.0)
-    asyncio.run(probe._ttv_preview_mp3(1, 3, {'ttv_language': 'pt-BR'}))
+    asyncio.run(probe._ttv_preview_mp3(1, 3, {'ttv_voice_id': 'kasane-teto', 'ttv_language': 'pt-BR'}))
     preview = probe._generate_tts_agent_worker_file.await_args.args[0]
     ordinary = item()
     preview_payload = probe._tts_agent_payload_for_item(preview)

@@ -89,8 +89,10 @@ class CDStreamingMixin:
         if cache is None:
             cache = self._cd_decoded_pcm_cache = DecodedPCMCache()
         path = self._make_runtime_temp_file(suffix='.cdpcm')
+        timing = getattr(self, '_tts_effect_timing', None)
+        playback_rate = timing(item)[0] if callable(timing) else 1.0
         buffer = PCMStreamBuffer(arrangement['duration_ms'] + PREROLL_MS,
-                                 prebuffer_ms=500, safety_ms=200)
+                                 prebuffer_ms=500, safety_ms=200, playback_rate=playback_rate)
         if not getattr(item, '_tts_prefetch', False):
             buffer.promote()
         handle = CDPCMHandle(path, item, buffer)

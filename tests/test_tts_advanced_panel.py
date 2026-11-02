@@ -117,6 +117,20 @@ class AdvancedPanelTests(unittest.IsolatedAsyncioTestCase):
         )
         self.panel = self.module.VisaoEfeitosAvancadosTTS(self.cog, 2, 1, resolved=self.saved)
 
+    async def test_ttv_engine_can_open_and_save_personal_effects(self):
+        self.saved["engine"] = "teto"
+        event = _interaction()
+        event.response.send_modal = AsyncMock()
+        await self.panel._open_modal(event)
+        modal = event.response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, self.module.ModalEfeitosAvancadosTTS)
+        modal.reverb.value = "3"
+        await modal.on_submit(_interaction())
+        self.cog._set_user_tts_and_refresh.assert_awaited_once_with(
+            1, 2, background_refresh=True, advanced_nightcore_level=1,
+            advanced_slowed_level=0, advanced_reverb_level=3,
+        )
+
     async def test_save_acknowledges_before_slow_persistence_and_edits_after_success(self):
         interaction = _interaction()
         started, release = asyncio.Event(), asyncio.Event()

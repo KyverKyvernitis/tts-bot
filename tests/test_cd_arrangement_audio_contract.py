@@ -35,7 +35,7 @@ from osaka_cd.lyrics import prepare_message_arrangement
 from osaka_cd.arrangement import arrangement_sha256
 from cogs.musica.runtime_telefone.agente.efeitos import (
     TTS_EFFECT_ENGINES, TTS_NIGHTCORE_MULTIPLIERS, TTS_SLOWED_MULTIPLIERS,
-    normalizar_efeitos_tts, payload_efeitos_tts,
+    normalizar_efeitos_tts, payload_efeitos_tts, filtros_tts,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +71,7 @@ contract_methods = production_nodes('cogs/tts/audio.py', {
     '_snapshot_tts_item', '_cache_key', '_get_item_normalized_cache_text', '_normalize_cache_text',
     '_estimate_playback_timeout', '_maybe_attach_prebuilt_direct_tts_audio',
     '_worker_voice_direct_tts_available_for', '_cd_preview_mp3', '_generate_tts_agent_worker_file',
+    '_tts_effect_filter', '_tts_effect_timing',
 }, contract_namespace)
 
 

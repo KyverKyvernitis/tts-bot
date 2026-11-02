@@ -11,7 +11,7 @@ import math
 from typing import Any, Mapping
 
 
-DEFAULT_VOICE_ID = "kasane-teto"
+DEFAULT_VOICE_ID = "pururu-purpura"
 DEFAULT_PITCH_SEMITONES = "+0.0"
 DEFAULT_SPEECH_RATE = 1.0
 DEFAULT_LANGUAGE = "pt-BR"
@@ -34,7 +34,7 @@ class TTVVoice:
 
 VOICE_CATALOG = (
     TTVVoice(
-        id=DEFAULT_VOICE_ID,
+        id="kasane-teto",
         name="Kasane Teto",
         engine="teto",
         description="A voz da Kasane Teto, com síntese no phone worker.",
@@ -63,10 +63,10 @@ VOICE_CATALOG = (
 VOICES = VOICE_CATALOG
 _VOICES_BY_ID = {voice.id: voice for voice in VOICE_CATALOG}
 _LEGACY_VOICE_IDS = {
-    "teto": DEFAULT_VOICE_ID,
-    "kasane_teto": DEFAULT_VOICE_ID,
-    "kasane-teto-standard": DEFAULT_VOICE_ID,
-    "kasane-teto-english-cvvc": DEFAULT_VOICE_ID,
+    "teto": "kasane-teto",
+    "kasane_teto": "kasane-teto",
+    "kasane-teto-standard": "kasane-teto",
+    "kasane-teto-english-cvvc": "kasane-teto",
 }
 
 
@@ -97,7 +97,7 @@ def worker_voice_details(state: Mapping[str, Any], voice_id: object = DEFAULT_VO
     voice = get_voice(voice_id)
     entry = next((row for row in (state.get("ttv_voices") or [])
                   if isinstance(row, dict) and row.get("id") == voice.id), {})
-    legacy = voice.id == DEFAULT_VOICE_ID
+    legacy = voice.id == "kasane-teto"
     languages = entry.get("languages")
     if languages is None:
         languages = (state.get("ttv_languages") or [DEFAULT_LANGUAGE]) if legacy else []

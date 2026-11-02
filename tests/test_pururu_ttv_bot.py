@@ -40,8 +40,8 @@ def test_native_portuguese_catalog_keeps_other_voices_and_default():
     assert ttv.get_voice('pururu-purpura').engine == 'teto'
     assert ttv.voice_language_choices('pururu-purpura') == (('pt-BR', 'Português brasileiro'),)
     assert ttv.language_label('pt-BR', voice_id='pururu-purpura') == 'Português brasileiro'
-    assert ttv.language_label('pt-BR') == 'Português adaptado'
-    assert ttv.resolve_preferences({})['ttv_voice_id'] == 'kasane-teto'
+    assert ttv.language_label('pt-BR') == 'Português brasileiro'
+    assert ttv.resolve_preferences({})['ttv_voice_id'] == 'pururu-purpura'
     assert {voice.id for voice in ttv.VOICE_CATALOG} == {
         'kasane-teto', 'hatsune-miku', 'anna-nyui', 'pururu-purpura'}
 
@@ -289,7 +289,7 @@ async def test_invalid_saved_pururu_language_does_not_block_unrelated_edge_edits
 def test_pururu_cache_does_not_reuse_other_voices_or_their_bank_revisions():
     probe = pururu_probe()
     key = probe._cache_key(item(ttv_voice_id='pururu-purpura'))
-    assert key != probe._cache_key(item())
+    assert key != probe._cache_key(item(ttv_voice_id="kasane-teto"))
     probe.route['teto_fingerprint'] = 'new-teto-bank'
     assert probe._cache_key(item(ttv_voice_id='pururu-purpura')) == key
     probe.route['ttv_voices'][-1]['language_fingerprints']['pt-BR'] = 'new-pururu-bank'

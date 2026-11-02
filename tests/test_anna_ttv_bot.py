@@ -40,7 +40,7 @@ def test_anna_keeps_her_identity_and_controls_without_changing_the_default():
     assert ttv.normalize_voice_id(' ANNA-NYUI ') == 'anna-nyui'
     assert ttv.get_voice('anna-nyui').engine == 'teto'
     assert ttv.voice_label('anna-nyui') == 'Anna Nyui'
-    assert ttv.resolve_preferences({})['ttv_voice_id'] == 'kasane-teto'
+    assert ttv.resolve_preferences({})['ttv_voice_id'] == 'pururu-purpura'
 
 
 @pytest.mark.asyncio
@@ -97,7 +97,7 @@ def test_anna_audio_cache_tracks_only_her_bank_and_requested_language():
     portuguese = probe._cache_key(item(ttv_voice_id='anna-nyui'))
     english = probe._cache_key(item(ttv_voice_id='anna-nyui', ttv_language='en-US'))
     assert english != portuguese
-    assert portuguese != probe._cache_key(item())
+    assert portuguese != probe._cache_key(item(ttv_voice_id="kasane-teto"))
     probe.route['teto_fingerprint'] = 'new-teto-bank'
     assert probe._cache_key(item(ttv_voice_id='anna-nyui')) == portuguese
     row = probe.route['ttv_voices'][1]

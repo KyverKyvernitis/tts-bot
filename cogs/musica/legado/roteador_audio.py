@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import random
 import time
 import threading
 import shutil
+import uuid
 from datetime import datetime, timezone
 from array import array
 from collections import deque
@@ -4523,7 +4525,7 @@ class AudioRouter:
             self._mark_phone_worker_tts_convert_failure(exc, cooldown=45.0)
             return False
 
-    async def _convert_tts_audio_for_lavalink(self, source_path: str, fmt: str) -> str | None:
+    async def _convert_tts_audio_for_lavalink(self, source_path: str, fmt: str, *, audio_filter: str = "") -> str | None:
         """Prepara o TTS para o Lavalink em formato leve e com transição suave.
 
         A preparação acontece antes de pausar a música, então falhas aqui só fazem
@@ -4531,6 +4533,7 @@ class AudioRouter:
         último fallback quando aplicável.
         """
         fmt = str(fmt or "").strip().lower()
+        staging = None
         try:
             source_path = os.path.abspath(str(source_path or ""))
             if not os.path.isfile(source_path) or os.path.getsize(source_path) <= 0:
@@ -4538,18 +4541,23 @@ class AudioRouter:
             ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
             duration_s = await self._probe_audio_duration_seconds(source_path)
             transition_filter = self._tts_transition_filter(duration_s=duration_s)
+            audio_filter = str(audio_filter or "").strip()
+            # Apply the transition on the original timeline, then the personal
+            # speed/ambience graph. A slowed voice keeps its entire fade/tail.
+            combined_filter = ",".join(part for part in (transition_filter, audio_filter) if part)
+            effect_key = (".fx_" + hashlib.sha256(audio_filter.encode("utf-8")).hexdigest()[:20]) if audio_filter else ""
             pre = MUSIC_TTS_PREROLL_SILENCE_MS
             post = MUSIC_TTS_POSTROLL_SILENCE_MS
             fin = MUSIC_TTS_FADE_IN_MS
             fout = MUSIC_TTS_FADE_OUT_MS
-            transform_enabled = bool(transition_filter)
+            transform_enabled = bool(combined_filter)
 
             if fmt in {"", "mp3", "mpeg"}:
                 # Se não há suavização para aplicar e o original já é MP3, preservar.
                 if not transform_enabled and source_path.lower().endswith(".mp3"):
                     return source_path
                 base, _ext = os.path.splitext(source_path)
-                target = f"{base}.tts_smooth_p{pre}_q{post}_fi{fin}_fo{fout}.mp3"
+                target = f"{base}.tts_smooth_p{pre}_q{post}_fi{fin}_fo{fout}{effect_key}.mp3"
                 codec_args = ["-c:a", "libmp3lame", "-b:a", MUSIC_TTS_MP3_BITRATE]
             elif fmt in {"opus", "ogg", "ogg_opus", "ogg/opus"}:
                 # Mesmo quando a entrada já é OGG/Opus, reprocessar se houver
@@ -4558,7 +4566,7 @@ class AudioRouter:
                 if not transform_enabled and source_path.lower().endswith((".ogg", ".opus")):
                     return source_path
                 base, _ext = os.path.splitext(source_path)
-                target = f"{base}.tts_opus_p{pre}_q{post}_fi{fin}_fo{fout}.ogg"
+                target = f"{base}.tts_opus_p{pre}_q{post}_fi{fin}_fo{fout}{effect_key}.ogg"
                 codec_args = [
                     "-c:a",
                     "libopus",
@@ -4580,8 +4588,8 @@ class AudioRouter:
                 return target
 
             worker_args = ["-vn"]
-            if transition_filter:
-                worker_args.extend(["-af", transition_filter])
+            if combined_filter:
+                worker_args.extend(["-af", combined_filter])
             worker_args.extend(codec_args)
             output_ext = "ogg" if fmt in {"opus", "ogg", "ogg_opus", "ogg/opus"} else "mp3"
             input_ext = os.path.splitext(source_path)[1].strip(".").lower() or "mp3"
@@ -4594,7 +4602,8 @@ class AudioRouter:
             ):
                 return target
 
-            cmd = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", source_path, *worker_args, target]
+            staging = f"{target}.{uuid.uuid4().hex}.part.{output_ext}"
+            cmd = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", source_path, *worker_args, staging]
 
             started = time.monotonic()
             proc = await asyncio.create_subprocess_exec(
@@ -4604,13 +4613,15 @@ class AudioRouter:
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=MUSIC_TTS_CONVERT_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError:
+            except BaseException as error:
                 with contextlib.suppress(Exception):
                     proc.kill()
                 with contextlib.suppress(Exception):
                     await proc.communicate()
                 with contextlib.suppress(Exception):
-                    os.remove(target)
+                    os.remove(staging)
+                if not isinstance(error, asyncio.TimeoutError):
+                    raise
                 logger.warning(
                     "[music/lavalink] tts_convert_timeout | source=%s fmt=%s timeout=%.1fs",
                     source_path,
@@ -4618,9 +4629,9 @@ class AudioRouter:
                     MUSIC_TTS_CONVERT_TIMEOUT_SECONDS,
                 )
                 return None
-            if proc.returncode != 0 or not os.path.isfile(target) or os.path.getsize(target) <= 0:
+            if proc.returncode != 0 or not os.path.isfile(staging) or os.path.getsize(staging) <= 0:
                 with contextlib.suppress(Exception):
-                    os.remove(target)
+                    os.remove(staging)
                 logger.warning(
                     "[music/lavalink] tts_convert_failed | source=%s fmt=%s rc=%s filter=%r stderr=%s",
                     source_path,
@@ -4630,6 +4641,7 @@ class AudioRouter:
                     (stderr or stdout or b"").decode("utf-8", "replace")[:400],
                 )
                 return None
+            os.replace(staging, target)
             logger.info(
                 "[music/lavalink] tts_convert_ok | source=%s target=%s format=%s size=%s elapsed_ms=%.1f filter=%r duration_s=%s",
                 source_path,
@@ -4644,8 +4656,12 @@ class AudioRouter:
         except Exception:
             logger.debug("[music/lavalink] falha ao preparar TTS para Lavalink", exc_info=True)
             return None
+        finally:
+            if staging:
+                with contextlib.suppress(OSError):
+                    os.remove(staging)
 
-    async def _lavalink_tts_source_paths_for_playback(self, path: str) -> list[str]:
+    async def _lavalink_tts_source_paths_for_playback(self, path: str, *, audio_filter: str = "") -> list[str]:
         """Retorna caminhos em ordem: formato preferido leve, depois fallback."""
         paths: list[str] = []
         original = os.path.abspath(str(path or ""))
@@ -4653,27 +4669,28 @@ class AudioRouter:
             return paths
         preferred = MUSIC_TTS_AUDIO_FORMAT
         fallback = MUSIC_TTS_AUDIO_FALLBACK_FORMAT
+        filter_options = {"audio_filter": audio_filter} if audio_filter else {}
         if preferred in {"opus", "ogg", "ogg_opus", "ogg/opus"}:
-            converted = await self._convert_tts_audio_for_lavalink(original, preferred)
+            converted = await self._convert_tts_audio_for_lavalink(original, preferred, **filter_options)
             if converted:
                 paths.append(converted)
         elif preferred in {"mp3", "mpeg"}:
-            converted = await self._convert_tts_audio_for_lavalink(original, "mp3")
+            converted = await self._convert_tts_audio_for_lavalink(original, "mp3", **filter_options)
             if converted:
                 paths.append(converted)
         # MP3 fallback preserva compatibilidade e evita travar quando o Lavalink não
         # aceitar o container/codec preferido.
         if fallback in {"mp3", "mpeg", ""}:
-            converted = await self._convert_tts_audio_for_lavalink(original, "mp3")
+            converted = await self._convert_tts_audio_for_lavalink(original, "mp3", **filter_options)
             if converted and converted not in paths:
                 paths.append(converted)
         elif fallback in {"opus", "ogg", "ogg_opus", "ogg/opus"}:
-            converted = await self._convert_tts_audio_for_lavalink(original, fallback)
+            converted = await self._convert_tts_audio_for_lavalink(original, fallback, **filter_options)
             if converted and converted not in paths:
                 paths.append(converted)
         # Último fallback absoluto: arquivo original. Só será usado se os
         # candidatos convertidos falharem no load/probe.
-        if original not in paths:
+        if not audio_filter and original not in paths:
             paths.append(original)
         return paths
 
@@ -4906,7 +4923,10 @@ class AudioRouter:
             # O arquivo já foi gerado pelo TTS antes de chegar aqui. Antes de
             # pausar/substituir a música, tenta preparar uma versão OGG/Opus
             # menor para Lavalink e mantém MP3 como fallback.
-            source_paths = await self._lavalink_tts_source_paths_for_playback(path)
+            from cogs.tts.utils.ffmpeg import compose_audio_filters
+            audio_filter = compose_audio_filters(options, "")[1]
+            source_paths = await self._lavalink_tts_source_paths_for_playback(
+                path, **({"audio_filter": audio_filter} if audio_filter else {}))
             raw_candidates: list[str] = []
             for source_path in source_paths:
                 raw_candidates.extend(self._lavalink_tts_candidates_for_path(source_path, timeout=timeout))
@@ -5000,7 +5020,8 @@ class AudioRouter:
             # Preferir síntese no phone worker quando o worker é dono da voz.
             # O fallback por audio_url só fica para chamadas antigas que já chegam
             # aqui com arquivo pronto e sem o QueueItem original.
-            if item is not None and str(getattr(item, "text", "") or "").strip():
+            if (item is not None and str(getattr(item, "text", "") or "").strip()
+                    and str(getattr(item, "engine", "") or "").strip().lower() != "teto"):
                 started_agent = time.monotonic()
                 result = await _music_agent_command(
                     "tts",
@@ -5041,7 +5062,10 @@ class AudioRouter:
                     "agent_elapsed_ms": elapsed_ms,
                     "worker_result": result,
                 }
-            source_paths = await self._lavalink_tts_source_paths_for_playback(path)
+            from cogs.tts.utils.ffmpeg import compose_audio_filters
+            audio_filter = compose_audio_filters(options, "")[1]
+            source_paths = await self._lavalink_tts_source_paths_for_playback(
+                path, **({"audio_filter": audio_filter} if audio_filter else {}))
             raw_candidates: list[str] = []
             for source_path in source_paths:
                 raw_candidates.extend(self._lavalink_tts_candidates_for_path(source_path, timeout=timeout))

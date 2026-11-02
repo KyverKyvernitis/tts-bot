@@ -475,7 +475,7 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
             try:
                 state = checker(voice.id)
             except TypeError:
-                if voice.id != DEFAULT_VOICE_ID:
+                if voice.id != "kasane-teto":
                     continue
                 # Old status readers have no per-character argument.
                 state = checker()
@@ -550,7 +550,7 @@ class ModalConfiguracaoTeto(discord.ui.Modal, title="Configurar TTV"):
                 language = voice.languages[0]
             language = normalize_voice_language(voice_id, language)
             rate = normalize_speech_rate(valor_unico_componente(self.ttv_speech_rate, str(self.current_rate)) or str(self.current_rate))
-            if voice_id != DEFAULT_VOICE_ID and voice_id not in {voice.id for voice in self._vozes_disponiveis()}:
+            if voice_id != "kasane-teto" and voice_id not in {voice.id for voice in self._vozes_disponiveis()}:
                 raise ValueError(f"{get_voice(voice_id).name} está indisponível agora. Confira a instalação dessa voz no worker.")
         except ValueError as error:
             await interaction.response.send_message(embed=self.cog._make_embed("Ajuste inválido", str(error), ok=False), ephemeral=True)

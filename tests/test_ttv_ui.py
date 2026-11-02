@@ -29,8 +29,10 @@ def modules():
     return modal, actions, launcher
 
 
-def cog_for(settings=None, *, ready=False):
-    values = dict(settings or {})
+def cog_for(settings=None, *, ready=False, legacy_teto=True):
+    # These original UI tests exercise Teto; select her explicitly now that
+    # a user with no saved character defaults to native Portuguese Pururu.
+    values = {**({"ttv_voice_id": "kasane-teto"} if legacy_teto else {}), **dict(settings or {})}
     db = SimpleNamespace(
         resolve_tts=lambda guild, user: dict(values),
         get_guild_tts_defaults=lambda guild: {"teto_prefix": "'"},
@@ -409,7 +411,7 @@ def test_compact_summary_keeps_only_changed_controls_and_saved_values():
         cog = cog_for(settings, ready=True)
         view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
         assert view._resumo_ttv() == "Voz: `Kasane Teto` · Tom: `-1,5st` · Velocidade: `107,5%`"
-        assert cog._get_db().get_user_tts(20, 10) == settings
+        assert cog._get_db().get_user_tts(20, 10) == {"ttv_voice_id": "kasane-teto", **settings}
         cog._set_user_tts_and_refresh.assert_not_awaited()
     asyncio.run(run())
 
@@ -450,4 +452,51 @@ def test_worker_status_failure_hides_ttv_without_using_stale_readiness():
         view = module.VisaoLancadorPublicoTTS(cog, 10, 20)
         sections = [item for item in view.to_components()[0]["components"] if item["type"] == 9]
         assert len(sections) == 2 and not view._teto_disponivel()
+    asyncio.run(run())
+
+
+def test_new_user_modal_selects_ready_pururu_and_native_portuguese():
+    async def run():
+        module, _, _ = modules()
+        cog = cog_for(ready=True, legacy_teto=False)
+        cog._ttv_voice_status = lambda voice_id: {
+            "id": voice_id, "ready": voice_id == "pururu-purpura", "available": voice_id == "pururu-purpura",
+        }
+        modal = module.ModalConfiguracaoTeto(cog, None, target_user_id=10)
+        components = modal.to_components()
+        assert components[0]["component"]["options"] == [
+            {"label": "Pururu Púrpura", "value": "pururu-purpura", "default": True}]
+        assert components[1]["component"]["options"] == [
+            {"label": "Português brasileiro", "value": "pt-BR", "default": True}]
+        assert cog._get_db().get_user_tts(20, 10) == {}
+    asyncio.run(run())
+
+
+def test_unavailable_default_pururu_does_not_borrow_legacy_teto_readiness_or_save():
+    async def run():
+        module, _, _ = modules()
+        cog = cog_for(ready=True, legacy_teto=False)
+        modal = module.ModalConfiguracaoTeto(cog, None, target_user_id=10)
+        options = modal.to_components()[0]["component"]["options"]
+        assert options == [
+            {"label": "Pururu Púrpura (indisponível)", "value": "pururu-purpura", "default": True},
+            {"label": "Kasane Teto", "value": "kasane-teto", "default": False},
+        ]
+        event = interaction()
+        await modal.on_submit(event)
+        cog._set_user_tts_and_refresh.assert_not_awaited()
+        response = event.response.send_message.await_args.kwargs
+        assert response["ephemeral"] and "Pururu Púrpura está indisponível" in response["embed"].description
+    asyncio.run(run())
+
+
+def test_tts_launcher_shows_pururu_default_and_omits_advanced_footer():
+    async def run():
+        _, _, module = modules()
+        view = module.VisaoLancadorPublicoTTS(cog_for(ready=True, legacy_teto=False), 10, 20)
+        assert view._resumo_ttv() == "Voz: `Pururu Púrpura`"
+        components = view.to_components()[0]["components"]
+        texts = [component["content"] for component in components if component["type"] == 10]
+        assert not any("Dica:" in content or "advanced" in content for content in texts)
+        assert components[-1]["type"] == 9
     asyncio.run(run())

@@ -4088,11 +4088,11 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             return
         resolved = dict(await self._maybe_await(db.resolve_tts(message.guild.id, message.author.id)) or {})
         engine = str(resolved.get("engine") or "gtts").strip().lower().replace("-", "_")
-        if engine not in {"edge", "gtts"}:
+        if engine not in {"edge", "gtts", "teto"}:
             await message.channel.send(
                 embed=self._make_embed(
                     "TTS avançado indisponível",
-                    "O `_advanced` funciona somente com **Edge** e **gTTS**. Troque sua engine e tente novamente.",
+                    "O `_advanced` funciona com **Edge**, **gTTS** e **TTV**. Troque sua engine e tente novamente.",
                     ok=False,
                 )
             )

@@ -191,7 +191,7 @@ class ShufflePersistenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_cd_choice_disables_shuffle_but_voice_edits_do_not(self):
         await self.db.set_user_tts(1, 2, ttv_random_cd=True)
-        await self.db.set_user_tts(1, 2, ttv_language="en-US")
+        await self.db.set_user_tts(1, 2, ttv_voice_id="kasane-teto", ttv_language="en-US")
         self.assertIs(self.db.resolve_tts(1, 2)["ttv_random_cd"], True)
         selected = list_melodies()[1].id
         await self.db.set_user_tts(1, 2, ttv_melody_id=selected)

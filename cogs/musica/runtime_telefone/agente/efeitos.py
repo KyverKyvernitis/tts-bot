@@ -80,7 +80,7 @@ def filtros(
     return ",".join(parts)
 
 
-TTS_EFFECT_ENGINES = frozenset(("edge", "gtts"))
+TTS_EFFECT_ENGINES = frozenset(("edge", "gtts", "teto"))
 TTS_NIGHTCORE_MULTIPLIERS = (1.0, 1.10, 1.20, 1.30)
 TTS_SLOWED_MULTIPLIERS = (1.0, 0.92, 0.84, 0.76)
 TTS_REVERB_DECAYS = (
@@ -156,7 +156,7 @@ def filtros_tts(
     slowed_level: object = 0,
     reverb_level: object = 0,
 ) -> str:
-    """Retorna o filtergraph pós-síntese pré-calculado para Edge/gTTS."""
+    """Retorna o filtergraph pós-síntese para Edge, gTTS e TTV."""
     if not (nightcore_level or slowed_level or reverb_level):
         return ""
     if str(engine or "").strip().lower().replace("-", "_") not in TTS_EFFECT_ENGINES:

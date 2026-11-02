@@ -1240,7 +1240,7 @@ class SettingsDB:
                 "teto_pitch_semitones",
                 str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0)),
             ),
-            # Efeitos avançados são pessoais e só são aplicados por Edge/gTTS.
+            # Efeitos avançados são pessoais para Edge, gTTS e TTV.
             # Não entram nos defaults da guild para evitar alterar TTS alheio.
             "advanced_nightcore_level": str(user.get("advanced_nightcore_level", "") or "0"),
             "advanced_slowed_level": str(user.get("advanced_slowed_level", "") or "0"),

@@ -1,4 +1,4 @@
-"""Components V2 para os efeitos DSP pessoais do TTS Edge/gTTS."""
+"""Components V2 para os efeitos DSP pessoais do TTS e do TTV."""
 from __future__ import annotations
 
 import contextlib
@@ -9,7 +9,7 @@ from .visoes_base import responder_painel_tts_de_outro
 from .visoes_layout import VisaoLayoutBaseTTS
 
 
-_ELIGIBLE_ENGINES = frozenset(("edge", "gtts"))
+_ELIGIBLE_ENGINES = frozenset(("edge", "gtts", "teto"))
 _LEVEL_LABELS = ("Desligado", "Nível 1 · Leve", "Nível 2 · Médio", "Nível 3 · Forte")
 _SUMMARY = {
     "nightcore": ("Desligado", "Nível 1 · Leve · +10%", "Nível 2 · Médio · +20%", "Nível 3 · Forte · +30%"),

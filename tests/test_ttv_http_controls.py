@@ -135,7 +135,7 @@ def test_ttv_http_cold_and_warm_audio_preserves_all_presets(
             probe = HTTPProbe(session, http_ttv.base, http_ttv.directory)
             queued = QueueItem(1, 2, 3, "Olá." if language == "pt-BR" else "Hello.",
                                "teto", "kasane-teto", language, "+0%", "+0Hz",
-                               ttv_language=language, ttv_pitch_semitones=pitch, ttv_speech_rate=rate)
+                               ttv_voice_id="kasane-teto", ttv_language=language, ttv_pitch_semitones=pitch, ttv_speech_rate=rate)
             for expected_hit in (False, True):
                 path = Path(await probe._generate_tts_agent_worker_file(queued))
                 try:
@@ -166,7 +166,7 @@ def test_numeric_zero_variants_arrive_as_nonempty_pitch_headers(http_ttv, numeri
     async def run():
         async with aiohttp.ClientSession() as session:
             probe = HTTPProbe(session, http_ttv.base, http_ttv.directory)
-            queued = QueueItem(1, 2, 3, "Olá.", "teto", "kasane-teto", "pt-BR", "+0%", "+0Hz")
+            queued = QueueItem(1, 2, 3, "Olá.", "teto", "kasane-teto", "pt-BR", "+0%", "+0Hz", ttv_voice_id="kasane-teto")
             # Exercise the wire parser directly as well as the production
             # generator: JSON numbers and signed zero must survive as text.
             result = await probe._request_phone_worker_raw_audio(
@@ -194,7 +194,7 @@ def test_prior_empty_zero_header_is_rejected_without_retaining_download(http_ttv
         async with aiohttp.ClientSession() as session:
             probe = HTTPProbe(session, http_ttv.base, http_ttv.directory)
             queued = QueueItem(1, 2, 3, "Hello.", "teto", "kasane-teto", language, "+0%", "+0Hz",
-                               ttv_language=language)
+                               ttv_voice_id="kasane-teto", ttv_language=language)
             with pytest.raises(RuntimeError, match="ajustes de TTV diferentes"):
                 await probe._generate_tts_agent_worker_file(queued)
             assert not probe.results
@@ -214,7 +214,7 @@ def test_default_pitch_private_preview_returns_playable_mp3_over_raw_http(http_t
     async def run():
         async with aiohttp.ClientSession() as session:
             probe = HTTPProbe(session, http_ttv.base, http_ttv.directory)
-            data = await probe._ttv_preview_mp3(1, 3, {"ttv_language": language})
+            data = await probe._ttv_preview_mp3(1, 3, {"ttv_voice_id": "kasane-teto", "ttv_language": language})
             assert len(data) > 1000
             assert probe.results[-1]["ttv_language"] == language
             assert float(probe.results[-1]["ttv_pitch_semitones"]) == 0.0
@@ -230,3 +230,27 @@ def test_default_pitch_private_preview_returns_playable_mp3_over_raw_http(http_t
     assert http_ttv.calls[0]["reading_language"] == language
     assert http_ttv.calls[0]["pitch_offset_semitones"] == 0.0
     assert http_ttv.calls[0]["speech_rate"] == 1.0
+
+
+def test_new_default_pururu_survives_real_http_without_explicit_voice_selection(http_ttv, tts, monkeypatch):
+    row = {'id': 'pururu-purpura', 'ready': True, 'available': True,
+           'supports_personal_rate': True, 'languages': ['pt-BR'], 'fingerprint': 'pururu-native'}
+    tts.deps['teto']['ttv_voices'] = [row]
+    monkeypatch.setattr(http_ttv.worker, '_get_pururu_renderer', http_ttv.worker._get_teto_renderer)
+
+    async def run():
+        async with aiohttp.ClientSession() as session:
+            probe = HTTPProbe(session, http_ttv.base, http_ttv.directory)
+            probe.route['ttv_voices'] = [row]
+            queued = QueueItem(1, 2, 3, 'Olá.', 'teto', '', 'pt-BR', '+0%', '+0Hz')
+            assert queued.ttv_voice_id == 'pururu-purpura'
+            path = Path(await probe._generate_tts_agent_worker_file(queued))
+            try:
+                assert path.read_bytes() == http_ttv.raw
+                assert probe.results[-1]['ttv_voice_id'] == 'pururu-purpura'
+                assert probe.results[-1]['ttv_language'] == 'pt-BR'
+            finally:
+                path.unlink()
+    asyncio.run(run())
+    assert len(http_ttv.calls) == 1
+    assert http_ttv.calls[0]['reading_language'] == 'pt-BR'
