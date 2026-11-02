@@ -195,8 +195,8 @@ def test_unexpected_probe_exception_keeps_bounded_error_schema(battery_env, monk
     assert worker._battery_snapshot() == worker._empty_battery_snapshot(source, error)
 
 
-@pytest.mark.parametrize(("temperature", "allowed"), [(350, True), (450, False)])
-def test_teto_resource_guard_consumes_corrected_sysfs_temperature(battery_env, monkeypatch, temperature, allowed):
+@pytest.mark.parametrize("temperature", [350, 450])
+def test_teto_resource_diagnostics_report_corrected_temperature_without_blocking(battery_env, monkeypatch, temperature):
     worker, battery = battery_env
     battery(capacity=80, status="Discharging", temp=temperature)
     monkeypatch.setattr(worker, "_available_memory_mb", lambda: 2048)
@@ -206,8 +206,8 @@ def test_teto_resource_guard_consumes_corrected_sysfs_temperature(battery_env, m
     monkeypatch.setenv("PHONE_WORKER_TETO_MIN_BATTERY_PERCENT", "25")
     result = worker._teto_resource_snapshot()
     assert result["battery_temperature_c"] == temperature / 10
-    assert result["ok"] is allowed
-    assert ("bateria aquecida" in result["reason"]) is (not allowed)
+    assert result["ok"] and result["reason"] == "ok"
+    assert result["limits_enforced"] is False
     assert worker._TETO_RENDERER is None
 
 

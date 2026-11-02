@@ -166,7 +166,7 @@ def test_warm_teto_adapter_observes_rebound_renderer_lock_clock_and_formatter(tt
     assert not lock.locked()
 
 
-def test_teto_singleton_is_lazy_shared_and_uses_live_guard_inputs(tts, monkeypatch):
+def test_teto_singleton_is_lazy_shared_and_keeps_resources_diagnostic(tts, monkeypatch):
     created = []
 
     def renderer(**kwargs):
@@ -179,12 +179,14 @@ def test_teto_singleton_is_lazy_shared_and_uses_live_guard_inputs(tts, monkeypat
         renderers = list(pool.map(lambda _: tts.get_teto_renderer(), range(32)))
     assert len(created) == 1 and all(r is renderers[0] for r in renderers)
     assert created[0]["resource_guard"] is tts.worker._teto_resource_snapshot
-    monkeypatch.setattr(tts.worker, "_safe_telemetry", lambda *a: {})
+    monkeypatch.setattr(tts.worker, "_teto_cached_battery_snapshot", lambda: ({}, None))
     monkeypatch.setattr(tts.worker, "_core_job_runtime_snapshot", lambda: {})
     monkeypatch.setattr(tts.worker, "_available_memory_mb", lambda: 1500)
     assert renderers[0].resource_guard()["ok"]
     monkeypatch.setattr(tts.worker, "_available_memory_mb", lambda: 200)
-    assert not renderers[0].resource_guard()["ok"]
+    low_memory = renderers[0].resource_guard()
+    assert low_memory["ok"] and low_memory["memory_available_mb"] == 200
+    assert low_memory["limits_enforced"] is False
     monkeypatch.setenv("PHONE_WORKER_TETO_MIN_FREE_MEMORY_MB", "128")
     assert renderers[0].resource_guard()["ok"]
     assert tts.worker._TETO_RENDERER_ERROR == ""
@@ -239,44 +241,52 @@ def test_enabled_teto_status_preserves_force_and_reports_resources_on_failure(tt
 def resource(tts, monkeypatch):
     state = {"memory": 1200, "battery": {"level": 25, "temperature_c": 43}, "job": {}}
     monkeypatch.setattr(tts.worker, "_available_memory_mb", lambda: state["memory"])
-    monkeypatch.setattr(tts.worker, "_safe_telemetry", lambda *a: state["battery"])
+    monkeypatch.setattr(tts.worker, "_teto_cached_battery_snapshot", lambda: (state["battery"], None))
     monkeypatch.setattr(tts.worker, "_core_job_runtime_snapshot", lambda: state["job"])
     return state
 
 
 @pytest.mark.parametrize("job", ["apk_build_debug", "apk_build", "worker_update", "self_update",
     "boot_repair", "audio_convert", "media_convert", "maintenance_heavy"])
-def test_teto_resource_guard_blocks_every_heavy_job(tts, resource, job):
+def test_teto_resource_diagnostics_do_not_block_heavy_jobs(tts, resource, job):
     resource["job"] = {"active_type": " " + job.upper() + " "}
     result = tts.worker._teto_resource_snapshot()
-    assert not result["ok"] and result["reason"] == "tarefa pesada ativa: " + job
+    assert result["ok"] and result["reason"] == "ok"
+    assert result["limits_enforced"] is False
     assert result["active_heavy_job"] == job
 
 
-@pytest.mark.parametrize(("memory", "battery", "ok"), [
-    (1200, {"level": 25, "temperature_c": 43}, True),
-    (1199, {"level": 25}, False), (None, {}, True), (None, None, True),
-    (1200, {"level": 0}, False), (1200, {"temperature_c": 43.1}, False),
-    (1200, {"level": "unknown", "temperature_c": "unknown"}, True),
-    (1200, {"level": 0, "charging": True}, True),
-    (1200, {"level": 0, "status": " FULL "}, True),
-    (1200, {"level": 0, "status": "charging"}, True),
-    (1200, {"level": 0, "status": "discharging"}, False),
+@pytest.mark.parametrize(("memory", "battery"), [
+    (1200, {"level": 25, "temperature_c": 43}),
+    (1199, {"level": 25}), (None, {}), (None, None),
+    (1200, {"level": 0}), (1200, {"temperature_c": 43.1}),
+    (1200, {"level": "unknown", "temperature_c": "unknown"}),
+    (1200, {"level": 0, "charging": True}),
+    (1200, {"level": 0, "status": " FULL "}),
+    (1200, {"level": 0, "status": "charging"}),
+    (1200, {"level": 0, "status": "discharging"}),
 ])
-def test_teto_resource_boundaries_and_missing_telemetry(tts, resource, memory, battery, ok):
+def test_teto_resource_extremes_and_missing_telemetry_are_diagnostic(tts, resource, memory, battery):
     resource.update(memory=memory, battery=battery, job={"active_type": "light_task"})
     result = tts.worker._teto_resource_snapshot()
-    assert result["ok"] == ok and result["memory_available_mb"] == memory
-    assert result["minimum_memory_mb"] == 1200
+    assert result["ok"] and result["memory_available_mb"] == memory
+    assert result["minimum_memory_mb"] == 0 and result["limits_enforced"] is False
+    assert result["battery_level"] == (battery or {}).get("level")
+    assert result["battery_temperature_c"] == (battery or {}).get("temperature_c")
 
 
-def test_teto_guard_accumulates_reasons_in_order_and_reads_env_again(tts, resource, monkeypatch):
+def test_teto_resource_threshold_settings_do_not_reintroduce_admission_limits(tts, resource, monkeypatch):
     resource.update(memory=127, battery={"level": 0, "temperature_c": 44, "charging": True})
     monkeypatch.setenv("PHONE_WORKER_TETO_ALLOW_LOW_BATTERY_WHEN_CHARGING", "false")
-    with tts.worker._APK_BUILD_THREAD_LOCK:
-        result = tts.worker._teto_resource_snapshot()
-    assert result["reason"] == ("tarefa pesada ativa: apk_build; memória disponível baixa: 127 MB < 1200 MB; "
-        "bateria aquecida: 44.0 °C > 43.0 °C; bateria baixa: 0% < 25%")
+    monkeypatch.setenv("PHONE_WORKER_TETO_MIN_FREE_MEMORY_MB", "900000")
+    monkeypatch.setenv("PHONE_WORKER_TETO_MAX_BATTERY_TEMP_C", "30")
+    monkeypatch.setenv("PHONE_WORKER_TETO_MIN_BATTERY_PERCENT", "100")
+    resource["job"] = {"active_type": "apk_build"}
+    result = tts.worker._teto_resource_snapshot()
+    assert result["ok"] and result["reason"] == "ok"
+    assert result["memory_available_mb"] == 127 and result["minimum_memory_mb"] == 0
+    assert result["battery_level"] == 0 and result["battery_temperature_c"] == 44
+    assert result["active_heavy_job"] == "apk_build"
     monkeypatch.setenv("PHONE_WORKER_TETO_MIN_FREE_MEMORY_MB", "0")
     monkeypatch.setenv("PHONE_WORKER_TETO_MAX_BATTERY_TEMP_C", "0")
     monkeypatch.setenv("PHONE_WORKER_TETO_MIN_BATTERY_PERCENT", "-1")

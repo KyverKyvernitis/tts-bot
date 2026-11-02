@@ -103,8 +103,8 @@ def test_normalized_controls_share_cache_and_voice_implementation_separates_it(t
     assert tts.handler._tts_agent_standard_cache_key(body, engine="teto") != key
 
 
-@pytest.mark.parametrize("state", ["ready", "disabled", "broken", "resource-blocked"])
-def test_catalog_health_reports_actual_renderer_and_resource_readiness(tts, monkeypatch, state):
+@pytest.mark.parametrize("state", ["ready", "disabled", "broken", "telemetry-unavailable"])
+def test_catalog_health_reports_renderer_readiness_independent_of_telemetry(tts, monkeypatch, state):
     monkeypatch.setenv("PHONE_WORKER_TETO_ENABLED", "false" if state == "disabled" else "true")
     monkeypatch.setenv("PHONE_WORKER_MIKU_ENABLED", "false")
     monkeypatch.setenv("PHONE_WORKER_ANNA_ENABLED", "false")
@@ -113,12 +113,12 @@ def test_catalog_health_reports_actual_renderer_and_resource_readiness(tts, monk
     monkeypatch.setattr(tts.worker, "_get_pururu_renderer", lambda: pytest.fail("disabled Pururu assets were probed"))
     monkeypatch.setattr(tts.worker, "_get_teto_renderer", lambda: SimpleNamespace(
         status=lambda **kw: {"ready": state != "broken", "available": state != "broken"}))
-    monkeypatch.setattr(tts.worker, "_teto_resource_snapshot", lambda: {"ok": state != "resource-blocked"})
+    monkeypatch.setattr(tts.worker, "_teto_resource_snapshot", lambda: {"ok": state != "telemetry-unavailable"})
     status = tts.teto_status(force=True)
     assert status["ttv_personal_settings"] is True
     expected_voices = [
-        {"id": "kasane-teto", "name": "Kasane Teto", "ready": state == "ready",
-         "available": state in {"ready", "resource-blocked"}, "enabled": state != "disabled",
+        {"id": "kasane-teto", "name": "Kasane Teto", "ready": state in {"ready", "telemetry-unavailable"},
+         "available": state in {"ready", "telemetry-unavailable"}, "enabled": state != "disabled",
          "supports_personal_rate": True, "languages": [], "fingerprint": "",
          "language_fingerprints": {}, "ttv_language_fingerprints": {}, "backend": "utau",
          "renderer_version": "", "voicebank_profile": "",

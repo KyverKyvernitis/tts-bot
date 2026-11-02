@@ -137,7 +137,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.51"
+PHONE_WORKER_VERSION = "1.11.52"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "termux"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2331,43 +2331,34 @@ def _available_memory_mb() -> int | None:
 
 
 def _teto_resource_snapshot() -> dict[str, Any]:
-    memory_mb = _available_memory_mb()
-    min_memory_mb = max(128, _env_int("PHONE_WORKER_TETO_MIN_FREE_MEMORY_MB", 1200))
-    battery, battery_age_ms = _teto_cached_battery_snapshot()
+    """Report phone conditions without restricting TTV admission.
+
+    All four voices share this callback. Legacy battery/temperature/memory
+    thresholds are intentionally ignored, including values in an existing
+    installation's .env. Missing telemetry must not interrupt a render either.
+    """
+    memory_mb = None
+    battery: dict[str, Any] = {}
+    battery_age_ms = None
+    core_job: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        memory_mb = _available_memory_mb()
+    with contextlib.suppress(Exception):
+        battery, battery_age_ms = _teto_cached_battery_snapshot()
+    with contextlib.suppress(Exception):
+        core_job = _core_job_runtime_snapshot()
     level = battery.get("level") if isinstance(battery, dict) else None
     temperature = battery.get("temperature_c") if isinstance(battery, dict) else None
     status = str((battery or {}).get("status") or "").strip().lower() if isinstance(battery, dict) else ""
     charging = bool((battery or {}).get("charging")) if isinstance(battery, dict) else False
     charging = charging or status in {"charging", "full"}
-    min_battery = max(0, min(100, _env_int("PHONE_WORKER_TETO_MIN_BATTERY_PERCENT", 25)))
-    max_temperature = max(30.0, _env_float("PHONE_WORKER_TETO_MAX_BATTERY_TEMP_C", 43.0))
-    allow_low_when_charging = _env_bool("PHONE_WORKER_TETO_ALLOW_LOW_BATTERY_WHEN_CHARGING", True)
-    core_job = _core_job_runtime_snapshot()
-    active_type = str(core_job.get("active_type") or "").strip().lower()
-    heavy_types = {
-        "worker_update", "self_update",
-        "boot_repair", "audio_convert", "media_convert", "maintenance_heavy",
-    }
-    reasons: list[str] = []
-    if active_type in heavy_types:
-        reasons.append(f"tarefa pesada ativa: {active_type or 'unknown'}")
-    if memory_mb is not None and memory_mb < min_memory_mb:
-        reasons.append(f"memória disponível baixa: {memory_mb} MB < {min_memory_mb} MB")
-    try:
-        if temperature is not None and float(temperature) > max_temperature:
-            reasons.append(f"bateria aquecida: {float(temperature):.1f} °C > {max_temperature:.1f} °C")
-    except (TypeError, ValueError):
-        pass
-    try:
-        if level is not None and float(level) < min_battery and not (charging and allow_low_when_charging):
-            reasons.append(f"bateria baixa: {float(level):.0f}% < {min_battery}%")
-    except (TypeError, ValueError):
-        pass
+    active_type = str(core_job.get("active_type") or "").strip().lower() if isinstance(core_job, dict) else ""
     return {
-        "ok": not reasons,
-        "reason": "; ".join(reasons) if reasons else "ok",
+        "ok": True,
+        "reason": "ok",
+        "limits_enforced": False,
         "memory_available_mb": memory_mb,
-        "minimum_memory_mb": min_memory_mb,
+        "minimum_memory_mb": 0,
         "battery_level": level,
         "battery_temperature_c": temperature,
         "battery_source": str((battery or {}).get("source") or "") if isinstance(battery, dict) else "",
@@ -2810,14 +2801,16 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
         try:
             resources = _teto_resource_snapshot()
         except Exception as exc:
-            resources = {"ok": False, "reason": _short_text(exc, limit=180)}
+            resources = {"ok": True, "reason": "ok", "limits_enforced": False,
+                         "telemetry_error": _short_text(exc, limit=180)}
     result["resources"] = resources
     result["ttv_performance_protocol"] = 2
     result["ttv_voices"] = []
     for voice_id, state in states.items():
         result["ttv_voices"].append({
             "id": voice_id, "name": _ttv_voice_name(voice_id),
-            "ready": bool(state.get("ready") and resources.get("ok", True)),
+            # Readiness describes the installed renderer and voicebank only.
+            "ready": bool(state.get("ready")),
             "available": bool(state.get("available")), "enabled": bool(state.get("enabled")),
             "supports_personal_rate": True, "languages": list(state.get("ttv_languages") or []),
             "fingerprint": str(state.get("fingerprint") or ""),
@@ -2981,8 +2974,7 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
         deps["android_native_error"] = _short_text(android_status.get("last_error"), limit=100)
     teto_status = _teto_status()
     deps["teto"] = teto_status
-    teto_resources = teto_status.get("resources") if isinstance(teto_status.get("resources"), dict) else {}
-    deps["teto_tts"] = bool(teto_status.get("ready") and teto_resources.get("ok", True))
+    deps["teto_tts"] = bool(teto_status.get("ready"))
     deps["teto_enabled"] = bool(teto_status.get("enabled"))
     deps["teto_fingerprint"] = str(teto_status.get("fingerprint") or "")[:64]
     if teto_status.get("last_error"):
@@ -3002,15 +2994,14 @@ def _teto_dependency_snapshot_fast() -> dict[str, Any]:
     """
     profile = _current_core_worker_profile()
     teto_status = _teto_status()
-    teto_resources = teto_status.get("resources") if isinstance(teto_status.get("resources"), dict) else {}
     return {
         "profile": profile,
         "turbo": profile == "turbo",
         "teto": teto_status,
-        "teto_tts": bool(teto_status.get("ready") and teto_resources.get("ok", True)),
+        "teto_tts": bool(teto_status.get("ready")),
         "teto_enabled": bool(teto_status.get("enabled")),
         "teto_fingerprint": str(teto_status.get("fingerprint") or "")[:64],
-        "ok": bool(teto_status.get("ready") and teto_resources.get("ok", True)),
+        "ok": bool(teto_status.get("ready")),
         "missing": [],
     }
 
@@ -5817,16 +5808,16 @@ class WorkerHandler(BaseHTTPRequestHandler):
             teto_state = _ttv_voice_state(deps.get("teto") or {}, controls["ttv_voice_id"])
             # Aggregate readiness keeps TTV visible when either character is
             # installed, but admission must always check the requested voice.
-            voice_ready = bool(teto_state.get("ready") and (teto_state.get("resources") or {}).get("ok", True))
+            voice_ready = bool(teto_state.get("ready"))
             if not voice_ready:
-                reason = teto_state.get("last_error") or (teto_state.get("resources") or {}).get("reason") or "voicebank ou resampler indisponível"
+                reason = teto_state.get("last_error") or "voicebank ou resampler indisponível"
                 name = _ttv_voice_name(controls["ttv_voice_id"])
                 raise RuntimeError(f"{name} indisponível: {_short_text(reason, limit=180)}")
             required_protocol = 2 if isinstance(performance.get("score"), dict) and "preset" in performance["score"] else 1
             if performance and isinstance((deps.get("teto") or {}).get("ttv_voices"), list) and int(teto_state.get("ttv_performance_protocol") or 0) < required_protocol:
                 raise RuntimeError("vocaloid sem suporte MIDI/efeitos TTV; use ESPER e atualize o runtime")
         if teto_request and not deps.get("teto_tts"):
-            reason = teto_state.get("last_error") or (teto_state.get("resources") or {}).get("reason") or "voicebank ou resampler indisponível"
+            reason = teto_state.get("last_error") or "voicebank ou resampler indisponível"
             raise RuntimeError(f"Teto indisponível: {_short_text(reason, limit=180)}")
         dependency_ms = (time.monotonic() - dependency_started) * 1000.0
         available = _tts_agent_available_engines(deps)

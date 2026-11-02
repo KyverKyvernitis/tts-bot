@@ -35,7 +35,7 @@ def test_unknown_backend_fails_before_loading_a_renderer(tts, monkeypatch):
         tts.get_teto_renderer()
 
 
-def test_legacy_remote_settings_do_not_bypass_phone_resource_guard(tts, monkeypatch):
+def test_legacy_remote_settings_keep_utau_readiness_independent_of_resource_diagnostics(tts, monkeypatch):
     monkeypatch.setenv("PHONE_WORKER_TETO_ENABLED", "true")
     monkeypatch.setenv("PHONE_WORKER_TETO_BACKEND", "voicepeak")
     monkeypatch.setenv("PHONE_WORKER_VOICEPEAK_URL", "http://retired.invalid")
