@@ -90,6 +90,8 @@ class TetoRenderer:
         self._lock = threading.Lock()
         self._reading_context = threading.local()
         self._english_index_lock = threading.Lock()
+        self._index_load_lock = threading.RLock()
+        self._status_lock = threading.RLock()
         self._english_index: VoicebankIndex | None = None
         self._english_index_path = ""
         self._index: VoicebankIndex | None = None
@@ -214,14 +216,18 @@ class TetoRenderer:
         if not path.is_dir():
             raise TetoConfigurationError(f"Inglês exige o banco de voz inglês da {self._voice_label()} instalado")
         resolved = str(path.resolve())
-        with self._english_index_lock:
+        with self._english_index_lock, self._index_load_lock:
             if self._english_index is None or self._english_index_path != resolved:
                 minimum = max(1, self._env_int("PHONE_WORKER_TETO_ENGLISH_MIN_ALIASES", 500))
                 try:
-                    index = VoicebankIndex.load(resolved, minimum_aliases=minimum,
-                                                alias_suffix=self._alias_suffix(),
-                                                case_sensitive=self.voice_id != "kasane-teto",
-                                                **({'pitch_map': True} if self.voice_id == 'anna-nyui' else {}))
+                    if (self._index is not None and self._index_path == resolved and
+                            getattr(self._index, 'alias_count', 0) >= minimum):
+                        index = self._index
+                    else:
+                        index = VoicebankIndex.load(resolved, minimum_aliases=minimum,
+                                                    alias_suffix=self._alias_suffix(),
+                                                    case_sensitive=self.voice_id != "kasane-teto",
+                                                    **({'pitch_map': True} if self.voice_id == 'anna-nyui' else {}))
                 except Exception as exc:
                     raise TetoConfigurationError(f"banco de voz inglês indisponível: {exc}") from exc
                 self._english_index = index
@@ -829,6 +835,10 @@ class TetoRenderer:
             return client
 
     def _load_index(self) -> VoicebankIndex:
+        with self._index_load_lock:
+            return self._load_index_locked()
+
+    def _load_index_locked(self) -> VoicebankIndex:
         candidates = self._voicebank_candidates()
         if not candidates:
             raise TetoConfigurationError("nenhuma voicebank Teto configurada")
@@ -844,10 +854,14 @@ class TetoRenderer:
                 self._voicebank_fallback_reason = "; ".join(errors)[:420]
                 return self._index
             try:
-                index = VoicebankIndex.load(resolved, minimum_aliases=minimum_aliases,
-                                            alias_suffix=self._alias_suffix(),
-                                            case_sensitive=self.voice_id != "kasane-teto",
-                                            **({'pitch_map': True} if self.voice_id == 'anna-nyui' else {}))
+                if (self._english_index is not None and self._english_index_path == resolved and
+                        getattr(self._english_index, 'alias_count', 0) >= minimum_aliases):
+                    index = self._english_index
+                else:
+                    index = VoicebankIndex.load(resolved, minimum_aliases=minimum_aliases,
+                                                alias_suffix=self._alias_suffix(),
+                                                case_sensitive=self.voice_id != "kasane-teto",
+                                                **({'pitch_map': True} if self.voice_id == 'anna-nyui' else {}))
             except Exception as exc:
                 errors.append(f"{profile}: {type(exc).__name__}: {exc}")
                 if self._voicebank_mode() != "auto":
@@ -862,6 +876,12 @@ class TetoRenderer:
         raise TetoConfigurationError(detail[:420])
 
     def status(self, *, force: bool = False) -> dict[str, Any]:
+        # A timed-out HTTP caller cannot cancel its Python status handler.
+        # Share the first bank load so retries cannot trigger parallel scans.
+        with self._status_lock:
+            return self._status_locked(force=force)
+
+    def _status_locked(self, *, force: bool = False) -> dict[str, Any]:
         now = time.monotonic()
         ttl = max(1, self._env_int("PHONE_WORKER_TETO_STATUS_CACHE_SECONDS", 15))
         if not force and self._last_status and now - self._last_status_at <= ttl:
@@ -882,7 +902,8 @@ class TetoRenderer:
         else:
             try:
                 command = self._resampler_command()
-                if self._getenv('PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256') and self._verified_native_straycat(command) is None:
+                native = self._verified_native_straycat(command)
+                if self._getenv('PHONE_WORKER_TETO_NATIVE_RESAMPLER_SHA256') and native is None:
                     raise TetoConfigurationError('o Straycat mudou ou não é nativo; execute a configuração do Straycat novamente')
                 if not shutil.which("ffmpeg"):
                     raise TetoConfigurationError("ffmpeg não encontrado")
@@ -898,10 +919,11 @@ class TetoRenderer:
                     "available": True,
                     "ready": True,
                     "resampler": " ".join(command[:2]),
-                    "native_resampler_verified": self._verified_native_straycat(command) is not None,
+                    "native_resampler_verified": native is not None,
+                    "native_resampler_sha256": native[1] if native is not None else "",
                     "resampler_backend": "straycat-rs" if (
                         Path(command[0]).name.startswith("straycat") or
-                        self._verified_native_straycat(command) is not None) else (
+                        native is not None) else (
                         "esper" if any(Path(item).name in {"resampler.py", "esper-utau-resampler"}
                                        for item in command[:2]) else "custom"),
                     "length_mode": self._length_mode(),
@@ -917,7 +939,7 @@ class TetoRenderer:
                 })
             except Exception as exc:
                 result["last_error"] = f"{type(exc).__name__}: {exc}"[:220]
-        self._last_status_at = now
+        self._last_status_at = time.monotonic()
         self._last_status = dict(result)
         return result
 

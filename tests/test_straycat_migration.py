@@ -30,6 +30,7 @@ def migration(monkeypatch, tmp_path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setattr(module.Path, 'home', lambda: tmp_path / 'home')
+    monkeypatch.setattr(module, 'report_path', lambda: tmp_path / 'report.json')
     return module
 
 
@@ -58,7 +59,7 @@ def installed(migration, monkeypatch, tmp_path):
     monkeypatch.setattr(migration.subprocess, 'run', probe)
     runtime = tmp_path / 'worker runtime'
     (runtime / 'teto_renderer').mkdir(parents=True)
-    (runtime / 'phone_worker.py').write_text('PHONE_WORKER_VERSION = "1.11.48"\n')
+    (runtime / 'phone_worker.py').write_text('PHONE_WORKER_VERSION = "1.11.49"\n')
     (runtime / 'teto_renderer/renderer.py').write_text('def _native_source_lease(): pass\n')
     (runtime / 'start-phone-worker.sh').write_text('#!/bin/bash\nexit 0\n')
     banks = {}
@@ -252,7 +253,7 @@ def test_pururu_does_not_use_an_english_bank_as_its_portuguese_source(migration,
 @pytest.mark.parametrize('version', ['1.11.47', '1.10.99', '1.9.999'])
 def test_old_installed_runtime_is_rejected_before_touching_env(migration, installed, version):
     (installed.runtime / 'phone_worker.py').write_text(f'PHONE_WORKER_VERSION = "{version}"\n')
-    with pytest.raises(migration.MigrationError, match='1.11.48'):
+    with pytest.raises(migration.MigrationError, match='1.11.49'):
         _migrate(migration, installed)
     assert installed.env.read_bytes() == installed.raw
     assert installed.probes == []
@@ -261,7 +262,7 @@ def test_old_installed_runtime_is_rejected_before_touching_env(migration, instal
 
 def test_version_alone_without_native_runtime_support_is_rejected(migration, installed):
     (installed.runtime / 'teto_renderer/renderer.py').write_text('# older renderer\n')
-    with pytest.raises(migration.MigrationError, match='1.11.48'):
+    with pytest.raises(migration.MigrationError, match='1.11.49'):
         _migrate(migration, installed)
     assert installed.env.read_bytes() == installed.raw
 
@@ -331,7 +332,7 @@ class _Response(io.BytesIO):
 def _health(voices, **changes):
     rows = [{'id': voice, 'ready': True, 'native_resampler_verified': True,
              'length_mode': 'post-consonant'} for voice in voices]
-    health = {'version': '1.11.48', 'tts_agent': {'teto': {'ttv_voices': rows}}}
+    health = {'version': '1.11.49', 'tts_agent': {'teto': {'ttv_voices': rows}}}
     health.update(changes)
     return health
 
@@ -413,7 +414,7 @@ def test_warmup_requires_ready_verified_native_health_before_synthesis(migration
 
 def test_warmup_rejects_a_stale_live_worker_even_with_a_new_runtime_on_disk(migration, monkeypatch):
     requests, _ = _mock_worker(migration, monkeypatch, _health(['anna-nyui'], version='1.11.47'))
-    with pytest.raises(migration.MigrationError, match='1.11.48'):
+    with pytest.raises(migration.MigrationError, match='1.11.49'):
         migration.warmup({'PHONE_WORKER_PORT': '8766'}, ['anna-nyui'])
     assert len(requests) == 1
 
@@ -447,30 +448,29 @@ def test_warmup_cannot_follow_a_redirect(migration):
 
 
 def test_cli_restarts_then_warms_teto_and_enabled_voices_by_default(migration, installed, monkeypatch, capsys):
-    original_probe = migration.subprocess.run
     calls = []
+    process = {'pid': 123, 'configuration_verified': True}
 
-    def run(command, **kwargs):
-        if command[-1] == '--version':
-            return original_probe(command, **kwargs)
-        calls.append(('restart', command, kwargs))
-        return subprocess.CompletedProcess(command, 0)
+    def restart(values, runtime, diagnostics):
+        calls.append(('restart', values, runtime))
+        assert values['_configuration_path'] == str(installed.env)
+        assert values['PHONE_WORKER_MIKU_RESAMPLER_COMMAND'] == shlex.join([str(installed.engine)])
+        return process
 
-    def warmup(values, voices):
+    def warmup(values, voices, **kwargs):
         calls.append(('warmup', values, voices))
+        assert kwargs['expected_process'] is process
+        assert kwargs['engine_sha'] == hashlib.sha256(installed.engine.read_bytes()).hexdigest()
         assert installed.env.read_bytes() != installed.raw
         return [{'voice_id': voice, 'ok': True} for voice in voices]
 
-    monkeypatch.setattr(migration.subprocess, 'run', run)
+    monkeypatch.setattr(migration, 'restart_worker', restart)
     monkeypatch.setattr(migration, 'warmup', warmup)
     assert migration.main(['--env', str(installed.env), '--runtime-dir', str(installed.runtime)]) == 0
     captured = capsys.readouterr()
     report = json.loads(captured.out)
     assert report['ok'] and report['phone_synthesis_verified']
     assert [call[0] for call in calls] == ['restart', 'warmup']
-    assert calls[0][1] == ['bash', str(installed.runtime / 'start-phone-worker.sh'), '--restart']
-    assert calls[0][2]['env']['PHONE_WORKER_ENV'] == str(installed.env)
-    assert calls[0][2]['timeout'] == 90
     assert report['voices'] == ['hatsune-miku', 'anna-nyui', 'pururu-purpura']
     assert calls[1][2] == ['kasane-teto', 'hatsune-miku', 'anna-nyui', 'pururu-purpura']
     assert 'phone-token-DO-NOT-PRINT' not in captured.out + captured.err
@@ -491,13 +491,10 @@ def test_cli_dry_run_or_no_restart_does_not_restart_or_claim_live_synthesis(
 
 
 def test_cli_redacts_auth_token_from_warmup_errors(migration, installed, monkeypatch, capsys):
-    def failed_warmup(values, voices):
+    def failed_warmup(values, voices, **kwargs):
         raise ValueError('worker refused Authorization: Bearer ' + values['PHONE_WORKER_TOKEN'])
 
-    original_probe = migration.subprocess.run
-    monkeypatch.setattr(migration.subprocess, 'run', lambda command, **kwargs:
-                        original_probe(command, **kwargs) if command[-1] == '--version'
-                        else subprocess.CompletedProcess(command, 0))
+    monkeypatch.setattr(migration, 'restart_worker', lambda *args: {'pid': 123})
     monkeypatch.setattr(migration, 'warmup', failed_warmup)
     assert migration.main(['--env', str(installed.env), '--runtime-dir', str(installed.runtime)]) == 1
     captured = capsys.readouterr()

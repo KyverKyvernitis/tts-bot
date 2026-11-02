@@ -137,7 +137,7 @@ _PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.48"
+PHONE_WORKER_VERSION = "1.11.49"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "termux"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2461,6 +2461,18 @@ _TTV_SHARED_RENDER_SETTINGS = frozenset({
 })
 
 
+def _ttv_renderer_configuration_digest() -> str:
+    # Attest only renderer settings, never transport credentials. This also
+    # works when Android denies the installer access to /proc/PID/environ.
+    suffixes = {"ENABLED", "VOICEBANK_DIR", "ENGLISH_VOICEBANK_DIR", "RESAMPLER_COMMAND",
+                "NATIVE_RESAMPLER_SHA256", "LENGTH_MODE", "BASE_PITCH", "SPEECH_RATE", "FLAGS",
+                "VELOCITY", "MODULATION", "TEMPO", "RENDER_THREADS", "FRAGMENT_CACHE_MB",
+                "PCM_CACHE_MB", "NATIVE_ANALYSIS_CACHE_MB"}
+    selected = {f"PHONE_WORKER_{prefix}_{suffix}": os.getenv(f"PHONE_WORKER_{prefix}_{suffix}", "")
+        for prefix in ("TETO", "MIKU", "ANNA", "PURURU") for suffix in suffixes}
+    return hashlib.sha256(json.dumps(selected, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def _ttv_voice_render_value(prefix: str, suffix: str, default: str) -> str:
     value = os.getenv(f"PHONE_WORKER_{prefix}_{suffix}")
     if value is not None and (value.strip() or suffix == "FLAGS"):
@@ -2783,6 +2795,8 @@ def _teto_status(*, force: bool = False) -> dict[str, Any]:
             "resampler": state.get("resampler", ""),
             "resampler_backend": state.get("resampler_backend", ""),
             "native_resampler_verified": bool(state.get("native_resampler_verified")),
+            **({"native_resampler_sha256": state["native_resampler_sha256"]}
+               if state.get("native_resampler_sha256") else {}),
             "length_mode": state.get("length_mode", ""),
             "render_threads": state.get("render_threads"),
             "voicebank_profile": state.get("voicebank_profile", ""), "last_error": state.get("last_error", ""),
@@ -4669,6 +4683,15 @@ class WorkerHandler(BaseHTTPRequestHandler):
             host, port = self._bind_host_port()
             _json_response(self, HTTPStatus.OK, _local_agent_status_payload(host=host, port=port))
             return
+        if path == "/tts-agent/configuration":
+            if not self._require_auth():
+                return
+            _json_response(self, HTTPStatus.OK, {
+                "version": PHONE_WORKER_VERSION, "pid": os.getpid(), "process_started_at": START_TIME,
+                "runtime_directory": str(Path(__file__).resolve().parent),
+                "renderer_configuration_sha256": _ttv_renderer_configuration_digest(),
+            })
+            return
         if path in {"/tts-agent/health", "/tts-agent/status"}:
             if not self._require_auth():
                 return
@@ -4681,6 +4704,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     "runtime_kind": "termux",
                     "pid": os.getpid(),
                     "process_started_at": START_TIME,
+                    "runtime_directory": str(Path(__file__).resolve().parent),
+                    "renderer_configuration_sha256": _ttv_renderer_configuration_digest(),
                     "connection": _ssh_connection_snapshot(),
                     "tts_agent": agent,
                 }

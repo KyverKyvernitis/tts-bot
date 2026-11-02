@@ -57,6 +57,8 @@ class WorldlineRenderer(TetoRenderer):
         self._lock = threading.Lock()
         self._reading_context = threading.local()
         self._english_index_lock = threading.Lock()
+        self._index_load_lock = threading.RLock()
+        self._status_lock = threading.RLock()
         self._english_index = None
         self._english_index_path = ""
         self._index = None

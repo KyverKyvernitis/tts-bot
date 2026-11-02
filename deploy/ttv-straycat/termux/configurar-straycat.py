@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 
-MINIMUM_WORKER = (1, 11, 48)
+MINIMUM_WORKER = (1, 11, 49)
 MAX_ENV = 256 * 1024
 VOICES = {
     'MIKU': ('hatsune-miku', 'hatsune-miku-english'),
@@ -125,8 +125,8 @@ def baseline_engine(values):
 
 def installed_runtime(values, explicit=None):
     candidates = [explicit] if explicit else [
-        Path.home() / '.core-worker-runtime/current',
-        Path(values.get('PHONE_WORKER_DIR') or Path.home() / 'phone-worker'),
+        phone_path(values.get('PHONE_WORKER_RUNTIME_ROOT') or Path.home() / '.core-worker-runtime') / 'current',
+        phone_path(values.get('PHONE_WORKER_DIR') or Path.home() / 'phone-worker'),
     ]
     for directory in candidates:
         path = Path(directory) / 'phone_worker.py'
@@ -138,7 +138,7 @@ def installed_runtime(values, explicit=None):
             renderer = Path(directory) / 'teto_renderer/renderer.py'
             if renderer.is_file() and '_native_source_lease' in regular_bytes(renderer, 2 * 1024 * 1024).decode('utf-8'):
                 return str(directory)
-    raise MigrationError('aplique o patch do bot e aguarde o worker 1.11.48 antes desta migração')
+    raise MigrationError('aplique o patch do bot e aguarde o worker 1.11.49 antes desta migração')
 
 
 def publish_environment(path, original, updated):
@@ -210,14 +210,219 @@ def migrate(path, *, dry_run=False, runtime_dir=None):
         os.close(descriptor)
 
 
+def phone_path(value):
+    return Path(str(value).replace('${HOME}', str(Path.home())).replace('$HOME', str(Path.home()))).expanduser()
+
+
+def renderer_configuration_digest(values):
+    suffixes = {'ENABLED', 'VOICEBANK_DIR', 'ENGLISH_VOICEBANK_DIR', 'RESAMPLER_COMMAND',
+                'NATIVE_RESAMPLER_SHA256', 'LENGTH_MODE', *BASELINE}
+    selected = {f'PHONE_WORKER_{prefix}_{suffix}': str(values.get(f'PHONE_WORKER_{prefix}_{suffix}',
+        os.getenv(f'PHONE_WORKER_{prefix}_{suffix}', '')))
+        .replace('${HOME}', str(Path.home())).replace('$HOME', str(Path.home()))
+        for prefix in ('TETO', *VOICES) for suffix in suffixes}
+    return hashlib.sha256(json.dumps(selected, sort_keys=True).encode('utf-8')).hexdigest()
+
+
+def process_snapshot(values, expected_runtime=None):
+    """Read only the selected worker's identity and whitelisted renderer keys."""
+    worker = phone_path(values.get('PHONE_WORKER_DIR') or Path.home() / 'phone-worker')
+    state_root = phone_path(values.get('PHONE_WORKER_STATE_DIR') or Path.home() / '.local/state/core-worker-phone-worker')
+    result = {'pid': None, 'identity_verified': False, 'configuration_verified': False,
+              'configuration_mismatches': [], 'runtime_matches': False}
+    try:
+        state = json.loads(regular_bytes(state_root / 'runtime-status.json', 65536))
+        pid_path = phone_path(values.get('PHONE_WORKER_PID_FILE') or worker / 'phone-worker.pid')
+        pid = int(regular_bytes(pid_path, 32).strip())
+        if pid <= 1 or pid != int(state.get('pid') or 0):
+            return result
+        result.update(pid=pid, started_at=state.get('started_at'), http_port=state.get('http_port'))
+        os.kill(pid, 0)
+        arguments = (Path('/proc') / str(pid) / 'cmdline').read_bytes().split(b'\x00')
+        names = [Path(value.decode('utf-8', errors='replace')).name for value in arguments if value]
+        if not any(name.startswith('python') for name in names) or 'phone_worker.py' not in names:
+            return result
+        result['identity_verified'] = bool(state.get('runtime_kind') == 'termux' and
+            state.get('source') == 'termux-phone-worker' and state.get('control_plane_alive') is True and
+            1024 <= int(state.get('http_port') or 0) <= 65535 and
+            0 <= time.time() - float(state.get('updated_at') or 0) <= 90)
+        result['expected_runtime'] = str(Path(expected_runtime).resolve()) if expected_runtime else None
+        try:
+            cwd = Path(os.readlink(Path('/proc') / str(pid) / 'cwd')).resolve()
+            result['runtime_matches'] = expected_runtime is None or cwd == Path(expected_runtime).resolve()
+        except PermissionError:
+            result['runtime_pending_health'] = True
+        try:
+            with (Path('/proc') / str(pid) / 'environ').open('rb') as source:
+                raw = source.read(1024 * 1024 + 1)
+        except PermissionError:
+            result['configuration_pending_health'] = True
+            return result
+        if len(raw) > 1024 * 1024:
+            return result
+        actual = {}
+        for item in raw.split(b'\x00'):
+            key, separator, value = item.partition(b'=')
+            if separator:
+                actual[key.decode('utf-8', errors='replace')] = value.decode('utf-8', errors='replace')
+        suffixes = {'ENABLED', 'VOICEBANK_DIR', 'ENGLISH_VOICEBANK_DIR', 'RESAMPLER_COMMAND',
+                    'NATIVE_RESAMPLER_SHA256', 'LENGTH_MODE', *BASELINE}
+        keys = {f'PHONE_WORKER_{prefix}_{suffix}' for prefix in ('TETO', *VOICES) for suffix in suffixes}
+        mismatches = []
+        for key in sorted(keys.intersection(values)):
+            expected = values[key].replace('${HOME}', str(Path.home())).replace('$HOME', str(Path.home()))
+            if actual.get(key) != expected:
+                mismatches.append(key)
+        result['configuration_mismatches'] = mismatches
+        result['configuration_verified'] = not mismatches
+    except (OSError, ValueError, TypeError) as error:
+        result['inspection_error'] = type(error).__name__
+    return result
+
+
+def startup_lock_state(values):
+    worker = phone_path(values.get('PHONE_WORKER_DIR') or Path.home() / 'phone-worker')
+    directory = phone_path(values.get('PHONE_WORKER_LOCK_DIR') or worker / '.phone-worker-start.lock')
+    result = {'exists': directory.exists(), 'owner_alive': False, 'owner_pid': None}
+    if not result['exists']:
+        return result
+    try:
+        pid = int(regular_bytes(directory / 'owner.pid', 32).strip())
+        if pid > 1:
+            os.kill(pid, 0)
+            arguments = (Path('/proc') / str(pid) / 'cmdline').read_bytes().split(b'\x00')
+            if any(Path(arg.decode('utf-8', errors='replace')).name == 'start-phone-worker.sh'
+                   for arg in arguments if arg):
+                result.update(owner_alive=True, owner_pid=pid)
+    except (OSError, ValueError):
+        pass
+    return result
+
+
+def restart_worker(values, runtime, diagnostics, *, budget=150):
+    """Wait for a live launcher, then prove the new worker loaded this env."""
+    deadline = time.monotonic() + budget
+    before = process_snapshot(values, runtime)
+    diagnostics.update(stage='waiting_startup_lock', previous_pid=before.get('pid'), restart_attempts=0)
+    worker = phone_path(values.get('PHONE_WORKER_DIR') or Path.home() / 'phone-worker')
+    start = worker / 'start-phone-worker.sh'
+    if not start.is_file():
+        raise MigrationError('configuração salva; launcher do worker não encontrado')
+    environment = dict(os.environ)
+    environment['PHONE_WORKER_ENV'] = values['_configuration_path']
+    attempts = 0
+    next_attempt = time.monotonic()
+    announced_lock = False
+    while time.monotonic() < deadline:
+        current = process_snapshot(values, runtime)
+        if current.get('identity_verified') and (current.get('runtime_pending_health') or
+                                                  current.get('configuration_pending_health')):
+            try:
+                configuration = local_configuration(values, current)
+                confirm_configuration(configuration, values, current)
+                current.update(configuration_verified=True, runtime_matches=True,
+                               configuration_verified_via='authenticated_local_endpoint')
+            except (OSError, ValueError, urllib.error.URLError) as error:
+                diagnostics['configuration_probe_error'] = type(error).__name__
+        diagnostics['process'] = current
+        runtime_ok = current.get('runtime_matches')
+        config_ok = current.get('configuration_verified')
+        if current.get('identity_verified') and runtime_ok and config_ok:
+            diagnostics.update(stage='process_verified', active_pid=current['pid'],
+                               process_restarted=(current.get('pid'), current.get('started_at')) !=
+                                   (before.get('pid'), before.get('started_at')))
+            return current
+        lock = startup_lock_state(values)
+        diagnostics['startup_lock'] = lock
+        if lock['owner_alive']:
+            diagnostics['stage'] = 'waiting_startup_lock'
+            if not announced_lock:
+                print('Aguardando a inicialização que já está em andamento...', file=sys.stderr, flush=True)
+                announced_lock = True
+            time.sleep(min(.25, max(0, deadline - time.monotonic())))
+            continue
+        if attempts < 3 and time.monotonic() >= next_attempt:
+            diagnostics['stage'] = 'requesting_restart'
+            attempts += 1
+            diagnostics['restart_attempts'] = attempts
+            try:
+                completed = subprocess.run(['bash', str(start), '--restart'], env=environment,
+                    timeout=max(1, min(90, deadline - time.monotonic())), check=False)
+                diagnostics['launcher_exit_code'] = completed.returncode
+            except subprocess.TimeoutExpired:
+                # The process we launched may wait on a slow companion even
+                # after the official worker started. Inspect that worker next.
+                diagnostics['launcher_timed_out'] = True
+            next_attempt = time.monotonic() + 45
+        diagnostics['stage'] = 'verifying_live_process'
+        time.sleep(min(.5, max(0, deadline - time.monotonic())))
+    if diagnostics.get('startup_lock', {}).get('owner_alive'):
+        raise MigrationError('a inicialização anterior continua em andamento; nenhum lock vivo foi apagado')
+    raise MigrationError('o processo ativo ainda não confirmou a nova configuração; consulte o diagnóstico')
+
+
+def report_path():
+    downloads = Path('/storage/emulated/0/Download')
+    return (downloads if downloads.is_dir() else Path.home()) / 'ttv-straycat-recuperacao.json'
+
+
+def save_report(report, path):
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix='.ttv-diagnostico-', dir=path.parent)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as target:
+            json.dump(report, target, ensure_ascii=False, indent=2)
+            target.write('\n')
+        os.replace(name, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name)
+
+
+def redact_report(value, secrets):
+    if isinstance(value, str):
+        for secret in secrets:
+            if secret:
+                value = value.replace(secret, '[oculto]')
+        return value
+    if isinstance(value, list):
+        return [redact_report(item, secrets) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_report(item, secrets) for key, item in value.items()}
+    return value
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         raise MigrationError('a consulta local tentou redirecionar para outro endereço')
 
 
-def warmup(values, voices, *, timeout=124):
+def local_configuration(values, process):
+    port = int(process.get('http_port') or values.get('PHONE_WORKER_PORT') or 8766)
+    if not 1024 <= port <= 65535:
+        raise MigrationError('porta local do worker inválida')
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    request = urllib.request.Request(f'http://127.0.0.1:{port}/tts-agent/configuration',
+        headers={'Authorization': 'Bearer ' + values.get('PHONE_WORKER_TOKEN', '')})
+    with opener.open(request, timeout=2) as response:
+        return json.loads(response.read(65536))
+
+
+def confirm_configuration(health, values, process):
+    if health.get('pid') != process.get('pid') or health.get('process_started_at') != process.get('started_at'):
+        raise MigrationError('o processo mudou durante a verificação; execute novamente')
+    if health.get('renderer_configuration_sha256') != renderer_configuration_digest(values):
+        raise MigrationError('o processo ativo não carregou a configuração salva')
+    if process.get('expected_runtime') and health.get('runtime_directory') != process['expected_runtime']:
+        raise MigrationError('o processo ativo não está usando o runtime atualizado')
+
+
+def warmup(values, voices, *, timeout=124, expected_process=None, engine_sha=None, diagnostics=None):
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics['stage'] = 'checking_voices'
     port = int(values.get('PHONE_WORKER_PORT') or 8766)
-    state_root = Path(values.get('PHONE_WORKER_STATE_DIR') or Path.home() / '.local/state/core-worker-phone-worker')
+    state_root = phone_path(values.get('PHONE_WORKER_STATE_DIR') or Path.home() / '.local/state/core-worker-phone-worker')
     with contextlib.suppress(OSError, ValueError):
         state = json.loads(regular_bytes(state_root / 'runtime-status.json', 65536))
         if state.get('control_plane_alive') and state.get('http_port'):
@@ -232,13 +437,31 @@ def warmup(values, voices, *, timeout=124):
         health = json.loads(response.read(2 * 1024 * 1024))
     version = tuple(int(number) for number in str(health.get('version', '')).split('.')[:3])
     if version < MINIMUM_WORKER:
-        raise MigrationError('o processo ativo ainda não é o worker 1.11.48; aguarde a atualização')
+        raise MigrationError('o processo ativo ainda não é o worker 1.11.49; aguarde a atualização')
+    if expected_process:
+        confirm_configuration(health, values, expected_process)
     rows = {row['id']: row for row in ((health.get('tts_agent') or {}).get('teto') or {}).get('ttv_voices', [])}
-    results = []
+    diagnostics['voices'] = [{key: rows.get(voice, {}).get(key) for key in (
+        'id', 'ready', 'available', 'enabled', 'native_resampler_verified', 'native_resampler_sha256',
+        'resampler', 'resampler_backend', 'length_mode', 'last_error')} for voice in voices]
+    for voice, row in zip(voices, diagnostics['voices']):
+        row['id'] = voice
+    diagnostics['resources'] = ((health.get('tts_agent') or {}).get('teto') or {}).get('resources', {})
+    pending = []
     for voice in voices:
         row = rows.get(voice, {})
-        if not row.get('ready') or not row.get('native_resampler_verified') or row.get('length_mode') != 'post-consonant':
-            raise MigrationError(f'{voice} ainda não confirmou o Straycat nativo pronto no worker')
+        length = values.get('PHONE_WORKER_TETO_LENGTH_MODE') if voice == 'kasane-teto' else 'post-consonant'
+        if length not in ('post-consonant', 'total'):
+            length = 'post-consonant'
+        if (not row.get('ready') or not row.get('native_resampler_verified') or row.get('length_mode') != length
+                or (engine_sha and row.get('native_resampler_sha256') and row['native_resampler_sha256'] != engine_sha)):
+            pending.append(voice)
+    if pending:
+        diagnostics['stage'] = 'voices_not_ready'
+        raise MigrationError('vozes ainda não confirmaram o Straycat nativo pronto: ' + ', '.join(pending))
+    results = []
+    for voice in voices:
+        diagnostics.update(stage='warming_voice', warming_voice=voice, completed_warmup=list(results))
         body = {'engine': 'teto', 'preferred_engine': 'teto', 'text': 'Olá. Como você está?',
                 'ttv_voice_id': voice, 'ttv_language': 'pt-BR', 'ttv_pitch_semitones': 0.0,
                 'ttv_speech_rate': 1.0, 'ttv_preview': True, 'timeout_seconds': 120,
@@ -255,6 +478,8 @@ def warmup(values, voices, *, timeout=124):
                     response.headers.get('X-Core-Worker-TTV-Language') != 'pt-BR'):
                 raise MigrationError(f'o worker não confirmou a amostra de {voice}')
         results.append({'voice_id': voice, 'ok': True, 'seconds': round(time.monotonic() - started, 3)})
+    diagnostics.update(stage='verified', completed_warmup=list(results))
+    diagnostics.pop('warming_voice', None)
     return results
 
 
@@ -265,24 +490,23 @@ def main(argv=None):
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--no-restart', action='store_true')
     parser.add_argument('--no-warmup', action='store_true')
+    parser.add_argument('--report', type=Path, default=report_path())
     options = parser.parse_args(argv)
-    report = {'ok': False, 'configuration_changed': False}
+    report = {'ok': False, 'configuration_changed': False, 'phone_synthesis_verified': False}
     values = {}
     try:
         report, values = migrate(options.env, dry_run=options.dry_run, runtime_dir=options.runtime_dir)
+        report['phone_synthesis_verified'] = False
+        diagnostics = report.setdefault('diagnostics', {})
         if not options.dry_run and not options.no_restart:
-            worker = Path(values.get('PHONE_WORKER_DIR') or Path.home() / 'phone-worker')
-            start = worker / 'start-phone-worker.sh'
-            if not start.is_file():
-                raise MigrationError('configuração salva; o launcher do worker não foi encontrado para reiniciar')
+            _, values = read_environment(options.env)
+            values['_configuration_path'] = str(options.env.expanduser().absolute())
             print('Reiniciando o worker com o Straycat...', file=sys.stderr, flush=True)
-            environment = dict(os.environ)
-            environment['PHONE_WORKER_ENV'] = str(options.env.expanduser().absolute())
-            restarted = subprocess.run(['bash', str(start), '--restart'], env=environment, timeout=90, check=False)
-            if restarted.returncode:
-                raise MigrationError('configuração salva; o worker não confirmou o reinício')
+            process = restart_worker(values, report['runtime'], diagnostics)
         if not options.dry_run and not options.no_warmup and not options.no_restart:
-            report['warmup'] = warmup(values, ['kasane-teto', *report['voices']])
+            print('Conferindo as quatro vozes no processo ativo...', file=sys.stderr, flush=True)
+            report['warmup'] = warmup(values, ['kasane-teto', *report['voices']],
+                expected_process=process, engine_sha=report['engine_sha256'], diagnostics=diagnostics)
         report['phone_synthesis_verified'] = bool(report.get('warmup'))
     except (OSError, ValueError, subprocess.SubprocessError, urllib.error.URLError) as error:
         report['ok'] = False
@@ -292,6 +516,13 @@ def main(argv=None):
             if secret:
                 detail = detail.replace(secret, '[oculto]')
         report['error'] = type(error).__name__ + ': ' + detail[:400]
+    report['diagnostic_report'] = str(options.report)
+    report = redact_report(report, [values.get(key) or os.getenv(key) for key in
+        ('PHONE_WORKER_TOKEN', 'CORE_WORKER_TOKEN')])
+    try:
+        save_report(report, options.report)
+    except OSError:
+        report['diagnostic_report_saved'] = False
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report['ok'] else 1
 
