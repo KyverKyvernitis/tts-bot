@@ -194,7 +194,9 @@ export default function App() {
     void loadDashboard(route.guildId, true);
   }, [hasUnsavedChanges, loadDashboard, route]);
 
-  if (sessionState === "loading") return <FullPageLoading progress={bootProgress} />;
+  // The public landing can be read and its samples played before Discord has
+  // resolved the session. Other pages retain the existing authentication gate.
+  if (sessionState === "loading" && route.page !== "landing") return <FullPageLoading progress={bootProgress} />;
 
   if (isProtectedRoute(route) && sessionState !== "authenticated") {
     return <LoginRequired onLogin={handleLogin} onHome={() => navigate({ page: "landing" }, true, true)} />;
@@ -202,7 +204,7 @@ export default function App() {
 
   return <>
     {notice && <Notice type={notice.type} text={notice.text} onClose={() => setNotice(null)} />}
-    {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} user={user} bot={botIdentity} supportServer={supportServer} refreshing={loadingServers} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onNavigate={(path) => navigate(parseRoute(path))} />}
+    {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} sessionPending={sessionState === "loading"} user={user} bot={botIdentity} supportServer={supportServer} refreshing={loadingServers} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onNavigate={(path) => navigate(parseRoute(path))} />}
     {route.page === "privacy" && <LegalPage kind="privacy" onBack={() => navigate({ page: "landing" })} />}
     {route.page === "terms" && <LegalPage kind="terms" onBack={() => navigate({ page: "landing" })} />}
     {route.page === "servers" && user && <ServerPicker manageable={manageable} needsInvite={needsInvite} loading={loadingServers} user={user} bot={botIdentity} supportServer={supportServer} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, view: "general", moduleId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
