@@ -142,7 +142,19 @@ export function FieldText({
 
   if (editing && field) {
     return (
-      <div className={className ? `osk-message-editable osk-message-editable--editing ${className}` : "osk-message-editable osk-message-editable--editing"} data-selected="true" data-message-field-anchor={field.id}>
+      <div
+        className={className ? `osk-message-editable osk-message-editable--editing ${className}` : "osk-message-editable osk-message-editable--editing"}
+        data-selected="true"
+        data-message-field-anchor={field.id}
+        role="group"
+        aria-label={`Edição de ${field.label}`}
+        tabIndex={-1}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget || !["Enter", " "].includes(event.key)) return;
+          event.preventDefault();
+          event.currentTarget.querySelector<HTMLInputElement | HTMLTextAreaElement>("input, textarea")?.focus({ preventScroll: true });
+        }}
+      >
         <MessageInlineTextEditor
           field={field}
           value={value}

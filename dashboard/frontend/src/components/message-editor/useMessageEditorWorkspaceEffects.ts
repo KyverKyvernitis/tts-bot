@@ -49,12 +49,16 @@ export function useMessageEditorWorkspaceEffects(options: UseMessageEditorWorksp
     const frame = window.requestAnimationFrame(() => {
       const panel = contextPanelRef.current;
       const target = panel?.querySelector<HTMLElement>(
-        ".osk-message-editor__view-body input:not(:disabled), .osk-message-editor__view-body textarea:not(:disabled), .osk-message-editor__view-body button:not(:disabled), .osk-message-editor__view-body select:not(:disabled)",
-      ) ?? panel?.querySelector<HTMLElement>("button:not(:disabled)");
-      target?.focus({ preventScroll: true });
+        ".osk-message-editor__view-head button:not(:disabled)",
+      );
+      if (target) target.focus({ preventScroll: true });
+      else if (panel) {
+        panel.tabIndex = -1;
+        panel.focus({ preventScroll: true });
+      }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [view, selectedFieldId]);
+  }, [contextPanelRef, view]);
 
   useEffect(() => {
     if (!canvasPaneRef.current) return;

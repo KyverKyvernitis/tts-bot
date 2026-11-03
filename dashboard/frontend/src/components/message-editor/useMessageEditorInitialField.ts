@@ -12,7 +12,7 @@ export function useMessageEditorInitialField({ editorKey, fieldId, fields, setSe
     setSelectedFieldId(fieldId); setContextAnchorFieldId(fieldId); setView("inspector");
     const frame = window.requestAnimationFrame(() => {
       const wrapper = Array.from(document.querySelectorAll<HTMLElement>(".osk-message-editor [data-field-id]")).find(node => node.dataset.fieldId === fieldId);
-      wrapper?.querySelector<HTMLElement>("input:not(:disabled), textarea:not(:disabled), button:not(:disabled)")?.focus({ preventScroll: true });
+      wrapper?.scrollIntoView({ block: "nearest", behavior: "auto" });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [editorKey, fieldId]); // Apenas ao abrir: preserva a navegação durante a edição.

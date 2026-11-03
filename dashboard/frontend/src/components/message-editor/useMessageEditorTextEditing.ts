@@ -42,6 +42,11 @@ export function useMessageEditorTextEditing(options: UseMessageEditorTextEditing
   const [activeTextFieldId, setActiveTextFieldId] = useState<string | null>(null);
   const [textToolNotice, setTextToolNotice] = useState<string | null>(null);
   const textSelectionRef = useRef<MessageEditorTextSelection | null>(null);
+  const selectionFrameRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (selectionFrameRef.current !== null) window.cancelAnimationFrame(selectionFrameRef.current);
+  }, []);
 
   const activeTextField = useMemo(
     () => fields.find((field) => field.id === activeTextFieldId && (field.type === "text" || field.type === "textarea")) ?? null,
@@ -81,16 +86,21 @@ export function useMessageEditorTextEditing(options: UseMessageEditorTextEditing
     textSelectionRef.current = { fieldId: field.id, start, end };
   }
 
-  function focusTextControl(fieldId: string, start: number, end: number) {
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
+  function restoreTextSelection(fieldId: string, start: number, end: number) {
+    if (selectionFrameRef.current !== null) window.cancelAnimationFrame(selectionFrameRef.current);
+    selectionFrameRef.current = window.requestAnimationFrame(() => {
+      selectionFrameRef.current = window.requestAnimationFrame(() => {
+        selectionFrameRef.current = null;
+        const saved = textSelectionRef.current;
+        if (saved?.fieldId !== fieldId || saved.start !== start || saved.end !== end) return;
         const inline = Array.from(dialogRef.current?.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-message-inline-field-id]") ?? [])
           .find((element) => element.dataset.messageInlineFieldId === fieldId);
         const form = Array.from(dialogRef.current?.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-message-field-id]") ?? [])
           .find((element) => element.dataset.messageFieldId === fieldId);
         const control = inline ?? form;
         if (!control) return;
-        control.focus({ preventScroll: true });
+        // Formatting must preserve the range without opening a keyboard.
+        // A focused control stays focused through the toolbar's pointer guard.
         control.setSelectionRange(start, end);
       });
     });
@@ -101,7 +111,7 @@ export function useMessageEditorTextEditing(options: UseMessageEditorTextEditing
     const limitNotice = messageEditorTextLimitNotice(activeTextField, result.value);
     if (limitNotice) {
       setTextToolNotice(limitNotice);
-      focusTextControl(
+      restoreTextSelection(
         activeTextField.id,
         textSelectionRef.current?.start ?? result.value.length,
         textSelectionRef.current?.end ?? result.value.length,
@@ -112,7 +122,7 @@ export function useMessageEditorTextEditing(options: UseMessageEditorTextEditing
     recordChanges([{ field: activeTextField, raw: result.value }], false);
     textSelectionRef.current = { fieldId: activeTextField.id, start: result.start, end: result.end };
     setSelectedFieldId(activeTextField.id);
-    focusTextControl(activeTextField.id, result.start, result.end);
+    restoreTextSelection(activeTextField.id, result.start, result.end);
   }
 
   function replaceTextSelection(insertion: string, selectInserted = false) {

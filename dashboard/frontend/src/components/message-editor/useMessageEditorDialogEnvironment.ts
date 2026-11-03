@@ -55,7 +55,13 @@ export function useMessageEditorDialogEnvironment({
     const previousTop = document.body.style.top;
     const previousWidth = document.body.style.width;
     scrollPositionRef.current = window.scrollY;
-    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const wasTypingControl = previouslyFocused?.matches("input, textarea, select, [contenteditable]:not([contenteditable='false'])")
+      || Boolean(previouslyFocused?.closest("[contenteditable]:not([contenteditable='false'])"));
+    returnFocusRef.current = wasTypingControl
+      ? previouslyFocused?.closest("section, article, form, main")?.querySelector<HTMLElement>("button:not(:disabled), a[href], summary")
+        ?? document.querySelector<HTMLElement>(".osk-dashboard-shell button:not(:disabled)")
+      : previouslyFocused;
     document.body.style.overflow = "hidden";
     document.body.style.position = "fixed";
     document.body.style.top = `-${scrollPositionRef.current}px`;
@@ -75,7 +81,16 @@ export function useMessageEditorDialogEnvironment({
     window.addEventListener("resize", syncVisualViewport);
 
     restoreHistoryMarker();
-    window.setTimeout(() => dialogRef.current?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)")?.focus(), 0);
+    const initialFocusTimer = window.setTimeout(() => {
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const target = dialog.querySelector<HTMLElement>("button:not(:disabled)");
+      if (target) target.focus({ preventScroll: true });
+      else {
+        dialog.tabIndex = -1;
+        dialog.focus({ preventScroll: true });
+      }
+    }, 0);
     const closeOpenContextSelect = () => {
       const trigger = dialogRef.current?.querySelector<HTMLButtonElement>(
         ".osk-message-context-select[data-open] .osk-message-context-select__trigger",
@@ -132,6 +147,7 @@ export function useMessageEditorDialogEnvironment({
     window.addEventListener("osk:message-editor-back", onBackRequest as EventListener);
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      window.clearTimeout(initialFocusTimer);
       document.body.style.overflow = previousOverflow;
       document.body.style.position = previousPosition;
       document.body.style.top = previousTop;
@@ -142,7 +158,8 @@ export function useMessageEditorDialogEnvironment({
       window.visualViewport?.removeEventListener("resize", syncVisualViewport);
       window.visualViewport?.removeEventListener("scroll", syncVisualViewport);
       window.removeEventListener("resize", syncVisualViewport);
-      window.setTimeout(() => returnFocusRef.current?.focus(), 0);
+      const returnTarget = returnFocusRef.current;
+      if (returnTarget?.isConnected && !returnTarget.closest("[inert]")) returnTarget.focus({ preventScroll: true });
     };
   }, [
     applyActionRef,

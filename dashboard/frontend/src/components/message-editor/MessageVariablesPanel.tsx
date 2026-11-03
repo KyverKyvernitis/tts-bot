@@ -16,12 +16,18 @@ async function copyText(value: string): Promise<void> {
   }
   const textarea = document.createElement("textarea");
   textarea.value = value;
+  textarea.readOnly = true;
+  textarea.inputMode = "none";
+  textarea.tabIndex = -1;
   textarea.style.position = "fixed";
   textarea.style.opacity = "0";
   document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  textarea.remove();
+  try {
+    textarea.select();
+    document.execCommand("copy");
+  } finally {
+    textarea.remove();
+  }
 }
 
 export function MessageVariablesPanel({ variables, insertTargetLabel, onInsert }: MessageVariablesPanelProps) {

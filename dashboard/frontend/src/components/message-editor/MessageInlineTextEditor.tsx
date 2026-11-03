@@ -23,13 +23,20 @@ export function MessageInlineTextEditor({
   useLayoutEffect(() => {
     const control = controlRef.current;
     if (!control) return;
-    control.focus({ preventScroll: true });
     const start = Math.max(0, Math.min(value.length, selection?.start ?? value.length));
     const end = Math.max(start, Math.min(value.length, selection?.end ?? start));
     control.setSelectionRange(start, end);
     onSelection(start, end);
     resizeTextarea(control);
-  }, []); // O foco inicial deve acontecer somente quando o editor é montado.
+    // Keep keyboard navigation in the selected region without focusing a
+    // typing control. A tap inside the control uses native caret placement.
+    control.parentElement?.focus({ preventScroll: true });
+  }, []);
+
+  useLayoutEffect(() => {
+    const control = controlRef.current;
+    if (control) resizeTextarea(control);
+  }, [value]);
 
   function resizeTextarea(control: HTMLInputElement | HTMLTextAreaElement) {
     if (!(control instanceof HTMLTextAreaElement)) return;
@@ -50,6 +57,10 @@ export function MessageInlineTextEditor({
   }
 
   function handleFocus(event: FocusEvent<HTMLInputElement | HTMLTextAreaElement>) {
+    updateSelection(event.currentTarget);
+  }
+
+  function handleBlur(event: FocusEvent<HTMLInputElement | HTMLTextAreaElement>) {
     updateSelection(event.currentTarget);
   }
 
@@ -79,7 +90,7 @@ export function MessageInlineTextEditor({
         onFocus={handleFocus}
         onSelect={handleSelect}
         onChange={handleChange}
-        onBlur={onFinish}
+        onBlur={handleBlur}
         onKeyDown={(event) => {
           if (event.key === "Escape" || (event.key === "Enter" && (event.ctrlKey || event.metaKey))) {
             event.preventDefault();
@@ -104,7 +115,7 @@ export function MessageInlineTextEditor({
       onFocus={handleFocus}
       onSelect={handleSelect}
       onChange={handleChange}
-      onBlur={onFinish}
+      onBlur={handleBlur}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === "Escape") {
           event.preventDefault();
