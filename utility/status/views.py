@@ -9,7 +9,7 @@ from typing import Any, Callable
 import discord
 
 from .data import StatusCollector, StatusSnapshot
-from .render import TTS_SECTIONS, PanelPage, panel_pages, safe_text
+from .render import TTS_SECTIONS, TTS_SECTION_DETAILS, PanelPage, panel_pages, safe_text
 
 
 logger = logging.getLogger(__name__)
@@ -34,8 +34,10 @@ class _StatusButton(discord.ui.Button):
 class _TTSSectionSelect(discord.ui.Select):
     def __init__(self, panel: "StatusView"):
         super().__init__(
-            placeholder="Detalhes do TTS",
-            options=[discord.SelectOption(label=label, value=key, default=key == panel.section) for key, label in TTS_SECTIONS.items()],
+            placeholder="Ver detalhes do TTS",
+            options=[discord.SelectOption(label=label, value=key, default=key == panel.section,
+                                          emoji=TTS_SECTION_DETAILS[key][0], description=TTS_SECTION_DETAILS[key][1])
+                     for key, label in TTS_SECTIONS.items()],
             disabled=panel.closed,
         )
         self.panel = panel
@@ -88,8 +90,8 @@ class StatusView(discord.ui.LayoutView):
         else:
             children.append(header)
         children.append(discord.ui.ActionRow(
-            _StatusButton(self, label="Servidores", action="tab", value="servers", disabled=self.closed or self.tab == "servers", style=discord.ButtonStyle.primary if self.tab == "servers" else discord.ButtonStyle.secondary),
-            _StatusButton(self, label="TTS", action="tab", value="tts", disabled=self.closed or self.tab == "tts", style=discord.ButtonStyle.primary if self.tab == "tts" else discord.ButtonStyle.secondary),
+            _StatusButton(self, label="Servidores", action="tab", value="servers", disabled=self.closed, style=discord.ButtonStyle.primary if self.tab == "servers" else discord.ButtonStyle.secondary),
+            _StatusButton(self, label="TTS", action="tab", value="tts", disabled=self.closed, style=discord.ButtonStyle.primary if self.tab == "tts" else discord.ButtonStyle.secondary),
         ))
         if self.tab == "tts":
             children.append(discord.ui.ActionRow(_TTSSectionSelect(self)))
@@ -108,12 +110,15 @@ class StatusView(discord.ui.LayoutView):
         if self._notice:
             footer += "\n" + self._notice
         children.append(discord.ui.TextDisplay("-# " + footer.replace("\n", "\n-# ")))
-        children.append(discord.ui.ActionRow(
-            _StatusButton(self, label="Anterior", action="page", value=-1, disabled=self.closed or self.page == 0),
-            _StatusButton(self, label="Próxima", action="page", value=1, disabled=self.closed or self.page >= len(pages) - 1),
-            _StatusButton(self, label="Atualizar", action="refresh", disabled=self.closed),
-        ))
-        self.add_item(discord.ui.Container(*children, accent_color=page.accent))
+        controls: list[discord.ui.Item[Any]] = []
+        if len(pages) > 1:
+            controls.extend((
+                _StatusButton(self, label="Anterior", action="page", value=-1, disabled=self.closed or self.page == 0),
+                _StatusButton(self, label="Próxima", action="page", value=1, disabled=self.closed or self.page >= len(pages) - 1),
+            ))
+        controls.append(_StatusButton(self, label="Atualizar", action="refresh", disabled=self.closed))
+        children.append(discord.ui.ActionRow(*controls))
+        self.add_item(discord.ui.Container(*children))
 
     async def _private_notice(self, interaction: discord.Interaction, message: str) -> None:
         with contextlib.suppress(Exception):
@@ -143,6 +148,8 @@ class StatusView(discord.ui.LayoutView):
             return
         async with self._lock:
             if self.closed or source_revision != self.revision:
+                return
+            if (action == "tab" and value == self.tab) or (action == "section" and value == self.section):
                 return
             previous = (self.snapshot, self.tab, self.section, self.page, self.revision, self._notice, self._page_cache)
             self._notice = ""

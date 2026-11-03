@@ -15,11 +15,10 @@ from utility.status.views import COLLECTION_TIMEOUT_SECONDS, StatusView
 logger = logging.getLogger(__name__)
 
 
-def _notice_view(message: str, *, failed: bool = False) -> discord.ui.LayoutView:
+def _notice_view(message: str) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(
         discord.ui.TextDisplay(message),
-        accent_color=discord.Color.orange() if failed else discord.Color.blurple(),
     ))
     return view
 
@@ -87,4 +86,4 @@ class StatusCommandMixin:
                 view.deactivate()
             logger.exception("[utility/status] falha ao abrir painel")
             with contextlib.suppress(Exception):
-                await response.edit(view=_notice_view("## ⚠️ Status indisponível\nTente novamente em alguns instantes.", failed=True), allowed_mentions=discord.AllowedMentions.none())
+                await response.edit(view=_notice_view("## ⚠️ Status indisponível\nTente novamente em alguns instantes."), allowed_mentions=discord.AllowedMentions.none())

@@ -11,7 +11,13 @@ from .data import StatusSnapshot, engine_label, first_present, integer, number
 
 ROWS_PER_PAGE = 5
 PAGE_TEXT_BUDGET = 2700
-TTS_SECTIONS = {"summary": "Resumo", "engines": "Engines", "voice": "Voz e conexão"}
+TTS_SECTIONS = {"summary": "Resumo", "engines": "Engines", "diagnostics": "Diagnóstico", "voice": "Voz e conexão"}
+TTS_SECTION_DETAILS = {
+    "summary": ("📊", "Disponibilidade, sínteses e desempenho"),
+    "engines": ("🔊", "Uso, latência e falhas por engine"),
+    "diagnostics": ("🛠️", "Rotas, cache e detalhes do worker"),
+    "voice": ("🎙️", "Sessões e conexão de voz"),
+}
 _ROUTE_REASONS = {
     "disabled_or_unconfigured": "worker desativado ou não configurado",
     "worker_base_unavailable": "endereço do worker indisponível",
@@ -34,7 +40,7 @@ _ROUTE_REASONS = {
     "edge_circuit_open": "Edge em pausa; gTTS usado",
     "edge_fallback": "Edge falhou; gTTS usado",
     "stream_fallback": "stream interrompido; áudio gerado por arquivo",
-    "synth_ok": "geração concluída",
+    "synth_ok": "geração concluída", "ready": "pronto",
 }
 _VOICE_STATES = {
     "voice_handoff_received_waiting_transfer": "handoff recebido; aguardando posse da voz",
@@ -58,7 +64,6 @@ class PanelPage:
     header: str
     cards: tuple[Card, ...]
     footer: str
-    accent: discord.Color
 
 
 def safe_text(value: Any, limit: int = 160) -> str:
@@ -104,6 +109,11 @@ def fmt_bool(value: Any) -> str:
 
 def timestamp(value: float) -> str:
     return datetime.fromtimestamp(value, timezone.utc).strftime("%H:%M:%S UTC")
+
+
+def _footer(snapshot: StatusSnapshot, index: int, count: int) -> str:
+    pagination = f"Página {index + 1}/{count} · " if count > 1 else ""
+    return f"{pagination}Atualizado às {timestamp(snapshot.collected_at)}"
 
 
 def reason_label(value: Any) -> str:
@@ -153,7 +163,7 @@ def server_pages(snapshot: StatusSnapshot) -> tuple[PanelPage, ...]:
         members_label = "membros somados (aproximado)" if approximate else "membros somados"
         total_synths = sum(row.synths or 0 for row in rows)
         all_stats_available = snapshot.stats_available and all(row.stats_available for row in rows)
-        synths_label = f"**{fmt_int(total_synths)}** sínteses · histórico persistido" if all_stats_available else "Total de sínteses históricas indisponível"
+        synths_label = f"**{fmt_int(total_synths)}** sínteses" if all_stats_available else "Total de sínteses históricas indisponível"
         header = f"## 🌐 Servidores\n**{fmt_int(len(rows))}** servidores · **{fmt_int(total_members)}** {members_label}\n{synths_label}"
     names: dict[str, int] = {}
     for row in rows:
@@ -162,32 +172,61 @@ def server_pages(snapshot: StatusSnapshot) -> tuple[PanelPage, ...]:
     for index, row in enumerate(rows, 1):
         suffix = f" · ID {row.guild_id}" if names[row.name.casefold()] > 1 else ""
         title = f"**{index}. {safe_text(row.name, 64)}**{suffix}"
-        members = fmt_int(row.members) + (" (aprox.)" if row.approximate_members else "")
-        lines = [title, f"{members} membros · {fmt_int(row.synths)} sínteses"]
+        members = f"**{fmt_int(row.members)}**" + (" (aprox.)" if row.approximate_members else "")
+        synths = f"**{fmt_int(row.synths)}** sínteses" if row.synths is not None else "sínteses indisponíveis"
+        lines = [title, f"{members} membros · {synths}"]
         if row.engines:
-            lines.append(" · ".join(f"{engine_label(key)} **{fmt_int(amount)}**" for key, amount in row.engines))
+            lines.append("-# " + " · ".join(f"{engine_label(key)} {fmt_int(amount)}" for key, amount in row.engines))
         cards.append(Card("\n".join(lines), row.icon_url))
     if not cards:
         cards.append(Card("Nenhum servidor encontrado no cache do bot." if snapshot.servers_available else "Tente atualizar o painel em alguns instantes."))
     chunks = _chunks(cards)
-    return tuple(PanelPage(header, cards, f"Página {index + 1}/{len(chunks)} · coletado às {timestamp(snapshot.collected_at)}", discord.Color.blurple()) for index, cards in enumerate(chunks))
+    return tuple(PanelPage(header, cards, _footer(snapshot, index, len(chunks))) for index, cards in enumerate(chunks))
 
 
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _route_card(metrics: dict[str, Any]) -> Card:
-    agent = _mapping(metrics.get("tts_agent"))
+def _worker_status(agent: dict[str, Any]) -> str:
     enabled, ok = agent.get("enabled"), agent.get("ok")
     if enabled is False:
-        status = "⚪ Worker desativado"
-    elif ok is True:
-        status = "🟢 Worker disponível"
-    elif enabled is True and ok is False:
-        status = "🟠 Worker indisponível · fallback na VPS"
+        return "⚪ Worker desativado"
+    if ok is True:
+        return "🟢 Worker disponível"
+    if enabled is True and ok is False:
+        return "🟠 Worker indisponível"
+    return "⚪ Disponibilidade do worker desconhecida"
+
+
+def _availability_card(metrics: dict[str, Any]) -> Card:
+    agent = _mapping(metrics.get("tts_agent"))
+    lines = ["### " + _worker_status(agent)]
+    age = number(agent.get("last_check_age_seconds"))
+    if age is not None:
+        lines.append(f"-# Verificado há {age:.0f} s" + (" · verificação desatualizada" if age > 60 else ""))
     else:
-        status = "⚪ Disponibilidade do worker desconhecida"
+        lines.append("-# Sem verificação registrada")
+    # Disponibilidade, decisão de rota e execução concluída são sinais diferentes.
+    # O campo de health `route` não comprova nenhuma execução recente.
+    routes = {"worker": "Worker", "vps": "VPS", "local": "VPS"}
+    effective = routes.get(str(agent.get("last_effective_route", "")))
+    if effective:
+        lines.append(f"Última síntese concluída: **{effective}**")
+        reason = agent.get("last_effective_reason")
+        if reason and reason != "synth_ok":
+            lines.append("-# " + reason_label(reason))
+    cooldown = number(agent.get("cooldown_remaining_seconds"))
+    if cooldown:
+        lines.append(f"Nova tentativa em **{cooldown:.0f} s**")
+    if agent.get("last_error") and agent.get("ok") is False:
+        lines.append("⚠️ " + safe_text(agent["last_error"], 120))
+    return Card("\n".join(lines))
+
+
+def _route_card(metrics: dict[str, Any]) -> Card:
+    agent = _mapping(metrics.get("tts_agent"))
+    status = _worker_status(agent)
     age = number(agent.get("last_check_age_seconds"))
     if age is not None:
         status += f" · health há {age:.0f} s" + (" (desatualizado)" if age > 60 else "")
@@ -197,8 +236,8 @@ def _route_card(metrics: dict[str, Any]) -> Card:
     decision = route_names.get(str(agent.get("last_route_decision", "")), "sem decisão registrada")
     effective = route_names.get(str(agent.get("last_effective_route", "")), "sem síntese registrada")
     lines = ["### 🧭 Rota e disponibilidade", status,
-             f"Última decisão: **{decision}** · {reason_label(agent.get('last_route_reason'))}",
-             f"Última síntese concluída: **{effective}** · {reason_label(agent.get('last_effective_reason'))}"]
+             f"Última decisão: **{decision}**" + (" · " + reason_label(agent["last_route_reason"]) if agent.get("last_route_reason") else ""),
+             f"Última síntese concluída: **{effective}**" + (" · " + reason_label(agent["last_effective_reason"]) if agent.get("last_effective_reason") else "")]
     if agent.get("worker_id"):
         lines.append(f"Worker: {safe_text(agent['worker_id'], 60)}" + (f" · versão {safe_text(agent['worker_version'], 30)}" if agent.get("worker_version") else ""))
     health_reason = agent.get("reason")
@@ -212,10 +251,8 @@ def _route_card(metrics: dict[str, Any]) -> Card:
     return Card("\n".join(lines))
 
 
-def _summary_cards(snapshot: StatusSnapshot) -> list[Card]:
+def _generation_card(snapshot: StatusSnapshot) -> Card:
     metrics = snapshot.tts
-    agent = _mapping(metrics.get("tts_agent"))
-    cards = [_route_card(metrics)]
     route_totals: dict[str, int] = {}
     valid_routes = _mapping(metrics.get("engines_by_route"))
     for route in ("worker", "vps"):
@@ -237,8 +274,51 @@ def _summary_cards(snapshot: StatusSnapshot) -> list[Card]:
     failures_available = bool(failures) and len(failures) == len(snapshot.engines)
     empty_engines_available = not snapshot.engines and (isinstance(metrics.get("engines"), dict) or all(isinstance(valid_routes.get(route), dict) for route in ("worker", "vps")))
     failure_total = sum(failures) if failures_available or empty_engines_available else None
-    labels = list(dict.fromkeys(engine_label(item.key) for item in snapshot.engines))
-    cards.append(Card("### 🔊 Sínteses desde o reinício\n" + totals + f"\nFalhas de geração: {fmt_int(failure_total)}" + ("\nEngines: " + " · ".join(safe_text(label, 64) for label in labels[:8]) if labels else "\nSem métricas de engines.")))
+    return Card("### 📊 Sínteses\n" + totals + f"\nFalhas de geração: **{fmt_int(failure_total)}**")
+
+
+def _cache_rate(metrics: dict[str, Any]) -> str:
+    hits, misses = integer(metrics.get("cache_hits")), integer(metrics.get("cache_misses"))
+    if hits is None or misses is None:
+        return "acerto indisponível"
+    if hits + misses == 0:
+        return "sem consultas"
+    return f"{100 * hits / (hits + misses):.1f}% de acerto"
+
+
+def _summary_cards(snapshot: StatusSnapshot) -> list[Card]:
+    metrics = snapshot.tts
+    agent = _mapping(metrics.get("tts_agent"))
+    cards = [_availability_card(metrics), _generation_card(snapshot)]
+    active, limit = integer(agent.get("queue_active")), integer(agent.get("queue_limit"))
+    # queue_active mede trabalho em execução, não itens na fila da VPS.
+    worker_load = f"{fmt_int(active)}/{fmt_int(limit)}" if limit else fmt_int(active)
+    lines = [
+        "### ⚡ Fila e desempenho",
+        f"VPS: **{fmt_int(metrics.get('queued_items_current'))}** na fila · Worker: **{worker_load}** em execução",
+        f"Espera média: **{fmt_ms(metrics.get('avg_queue_wait_ms'))}**",
+        f"Despacho médio: **{fmt_ms(metrics.get('avg_dispatch_ms'))}**",
+    ]
+    if integer(metrics.get("cache_hits")) is not None and integer(metrics.get("cache_misses")) is not None:
+        lines.append("Cache VPS: **" + _cache_rate(metrics) + "**")
+    cards.append(Card("\n".join(lines)))
+    requested = first_present(agent, "last_requested_engine", metrics, "tts_agent_last_requested_engine")
+    selected = first_present(agent, "last_selected_engine", metrics, "tts_agent_last_selected_engine")
+    if selected:
+        lines = ["### 🎙️ Última resposta do worker", f"**{safe_text(engine_label(selected), 64)}**"]
+        duration = first_present(agent, "last_synth_ms", metrics, "tts_agent_last_synth_ms")
+        if number(duration) is not None:
+            lines[-1] += f" · {fmt_ms(duration)}"
+        if requested and engine_label(requested) != engine_label(selected):
+            lines.append("-# Solicitado: " + safe_text(engine_label(requested), 64))
+        cards.append(Card("\n".join(lines)))
+    return cards
+
+
+def _diagnostic_cards(snapshot: StatusSnapshot) -> list[Card]:
+    metrics = snapshot.tts
+    agent = _mapping(metrics.get("tts_agent"))
+    cards = [_route_card(metrics)]
     cards.append(Card(
         "### ⏳ Filas e tempos\n"
         f"VPS agora: **{fmt_int(metrics.get('queued_items_current'))}** itens · {fmt_int(metrics.get('guild_states_current'))} servidores com estado ativo\n"
@@ -247,7 +327,7 @@ def _summary_cards(snapshot: StatusSnapshot) -> list[Card]:
         f"Média de espera: {fmt_ms(metrics.get('avg_queue_wait_ms'))} · despacho: {fmt_ms(metrics.get('avg_dispatch_ms'))}"
     ))
     hits, misses = integer(metrics.get("cache_hits")), integer(metrics.get("cache_misses"))
-    rate = f"{100 * hits / (hits + misses):.1f}% de acerto" if hits is not None and misses is not None and hits + misses > 0 else "sem consultas" if hits == misses == 0 else "acerto indisponível"
+    rate = _cache_rate(metrics)
     storage = snapshot.storage
     cards.append(Card(
         "### 📦 Cache e armazenamento\n"
@@ -272,8 +352,11 @@ def _summary_cards(snapshot: StatusSnapshot) -> list[Card]:
     if requested or selected:
         cache = first_present(agent, "last_cache_hit", metrics, "tts_agent_last_cache_hit")
         cache_label = "hit" if cache is True else "miss" if cache is False else "indisponível"
+        response = safe_text(engine_label(selected), 64) if selected else "engine não informada"
+        if requested and engine_label(requested) != engine_label(selected):
+            response += f" (solicitado: {safe_text(engine_label(requested), 64)})"
         worker_lines.extend([
-            f"Última resposta TTS: {safe_text(engine_label(requested), 64)} solicitado → {safe_text(engine_label(selected), 64)} usado",
+            f"Última resposta TTS: {response}",
             f"{safe_text(first_present(agent, 'last_audio_format', metrics, 'tts_agent_last_audio_format'), 30)} · {fmt_bytes(first_present(agent, 'last_audio_bytes', metrics, 'tts_agent_last_audio_bytes'))} · cache {cache_label} · {fmt_ms(first_present(agent, 'last_synth_ms', metrics, 'tts_agent_last_synth_ms'))}",
         ])
     if metrics.get("tts_agent_last_failure_reason"):
@@ -349,13 +432,14 @@ def _voice_cards(snapshot: StatusSnapshot) -> list[Card]:
 
 def tts_pages(snapshot: StatusSnapshot, section: str = "summary") -> tuple[PanelPage, ...]:
     section = section if section in TTS_SECTIONS else "summary"
-    header = f"## 🔊 TTS · {TTS_SECTIONS[section]}\n-# Métricas de geração desde o reinício do bot."
+    header = f"## 🔊 TTS · {TTS_SECTIONS[section]}\n-# Atividade desde o reinício do bot."
     if not snapshot.tts_available:
         cards = [Card("Métricas TTS indisponíveis. Atualize quando o módulo de voz estiver pronto.")]
     else:
-        cards = _summary_cards(snapshot) if section == "summary" else _engine_cards(snapshot) if section == "engines" else _voice_cards(snapshot)
+        render = {"summary": _summary_cards, "engines": _engine_cards, "diagnostics": _diagnostic_cards, "voice": _voice_cards}
+        cards = render[section](snapshot)
     chunks = _chunks(cards)
-    return tuple(PanelPage(header, cards, f"Página {index + 1}/{len(chunks)} · coletado às {timestamp(snapshot.collected_at)}", discord.Color.dark_teal()) for index, cards in enumerate(chunks))
+    return tuple(PanelPage(header, cards, _footer(snapshot, index, len(chunks))) for index, cards in enumerate(chunks))
 
 
 def panel_pages(snapshot: StatusSnapshot, tab: str, section: str = "summary") -> tuple[PanelPage, ...]:
