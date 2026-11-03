@@ -3008,6 +3008,10 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         return default
 
     async def _get_guild_toggle_value(self, guild_id: int, *, public_key: str, raw_key: str, default: bool) -> bool:
+        # Legacy values cannot disable departure from empty calls. All TTS,
+        # music integration and worker payloads share this accessor.
+        if public_key == "auto_leave" or raw_key == "auto_leave_enabled":
+            return True
         db = self._get_db()
         if db is None:
             return default

@@ -1,3 +1,4 @@
+import { resolveDashboardTtvDefaults } from "../services/dashboardTtvModel.js";
 import { BIRTHDAY_DOC_CONFIG } from "./dashboardDocumentIds.js";
 import { isLongLikeObject, isPlainObject } from "./dashboardObjectUtils.js";
 
@@ -49,6 +50,11 @@ export function applyLegacyFeatureFlags(type: string, raw: Record<string, unknow
     merged.color_roles = colors;
 
     if (!hasOwn(raw, "tts_enabled")) merged.tts_enabled = true;
+    // Resolve from the stored document before defaults hide a legacy pitch value.
+    merged.tts_defaults = {
+      ...(isPlainObject(merged.tts_defaults) ? merged.tts_defaults : {}),
+      ...resolveDashboardTtvDefaults(raw),
+    };
   }
 
   if (type === BIRTHDAY_DOC_CONFIG && !hasOwn(raw, "enabled")) {

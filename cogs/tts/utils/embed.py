@@ -188,8 +188,8 @@ def build_expired_panel_embed(*, slash_mention: str, prefix_hint: str) -> discor
 
 
 def build_toggle_embed(*, auto_leave_enabled: bool) -> discord.Embed:
-    embed = discord.Embed(title="Painel de toggles do TTS", description="Use o botão abaixo para ligar ou desligar o Auto Leave do TTS.", color=discord.Color.blurple())
-    embed.add_field(name="Auto leave", value="`Ativado`" if bool(auto_leave_enabled) else "`Desativado`", inline=True)
+    embed = discord.Embed(title="Saída automática", description="O bot sai automaticamente quando a call fica vazia ou só com bots.", color=discord.Color.blurple())
+    embed.add_field(name="Saída da call", value="`Sempre ativa`", inline=True)
     return embed
 
 

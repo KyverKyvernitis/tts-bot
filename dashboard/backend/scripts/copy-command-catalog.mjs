@@ -8,3 +8,4 @@ const destinationDirectory = resolve(scriptDirectory, "../dist/data");
 
 await mkdir(destinationDirectory, { recursive: true });
 await copyFile(source, resolve(destinationDirectory, "help_catalog.json"));
+await copyFile(resolve(scriptDirectory, "../../../shared/ttv_catalog.json"), resolve(destinationDirectory, "ttv_catalog.json"));

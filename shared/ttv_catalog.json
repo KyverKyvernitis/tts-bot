@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "defaultVoiceId": "pururu-purpura",
+  "defaultLanguage": "pt-BR",
+  "defaultPitchSemitones": "+0.0",
+  "defaultSpeechRate": 1.0,
+  "voices": [
+    { "id": "kasane-teto", "name": "Kasane Teto", "languages": ["pt-BR", "en-US"], "nativePortuguese": false },
+    { "id": "hatsune-miku", "name": "Hatsune Miku", "languages": ["pt-BR", "en-US"], "nativePortuguese": false },
+    { "id": "anna-nyui", "name": "Anna Nyui", "languages": ["pt-BR", "en-US"], "nativePortuguese": false },
+    { "id": "pururu-purpura", "name": "Pururu Púrpura", "languages": ["pt-BR"], "nativePortuguese": true }
+  ]
+}

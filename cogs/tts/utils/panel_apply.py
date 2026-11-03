@@ -567,8 +567,8 @@ async def _apply_auto_leave_from_panel(cog, interaction: discord.Interaction, en
         return
 
     panel_message = source_panel_message or getattr(interaction, "message", None)
-    await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, auto_leave=bool(enabled)))
-    desc = f"Auto leave {'ativado' if enabled else 'desativado'}."
+    await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, auto_leave=True))
+    desc = "A saída automática fica sempre ativa. O bot sai quando a call fica vazia ou só com bots."
     embed = await cog._build_toggle_embed(interaction.guild.id, interaction.user.id)
     view = cog._build_toggle_view(0 if getattr(getattr(interaction, "message", None), "id", None) in cog._public_panel_states else interaction.user.id, interaction.guild.id)
     await cog._panel_update_after_change(

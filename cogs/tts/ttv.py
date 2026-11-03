@@ -7,14 +7,41 @@ IDs desconhecidos são rejeitados para nunca trocar a personagem em silêncio.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
+from pathlib import Path
 from typing import Any, Mapping
 
 
-DEFAULT_VOICE_ID = "pururu-purpura"
-DEFAULT_PITCH_SEMITONES = "+0.0"
-DEFAULT_SPEECH_RATE = 1.0
-DEFAULT_LANGUAGE = "pt-BR"
+def _load_catalog() -> dict[str, Any]:
+    path = Path(__file__).resolve().parents[2] / "shared" / "ttv_catalog.json"
+    with path.open(encoding="utf-8") as stream:
+        catalog = json.load(stream)
+    if (not isinstance(catalog, dict) or catalog.get("version") != 1
+            or not isinstance(catalog.get("voices"), list) or not catalog["voices"]):
+        raise RuntimeError("O catálogo compartilhado de TextToVocaloid é inválido.")
+    ids: set[str] = set()
+    for voice in catalog["voices"]:
+        if (not isinstance(voice, dict) or not isinstance(voice.get("id"), str)
+                or not voice["id"] or voice["id"] in ids
+                or not isinstance(voice.get("name"), str) or not voice["name"]
+                or not isinstance(voice.get("languages"), list) or not voice["languages"]
+                or any(language not in {"pt-BR", "en-US"} for language in voice["languages"])
+                or type(voice.get("nativePortuguese")) is not bool):
+            raise RuntimeError("Há uma voz inválida no catálogo de TextToVocaloid.")
+        ids.add(voice["id"])
+    if (catalog.get("defaultVoiceId") not in ids or catalog.get("defaultLanguage") != "pt-BR"
+            or catalog.get("defaultPitchSemitones") != "+0.0"
+            or catalog.get("defaultSpeechRate") != 1.0):
+        raise RuntimeError("Os padrões do catálogo de TextToVocaloid são inválidos.")
+    return catalog
+
+
+_CATALOG = _load_catalog()
+DEFAULT_VOICE_ID = _CATALOG["defaultVoiceId"]
+DEFAULT_PITCH_SEMITONES = _CATALOG["defaultPitchSemitones"]
+DEFAULT_SPEECH_RATE = float(_CATALOG["defaultSpeechRate"])
+DEFAULT_LANGUAGE = _CATALOG["defaultLanguage"]
 LANGUAGE_CHOICES = (
     (DEFAULT_LANGUAGE, "Português adaptado"),
     ("en-US", "Inglês"),
@@ -32,33 +59,14 @@ class TTVVoice:
     native_portuguese: bool = False
 
 
-VOICE_CATALOG = (
+VOICE_CATALOG = tuple(
     TTVVoice(
-        id="kasane-teto",
-        name="Kasane Teto",
-        engine="teto",
-        description="A voz da Kasane Teto, com síntese no phone worker.",
-    ),
-    TTVVoice(
-        id="hatsune-miku",
-        name="Hatsune Miku",
-        engine="teto",
-        description="A voz da Hatsune Miku, com síntese no phone worker.",
-    ),
-    TTVVoice(
-        id="anna-nyui",
-        name="Anna Nyui",
-        engine="teto",
-        description="A voz da Anna Nyui, com síntese no phone worker.",
-    ),
-    TTVVoice(
-        id="pururu-purpura",
-        name="Pururu Púrpura",
-        engine="teto",
-        description="A voz da Pururu Púrpura, gravada em português brasileiro, com síntese no phone worker.",
-        languages=("pt-BR",),
-        native_portuguese=True,
-    ),
+        id=voice["id"], name=voice["name"], engine="teto",
+        description=(f"A voz da {voice['name']}, gravada em português brasileiro, com síntese no phone worker."
+                     if voice["nativePortuguese"] else f"A voz da {voice['name']}, com síntese no phone worker."),
+        languages=tuple(voice["languages"]), native_portuguese=voice["nativePortuguese"],
+    )
+    for voice in _CATALOG["voices"]
 )
 VOICES = VOICE_CATALOG
 _VOICES_BY_ID = {voice.id: voice for voice in VOICE_CATALOG}
@@ -187,6 +195,58 @@ def normalize_speech_rate(value: object, default: float = DEFAULT_SPEECH_RATE) -
     if not math.isfinite(rate) or not 0.5 <= rate <= 1.5:
         raise ValueError("A velocidade deve ficar entre 50% e 150%.")
     return rate
+
+
+def inherit_server_preferences(
+    personal: Mapping[str, Any] | None,
+    server: Mapping[str, Any] | None,
+    default_pitch: object = 0.0,
+) -> dict[str, Any]:
+    """Fill unset personal TTV settings from this server, without persisting them.
+
+    A personal legacy pitch remains a personal choice. A voice chosen by the
+    member also takes precedence over an incompatible inherited language.
+    Explicit invalid voice IDs/languages remain observable to the TTV route.
+    """
+    personal, server = personal or {}, server or {}
+
+    def present(value: object) -> bool:
+        return value is not None and str(value).strip() != ""
+
+    values = {
+        key: personal.get(key) if present(personal.get(key)) else server.get(key)
+        for key in ("ttv_voice_id", "ttv_language")
+    }
+    if not present(personal.get("ttv_language")):
+        try:
+            voice = get_voice(values["ttv_voice_id"])
+            inherited_language = normalize_language(values["ttv_language"])
+            if inherited_language not in voice.languages:
+                values["ttv_language"] = voice.languages[0]
+        except ValueError:
+            pass
+
+    for candidate in (
+        personal.get("ttv_pitch_semitones"), personal.get("teto_pitch_semitones"),
+        server.get("ttv_pitch_semitones"), server.get("teto_pitch_semitones"),
+        default_pitch,
+    ):
+        if not present(candidate):
+            continue
+        try:
+            values["ttv_pitch_semitones"] = normalize_pitch(candidate)
+            break
+        except ValueError:
+            continue
+    for candidate in (personal.get("ttv_speech_rate"), server.get("ttv_speech_rate"), DEFAULT_SPEECH_RATE):
+        if not present(candidate):
+            continue
+        try:
+            values["ttv_speech_rate"] = normalize_speech_rate(candidate)
+            break
+        except ValueError:
+            continue
+    return values
 
 
 def resolve_preferences(mapping: Mapping[str, Any] | None, default_pitch: object = 0.0) -> dict[str, Any]:

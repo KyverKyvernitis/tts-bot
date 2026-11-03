@@ -557,8 +557,8 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
 
     @staticmethod
     def _update_auto_leave_from_body(st: GuildMusicState, body: dict[str, Any]) -> None:
-        if "auto_leave_enabled" in body:
-            st.auto_leave_enabled = truthy(body.get("auto_leave_enabled"), True)
+        # Older clients may still send False; an empty call always times out.
+        st.auto_leave_enabled = True
 
     def _record_voice_disconnect(
         self,

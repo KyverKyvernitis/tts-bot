@@ -22,7 +22,7 @@ export function sectionEditorFieldVisible(
   field: DashboardFieldDefinition,
   draft: Record<string, unknown>,
 ): boolean {
-  if (field.id === "tts.ignored_tts_role_enabled") return false;
+  if (["tts.ignored_tts_role_enabled", "tts.voice_channel_id", "tts.auto_leave_enabled"].includes(field.id)) return false;
   if (sectionId === "tts" && field.id === "tts.engine") return false;
 
   if (sectionId === "welcome") {

@@ -17,7 +17,7 @@ export type DashboardFieldType =
   | "color_panel_layout";
 export type DashboardFieldScope = "guild" | "welcome" | "birthday";
 
-export interface DashboardFieldOption { value: string; label: string }
+export interface DashboardFieldOption { value: string; label: string; languages?: string[]; nativePortuguese?: boolean }
 export type DashboardTemplateSyntax = "curly" | "dollar_curly";
 export interface DashboardTemplateVariable { key: string; label: string }
 export interface DashboardTemplateVariables { syntax: DashboardTemplateSyntax; items: DashboardTemplateVariable[] }

@@ -191,6 +191,11 @@ class VisaoPainelToggleTTS(VisaoBaseTTS):
     def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 180):
         super().__init__(cog, owner_id, guild_id, timeout=timeout)
         self.panel_kind = "toggle"
+        # Keep the callback for already published panels, without offering a
+        # switch that could disable the mandatory departure from empty calls.
+        for child in list(self.children):
+            if child is self.auto_leave_button:
+                self.remove_item(child)
 
     def _target_owner(self, interaction: discord.Interaction) -> int:
         return interaction.user.id if self.owner_id == 0 else self.owner_id

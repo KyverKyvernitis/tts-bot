@@ -1,3 +1,4 @@
+import { resolveDashboardTtvDefaults } from "../services/dashboardTtvModel.js";
 import { defaultColorPanelLayout, defaultColorSlots } from "./dashboardColorRoleDefaults.js";
 import { defaultFormsConfig } from "./dashboardFormsDefaults.js";
 import { snowflakeToLong } from "./dashboardSnowflakes.js";
@@ -24,7 +25,7 @@ export function defaultGuildDoc(guildId: string): Record<string, unknown> {
     ignored_tts_role_enabled: false,
     tts_enabled: true,
     tts_voice_channel_id: 0,
-    tts_defaults: { engine: "edge", voice: "", language: "pt-BR", rate: "+0%", pitch: "+0Hz" },
+    tts_defaults: { engine: "edge", voice: "", language: "pt-BR", rate: "+0%", pitch: "+0Hz", ...resolveDashboardTtvDefaults(null) },
     forms: defaultFormsConfig(),
     tickets: defaultTicketsConfig(),
     color_roles: {

@@ -14,7 +14,7 @@ import uuid
 from motor.motor_asyncio import AsyncIOMotorClient
 
 import config
-from cogs.tts.ttv import normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id, normalize_voice_language, resolve_preferences
+from cogs.tts.ttv import inherit_server_preferences, normalize_language, normalize_pitch, normalize_speech_rate, normalize_voice_id, normalize_voice_language, resolve_preferences
 
 
 def _tts_effect_level(value: object) -> int:
@@ -726,6 +726,11 @@ class SettingsDB:
             "android_language": str(tts.get("android_language", "") or ""),
             "android_rate": str(tts.get("android_rate", "") or ""),
             "android_pitch": str(tts.get("android_pitch", "") or ""),
+            "ttv_voice_id": str(tts.get("ttv_voice_id", "") or ""),
+            "ttv_language": str(tts.get("ttv_language", "") or ""),
+            "ttv_pitch_semitones": str(tts.get("ttv_pitch_semitones", "") if tts.get("ttv_pitch_semitones") is not None else ""),
+            "ttv_speech_rate": str(tts.get("ttv_speech_rate", "") if tts.get("ttv_speech_rate") is not None else ""),
+            "teto_pitch_semitones": str(tts.get("teto_pitch_semitones", "") if tts.get("teto_pitch_semitones") is not None else ""),
             "bot_prefix": str(g.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(g.get("tts_prefix", ",") or ","),
             "atts_prefix": str(g.get("atts_prefix", getattr(config, "TTS_ATTS_PREFIX", "%")) or getattr(config, "TTS_ATTS_PREFIX", "%")),
@@ -734,7 +739,7 @@ class SettingsDB:
             "edge_prefix": str(g.get("edge_prefix", ",") or ","),
             "speech_limit_seconds": int(g.get("speech_limit_seconds", 30) or 30),
             "announce_author": bool(g.get("announce_author_enabled", False)),
-            "auto_leave": bool(g.get("auto_leave_enabled", True)),
+            "auto_leave": True,
             "ignored_tts_role_id": int(g.get("ignored_tts_role_id", 0) or 0),
             # Migração suave: servidores antigos tinham apenas o ID.
             # Se já havia cargo salvo e não existe flag explícita, mantemos ativo
@@ -811,7 +816,9 @@ class SettingsDB:
         if announce_author is not None:
             doc["announce_author_enabled"] = bool(announce_author)
         if auto_leave is not None:
-            doc["auto_leave_enabled"] = bool(auto_leave)
+            # Kept for callers of older Discord panels; leaving an empty call
+            # is now mandatory, including servers that saved False before.
+            doc["auto_leave_enabled"] = True
         if ignored_tts_role_id is not None:
             try:
                 doc["ignored_tts_role_id"] = max(0, int(ignored_tts_role_id or 0))
@@ -1115,8 +1122,11 @@ class SettingsDB:
             if ttv_voice_id is not None or ttv_language is not None:
                 # Validate the merged pair before saving any part of a personal
                 # edit. Native Portuguese recordings cannot inherit English.
-                normalize_voice_language(ttv_updates.get("ttv_voice_id", tts.get("ttv_voice_id")),
-                                         ttv_updates.get("ttv_language", tts.get("ttv_language")))
+                effective_ttv = inherit_server_preferences(
+                    {**tts, **ttv_updates}, self.get_guild_tts_defaults(guild_id),
+                    default_pitch=getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0),
+                )
+                normalize_voice_language(effective_ttv.get("ttv_voice_id"), effective_ttv.get("ttv_language"))
             # A manually selected CD restores the user's fixed choice. Random draws
             # are frozen only in their synthesis payload and never write this field.
             if ttv_melody_id is not None and ttv_random_cd is None and tts.get("ttv_random_cd") is True:
@@ -1254,7 +1264,9 @@ class SettingsDB:
             "edge_prefix": str(guild.get("edge_prefix", ",") or ","),
             "speech_limit_seconds": int(guild.get("speech_limit_seconds", 30) or 30),
         }
-        ttv_values = {**user, "teto_pitch_semitones": resolved["teto_pitch_semitones"]}
+        ttv_values = inherit_server_preferences(
+            user, guild, default_pitch=getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0),
+        )
         # Invalid saved TTV selections must never be silently replaced. Keep
         # them for the TTV route to reject, without preventing Edge/gTTS use.
         ttv_preferences = resolve_preferences(

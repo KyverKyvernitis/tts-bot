@@ -1,10 +1,10 @@
-import { AudioLines, Languages, Mic2, RotateCcw, Type } from "lucide-react";
+import { AudioLines, Languages, RotateCcw } from "lucide-react";
 import type { DashboardFieldDefinition, DashboardOptionsPayload } from "../../types/dashboard";
 import { FieldsPanel } from "../SectionEditorPanels";
 import { DashboardFieldControl } from "../DashboardFieldControl";
 import { sectionEditorValuesEqual } from "../sectionEditorModel";
-import { AdvancedSettings } from "./AdvancedSettings";
 import { EdgeVoicePicker } from "./EdgeVoicePicker";
+import { TtvSettings } from "./TtvSettings";
 
 interface Props {
   fields: DashboardFieldDefinition[]; values: Record<string, unknown>; draft: Record<string, unknown>;
@@ -34,15 +34,11 @@ function adjustmentDefault(field: DashboardFieldDefinition): string {
 
 export function TtsVoiceSettings({ fields, values, draft, guildOptions, onChange }: Props) {
   const engineFields = new Set(engines.flatMap(engine => [...engine.fields, engine.prefix]));
-  const otherPrefixes = fields.filter(field => ["tts.atts_prefix", "tts.teto_prefix"].includes(field.id));
-  for (const field of otherPrefixes) engineFields.add(field.id);
+  engineFields.add("tts.atts_prefix");
+  engineFields.add("tts.teto_prefix");
+  for (const id of ["tts.ttv_voice_id", "tts.ttv_language", "tts.ttv_pitch_semitones", "tts.ttv_speech_rate", "tts.voice_channel_id"]) engineFields.add(id);
   const shared = fields.filter(field => field.id !== "tts.engine" && !engineFields.has(field.id));
   const common = { values, draft, guildOptions, onChange };
-  const prefixSummary = otherPrefixes.map(field => {
-    const value = String(draft[field.id] ?? field.placeholder ?? "").trim();
-    const label = field.id === "tts.atts_prefix" ? "ATTS" : "Kasane Teto";
-    return value ? `${label}: ${value}` : label;
-  }).join(" · ");
 
   return <div className="osk-tts-settings">
     <div className="osk-tts-engines">{engines.map(engine => {
@@ -76,9 +72,7 @@ export function TtsVoiceSettings({ fields, values, draft, guildOptions, onChange
         })}</div>}
       </section>;
     })}</div>
-    {shared.length > 0 && <section className="osk-settings-card osk-tts-destination"><header><Mic2 size={19} aria-hidden="true" /><h2>Canal de voz</h2></header><FieldsPanel {...common} sectionId="tts" fields={shared} /></section>}
-    {otherPrefixes.length > 0 && <AdvancedSettings title="Outros prefixos" summary={prefixSummary} fields={otherPrefixes} values={values} draft={draft} icon={Type} className="osk-tts-extra-prefixes">
-      <FieldsPanel {...common} sectionId="tts" fields={otherPrefixes.map(field => field.id === "tts.teto_prefix" ? { ...field, description: "Prefixo para a voz Kasane Teto, quando disponível." } : field)} />
-    </AdvancedSettings>}
+    {shared.length > 0 && <section className="osk-settings-card"><FieldsPanel {...common} sectionId="tts" fields={shared} /></section>}
+    <TtvSettings fields={fields} values={values} draft={draft} guildOptions={guildOptions} onChange={onChange} />
   </div>;
 }

@@ -1,3 +1,4 @@
+import { DashboardTtvValueError, resolveDashboardTtvDefaults, validateDashboardTtvVoiceLanguage } from "./dashboardTtvModel.js";
 import { allDashboardFields, dashboardSections } from "../config/dashboardCatalog.js";
 import { isConfiguredValue, resolveDashboardSectionState } from "../config/dashboardSectionState.js";
 import { normalizeColorPanelLayout, normalizeFieldValue, serializeFieldValue } from "../config/dashboardValueCodec.js";
@@ -22,6 +23,7 @@ export interface DashboardUpdatePlan {
 export function dashboardValuesFromDocs(docs: DashboardDocs): Record<string, unknown> {
   const values: Record<string, unknown> = {};
   for (const field of allDashboardFields()) values[field.id] = serializeFieldValue(field, getPath(docs[field.scope], field.path));
+  for (const [key, value] of Object.entries(resolveDashboardTtvDefaults(docs.guild))) values[`tts.${key}`] = value;
   return values;
 }
 
@@ -82,6 +84,13 @@ export function planDashboardUpdates(docs: DashboardDocs, updates: Record<string
     patches.set(field.scope, scopePatch);
     saved.push(field.id);
     changedSections.add(field.id.split(".")[0] || field.scope);
+  }
+  if (saved.includes("tts.ttv_voice_id") || saved.includes("tts.ttv_language")) {
+    try { validateDashboardTtvVoiceLanguage(resolveDashboardTtvDefaults(docs.guild)); }
+    catch (error) {
+      if (error instanceof DashboardTtvValueError) throw new DashboardConfigValueError(`tts.${error.field}`, error.message);
+      throw error;
+    }
   }
   if (saved.some((fieldId) => DASHBOARD_PREFIX_FIELD_IDS.has(fieldId))) validateDashboardPrefixes(docs.guild);
   if (saved.includes("general.timezone")) changedSections.add("birthday");

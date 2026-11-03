@@ -11,6 +11,14 @@ const fields = [
   { ...field("tts.language", "select"), options: [{ value: "pt", label: "Português" }, { value: "en", label: "Inglês" }] },
   field("tts.rate", "text"), field("tts.pitch", "text"), field("tts.voice_channel_id", "channel"),
   field("tts.edge_prefix", "text"), field("tts.gtts_prefix", "text"), field("tts.atts_prefix", "text"), field("tts.teto_prefix", "text"),
+  { ...field("tts.ttv_voice_id", "select"), options: [
+    { value: "kasane-teto", label: "Kasane Teto", languages: ["pt-BR", "en-US"], nativePortuguese: false },
+    { value: "hatsune-miku", label: "Hatsune Miku", languages: ["pt-BR", "en-US"], nativePortuguese: false },
+    { value: "anna-nyui", label: "Anna Nyui", languages: ["pt-BR", "en-US"], nativePortuguese: false },
+    { value: "pururu-purpura", label: "Pururu Púrpura", languages: ["pt-BR"], nativePortuguese: true },
+  ] },
+  { ...field("tts.ttv_language", "select"), options: [{ value: "pt-BR", label: "Português" }, { value: "en-US", label: "Inglês" }] },
+  field("tts.ttv_pitch_semitones", "text"), field("tts.ttv_speech_rate", "number"),
   { ...field("tts.engine", "select"), options: [{ value: "edge", label: "Selecionar engine" }] },
 ];
 const render = (draft: Record<string, unknown>) => renderToStaticMarkup(React.createElement(TtsVoiceSettings, { fields, values: draft, draft, guildOptions: null, onChange() {} }));
@@ -22,7 +30,7 @@ test("ambos os motores aparecem com seus controles sem depender de engine legada
     assert.match(html, /Antônio/); assert.match(html, /Inglês/);
     assert.match(html, /\+25%/); assert.match(html, /-10Hz/);
     assert.doesNotMatch(html, /data-field-id="tts.engine"/);
-    assert.match(html, /data-field-id="tts.voice_channel_id"/);
+    assert.doesNotMatch(html, /data-field-id="tts.voice_channel_id"|Canal de voz preferido/);
   }
 });
 
@@ -34,13 +42,15 @@ test("valor vazio informa o padrão real em vez de pedir escolha de voz", () => 
   assert.doesNotMatch(html, /Selecione uma opção/);
 });
 
-test("mostra idioma legado e prefixos salvos sem reescrever o rascunho", () => {
+test("preserva idioma e prefixos salvos, com TextToVocaloid próprio e sem ATTS na interface", () => {
   const draft = { "tts.language": "pt-BR", "tts.edge_prefix": "!!", "tts.gtts_prefix": "??" };
   const before = structuredClone(draft);
   const html = render(draft);
   assert.match(html, /Português — configuração atual/);
   assert.match(html, /aria-label="tts.edge_prefix"[^>]*value="!!"/); assert.match(html, /aria-label="tts.gtts_prefix"[^>]*value="\?\?"/);
-  assert.match(html, /data-field-id="tts.atts_prefix"/); assert.match(html, /data-field-id="tts.teto_prefix"/);
+  assert.doesNotMatch(html, /data-field-id="tts.atts_prefix"|Prefixo ATTS|Outros prefixos/);
+  assert.match(html, /TextToVocaloid/);
+  assert.match(html, /data-field-id="tts.teto_prefix"/);
   assert.deepEqual(draft, before);
 });
 
@@ -55,4 +65,18 @@ test("idiomas regionais legados conservam a região e o valor salvo", () => {
     assert.ok(html.includes(`${label} — configuração atual`));
     assert.deepEqual(draft, { "tts.language": value });
   }
+});
+
+test("TextToVocaloid usa padrões do servidor e preserva ajustes salvos sem ação pessoal", () => {
+  const draft = { "tts.ttv_voice_id": "hatsune-miku", "tts.ttv_language": "en-US", "tts.ttv_pitch_semitones": "-1.5", "tts.ttv_speech_rate": 1.075, "general.bot_prefix": "!" };
+  const before = structuredClone(draft);
+  const html = render(draft);
+  for (const name of ["Kasane Teto", "Hatsune Miku", "Anna Nyui", "Pururu Púrpura"]) assert.ok(html.includes(name));
+  assert.match(html, /Voz padrão do servidor/);
+  assert.match(html, /data-field-id="tts.ttv_speech_rate"/);
+  assert.match(html, /value="107.5"/);
+  assert.match(html, /-1,5 semitons/);
+  assert.match(html, /!cd/); assert.match(html, /!rcd/);
+  assert.doesNotMatch(html, /Salvar minha voz|Preferências da sua conta|tts\.atts_prefix|tts\.voice_channel_id/);
+  assert.deepEqual(draft, before);
 });

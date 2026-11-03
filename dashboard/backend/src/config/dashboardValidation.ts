@@ -36,7 +36,7 @@ export function validateDashboardPrefixes(guild: Record<string, unknown>): void 
   const entries: Array<[string, string]> = [
     ["bot", normalizeDashboardPrefix(getPath(guild, "bot_prefix"))],
     ["ATTS", normalizeDashboardPrefix(getPath(guild, "atts_prefix"))],
-    ["Kasane Teto", normalizeDashboardPrefix(getPath(guild, "teto_prefix"))],
+    ["TextToVocaloid", normalizeDashboardPrefix(getPath(guild, "teto_prefix"))],
     ["gTTS", normalizeDashboardPrefix(getPath(guild, "gtts_prefix"))],
     ["Edge", normalizeDashboardPrefix(getPath(guild, "edge_prefix"))],
   ];

@@ -1,3 +1,5 @@
+import { DASHBOARD_TTV_FIELD_IDS, DashboardTtvValueError, normalizeDashboardTtvField } from "../services/dashboardTtvModel.js";
+import { DashboardConfigValueError } from "./dashboardTypes.js";
 import {
   normalizeColorPanelLayout,
   normalizeColorSlots,
@@ -20,6 +22,13 @@ export function serializeFieldValue(field: DashboardFieldDefinition, value: unkn
 }
 
 export function normalizeFieldValue(field: DashboardFieldDefinition, raw: unknown): unknown {
+  if (DASHBOARD_TTV_FIELD_IDS.has(field.id)) {
+    try { return normalizeDashboardTtvField(field.id, raw); }
+    catch (error) {
+      if (error instanceof DashboardTtvValueError) throw new DashboardConfigValueError(field.id, error.message);
+      throw error;
+    }
+  }
   if (field.type === "boolean") return raw === true || raw === "true" || raw === "1" || raw === 1;
   if (field.type === "number") {
     const n = Number(raw);

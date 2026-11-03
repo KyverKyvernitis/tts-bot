@@ -20,6 +20,7 @@ import "./workspace-module-details.css";
 import "./message-editor-refinement.css";
 import "./discord-preview-refinement.css";
 import "./message-media-refinement.css";
+import "./ttv-settings.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

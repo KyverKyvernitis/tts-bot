@@ -17,6 +17,8 @@ export type DashboardFieldType =
 export interface DashboardFieldOption {
   value: string;
   label: string;
+  languages?: string[];
+  nativePortuguese?: boolean;
 }
 
 export type DashboardTemplateSyntax = "curly" | "dollar_curly";
