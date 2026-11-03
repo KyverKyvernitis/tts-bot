@@ -1,0 +1,104 @@
+/* The account menu is a shared portal, so its own root scopes every rule. */
+.osk-root .osk-account-trigger[data-refined] {
+  min-height: 44px;
+  max-width: 218px;
+  grid-template-columns: 32px minmax(0, 1fr) 14px;
+  gap: 10px;
+  padding: 5px 10px 5px 6px;
+  border: 1px solid #333;
+  border-radius: 12px;
+  color: #eee;
+  background: #171717;
+  box-shadow: none;
+}
+.osk-root .osk-account-trigger[data-refined]:hover,
+.osk-root .osk-account-trigger[data-refined][aria-expanded="true"] {
+  border-color: #555;
+  background: #222;
+  color: #fff;
+}
+.osk-root .osk-account-trigger[data-refined]:focus-visible { outline: 2px solid #9b9b9b; outline-offset: 3px; box-shadow: none; }
+.osk-root .osk-account-trigger[data-refined] .osk-account-trigger-avatar {
+  width: 32px !important;
+  height: 32px !important;
+  display: grid;
+  place-items: center;
+  border: 1px solid #3c3c3c;
+  border-radius: 50%;
+  background: #303030;
+  font-size: 12px;
+}
+.osk-account-trigger[data-refined] .osk-account-trigger-copy { gap: 3px; }
+.osk-account-trigger[data-refined] .osk-account-trigger-copy small { color: #a2a2a2; font: 400 10px/1.2 var(--osk-font); letter-spacing: 0; text-transform: none; }
+.osk-account-trigger[data-refined] .osk-account-trigger-copy strong { color: #eee; font: 500 13px/1.2 var(--osk-font); }
+.osk-account-trigger[data-refined] .osk-account-caret { color: #aaa; transition: transform .18s ease; }
+.osk-account-trigger[data-refined][aria-expanded="true"] .osk-account-caret { transform: rotate(180deg); }
+.osk-account-layer[data-refined] { font-family: var(--osk-font); color-scheme: dark; }
+.osk-account-layer[data-refined] .osk-account-sheet {
+  width: min(304px, calc(100vw - 24px));
+  padding: 7px;
+  border: 1px solid #363636;
+  border-radius: 16px;
+  color: #e8e8e8;
+  background: #171717;
+  box-shadow: 0 12px 28px #0005, 0 30px 70px #0006;
+  backdrop-filter: none;
+  scrollbar-width: thin;
+  scrollbar-color: #505050 transparent;
+}
+.osk-account-layer[data-refined] .osk-account-profile {
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 11px 17px;
+  margin: 0 3px 5px;
+  background: transparent;
+  border-bottom: 1px solid #303030;
+}
+.osk-account-layer[data-refined] .osk-account-profile-avatar {
+  width: 42px !important;
+  height: 42px !important;
+  display: grid;
+  place-items: center;
+  border: 1px solid #424242;
+  border-radius: 13px;
+  color: #dedede;
+  background: #303030;
+}
+.osk-account-layer[data-refined] .osk-account-profile > span { gap: 4px; }
+.osk-account-layer[data-refined] .osk-account-profile strong { color: #f0f0f0; font: 600 15px/1.4 var(--osk-font); letter-spacing: -.015em; }
+.osk-account-layer[data-refined] .osk-account-profile small { color: #a8a8a8; font: 400 12px/1.4 var(--osk-font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.osk-account-layer[data-refined] .osk-account-actions { gap: 3px; padding-top: 0; }
+.osk-account-layer[data-refined] .osk-account-actions > :is(button, a) {
+  min-height: 45px;
+  grid-template-columns: 19px minmax(0, 1fr) 15px;
+  gap: 11px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  color: #dedede;
+  background: transparent;
+  font: 400 14px/1.5 var(--osk-font);
+  letter-spacing: -.01em;
+  transition: background .14s ease, color .14s ease;
+}
+.osk-account-layer[data-refined] .osk-account-actions > :is(button, a) > svg { color: #a5a5a5; stroke-width: 1.65; }
+.osk-account-layer[data-refined] .osk-account-actions > :is(button, a) > svg:last-child { color: #808080; }
+.osk-account-layer[data-refined] .osk-account-actions > :is(button, a):hover,
+.osk-account-layer[data-refined] .osk-account-actions > :is(button, a):focus-visible { color: #fafafa; background: #292929; }
+.osk-account-layer[data-refined] .osk-account-actions > :is(button, a):focus-visible { outline: 1px solid #777; outline-offset: -1px; box-shadow: none; }
+.osk-account-layer[data-refined] .osk-account-actions > button:disabled { cursor: wait; opacity: .55; }
+.osk-account-layer[data-refined] .osk-account-divider { height: 1px; margin: 4px 10px; background: #303030; }
+.osk-account-layer[data-refined] .osk-account-actions .osk-account-logout { color: #e0aaaa; }
+.osk-account-layer[data-refined] .osk-account-actions .osk-account-logout > svg { color: #c38f8f; }
+.osk-account-layer[data-refined] .osk-account-actions .osk-account-logout:hover,
+.osk-account-layer[data-refined] .osk-account-actions .osk-account-logout:focus-visible { color: #f1bdbd; background: #332425; }
+.osk-account-layer[data-refined] .osk-account-current-server { margin: 8px 5px; padding: 9px; border: 1px solid #363636; background: #202020; }
+.osk-account-layer[data-refined] .osk-account-current-server small { color: #aaa; font: 400 11px/1.4 var(--osk-font); letter-spacing: 0; text-transform: none; }
+.osk-account-layer[data-refined] .osk-account-current-server strong { color: #eee; font: 500 13px/1.4 var(--osk-font); }
+@media (max-width: 600px) {
+  .osk-root .osk-account-trigger[data-refined] { max-width: 78px; grid-template-columns: 32px 14px; padding: 5px 9px 5px 6px; gap: 8px; }
+  .osk-account-trigger[data-refined] .osk-account-trigger-copy { display: none; }
+  .osk-account-layer[data-refined] .osk-account-actions > :is(button, a) { min-height: 47px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .osk-account-layer[data-refined], .osk-account-layer[data-refined] *, .osk-account-trigger[data-refined] * { transition: none !important; animation: none !important; }
+}

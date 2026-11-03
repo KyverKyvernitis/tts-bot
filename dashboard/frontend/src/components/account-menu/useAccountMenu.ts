@@ -22,6 +22,7 @@ export function useAccountMenu() {
       rect,
       window.innerWidth,
       window.visualViewport?.height ?? window.innerHeight,
+      { menuHeight: sheetRef.current?.scrollHeight || 320, menuWidth: 304, margin: 12 },
     ));
   }, []);
 
@@ -51,13 +52,14 @@ export function useAccountMenu() {
 
   const close = useCallback((restoreFocus = true) => {
     clearOpenFrames();
+    if (sheetRef.current) sheetRef.current.inert = true;
+    if (restoreFocus) triggerRef.current?.focus({ preventScroll: true });
     setVisible(false);
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => {
       setMounted(false);
       closeTimerRef.current = null;
     }, CLOSE_MS + 40);
-    if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
   }, [clearOpenFrames]);
 
   const toggle = useCallback(() => {
@@ -66,11 +68,14 @@ export function useAccountMenu() {
   }, [close, mounted, open, visible]);
 
   useLayoutEffect(() => {
-    if (mounted) measure();
-  }, [measure, mounted]);
+    if (mounted) {
+      if (sheetRef.current) sheetRef.current.inert = !visible;
+      measure();
+    }
+  }, [measure, mounted, visible]);
 
   useEffect(() => {
-    if (!mounted) return;
+    if (!mounted || !visible) return;
     const focusTimer = visible
       ? window.setTimeout(() => sheetRef.current?.querySelector<HTMLElement>("[role='menuitem']:not([disabled])")?.focus(), 60)
       : null;

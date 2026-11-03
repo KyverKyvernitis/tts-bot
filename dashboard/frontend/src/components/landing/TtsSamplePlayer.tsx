@@ -92,24 +92,23 @@ export function TtsSamplePlayer({ id = "ouvir-osaka" }: { id?: string }) {
   }
 
   const playLabel = isLoading
-    ? "Cancelar carregamento da amostra"
+    ? "Cancelar carregamento do áudio"
     : isPlaying
-      ? `Pausar amostra: ${sample.label}`
+      ? `Pausar voz: ${sample.label}`
       : phase === "error"
         ? `Tentar reproduzir novamente: ${sample.label}`
-        : `Ouvir amostra: ${sample.label}`;
+        : `Ouvir voz: ${sample.label}`;
 
   return (
     <section id={id} className="osk-tts-player" aria-labelledby={`${id}-title`} data-playing={isPlaying || undefined} data-loading={isLoading || undefined}>
       <div className="osk-tts-player__heading">
-        <h2 id={`${id}-title`} className="osk-tts-player__eyebrow">Ouça a Osaka</h2>
-        <span className="osk-tts-player__index" aria-hidden="true">{String(sampleIndex + 1).padStart(2, "0")} / 03</span>
+        <h2 id={`${id}-title`} className="osk-tts-player__eyebrow">Escolha uma voz</h2>
       </div>
 
-      <div className="osk-tts-player__choices" role="group" aria-label="Escolha uma amostra de voz">
+      <div className="osk-tts-player__choices" role="group" aria-label="Escolha uma voz">
         {TTS_SAMPLES.map((item, index) => (
           <button key={item.id} type="button" className="osk-tts-player__choice" data-selected={index === sampleIndex || undefined} aria-pressed={index === sampleIndex} onClick={() => selectSample(index)}>
-            <span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>{item.label}
+            {item.label}
           </button>
         ))}
       </div>
@@ -126,14 +125,14 @@ export function TtsSamplePlayer({ id = "ouvir-osaka" }: { id?: string }) {
         <span className="osk-tts-player__time" aria-hidden="true">{formatTime(elapsed)}<span> / {duration > 0 ? formatTime(duration) : "—"}</span></span>
       </div>
 
-      <div className="osk-tts-player__progress" role="progressbar" aria-label="Progresso da amostra" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)} aria-valuetext={duration > 0 ? `${formatTime(elapsed)} de ${formatTime(duration)}` : "Amostra ainda não iniciada"}>
+      <div className="osk-tts-player__progress" role="progressbar" aria-label="Progresso do áudio" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)} aria-valuetext={duration > 0 ? `${formatTime(elapsed)} de ${formatTime(duration)}` : "Áudio ainda não iniciado"}>
         <span style={{ transform: `scaleX(${progress / 100})` }} />
       </div>
 
-      <p id={`${id}-voice`} className="osk-tts-player__caption">{sample.description}<span>Amostra gravada</span></p>
+      <p id={`${id}-voice`} className="osk-tts-player__caption">{sample.description}</p>
       <p className="osk-tts-player__transcript">“{sample.transcript}”</p>
       {phase === "error" && <p className="osk-tts-player__error" role="alert">Não foi possível reproduzir. Toque no botão para tentar novamente.</p>}
-      <span className="osk-sr-only" role="status" aria-live="polite">{phase === "loading" ? "Carregando amostra de voz." : phase === "playing" ? `Reproduzindo ${sample.label}.` : phase === "paused" ? "Amostra pausada." : ""}</span>
+      <span className="osk-sr-only" role="status" aria-live="polite">{phase === "loading" ? "Carregando áudio." : phase === "playing" ? `Reproduzindo ${sample.label}.` : phase === "paused" ? "Áudio pausado." : ""}</span>
 
       <audio
         ref={audioRef}

@@ -4,6 +4,7 @@ import { previewImageCandidates } from "./message-editor/messageEditorUtils";
 
 interface SmartAvatarProps {
   src?: string | null;
+  fallbackSrc?: string | null;
   name: string;
   type: "user" | "server";
   size?: number;
@@ -18,15 +19,22 @@ interface SmartAvatarProps {
  * osk-user-chip-avatar) — só troca o conteúdo interno por <img> quando há uma
  * imagem válida, preservando o fundo roxo/azul como fallback.
  */
-export function SmartAvatar({ src, name, type, size, alt, className, loading = "lazy" }: SmartAvatarProps) {
-  const candidates = useMemo(() => previewImageCandidates(src), [src]);
+export function SmartAvatar({ src, fallbackSrc, name, type, size, alt, className, loading = "lazy" }: SmartAvatarProps) {
+  const candidates = useMemo(() => {
+    // Bundled avatars are safe local image sources; message preview URL rules
+    // deliberately accept only absolute URLs and remain unchanged.
+    const candidatesFor = (value: string | null | undefined) => typeof value === "string" && value.startsWith("/assets/")
+      ? [value]
+      : previewImageCandidates(value);
+    return Array.from(new Set([...candidatesFor(src), ...candidatesFor(fallbackSrc)]));
+  }, [src, fallbackSrc]);
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [broken, setBroken] = useState(false);
 
   useEffect(() => {
     setCandidateIndex(0);
     setBroken(false);
-  }, [src]);
+  }, [src, fallbackSrc]);
 
   const currentSrc = candidates[candidateIndex] || "";
   const showImage = Boolean(currentSrc) && !broken;

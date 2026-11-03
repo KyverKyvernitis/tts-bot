@@ -1,4 +1,5 @@
 import {
+  ArrowUpRight,
   ChevronDown,
   ChevronRight,
   LogOut,
@@ -46,6 +47,7 @@ export function AccountMenu({
       ref={menu.triggerRef}
       type="button"
       className="osk-account-trigger"
+      data-refined="true"
       data-variant={variant}
       onClick={menu.toggle}
       aria-label={`${menu.visible ? "Fechar" : "Abrir"} menu da conta de ${name}`}
@@ -65,12 +67,12 @@ export function AccountMenu({
         <small>Conta</small>
         <strong>{name}</strong>
       </span>
-      <ChevronDown size={15} aria-hidden="true" />
+      <ChevronDown className="osk-account-caret" size={15} aria-hidden="true" />
     </button>
 
     {menu.mounted && createPortal(
-      <div className="osk-account-layer" data-visible={menu.visible || undefined}>
-        <button type="button" className="osk-account-backdrop" onClick={() => menu.close()} aria-label="Fechar menu da conta" />
+      <div className="osk-account-layer" data-refined="true" data-visible={menu.visible || undefined}>
+        <button type="button" className="osk-account-backdrop" tabIndex={-1} onClick={() => menu.close()} aria-label="Fechar menu da conta" />
         <section
           id={menu.menuId}
           ref={menu.sheetRef}
@@ -85,9 +87,9 @@ export function AccountMenu({
           aria-hidden={!menu.visible}
         >
           <header className="osk-account-profile">
-            <SmartAvatar className="osk-account-profile-avatar" src={user.avatarUrl} name={name} type="user" alt="" size={38} />
+            <SmartAvatar className="osk-account-profile-avatar" src={user.avatarUrl} name={name} type="user" alt="" size={42} />
             <span>
-              <strong>{name}</strong>
+              <strong title={name}>{name}</strong>
               {user.username && <small>@{user.username}</small>}
             </span>
           </header>
@@ -105,10 +107,11 @@ export function AccountMenu({
               <RefreshCw size={17} className={busy ? "osk-spin" : undefined} /><span>{busy ? "Atualizando..." : "Atualizar dados"}</span>
             </button>
             <a role="menuitem" href={supportInviteUrl} target="_blank" rel="noreferrer noopener" onClick={() => menu.close(false)}>
-              <MessagesSquare size={17} /><span>Servidor de suporte</span><ChevronRight size={15} />
+              <MessagesSquare size={17} /><span>Servidor de suporte</span><ArrowUpRight size={15} />
             </a>
+            <div className="osk-account-divider" role="separator" />
             <button type="button" role="menuitem" className="osk-account-logout" onClick={() => menu.run(onLogout, false)}>
-              <LogOut size={17} /><span>Sair</span>
+              <LogOut size={17} /><span>Sair da conta</span>
             </button>
           </nav>
         </section>
