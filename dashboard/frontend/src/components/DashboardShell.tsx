@@ -8,6 +8,8 @@ import { Sidebar, type DashboardNavigationPage } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { DashboardMobileNav } from "./DashboardMobileNav";
 import { LoadingProgress, LoadingVisual } from "./VisualTemplates";
+import { type CSSProperties } from "react";
+import { useDashboardViewport } from "../app/useDashboardViewport";
 import type { DashboardVisualModule } from "../moduleCatalog";
 import type {
   DashboardFieldDefinition,
@@ -94,13 +96,18 @@ export function DashboardShell({
   onDiscard,
   onSave,
 }: DashboardShellProps) {
+  const viewport = useDashboardViewport();
   const guildName = selectedServer?.name || `Servidor ${route.guildId.slice(-6)}`;
   const guildIcon = selectedServer?.icon || null;
   const botName = botIdentity?.global_name || botIdentity?.username || "Osaka";
   const activePage: DashboardNavigationPage = route.view === "module" ? "modules" : route.view;
   const editableSection = route.view === "general" || route.view === "module" ? selectedSection : null;
 
-  return <FieldFeedbackContext.Provider value={{ errors: fieldErrors, optionsBusy, onRetryOptions }}><div className="osk-dashboard-shell" data-has-draft={changedCount > 0 || undefined}>
+  return <FieldFeedbackContext.Provider value={{ errors: fieldErrors, optionsBusy, onRetryOptions }}><div
+    className="osk-dashboard-shell" data-workspace="true" data-has-draft={changedCount > 0 || undefined}
+    data-keyboard-open={viewport.keyboardOpen || undefined}
+    style={{ "--osk-keyboard-bottom": `${viewport.dockBottom}px`, "--osk-viewport-height": `${viewport.viewportHeight}px`, "--osk-workspace-sidebar-width": "228px" } as CSSProperties}
+  >
     <Sidebar
       activePage={activePage}
       mobileOpen={mobileMenuOpen}
@@ -148,7 +155,7 @@ export function DashboardShell({
       </main>
     </div>
     {!messageEditorActive && editableSection && <SaveDock changedCount={changedCount} sectionLabel={editableSection.label} saving={saving} onDiscard={onDiscard} onSave={onSave} />}
-    {!messageEditorActive && <DashboardMobileNav activePage={activePage} onNavigate={onNavigate} />}
+    {!messageEditorActive && !viewport.keyboardOpen && <DashboardMobileNav activePage={activePage} onNavigate={onNavigate} />}
   </div></FieldFeedbackContext.Provider>;
 }
 

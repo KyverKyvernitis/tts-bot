@@ -56,14 +56,14 @@ export function ColorSlotsEditor({
       const roleHasOwnColor = Boolean(currentRole && Number(currentRole.color || 0) > 0);
       const colorDescription = currentRole
         ? (roleHasOwnColor ? `${color} · atualizada automaticamente pelo Discord` : "Cargo sem cor própria · prévia neutra")
-        : `${color} · cor do preset usada enquanto não há cargo válido`;
+        : `${color} · cor usada enquanto nenhum cargo estiver vinculado`;
       const visibleIndex = visibleSlotIds?.indexOf(slotNumber) ?? -1;
       return <article key={key} data-slot-number={slotNumber}>
         <header>
           <span className="osk-color-slot-swatch" style={{ background: color }}><b>{visibleIndex >= 0 ? visibleIndex + 1 : slotNumber}</b></span>
           <div><strong>{String(slot.name || `Cor ${slotNumber}`)}</strong><small>{colorRoleLabel(slot, { ok: true, channels: [], roles })}</small></div>
         </header>
-        <label><span>Nome exibido</span><input value={String(slot.name || "")} maxLength={80} onFocus={() => onSelectSlot?.(slotNumber)} onChange={(event) => update(slotNumber, { name: event.target.value })} /></label>
+        <label><span>Nome da opção</span><input aria-label={`Nome da opção ${visibleIndex >= 0 ? visibleIndex + 1 : slotNumber}`} value={String(slot.name || "")} maxLength={80} onFocus={() => onSelectSlot?.(slotNumber)} onChange={(event) => update(slotNumber, { name: event.target.value })} /></label>
         <label><span>Cargo vinculado</span>{availableRoles.length || currentRoleId ? <SmartSelect id={`color-slot-${key}`} ariaLabel={`Cargo vinculado à opção ${visibleIndex >= 0 ? visibleIndex + 1 : slotNumber}`} value={currentRoleId} options={[{ value: "", label: "Nenhum cargo" }, ...selectOptions]} onChange={(next) => {
           const selected = roles.find((role) => role.id === next);
           update(slotNumber, { role_id: next, role_name: selected?.name || String(slot.name || `Cor ${slotNumber}`), managed: false });

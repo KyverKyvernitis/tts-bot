@@ -51,18 +51,18 @@ export function RoleMultiEditor({ field, value, options, onChange }: { field: Da
   const filtered = needle ? options.filter((option) => `${option.label} ${option.hint || ""}`.toLocaleLowerCase("pt-BR").includes(needle)) : options;
   const toggle = (roleId: string) => setWorking((current) => current.includes(roleId) ? current.filter((id) => id !== roleId) : [...current, roleId]);
 
-  const modal = open ? <div className="osk-root osk-multi-sheet" role="dialog" aria-modal="true" aria-label={`Selecionar ${field.label}`}>
-    <button type="button" className="osk-multi-sheet__backdrop" onClick={() => setOpen(false)} aria-label="Fechar" />
+  const modal = open ? <div className="osk-root osk-multi-sheet osk-multi-sheet--workspace" role="dialog" aria-modal="true" aria-label={`Selecionar ${field.label}`}>
+    <button type="button" className="osk-multi-sheet__backdrop" onClick={() => setOpen(false)} tabIndex={-1} aria-label="Fechar" />
     <div className="osk-multi-sheet__panel" ref={panelRef}>
       <header><div><strong>{field.label}</strong><small>{working.length} selecionado{working.length === 1 ? "" : "s"}</small></div><button type="button" onClick={() => setOpen(false)} aria-label="Fechar"><X size={18} /></button></header>
       <label className="osk-multi-sheet__search"><Search size={16} /><input aria-label="Buscar cargo" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar cargo" /></label>
       <div className="osk-multi-sheet__list">
-        {filtered.map((option) => <button key={option.value} type="button" data-selected={working.includes(option.value) || undefined} onClick={() => toggle(option.value)}>
+        {filtered.map((option) => <button key={option.value} type="button" disabled={option.disabled} data-selected={working.includes(option.value) || undefined} aria-pressed={working.includes(option.value)} onClick={() => toggle(option.value)}>
           <span><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span>{working.includes(option.value) && <Check size={17} />}
         </button>)}
         {!filtered.length && <div className="osk-message-empty">Nenhum cargo encontrado.</div>}
       </div>
-      <footer><button type="button" className="osk-secondary-button" onClick={() => { setWorking([]); }}>Limpar</button><button type="button" className="osk-primary-button" onClick={() => { onChange(field, working); setOpen(false); }}>Concluir</button></footer>
+      <footer><button type="button" className="osk-secondary-button" onClick={() => { setWorking([]); }}>Limpar seleção</button><button type="button" className="osk-primary-button" onClick={() => { onChange(field, working); setOpen(false); }}>Usar cargos</button></footer>
     </div>
   </div> : null;
 

@@ -37,7 +37,7 @@ export function MessageGroupPanel({
   const enabled = sectionEditorEnabled(sectionId, group, draft);
 
   return <div className="osk-message-group-panel">
-    {!enabled && <div className="osk-inline-note">Você pode preparar estas mensagens agora. O envio acompanha a opção configurada acima.</div>}
+    {!enabled && <div className="osk-inline-note">O envio está desativado. Você pode editar e salvar a mensagem antes de ativá-lo.</div>}
     {settingsFields.length > 0 && <div className="osk-message-group-settings">
       {sectionId === "forms" && group === "Aprovação"
         ? <FormsApprovalSettings fields={settingsFields} draft={draft} renderFields={renderFields} />
@@ -85,7 +85,7 @@ function FormsApprovalSettings({ fields, draft, renderFields }: {
   };
   return <div className="osk-approval-settings">
     {enabledField && renderFields([enabledField])}
-    {!enabled && <div className="osk-inline-note">Prepare o cargo e os botões abaixo. Eles serão usados ao habilitar a aprovação.</div>}
+    {!enabled && <div className="osk-inline-note">A aprovação está desativada. Os ajustes abaixo serão usados quando você ativá-la.</div>}
     <>
       {roleField && <section className="osk-approval-settings__result"><header><LockKeyhole size={17} /><span><strong>Resultado da aprovação</strong><small>Cargo concedido quando a equipe aprova a resposta.</small></span></header>{renderFields([roleField])}</section>}
       <div className="osk-approval-settings__buttons">

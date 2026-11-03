@@ -96,6 +96,7 @@ export function MessageEditorContextPanel(props: MessageEditorContextPanelProps)
         className="osk-message-editor__context-backdrop"
         onClick={onClose}
         disabled={pendingJson}
+        tabIndex={-1}
         aria-label="Fechar configurações"
       />
       <section
@@ -109,7 +110,7 @@ export function MessageEditorContextPanel(props: MessageEditorContextPanelProps)
         <div className="osk-message-editor__view-head">
           <div>
             <strong>{title}</strong>
-            <small>{description}</small>
+            {description && <small>{description}</small>}
           </div>
           <button type="button" onClick={onClose} disabled={pendingJson} aria-label="Fechar"><X size={17} /></button>
         </div>
@@ -129,8 +130,8 @@ export function MessageEditorContextPanel(props: MessageEditorContextPanelProps)
           ) : selectedField ? (
             <>
               {senderSelected && <div className="osk-message-sender-note" data-enabled={senderEnabled || undefined}>
-                <strong>{senderEnabled ? "Webhook ativado" : "Enviado pela Osaka"}</strong>
-                <span>{senderEnabled ? "A identidade abaixo será usada apenas nesta mensagem." : "Ative o webhook para escolher outro nome e avatar."}</span>
+                <strong>{senderEnabled ? "Remetente personalizado" : "Enviado pelo bot"}</strong>
+                <span>{senderEnabled ? "Nome e avatar usados nesta mensagem." : "Ative o webhook para usar outro nome e avatar."}</span>
               </div>}
               <MessageVisualEditor
                 fields={inspectorFields}

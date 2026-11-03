@@ -10,6 +10,11 @@ import "./typography.css";
 import "./module-settings.css";
 import "./landing-refresh.css";
 import "./account-menu-refresh.css";
+import "./workspace-foundation.css";
+import "./workspace-pages.css";
+import "./workspace-modules.css";
+import "./workspace-navigation.css";
+import "./workspace-editors.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

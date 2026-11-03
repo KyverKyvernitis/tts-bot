@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Clipboard, Command, RefreshCw, Search, X } from "lucide-react";
+import { Check, ChevronDown, Clipboard, RefreshCw, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchDashboardCommands } from "../transport/dashboardApi";
 import type { DashboardCommandCategory, DashboardCommandEntry, DashboardCommandsPayload } from "../types/dashboard";
@@ -36,6 +36,7 @@ async function copyText(value: string): Promise<void> {
     await navigator.clipboard.writeText(value);
     return;
   }
+  const previousFocus = document.activeElement;
   const field = document.createElement("textarea");
   field.value = value;
   field.setAttribute("readonly", "");
@@ -43,8 +44,12 @@ async function copyText(value: string): Promise<void> {
   field.style.opacity = "0";
   document.body.appendChild(field);
   field.select();
-  document.execCommand("copy");
-  field.remove();
+  try {
+    if (!document.execCommand("copy")) throw new Error("clipboard_unavailable");
+  } finally {
+    field.remove();
+    if (previousFocus instanceof HTMLElement) previousFocus.focus({ preventScroll: true });
+  }
 }
 
 export function CommandsPage({ guildId, refreshToken = 0 }: CommandsPageProps) {
@@ -55,6 +60,8 @@ export function CommandsPage({ guildId, refreshToken = 0 }: CommandsPageProps) {
   const [category, setCategory] = useState("all");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const copyRequestRef = useRef(0);
   const generationRef = useRef(0);
   const copyTimerRef = useRef<number | null>(null);
 
@@ -80,11 +87,16 @@ export function CommandsPage({ guildId, refreshToken = 0 }: CommandsPageProps) {
     setQuery("");
     setCategory("all");
     setExpanded(null);
+    setCopied(null);
+    setCopyError(null);
+    copyRequestRef.current += 1;
+    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
     void load(refreshToken > 0);
     return () => { generationRef.current += 1; };
   }, [load, refreshToken]);
 
   useEffect(() => () => {
+    copyRequestRef.current += 1;
     if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
   }, []);
 
@@ -101,31 +113,33 @@ export function CommandsPage({ guildId, refreshToken = 0 }: CommandsPageProps) {
   })).filter((item) => item.commands.length > 0), [filtered, payload?.categories]);
 
   const handleCopy = useCallback(async (command: DashboardCommandEntry) => {
+    const request = ++copyRequestRef.current;
+    setCopyError(null);
     try {
       await copyText(command.usage);
+      if (request !== copyRequestRef.current) return;
       setCopied(command.key);
       if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
       copyTimerRef.current = window.setTimeout(() => setCopied(null), 1_600);
     } catch {
+      if (request !== copyRequestRef.current) return;
       setCopied(null);
+      setCopyError(command.key);
     }
   }, []);
 
   return <section className="osk-dashboard-page osk-commands-page">
-    <header className="osk-commands-intro">
-      <span className="osk-kicker">Referência do usuário</span>
-      <span className="osk-commands-title"><span aria-hidden="true"><Command size={25} /></span><span><h1>Comandos</h1><p>Encontre tudo o que usuários comuns podem usar neste servidor.</p></span></span>
-    </header>
+    <header className="osk-workspace-page-heading"><h1>Comandos</h1><p>Consulte os comandos e copie o que precisar.</p></header>
 
     <div className="osk-command-discovery">
       <label className="osk-command-search">
         <Search size={20} aria-hidden="true" />
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comando, uso, alias ou categoria" aria-label="Buscar comandos" autoComplete="off" />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comando ou palavra-chave" aria-label="Buscar comandos" autoComplete="off" />
         {query && <button type="button" onClick={() => setQuery("")} aria-label="Limpar pesquisa"><X size={17} /></button>}
       </label>
       <nav className="osk-command-categories" aria-label="Categorias de comandos">
-        <button type="button" data-active={category === "all" || undefined} onClick={() => setCategory("all")}>Todos</button>
-        {(payload?.categories ?? []).map((item) => <button key={item.key} type="button" data-active={category === item.key || undefined} onClick={() => setCategory(item.key)}><span aria-hidden="true">{item.emoji}</span>{item.label}</button>)}
+        <button type="button" data-active={category === "all" || undefined} aria-pressed={category === "all"} onClick={() => setCategory("all")}>Todos</button>
+        {(payload?.categories ?? []).map((item) => <button key={item.key} type="button" data-active={category === item.key || undefined} aria-pressed={category === item.key} onClick={() => setCategory(item.key)}><span aria-hidden="true">{item.emoji}</span>{item.label}</button>)}
       </nav>
     </div>
 
@@ -133,7 +147,7 @@ export function CommandsPage({ guildId, refreshToken = 0 }: CommandsPageProps) {
     {error && !payload && <div className="osk-commands-error" role="alert"><p>Não foi possível abrir o catálogo agora.</p><button type="button" onClick={() => void load(true)}><RefreshCw size={16} />Tentar novamente</button></div>}
 
     {payload && <div className="osk-command-results">
-      <span className="osk-sr-only" role="status">{filtered.length} comandos encontrados</span>
+      <span className="osk-sr-only" role="status">{copied ? "Comando copiado." : `${filtered.length} comandos encontrados`}</span>
       {grouped.map(({ category: item, commands }) => <section key={item.key} className="osk-command-category-section">
         <header><span className="osk-command-category-icon" aria-hidden="true">{item.emoji}</span><div><h2>{item.label}</h2><p>{item.description}</p></div></header>
         <div className="osk-command-list">
@@ -145,6 +159,7 @@ export function CommandsPage({ guildId, refreshToken = 0 }: CommandsPageProps) {
                 <p>{command.description}</p>
               </div>
               <button type="button" className="osk-command-copy" data-copied={copied === command.key || undefined} onClick={() => void handleCopy(command)} aria-label={`Copiar ${command.usage}`}>{copied === command.key ? <Check size={17} /> : <Clipboard size={17} />}<span>{copied === command.key ? "Copiado" : "Copiar"}</span></button>
+              {copyError === command.key && <p className="osk-command-copy-error" role="alert">Não foi possível copiar. <button type="button" onClick={() => void handleCopy(command)}>Tentar novamente</button></p>}
               {command.aliases.length > 0 && <button type="button" className="osk-command-details" onClick={() => setExpanded(open ? null : command.key)} aria-expanded={open}><span>{open ? "Ocultar aliases" : "Ver aliases"}</span><ChevronDown size={16} /></button>}
               {open && <div className="osk-command-aliases"><small>Também funciona com</small><div>{command.aliases.map((alias) => <code key={alias}>{alias}</code>)}</div></div>}
             </article>;

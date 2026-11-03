@@ -42,8 +42,8 @@ export function Topbar({
   onOpenMenu,
 }: TopbarProps) {
   return <header className="osk-dashboard-topbar">
-    <button type="button" className="osk-topbar-menu" onClick={onOpenMenu} aria-label="Abrir menu"><Menu size={22} /></button>
-    <span className="osk-topbar-brand"><SmartAvatar src={botAvatarUrl} name={botName} type="user" size={34} /><strong>{botName}</strong></span>
+    <button type="button" className="osk-topbar-menu" onClick={onOpenMenu} aria-label="Abrir navegação do painel"><Menu size={20} aria-hidden="true" /></button>
+    <span className="osk-topbar-brand"><SmartAvatar src={botAvatarUrl} fallbackSrc="/assets/osaka-discord-avatar.png" name={botName} type="user" size={32} alt="" /><strong title={botName}>{botName}</strong></span>
     <ServerSwitcher guildId={guildId} guildName={guildName} guildIcon={guildIcon} servers={servers} onSelect={onSelectServer} />
     <AccountMenu
       user={user}

@@ -13,11 +13,16 @@ interface ServerSwitcherProps {
 
 export function ServerSwitcher({ guildId, guildName, guildIcon, servers, onSelect }: ServerSwitcherProps) {
   const choices = useMemo(() => servers.filter((server) => server.canManage && server.botPresent), [servers]);
-  const options = useMemo(() => choices.map((server) => ({ value: server.id, label: server.name })), [choices]);
-  const avatar = (id: string, name: string) => <SmartAvatar src={choices.find((server) => server.id === id)?.icon || (id === guildId ? guildIcon : null)} name={name} type="server" size={34} />;
+  const options = useMemo(() => {
+    const available = choices.map((server) => ({ value: server.id, label: server.name }));
+    return available.some(server => server.value === guildId)
+      ? available
+      : [{ value: guildId, label: guildName }, ...available];
+  }, [choices, guildId, guildName]);
+  const avatar = (id: string, name: string) => <SmartAvatar src={choices.find((server) => server.id === id)?.icon || (id === guildId ? guildIcon : null)} name={name} type="server" size={32} alt="" />;
 
-  if (choices.length < 2) return <div className="osk-server-identity">
-    {avatar(guildId, guildName)}<span><small>Servidor</small><strong>{guildName}</strong></span>
+  if (options.length < 2) return <div className="osk-server-identity" aria-label={`Servidor: ${guildName}`}>
+    {avatar(guildId, guildName)}<span><small>Servidor</small><strong title={guildName}>{guildName}</strong></span>
   </div>;
 
   return <div className="osk-server-switcher"><SmartSelect

@@ -47,7 +47,7 @@ export function MessageEditorSurface({
   return (
     <div
       ref={dialogRef}
-      className="osk-root osk-message-editor osk-message-editor--unified"
+      className="osk-root osk-message-editor osk-message-editor--unified osk-message-editor--workspace"
       data-visible={visible || undefined}
       data-editor-view={view}
       data-text-editing={textEditing ? "true" : undefined}
@@ -63,13 +63,12 @@ export function MessageEditorSurface({
           {context ? <MessageEditorContextPanel {...context} /> : null}
         </div>
         {textDock ? <MessageEditorTextDock {...textDock} /> : null}
-        <footer className="osk-message-editor__footer" data-text-editing={textEditing ? "true" : undefined}>
-          <button type="button" className="osk-secondary-button" onClick={onDiscard}>Descartar alterações</button>
+        <footer className="osk-message-editor__footer" data-text-editing={textEditing ? "true" : undefined} data-dirty={dirty || undefined}>
+          <button type="button" className="osk-secondary-button" onClick={onDiscard}>Descartar</button>
           <button type="button" className="osk-primary-button" disabled={pendingJson} onClick={onApply}>
-            {pendingJson ? "Aplicando..." : dirty ? "Concluir edição" : "Concluir"}
+            {pendingJson ? "Aplicando…" : "Aplicar ao rascunho"}
           </button>
         </footer>
-        <small className="osk-editor-draft-note">Concluir mantém a edição no rascunho. Salve no servidor ao voltar ao módulo.</small>
       </div>
     </div>
   );

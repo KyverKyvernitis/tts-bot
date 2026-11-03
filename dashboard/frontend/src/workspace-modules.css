@@ -1,0 +1,165 @@
+/* Configuration pages keep their styles inside the authenticated workspace. */
+.osk-dashboard-shell[data-workspace] .osk-module-settings { max-width: 1120px; }
+.osk-dashboard-shell[data-workspace] .osk-module-breadcrumb { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin-bottom: 14px; }
+.osk-dashboard-shell[data-workspace] .osk-module-breadcrumb .osk-page-back { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; margin: 0; padding: 0 3px; border: 0; background: transparent; color: #aaa; font: 400 14px/1.4 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-breadcrumb .osk-page-back:hover { color: #f5f5f5; }
+.osk-dashboard-shell[data-workspace] .osk-module-breadcrumb > span { padding: 5px 9px; border: 1px solid #303030; border-radius: 7px; background: #191919; color: #bdbdbd; font: 400 12px/1.4 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-heading { display: flex; align-items: center; gap: 16px; margin-bottom: 26px; padding: 0; border: 0; background: transparent; }
+.osk-dashboard-shell[data-workspace] .osk-module-emblem { flex: 0 0 58px; width: 58px; height: 54px; border: 1px solid #2d2d2d; border-radius: 12px; background: #151515; }
+.osk-dashboard-shell[data-workspace] .osk-module-emblem .osk-module-artwork { position: absolute; top: 50%; left: 50%; width: 144px; height: 104px; transform: translate(-50%, -50%) scale(.42); }
+.osk-dashboard-shell[data-workspace] .osk-module-heading-copy { flex: 1; min-width: 0; }
+.osk-dashboard-shell[data-workspace] .osk-module-heading-copy h1 { margin: 0; color: #f3f3f3; font: 600 clamp(25px, 2.6vw, 32px)/1.25 var(--osk-font-display); letter-spacing: -.045em; overflow-wrap: anywhere; }
+.osk-dashboard-shell[data-workspace] .osk-module-heading-copy > p { max-width: 58ch; margin: 7px 0 0; color: #a6a6a6; font: 400 14px/1.55 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-toggle { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 20px; min-height: 58px; max-width: 300px; padding: 10px 14px; border: 1px solid #303030; border-radius: 11px; background: #151515; color: #eee; }
+.osk-dashboard-shell[data-workspace] .osk-module-toggle-copy { display: grid; gap: 3px; min-width: 0; }
+.osk-dashboard-shell[data-workspace] .osk-module-toggle-copy strong { font: 500 13px/1.4 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-toggle-copy small { color: #aaa; font: 400 12px/1.4 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-toggle .osk-switch { flex-shrink: 0; min-height: 32px; }
+.osk-dashboard-shell[data-workspace] .osk-module-toggle:focus-within { border-color: #777; }
+.osk-dashboard-shell[data-workspace] .osk-module-tabs { display: flex; align-items: stretch; gap: 10px; margin: 0 0 24px; padding: 0; border: 0; border-bottom: 1px solid #2b2b2b; border-radius: 0; background: transparent; scrollbar-width: none; overflow-x: auto; overflow-y: hidden; }
+.osk-dashboard-shell[data-workspace] .osk-module-tabs::-webkit-scrollbar { display: none; }
+.osk-dashboard-shell[data-workspace] .osk-module-tabs > button { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; gap: 8px; min-height: 46px; padding: 12px 13px; border: 0; border-radius: 7px 7px 0 0; color: #a0a0a0; background: transparent; box-shadow: none; font: 500 14px/1.4 var(--osk-font); transition: color 160ms ease, background 160ms ease; }
+.osk-dashboard-shell[data-workspace] .osk-module-tabs > button::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: 0; height: 2px; border-radius: 2px 2px 0 0; background: #eee; transform: scaleX(0); transition: transform 180ms ease; }
+.osk-dashboard-shell[data-workspace] .osk-module-tabs > button:hover { color: #eee; background: #191919; }
+.osk-dashboard-shell[data-workspace] .osk-module-tabs > button[aria-selected="true"] { color: #f4f4f4; border-color: transparent; background: transparent; box-shadow: none; }
+.osk-dashboard-shell[data-workspace] .osk-module-tabs > button[aria-selected="true"]::after { transform: scaleX(1); }
+.osk-dashboard-shell[data-workspace] .osk-module-tabs > button:focus-visible { outline: 2px solid #aaa; outline-offset: -4px; box-shadow: none; }
+.osk-dashboard-shell[data-workspace] .osk-area-change { flex-shrink: 0; width: 5px; height: 5px; background: #d8d8d8; }
+.osk-dashboard-shell[data-workspace] .osk-area-error { flex-shrink: 0; width: 14px; height: 14px; color: #df9a98; background: transparent; }
+.osk-dashboard-shell[data-workspace] .osk-module-area { display: grid; gap: 20px; min-width: 0; }
+.osk-dashboard-shell[data-workspace] .osk-settings-card { min-width: 0; padding: 24px; border: 1px solid #2b2b2b; border-radius: 14px; background: #111; color: #f2f2f2; box-shadow: none; }
+.osk-dashboard-shell[data-workspace] .osk-settings-card > header { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+.osk-dashboard-shell[data-workspace] .osk-settings-card > header > svg { flex-shrink: 0; width: 19px; color: #aaa; }
+.osk-dashboard-shell[data-workspace] .osk-settings-card > header h2 { margin: 0; font: 500 16px/1.4 var(--osk-font-display); letter-spacing: -.025em; }
+.osk-dashboard-shell[data-workspace] .osk-settings-card > p { margin: 0 0 20px; color: #a5a5a5; font: 400 14px/1.6 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field { grid-template-columns: minmax(0, .95fr) minmax(0, 1fr); gap: 26px; padding: 20px 0; border-bottom-color: #292929; }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field:first-child { padding-top: 0; }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field:last-child { padding-bottom: 0; }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field[data-complex] { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field-copy strong { color: #eee; font: 500 14px/1.5 var(--osk-font); letter-spacing: 0; }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field-copy small { display: block; max-width: 48ch; margin-top: 5px; color: #a1a1a1; font: 400 14px/1.55 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field[data-type="boolean"] { align-items: center; }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field[data-type="boolean"] .osk-compact-field-control { width: auto; justify-self: end; }
+.osk-dashboard-shell[data-workspace] .osk-settings-groups > section + section { margin-top: 28px; padding-top: 22px; border-top: 1px solid #292929; }
+.osk-dashboard-shell[data-workspace] .osk-settings-groups > section > header strong { font: 500 14px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-settings-groups > section > header small { color: #a1a1a1; font: 400 14px/1.55 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-advanced.osk-workspace-advanced { min-width: 0; padding: 0; border: 1px solid #2b2b2b; border-radius: 12px; background: #111; overflow: clip; }
+.osk-dashboard-shell[data-workspace] .osk-workspace-advanced > summary { display: flex; align-items: center; gap: 12px; min-height: 70px; padding: 18px 22px; list-style: none; cursor: pointer; user-select: none; }
+.osk-dashboard-shell[data-workspace] .osk-workspace-advanced > summary::-webkit-details-marker { display: none; }
+.osk-dashboard-shell[data-workspace] .osk-workspace-advanced > summary::after { content: none; }
+.osk-dashboard-shell[data-workspace] .osk-workspace-advanced > summary > svg:not(.osk-advanced-chevron) { flex-shrink: 0; width: 19px; height: 19px; color: #aaa; }
+.osk-dashboard-shell[data-workspace] .osk-advanced-heading { display: grid; flex: 1; gap: 4px; min-width: 0; }
+.osk-dashboard-shell[data-workspace] .osk-advanced-heading strong { color: #e9e9e9; font: 500 14px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-advanced-heading small { color: #a1a1a1; font: 400 13px/1.5 var(--osk-font); overflow-wrap: anywhere; }
+.osk-dashboard-shell[data-workspace] .osk-advanced-state { flex-shrink: 0; padding: 4px 7px; border: 1px solid #363636; border-radius: 6px; color: #c9c9c9; background: #1c1c1c; font: 400 11px/1.4 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-advanced-state[data-error] { border-color: #704745; color: #e8b0ad; background: #281c1b; }
+.osk-dashboard-shell[data-workspace] .osk-advanced-chevron { flex-shrink: 0; width: 16px; height: 16px; color: #999; transition: transform 180ms ease; }
+.osk-dashboard-shell[data-workspace] .osk-workspace-advanced[open] > summary .osk-advanced-chevron { transform: rotate(180deg); }
+.osk-dashboard-shell[data-workspace] .osk-workspace-advanced > summary:hover { background: #171717; }
+.osk-dashboard-shell[data-workspace] .osk-workspace-advanced > summary:focus-visible { outline: 2px solid #999; outline-offset: -4px; }
+.osk-dashboard-shell[data-workspace] .osk-workspace-advanced > div { padding: 0 22px 22px; }
+.osk-dashboard-shell[data-workspace] .osk-tts-settings { display: grid; gap: 20px; min-width: 0; }
+.osk-dashboard-shell[data-workspace] .osk-tts-engines { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start; }
+.osk-dashboard-shell[data-workspace] .osk-tts-engine > header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 18px 12px; margin-bottom: 18px; }
+.osk-dashboard-shell[data-workspace] .osk-tts-engine-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.osk-dashboard-shell[data-workspace] .osk-tts-engine-title > svg { flex-shrink: 0; width: 20px; height: 20px; color: #c9c9c9; }
+.osk-dashboard-shell[data-workspace] .osk-tts-engine-title > div, .osk-dashboard-shell[data-workspace] .osk-tts-engine-title > span { min-width: 0; }
+.osk-dashboard-shell[data-workspace] .osk-tts-engine-title h2 { margin: 0; color: #eee; font: 500 16px/1.4 var(--osk-font-display); }
+.osk-dashboard-shell[data-workspace] .osk-tts-engine-title small { display: block; margin-top: 4px; color: #a1a1a1; font: 400 13px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-tts-prefix { display: flex; align-items: center; gap: 9px; color: #aaa; font: 400 12px/1.4 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-tts-prefix .osk-field-control { width: 80px; }
+.osk-dashboard-shell[data-workspace] .osk-tts-prefix > label { color: #aaa; font: 400 13px/1.4 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-tts-prefix[data-changed] > label::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 6px; border-radius: 50%; background: #ddd; vertical-align: middle; }
+.osk-dashboard-shell[data-workspace] .osk-tts-prefix input { min-height: 44px; padding: 9px; border-color: #363636; border-radius: 8px; background: #191919; color: #f3f3f3; font-size: 16px; text-align: center; }
+.osk-dashboard-shell[data-workspace] .osk-tts-prefix:has(.osk-field-error) { flex-basis: 100%; align-items: start; }
+.osk-dashboard-shell[data-workspace] .osk-tts-prefix:has(.osk-field-error) .osk-field-control { flex: 1; width: auto; }
+.osk-dashboard-shell[data-workspace] .osk-tts-engine-note { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; margin: 0 0 22px; padding: 10px 12px; border: 1px solid #292929; border-radius: 8px; background: #171717; color: #a9a9a9; font: 400 13px/1.6 var(--osk-font); overflow-wrap: anywhere; }
+.osk-dashboard-shell[data-workspace] .osk-tts-engine-note code { padding: 2px 4px; color: #e4e4e4; background: #252525; border-radius: 4px; font: 400 13px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.osk-dashboard-shell[data-workspace] .osk-edge-picker { min-width: 0; margin: 0 0 20px; padding: 0; border: 0; }
+.osk-dashboard-shell[data-workspace] .osk-tts-voice-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.osk-dashboard-shell[data-workspace] .osk-tts-voice-pair > div { min-width: 0; }
+.osk-dashboard-shell[data-workspace] .osk-tts-voice-pair label { display: block; margin: 0 0 9px; color: #dedede; font: 500 14px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-tts-resolved { display: block; margin-top: 8px; color: #9d9d9d; font: 400 12px/1.5 var(--osk-font); overflow-wrap: anywhere; }
+.osk-dashboard-shell[data-workspace] .osk-tts-catalog-note { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 12px; margin-top: 14px; color: #aaa; font: 400 13px/1.6 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-tts-catalog-note button { min-height: 44px; padding: 4px 0; color: #eee; font: 400 13px/1.4 var(--osk-font); text-underline-offset: 4px; }
+.osk-dashboard-shell[data-workspace] .osk-tts-adjustment { padding: 17px 0; border-top: 1px solid #292929; }
+.osk-dashboard-shell[data-workspace] .osk-tts-adjustment:last-child { padding-bottom: 0; }
+.osk-dashboard-shell[data-workspace] .osk-tts-adjustment > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.osk-dashboard-shell[data-workspace] .osk-tts-adjustment > header > label,
+.osk-dashboard-shell[data-workspace] .osk-tts-adjustment > header > strong { color: #dedede; font: 500 14px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-tts-reset { display: inline-flex; align-items: center; gap: 5px; min-height: 44px; padding: 5px 8px; border: 0; border-radius: 7px; color: #b8b8b8; background: transparent; font: 400 12px/1.4 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-tts-reset:hover:not(:disabled) { color: #fff; background: #242424; }
+.osk-dashboard-shell[data-workspace] .osk-tts-reset:disabled { color: #828282; opacity: .6; }
+.osk-dashboard-shell[data-workspace] .osk-tts-adjustment .osk-range-control { display: flex; align-items: center; gap: 14px; min-width: 0; min-height: 44px; }
+.osk-dashboard-shell[data-workspace] .osk-tts-adjustment .osk-range-control input[type="range"] { min-width: 0; flex: 1; width: 0; accent-color: #eee; }
+.osk-dashboard-shell[data-workspace] .osk-tts-adjustment .osk-range-control output { flex-shrink: 0; min-width: 68px; padding: 7px 9px; border: 1px solid #333; border-radius: 8px; background: #202020; color: #eaeaea; font: 400 14px/1.4 var(--osk-font); font-variant-numeric: tabular-nums; text-align: center; }
+.osk-dashboard-shell[data-workspace] .osk-tts-extra-prefixes .osk-compact-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.osk-dashboard-shell[data-workspace] .osk-tts-extra-prefixes .osk-compact-field { grid-template-columns: minmax(0, 1fr); gap: 9px; padding: 0; border: 0; }
+.osk-dashboard-shell[data-workspace] .osk-tts-destination .osk-compact-field { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); }
+.osk-dashboard-shell[data-workspace] .osk-module-errors { gap: 6px; padding: 18px 20px; margin-bottom: 22px; border-color: #724b4866; border-radius: 12px; background: #251918; color: #e3b2af; }
+.osk-dashboard-shell[data-workspace] .osk-module-errors > strong { font: 500 14px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-errors > button { min-height: 40px; padding: 7px 9px; margin-inline: -9px; border: 0; border-radius: 6px; color: #e3b2af; font: 400 14px/1.5 var(--osk-font); text-align: left; text-decoration: none; }
+.osk-dashboard-shell[data-workspace] .osk-module-errors > button:hover { background: #382421; text-decoration: underline; text-underline-offset: 3px; }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-field-error { font: 400 13px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-field-unavailable > small { font: 400 13px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-module-settings .osk-field-unavailable > button { min-height: 44px; font: 400 13px/1.5 var(--osk-font); }
+@media (prefers-reduced-motion: no-preference) {
+  .osk-dashboard-shell[data-workspace] .osk-module-area[data-area] { animation: osk-workspace-area-enter 180ms ease-out both; }
+  .osk-dashboard-shell[data-workspace] .osk-workspace-advanced[open] > div { animation: osk-workspace-details-enter 160ms ease-out both; }
+}
+@keyframes osk-workspace-area-enter { from { opacity: .72; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes osk-workspace-details-enter { from { opacity: .84; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@media (max-width: 1199px) {
+  .osk-dashboard-shell[data-workspace] .osk-tts-voice-pair { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .osk-dashboard-shell[data-workspace] .osk-tts-engines { grid-template-columns: minmax(0, 1fr); }
+  .osk-dashboard-shell[data-workspace] .osk-tts-voice-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .osk-dashboard-shell[data-workspace] .osk-module-toggle { max-width: 250px; }
+}
+@media (max-width: 600px) {
+  .osk-dashboard-shell[data-workspace] .osk-module-breadcrumb { margin-bottom: 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-breadcrumb > span { font-size: 11px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-heading { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 13px; margin-bottom: 22px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-emblem { width: 52px; height: 50px; border-radius: 11px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-emblem .osk-module-artwork { transform: translate(-50%, -50%) scale(.37); }
+  .osk-dashboard-shell[data-workspace] .osk-module-heading-copy h1 { font-size: 25px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-heading-copy > p { margin-top: 5px; font-size: 13px; line-height: 1.55; }
+  .osk-dashboard-shell[data-workspace] .osk-module-toggle { grid-column: 1 / -1; width: 100%; max-width: none; min-height: 62px; gap: 16px; padding: 11px 13px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-toggle-copy strong { font-size: 14px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-toggle-copy small { font-size: 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-tabs { gap: 3px; margin-bottom: 20px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-tabs > button { min-height: 46px; padding-inline: 12px; font-size: 14px; }
+  .osk-dashboard-shell[data-workspace] .osk-settings-card { padding: 18px; border-radius: 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-settings-card > header { margin-bottom: 20px; }
+  .osk-dashboard-shell[data-workspace] .osk-settings-card > header h2 { font-size: 15px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-area { gap: 16px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field,
+  .osk-dashboard-shell[data-workspace] .osk-tts-destination .osk-compact-field { grid-template-columns: minmax(0, 1fr); gap: 11px; padding-block: 18px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field:first-child { padding-top: 0; }
+  .osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field:last-child { padding-bottom: 0; }
+  .osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field[data-type="boolean"] { grid-template-columns: minmax(0, 1fr) auto; gap: 16px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field-copy strong { font-size: 14px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-settings .osk-compact-field-copy small { font-size: 13px; line-height: 1.6; }
+  .osk-dashboard-shell[data-workspace] .osk-workspace-advanced > summary { min-height: 72px; gap: 10px; padding: 16px 18px; }
+  .osk-dashboard-shell[data-workspace] .osk-advanced-heading small { font-size: 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-advanced-state { max-width: 74px; font-size: 10px; text-align: center; }
+  .osk-dashboard-shell[data-workspace] .osk-workspace-advanced > div { padding: 0 18px 18px; }
+  .osk-dashboard-shell[data-workspace] .osk-tts-engines { gap: 16px; }
+  .osk-dashboard-shell[data-workspace] .osk-tts-engine > header { gap: 14px; }
+  .osk-dashboard-shell[data-workspace] .osk-tts-engine-title small { font-size: 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-tts-prefix .osk-field-control { width: 72px; }
+  .osk-dashboard-shell[data-workspace] .osk-tts-voice-pair { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .osk-dashboard-shell[data-workspace] .osk-tts-adjustment { padding-block: 14px; }
+  .osk-dashboard-shell[data-workspace] .osk-tts-reset { padding-inline: 7px; }
+  .osk-dashboard-shell[data-workspace] .osk-tts-extra-prefixes .osk-compact-fields { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-errors { padding: 16px 17px; }
+  .osk-dashboard-shell[data-workspace] .osk-module-errors > button { min-height: 44px; font-size: 13px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .osk-dashboard-shell[data-workspace] .osk-module-area,
+  .osk-dashboard-shell[data-workspace] .osk-workspace-advanced > div,
+  .osk-dashboard-shell[data-workspace] .osk-module-tabs > button,
+  .osk-dashboard-shell[data-workspace] .osk-module-tabs > button::after,
+  .osk-dashboard-shell[data-workspace] .osk-advanced-chevron { animation: none !important; transition: none !important; }
+}

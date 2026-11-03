@@ -61,17 +61,17 @@ function FieldControl({ field, value, guildOptions, onChange, onTextSelection, s
 
   if (field.type === "boolean") {
     const stateLabel = dashboardBooleanStateLabel(field.id, value);
-    return <label className="osk-switch"><input type="checkbox" aria-label={field.label} checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} /><span className="osk-switch-track" /><span className="osk-switch-state">{stateLabel}</span></label>;
+    return <label className="osk-switch"><input id={`field-${field.id}`} type="checkbox" aria-label={field.label} checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} /><span className="osk-switch-track" /><span className="osk-switch-state">{stateLabel}</span></label>;
   }
 
   if (field.id === "tts.rate") {
     const numeric = Math.max(-100, Math.min(100, Number.parseInt(currentValue, 10) || 0));
-    return <div className="osk-range-control"><input type="range" aria-label={field.label} min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}%`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}%</output></div>;
+    return <div className="osk-range-control"><input id={`field-${field.id}`} type="range" aria-label={field.label} min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}%`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}%</output></div>;
   }
 
   if (field.id === "tts.pitch") {
     const numeric = Math.max(-100, Math.min(100, Number.parseInt(currentValue, 10) || 0));
-    return <div className="osk-range-control"><input type="range" aria-label={field.label} min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}Hz`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}Hz</output></div>;
+    return <div className="osk-range-control"><input id={`field-${field.id}`} type="range" aria-label={field.label} min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}Hz`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}Hz</output></div>;
   }
 
   if (field.type === "select") {
@@ -116,6 +116,7 @@ function FieldControl({ field, value, guildOptions, onChange, onTextSelection, s
 
   if (field.type === "textarea") {
     return <textarea
+      id={`field-${field.id}`}
       {...attributes}
       aria-label={field.label}
       data-message-field-id={field.id}
@@ -136,6 +137,7 @@ function FieldControl({ field, value, guildOptions, onChange, onTextSelection, s
   return <div className={`${field.type === "color" ? "osk-color-input" : ""}${suffix ? " osk-input-suffix" : ""}`.trim()}>
     {field.type === "color" && <input type="color" value={/^#[0-9a-f]{6}$/i.test(currentValue) ? currentValue : "#5865f2"} onChange={(event) => onChange(field, event.target.value)} aria-label={field.label} />}
     <input
+      id={`field-${field.id}`}
       {...attributes}
       aria-label={field.label}
       data-message-field-id={field.type === "text" ? field.id : undefined}

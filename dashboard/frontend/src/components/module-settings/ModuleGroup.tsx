@@ -6,6 +6,7 @@ import { ColorRolesPanelManager } from "../color-roles/ColorRolesPanelManager";
 import { sectionGroupIcon } from "../sectionGroupPresentation";
 import { BirthdayTimeField } from "./BirthdayTimeField";
 import { TtsVoiceSettings } from "./TtsVoiceSettings";
+import { AdvancedSettings } from "./AdvancedSettings";
 
 export interface ModuleGroupProps {
   section: DashboardSectionDefinition; group: string; values: Record<string, unknown>; draft: Record<string, unknown>;
@@ -31,7 +32,7 @@ export function ModuleGroup({ section, group, values, draft, guildOptions, onCha
   else content = renderFields(fields);
   if (!fields.length) return null;
   if (section.id === "tts" && group === "Voz") return <TtsVoiceSettings {...common} fields={fields} />;
-  if (section.id === "tickets" && group === "Textos") return <details className="osk-module-advanced"><summary><Icon size={17} />Mensagens padrão e encerramento</summary><div>{content}</div></details>;
+  if (section.id === "tickets" && group === "Textos") return <AdvancedSettings title="Mensagens padrão e encerramento" summary="Textos usados durante o atendimento e ao fechar um ticket." fields={fields} values={values} draft={draft} icon={Icon}>{content}</AdvancedSettings>;
   return <section className="osk-settings-card" data-group={group}>
     <header><Icon size={19} aria-hidden="true" /><h2>{group === "Geral" && section.id === "birthday" ? "Preferências do cadastro" : group}</h2></header>
     {content}

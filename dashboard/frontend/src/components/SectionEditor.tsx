@@ -30,6 +30,7 @@ export function SectionEditor({ section, module, values, draft, guildOptions, pr
   const { activeEditor, openMessageEditor, finishEditor, closeEditorDiscard } = useSectionMessageEditor({ section, draft, onChange, onActiveChange: onMessageEditorActiveChange });
   const identity = { botName: previewBotName, botAvatarUrl: previewBotAvatarUrl, guildName: previewGuildName, guildAvatarUrl: previewGuildAvatarUrl };
   const fieldErrors = section.fields.filter(field => errors[field.id]);
+  const invalidAreas = new Set(areas.filter(area => fieldErrors.some(field => area.groups.includes(field.group || "Geral"))).map(area => area.id));
   const openEditor: typeof openMessageEditor = (editor, variables) => { setFocusFieldId(null); openMessageEditor(editor, variables); };
 
   function revealField(field: DashboardFieldDefinition) {
@@ -42,10 +43,10 @@ export function SectionEditor({ section, module, values, draft, guildOptions, pr
 
   return <ModulePreviewContext.Provider value={identity}>
     <section className="osk-dashboard-page osk-section-page osk-module-settings" data-module={section.id} aria-hidden={activeEditor ? true : undefined}>
-      <ModuleSettingsHeader section={section} module={module} draft={draft} onChange={onChange} onBack={onBack} />
+      <ModuleSettingsHeader section={section} module={module} values={values} draft={draft} onChange={onChange} onBack={onBack} />
       {fieldErrors.length > 0 && <div className="osk-module-errors" role="alert"><strong>Revise antes de salvar</strong>{fieldErrors.map(field => <button key={field.id} type="button" onClick={() => revealField(field)}>{field.label}: {errors[field.id]}</button>)}</div>}
-      {areas.length > 1 && <ModuleNavigation sectionId={section.id} areas={areas} selected={selected?.id || ""} changed={changedAreas} onSelect={setSelectedArea} />}
-      {selected && <div className="osk-module-area" role={areas.length > 1 ? "tabpanel" : undefined} id={`module-area-${section.id}-${selected.id}`} aria-labelledby={areas.length > 1 ? `module-tab-${section.id}-${selected.id}` : undefined}>
+      {areas.length > 1 && <ModuleNavigation sectionId={section.id} areas={areas} selected={selected?.id || ""} changed={changedAreas} invalid={invalidAreas} onSelect={setSelectedArea} />}
+      {selected && <div key={`${section.id}-${selected.id}`} className="osk-module-area" data-area={selected.id} role={areas.length > 1 ? "tabpanel" : undefined} id={`module-area-${section.id}-${selected.id}`} aria-labelledby={areas.length > 1 ? `module-tab-${section.id}-${selected.id}` : undefined}>
         {section.id === "economy" ? <EconomySettings fields={section.fields} draft={draft} guildOptions={guildOptions} onChange={onChange} /> : selected.groups.map(group => <ModuleGroup key={group} section={section} group={group} values={values} draft={draft} guildOptions={guildOptions} onChange={onChange} onOpenEditor={openEditor} />)}
       </div>}
     </section>

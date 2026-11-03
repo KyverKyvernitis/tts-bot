@@ -45,18 +45,19 @@ export function MessageEditorHeader({
         className="osk-message-editor__back"
         onClick={onBack}
         aria-label={view === "canvas" ? "Aplicar ao rascunho e voltar" : "Voltar à mensagem"}
+        title={view === "canvas" ? "Aplicar ao rascunho e voltar" : "Voltar à mensagem"}
       >
         <ChevronLeft size={19} />
       </button>
       <div className="osk-message-editor__title">
         <small>{sectionLabel}</small>
-        <strong>{groupLabel}</strong>
+        <strong title={groupLabel}>{groupLabel}</strong>
       </div>
       <div className="osk-message-editor__header-actions">
         <button type="button" disabled={historyIndex <= 0 || historyBlocked} onClick={onUndo} aria-label="Desfazer" title="Desfazer"><Undo2 size={17} /></button>
         <button type="button" disabled={historyIndex >= historyLength || historyBlocked} onClick={onRedo} aria-label="Refazer" title="Refazer"><Redo2 size={17} /></button>
-        {hasVariables ? <button type="button" disabled={pendingJson} onClick={onVariables} aria-label="Abrir variáveis" title="Variáveis"><Variable size={17} /></button> : null}
-        {presentation !== "color_panel" && <button type="button" disabled={pendingJson} onClick={onJson} aria-label="Abrir JSON avançado" title="JSON avançado"><Braces size={17} /></button>}
+        {hasVariables ? <button type="button" disabled={pendingJson} onClick={onVariables} aria-label="Abrir variáveis" title="Variáveis"><Variable size={17} /><span className="osk-workspace-tool-label">Variáveis</span></button> : null}
+        {presentation !== "color_panel" && <button type="button" disabled={pendingJson} onClick={onJson} aria-label="Abrir JSON avançado" title="JSON avançado"><Braces size={17} /><span className="osk-workspace-tool-label">JSON</span></button>}
         <span className="osk-message-editor__dirty" data-visible={localDirty || jsonDirty || undefined} aria-live="polite" aria-hidden={!(localDirty || jsonDirty)}>Alterado</span>
       </div>
     </header>

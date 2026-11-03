@@ -6,7 +6,7 @@ export function revealModuleField(fieldId: string) {
       const target = Array.from(document.querySelectorAll<HTMLElement>("[data-field-id]")).find(node => node.dataset.fieldId === fieldId);
       if (!target) return;
       for (let parent = target.parentElement; parent; parent = parent.parentElement) if (parent instanceof HTMLDetailsElement) parent.open = true;
-      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      target.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
       target.querySelector<HTMLElement>("input:not(:disabled), textarea:not(:disabled), button:not(:disabled)")?.focus({ preventScroll: true });
     });
   });

@@ -1,0 +1,144 @@
+/* Module discovery, general preferences and command reference in the workspace. */
+.osk-dashboard-shell[data-workspace] .osk-workspace-page-heading { display: grid; gap: 8px; margin: 0 0 25px; padding: 0; color: #f0f0ed; }
+.osk-dashboard-shell[data-workspace] .osk-workspace-page-heading h1 { margin: 0; font: 600 30px/1.2 var(--osk-font-display); letter-spacing: -.055em; }
+.osk-dashboard-shell[data-workspace] .osk-workspace-page-heading p { margin: 0; font: 400 14px/1.6 var(--osk-font); color: #a6a6a2; }
+.osk-dashboard-shell[data-workspace] .osk-modules-page { display: block; }
+.osk-dashboard-shell[data-workspace] .osk-function-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 14px; }
+.osk-dashboard-shell[data-workspace] .osk-function-card {
+  position: relative; display: block; width: 100%; min-width: 0; height: auto; min-height: 170px;
+  padding: 18px; border: 1px solid #2b2b2b; border-radius: 14px; background: #121212; color: #eee;
+  text-align: left; box-shadow: none; overflow: hidden; transform: none;
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+.osk-dashboard-shell[data-workspace] .osk-function-card::before { display: none; }
+.osk-dashboard-shell[data-workspace] .osk-function-card:hover:not(:disabled),
+.osk-dashboard-shell[data-workspace] .osk-function-card:focus-visible { border-color: #60605b; background: #191919; transform: translateY(-2px); color: #fafafa; }
+.osk-dashboard-shell[data-workspace] .osk-function-card:active:not(:disabled) { transform: translateY(0); }
+.osk-dashboard-shell[data-workspace] .osk-function-card:disabled { opacity: .58; cursor: not-allowed; }
+.osk-dashboard-shell[data-workspace] .osk-function-card .osk-module-artwork { position: absolute; top: 14px; left: 18px; width: 120px; height: 72px; transform: scale(.7); transform-origin: top left; pointer-events: none; }
+.osk-dashboard-shell[data-workspace] .osk-module-card-copy { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-end; min-height: 132px; padding-top: 76px; min-width: 0; }
+.osk-dashboard-shell[data-workspace] .osk-function-card .osk-function-label { display: flex; gap: 10px; min-height: 0; }
+.osk-dashboard-shell[data-workspace] .osk-function-card .osk-function-label strong { flex: 1; font: 500 16px/1.35 var(--osk-font-display); letter-spacing: -.035em; overflow-wrap: anywhere; }
+.osk-dashboard-shell[data-workspace] .osk-function-card .osk-function-arrow { display: block; width: 17px; height: 17px; flex-shrink: 0; color: #8d8d88; }
+/* TTS leads the grid; the game controls keep their compact full-width row. */
+.osk-dashboard-shell[data-workspace] .osk-function-card[data-featured] { border-color: #64645b; background: #1b1b19; }
+.osk-dashboard-shell[data-workspace] .osk-function-card[data-featured] .osk-function-label strong { color: #fafaf5; }
+.osk-dashboard-shell[data-workspace] .osk-function-card[data-featured] .osk-mini-wave i { background: #d6d6ca; }
+.osk-dashboard-shell[data-workspace] .osk-function-card[data-featured]:hover .osk-mini-wave { transform: scaleY(1.08); }
+.osk-dashboard-shell[data-workspace] .osk-function-card[data-wide] { grid-column: 1 / -1; display: flex; align-items: center; gap: 20px; min-height: 82px; padding: 12px 20px; }
+.osk-dashboard-shell[data-workspace] .osk-function-card[data-wide] .osk-module-artwork { position: relative; top: auto; left: auto; width: 94px; height: 58px; transform: none; }
+.osk-dashboard-shell[data-workspace] .osk-function-card[data-wide] .osk-module-card-copy { flex: 1; min-height: 0; padding-top: 0; }
+
+.osk-dashboard-shell[data-workspace] .osk-general-page { display: block; }
+.osk-dashboard-shell[data-workspace] .osk-general-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
+.osk-dashboard-shell[data-workspace] .osk-general-card { display: flex; flex-direction: column; gap: 23px; padding: 24px; border: 1px solid #2b2b2b; border-radius: 14px; color: #eee; background: #121212; box-shadow: none; transform: none; }
+.osk-dashboard-shell[data-workspace] .osk-general-card:hover { transform: none; border-color: #3b3b38; }
+.osk-dashboard-shell[data-workspace] .osk-general-card[data-changed] { border-color: #77776e; box-shadow: inset 2px 0 #b5b5aa; }
+.osk-dashboard-shell[data-workspace] .osk-general-card > header { display: flex; align-items: flex-start; gap: 12px; }
+.osk-dashboard-shell[data-workspace] .osk-general-card > header > span { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; padding: 0; border: 1px solid #353532; border-radius: 10px; color: #c8c8be; background: #1c1c1b; box-shadow: none; }
+.osk-dashboard-shell[data-workspace] .osk-general-card h2 { margin: 0 0 6px; font: 500 17px/1.4 var(--osk-font-display); letter-spacing: -.025em; }
+.osk-dashboard-shell[data-workspace] .osk-general-card header p { margin: 0; font: 400 14px/1.6 var(--osk-font); color: #a6a6a0; }
+.osk-dashboard-shell[data-workspace] .osk-general-control { display: grid; gap: 9px; }
+.osk-dashboard-shell[data-workspace] .osk-general-control > label,
+.osk-dashboard-shell[data-workspace] .osk-general-control-label { font: 500 14px/1.5 var(--osk-font); color: #d3d3cc; }
+.osk-dashboard-shell[data-workspace] .osk-prefix-example { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border: 1px solid #30302d; border-radius: 9px; background: #191918; color: #aaa99e; }
+.osk-dashboard-shell[data-workspace] .osk-prefix-example > span { font: 400 12px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-prefix-example code { color: #e1e1d6; font: 400 15px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
+.osk-dashboard-shell[data-workspace] .osk-general-footnote { margin-top: -9px; color: #99998f; font: 400 12px/1.55 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-time-preview { display: flex; align-items: flex-start; gap: 11px; padding: 14px; border: 1px solid #30302c; border-radius: 9px; background: #191918; }
+.osk-dashboard-shell[data-workspace] .osk-time-preview > svg { margin-top: 3px; color: #b7b7ac; flex-shrink: 0; }
+.osk-dashboard-shell[data-workspace] .osk-time-preview > span { min-width: 0; display: grid; gap: 5px; }
+.osk-dashboard-shell[data-workspace] .osk-time-preview small { color: #a2a296; font: 400 12px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-time-preview strong { color: #e1e1d6; font: 400 14px/1.6 var(--osk-font); overflow-wrap: anywhere; }
+.osk-dashboard-shell[data-workspace] .osk-detect-timezone { display: inline-flex; align-items: center; align-self: flex-start; gap: 7px; margin-top: -10px; min-height: 40px; padding: 6px 0; border: 0; border-radius: 4px; background: transparent; color: #d4d4cb; font: 400 13px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-detect-timezone:hover { color: #fff; text-decoration: underline; text-underline-offset: 4px; }
+.osk-dashboard-shell[data-workspace] .osk-general-other-card { grid-column: 1 / -1; }
+
+.osk-dashboard-shell[data-workspace] .osk-commands-page { display: block; }
+.osk-dashboard-shell[data-workspace] .osk-command-discovery { display: grid; gap: 13px; margin: 0 0 27px; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.osk-dashboard-shell[data-workspace] .osk-command-search { display: flex; align-items: center; gap: 11px; min-height: 50px; padding: 3px 14px; border: 1px solid #343431; border-radius: 11px; background: #151515; color: #999991; }
+.osk-dashboard-shell[data-workspace] .osk-command-search:focus-within { border-color: #8f8f84; color: #ddd; box-shadow: none; }
+.osk-dashboard-shell[data-workspace] .osk-command-search input { min-width: 0; flex: 1; height: 42px; border: 0; outline: 0; padding: 7px 0; background: transparent; color: #eee; font: 400 16px/1.5 var(--osk-font); box-shadow: none; }
+.osk-dashboard-shell[data-workspace] .osk-command-search input:focus-visible { box-shadow: none; outline: none; }
+.osk-dashboard-shell[data-workspace] .osk-command-search > svg { flex-shrink: 0; }
+.osk-dashboard-shell[data-workspace] .osk-command-search > button { display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0; border: 0; border-radius: 7px; color: #aaa; background: transparent; }
+.osk-dashboard-shell[data-workspace] .osk-command-search > button:hover { color: #eee; background: #262624; }
+.osk-dashboard-shell[data-workspace] .osk-command-categories { display: flex; gap: 7px; overflow-x: auto; margin: 0; padding: 1px 1px 5px; scrollbar-width: thin; scrollbar-color: #42423e transparent; }
+.osk-dashboard-shell[data-workspace] .osk-command-categories > button { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; gap: 7px; padding: 8px 13px; border: 1px solid #30302e; border-radius: 8px; color: #b6b6ac; background: #151515; font: 400 13px/1.5 var(--osk-font); transition: color 160ms ease, background 160ms ease, border-color 160ms ease; }
+.osk-dashboard-shell[data-workspace] .osk-command-categories > button:hover { color: #eee; border-color: #66665d; }
+.osk-dashboard-shell[data-workspace] .osk-command-categories > button[data-active] { color: #111; border-color: #e5e4db; background: #e5e4db; }
+.osk-dashboard-shell[data-workspace] .osk-command-categories > button > span { font-size: 14px; }
+.osk-dashboard-shell[data-workspace] .osk-command-results { display: grid; gap: 27px; }
+.osk-dashboard-shell[data-workspace] .osk-command-category-section { display: grid; gap: 12px; }
+.osk-dashboard-shell[data-workspace] .osk-command-category-section > header { display: flex; align-items: flex-start; gap: 10px; padding: 0; }
+.osk-dashboard-shell[data-workspace] .osk-command-category-icon { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 1px solid #32322f; border-radius: 9px; background: #191918; font-size: 16px; }
+.osk-dashboard-shell[data-workspace] .osk-command-category-section h2 { margin: 0 0 3px; font: 500 17px/1.4 var(--osk-font-display); letter-spacing: -.025em; }
+.osk-dashboard-shell[data-workspace] .osk-command-category-section header p { margin: 0; color: #99998f; font: 400 13px/1.55 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-command-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.osk-dashboard-shell[data-workspace] .osk-command-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 17px 17px 15px; border: 1px solid #2d2d2a; border-radius: 12px; background: #131313; color: #eee; box-shadow: none; transform: none; transition: border-color 160ms ease; }
+.osk-dashboard-shell[data-workspace] .osk-command-card:hover { border-color: #4b4b45; transform: none; }
+.osk-dashboard-shell[data-workspace] .osk-command-card[data-open] { border-color: #5a5a52; }
+.osk-dashboard-shell[data-workspace] .osk-command-card-main { gap: 9px; }
+.osk-dashboard-shell[data-workspace] .osk-command-card-main > p { margin: 0; color: #adada3; font: 400 14px/1.55 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-command-syntax { display: flex; flex-wrap: wrap; gap: 7px; }
+.osk-dashboard-shell[data-workspace] .osk-command-syntax code { margin: 0; padding: 0; border: 0; color: #ebebe0; background: transparent; font: 400 15px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; white-space: normal; overflow-wrap: anywhere; }
+.osk-dashboard-shell[data-workspace] .osk-command-syntax > span { padding: 2px 6px; border: 1px solid #34342f; border-radius: 5px; color: #a7a79d; background: transparent; font: 400 11px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-command-copy { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-width: 48px; min-height: 48px; padding: 6px; border: 1px solid #30302b; border-radius: 9px; color: #b9b9ae; background: #1b1b19; font: 400 10px/1.4 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-command-copy > span { display: inline; }
+.osk-dashboard-shell[data-workspace] .osk-command-copy:hover,
+.osk-dashboard-shell[data-workspace] .osk-command-copy[data-copied] { color: #f3f2e8; border-color: #626258; background: #30302b; }
+.osk-dashboard-shell[data-workspace] .osk-command-details { display: inline-flex; align-items: center; justify-content: flex-start; justify-self: start; gap: 7px; min-height: 36px; margin: -4px 0 -5px; padding: 3px 0; border: 0; border-radius: 3px; color: #a6a69b; background: transparent; font: 400 12px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-command-details:hover { color: #eee; }
+.osk-dashboard-shell[data-workspace] .osk-command-aliases { grid-column: 1 / -1; display: grid; gap: 9px; padding-top: 12px; border-top: 1px solid #30302b; }
+.osk-dashboard-shell[data-workspace] .osk-command-aliases small { color: #9d9d92; font: 400 12px/1.5 var(--osk-font); text-transform: none; letter-spacing: 0; }
+.osk-dashboard-shell[data-workspace] .osk-command-aliases > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.osk-dashboard-shell[data-workspace] .osk-command-aliases code { padding: 3px 7px; border: 1px solid #30302b; border-radius: 5px; background: #1c1c19; color: #cfcfc0; font: 400 13px/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
+.osk-dashboard-shell[data-workspace] .osk-command-copy-error { grid-column: 1 / -1; margin: 0; color: #e3adad; font: 400 12px/1.5 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-command-copy-error button { padding: 3px 0; border: 0; background: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; font: inherit; }
+.osk-dashboard-shell[data-workspace] :is(.osk-commands-error, .osk-command-empty) { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 23px; border: 1px solid #30302b; border-radius: 12px; background: #131313; text-align: left; }
+.osk-dashboard-shell[data-workspace] :is(.osk-commands-error, .osk-command-empty) p { margin: 0; color: #aaa99d; font: 400 14px/1.6 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] :is(.osk-commands-error, .osk-command-empty) h2 { margin: 0; font-size: 18px; }
+.osk-dashboard-shell[data-workspace] :is(.osk-commands-error, .osk-command-empty) button { min-height: 42px; display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; border: 1px solid #414139; border-radius: 8px; color: #dddcd0; background: #22221f; font: 400 13px/1.5 var(--osk-font); }
+@media (max-width: 900px) {
+  .osk-dashboard-shell[data-workspace] .osk-function-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .osk-dashboard-shell[data-workspace] .osk-general-grid { grid-template-columns: 1fr; }
+  .osk-dashboard-shell[data-workspace] .osk-command-list { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .osk-dashboard-shell[data-workspace] .osk-workspace-page-heading { margin-bottom: 21px; gap: 7px; }
+  .osk-dashboard-shell[data-workspace] .osk-workspace-page-heading h1 { font-size: 27px; }
+  .osk-dashboard-shell[data-workspace] .osk-workspace-page-heading p { font-size: 14px; }
+  .osk-dashboard-shell[data-workspace] .osk-function-grid { gap: 10px; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card { min-height: 160px; padding: 15px; border-radius: 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card .osk-module-artwork { left: 15px; top: 13px; transform: scale(.65); }
+  .osk-dashboard-shell[data-workspace] .osk-module-card-copy { min-height: 128px; padding-top: 70px; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card .osk-function-label strong { font-size: 14px; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card .osk-function-arrow { width: 14px; height: 14px; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card[data-wide] { min-height: 76px; padding: 10px 15px; gap: 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card[data-wide] .osk-module-artwork { width: 84px; height: 54px; }
+  .osk-dashboard-shell[data-workspace] .osk-general-card { gap: 20px; padding: 19px; border-radius: 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-general-card h2 { font-size: 16px; }
+  .osk-dashboard-shell[data-workspace] .osk-general-card > header { gap: 10px; }
+  .osk-dashboard-shell[data-workspace] .osk-general-card > header > span { width: 30px; height: 30px; border-radius: 8px; }
+  .osk-dashboard-shell[data-workspace] .osk-prefix-example { flex-wrap: wrap; gap: 7px; }
+  .osk-dashboard-shell[data-workspace] .osk-command-discovery { margin-bottom: 24px; }
+  .osk-dashboard-shell[data-workspace] .osk-command-categories > button { min-height: 42px; }
+  .osk-dashboard-shell[data-workspace] .osk-command-category-section header p { font-size: 13px; }
+  .osk-dashboard-shell[data-workspace] .osk-command-card { gap: 10px; padding: 16px 14px; }
+  .osk-dashboard-shell[data-workspace] .osk-command-copy { min-width: 45px; min-height: 48px; }
+}
+@media (max-width: 359px) {
+  .osk-dashboard-shell[data-workspace] .osk-function-grid { grid-template-columns: 1fr; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card:not([data-wide]) { min-height: 120px; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card:not([data-wide]) .osk-module-card-copy { min-height: 88px; padding-top: 0; padding-right: 90px; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card:not([data-wide]) .osk-module-artwork { top: 22px; left: auto; right: 12px; width: 95px; transform-origin: top right; }
+
+}
+@media (prefers-reduced-motion: reduce) {
+  .osk-dashboard-shell[data-workspace] .osk-function-card,
+  .osk-dashboard-shell[data-workspace] .osk-function-card .osk-module-artwork > span,
+  .osk-dashboard-shell[data-workspace] .osk-command-categories > button { transition: none; animation: none; }
+  .osk-dashboard-shell[data-workspace] .osk-function-card:hover:not(:disabled),
+  .osk-dashboard-shell[data-workspace] .osk-function-card:focus-visible,
+  .osk-dashboard-shell[data-workspace] .osk-function-card[data-featured]:hover .osk-mini-wave { transform: none; }
+}
