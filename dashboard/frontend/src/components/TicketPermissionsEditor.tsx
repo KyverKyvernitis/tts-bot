@@ -1,6 +1,7 @@
 import { AlertTriangle, ChevronDown, LockKeyhole, Settings2, Users } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { DashboardFieldDefinition } from "../types/dashboard";
+import { useFieldFeedback } from "./module-settings/FieldFeedback";
 
 interface TicketPermissionsEditorProps {
   fields: DashboardFieldDefinition[];
@@ -40,7 +41,10 @@ const PROFILES: Array<{ id: PermissionProfile; label: string; description: strin
 
 export function TicketPermissionsEditor({ fields, draft, renderFields, onChange }: TicketPermissionsEditorProps) {
   const detected = useMemo(() => detectProfile(fields, draft), [draft, fields]);
-  const [advancedOpen, setAdvancedOpen] = useState(detected === "custom");
+  const { errors } = useFieldFeedback();
+  const hasErrors = fields.some(field => Boolean(errors[field.id]));
+  const [advancedOpen, setAdvancedOpen] = useState(detected === "custom" || hasErrors);
+  useEffect(() => { if (hasErrors) setAdvancedOpen(true); }, [hasErrors]);
 
   function applyProfile(profile: PermissionProfile) {
     if (profile === "custom") {
@@ -67,7 +71,7 @@ export function TicketPermissionsEditor({ fields, draft, renderFields, onChange 
       {PROFILES.map((profile) => {
         const Icon = profile.icon;
         const selected = detected === profile.id;
-        return <button key={profile.id} type="button" data-selected={selected || undefined} onClick={() => applyProfile(profile.id)}>
+        return <button key={profile.id} type="button" data-selected={selected || undefined} aria-pressed={selected} onClick={() => applyProfile(profile.id)}>
           <span><Icon size={18} /></span>
           <strong>{profile.label}</strong>
           <small>{profile.description}</small>
@@ -75,14 +79,25 @@ export function TicketPermissionsEditor({ fields, draft, renderFields, onChange 
       })}
     </div>
 
+    <div className="osk-permission-access" aria-label="Resumo das permissões">
+      {grouped.map(group => {
+        const view = fields.find(field => field.id === `tickets.permissions.${group.id}.view_channel`);
+        const send = fields.find(field => field.id === `tickets.permissions.${group.id}.send_messages`);
+        const canView = view ? Boolean(draft[view.id]) : null;
+        const canSend = send ? Boolean(draft[send.id]) : null;
+        return <div key={group.id}><strong>{group.label}</strong><span data-access={canView === false ? "none" : "allowed"}>{canView === false ? "Sem acesso ao canal" : canView && canSend ? "Pode ver e responder" : canView ? "Pode ver o canal" : "Não configurado"}</span></div>;
+      })}
+    </div>
+
     {risky && <div className="osk-inline-warning"><AlertTriangle size={17} /><span><strong>Configuração arriscada</strong><small>O autor ou a equipe pode ficar sem acesso ao ticket. Revise as permissões antes de salvar.</small></span></div>}
 
-    <button type="button" className="osk-permission-advanced-toggle" onClick={() => setAdvancedOpen((current) => !current)} aria-expanded={advancedOpen}>
+    <details className="osk-permission-details" open={advancedOpen} onToggle={event => setAdvancedOpen(event.currentTarget.open)}>
+    <summary className="osk-permission-advanced-toggle">
       <span><Settings2 size={17} /><strong>Ajustes avançados</strong></span>
       <ChevronDown size={17} />
-    </button>
+    </summary>
 
-    {advancedOpen && <div className="osk-permission-groups">
+    <div className="osk-permission-groups">
       {grouped.map((group) => {
         const groupFields = fields.filter((field) => scopeOf(field) === group.id).map((field) => ({
           ...field,
@@ -94,6 +109,8 @@ export function TicketPermissionsEditor({ fields, draft, renderFields, onChange 
           {renderFields(groupFields)}
         </section>;
       })}
-    </div>}
+      {fields.some(field => scopeOf(field) === "other") && <section><header><strong>Outras permissões</strong></header>{renderFields(fields.filter(field => scopeOf(field) === "other"))}</section>}
+    </div>
+    </details>
   </div>;
 }

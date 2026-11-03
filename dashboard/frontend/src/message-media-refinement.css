@@ -1,0 +1,23 @@
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic {
+  position: relative; display: grid; place-items: center; overflow: hidden; padding: 0; color: #b8b9b0; background: #242522; border: 1px solid #393a34; border-radius: 8px;
+}
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic:not([data-kind="avatar_stars"]) { width: min(100%, 160px); height: 160px; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic > svg { display: block; width: 100%; height: 100%; max-height: 200px; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic > .osk-dynamic-avatar { display: grid; place-items: center; width: 100%; height: 100%; margin: 0; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic > small { position: absolute; right: 5px; bottom: 4px; padding: 1px 4px; border-radius: 3px; color: #d2d3c9; background: #171813df; font: 400 10px/1.4 var(--osk-font); }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic[data-kind="avatar_stars"] { min-height: 144px; width: 100%; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic.osk-message-preview__thumbnail { min-height: 80px; width: 80px; height: 80px; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic.osk-message-preview__icon { width: 24px; height: 24px; min-height: 0; border-radius: 50%; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic.osk-message-preview__icon > .osk-smart-avatar { margin: 0; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__image-placeholder[data-error] { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; min-height: 80px; padding: 12px; color: #b8aaa5; border: 1px dashed #594943; background: #211c1a; font: 400 12px/1.5 var(--osk-font); text-align: center; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-media-replace-label { display: inline-flex; gap: 7px; min-height: 24px; align-items: center; color: #eee5de; font: 500 12px/1.5 var(--osk-font); }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-media-empty { min-height: 52px; font-size: 12px; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__icon-wrap .osk-message-preview__image-placeholder[data-error] { min-height: 24px; width: 24px; height: 24px; padding: 2px; overflow: hidden; font-size: 0; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__icon-wrap .osk-media-replace-label { font-size: 0; min-height: 0; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__icon-wrap .osk-media-replace-label > svg { width: 14px; height: 14px; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__icon-wrap .osk-message-image-loader > .osk-message-preview__image-placeholder { width: 24px; min-height: 24px; height: 24px; padding: 0; font-size: 0; }
+@media (max-width: 480px) {
+  :is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__dynamic.osk-message-preview__thumbnail { width: 64px; height: 64px; min-height: 64px; }
+}
+
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview__header strong { font-family: var(--osk-font), "Segoe UI Symbol", "Noto Sans Symbols 2", "Apple Color Emoji", "Segoe UI Emoji", sans-serif; overflow-wrap: anywhere; }

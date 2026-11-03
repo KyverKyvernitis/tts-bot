@@ -2,6 +2,7 @@ import { Pencil } from "lucide-react";
 import { useMemo } from "react";
 import type { DashboardFieldDefinition } from "../../types/dashboard";
 import { SmartAvatar } from "../SmartAvatar";
+import { MessageMediaContext } from "./messagePreviewMediaContext";
 import {
   filterPreviewFields,
   resolvePreviewRenderPlan,
@@ -46,7 +47,7 @@ function SenderHeader({
   const enabled = interactive && senderFields.length > 0 && onSelect;
   const activate = () => { if (selected && onEdit) onEdit(); else onSelect?.(); };
   const content = <>
-    <SmartAvatar name={sender.name} src={sender.avatar} type="server" size={34} className="osk-message-preview__avatar" />
+    <SmartAvatar name={sender.name} src={sender.avatar} fallbackSrc={!sender.enabled ? "/assets/osaka-discord-avatar.png" : undefined} type={sender.enabled ? "server" : "user"} size={34} className="osk-message-preview__avatar" />
     <div><strong>{sender.name}</strong><span>{sender.badge}</span></div>
     {selected && <span className="osk-message-sender__pencil" aria-hidden="true"><Pencil size={12} /></span>}
   </>;
@@ -112,6 +113,7 @@ export function MessagePreview({
   };
 
   return (
+    <MessageMediaContext.Provider value={{ guildName, guildAvatarUrl, botAvatarUrl }}>
     <div className="osk-message-preview" data-interactive={interactive ? "true" : "false"} data-editor-kind={renderKind}>
       <SenderHeader senderFields={senderFields} draft={draft} botName={botName} botAvatarUrl={botAvatarUrl} guildName={guildName} guildAvatarUrl={guildAvatarUrl} interactive={interactive} selected={senderSelected} onSelect={onSelectSender} onEdit={onEditSender} fieldId={senderFields.find((field) => field.id === "welcome.webhook.enabled")?.id ?? senderFields[0]?.id} />
       <div className="osk-message-preview__canvas" aria-label={`${interactive ? "Mensagem editável" : "Prévia"} de ${groupLabel}`}>
@@ -123,5 +125,6 @@ export function MessagePreview({
                   : <GenericMessagePreview {...shared} />}
       </div>
     </div>
+    </MessageMediaContext.Provider>
   );
 }

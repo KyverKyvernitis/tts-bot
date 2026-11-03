@@ -2,6 +2,7 @@ import { Pencil, Settings2 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { DashboardFieldDefinition, DashboardOptionsPayload } from "../../types/dashboard";
 import { DiscordRichText } from "./DiscordRichText";
+import type { DiscordTextFormat } from "./discordRichTextModel";
 import { MessageInlineTextEditor } from "./MessageInlineTextEditor";
 import { readableFieldLabel } from "./messageEditorUtils";
 import { fieldString } from "./messagePreviewModel";
@@ -18,6 +19,7 @@ export function EditableRegion({
   children,
   placeholder,
   textEditable = false,
+  ariaLabel,
 }: {
   field?: DashboardFieldDefinition;
   interactive?: boolean;
@@ -30,6 +32,7 @@ export function EditableRegion({
   children?: ReactNode;
   placeholder?: string;
   textEditable?: boolean;
+  ariaLabel?: string;
 }) {
   if (!children && !interactive) return null;
   if (!interactive || !field || !onSelectField) return <div className={className}>{children}</div>;
@@ -66,6 +69,7 @@ export function EditableRegion({
         selectOrEdit();
       }}
       title={textEditable ? `Editar ${field.label}` : `Configurar ${field.label}`}
+      aria-label={ariaLabel}
     >
       {children ?? <span className="osk-message-preview__ghost">+ {placeholder ?? readableFieldLabel(field)}</span>}
       {selected && textEditable && <span className="osk-message-editable__pencil" aria-hidden="true"><Pencil size={11} /></span>}
@@ -113,6 +117,7 @@ export function FieldText({
   onTextSelection,
   className,
   placeholder,
+  format,
 }: {
   field?: DashboardFieldDefinition;
   draft: Record<string, unknown>;
@@ -130,6 +135,7 @@ export function FieldText({
   onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
   className?: string;
   placeholder?: string;
+  format?: DiscordTextFormat;
 }) {
   const value = fieldString(field, draft);
   const editing = Boolean(field && editingFieldId === field.id && onChange && onTextSelection && onFinishEdit);
@@ -162,7 +168,7 @@ export function FieldText({
       placeholder={placeholder}
       textEditable={Boolean(field && (field.type === "text" || field.type === "textarea"))}
     >
-      {value.trim() ? <DiscordRichText text={value} guildOptions={guildOptions} /> : undefined}
+      {value.trim() ? <DiscordRichText text={value} guildOptions={guildOptions} format={format} /> : undefined}
     </EditableRegion>
   );
 }

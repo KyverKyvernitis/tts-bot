@@ -1,0 +1,29 @@
+/* Formatting belongs to the preview independently of panel typography. */
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-rich-text {
+  font-family: var(--osk-font), "Segoe UI Symbol", "Noto Sans Symbols 2", "Noto Sans Symbols", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  font-size: inherit; font-weight: inherit; line-height: 1.5; letter-spacing: normal; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-paragraph { display: block; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-blank { display: block; height: .7em; line-height: .7; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-heading { display: block; margin: .25em 0 .15em; color: #f2f3f5; font-family: inherit; font-weight: 700; line-height: 1.3; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-heading[data-level="1"] { font-size: 1.4em; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-heading[data-level="2"] { font-size: 1.2em; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-heading[data-level="3"] { font-size: 1.05em; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-subtext { display: block; color: #a6a8af; font-size: .84em; line-height: 1.5; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-list { display: block; margin: .2em 0; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-list-item { display: flex; align-items: baseline; gap: .45em; padding-left: calc(.5em + var(--osk-list-level, 0) * 1em); }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-list-marker { min-width: .7em; flex: 0 0 auto; text-align: right; color: inherit; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-list-item > span:last-child { min-width: 0; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-quote { display: block; margin: .15em 0; padding: 0 0 0 .7em; border-left: 3px solid #53565e; color: inherit; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-codeblock { display: block; max-width: 100%; padding: .65em .8em; margin: .4em 0; border: 1px solid #32343a; border-radius: 5px; background: #111214; white-space: pre-wrap; overflow-wrap: anywhere; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-codeblock code { padding: 0; border: 0; background: none; font-size: .92em; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-rich-text strong { font-weight: 700; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-rich-text em { font-style: italic; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-mention { display: inline; padding: 1px 3px; border-radius: 3px; font-family: inherit; font-size: inherit; font-weight: 500; line-height: inherit; white-space: break-spaces; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-variable { display: inline; padding: 1px 4px; border-radius: 3px; color: #c5c7ce; background: #292b31; font-size: .9em; line-height: inherit; white-space: break-spaces; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-emoji { width: 1.35em; height: 1.35em; min-width: 1.35em; margin: 0 .04em; vertical-align: -.28em; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-discord-emoji-fallback { color: #c5c7ce; font: inherit; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-v2-component-label,
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-v2-container__toolbar { display: none; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-message-preview[data-interactive="true"] .osk-v2-container__toolbar:has(.osk-v2-structure-chip) { display: flex; }
+:is(.osk-dashboard-shell[data-workspace], .osk-message-editor--workspace) .osk-v2-structure-chip .osk-v2-component-label { display: inline-flex; font: 400 11px/1.4 var(--osk-font); letter-spacing: 0; text-transform: none; }

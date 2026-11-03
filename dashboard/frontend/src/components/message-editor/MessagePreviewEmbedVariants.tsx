@@ -33,14 +33,14 @@ export function EmbedPreview(props: PreviewCoreProps) {
         <div className="osk-message-preview__embed-main">
           <div className="osk-message-preview__author-row">
             <IconSlot urlField={authorIconUrlField} modeField={authorIconModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} alt="Ícone do autor" fallbackLabel="Ícone do autor" />
-            <FieldText {...textProps} field={authorField} className="osk-message-preview__author" placeholder="Adicionar autor" />
+            <FieldText {...textProps} field={authorField} format="plain" className="osk-message-preview__author" placeholder="Adicionar autor" />
           </div>
-          <FieldText {...textProps} field={titleField} className="osk-message-preview__title" placeholder="Adicionar título" />
+          <FieldText {...textProps} field={titleField} format="plain" className="osk-message-preview__title" placeholder="Adicionar título" />
           <FieldText {...textProps} field={descriptionField} className="osk-message-preview__description" placeholder="Adicionar descrição" />
           <ImageSlot urlField={imageUrlField} modeField={imageModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__image" alt="Imagem da mensagem" fallbackLabel="Adicionar imagem" />
           <div className="osk-message-preview__footer-row">
             <IconSlot urlField={footerIconUrlField} modeField={footerIconModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} alt="Ícone do rodapé" fallbackLabel="Ícone do rodapé" />
-            <FieldText {...textProps} field={footerField} className="osk-message-preview__footer" placeholder="Adicionar rodapé" />
+            <FieldText {...textProps} field={footerField} format="plain" className="osk-message-preview__footer" placeholder="Adicionar rodapé" />
           </div>
         </div>
         <ImageSlot urlField={thumbnailUrlField} modeField={thumbnailModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__thumbnail" alt="Thumbnail da mensagem" fallbackLabel="Adicionar thumbnail" />
@@ -61,10 +61,10 @@ export function WelcomeDmEmbedPreview(props: PreviewCoreProps) {
     <div className="osk-message-preview__message">
       <div className="osk-message-preview__embed" style={{ "--osk-message-accent": accent } as CSSProperties}>
         <div className="osk-message-preview__embed-main">
-          <FieldText {...textProps} field={titleField} className="osk-message-preview__title" placeholder="Adicionar título" />
+          <FieldText {...textProps} field={titleField} format="plain" className="osk-message-preview__title" placeholder="Adicionar título" />
           <FieldText {...textProps} field={bodyField} className="osk-message-preview__description" placeholder="Adicionar mensagem" />
           <div className="osk-message-preview__footer-row">
-            <FieldText {...textProps} field={footerField} className="osk-message-preview__footer" placeholder="Adicionar rodapé" />
+            <FieldText {...textProps} field={footerField} format="plain" className="osk-message-preview__footer" placeholder="Adicionar rodapé" />
           </div>
         </div>
       </div>

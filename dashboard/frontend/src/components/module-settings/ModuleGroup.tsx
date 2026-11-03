@@ -1,5 +1,5 @@
 import type { DashboardFieldDefinition, DashboardMessageEditorDefinition, DashboardOptionsPayload, DashboardSectionDefinition, DashboardTemplateVariables } from "../../types/dashboard";
-import { FieldsPanel, MessageGroupPanel, TicketAttendancePanel } from "../SectionEditorPanels";
+import { FieldsPanel, FormsQuestionPanel, MessageGroupPanel, TicketAttendancePanel } from "../SectionEditorPanels";
 import { TicketFlowEditor } from "../TicketFlowEditor";
 import { TicketPermissionsEditor } from "../TicketPermissionsEditor";
 import { ColorRolesPanelManager } from "../color-roles/ColorRolesPanelManager";
@@ -25,9 +25,29 @@ export function ModuleGroup({ section, group, values, draft, guildOptions, onCha
   };
   let content;
   if (section.id === "color_roles" && group === "Painel") content = <ColorRolesPanelManager {...common} fields={fields} onOpenEditor={onOpenEditor} />;
-  else if (section.id === "tickets" && group === "Atendimento") content = <TicketAttendancePanel fields={fields} renderFields={renderFields} />;
+  else if (section.id === "tickets" && group === "Atendimento") content = <TicketAttendancePanel fields={fields} draft={draft} guildOptions={guildOptions} renderFields={renderFields} />;
   else if (section.id === "tickets" && group === "Fluxos") content = <TicketFlowEditor fields={fields} draft={draft} renderFields={renderFields} onChange={onChange} />;
   else if (section.id === "tickets" && group === "Permissões") content = <TicketPermissionsEditor fields={fields} draft={draft} renderFields={renderFields} onChange={onChange} />;
+  else if (section.id === "forms" && group === "Perguntas") content = <FormsQuestionPanel fields={fields} draft={draft} renderFields={renderFields} />;
+  else if (section.id === "welcome" && group === "Aparência") {
+    const publicEditorFields = new Set(section.groupMetadata?.["Mensagem de entrada"]?.editors?.flatMap(editor => editor.fieldIds) || []);
+    const remaining = fields.filter(field => !publicEditorFields.has(field.id));
+    const publicMode = String(draft["welcome.render_mode"] || "components_v2");
+    const privateMode = String(draft["welcome.dm_render_mode"] || "components_v2");
+    // These same values can still affect the private message, even when its
+    // sending toggle is off. Keep them editable while preparing that message.
+    const shared = publicMode !== "components_v2" && privateMode !== "normal"
+      ? fields.filter(field => publicEditorFields.has(field.id))
+      : publicMode === "normal" && Boolean(draft["welcome.decorative_emoji_enabled"])
+        ? fields.filter(field => ["welcome.accent_color", "welcome.accent_color_mode"].includes(field.id))
+        : [];
+    content = <div className="osk-welcome-appearance">
+      {remaining.length > 0 && renderFields(remaining)}
+      {shared.length > 0 && <AdvancedSettings title="Ajustes compartilhados" summary={privateMode !== "normal" ? "Usados também pela mensagem privada." : "Cor usada pelos emojis decorativos."} fields={shared} values={values} draft={draft}>
+        {renderFields(shared)}
+      </AdvancedSettings>}
+    </div>;
+  }
   else if (metadata?.kind === "message") content = <MessageGroupPanel {...common} sectionId={section.id} group={group} fields={fields} allFields={section.fields} metadata={metadata} renderFields={renderFields} onOpenEditor={onOpenEditor} />;
   else content = renderFields(fields);
   if (!fields.length) return null;

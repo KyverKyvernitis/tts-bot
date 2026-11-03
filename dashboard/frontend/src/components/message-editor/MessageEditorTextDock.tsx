@@ -22,7 +22,7 @@ export function MessageEditorTextDock({ field, value, notice, hasVariables, onWr
         {field.maxLength ? <span>{value.length}/{field.maxLength}</span> : null}
         {notice && <em role="status">{notice}</em>}
       </div>
-      <div className="osk-message-editor__text-dock-tools" aria-label="Formatação de texto">
+      <div className="osk-message-editor__text-dock-tools" role="group" aria-label="Formatação de texto">
         <button type="button" onPointerDown={preventToolbarBlur} onClick={() => onWrap("**", "**", "texto")} aria-label="Negrito" title="Negrito"><Bold size={16} /></button>
         <button type="button" onPointerDown={preventToolbarBlur} onClick={() => onWrap("*", "*", "texto")} aria-label="Itálico" title="Itálico"><Italic size={16} /></button>
         <button type="button" onPointerDown={preventToolbarBlur} onClick={() => onWrap("__", "__", "texto")} aria-label="Sublinhado" title="Sublinhado"><Underline size={16} /></button>

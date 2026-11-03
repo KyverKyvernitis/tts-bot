@@ -1,183 +1,70 @@
-import type { ReactNode } from "react";
-import { useState } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import type { DashboardOptionsPayload } from "../../types/dashboard";
+import { parseDiscordBlocks, parseDiscordInline, type DiscordInlineNode, type DiscordTextBlock, type DiscordTextFormat } from "./discordRichTextModel";
 
 interface DiscordRichTextProps {
   text: string;
   guildOptions?: DashboardOptionsPayload | null;
   compact?: boolean;
   className?: string;
+  /** Plain fields do not interpret message Markdown or Discord mentions. */
+  format?: DiscordTextFormat;
 }
-
-type InlineToken =
-  | { type: "text"; value: string }
-  | { type: "emoji"; raw: string; name: string; id: string; animated: boolean }
-  | { type: "userMention"; raw: string; id: string }
-  | { type: "roleMention"; raw: string; id: string }
-  | { type: "channelMention"; raw: string; id: string }
-  | { type: "templateVariable"; raw: string; key: string; mentionKind?: "user" | "channel" };
-
-const DISCORD_TOKEN_RE = /(<a?:[^:\s>]+:\d{15,25}>|<@!?\d{15,25}>|<@&\d{15,25}>|<#\d{15,25}>|\$\{[A-Za-z0-9_]+\}|\{[A-Za-z0-9_]+\})/g;
-const INLINE_MARKDOWN_RE = /(\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\|\|[^|]+\|\||`[^`]+`|\*[^*]+\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s<]+)/g;
-
-function tokenizeDiscordText(text: string): InlineToken[] {
-  const tokens: InlineToken[] = [];
-  let cursor = 0;
-  text.replace(DISCORD_TOKEN_RE, (match, _token, offset: number) => {
-    if (offset > cursor) tokens.push({ type: "text", value: text.slice(cursor, offset) });
-    const emoji = match.match(/^<(a?):([^:\s>]+):(\d{15,25})>$/);
-    if (emoji) {
-      tokens.push({ type: "emoji", raw: match, animated: emoji[1] === "a", name: emoji[2], id: emoji[3] });
-    } else if (/^<@!?\d{15,25}>$/.test(match)) {
-      tokens.push({ type: "userMention", raw: match, id: match.replace(/\D/g, "") });
-    } else if (/^<@&\d{15,25}>$/.test(match)) {
-      tokens.push({ type: "roleMention", raw: match, id: match.replace(/\D/g, "") });
-    } else if (/^<#\d{15,25}>$/.test(match)) {
-      tokens.push({ type: "channelMention", raw: match, id: match.replace(/\D/g, "") });
-    } else {
-      const key = match.startsWith("${") ? match.slice(2, -1) : match.slice(1, -1);
-      const lower = key.toLowerCase();
-      const mentionKind = lower.includes("channel") ? "channel" : lower.includes("mention") || lower.includes("mencao") ? "user" : undefined;
-      tokens.push({ type: "templateVariable", raw: match, key, mentionKind });
-    }
-    cursor = offset + match.length;
-    return match;
-  });
-  if (cursor < text.length) tokens.push({ type: "text", value: text.slice(cursor) });
-  return tokens;
-}
-
-function renderInlineMarkdown(text: string, prefix: string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  let cursor = 0;
-  text.replace(INLINE_MARKDOWN_RE, (match, _token, offset: number) => {
-    if (offset > cursor) nodes.push(text.slice(cursor, offset));
-    const key = `${prefix}-md-${offset}`;
-    if (match.startsWith("**") && match.endsWith("**")) {
-      nodes.push(<strong key={key}>{match.slice(2, -2)}</strong>);
-    } else if (match.startsWith("__") && match.endsWith("__")) {
-      nodes.push(<u key={key}>{match.slice(2, -2)}</u>);
-    } else if (match.startsWith("~~") && match.endsWith("~~")) {
-      nodes.push(<s key={key}>{match.slice(2, -2)}</s>);
-    } else if (match.startsWith("||") && match.endsWith("||")) {
-      nodes.push(<span key={key} className="osk-discord-spoiler" title="Spoiler">{match.slice(2, -2)}</span>);
-    } else if (match.startsWith("`") && match.endsWith("`")) {
-      nodes.push(<code key={key}>{match.slice(1, -1)}</code>);
-    } else if (match.startsWith("*") && match.endsWith("*")) {
-      nodes.push(<em key={key}>{match.slice(1, -1)}</em>);
-    } else if (match.startsWith("[") && match.includes("](http")) {
-      const parsedLink = /^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/.exec(match);
-      nodes.push(parsedLink
-        ? <span key={key} className="osk-discord-link" title={parsedLink[2]}>{parsedLink[1]}</span>
-        : match);
-    } else if (match.startsWith("http://") || match.startsWith("https://")) {
-      nodes.push(<span key={key} className="osk-discord-link">{match}</span>);
-    } else {
-      nodes.push(match);
-    }
-    cursor = offset + match.length;
-    return match;
-  });
-  if (cursor < text.length) nodes.push(text.slice(cursor));
-  return nodes;
-}
-
-function DiscordEmoji({ token }: { token: Extract<InlineToken, { type: "emoji" }> }) {
+function DiscordEmoji({ token }: { token: Extract<DiscordInlineNode, { type: "emoji" }> }) {
   const primaryExtension = token.animated ? "gif" : "webp";
   const fallbackExtension = token.animated ? "webp" : "png";
   const [extension, setExtension] = useState(primaryExtension);
   const [failed, setFailed] = useState(false);
-
-  if (failed) {
-    return <span className="osk-discord-emoji-fallback" title={token.raw}>:{token.name}:</span>;
-  }
-
-  return (
-    <img
-      className="osk-discord-emoji"
-      src={`https://cdn.discordapp.com/emojis/${token.id}.${extension}?size=44&quality=lossless`}
-      alt={`:${token.name}:`}
-      title={`:${token.name}:`}
-      loading="lazy"
-      decoding="async"
-      draggable={false}
-      onError={() => {
-        if (extension !== fallbackExtension) setExtension(fallbackExtension);
-        else setFailed(true);
-      }}
-    />
-  );
+  if (failed) return <span className="osk-discord-emoji-fallback" title={token.raw}>:{token.name}:</span>;
+  return <img className="osk-discord-emoji" src={`https://cdn.discordapp.com/emojis/${token.id}.${extension}?size=44&quality=lossless`}
+    alt={`:${token.name}:`} title={`:${token.name}:`} loading="lazy" decoding="async" draggable={false}
+    onError={() => { if (extension !== fallbackExtension) setExtension(fallbackExtension); else setFailed(true); }} />;
 }
-
-function mentionLabel(token: InlineToken, guildOptions?: DashboardOptionsPayload | null): string {
-  if (token.type === "roleMention") {
-    const role = guildOptions?.roles?.find((item) => item.id === token.id);
-    return `@${role?.name ?? "cargo"}`;
+function mentionLabel(token: Extract<DiscordInlineNode, { type: "mention" | "variable" }>, guildOptions?: DashboardOptionsPayload | null): string {
+  if (token.type === "mention") {
+    if (token.kind === "role") return `@${guildOptions?.roles?.find(item => item.id === token.id)?.name ?? "cargo"}`;
+    if (token.kind === "channel") return `#${guildOptions?.channels?.find(item => item.id === token.id)?.name ?? "canal"}`;
+    return "@usuário";
   }
-  if (token.type === "channelMention") {
-    const channel = guildOptions?.channels?.find((item) => item.id === token.id);
-    return `#${channel?.name ?? "canal"}`;
-  }
-  if (token.type === "templateVariable") {
-    if (token.mentionKind === "channel") return "#canal";
-    if (token.mentionKind === "user") return token.key.includes("convid") || token.key.includes("inviter") ? "@convidador" : "@membro";
-    return token.raw;
-  }
-  return "@usuário";
+  if (token.mentionKind === "channel") return "#canal";
+  const key = token.key.toLowerCase();
+  return key.includes("convid") || key.includes("inviter") ? "@convidador" : "@membro";
 }
-
-function renderTextToken(value: string, keyPrefix: string): ReactNode[] {
-  const blocks = value.split(/(```[\s\S]*?```)/g);
-  const result: ReactNode[] = [];
-  blocks.forEach((block, blockIndex) => {
-    const blockKey = `${keyPrefix}-block-${blockIndex}`;
-    if (block.startsWith("```") && block.endsWith("```")) {
-      result.push(<pre key={blockKey} className="osk-discord-codeblock"><code>{block.slice(3, -3).trim()}</code></pre>);
-      return;
+function renderInline(nodes: DiscordInlineNode[], guildOptions: DashboardOptionsPayload | null | undefined, prefix: string): ReactNode[] {
+  return nodes.map((node, index) => {
+    const key = `${prefix}-${index}`;
+    if (node.type === "text") return node.value;
+    if (node.type === "code") return <code key={key}>{node.value}</code>;
+    if (node.type === "emoji") return <DiscordEmoji key={`${key}-${node.raw}`} token={node} />;
+    if (node.type === "link") return <span key={key} className="osk-discord-link" title={node.url}>{renderInline(node.children, guildOptions, key)}</span>;
+    if (node.type === "mention" || node.type === "variable" && node.mentionKind) {
+      return <span key={key} className="osk-discord-mention" data-kind={node.type === "mention" ? node.kind : node.mentionKind} title={node.raw}>{mentionLabel(node, guildOptions)}</span>;
     }
-    const lines = block.split("\n");
-    lines.forEach((line, lineIndex) => {
-      const quoted = line.startsWith("> ");
-      const lineContent = quoted ? line.slice(2) : line;
-      const renderedLine = renderInlineMarkdown(lineContent, `${blockKey}-${lineIndex}`);
-      if (quoted) result.push(<span key={`${blockKey}-quote-${lineIndex}`} className="osk-discord-quote">{renderedLine}</span>);
-      else result.push(...renderedLine);
-      if (lineIndex < lines.length - 1) result.push(<br key={`${blockKey}-br-${lineIndex}`} />);
-    });
+    if (node.type === "variable") return <span key={key} className="osk-discord-variable" title="Variável de template">{node.raw}</span>;
+    const children = renderInline(node.children, guildOptions, key);
+    if (node.style === "bold") return <strong key={key}>{children}</strong>;
+    if (node.style === "italic") return <em key={key}>{children}</em>;
+    if (node.style === "bold-italic") return <strong key={key}><em>{children}</em></strong>;
+    if (node.style === "underline") return <u key={key}>{children}</u>;
+    if (node.style === "strike") return <s key={key}>{children}</s>;
+    return <span key={key} className="osk-discord-spoiler" title="Spoiler">{children}</span>;
   });
-  return result;
 }
-
-export function DiscordRichText({ text, guildOptions, compact, className }: DiscordRichTextProps) {
+function renderBlock(block: DiscordTextBlock, index: number, guildOptions?: DashboardOptionsPayload | null): ReactNode {
+  const key = `block-${index}`;
+  if (block.type === "blank") return <span key={key} className="osk-discord-blank" aria-hidden="true">{"\n"}</span>;
+  if (block.type === "code") return <span key={key} className="osk-discord-codeblock" data-language={block.language || undefined}><code>{block.text}</code></span>;
+  if (block.type === "list") return <span key={key} className="osk-discord-list" role="list">{block.items.map((item, itemIndex) => <span className="osk-discord-list-item" role="listitem" key={itemIndex} style={{ "--osk-list-level": item.level } as CSSProperties}><span className="osk-discord-list-marker" aria-hidden="true">{item.marker}</span><span>{renderInline(parseDiscordInline(item.text), guildOptions, `${key}-${itemIndex}`)}</span></span>)}</span>;
+  const children = renderInline(parseDiscordInline(block.text), guildOptions, key);
+  if (block.type === "heading") return <span key={key} className="osk-discord-heading" data-level={block.level} role="heading" aria-level={block.level}>{children}</span>;
+  if (block.type === "quote") return <span key={key} className="osk-discord-quote">{children}</span>;
+  if (block.type === "subtext") return <span key={key} className="osk-discord-subtext">{children}</span>;
+  return <span key={key} className="osk-discord-paragraph">{children}</span>;
+}
+export function DiscordRichText({ text, guildOptions, compact, className, format = compact ? "inline" : "full" }: DiscordRichTextProps) {
   if (!text.trim()) return null;
-  const nodes = tokenizeDiscordText(text).flatMap((token, index): ReactNode[] => {
-    const key = `discord-token-${index}-${token.type === "text" ? "text" : token.raw}`;
-    if (token.type === "text") return renderTextToken(token.value, key);
-    if (token.type === "emoji") return [<DiscordEmoji key={key} token={token} />];
-    if (token.type === "roleMention" || token.type === "channelMention" || token.type === "userMention") {
-      return [
-        <span key={key} className="osk-discord-mention" data-kind={token.type.replace("Mention", "")} title={token.raw}>
-          {mentionLabel(token, guildOptions)}
-        </span>,
-      ];
-    }
-    if (token.type === "templateVariable" && token.mentionKind) {
-      return [
-        <span key={key} className="osk-discord-mention" data-kind={token.mentionKind} title={token.raw}>
-          {mentionLabel(token, guildOptions)}
-        </span>,
-      ];
-    }
-    return [
-      <span key={key} className="osk-discord-variable" title="Variável de template">
-        {token.raw}
-      </span>,
-    ];
-  });
-
-  return (
-    <span className={className ?? "osk-discord-rich-text"} data-compact={compact ? "true" : "false"}>
-      {nodes}
-    </span>
-  );
+  const nodes = format === "plain" ? text : format === "inline"
+    ? renderInline(parseDiscordInline(text), guildOptions, "inline")
+    : parseDiscordBlocks(text).map((block, index) => renderBlock(block, index, guildOptions));
+  return <span className={className ?? "osk-discord-rich-text"} data-compact={compact ? "true" : "false"} data-format={format}>{nodes}</span>;
 }

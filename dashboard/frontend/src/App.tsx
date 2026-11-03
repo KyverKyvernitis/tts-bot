@@ -42,6 +42,7 @@ export default function App() {
     needsInvite,
     serversLoaded,
     loadingServers,
+    serversError,
     selectedServer,
     setSelectedServer,
     sections,
@@ -203,11 +204,11 @@ export default function App() {
   }
 
   return <>
-    {notice && <Notice type={notice.type} text={notice.text} onClose={() => setNotice(null)} />}
+    {notice && !(route.page === "servers" && notice.type === "error" && notice.text === serversError) && <Notice type={notice.type} text={notice.text} onClose={() => setNotice(null)} />}
     {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} sessionPending={sessionState === "loading"} user={user} bot={botIdentity} supportServer={supportServer} refreshing={loadingServers} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onNavigate={(path) => navigate(parseRoute(path))} />}
     {route.page === "privacy" && <LegalPage kind="privacy" onBack={() => navigate({ page: "landing" })} />}
     {route.page === "terms" && <LegalPage kind="terms" onBack={() => navigate({ page: "landing" })} />}
-    {route.page === "servers" && user && <ServerPicker manageable={manageable} needsInvite={needsInvite} loading={loadingServers} user={user} bot={botIdentity} supportServer={supportServer} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, view: "general", moduleId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
+    {route.page === "servers" && user && <ServerPicker manageable={manageable} needsInvite={needsInvite} loading={loadingServers} loaded={serversLoaded} error={serversError} user={user} bot={botIdentity} supportServer={supportServer} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, view: "general", moduleId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
     {route.page === "invite" && <InviteScreen server={selectedServer || needsInvite.find((item) => item.id === route.guildId) || null} busy={inviteBusy} onBack={() => navigate({ page: "servers" })} onOpenInvite={() => void openInvite(route.guildId)} />}
     {route.page === "dashboard" && <DashboardShell
       route={route}

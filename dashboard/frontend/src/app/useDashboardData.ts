@@ -26,6 +26,9 @@ export function useDashboardData({ sessionState, setSessionState, setUser, setBo
   const [needsInvite, setNeedsInvite] = useState<DashboardServerCard[]>([]);
   const [serversLoaded, setServersLoaded] = useState(false);
   const [loadingServers, setLoadingServers] = useState(false);
+  const [serversError, setServersError] = useState<string | null>(null);
+  const serverErrorRef = useRef<string | null>(null);
+  const serverLoadRef = useRef({ generation: 0, pending: false });
   const [selectedServer, setSelectedServer] = useState<DashboardServerCard | null>(null);
   const [sections, setSections] = useState<DashboardSectionDefinition[]>([]);
   const [summary, setSummary] = useState<DashboardSectionSummary[]>([]);
@@ -39,23 +42,37 @@ export function useDashboardData({ sessionState, setSessionState, setUser, setBo
   const activeGuildRef = useRef<string | null>(null);
 
   const loadServers = useCallback(async (force = false) => {
-    if (sessionState !== "authenticated" || (serversLoaded && !force)) return;
+    if (sessionState !== "authenticated" || (serversLoaded && !force) || serverLoadRef.current.pending) return;
+    const generation = serverLoadRef.current.generation + 1;
+    serverLoadRef.current = { generation, pending: true };
+    const previousError = serverErrorRef.current;
+    if (previousError) setNotice(current => current?.type === "error" && current.text === previousError ? null : current);
+    serverErrorRef.current = null;
+    setServersError(null);
     setLoadingServers(true);
     try {
       const payload = await fetchDashboardServers();
+      if (serverLoadRef.current.generation !== generation) return;
       setManageable(payload.manageable || []);
       setNeedsInvite(payload.needsInvite || []);
       if (payload.user) setUser(payload.user);
       setServersLoaded(true);
     } catch (error) {
+      if (serverLoadRef.current.generation !== generation) return;
       if (error instanceof DashboardHttpError && error.status === 401) {
         setSessionState("anonymous");
         setUser(null);
         loadedGuildRef.current = null;
       }
-      setNotice({ type: "error", text: errorText(error) });
+      const message = errorText(error);
+      serverErrorRef.current = message;
+      setServersError(message);
+      setNotice({ type: "error", text: message });
     } finally {
-      setLoadingServers(false);
+      if (serverLoadRef.current.generation === generation) {
+        serverLoadRef.current.pending = false;
+        setLoadingServers(false);
+      }
     }
   }, [serversLoaded, sessionState, setNotice, setSessionState, setUser]);
 
@@ -118,9 +135,13 @@ export function useDashboardData({ sessionState, setSessionState, setUser, setBo
   }, [sessionState, setBotIdentity, setNotice, setSessionState, setUser]);
 
   const resetServers = useCallback(() => {
+    serverLoadRef.current = { generation: serverLoadRef.current.generation + 1, pending: false };
     setManageable([]);
     setNeedsInvite([]);
     setServersLoaded(false);
+    setLoadingServers(false);
+    setServersError(null);
+    serverErrorRef.current = null;
     loadedGuildRef.current = null;
   }, []);
 
@@ -129,6 +150,7 @@ export function useDashboardData({ sessionState, setSessionState, setUser, setBo
     needsInvite,
     serversLoaded,
     loadingServers,
+    serversError,
     selectedServer,
     setSelectedServer,
     sections,

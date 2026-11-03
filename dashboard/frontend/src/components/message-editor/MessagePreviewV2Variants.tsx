@@ -33,7 +33,7 @@ export function WelcomeComponentsV2Preview(props: PreviewCoreProps & { dm?: bool
         {interactive && <AccentControl field={accentTarget} selectedFieldId={selectedFieldId} onSelectField={onSelectField} />}
         <div className="osk-v2-container__toolbar">
           <EditableRegion field={styleField} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-v2-structure-chip" placeholder="Estilo do container">
-            <V2BlockLabel>Container · {optionLabel(styleField, draft) ?? "Completo"}</V2BlockLabel>
+            <V2BlockLabel>Estilo: {optionLabel(styleField, draft) ?? "Completo"}</V2BlockLabel>
           </EditableRegion>
         </div>
         <div className="osk-v2-text-display osk-v2-text-display--title">
@@ -160,7 +160,7 @@ export function ComponentsV2Preview(props: PreviewCoreProps) {
                 </EditableRegion>
               ) : (
                 <EditableRegion field={buttonLabelField ?? buttonStyleField} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__component-wrap" placeholder="Botão">
-                  <div className="osk-message-preview__button-row"><span data-style={fieldString(buttonStyleField, draft) || "primary"}>{fieldString(buttonEmojiField, draft) && <><DiscordRichText text={fieldString(buttonEmojiField, draft)} guildOptions={guildOptions} compact /> </>}<DiscordRichText text={fieldString(buttonLabelField, draft) || "Continuar"} guildOptions={guildOptions} compact /></span></div>
+                  <div className="osk-message-preview__button-row"><span data-style={fieldString(buttonStyleField, draft) || "primary"}>{fieldString(buttonEmojiField, draft) && <><DiscordRichText text={fieldString(buttonEmojiField, draft)} guildOptions={guildOptions} compact /> </>}<DiscordRichText text={fieldString(buttonLabelField, draft) || "Continuar"} guildOptions={guildOptions} format="plain" compact /></span></div>
                 </EditableRegion>
               )}
             </div>

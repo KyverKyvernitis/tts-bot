@@ -22,7 +22,11 @@ export function FormFieldsEditor({ field, value, onChange }: { field: DashboardF
     const target = fields[index];
     if ((target.label || target.placeholder) && !window.confirm(`Excluir “${target.label || `Pergunta ${index + 1}`}”?`)) return;
     onChange(field, fields.filter((_, itemIndex) => itemIndex !== index));
-    if (openId === target.id) setOpenId(fields[index + 1]?.id || fields[index - 1]?.id || null);
+    if (openId === target.id) {
+      const nextId = fields[index + 1]?.id || fields[index - 1]?.id || null;
+      newQuestionRef.current = nextId;
+      setOpenId(nextId);
+    }
   };
   const add = () => {
     if (fields.length >= 5) return;
@@ -47,22 +51,22 @@ export function FormFieldsEditor({ field, value, onChange }: { field: DashboardF
   };
 
   return <div className="osk-form-fields-editor" ref={rootRef}>
-    <div className="osk-form-fields-limit"><strong>{fields.length} de 5 perguntas</strong></div>
+    <div className="osk-form-fields-limit"><strong>{fields.length} de 5 perguntas</strong><span>{fields.filter(item => item.enabled).length} visíveis</span></div>
     {!fields.length && <div className="osk-workspace-empty-list">Nenhuma pergunta adicionada.</div>}
     {fields.map((item, index) => {
       const open = openId === item.id;
       const panelId = `form-question-panel-${item.id || index}`;
       return <article key={item.id || index} data-open={open || undefined} data-enabled={item.enabled || undefined}>
         <div className="osk-form-question-head">
-          <button type="button" className="osk-form-question-summary" onClick={() => setOpenId((current) => current === item.id ? null : item.id)} aria-expanded={open} aria-controls={panelId}>
-            <span className="osk-question-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span><span><strong>{item.label || `Pergunta ${index + 1}`}</strong><small>{item.required ? "Obrigatória" : "Opcional"} · {item.long ? "Resposta longa" : "Resposta curta"}</small></span><ChevronDown size={16} />
+          <button type="button" className="osk-form-question-summary" onClick={() => setOpenId((current) => current === item.id ? null : item.id)} aria-expanded={open} aria-controls={panelId} aria-label={`Editar pergunta ${index + 1}`}>
+            <span className="osk-question-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span><span><strong>{item.label || `Pergunta ${index + 1}`}</strong><small>{item.enabled ? `${item.required ? "Obrigatória" : "Opcional"} · ${item.long ? "Resposta longa" : "Resposta curta"}` : "Oculta no formulário"}</small></span><ChevronDown size={16} />
           </button>
-          <div className="osk-form-question-actions">
+          {open && <div className="osk-form-question-actions">
             <button type="button" onClick={() => duplicate(index)} disabled={fields.length >= 5} aria-label={`Duplicar pergunta ${index + 1}`} title="Duplicar"><Copy size={16} /></button>
             <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`Mover pergunta ${index + 1} para cima`} title="Mover para cima"><ArrowUp size={16} /></button>
             <button type="button" onClick={() => move(index, 1)} disabled={index === fields.length - 1} aria-label={`Mover pergunta ${index + 1} para baixo`} title="Mover para baixo"><ArrowDown size={16} /></button>
             <button type="button" data-danger onClick={() => remove(index)} aria-label={`Remover pergunta ${index + 1}`} title="Remover"><Trash2 size={16} /></button>
-          </div>
+          </div>}
         </div>
         {open && <div className="osk-form-question-panel" id={panelId}>
           <div className="osk-form-question-panel-inner">
