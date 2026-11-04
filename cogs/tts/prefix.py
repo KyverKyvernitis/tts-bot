@@ -107,6 +107,10 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
         return PrefixControlCommand("importcd", import_parts[1].strip() if len(import_parts) == 2 else "")
     if matches_prefixed_command(raw, bot_prefix, kind="advanced"):
         return PrefixControlCommand("advanced")
+    export_parts = raw.split(None, 1)
+    if any(export_parts[0].casefold() == alias.casefold()
+           for alias in get_prefixed_aliases(bot_prefix, "ttvmp3")):
+        return PrefixControlCommand("ttvmp3", export_parts[1].strip() if len(export_parts) == 2 else "")
     if matches_prefixed_command(raw, bot_prefix, kind="clear"):
         return PrefixControlCommand("clear")
     if matches_prefixed_command(raw, bot_prefix, kind="leave"):
@@ -209,6 +213,10 @@ async def dispatch_prefix_control_command(cog: Any, message: Any, command: Prefi
         return bool(await handle_import_cd(cog, message))
     if kind == "advanced":
         await cog._prefix_advanced(message)
+        return True
+    if kind == "ttvmp3":
+        from .interface.exportar_mp3 import handle_export_ttv_mp3
+        await handle_export_ttv_mp3(cog, message, command.argument)
         return True
     if kind == "clear":
         await cog._prefix_clear(message)

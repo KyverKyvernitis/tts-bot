@@ -104,6 +104,21 @@
       ]
     },
     {
+      "key": "ttv_mp3",
+      "category": "voice",
+      "group": "Gerar áudio",
+      "description": "Gera um MP3 com sua voz, CD e efeitos do TextToVocaloid.",
+      "usage": "{bot_prefix}ttvmp3 texto~~",
+      "search_terms": [
+        "texttovocaloid",
+        "ttv mp3",
+        "exportar audio",
+        "baixar voz",
+        "cantar"
+      ],
+      "detail_note": "Use ~ no final para cantar. Usa o CD e os efeitos que você configurou, sem entrar na call."
+    },
+    {
       "key": "tts_menu",
       "category": "voice",
       "group": "Configurar",

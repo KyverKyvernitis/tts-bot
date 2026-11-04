@@ -107,6 +107,8 @@ async def preparar_payload_tts_mensagem(
     guild_defaults: dict | None,
     active_prefix: str,
     forced_engine: str,
+    require_voice_channel: bool = True,
+    text_override: str | None = None,
 ) -> PayloadTTSMensagem | None:
     db = cog._get_db()
     if db is None:
@@ -176,13 +178,13 @@ async def preparar_payload_tts_mensagem(
     # No user-provided MIDI is downloaded or converted into a singing score.
     author_voice = getattr(message.author, "voice", None)
     voice_channel = getattr(author_voice, "channel", None)
-    if voice_channel is None:
+    if voice_channel is None and require_voice_channel:
         return None
 
     import time
     preparation_started = time.perf_counter()
     adaptation_ms = 0.0
-    raw_text = message.content[len(active_prefix):].strip()
+    raw_text = (message.content[len(active_prefix):] if text_override is None else text_override).strip()
     score, segments, arrangement = None, None, None
     is_ttv = resolved.get("engine") == "teto"
     # Attachments .mid/.midi have no special behavior on any TTV request.
@@ -261,7 +263,7 @@ async def preparar_payload_tts_mensagem(
 
     queue_item = QueueItem(
         guild_id=message.guild.id,
-        channel_id=voice_channel.id,
+        channel_id=voice_channel.id if require_voice_channel else 0,
         author_id=message.author.id,
         text=text,
         engine=str(resolved.get("engine") or "gtts"),

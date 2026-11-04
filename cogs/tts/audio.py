@@ -2335,6 +2335,88 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 with contextlib.suppress(FileNotFoundError, OSError):
                     os.remove(path)
 
+    async def _ttv_message_mp3(self, item: QueueItem, *, max_bytes: int = 8 * 1024 * 1024) -> bytes:
+        """Export one prepared message without joining voice or touching its queue.
+
+        Preparation owns the exact lyrics, CD snapshot and personal settings.
+        The worker/composition renderer produces dry audio; the same playback
+        filter applies the personal effects once when encoding the attachment.
+        """
+        if str(item.engine or "").lower() != "teto":
+            raise TTVSingingError("A exportação em MP3 usa o TextToVocaloid.")
+        self._snapshot_tts_item(item)
+        max_bytes = max(1, min(8 * 1024 * 1024, int(max_bytes)))
+        max_duration = 120.0
+        arrangement = getattr(item, "ttv_arrangement", None)
+        score = getattr(item, "ttv_score", None)
+        musical = arrangement if isinstance(arrangement, dict) else score
+        if isinstance(musical, dict) and float(musical.get("duration_ms") or 0) > max_duration * 1000:
+            raise TTVSingingError("Use um trecho de até 2 minutos para exportar o MP3.", code="ttv_export_too_long")
+
+        status = self._ttv_voice_status(item.ttv_voice_id)
+        voice_name = get_voice(item.ttv_voice_id).name
+        if not status.get("online") or not status.get("ready"):
+            raise TTVSingingError(f"{voice_name} está indisponível agora. Tente novamente quando a voz voltar.")
+        if item.ttv_language not in status.get("languages", ()):
+            raise TTVSingingError("O idioma selecionado está indisponível para essa voz.")
+        if score is not None and status.get("singing_available") is False:
+            raise TTVSingingError("O banco de canto está indisponível.", code="ttv_singing_bank_missing")
+        if score is None and not status.get("supports_personal_rate"):
+            raise TTVSingingError("Atualize o worker para exportar os ajustes pessoais de TTV.")
+
+        item._ttv_preview = True
+        path, process = "", None
+        try:
+            path = await asyncio.wait_for(self._generate_tts_agent_worker_file(item), timeout=180)
+            if not os.path.isfile(path) or not 0 < os.path.getsize(path) <= 32 * 1024 * 1024:
+                raise TTVSingingError("O sintetizador retornou um arquivo de áudio inválido.")
+
+            # Validate duration before encoding. Export limits reject long audio
+            # instead of silently cutting off a phrase or a musical arrangement.
+            process = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            duration_data, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+            if process.returncode != 0:
+                raise TTVSingingError("Não consegui ler o áudio gerado para exportar.")
+            try:
+                duration = float(duration_data.decode("ascii").strip())
+            except (ValueError, UnicodeError):
+                raise TTVSingingError("Não consegui verificar a duração do áudio gerado.") from None
+            speed, tail = self._tts_effect_timing(item)
+            if not math.isfinite(duration) or duration <= 0:
+                raise TTVSingingError("O sintetizador retornou um áudio sem duração válida.")
+            if duration / speed + tail > max_duration:
+                raise TTVSingingError("O MP3 com esses efeitos deve ter até 2 minutos.", code="ttv_export_too_long")
+
+            effect_filter = self._tts_effect_filter(item)
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", path,
+                *(["-af", effect_filter] if effect_filter else []),
+                "-vn", "-map_metadata", "-1", "-ac", "2" if arrangement is not None else "1",
+                "-ar", "44100", "-codec:a", "libmp3lame", "-b:a", "192k",
+                "-fs", str(max_bytes + 1), "-f", "mp3", "pipe:1",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            data, _ = await asyncio.wait_for(process.communicate(), timeout=25)
+            if process.returncode != 0 or not data:
+                raise TTVSingingError("Não consegui converter a mensagem para MP3.")
+            if len(data) > max_bytes:
+                raise TTVSingingError("O MP3 excede o limite de tamanho para anexos.", code="ttv_export_too_large")
+            return data
+        except asyncio.TimeoutError:
+            raise TTVSingingError("A geração do MP3 demorou demais. Tente novamente.", code="ttv_singing_timeout") from None
+        finally:
+            if process is not None and process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
+            if path:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(path)
+
     async def _cd_preview_mp3(self, guild_id: int, user_id: int, *, melody_id: str = DEFAULT_MELODY_ID,
                               settings: dict | None = None) -> bytes:
         """Sing the selected melody privately through the verified worker route."""

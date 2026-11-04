@@ -35,6 +35,11 @@ _PREFIX_CONTROL_SPECS: dict[str, dict[str, object]] = {
         "display": ("advanced",),
         "accepts_argument": False,
     },
+    "ttvmp3": {
+        "aliases": ("ttvmp3",),
+        "display": ("ttvmp3",),
+        "accepts_argument": True,
+    },
     "clear": {
         "aliases": ("clear",),
         "display": ("clear",),
