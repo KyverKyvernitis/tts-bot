@@ -1589,21 +1589,31 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             return None
         setattr(item, "_edge_worker_attempted", True)
         setattr(item, "_edge_phone_recovery", True)
+        self._observe_tts_route_decision(route="worker", reason="phone_recovery")
         metrics = self._get_metrics_store()
         metrics["edge_phone_recovery_attempts"] = int(metrics.get("edge_phone_recovery_attempts", 0) or 0) + 1
+        started = time.monotonic()
         try:
             path = await self._generate_tts_agent_worker_file(item)
         except asyncio.CancelledError:
             self._edge_phone_policy().failed_other()
             raise
         except Exception as exc:
+            self._record_route_engine_result("edge", "worker", (time.monotonic() - started) * 1000, error=exc)
             self._edge_phone_result(success=False, error=exc)
             logger.warning("[tts_edge_phone] recuperação por arquivo falhou | guild=%s erro=%s", item.guild_id, _tts_safe_exception_detail(exc))
             return None
         if str(getattr(item, "_tts_agent_selected_engine", "") or "").lower() != "edge":
-            self._edge_phone_result(success=False, error=RuntimeError("Phone Worker mudou a engine Edge"))
+            mismatch = RuntimeError("Phone Worker mudou a engine Edge")
+            self._record_route_engine_result("edge", "worker", (time.monotonic() - started) * 1000, error=mismatch)
+            self._edge_phone_result(success=False, error=mismatch)
             logger.warning("[tts_edge_phone] worker não preservou Edge; usando fallback | guild=%s", item.guild_id)
             return None
+        duration = (time.monotonic() - started) * 1000
+        cached = bool(getattr(item, "_tts_agent_synthesis_cache_hit", False))
+        self._record_route_engine_result("edge", "worker", duration, cached=cached)
+        if not cached:
+            self._observe_tts_effective_route(route="worker", reason="phone_recovery")
         self._edge_phone_result(success=True)
         item._tts_actual_engine = "edge"
         item._tts_actual_item = None
@@ -2100,7 +2110,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 "last_selected_engine": "",
                 "last_audio_format": "",
                 "last_audio_bytes": 0,
-                "last_cache_hit": False,
+                "last_cache_hit": None,
                 "last_synth_ms": 0.0,
                 "voice_agent": {},
             }
@@ -2139,11 +2149,15 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "queue_limit": int(state.get("queue_limit") or 0),
             "avg_synth_ms": float(state.get("avg_synth_ms") or 0.0),
             "last_requested_engine": str(state.get("last_requested_engine") or ""),
-            "last_selected_engine": str(state.get("last_selected_engine") or state.get("engine") or ""),
+            "last_selected_engine": str(state.get("last_selected_engine") or ""),
             "last_audio_format": str(state.get("last_audio_format") or ""),
             "last_audio_bytes": int(state.get("last_audio_bytes") or 0),
-            "last_cache_hit": bool(state.get("last_cache_hit")),
+            "last_cache_hit": state.get("last_cache_hit") if isinstance(state.get("last_cache_hit"), bool) else None,
             "last_synth_ms": float(state.get("last_synth_ms") or 0.0),
+            "last_route_decision": str(state.get("last_route_decision") or ""),
+            "last_route_reason": str(state.get("last_route_reason") or ""),
+            "last_effective_route": str(state.get("last_effective_route") or ""),
+            "last_effective_reason": str(state.get("last_effective_reason") or ""),
             "connection": dict(state.get("connection") or {}),
             "voice_agent": dict(state.get("voice_agent") or {}),
         }
@@ -2508,6 +2522,47 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             if path:
                 with contextlib.suppress(FileNotFoundError, OSError):
                     os.remove(path)
+
+    def _observe_tts_route_decision(self, *, route: str, reason: str) -> None:
+        state = self._tts_agent_route_state()
+        state["last_route_decision"] = route if route in {"worker", "vps"} else ""
+        state["last_route_reason"] = str(reason or "")[:120]
+
+    def _observe_tts_effective_route(self, *, route: str, reason: str) -> None:
+        if route not in {"worker", "vps"}:
+            return
+        state = self._tts_agent_route_state()
+        state["last_effective_route"] = route
+        state["last_effective_reason"] = str(reason or "")[:120]
+
+    def _record_route_engine_result(
+        self, engine: str, route: str, duration_ms: float,
+        *, error: Exception | None = None, cached: bool = False,
+    ) -> None:
+        """Observação separada das métricas legadas, sem contabilizar cache como síntese."""
+        if route not in {"worker", "vps"}:
+            return
+        name = str(engine or "other").strip().lower().removeprefix("tts_agent:") or "other"
+        groups = self._get_metrics_store().setdefault("engines_by_route", {"worker": {}, "vps": {}})
+        route_metrics = groups.setdefault(route, {}).setdefault(name, {
+            "synth_count": 0, "synth_total_ms": 0.0, "synth_failures": 0,
+            "consecutive_failures": 0, "cache_hits": 0,
+            "last_error": "", "last_error_at": None,
+        })
+        if cached:
+            route_metrics["cache_hits"] += 1
+        elif error is not None:
+            route_metrics["synth_failures"] += 1
+            route_metrics["consecutive_failures"] += 1
+            route_metrics["last_error"] = str(error).replace("\n", " ")[:160]
+            route_metrics["last_error_at"] = time.time()
+        else:
+            route_metrics["synth_count"] += 1
+            route_metrics["synth_total_ms"] += max(0.0, float(duration_ms))
+            route_metrics["last_synth_ms"] = round(max(0.0, float(duration_ms)), 2)
+            route_metrics["consecutive_failures"] = 0
+            route_metrics["last_error"] = ""
+            route_metrics["last_error_at"] = None
 
     def _record_tts_agent_route_sample(self, worker: bool) -> None:
         metrics = self._get_metrics_store()
@@ -3656,8 +3711,21 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 "avg_synth_ms": round(total_ms / synth_count, 2) if synth_count else 0.0,
                 "last_synth_ms": engine_metrics.get("last_synth_ms"),
                 "last_error": engine_metrics.get("last_error"),
+                "last_error_at": engine_metrics.get("last_error_at"),
                 "consecutive_failures": int(engine_metrics.get("consecutive_failures", 0) or 0),
             }
+        by_route = metrics.get("engines_by_route")
+        if isinstance(by_route, dict):
+            snapshot["engines_by_route"] = {
+                route: {
+                    name: {**dict(row), "avg_synth_ms": round(float(row.get("synth_total_ms") or 0.0) / int(row.get("synth_count") or 1), 2)}
+                    for name, row in dict(by_route.get(route) or {}).items()
+                } for route in ("worker", "vps")
+            }
+        for suffix in ("transfer_begin_ok", "transfer_begin_failed", "transfer_release_ok", "transfer_release_failed",
+                       "direct_tts_ok", "direct_tts_failed", "direct_tts_skipped"):
+            snapshot[f"worker_voice_session_{suffix}"] = int(metrics.get(f"worker_voice_session_{suffix}", 0) or 0)
+        snapshot["worker_voice_direct_last_skip_reason"] = str(metrics.get("worker_voice_direct_last_skip_reason") or "")[:120]
         return snapshot
 
     def _should_prune_tmp_audio_dir(self, *, force: bool = False) -> bool:
@@ -5216,11 +5284,15 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         payload.setdefault("confirm_transfer", True)
         payload.setdefault("confirm", True)
         payload.setdefault("source", "tts_worker_voice_direct")
-        data = await self._request_worker_voice_agent_json(
-            task="voice_agent_begin_transfer",
-            payload=payload,
-            timeout_seconds=WORKER_VOICE_AGENT_TRANSFER_TIMEOUT_SECONDS,
-        )
+        try:
+            data = await self._request_worker_voice_agent_json(
+                task="voice_agent_begin_transfer",
+                payload=payload,
+                timeout_seconds=WORKER_VOICE_AGENT_TRANSFER_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            self._record_worker_voice_session_metric("transfer_begin_failed")
+            raise
         self._record_worker_voice_session_metric("transfer_begin_ok" if data.get("ok", True) else "transfer_begin_failed")
         return data
 
@@ -5262,11 +5334,14 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     async def _try_worker_voice_direct_tts(self, guild: discord.Guild, item: QueueItem) -> dict[str, Any] | None:
         cd_allowed = getattr(self, '_cd_streaming_allowed_for', None)
         if callable(cd_allowed) and cd_allowed(item)[0]:
+            self._record_worker_voice_session_metric("direct_tts_skipped")
+            self._get_metrics_store()["worker_voice_direct_last_skip_reason"] = "cd_streaming_active"
             return None
         try:
             allowed, reason = self._worker_voice_direct_tts_available_for(guild, item)
         except Exception as exc:
             self._record_worker_voice_session_metric("direct_tts_skipped")
+            self._get_metrics_store()["worker_voice_direct_last_skip_reason"] = "availability_check_failed"
             logger.warning(
                 "[worker_voice_agent] disponibilidade do TTS direto falhou; seguindo fallback normal | guild=%s erro=%s",
                 guild.id,
@@ -5275,6 +5350,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             return None
         if not allowed:
             self._record_worker_voice_session_metric("direct_tts_skipped")
+            self._get_metrics_store()["worker_voice_direct_last_skip_reason"] = str(reason or "not_ready")[:120]
             logger.debug("[worker_voice_agent] TTS direto worker pulado | guild=%s reason=%s", guild.id, reason)
             return None
         payload = self._worker_voice_direct_tts_payload(guild, item)
@@ -5305,6 +5381,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 or str(getattr(item, "_tts_actual_engine", "") or "teto").lower() != "teto"
             ):
                 self._record_worker_voice_session_metric("direct_tts_skipped")
+                self._get_metrics_store()["worker_voice_direct_last_skip_reason"] = "teto_prebuilt_audio_unavailable"
                 return None
             # Garante que o painel/worker tenham a sessão/handoff mais recente quando a VPS ainda está na call.
             vc = self._get_voice_client_for_guild(guild)
@@ -6339,8 +6416,10 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         guild_id: int | None = None,
         persistent_engine: Any = None,
         item: QueueItem | None = None,
+        route: str = "vps",
     ) -> str:
         started_at = time.monotonic()
+        actual_route = "worker" if route == "worker" or engine.startswith("tts_agent:") else "vps"
         try:
             result = await factory()
         except asyncio.CancelledError:
@@ -6352,10 +6431,18 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             raise
         except Exception as exc:
             duration_ms = (time.monotonic() - started_at) * 1000.0
-            self._record_engine_failure(engine, exc, duration_ms=duration_ms, item=item)
+            self._record_engine_failure(engine, exc, duration_ms=duration_ms, item=item, route=actual_route)
+            self._record_route_engine_result(engine, actual_route, duration_ms, error=exc)
             raise
         duration_ms = (time.monotonic() - started_at) * 1000.0
-        self._record_engine_success(engine, duration_ms)
+        self._record_engine_success(engine, duration_ms, route=actual_route)
+        selected = str(getattr(item, "_tts_agent_selected_engine", "") or "") if actual_route == "worker" else ""
+        reported_engine = selected or engine
+        cached = actual_route == "worker" and bool(getattr(item, "_tts_agent_synthesis_cache_hit", False) or getattr(item, "_tts_worker_cache_hit", False))
+        self._record_route_engine_result(reported_engine, actual_route, duration_ms, cached=cached)
+        if not cached:
+            reason = "worker_fallback" if actual_route == "vps" and getattr(item, "_tts_file_worker_failed", False) else getattr(item, "_tts_route_reason", "synth_ok")
+            self._observe_tts_effective_route(route=actual_route, reason=reason)
 
         engine_to_persist = engine
         if callable(persistent_engine):
@@ -6435,6 +6522,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 raise ValueError("O áudio direto exige uma parte musical, não um arranjo completo.")
             return await self._generate_arrangement_worker_file(item)
         setattr(item, "_tts_agent_selected_engine", "")
+        setattr(item, "_tts_agent_synthesis_cache_hit", False)
         if not self._tts_agent_route_available():
             raise RuntimeError("TTS Agent indisponível pela rota cacheada")
         text = str(item.text or "").strip()
@@ -6588,6 +6676,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     total_ms,
                     " ".join(timing_bits),
                 )
+                setattr(item, "_tts_agent_synthesis_cache_hit", bool(data.get("cache_hit")))
                 if bool(data.get("cache_hit")) or worker_timing:
                     setattr(item, "_tts_agent_inline_cache", True)
                 return (raw, metadata) if _return_audio else path
@@ -6698,6 +6787,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if item.engine == "edge" and self._edge_rate_limit_policy().level:
             use_agent, agent_decision = False, "vps_rate_limited_phone_recovery"
         self._record_tts_agent_route_sample(use_agent)
+        self._observe_tts_route_decision(route="worker" if use_agent else "vps", reason=agent_decision)
+        item._tts_route_reason = agent_decision
+        item._tts_file_worker_failed = False
         if agent_available and not use_agent:
             self._tts_agent_route_state()["last_error"] = ""
             self._tts_agent_route_state()["reason"] = agent_decision[:160]
@@ -6710,6 +6802,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     lambda: self._generate_tts_agent_worker_file(item),
                     guild_id=item.guild_id,
                     persistent_engine=lambda: getattr(item, "_tts_agent_selected_engine", "") or item.engine,
+                        item=item,
                 )
             except Exception as e:
                 if item.engine == "edge":
@@ -6723,6 +6816,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     if _ttv_performance_payload(item):
                         raise RuntimeError(f"TTV: {e}") from e
                     raise RuntimeError("Kasane Teto indisponível no worker de síntese") from e
+                item._tts_file_worker_failed = True
                 logger.warning("[tts_agent] TTS no worker falhou; usando fallback local/VPS | guild=%s engine=%s erro=%s", item.guild_id, item.engine, e)
 
         if item.engine == "teto":
@@ -6735,13 +6829,18 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             return await self._generate_piper_fallback_file(item)
 
         if item.engine == "piper":
+            self._observe_tts_route_decision(route="worker", reason="piper_legacy_worker")
+            item._tts_route_reason = "piper_legacy_worker"
             try:
                 return await self._run_timed_generation(
                     "piper",
                     lambda: self._generate_piper_worker_file(item),
                     guild_id=item.guild_id,
+                    item=item,
+                    route="worker",
                 )
             except Exception as e:
+                item._tts_file_worker_failed = True
                 logger.warning("[tts_piper] Piper experimental falhou, usando fallback local | guild=%s erro=%s", item.guild_id, e)
                 return await self._generate_piper_fallback_file(item)
 
@@ -6757,7 +6856,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 item._tts_actual_engine = "gtts"
                 path = await self._run_timed_generation("gtts",
                     lambda: self._generate_gtts_file_with_priority(item.text, item.language, foreground=foreground),
-                    guild_id=item.guild_id)
+                    guild_id=item.guild_id, item=item)
                 self._notify_edge_rate_limit(item)
                 return path
             blocked_by_rate_limit = self._edge_rate_limit_bypass(item)
@@ -6779,6 +6878,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                         foreground=foreground,
                     ),
                     guild_id=item.guild_id,
+                    item=item,
                 )
                 self._notify_edge_rate_limit(item)
                 return path
@@ -6787,7 +6887,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     "edge",
                     lambda: self._generate_edge_file(item.text, item.voice, item.rate, item.pitch, foreground=foreground),
                     guild_id=item.guild_id,
-                    item=item,
+                        item=item,
                 )
             except Exception as e:
                 logger.warning("[tts_voice] Edge falhou; tentando recuperação | guild=%s erro=%s", item.guild_id, _tts_safe_exception_detail(e))
@@ -6803,6 +6903,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                         foreground=foreground,
                     ),
                     guild_id=item.guild_id,
+                    item=item,
                 )
                 self._notify_edge_rate_limit(item)
                 return path
@@ -6816,6 +6917,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 foreground=foreground,
             ),
             guild_id=item.guild_id,
+            item=item,
         )
 
     def _build_edge_gtts_fallback_item(self, item: QueueItem) -> QueueItem:

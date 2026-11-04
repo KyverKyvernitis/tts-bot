@@ -5,6 +5,7 @@ import ast
 import asyncio
 import contextlib
 import logging
+import re
 import sys
 import time
 import types
@@ -30,12 +31,14 @@ AUDIO_METHODS = {
     "_tts_agent_route_state", "_tts_agent_public_snapshot", "_get_metrics_store",
     "_record_tts_agent_route_sample", "_observe_tts_route_decision", "_observe_tts_effective_route",
     "_record_route_engine_result", "_run_timed_generation", "_generate_audio_file",
+    "get_tts_metrics_snapshot",
     "_resolve_or_generate_singleflight_audio",
 }
 namespace = {
     "asyncio": asyncio, "contextlib": contextlib, "time": time,
     "logger": logging.getLogger(__name__), "TTS_WORKER_AGENT_ENABLED": True, "TTS_DEBUG_LOGS": False,
     "_has_speakable_tts_text": lambda text: any(letter.isalnum() for letter in text),
+    "_tts_temp_dirs_snapshot": lambda: {},
 }
 Base = type("RealAudioMethods", (), methods("cogs/tts/audio.py", "TTSAudioMixin", AUDIO_METHODS, namespace))
 
@@ -49,6 +52,7 @@ class Probe(Base):
         self.local_error = None
         self.legacy_results = []
         self.persisted = []
+        self.guild_states = {}
 
     def _tts_agent_route_available(self):
         return self.agent_available
@@ -56,11 +60,32 @@ class Probe(Base):
     def _tts_agent_should_try_worker(self, item):
         return self.preference if self.agent_available else (False, "worker_offline_or_not_ready")
 
-    def _record_engine_success(self, engine, duration):
+    def _record_engine_success(self, engine, duration, *, route="local"):
         self.legacy_results.append((engine, True))
 
-    def _record_engine_failure(self, engine, error, *, duration_ms):
+    def _record_engine_failure(self, engine, error, *, duration_ms, item=None, route="local"):
         self.legacy_results.append((engine, False))
+
+    def _get_edge_prebuffer_profiles(self):
+        return {}
+
+    def _edge_sources_enabled(self):
+        return False
+
+    def _edge_rate_limit_policy(self):
+        return SimpleNamespace(level=0, remaining_seconds=lambda: 0)
+
+    def _edge_phone_policy(self):
+        return SimpleNamespace(level=0, remaining_seconds=lambda: 0)
+
+    def _get_edge_stream_handles(self):
+        return {}
+
+    def _get_worker_cache_index(self):
+        return {}
+
+    def _latency_percentiles_snapshot(self):
+        return {}
 
     def _schedule_persistent_synt_success(self, guild_id, engine):
         self.persisted.append((guild_id, engine))
@@ -177,6 +202,19 @@ class FileRouteTelemetryTests(unittest.IsolatedAsyncioTestCase):
         state["last_cache_hit"] = False
         self.assertIs(probe._tts_agent_public_snapshot()["last_cache_hit"], False)
 
+    async def test_snapshot_exports_route_and_voice_counts_without_overwriting_legacy_engines(self):
+        probe = Probe()
+        probe._record_route_engine_result("edge", "worker", 28)
+        probe._record_route_engine_result("gtts", "vps", 20, error=RuntimeError("temporary"))
+        probe._get_metrics_store()["worker_voice_session_transfer_begin_failed"] = 2
+        probe._get_metrics_store()["worker_voice_session_direct_tts_skipped"] = 3
+        snap = probe.get_tts_metrics_snapshot()
+        self.assertEqual(snap["engines_by_route"]["worker"]["edge"]["synth_count"], 1)
+        self.assertEqual(snap["engines_by_route"]["vps"]["gtts"]["synth_failures"], 1)
+        self.assertEqual(snap["worker_voice_session_transfer_begin_failed"], 2)
+        self.assertEqual(snap["worker_voice_session_direct_tts_skipped"], 3)
+        self.assertEqual(snap["engines"], {})
+
     async def test_route_counter_clears_current_failure_streak_after_recovery(self):
         probe = Probe()
         probe._record_route_engine_result("gtts", "vps", 15, error=RuntimeError("temporary"))
@@ -263,6 +301,9 @@ class StreamProbe(Probe, StreamBase):
     def _mark_tts_agent_synth_failure(self, error):
         self.failed_requests.append(error)
 
+    def _record_edge_phone_failure(self, error):
+        self.failed_requests.append(error)
+
 
 def stream_job():
     return SimpleNamespace(item=item("edge"), route="local", foreground=asyncio.Event(), stop=asyncio.Event(),
@@ -297,6 +338,7 @@ class StreamRouteTelemetryTests(unittest.IsolatedAsyncioTestCase):
         package = types.ModuleType("telemetry_test")
         package.__path__ = []
         audio = types.ModuleType("telemetry_test.audio")
+        audio.re = re
         audio.TTS_EDGE_STREAM_TOTAL_TIMEOUT_SECONDS = 10
         audio.TTS_EDGE_CONNECT_TIMEOUT_SECONDS = 2
         audio.TTS_EDGE_RECEIVE_TIMEOUT_SECONDS = 2

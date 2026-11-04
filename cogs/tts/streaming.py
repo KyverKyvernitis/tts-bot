@@ -242,6 +242,10 @@ class SharedSynthesisMixin:
         engine = job.item.engine
         source_bound = engine == 'edge' and not forced_phone and bool(getattr(self, '_edge_sources_enabled', lambda: False)())
         started = time.monotonic()
+        # A decisão de geração é independente do health do Worker.
+        prefer_worker, decision_reason = self._tts_agent_should_try_worker(job.item) if self._tts_agent_route_available() else (False, "worker_offline_or_not_ready")
+        expected_worker = bool(forced_phone or (not forced_vps and not source_bound and prefer_worker and self._worker_stream_available_for(job.item)))
+        self._observe_tts_route_decision(route="worker" if expected_worker else "vps", reason="phone_recovery" if forced_phone else "vps_recovery" if forced_vps else decision_reason)
         try:
             if forced_phone:
                 # Reserve phone capacity separately: remote synthesis must not
@@ -315,6 +319,11 @@ class SharedSynthesisMixin:
             await job.buffer.finish()
             duration = (time.monotonic() - job.started_at) * 1000.0
             self._record_engine_success(engine, duration, route=job.route)
+            cached = bool(job.route == 'worker' and getattr(job.item, '_tts_worker_cache_hit', False))
+            actual_route = 'worker' if job.route == 'worker' else 'vps'
+            self._record_route_engine_result(job.actual_engine if actual_route == 'worker' else engine, actual_route, duration, cached=cached)
+            if not cached:
+                self._observe_tts_effective_route(route=actual_route, reason='worker_fallback' if job.route == 'local_fallback' else decision_reason if actual_route == 'vps' else 'synth_ok')
             if source_bound and job.route != 'worker':
                 self._edge_source_succeeded(job.item, duration)
             self._record_latency_sample(f'synthesis:{engine}:{job.route}', duration - job.slot_wait_ms)
@@ -341,6 +350,9 @@ class SharedSynthesisMixin:
             # A remote Edge failure must not trip the VPS's local circuit breaker.
             if not (engine == 'edge' and job.route == 'worker'):
                 self._record_engine_failure(engine, error, duration_ms=(time.monotonic() - started) * 1000, item=job.item, route=job.route)
+                # O producer já registrou a falha da tentativa remota.
+                if job.route != 'worker':
+                    self._record_route_engine_result(engine, 'vps', (time.monotonic() - started) * 1000, error=error)
             metrics = self._get_metrics_store()
             metrics[f'{engine}_stream_failures'] = int(metrics.get(f'{engine}_stream_failures', 0)) + 1
         finally:
@@ -536,6 +548,7 @@ class SharedSynthesisMixin:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            self._record_route_engine_result(job.actual_engine, 'worker', (time.monotonic() - started) * 1000, error=error)
             if job.item.engine == 'edge' and not getattr(job.item, '_edge_phone_recovery', False):
                 self._record_edge_phone_failure(error)
             if not getattr(job.item, '_edge_phone_recovery', False) and not (

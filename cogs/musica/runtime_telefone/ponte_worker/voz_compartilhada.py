@@ -17,7 +17,8 @@ def voice_agent_snapshot(
     a voz permanece neste domínio.
     """
     profile = hooks.current_profile()
-    capabilities = hooks.env_list("CORE_WORKER_CAPABILITIES", hooks.profile_capabilities(profile))
+    resolver = getattr(hooks, "effective_capabilities", None)
+    capabilities = resolver() if callable(resolver) else hooks.env_list("CORE_WORKER_CAPABILITIES", hooks.profile_capabilities(profile))
     enabled = hooks.env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True)
     shared_session_enabled = hooks.env_bool("PHONE_WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED", True)
     direct_tts_enabled = hooks.env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True)

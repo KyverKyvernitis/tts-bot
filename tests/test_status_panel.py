@@ -188,7 +188,7 @@ def test_historical_failures_do_not_make_a_currently_recovered_engine_red():
 
 def test_legacy_metrics_keep_unidentified_route_visible():
     metrics = {"engines": {"edge": {"synth_count": 4}}}
-    assert "Rota não identificada (métricas anteriores): **4**" in text_of(tts_pages(snapshot_for(metrics=metrics)))
+    assert "Sem rota registrada: **4**" in text_of(tts_pages(snapshot_for(metrics=metrics)))
     assert "**Edge** · rota não identificada" in text_of(tts_pages(snapshot_for(metrics=metrics), "engines"))
 
 

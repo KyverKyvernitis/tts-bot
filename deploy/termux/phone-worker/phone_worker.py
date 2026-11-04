@@ -3097,8 +3097,7 @@ def _tts_transport_module():
 
 def _tts_agent_snapshot() -> dict[str, Any]:
     profile = _current_core_worker_profile()
-    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
-    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
+    roles, capabilities = _current_core_worker_roles_and_capabilities()
     deps = _turbo_dependency_snapshot()
     available = _tts_agent_available_engines(deps)
     preferred = _tts_agent_preferred_engine(available)
@@ -4378,6 +4377,7 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         current_profile=_current_core_worker_profile,
         env_list=_env_list,
         profile_capabilities=_core_worker_profile_capabilities,
+        effective_capabilities=lambda: _current_core_worker_roles_and_capabilities()[1],
         env_bool=_env_bool,
         safe_mode_enabled=_phone_worker_safe_mode_enabled,
         safe_telemetry=_safe_telemetry,
@@ -4478,8 +4478,7 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
     profile = _current_core_worker_profile()
     safe_mode = _phone_worker_safe_mode_enabled()
     status = _safe_telemetry("system", _system_status, {"ok": False})
-    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
-    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
+    roles, capabilities = _current_core_worker_roles_and_capabilities()
     if safe_mode:
         roles = [item for item in roles if not str(item).lower().startswith("music")]
         capabilities = [item for item in capabilities if not str(item).lower().startswith("music")]

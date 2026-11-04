@@ -100,6 +100,7 @@ class EngineMetric:
     cache_hits: int | None
     cache_misses: int | None
     last_error: str
+    last_error_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +214,7 @@ def collect_engines(metrics: dict[str, Any]) -> tuple[EngineMetric, ...]:
             average_ms=average, last_ms=next((item for item in reversed(last) if item is not None), None),
             cache_hits=summed("cache_hits"), cache_misses=summed("cache_misses"),
             last_error=next((str(item.get("last_error")) for item in reversed(values) if item.get("last_error")), ""),
+            last_error_at=max((value for item in values if (value := number(item.get("last_error_at"))) is not None), default=None),
         ))
     return tuple(sorted(result, key=lambda item: (item.route != "worker", ENGINE_ORDER.get(item.key, 99), item.key)))
 

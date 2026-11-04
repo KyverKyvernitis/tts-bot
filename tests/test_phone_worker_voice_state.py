@@ -323,3 +323,17 @@ assert "phone_worker" not in sys.modules and "aiohttp" not in sys.modules and "m
     result = subprocess.run([sys.executable, "-S", "-c", code, str(PHONE.parent / "phone_worker_runtime/voice_state.py")],
         cwd=tmp_path, env=os.environ.copy(), capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_old_turbo_capabilities_do_not_hide_voice_agent(voice, monkeypatch):
+    worker, _ = voice
+    monkeypatch.setenv("CORE_WORKER_PROFILE", "turbo")
+    monkeypatch.setenv("CORE_WORKER_CAPABILITIES", "tts-synth")  # env antigo
+    monkeypatch.setenv("PHONE_WORKER_VOICE_AGENT_ENABLED", "true")
+    capabilities = worker._current_core_worker_roles_and_capabilities()[1]
+    assert "voice-agent" in capabilities and "worker-voice" in capabilities
+    agent = worker._voice_agent_snapshot(music_agent={"ok": True}, tts_agent={"ok": True, "synth_ready": True})
+    assert agent["available"] is True
+    assert "capacidade voice-agent/worker-voice" not in agent["missing"]
+    monkeypatch.setenv("PHONE_WORKER_VOICE_AGENT_ENABLED", "false")
+    assert worker._voice_agent_snapshot(music_agent={"ok": True}, tts_agent={"ok": True, "synth_ready": True})["available"] is False

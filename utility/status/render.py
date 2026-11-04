@@ -40,6 +40,17 @@ _ROUTE_REASONS = {
     "edge_circuit_open": "Edge em pausa; gTTS usado",
     "edge_fallback": "Edge falhou; gTTS usado",
     "stream_fallback": "stream interrompido; áudio gerado por arquivo",
+    "phone_recovery": "recuperação pelo Phone Worker",
+    "vps_recovery": "recuperação na VPS",
+    "cd_streaming_active": "streaming de música ativo",
+    "availability_check_failed": "falha ao verificar disponibilidade de voz",
+    "teto_prebuilt_audio_unavailable": "áudio preparado da Teto indisponível",
+    "edge_local_sources_first": "prioridade das origens Edge na VPS",
+    "music_worker_confirmed_offline": "Worker de música indisponível",
+    "worker_edge_unavailable": "Edge indisponível no Worker",
+    "phone_edge_rate_limited": "Edge do Worker em pausa",
+    "phone_edge_unavailable": "Edge do Worker temporariamente indisponível",
+    "vps_rate_limited_phone_recovery": "recuperação após limite de requisições Edge",
     "synth_ok": "geração concluída", "ready": "pronto",
 }
 _VOICE_STATES = {
@@ -50,6 +61,9 @@ _VOICE_STATES = {
     "shared_voice_session_registered": "sessão compartilhada registrada",
     "voice_connection_dry_run_ready": "conexão de teste pronta",
     "not_ready": "preparando",
+    "waiting_dependencies": "aguardando dependências",
+    "waiting_shared_voice_session": "aguardando sessão compartilhada",
+    "direct_tts_voice_ready": "TTS direto pronto",
 }
 
 
@@ -267,9 +281,9 @@ def _generation_card(snapshot: StatusSnapshot) -> Card:
         invalid_source = isinstance(routed, dict) and any(not isinstance(value, dict) or integer(value.get("synth_count")) is None for value in routed.values())
         if invalid_source or any(metric.route == route and metric.count is None for metric in snapshot.engines):
             del route_totals[route]
-    totals = " · ".join(f"{label}: **{fmt_int(route_totals.get(route))}**" for route, label in (("worker", "Worker"), ("vps", "VPS")))
+    totals = " · ".join(f"{label}: **{fmt_int(route_totals.get(route)) if route in route_totals else 'sem métricas de rota'}**" for route, label in (("worker", "Worker"), ("vps", "VPS")))
     if "unknown" in route_totals:
-        totals += f"\nRota não identificada (métricas anteriores): **{fmt_int(route_totals['unknown'])}**"
+        totals += f"\nSem rota registrada: **{fmt_int(route_totals['unknown'])}**"
     failures = [item.failures for item in snapshot.engines if item.failures is not None]
     failures_available = bool(failures) and len(failures) == len(snapshot.engines)
     empty_engines_available = not snapshot.engines and (isinstance(metrics.get("engines"), dict) or all(isinstance(valid_routes.get(route), dict) for route in ("worker", "vps")))
@@ -297,7 +311,7 @@ def _summary_cards(snapshot: StatusSnapshot) -> list[Card]:
         "### ⚡ Fila e desempenho",
         f"VPS: **{fmt_int(metrics.get('queued_items_current'))}** na fila · Worker: **{worker_load}** em execução",
         f"Espera média: **{fmt_ms(metrics.get('avg_queue_wait_ms'))}**",
-        f"Despacho médio: **{fmt_ms(metrics.get('avg_dispatch_ms'))}**",
+        f"Até o início da reprodução (média): **{fmt_ms(metrics.get('avg_dispatch_ms'))}**",
     ]
     if integer(metrics.get("cache_hits")) is not None and integer(metrics.get("cache_misses")) is not None:
         lines.append("Cache VPS: **" + _cache_rate(metrics) + "**")
@@ -324,7 +338,7 @@ def _diagnostic_cards(snapshot: StatusSnapshot) -> list[Card]:
         f"VPS agora: **{fmt_int(metrics.get('queued_items_current'))}** itens · {fmt_int(metrics.get('guild_states_current'))} servidores com estado ativo\n"
         f"Worker agora: **{fmt_int(agent.get('queue_active'))}/{fmt_int(agent.get('queue_limit'))}**\n"
         f"Acumulado: {fmt_int(metrics.get('queue_enqueued'))} enfileiradas · {fmt_int(metrics.get('queue_deduplicated'))} deduplicadas · {fmt_int(metrics.get('queue_dropped'))} descartadas\n"
-        f"Média de espera: {fmt_ms(metrics.get('avg_queue_wait_ms'))} · despacho: {fmt_ms(metrics.get('avg_dispatch_ms'))}"
+        f"Média de espera: {fmt_ms(metrics.get('avg_queue_wait_ms'))} · até iniciar reprodução: {fmt_ms(metrics.get('avg_dispatch_ms'))}"
     ))
     hits, misses = integer(metrics.get("cache_hits")), integer(metrics.get("cache_misses"))
     rate = _cache_rate(metrics)
@@ -373,10 +387,13 @@ def _engine_cards(snapshot: StatusSnapshot) -> list[Card]:
         lines = [f"{marker} **{safe_text(engine_label(item.key), 64)}** · {route}",
                  f"{fmt_int(item.count)} sínteses · {fmt_int(item.failures)} falhas · média {fmt_ms(item.average_ms)}",
                  f"Última duração: {fmt_ms(item.last_ms)} · {fmt_int(item.consecutive_failures)} falhas seguidas"]
-        if item.cache_hits is not None or item.cache_misses is not None:
-            lines.append(f"Cache: {fmt_int(item.cache_hits)} hits · {fmt_int(item.cache_misses)} misses")
+        if item.cache_hits or item.cache_misses:
+            lines.append(f"Cache: {fmt_int(item.cache_hits)} hits" + (f" · {fmt_int(item.cache_misses)} misses" if item.cache_misses is not None else ""))
         if item.last_error:
-            lines.append("Último erro: " + safe_text(item.last_error, 160))
+            historical = item.consecutive_failures == 0
+            label = "Último erro (histórico)" if historical else "Último erro"
+            when = f" · {timestamp(item.last_error_at)}" if item.last_error_at else ""
+            lines.append(label + when + ": " + safe_text(item.last_error, 160))
         cards.append(Card("\n".join(lines)))
     return cards or [Card("Nenhuma métrica de engine registrada desde o reinício.")]
 
@@ -396,6 +413,9 @@ def _voice_cards(snapshot: StatusSnapshot) -> list[Card]:
     missing = voice.get("missing")
     if isinstance(missing, (list, tuple)) and missing:
         lines.append("Pendências: " + " · ".join(safe_text(item, 80) for item in missing[:8]))
+    skipped_reason = metrics.get("worker_voice_direct_last_skip_reason")
+    if skipped_reason:
+        lines.append("Último TTS direto ignorado: " + reason_label(skipped_reason))
     cards = [Card("\n".join(lines))]
     specs = [
         ("Sessões", "worker_voice_session_reports", "worker_voice_session_skipped"),
@@ -420,7 +440,10 @@ def _voice_cards(snapshot: StatusSnapshot) -> list[Card]:
         cards.append(Card(f"### Último handoff\nDono: {safe_text(handoff.get('voice_owner', handoff.get('transport_owner')), 40)}\nSessão presente: {fmt_bool(handoff.get('session_id_present'))} · endpoint presente: {fmt_bool(handoff.get('endpoint_present'))} · token presente: {fmt_bool(handoff.get('voice_token_present'))}"))
     transfer = _mapping(voice.get("last_transfer"))
     if transfer:
-        cards.append(Card(f"### Última transferência\n{safe_text(transfer.get('voice_owner', transfer.get('current_owner')), 40)} → {safe_text(transfer.get('requested_owner'), 40)}\nEstado: {safe_text(transfer.get('state'), 100)}"))
+        transfer_states = {"transfer_staged_waiting_vps_release": "aguardando a VPS liberar a conexão de voz"}
+        raw_state = str(transfer.get('state') or '')
+        display_state = transfer_states.get(raw_state, _VOICE_STATES.get(raw_state, raw_state))
+        cards.append(Card(f"### Última transferência\n{safe_text(transfer.get('voice_owner', transfer.get('current_owner')), 40)} → {safe_text(transfer.get('requested_owner'), 40)}\nEstado: {safe_text(display_state, 100)}"))
     connection = _mapping(voice.get("last_connection"))
     if connection:
         lines = ["### Última conexão", f"Estado: {safe_text(connection.get('state'), 80)} · etapa: {safe_text(connection.get('stage'), 80)}", f"WS pronto: {fmt_bool(connection.get('ready_received'))} · UDP ok: {fmt_bool(connection.get('udp_probe_ok'))}"]
@@ -432,7 +455,7 @@ def _voice_cards(snapshot: StatusSnapshot) -> list[Card]:
 
 def tts_pages(snapshot: StatusSnapshot, section: str = "summary") -> tuple[PanelPage, ...]:
     section = section if section in TTS_SECTIONS else "summary"
-    header = f"## 🔊 TTS · {TTS_SECTIONS[section]}\n-# Atividade desde o reinício do bot."
+    header = f"## 🔊 TTS · {TTS_SECTIONS[section]}\n-# Métricas desde o reinício; disponibilidade atual quando indicada."
     if not snapshot.tts_available:
         cards = [Card("Métricas TTS indisponíveis. Atualize quando o módulo de voz estiver pronto.")]
     else:
