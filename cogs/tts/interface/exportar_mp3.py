@@ -4,12 +4,16 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+from pathlib import Path
+import traceback
+import uuid
 
 import discord
 
 import config
 from osaka_cd.runtime import pin_snapshot
 
+from ..audio import TTVSingingError
 from ..melodies import get_melody
 from ..mensagens.preparacao import preparar_payload_tts_mensagem
 from ..performance import singing_request
@@ -31,7 +35,30 @@ _FAILURES = {
     'ttv_singing_score_invalid': 'Não consegui usar a partitura deste CD. Escolha outro no menu de CDs.',
     'ttv_export_too_long': 'Use um trecho de até 2 minutos para gerar o MP3.',
     'ttv_export_too_large': 'O MP3 ficou maior que o limite de anexos deste canal. Tente uma frase ou um trecho menor.',
+    'ttv_export_worker_unavailable': 'O serviço de voz está indisponível agora. Tente novamente em instantes.',
+    'ttv_export_ffmpeg_missing': 'Não encontrei o FFmpeg no ambiente do bot para converter o áudio em MP3.',
+    'ttv_export_probe_failed': 'Não consegui verificar a duração do áudio gerado. Tente novamente.',
+    'ttv_export_encode_failed': 'O áudio foi gerado, mas a conversão para MP3 falhou.',
+    'ttv_export_audio_invalid': 'O sintetizador não devolveu um arquivo de áudio válido.',
+    'ttv_export_restart_required': 'A exportação ainda não foi carregada. Reinicie o bot após aplicar a atualização.',
 }
+_STAGES = frozenset(('prepare', 'validate', 'health', 'render', 'read', 'probe', 'encode', 'send'))
+
+
+def _diagnostic(error, *, reference: str, stage: str, guild_id: int, user_id: int):
+    """Record the failing code location without prompts, URLs or error bodies."""
+    frames = traceback.extract_tb(error.__traceback__)[-3:]
+    location = ' > '.join(f'{Path(frame.filename).name}:{frame.name}:{frame.lineno}' for frame in frames)
+    raw_code = getattr(error, 'code', None)
+    code = raw_code if isinstance(raw_code, str) and raw_code in _FAILURES else singing_failure_code(error)
+    number = getattr(error, 'errno', None)
+    attribute = getattr(error, 'name', None) if isinstance(error, AttributeError) else None
+    if not isinstance(attribute, str) or not attribute.isidentifier() or len(attribute) > 80:
+        attribute = '-'
+    _LOG.warning('[ttv_mp3] ref=%s stage=%s type=%s code=%s errno=%s attribute=%s at=%s guild=%s user=%s',
+                 reference, stage, type(error).__name__, code,
+                 number if type(number) is int else '-', attribute, location or '-', guild_id, user_id)
+    return code
 
 
 def _label(value: object) -> str:
@@ -116,9 +143,13 @@ async def handle_export_ttv_mp3(cog, message, text: str) -> bool:
         return True
     running.add(key)
     progress = None
+    item = None
+    stage = 'prepare'
+    reference = 'MP3-' + uuid.uuid4().hex[:8].upper()
     try:
         progress = await _send(message, 'Gerando seu MP3…')
-        async with asyncio.timeout(_EXPORT_TIMEOUT):
+        async def generate_and_send():
+            nonlocal item, stage
             # Keep the catalog generation and personal CD draw frozen throughout
             # preparation, rendering and the label attached to this one file.
             with pin_snapshot():
@@ -132,8 +163,13 @@ async def handle_export_ttv_mp3(cog, message, text: str) -> bool:
                 item = payload.queue_item
                 melody_name = get_melody(payload.resolved.get('ttv_melody_id')).name if item.ttv_score is not None else None
                 max_bytes = min(_MAX_BYTES, max(1, int(getattr(guild, 'filesize_limit', _MAX_BYTES) or _MAX_BYTES)))
-                audio = await cog._ttv_message_mp3(item, max_bytes=max_bytes)
+                stage = 'render'
+                render = getattr(cog, '_ttv_message_mp3', None)
+                if not callable(render):
+                    raise TTVSingingError('Export adapter not loaded', code='ttv_export_restart_required')
+                audio = await render(item, max_bytes=max_bytes)
                 content = _summary(item, melody_name)
+            stage = 'send'
             with io.BytesIO(audio) as buffer:
                 attachment = discord.File(buffer, filename='texttovocaloid.mp3')
                 try:
@@ -143,27 +179,42 @@ async def handle_export_ttv_mp3(cog, message, text: str) -> bool:
                     ), timeout=_DISCORD_TIMEOUT)
                 finally:
                     attachment.close()
+        await asyncio.wait_for(generate_and_send(), timeout=_EXPORT_TIMEOUT)
     except asyncio.CancelledError:
         raise
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as error:
+        failure_stage = getattr(item, '_ttv_export_stage', stage) if stage == 'render' else stage
+        if failure_stage not in _STAGES:
+            failure_stage = stage
+        _diagnostic(error, reference=reference, stage=failure_stage, guild_id=guild.id, user_id=message.author.id)
         if progress is not None:
-            await _edit(progress, 'A geração do MP3 excedeu o tempo de espera. Tente novamente.')
+            notice = ('O MP3 foi gerado, mas o envio excedeu o tempo de espera. Tente novamente.'
+                      if stage == 'send' else 'A geração do MP3 excedeu o tempo de espera. Tente novamente.')
+            await _edit(progress, f'{notice}\n-# Referência: `{reference}`')
     except Exception as error:
         # Worker commands, response bodies and filesystem paths stay out of chat.
-        _LOG.warning('[ttv_mp3] export failed type=%s guild=%s user=%s',
-                     type(error).__name__, guild.id, message.author.id)
+        failure_stage = getattr(item, '_ttv_export_stage', stage) if stage == 'render' else stage
+        if failure_stage not in _STAGES:
+            failure_stage = stage
+        code = _diagnostic(error, reference=reference, stage=failure_stage,
+                           guild_id=guild.id, user_id=message.author.id)
         if progress is not None:
             if isinstance(error, discord.Forbidden):
                 notice = 'Não consegui anexar o MP3. Confira as permissões do bot neste canal.'
             elif isinstance(error, discord.NotFound):
                 return True
             else:
-                code = getattr(error, 'code', None)
-                if code not in _FAILURES:
-                    code = singing_failure_code(error)
-                notice = _FAILURES.get(code,
-                    'Não consegui gerar o MP3 agora. Confira se a voz e o CD estão disponíveis e tente novamente.')
-            await _edit(progress, notice)
+                fallback = {
+                    'prepare': 'Não consegui preparar esse áudio. A falha foi registrada para diagnóstico.',
+                    'render': 'Não consegui sintetizar esse texto. A falha foi registrada para diagnóstico.',
+                    'read': 'Não consegui acessar o áudio gerado. Tente novamente.',
+                    'probe': 'Não consegui verificar a duração do áudio gerado.',
+                    'encode': 'O áudio foi gerado, mas a conversão para MP3 falhou.',
+                    'send': 'O MP3 foi gerado, mas não consegui anexá-lo neste canal. Tente novamente.',
+                }
+                notice = _FAILURES.get(code, fallback.get(failure_stage,
+                    'Não consegui gerar o MP3 agora. A falha foi registrada para diagnóstico.'))
+            await _edit(progress, f'{notice}\n-# Referência: `{reference}`')
     finally:
         running.discard(key)
     return True
