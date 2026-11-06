@@ -17,6 +17,9 @@ from utility.commands.ping import PingCommandMixin
 from utility.commands.base import BaseCommandMixin
 from utility.commands.status import StatusCommandMixin
 from utility.commands.workers import WorkersCommandMixin
+from utility.commands.ttsendpoint import EdgeEndpointModal
+from cogs.tts.edge_endpoint import transport_ready
+from utility.technical_commands import TECHNICAL_COMMAND_GUILD_ID, can_use_technical_command
 
 
 class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusCommandMixin, WorkersCommandMixin, commands.Cog):
@@ -27,7 +30,25 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
         self._help_permission_cache: dict[tuple[int, int], tuple[float, frozenset[str]]] = {}
         self._core_worker_auto_wake_task: asyncio.Task | None = None
         self._core_worker_wake_lock = asyncio.Lock()
+        self._edge_endpoint_settings_lock = asyncio.Lock()
         self._start_core_worker_auto_wake_task()
+
+    @app_commands.command(name="ttsendpoint", description="Configura os endpoints Edge de síntese da VPS")
+    @app_commands.guilds(discord.Object(id=TECHNICAL_COMMAND_GUILD_ID))
+    async def ttsendpoint(self, interaction: discord.Interaction) -> None:
+        if not await can_use_technical_command(self.bot, interaction.user, interaction.guild):
+            await interaction.response.send_message(
+                "Comando exclusivo do dono do bot na guilda administrativa.", ephemeral=True)
+            return
+        if not all(hasattr(discord.ui, name) for name in ("CheckboxGroup", "Label")):
+            await interaction.response.send_message(
+                "Components V2 indisponíveis nesta versão do discord.py.", ephemeral=True)
+            return
+        if not transport_ready():
+            await interaction.response.send_message(
+                "O transporte Edge instalado não aceita troca dinâmica de endpoint.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EdgeEndpointModal(self))
 
     def cog_unload(self):
         self._stop_core_worker_auto_wake_task()

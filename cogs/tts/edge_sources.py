@@ -47,6 +47,7 @@ class SourceLease:
     started: bool = False
     finished: bool = False
     started_failure_count: int = 0
+    endpoint_key: str = ""
 
 
 @dataclass

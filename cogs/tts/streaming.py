@@ -240,6 +240,8 @@ class SharedSynthesisMixin:
         acquired = False
         blocking = None
         engine = job.item.engine
+        unbound_endpoint = None
+        unbound_endpoint_active = False
         source_bound = engine == 'edge' and not forced_phone and bool(getattr(self, '_edge_sources_enabled', lambda: False)())
         started = time.monotonic()
         # A decisão de geração é independente do health do Worker.
@@ -288,6 +290,15 @@ class SharedSynthesisMixin:
                         if source_bound:
                             communicate = await stack.enter_async_context(self._edge_source_communicate(job.item, **options))
                         else:
+                            # Older extracted-method test harnesses intentionally
+                            # omit the optional endpoint adapter; keep that
+                            # fallback compatible with their minimal audio stub.
+                            endpoint_meter = getattr(a, 'edge_endpoint_telemetry', None)
+                            if endpoint_meter is not None:
+                                unbound_endpoint = endpoint_meter.choose()
+                                stack.enter_context(a.edge_endpoint_scope(unbound_endpoint))
+                                endpoint_meter.start(unbound_endpoint, "")
+                                unbound_endpoint_active = True
                             communicate = a.edge_tts.Communicate(**options)
                         async for message in _iter_with_deadline(communicate.stream(), job.deadline):
                             data = self._edge_stream_audio_chunk(message)
@@ -325,7 +336,10 @@ class SharedSynthesisMixin:
             if not cached:
                 self._observe_tts_effective_route(route=actual_route, reason='worker_fallback' if job.route == 'local_fallback' else decision_reason if actual_route == 'vps' else 'synth_ok')
             if source_bound and job.route != 'worker':
-                self._edge_source_succeeded(job.item, duration)
+                self._edge_source_succeeded(job.item, duration, first_audio_ms=job.first_audio_ms)
+            elif unbound_endpoint_active:
+                a.edge_endpoint_telemetry.success(unbound_endpoint, "", duration, job.first_audio_ms)
+                unbound_endpoint_active = False
             self._record_latency_sample(f'synthesis:{engine}:{job.route}', duration - job.slot_wait_ms)
             cached = bool(getattr(job.item, '_tts_worker_cache_hit', False))
             history = self._route_measurements()
@@ -341,10 +355,16 @@ class SharedSynthesisMixin:
                     if handle.shared_job is job:
                         handle.cache_task = job.cache_task
         except asyncio.CancelledError as error:
+            if unbound_endpoint_active:
+                a.edge_endpoint_telemetry.cancel(unbound_endpoint, "")
+                unbound_endpoint_active = False
             job.stop.set()
             await job.buffer.finish(error)
             raise
         except Exception as error:
+            if unbound_endpoint_active:
+                a.edge_endpoint_telemetry.failure(unbound_endpoint, "", error)
+                unbound_endpoint_active = False
             job.stop.set()
             await job.buffer.finish(error)
             # A remote Edge failure must not trip the VPS's local circuit breaker.

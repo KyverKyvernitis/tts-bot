@@ -11,10 +11,11 @@ from .data import StatusSnapshot, engine_label, first_present, integer, number
 
 ROWS_PER_PAGE = 5
 PAGE_TEXT_BUDGET = 2700
-TTS_SECTIONS = {"summary": "Resumo", "engines": "Engines", "diagnostics": "Diagnóstico", "voice": "Voz e conexão"}
+TTS_SECTIONS = {"summary": "Resumo", "engines": "Engines", "edge": "Edge", "diagnostics": "Diagnóstico", "voice": "Voz e conexão"}
 TTS_SECTION_DETAILS = {
     "summary": ("📊", "Disponibilidade, sínteses e desempenho"),
     "engines": ("🔊", "Uso, latência e falhas por engine"),
+    "edge": ("🌐", "Endpoints, origens IPv4, HTTP 429 e latência"),
     "diagnostics": ("🛠️", "Rotas, cache e detalhes do worker"),
     "voice": ("🎙️", "Sessões e conexão de voz"),
 }
@@ -311,7 +312,8 @@ def _summary_cards(snapshot: StatusSnapshot) -> list[Card]:
         "### ⚡ Fila e desempenho",
         f"VPS: **{fmt_int(metrics.get('queued_items_current'))}** na fila · Worker: **{worker_load}** em execução",
         f"Espera média: **{fmt_ms(metrics.get('avg_queue_wait_ms'))}**",
-        f"Até o início da reprodução (média): **{fmt_ms(metrics.get('avg_dispatch_ms'))}**",
+        f"Até o início da reprodução (média): **{fmt_ms(metrics.get('avg_total_to_playback_ms'))}**",
+        f"Despacho (média): **{fmt_ms(metrics.get('avg_dispatch_ms'))}**",
     ]
     if integer(metrics.get("cache_hits")) is not None and integer(metrics.get("cache_misses")) is not None:
         lines.append("Cache VPS: **" + _cache_rate(metrics) + "**")
@@ -338,7 +340,8 @@ def _diagnostic_cards(snapshot: StatusSnapshot) -> list[Card]:
         f"VPS agora: **{fmt_int(metrics.get('queued_items_current'))}** itens · {fmt_int(metrics.get('guild_states_current'))} servidores com estado ativo\n"
         f"Worker agora: **{fmt_int(agent.get('queue_active'))}/{fmt_int(agent.get('queue_limit'))}**\n"
         f"Acumulado: {fmt_int(metrics.get('queue_enqueued'))} enfileiradas · {fmt_int(metrics.get('queue_deduplicated'))} deduplicadas · {fmt_int(metrics.get('queue_dropped'))} descartadas\n"
-        f"Média de espera: {fmt_ms(metrics.get('avg_queue_wait_ms'))} · até iniciar reprodução: {fmt_ms(metrics.get('avg_dispatch_ms'))}"
+        f"Média de espera: {fmt_ms(metrics.get('avg_queue_wait_ms'))} · até iniciar reprodução: {fmt_ms(metrics.get('avg_total_to_playback_ms'))}"
+        f"\nDespacho: {fmt_ms(metrics.get('avg_dispatch_ms'))} · preparo da fonte: {fmt_ms(metrics.get('avg_source_setup_ms'))}"
     ))
     hits, misses = integer(metrics.get("cache_hits")), integer(metrics.get("cache_misses"))
     rate = _cache_rate(metrics)
@@ -453,13 +456,67 @@ def _voice_cards(snapshot: StatusSnapshot) -> list[Card]:
     return cards
 
 
+
+def _edge_cards(snapshot: StatusSnapshot) -> list[Card]:
+    metrics = snapshot.tts
+    endpoint_state = _mapping(metrics.get("edge_endpoint_telemetry"))
+    enabled = endpoint_state.get("enabled")
+    names = {"services": "Edge Services", "bing": "Bing Speech"}
+    allowed = [names[key] for key in enabled if key in names] if isinstance(enabled, list) else []
+    mode = "automático" if len(allowed) == 2 else "fixo"
+    lines = [
+        "### 🌐 Conexão Edge na VPS",
+        f"Modo: **{mode}** · Permitidos: **{', '.join(allowed) or 'sem configuração'}**",
+        f"Multi-IP: **{fmt_bool(metrics.get('edge_sources_enabled'))}** · HTTP 429: **{fmt_int(metrics.get('edge_rate_limit_429'))}**",
+        f"Streams: {fmt_int(metrics.get('edge_stream_completed'))} concluídos · {fmt_int(metrics.get('edge_stream_failures'))} falhas · {fmt_int(metrics.get('edge_stream_fallbacks'))} fallbacks",
+        f"Worker offline é uma indisponibilidade esperada; recuperação via Worker: {fmt_int(metrics.get('edge_phone_recovery_success'))}/{fmt_int(metrics.get('edge_phone_recovery_attempts'))} sucessos/tentativas",
+    ]
+    if endpoint_state.get("load_error"):
+        lines.append("Configuração persistida inválida; endpoint padrão aplicado.")
+    cards = [Card("\n".join(lines))]
+    sources = _mapping(metrics.get("edge_sources"))
+    for ip, raw in sorted(sources.items())[:16]:
+        state = _mapping(raw)
+        attempts = integer(state.get("attempts")) or 0
+        hits = integer(state.get("http_429")) or 0
+        rate = f"{100 * hits / attempts:.2f}%" if attempts else "sem amostras"
+        cards.append(Card(
+            f"### Origem {safe_text(ip, 48)}\n"
+            f"Tentativas: **{fmt_int(attempts)}** · Sucessos: **{fmt_int(state.get('successes'))}** · Falhas: **{fmt_int(state.get('failures'))}**\n"
+            f"HTTP 429: **{fmt_int(hits)}** ({rate}) · Cooldown: {fmt_ms((number(state.get('rate_limit_remaining_seconds')) or 0) * 1000)}\n"
+            f"Média de síntese: {fmt_ms(state.get('avg_synth_ms'))} · Probing: {fmt_bool(state.get('probing'))}"
+        ))
+    pairs = _mapping(endpoint_state.get("pairs"))
+    for key, raw in sorted(pairs.items())[:32]:
+        state = _mapping(raw)
+        name, _, ip = key.partition("|")
+        attempts = integer(state.get("attempts")) or 0
+        hits = integer(state.get("http_429")) or 0
+        rate = f"{100 * hits / attempts:.2f}%" if attempts else "sem amostras"
+        fifteen = _mapping(state.get("last_15m"))
+        hour = _mapping(state.get("last_60m"))
+        cards.append(Card(
+            f"### {safe_text(names.get(name, name), 40)} · {safe_text(ip, 32)}\n"
+            f"Acumulado: {fmt_int(attempts)} tentativas · {fmt_int(state.get('successes'))} sucessos · {fmt_int(state.get('failures'))} falhas\n"
+            f"HTTP 429: {fmt_int(hits)} ({rate}) · 403: {fmt_int(state.get('http_403'))} · Sem áudio: {fmt_int(state.get('no_audio'))} · Timeouts: {fmt_int(state.get('timeouts'))}\n"
+            f"Seleções de alternativa: {fmt_int(state.get('fallback_selected'))}\n"
+            f"15 min: {fmt_int(fifteen.get('attempts', 0))} tentativas / {fmt_int(fifteen.get('http_429', 0))} bloqueios · "
+            f"60 min: {fmt_int(hour.get('attempts', 0))} / {fmt_int(hour.get('http_429', 0))}\n"
+            f"Síntese média: {fmt_ms(state.get('avg_synth_ms')) if integer(state.get('successes')) else 'sem amostras'} · "
+            f"1º áudio: {fmt_ms(state.get('avg_first_audio_ms')) if integer(state.get('first_audio_samples')) else 'sem amostras'} · "
+            f"Em andamento: {fmt_int(state.get('active'))} · Indisponível: {number(state.get('unavailable_seconds')) or 0:.0f} s"
+        ))
+    if not sources and not pairs:
+        cards.append(Card("Ainda não há tentativas Edge registradas neste processo."))
+    return cards
+
 def tts_pages(snapshot: StatusSnapshot, section: str = "summary") -> tuple[PanelPage, ...]:
     section = section if section in TTS_SECTIONS else "summary"
     header = f"## 🔊 TTS · {TTS_SECTIONS[section]}\n-# Métricas desde o reinício; disponibilidade atual quando indicada."
     if not snapshot.tts_available:
         cards = [Card("Métricas TTS indisponíveis. Atualize quando o módulo de voz estiver pronto.")]
     else:
-        render = {"summary": _summary_cards, "engines": _engine_cards, "diagnostics": _diagnostic_cards, "voice": _voice_cards}
+        render = {"summary": _summary_cards, "engines": _engine_cards, "edge": _edge_cards, "diagnostics": _diagnostic_cards, "voice": _voice_cards}
         cards = render[section](snapshot)
     chunks = _chunks(cards)
     return tuple(PanelPage(header, cards, _footer(snapshot, index, len(chunks))) for index, cards in enumerate(chunks))

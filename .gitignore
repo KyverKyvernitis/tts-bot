@@ -234,3 +234,6 @@ scripts/*.paused-emergency-*
 .healthcheck_fail_since
 .healthcheck_starting_since
 .healthcheck_last_restart
+
+# Configuração administrativa dos endpoints de síntese Edge
+data/tts_edge_endpoints.json
