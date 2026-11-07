@@ -58,7 +58,7 @@ from cogs.musica.integracoes.tts import (
     rotear_item_tts_para_musica,
 )
 
-from .edge_endpoint import configure_edge_endpoint
+from .edge_endpoint import configure_edge_endpoint, edge_endpoint_scope, telemetry as edge_endpoint_telemetry
 from .edge_rate_limit import EdgeRateLimitPolicy
 from .edge_sources import EdgeSourcePool, EdgeSourceUnavailable, bound_communicate
 from .helpers import validate_voice
@@ -69,7 +69,6 @@ from .arrangement_audio import ArrangementAudioMixin, execution_arrangement, fro
 from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences, worker_voice_details
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
 from .streaming import SharedSynthesisMixin
-from .fluxo_rust import FalhaFilaRust
 from .routing import RouteMeasurements
 from .prepared import PreparedOpusCache
 from .utils.ffmpeg import compose_audio_filters
@@ -640,7 +639,7 @@ class EdgeStreamHandle:
     cache_key: str
     state: GuildTTSState
     item: QueueItem
-    queue: Any
+    queue: asyncio.Queue
     store_in_cache: bool
     started_at: float
     first_audio_ms: float
@@ -679,7 +678,6 @@ class EdgeStreamHandle:
     consumer_abandoned: bool = False
     cleaned: bool = False
     shared_job: Optional[StreamJob] = field(default=None, repr=False)
-    mecanismo_fila: str = "python"
 
 
 @dataclass
@@ -1306,6 +1304,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         lease = item._edge_source_lease
         pool = self._edge_source_pool()
         pool.start(lease)
+        if not getattr(lease, "endpoint_key", ""):
+            lease.endpoint_key = edge_endpoint_telemetry.choose(lease.source_ip)
+            edge_endpoint_telemetry.start(lease.endpoint_key, lease.source_ip)
         attempted = set(getattr(item, "_edge_sources_attempted", ()) or ())
         attempted.add(lease.source_ip)
         item._edge_sources_attempted = attempted
@@ -1314,16 +1315,19 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         kwargs.setdefault("connect_timeout", TTS_EDGE_CONNECT_TIMEOUT_SECONDS)
         kwargs.setdefault("receive_timeout", TTS_EDGE_RECEIVE_TIMEOUT_SECONDS)
         try:
-            async with bound_communicate(edge_tts.Communicate, lease.source_ip, **kwargs) as communicate:
-                yield communicate
+            with edge_endpoint_scope(lease.endpoint_key):
+                async with bound_communicate(edge_tts.Communicate, lease.source_ip, **kwargs) as communicate:
+                    yield communicate
         except asyncio.CancelledError:
             self._edge_source_release(item)
             raise
 
-    def _edge_source_succeeded(self, item: QueueItem, duration_ms: float) -> None:
+    def _edge_source_succeeded(self, item: QueueItem, duration_ms: float, first_audio_ms: float = 0.0) -> None:
         lease = getattr(item, "_edge_source_lease", None)
         if lease is not None and not lease.finished:
             self._edge_source_pool().success(lease, duration_ms)
+            if lease.started and lease.endpoint_key:
+                edge_endpoint_telemetry.success(lease.endpoint_key, lease.source_ip, duration_ms, first_audio_ms)
             item._edge_source_result_recorded = True
             item._edge_source_reserved = False
 
@@ -1332,6 +1336,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if lease is None or lease.finished:
             return
         result = self._edge_source_pool().failure(lease, error, duration_ms)
+        if lease.started and lease.endpoint_key:
+            edge_endpoint_telemetry.failure(lease.endpoint_key, lease.source_ip, error)
         item._edge_source_result_recorded = True
         item._edge_source_reserved = False
         if result is not None and result[1]:
@@ -1341,7 +1347,10 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     def _edge_source_release(self, item: QueueItem) -> None:
         lease = getattr(item, "_edge_source_lease", None)
         if lease is not None:
+            active_attempt = lease.started and not lease.finished and bool(lease.endpoint_key)
             self._edge_source_pool().release(lease)
+            if active_attempt:
+                edge_endpoint_telemetry.cancel(lease.endpoint_key, lease.source_ip)
         item._edge_source_lease = None
         item._edge_source_reserved = False
 
@@ -1868,16 +1877,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     handle.queue.task_done()
         except asyncio.CancelledError:
             raise
-        except (BrokenPipeError, ConnectionError, OSError, FalhaFilaRust) as exc:
+        except (BrokenPipeError, ConnectionError, OSError) as exc:
             handle.pipe_error = exc
             handle.consumer_abandoned = True
-            if isinstance(exc, FalhaFilaRust):
-                metricas = self._get_metrics_store()
-                nome = "tts_fluxo_rust_falhas_em_reproducao"
-                metricas[nome] = int(metricas.get(nome, 0)) + 1
-            cancelar_fila = getattr(handle.queue, "cancelar", None)
-            if callable(cancelar_fila):
-                cancelar_fila()
             producer_task = handle.producer_task
             if producer_task is not None and not producer_task.done():
                 producer_task.cancel()
@@ -1929,9 +1931,6 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if cancel:
             handle.consumer_abandoned = True
             handle.stop_requested.set()
-            cancelar_fila = getattr(handle.queue, "cancelar", None)
-            if callable(cancelar_fila):
-                cancelar_fila()  # Desperta to_thread preso no Condvar Rust.
             blocking_future = handle.blocking_future
             if (
                 handle.engine != "gtts"
@@ -1947,17 +1946,6 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if tasks:
             with contextlib.suppress(BaseException):
                 await asyncio.gather(*tasks, return_exceptions=True)
-        if handle.mecanismo_fila == "rust":
-            with contextlib.suppress(Exception):
-                dados_fila = handle.queue.estatisticas()
-                metricas_fila = self._get_metrics_store()
-                for campo in ("bytes_escritos", "bytes_lidos", "bytes_descartados",
-                              "prazos_escrita_esgotados", "prazos_leitura_esgotados"):
-                    nome = f"tts_fluxo_rust_{campo}"
-                    metricas_fila[nome] = int(metricas_fila.get(nome, 0)) + int(dados_fila.get(campo, 0))
-                nome = "tts_fluxo_rust_pico_bytes"
-                metricas_fila[nome] = max(int(metricas_fila.get(nome, 0)),
-                                          int(dados_fila.get("maior_ocupacao_bytes", 0)))
         self._release_edge_stream_slot(handle)
         self._close_edge_stream_reader_anchor(handle)
 
@@ -1995,9 +1983,6 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         for handle in handles:
             handle.consumer_abandoned = True
             handle.stop_requested.set()
-            cancelar_fila = getattr(handle.queue, "cancelar", None)
-            if callable(cancelar_fila):
-                cancelar_fila()
             handle.cleaned = True
             early = getattr(handle, '_early_source', None)
             if early is not None:
@@ -3587,17 +3572,6 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     def get_tts_metrics_snapshot(self) -> dict[str, object]:
         metrics = self._get_metrics_store()
         snapshot = {
-            "tts_fluxo_rust_habilitado": os.environ.get("TTS_FLUXO_RUST", "0").strip() == "1",
-            "tts_fluxo_rust_streams": int(metrics.get("tts_fluxo_rust_streams", 0) or 0),
-            "tts_fluxo_python_streams": int(metrics.get("tts_fluxo_python_streams", 0) or 0),
-            "tts_fluxo_rust_fallbacks_inicializacao": int(metrics.get("tts_fluxo_rust_fallbacks_inicializacao", 0) or 0),
-            "tts_fluxo_rust_falhas_em_reproducao": int(metrics.get("tts_fluxo_rust_falhas_em_reproducao", 0) or 0),
-            "tts_fluxo_rust_bytes_escritos": int(metrics.get("tts_fluxo_rust_bytes_escritos", 0) or 0),
-            "tts_fluxo_rust_bytes_lidos": int(metrics.get("tts_fluxo_rust_bytes_lidos", 0) or 0),
-            "tts_fluxo_rust_bytes_descartados": int(metrics.get("tts_fluxo_rust_bytes_descartados", 0) or 0),
-            "tts_fluxo_rust_pico_bytes": int(metrics.get("tts_fluxo_rust_pico_bytes", 0) or 0),
-            "tts_fluxo_rust_prazos_escrita_esgotados": int(metrics.get("tts_fluxo_rust_prazos_escrita_esgotados", 0) or 0),
-            "tts_fluxo_rust_prazos_leitura_esgotados": int(metrics.get("tts_fluxo_rust_prazos_leitura_esgotados", 0) or 0),
             "queue_enqueued": int(metrics.get("queue_enqueued", 0) or 0),
             "queue_deduplicated": int(metrics.get("queue_deduplicated", 0) or 0),
             "queue_dropped": int(metrics.get("queue_dropped", 0) or 0),
@@ -3651,6 +3625,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "edge_sources_enabled": self._edge_sources_enabled(),
             "edge_sources": self._edge_source_pool().snapshot() if self._edge_sources_enabled() else {},
             "edge_sources_config_error": self._edge_source_pool().config_error if self._edge_sources_enabled() else "",
+            "edge_endpoint_telemetry": edge_endpoint_telemetry.snapshot() if "edge_endpoint_telemetry" in globals() else {},
             "edge_phone_rate_limit_level": self._edge_phone_policy().level,
             "edge_phone_rate_limit_remaining_seconds": self._edge_phone_policy().remaining_seconds(),
             "edge_phone_recovery_attempts": int(metrics.get("edge_phone_recovery_attempts", 0) or 0),
@@ -4404,10 +4379,23 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     raise RuntimeError("arquivo Edge vazio")
                 self._edge_source_succeeded(source_item, (time.monotonic() - started) * 1000)
             else:
-                communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch,
-                    connect_timeout=TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
-                    receive_timeout=TTS_EDGE_RECEIVE_TIMEOUT_SECONDS)
-                await asyncio.wait_for(communicate.save(path), timeout=TTS_EDGE_TIMEOUT_SECONDS)
+                endpoint_key = edge_endpoint_telemetry.choose()
+                edge_endpoint_telemetry.start(endpoint_key, "")
+                try:
+                    with edge_endpoint_scope(endpoint_key):
+                        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch,
+                            connect_timeout=TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
+                            receive_timeout=TTS_EDGE_RECEIVE_TIMEOUT_SECONDS)
+                        await asyncio.wait_for(communicate.save(path), timeout=TTS_EDGE_TIMEOUT_SECONDS)
+                    if os.path.getsize(path) <= 0:
+                        raise RuntimeError("arquivo Edge vazio")
+                    edge_endpoint_telemetry.success(endpoint_key, "", (time.monotonic() - started) * 1000)
+                except asyncio.CancelledError:
+                    edge_endpoint_telemetry.cancel(endpoint_key, "")
+                    raise
+                except Exception as exc:
+                    edge_endpoint_telemetry.failure(endpoint_key, "", exc)
+                    raise
             return path
         except BaseException as exc:
             if self._edge_sources_enabled() and source_item is not None:
