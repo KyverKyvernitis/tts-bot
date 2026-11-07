@@ -1,0 +1,14 @@
+[package]
+name = "vinculo_fluxo_tts"
+version = "0.2.0"
+edition = "2021"
+description = "Vinculo experimental Python/Rust para fluxo de audio TTS"
+publish = false
+
+[lib]
+name = "_nucleo_fluxo_tts"
+crate-type = ["cdylib"]
+
+[dependencies]
+nucleo_fluxo_tts = { path = ".." }
+pyo3 = { version = "=0.27.1", features = ["extension-module", "abi3-py310"] }

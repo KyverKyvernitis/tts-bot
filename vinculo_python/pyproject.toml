@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "tts-fluxo-experimental"
+version = "0.2.0"
+description = "Fila de audio Rust experimental, com adaptador Python e asyncio"
+requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+python-source = "python"
+module-name = "tts_fluxo_experimental._nucleo_fluxo_tts"
