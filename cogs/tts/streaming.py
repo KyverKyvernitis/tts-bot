@@ -9,6 +9,7 @@ import time
 from dataclasses import replace
 
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, await_physical_completion, cancel_task_once
+from .fluxo_rust import FalhaFilaRust, criar_fila_streaming, rust_habilitado
 
 
 async def _iter_with_deadline(stream, deadline: float):
@@ -443,6 +444,10 @@ class SharedSynthesisMixin:
             raise
         except Exception as error:
             handle.error = error
+            if isinstance(error, FalhaFilaRust):
+                metricas = self._get_metrics_store()
+                nome = "tts_fluxo_rust_falhas_em_reproducao"
+                metricas[nome] = int(metricas.get(nome, 0)) + 1
         finally:
             if handle.item.engine == 'edge' and bool(getattr(self, '_edge_sources_enabled', lambda: False)()):
                 self._edge_source_merge(handle.item, job.item)
@@ -466,15 +471,28 @@ class SharedSynthesisMixin:
             timeout = a.TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS if edge else a.TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS
             if edge and getattr(item, '_edge_phone_recovery', False):
                 timeout = min(timeout, a.TTS_EDGE_PHONE_FIRST_AUDIO_TIMEOUT_SECONDS)
+            # Só a fila entre ReplayBuffer e FIFO tem um consumidor.
+            # ReplayBuffer permanece em Python para cache e múltiplos leitores.
+            fila, mecanismo_fila = criar_fila_streaming(
+                maximo_blocos=a.TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS,
+                bytes_por_bloco=a.TTS_EDGE_STREAM_CHUNK_BYTES,
+                sentinela=a._TTS_STREAM_END,
+            )
             path = self._make_edge_stream_fifo()
             handle = a.EdgeStreamHandle(fifo_path=path, part_path='', cache_key=job.key,
-                state=state, item=item, queue=asyncio.Queue(maxsize=a.TTS_EDGE_STREAM_QUEUE_MAX_CHUNKS),
+                state=state, item=item, queue=fila, mecanismo_fila=mecanismo_fila,
                 store_in_cache=False, started_at=consumer_started, first_audio_ms=job.first_audio_ms,
                 engine=item.engine, shared_job=job, prebuffer_ms=prebuffer,
                 prebuffer_profile_key=profile, synth_slot_wait_ms=consumer_slot_wait,
                 network_first_audio_ms=job.network_first_audio_ms,
                 cache_task=job.cache_task, cache_path=job.path)
             self._get_edge_stream_handles()[os.path.abspath(path)] = handle
+            metricas = self._get_metrics_store()
+            nome = f"tts_fluxo_{mecanismo_fila}_streams"
+            metricas[nome] = int(metricas.get(nome, 0)) + 1
+            if mecanismo_fila == "python" and rust_habilitado():
+                nome = "tts_fluxo_rust_fallbacks_inicializacao"
+                metricas[nome] = int(metricas.get(nome, 0)) + 1
             handle.producer_task = asyncio.create_task(self._shared_stream_reader(handle))
             early_count = int(getattr(self, '_tts_early_decoders', 0))
             if (a.TTS_FFMPEG_PRIME_ENABLED and getattr(a.config, 'TTS_FFMPEG_OVERLAP_ENABLED', True)

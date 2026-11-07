@@ -69,6 +69,7 @@ from .arrangement_audio import ArrangementAudioMixin, execution_arrangement, fro
 from .ttv import DEFAULT_LANGUAGE, DEFAULT_VOICE_ID, get_voice, normalize_language, normalize_pitch, normalize_speech_rate, resolve_preferences, worker_voice_details
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion, cancel_task_once
 from .streaming import SharedSynthesisMixin
+from .fluxo_rust import FalhaFilaRust
 from .routing import RouteMeasurements
 from .prepared import PreparedOpusCache
 from .utils.ffmpeg import compose_audio_filters
@@ -639,7 +640,7 @@ class EdgeStreamHandle:
     cache_key: str
     state: GuildTTSState
     item: QueueItem
-    queue: asyncio.Queue
+    queue: Any
     store_in_cache: bool
     started_at: float
     first_audio_ms: float
@@ -678,6 +679,7 @@ class EdgeStreamHandle:
     consumer_abandoned: bool = False
     cleaned: bool = False
     shared_job: Optional[StreamJob] = field(default=None, repr=False)
+    mecanismo_fila: str = "python"
 
 
 @dataclass
@@ -1877,9 +1879,16 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     handle.queue.task_done()
         except asyncio.CancelledError:
             raise
-        except (BrokenPipeError, ConnectionError, OSError) as exc:
+        except (BrokenPipeError, ConnectionError, OSError, FalhaFilaRust) as exc:
             handle.pipe_error = exc
             handle.consumer_abandoned = True
+            if isinstance(exc, FalhaFilaRust):
+                metricas = self._get_metrics_store()
+                nome = "tts_fluxo_rust_falhas_em_reproducao"
+                metricas[nome] = int(metricas.get(nome, 0)) + 1
+            cancelar_fila = getattr(handle.queue, "cancelar", None)
+            if callable(cancelar_fila):
+                cancelar_fila()
             producer_task = handle.producer_task
             if producer_task is not None and not producer_task.done():
                 producer_task.cancel()
@@ -1931,6 +1940,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if cancel:
             handle.consumer_abandoned = True
             handle.stop_requested.set()
+            cancelar_fila = getattr(handle.queue, "cancelar", None)
+            if callable(cancelar_fila):
+                cancelar_fila()  # Desperta to_thread preso no Condvar Rust.
             blocking_future = handle.blocking_future
             if (
                 handle.engine != "gtts"
@@ -1946,6 +1958,17 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if tasks:
             with contextlib.suppress(BaseException):
                 await asyncio.gather(*tasks, return_exceptions=True)
+        if handle.mecanismo_fila == "rust":
+            with contextlib.suppress(Exception):
+                dados_fila = handle.queue.estatisticas()
+                metricas_fila = self._get_metrics_store()
+                for campo in ("bytes_escritos", "bytes_lidos", "bytes_descartados",
+                              "prazos_escrita_esgotados", "prazos_leitura_esgotados"):
+                    nome = f"tts_fluxo_rust_{campo}"
+                    metricas_fila[nome] = int(metricas_fila.get(nome, 0)) + int(dados_fila.get(campo, 0))
+                nome = "tts_fluxo_rust_pico_bytes"
+                metricas_fila[nome] = max(int(metricas_fila.get(nome, 0)),
+                                          int(dados_fila.get("maior_ocupacao_bytes", 0)))
         self._release_edge_stream_slot(handle)
         self._close_edge_stream_reader_anchor(handle)
 
@@ -1983,6 +2006,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         for handle in handles:
             handle.consumer_abandoned = True
             handle.stop_requested.set()
+            cancelar_fila = getattr(handle.queue, "cancelar", None)
+            if callable(cancelar_fila):
+                cancelar_fila()
             handle.cleaned = True
             early = getattr(handle, '_early_source', None)
             if early is not None:
@@ -3572,6 +3598,17 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     def get_tts_metrics_snapshot(self) -> dict[str, object]:
         metrics = self._get_metrics_store()
         snapshot = {
+            "tts_fluxo_rust_habilitado": os.environ.get("TTS_FLUXO_RUST", "0").strip() == "1",
+            "tts_fluxo_rust_streams": int(metrics.get("tts_fluxo_rust_streams", 0) or 0),
+            "tts_fluxo_python_streams": int(metrics.get("tts_fluxo_python_streams", 0) or 0),
+            "tts_fluxo_rust_fallbacks_inicializacao": int(metrics.get("tts_fluxo_rust_fallbacks_inicializacao", 0) or 0),
+            "tts_fluxo_rust_falhas_em_reproducao": int(metrics.get("tts_fluxo_rust_falhas_em_reproducao", 0) or 0),
+            "tts_fluxo_rust_bytes_escritos": int(metrics.get("tts_fluxo_rust_bytes_escritos", 0) or 0),
+            "tts_fluxo_rust_bytes_lidos": int(metrics.get("tts_fluxo_rust_bytes_lidos", 0) or 0),
+            "tts_fluxo_rust_bytes_descartados": int(metrics.get("tts_fluxo_rust_bytes_descartados", 0) or 0),
+            "tts_fluxo_rust_pico_bytes": int(metrics.get("tts_fluxo_rust_pico_bytes", 0) or 0),
+            "tts_fluxo_rust_prazos_escrita_esgotados": int(metrics.get("tts_fluxo_rust_prazos_escrita_esgotados", 0) or 0),
+            "tts_fluxo_rust_prazos_leitura_esgotados": int(metrics.get("tts_fluxo_rust_prazos_leitura_esgotados", 0) or 0),
             "queue_enqueued": int(metrics.get("queue_enqueued", 0) or 0),
             "queue_deduplicated": int(metrics.get("queue_deduplicated", 0) or 0),
             "queue_dropped": int(metrics.get("queue_dropped", 0) or 0),
