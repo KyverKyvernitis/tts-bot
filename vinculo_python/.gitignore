@@ -2,6 +2,7 @@
 /dist/
 /.venv/
 /python/tts_fluxo_experimental/*.so
+!/python/tts_fluxo_experimental/_nucleo_fluxo_tts.abi3.so
 /python/tts_fluxo_experimental/*.pyd
 **/__pycache__/
 *.pyc
