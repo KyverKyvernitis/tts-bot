@@ -1,0 +1,12 @@
+[package]
+name = "nucleo_fluxo_tts"
+version = "0.1.0"
+edition = "2021"
+description = "Nucleo experimental de buffer de audio limitado para o TTS"
+publish = false
+
+[lib]
+name = "nucleo_fluxo_tts"
+path = "src/lib.rs"
+
+[dependencies]
