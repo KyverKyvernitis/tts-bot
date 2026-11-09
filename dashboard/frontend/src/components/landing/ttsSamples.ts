@@ -6,6 +6,7 @@ export interface TtsSample {
   description: string;
   src: string;
   transcript: string;
+  command?: string;
 }
 
 /** Prerecorded with the same TTS providers supported by the Discord bot. */
@@ -18,11 +19,12 @@ export const TTS_SAMPLES: readonly TtsSample[] = [
     transcript: TTS_SAMPLE_TRANSCRIPT,
   },
   {
-    id: "francisca-fast",
-    label: "Mais rápida",
-    description: "Francisca · Velocidade +20%",
-    src: "/assets/tts/francisca-fast.mp3?v=20261103-call",
+    id: "texttovocaloid",
+    label: "TextToVocaloid",
+    description: "Young Girl A · Reverb 2",
+    src: "/assets/tts/texttovocaloid-young-girl-a.mp3?v=20261104",
     transcript: TTS_SAMPLE_TRANSCRIPT,
+    command: `'“${TTS_SAMPLE_TRANSCRIPT}”~~`,
   },
   {
     id: "google-pt",

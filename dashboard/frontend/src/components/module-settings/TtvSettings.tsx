@@ -14,6 +14,23 @@ interface TtvSettingsProps {
   onChange(field: DashboardFieldDefinition, value: unknown): void;
 }
 
+const VOICE_ART: Record<string, string> = {
+  "kasane-teto": "/assets/ttv/kasane-teto.png",
+  "hatsune-miku": "/assets/ttv/hatsune-miku.png",
+  "anna-nyui": "/assets/ttv/anna-nyui.png",
+  "pururu-purpura": "/assets/ttv/pururu-purpura.png",
+};
+
+function VoicePortrait({ voiceId }: { voiceId: string }) {
+  const [failed, setFailed] = useState(false);
+  const src = VOICE_ART[voiceId];
+  return <span className="osk-ttv-voice-art" aria-hidden="true">
+    {src && !failed
+      ? <img src={src} alt="" width={160} height={160} loading="lazy" decoding="async" draggable={false} onError={() => setFailed(true)} />
+      : <AudioLines size={36} />}
+  </span>;
+}
+
 function languageName(language: string, voice?: DashboardFieldOption) {
   if (language === "pt-BR") return voice?.nativePortuguese ? "Português brasileiro" : "Português adaptado";
   if (language === "en-US") return "Inglês";
@@ -80,7 +97,7 @@ export function TtvSettings({ fields, values, draft, guildOptions, onChange }: T
             const selected = voice.value === voiceId;
             return <label key={voice.value} className="osk-ttv-voice" data-voice-id={voice.value} data-selected={selected || undefined}>
               <input id={index === 0 ? `field-${voiceField.id}` : undefined} type="radio" name={`${uid}-voice`} value={voice.value} aria-label={voice.label} checked={selected} onChange={() => changeVoice(voice)} />
-              <span className="osk-ttv-voice-mark" aria-hidden="true">{voice.label.split(" ").slice(0, 2).map(part => part[0]).join("")}</span>
+              <VoicePortrait voiceId={voice.value} />
               <strong>{voice.label}</strong><small>{voiceLanguages(voice)}</small><span className="osk-ttv-voice-check" aria-hidden="true">{selected && <Check size={13} />}</span>
             </label>;
           })}

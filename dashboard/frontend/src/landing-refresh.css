@@ -67,6 +67,7 @@ body:has(.osaka-home) { overflow-x: clip; }
 .osk-tts-player__choices { display: flex; gap: 6px; margin-top: 20px; }
 .osaka-home .osk-tts-player__choice { display: inline-flex; justify-content: center; align-items: center; gap: 6px; flex: 1; min-width: 0; min-height: 44px; padding: 9px 10px; border: 1px solid #d7d5cd; border-radius: 8px; color: #55534d; background: transparent; font: 500 13px/1.4 var(--osk-font); text-align: center; white-space: normal; transition: background .2s; }
 .osk-tts-player__choice > span:first-child { font: 400 11px/1.4 var(--osk-font); }
+.osaka-home .osk-tts-player__choice > .osk-tts-player__choice-label { min-width: 0; font: inherit; }
 .osaka-home .osk-tts-player__choice[data-selected] { color: #faf9f5; border-color: #161616; background: #161616; }
 .osk-tts-player__choice:hover:not([data-selected]) { background: #e8e6de; }
 .osk-tts-player__controls { display: flex; align-items: center; gap: 18px; min-height: 100px; margin-top: 13px; }

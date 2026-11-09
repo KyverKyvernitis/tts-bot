@@ -15,15 +15,22 @@
 .osk-dashboard-shell[data-workspace] .osk-ttv-server-defaults h3 { margin: 0; color: #eaeae3; font: 500 15px/1.45 var(--osk-font); }
 .osk-dashboard-shell[data-workspace] .osk-ttv-server-defaults > header p { margin: 4px 0 0; color: #99998f; font: 400 12px/1.5 var(--osk-font); }
 .osk-dashboard-shell[data-workspace] .osk-ttv-voices { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-.osk-dashboard-shell[data-workspace] .osk-ttv-voice { position: relative; display: flex; min-width: 0; min-height: 134px; flex-direction: column; align-items: flex-start; padding: 16px 14px; border: 1px solid #353530; border-radius: 11px; background: #171715; color: #d2d2c8; cursor: pointer; transition: border-color 180ms ease, background 180ms ease; }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice { position: relative; display: flex; min-width: 0; min-height: 210px; flex-direction: column; align-items: flex-start; padding: 16px 14px; border: 1px solid #353530; border-radius: 11px; background: #171715; color: #d2d2c8; cursor: pointer; transition: border-color 180ms ease, background 180ms ease; }
 .osk-dashboard-shell[data-workspace] .osk-ttv-voice:hover { border-color: #6a6a5f; background: #20201c; }
 .osk-dashboard-shell[data-workspace] .osk-ttv-voice[data-selected] { border-color: #d0d0be; background: #282821; color: #f0f0e7; }
 .osk-dashboard-shell[data-workspace] .osk-ttv-voice:focus-within { outline: 2px solid #d0d0be; outline-offset: 3px; }
 .osk-dashboard-shell[data-workspace] .osk-ttv-settings .osk-ttv-voice input[type="radio"] { position: absolute; width: 1px; height: 1px; min-width: 0; min-height: 0; border: 0; margin: 0; padding: 0; overflow: hidden; opacity: 0; }
-.osk-dashboard-shell[data-workspace] .osk-ttv-voice-mark { display: grid; place-items: center; width: 30px; height: 30px; margin-bottom: 13px; border: 1px solid #44443a; border-radius: 8px; color: #b5b5a6; background: #23231e; font: 500 11px/1 var(--osk-font); }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice[data-voice-id="kasane-teto"] { --osk-ttv-art-size: 170px; }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice[data-voice-id="hatsune-miku"] { --osk-ttv-art-size: 170px; }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice[data-voice-id="anna-nyui"] { --osk-ttv-art-size: 140px; }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice[data-voice-id="pururu-purpura"] { --osk-ttv-art-size: 190px; }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice-art { display: flex; align-items: flex-start; justify-content: center; flex: 0 0 128px; width: 100%; height: 128px; margin-bottom: 14px; padding-top: 4px; overflow: hidden; color: #aaa99b; }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice-art img { display: block; flex: 0 0 var(--osk-ttv-art-size, 148px); width: var(--osk-ttv-art-size, 148px); max-width: none; height: var(--osk-ttv-art-size, 148px); object-fit: cover; object-position: center top; pointer-events: none; user-select: none; transition: transform 180ms ease; }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice-art > svg { align-self: center; }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice:hover .osk-ttv-voice-art img { transform: translateY(-3px); }
 .osk-dashboard-shell[data-workspace] .osk-ttv-voice strong { max-width: 100%; color: inherit; font: 500 14px/1.45 var(--osk-font); overflow-wrap: anywhere; }
 .osk-dashboard-shell[data-workspace] .osk-ttv-voice small { margin-top: 4px; color: #a6a697; font: 400 11px/1.5 var(--osk-font); }
-.osk-dashboard-shell[data-workspace] .osk-ttv-voice-check { position: absolute; top: 14px; right: 12px; display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid #555549; border-radius: 50%; color: #161710; }
+.osk-dashboard-shell[data-workspace] .osk-ttv-voice-check { position: absolute; z-index: 1; top: 14px; right: 12px; display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid #555549; border-radius: 50%; color: #161710; background: #171715; }
 .osk-dashboard-shell[data-workspace] .osk-ttv-voice[data-selected] .osk-ttv-voice-check { border-color: #d1d1be; background: #d1d1be; }
 .osk-dashboard-shell[data-workspace] .osk-ttv-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; margin-top: 24px; }
 .osk-dashboard-shell[data-workspace] .osk-ttv-language { grid-column: 1 / -1; max-width: 440px; margin-bottom: 24px; }
@@ -71,7 +78,8 @@
   .osk-dashboard-shell[data-workspace] .osk-ttv-server-prefix > .osk-field-control { width: 72px; flex-basis: 72px; }
   .osk-dashboard-shell[data-workspace] .osk-ttv-server-defaults { padding: 20px 18px; }
   .osk-dashboard-shell[data-workspace] .osk-ttv-server-defaults > header { margin-bottom: 17px; }
-  .osk-dashboard-shell[data-workspace] .osk-ttv-voice { min-height: 132px; padding: 14px 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-ttv-voice { min-height: 204px; padding: 14px 12px; }
+  .osk-dashboard-shell[data-workspace] .osk-ttv-voice-art { flex-basis: 122px; height: 122px; margin-bottom: 12px; }
   .osk-dashboard-shell[data-workspace] .osk-ttv-voice strong { font-size: 13px; }
   .osk-dashboard-shell[data-workspace] .osk-ttv-voice small { font-size: 10px; }
   .osk-dashboard-shell[data-workspace] .osk-ttv-controls { grid-template-columns: minmax(0, 1fr); gap: 16px; margin-top: 21px; }
@@ -82,5 +90,7 @@
   .osk-dashboard-shell[data-workspace] .osk-ttv-speech-examples { grid-template-columns: minmax(0, 1fr); gap: 10px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .osk-dashboard-shell[data-workspace] .osk-ttv-voice { transition: none; }
+  .osk-dashboard-shell[data-workspace] .osk-ttv-voice,
+  .osk-dashboard-shell[data-workspace] .osk-ttv-voice-art img { transition: none; }
+  .osk-dashboard-shell[data-workspace] .osk-ttv-voice:hover .osk-ttv-voice-art img { transform: none; }
 }

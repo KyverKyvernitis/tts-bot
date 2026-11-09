@@ -108,7 +108,7 @@ export function TtsSamplePlayer({ id = "ouvir-osaka" }: { id?: string }) {
       <div className="osk-tts-player__choices" role="group" aria-label="Escolha uma voz">
         {TTS_SAMPLES.map((item, index) => (
           <button key={item.id} type="button" className="osk-tts-player__choice" data-selected={index === sampleIndex || undefined} aria-pressed={index === sampleIndex} onClick={() => selectSample(index)}>
-            {item.label}
+            {item.id === "texttovocaloid" ? <span className="osk-tts-player__choice-label">TextTo<wbr />Vocaloid</span> : item.label}
           </button>
         ))}
       </div>
@@ -130,7 +130,7 @@ export function TtsSamplePlayer({ id = "ouvir-osaka" }: { id?: string }) {
       </div>
 
       <p id={`${id}-voice`} className="osk-tts-player__caption">{sample.description}</p>
-      <p className="osk-tts-player__transcript">“{sample.transcript}”</p>
+      <p className="osk-tts-player__transcript">{sample.command ?? `“${sample.transcript}”`}</p>
       {phase === "error" && <p className="osk-tts-player__error" role="alert">Não foi possível reproduzir. Toque no botão para tentar novamente.</p>}
       <span className="osk-sr-only" role="status" aria-live="polite">{phase === "loading" ? "Carregando áudio." : phase === "playing" ? `Reproduzindo ${sample.label}.` : phase === "paused" ? "Áudio pausado." : ""}</span>
 
