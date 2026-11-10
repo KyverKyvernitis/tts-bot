@@ -72,6 +72,13 @@ def configure_edge_endpoint() -> bool:
 
 def transport_ready() -> bool:
     """Guard the admin UI if a future edge-tts layout is not supported."""
+    from . import providers_rust
+    if providers_rust.enabled():
+        try:
+            providers_rust.native_module()
+            return True
+        except (ImportError, OSError, RuntimeError):
+            return False
     try:
         from edge_tts import communicate
     except ImportError:

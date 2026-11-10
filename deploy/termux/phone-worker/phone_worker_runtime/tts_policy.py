@@ -5,13 +5,67 @@ import contextlib
 import hashlib
 import importlib
 import math
+import json
+import os
 from pathlib import Path
 import re
 import sys
 from typing import Any
 
 
+def _native_policy(operation: str, *, _payload=None, **payload):
+    """Optional native pure policy, usable without importing the bot package.
+
+    The granular flag tolerates an absent binary for staged deployments.
+    Selecting the complete Rust backend requires a compatible native artifact.
+    No environment, imports or payload encoding are performed at module import.
+    """
+    required = os.environ.get("TTS_BACKEND", "").strip().lower() == "rust"
+    if not required and os.environ.get("TTS_POLICY_RUST", "0").strip() != "1":
+        return False, None
+    native = None
+    for name in ("tts_fluxo_experimental._nucleo_fluxo_tts", "_nucleo_fluxo_tts"):
+        try:
+            candidate = importlib.import_module(name)
+        except ImportError:
+            continue
+        if callable(getattr(candidate, "policy_call", None)):
+            native = candidate
+            break
+    if native is None:
+        if required:
+            raise RuntimeError("TTS_BACKEND=rust exige a extensão nativa de políticas TTS no worker.")
+        return False, None
+    if _payload is not None:
+        payload = _payload()
+
+    def safe(value):
+        if isinstance(value, float) and not math.isfinite(value):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [safe(item) for item in value]
+        return value
+    try:
+        encoded = json.dumps(safe(payload), ensure_ascii=False, allow_nan=False,
+                             separators=(",", ":"))
+    except (TypeError, ValueError):
+        if required:
+            raise
+        return False, None
+    try:
+        return True, json.loads(native.policy_call(operation, encoded))
+    except ValueError as error:
+        if operation == "sanitize_cache_key":
+            raise RuntimeError(str(error)) from error
+        raise
+
+
 def normalize_engine(raw: Any, *, default: str = "gtts") -> str:
+    native, result = _native_policy("normalize_engine", value=raw, default=default)
+    if native:
+        return result
     value = str(raw or default).strip().lower().replace("-", "_") or default
     aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto"}
     return aliases.get(value, value)
@@ -20,6 +74,9 @@ def normalize_engine(raw: Any, *, default: str = "gtts") -> str:
 
 
 def normalize_teto_pitch_semitones(raw: Any, *, default: float = 0.0) -> float:
+    native, result = _native_policy("normalize_teto_pitch_semitones", value=raw, default=default)
+    if native:
+        return result
     text = str(raw if raw not in (None, "") else default).strip().lower()
     text = text.replace(",", ".").replace("−", "-").replace("–", "-").replace("—", "-")
     for suffix in ("semitones", "semitone", "semitons", "semitom", "st"):
@@ -37,6 +94,9 @@ def normalize_teto_pitch_semitones(raw: Any, *, default: float = 0.0) -> float:
 
 
 def normalize_ttv_voice_id(raw: Any = "kasane-teto") -> str:
+    native, result = _native_policy("normalize_ttv_voice_id", value=raw)
+    if native:
+        return result
     voice_id = str(raw).strip().lower()
     if voice_id not in {"kasane-teto", "hatsune-miku", "anna-nyui", "pururu-purpura"}:
         raise ValueError("vocaloid TTV desconhecida ou indisponível")
@@ -44,6 +104,9 @@ def normalize_ttv_voice_id(raw: Any = "kasane-teto") -> str:
 
 
 def normalize_ttv_speech_rate(raw: Any) -> float:
+    native, result = _native_policy("normalize_ttv_speech_rate", value=raw)
+    if native:
+        return result
     if isinstance(raw, bool):
         raise ValueError("velocidade TTV deve estar entre 0.5 e 1.5")
     try:
@@ -56,6 +119,9 @@ def normalize_ttv_speech_rate(raw: Any) -> float:
 
 
 def normalize_ttv_language(raw: Any = "pt-BR") -> str:
+    native, result = _native_policy("normalize_ttv_language", value=raw)
+    if native:
+        return result
     if not isinstance(raw, str):
         raise ValueError("idioma TTV deve ser Português adaptado ou Inglês")
     language = raw.strip().lower().replace("_", "-")
@@ -67,6 +133,10 @@ def normalize_ttv_language(raw: Any = "pt-BR") -> str:
 
 
 def effective_ttv_settings(body: dict[str, Any], *, default_speech_rate: Any = 1.0) -> dict[str, Any]:
+    native, result = _native_policy("effective_ttv_settings", body=body,
+                                     default_speech_rate=default_speech_rate)
+    if native:
+        return result
     # The global value belongs only to legacy requests. Personal controls are
     # explicit values and must never be silently repaired to another speed.
     try:
@@ -119,6 +189,9 @@ def performance_request(body: dict[str, Any], *, engine: str | None = None) -> d
     return {"score": score, "segments": segments, "hash": digest}
 
 def available_engines(deps: dict[str, Any]) -> list[str]:
+    native, result = _native_policy("available_engines", deps=deps)
+    if native:
+        return result
     engines: list[str] = []
     if deps.get("teto_tts"):
         engines.append("teto")
@@ -132,6 +205,9 @@ def available_engines(deps: dict[str, Any]) -> list[str]:
 
 
 def preferred_engine(available: list[str], *, requested: Any) -> str:
+    native, result = _native_policy("preferred_engine", available=available, requested=requested)
+    if native:
+        return result
     requested = normalize_engine(requested, default="auto")
     if requested != "auto" and requested in available:
         return requested
@@ -142,6 +218,10 @@ def preferred_engine(available: list[str], *, requested: Any) -> str:
 
 
 def engine_order(body: dict[str, Any], available: list[str], *, preferred_default: Any) -> list[str]:
+    native, result = _native_policy("engine_order", body=body, available=available,
+                                     preferred_default=preferred_default)
+    if native:
+        return result
     requested = normalize_engine(body.get("engine"))
     preferred = normalize_engine(body.get("preferred_engine") or preferred_default, default="auto")
     fallback = normalize_engine(body.get("fallback_engine"))
@@ -167,6 +247,9 @@ def engine_order(body: dict[str, Any], available: list[str], *, preferred_defaul
 
 
 def normalize_edge_rate(raw: Any) -> str:
+    native, result = _native_policy("normalize_edge_rate", value=raw)
+    if native:
+        return result
     value = str(raw or "").strip().replace("％", "%").replace("−", "-").replace("–", "-").replace("—", "-").replace(" ", "")
     if value.endswith("%"):
         value = value[:-1]
@@ -181,6 +264,9 @@ def normalize_edge_rate(raw: Any) -> str:
 
 
 def normalize_edge_pitch(raw: Any) -> str:
+    native, result = _native_policy("normalize_edge_pitch", value=raw)
+    if native:
+        return result
     value = str(raw or "").strip().replace("−", "-").replace("–", "-").replace("—", "-").replace(" ", "")
     if value.lower().endswith("hz"):
         value = value[:-2]
@@ -195,6 +281,9 @@ def normalize_edge_pitch(raw: Any) -> str:
 
 
 def normalize_gtts_language(raw: Any) -> str:
+    native, result = _native_policy("normalize_gtts_language", value=raw)
+    if native:
+        return result
     language = str(raw or "pt").strip().lower().replace("_", "-") or "pt"
     if language == "pt-br":
         language = "pt"
@@ -202,6 +291,9 @@ def normalize_gtts_language(raw: Any) -> str:
 
 
 def sanitize_cache_key(raw: Any) -> str:
+    native, result = _native_policy("sanitize_cache_key", value=raw)
+    if native:
+        return result
     key = str(raw or "").strip().lower()
     key = re.sub(r"[^a-z0-9_\-]", "", key)
     if len(key) < 16:
@@ -210,6 +302,9 @@ def sanitize_cache_key(raw: Any) -> str:
 
 
 def normalize_cache_format(raw: Any) -> str:
+    native, result = _native_policy("normalize_cache_format", value=raw)
+    if native:
+        return result
     fmt = str(raw or "mp3").strip().lower().replace(".", "")
     if fmt in {"wav", "wave"}:
         return "wav"
@@ -227,6 +322,28 @@ def standard_cache_key(body: dict[str, Any], *, engine: str, sanitize_key, norma
     if provided and requested_engine == normalized_engine and normalized_engine != "teto":
         with contextlib.suppress(Exception):
             return sanitize_key(provided)
+
+    def native_payload():
+        # Preserve live caller callbacks, including deliberate test/runtime
+        # rebindings. Rust still owns the complete policy and cache identity.
+        normalizers = {}
+        performance = {}
+        if normalized_engine == "edge":
+            normalizers = {"rate": normalize_rate(body.get("rate")),
+                           "pitch": normalize_pitch(body.get("pitch"))}
+        elif normalized_engine not in {"teto", "android_native"}:
+            normalizers = {"language": normalize_language(body.get("language") or body.get("fallback_language"))}
+        elif normalized_engine == "teto":
+            performance = performance_request(body, engine=normalized_engine)
+        return {"body": body, "engine": normalized_engine,
+                "normalizers": normalizers,
+                "teto_fingerprint": teto_fingerprint, "teto_base_pitch": teto_base_pitch,
+                "teto_speech_rate": teto_speech_rate,
+                "performance_hash": performance.get("hash")}
+
+    native, result = _native_policy("standard_cache_key", _payload=native_payload)
+    if native:
+        return result
     text = str(body.get("text") or "").strip()
     if normalized_engine == "teto":
         performance = performance_request(body, engine=normalized_engine)
@@ -267,10 +384,16 @@ def standard_cache_key(body: dict[str, Any], *, engine: str, sanitize_key, norma
 
 
 def cache_mode_allows_read(body: dict[str, Any]) -> bool:
+    native, result = _native_policy("cache_mode_allows_read", body=body)
+    if native:
+        return result
     mode = str(body.get("cache_mode") or "prefer").strip().lower()
     return mode not in {"0", "false", "off", "disabled", "none", "bypass", "refresh"}
 
 
 def cache_mode_allows_store(body: dict[str, Any]) -> bool:
+    native, result = _native_policy("cache_mode_allows_store", body=body)
+    if native:
+        return result
     mode = str(body.get("cache_mode") or "prefer").strip().lower()
     return mode not in {"0", "false", "off", "disabled", "none", "bypass", "no_store", "only", "cache_only"}

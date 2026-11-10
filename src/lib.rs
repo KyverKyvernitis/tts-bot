@@ -1,12 +1,14 @@
 //! Nucleo experimental para transportar blocos de audio entre produtor e consumidor.
 //!
-//! Esta biblioteca ainda nao e utilizada pelo bot Python. O fluxo e de consumo
-//! unico; o ReplayBuffer compartilhado existente permanece fora deste escopo.
+//! A fila de consumo unico e o replay compartilhado possuem contratos separados.
+//! A integracao Python seleciona o backend por operacao, antes da reproducao.
 
 mod configuracao;
 mod erro;
 mod fluxo;
 mod metricas;
+pub mod replay;
+pub mod source;
 
 pub use configuracao::ConfiguracaoDoFluxo;
 pub use erro::ErroDoFluxo;

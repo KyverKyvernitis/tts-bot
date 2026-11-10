@@ -3,9 +3,15 @@ from functools import lru_cache
 import re
 import shlex
 
+from cogs.tts.policy_rust import optional as _native_policy
+
 
 @lru_cache(maxsize=128)
 def compose_audio_filters(options: str, effect_filter: str) -> tuple[str, str]:
+    native, result = _native_policy("compose_audio_filters", options=options,
+                                     effect_filter=effect_filter)
+    if native:
+        return tuple(result)
     tokens = shlex.split(options)
     kept: list[str] = []
     configured_filter = ""

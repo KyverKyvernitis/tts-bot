@@ -237,3 +237,25 @@ scripts/*.paused-emergency-*
 
 # Configuração administrativa dos endpoints de síntese Edge
 data/tts_edge_endpoints.json
+
+# Artefatos locais do workspace Rust e das validacoes nativas.
+/target/
+/native-dist/
+/crates/*/Cargo.lock
+/vinculo_python/python/tts_fluxo_experimental/*.so
+/vinculo_python/python/tts_fluxo_experimental/*.pyd
+/vinculo_python/python/tts_fluxo_experimental/*.so.new
+
+# Dados de runtime ficam fora do Git. Os recursos estaticos das crates sao fonte.
+/data/
+!/crates/tts-engines/data/
+/crates/tts-engines/data/*
+!/crates/tts-engines/data/README.md
+!/crates/tts-engines/data/esper-startup-hook.base64
+!/crates/tts-render/data/
+/crates/tts-render/data/*
+!/crates/tts-render/data/CMUDICT-LICENSE.txt
+!/crates/tts-render/data/README.md
+!/crates/tts-render/data/cmudict.txt
+!/crates/tts-render/data/g2p-contracts.json
+!/crates/tts-render/data/phonemizer-contracts.json

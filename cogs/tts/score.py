@@ -34,6 +34,35 @@ class ScoreError(ValueError):
         self.tracks = list(tracks or [])
 
 
+def _native_midi_enabled() -> bool:
+    import os
+    return (os.getenv("TTS_RENDER_RUST", "0").strip() == "1"
+            or os.getenv("TTS_BACKEND", "").strip().lower() == "rust")
+
+
+def _native_midi(data, *, lyrics="", track_index=None, inspect_only=False):
+    # This is a transport/exception adapter. Parsing, conductor selection,
+    # lyric association and score validation all execute inside Rust.
+    import json
+    from .render_rust import native_module
+    if not isinstance(data, bytes):
+        raise ScoreError("O conteúdo MIDI deve ser enviado como bytes.")
+    if not isinstance(lyrics, str):
+        raise ScoreError("A letra enviada com o MIDI deve ser texto.")
+    native = native_module()
+    if track_index is not None and (type(track_index) is not int or track_index < 0):
+        structural = json.loads(native.ttv_midi_json(data, "", None, True))
+        if not structural["ok"]:
+            error = structural["error"]
+            raise ScoreError(error["message"], code=error["code"], tracks=error["tracks"])
+        raise ScoreError("O índice da faixa MIDI é inválido; os índices começam em 0.")
+    result = json.loads(native.ttv_midi_json(data, lyrics, track_index, inspect_only))
+    if not result["ok"]:
+        error = result["error"]
+        raise ScoreError(error["message"], code=error["code"], tracks=error["tracks"])
+    return result["value"]
+
+
 @dataclass(frozen=True)
 class _Note:
     start: int
@@ -358,6 +387,8 @@ def inspect_midi_tracks(data: bytes) -> list[dict]:
     A recommendation identifies an unambiguous melody, not a validated score:
     :func:`parse_midi` also validates pitch, note count and musical durations.
     """
+    if _native_midi_enabled():
+        return _native_midi(data, inspect_only=True)
     tracks, timeline = _read_midi(data)
     try:
         recommended = _choose_track(tracks, timeline, None).index
@@ -378,6 +409,8 @@ def parse_midi(data: bytes, *, lyrics: str = "", track_index: int | None = None)
     become ``~`` (continue its vowel), while a score without lyrics uses ``a``.
     Select an ambiguous track explicitly with its zero-based ``track_index``.
     """
+    if _native_midi_enabled():
+        return _native_midi(data, lyrics=lyrics, track_index=track_index)
     if not isinstance(lyrics, str):
         raise ScoreError("A letra enviada com o MIDI deve ser texto.")
     tracks, timeline = _read_midi(data)

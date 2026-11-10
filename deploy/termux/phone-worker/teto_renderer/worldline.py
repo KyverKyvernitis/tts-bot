@@ -136,8 +136,18 @@ class WorldlineRenderer(TetoRenderer):
                    "--bind", f"{Path(__file__).resolve().parent}:/opt/worldline-code"]
         if workdir is not None:
             command += ["--bind", f"{workdir}:/opt/worldline-job"]
-        command += ["--", "/usr/bin/env", "LANG=C", "LC_ALL=C", "/usr/bin/python3",
-                    "/opt/worldline-code/worldline_native.py", "--library", f"/opt/worldline-lib/{library.name}"]
+        if str(self._getenv("TTS_ENGINES_RUST", "0")).strip() == "1":
+            helper = str(self._getenv("PHONE_WORKER_WORLDLINE_RUST_HELPER") or
+                         "/usr/local/bin/tts-worldline-native").strip()
+            if not helper.startswith("/") or "\x00" in helper or ".." in Path(helper).parts:
+                raise TetoConfigurationError("helper WORLDLINE Rust deve usar caminho absoluto no guest")
+            # The helper is built for the glibc guest. Never execute an Android
+            # binary here or silently return to the Python phrase adapter.
+            runtime = [helper]
+        else:
+            runtime = ["/usr/bin/python3", "/opt/worldline-code/worldline_native.py"]
+        command += ["--", "/usr/bin/env", "LANG=C", "LC_ALL=C", *runtime,
+                    "--library", f"/opt/worldline-lib/{library.name}"]
         if workdir is None:
             return command + ["--probe", "--timeout", "6"]
         return command + ["--job", "/opt/worldline-job/job.json", "--output", "/opt/worldline-job/output.wav"]

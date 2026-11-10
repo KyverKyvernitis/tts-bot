@@ -168,6 +168,9 @@ def _expand_abbreviations_for_tts(text: str) -> str:
     return _TTS_ABBREVIATION_PATTERN.sub(repl, text)
 
 def get_gtts_languages() -> dict[str, str]:
+    from . import providers_rust
+    if providers_rust.enabled():
+        return providers_rust.languages()
     try:
         from gtts.lang import tts_langs
         return tts_langs()

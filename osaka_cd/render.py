@@ -646,11 +646,8 @@ def _render_arrangement(arrangement, text, render_part, *, segments, cache_dir,
                         # consonantal preroll/tail. Blend these same-part
                         # waveforms instead of adding then hard-clipping them.
                         # Constant sustained vowels retain constant amplitude.
-                        denominator = max(1, overlap - 1)
-                        combined = array.array("h", (round(first * (1 - index / denominator)
-                                                           + second * (index / denominator))
-                                                     for index, (first, second)
-                                                     in enumerate(zip(old, incoming))))
+                        from .pcm import linear_overlap
+                        combined = linear_overlap(old, incoming)
                         if sys.byteorder != "little":
                             combined.byteswap()
                         pcm = combined.tobytes() + pcm[overlap * 2:]

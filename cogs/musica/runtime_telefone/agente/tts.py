@@ -7,9 +7,13 @@ import contextlib
 import hashlib
 import importlib
 import io
+import http.client
+import json
+import math
 import os
 import queue
 import re
+import socket
 import tempfile
 import threading
 import time
@@ -26,6 +30,122 @@ from .mixer_pcm import AgentMixedAudioSource
 from .utilitarios import safe_id, short_text
 
 _TTS_FFMPEG_BASE_OPTIONS = "-vn -sn -dn -loglevel warning"
+
+
+def _native_tts_enabled():
+    return (truthy(os.environ.get("TTS_NATIVE_WORKER"), False)
+            or os.environ.get("TTS_BACKEND", "").strip().lower() == "rust")
+
+
+class _NativeTTSReader(io.RawIOBase):
+    """Bounded opaque MP3 relay; closing the reader cancels its native request.
+
+    This transport does not start workers or import any synthesis provider.
+    The existing FFmpeg/Discord adapter consumes it on its own feeder thread.
+    """
+
+    def __init__(self, body, *, timeout, max_bytes):
+        super().__init__()
+        self._socket = None
+        self._response = None
+        self._lock = threading.Lock()
+        self._closing = False
+        self.path = os.environ.get("TTS_NATIVE_WORKER_SOCKET", "").strip()
+        if not self.path:
+            raise RuntimeError("TTS_NATIVE_WORKER_SOCKET não configurado no Music Agent")
+        if not math.isfinite(timeout) or not 0 < timeout <= 3600 or max_bytes <= 0:
+            raise ValueError("prazo ou orçamento TTS nativo inválido")
+        self.body = json.dumps(body, ensure_ascii=False, allow_nan=False,
+                               separators=(",", ":")).encode("utf-8")
+        self.engine = body["engine"]
+        self.deadline = time.monotonic() + timeout
+        self.max_bytes, self.size = max_bytes, 0
+        self.error = None
+        self.eof = False
+        self.cache_hit = False
+        self.audio_format = "mp3"
+
+    def readable(self):
+        return True
+
+    def _remaining(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("prazo total do TTS nativo esgotado")
+        return remaining
+
+    def _open(self):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        with self._lock:
+            if self._closing:
+                connection.close()
+                raise RuntimeError("TTS nativo cancelado")
+            self._socket = connection
+        connection.settimeout(self._remaining())
+        connection.connect(self.path)
+        headers = ("POST /tts-agent/synthesize.stream HTTP/1.1\r\nHost: native-tts\r\n"
+                   "Connection: close\r\nContent-Type: application/json\r\n"
+                   f"Content-Length: {len(self.body)}\r\n\r\n").encode("ascii")
+        connection.sendall(headers + self.body)
+        response = http.client.HTTPResponse(connection)
+        response.begin()
+        with self._lock:
+            if self._closing:
+                response.close()
+                raise RuntimeError("TTS nativo cancelado")
+            self._response = response
+        if response.status != 200:
+            raw = response.read(65537)
+            try:
+                error = str(json.loads(raw).get("error") or f"HTTP {response.status}")[:512]
+            except (ValueError, AttributeError):
+                error = f"HTTP {response.status}"
+            raise RuntimeError(f"síntese TTS nativa falhou: {error}")
+        if (response.getheader("X-Core-Worker-Engine") != self.engine
+                or response.getheader("X-Core-Worker-Audio-Format") != "mp3"
+                or response.getheader("X-Core-Worker-Stream-Protocol") != "2"
+                or not response.chunked):
+            raise RuntimeError("resposta TTS nativa retornou engine/formato/protocolo incompatível")
+        self.cache_hit = response.getheader("X-Core-Worker-Cache-Hit", "false").lower() == "true"
+
+    def read(self, size=-1):
+        if self.closed or self._closing or self.eof or size == 0:
+            return b""
+        try:
+            if self._response is None:
+                self._open()
+            self._socket.settimeout(self._remaining())
+            chunk = self._response.read1(16384 if size < 0 else min(size, 16384))
+            if not chunk:
+                self.eof = True
+                if not self.size:
+                    raise RuntimeError("TTS nativo não enviou áudio")
+                return b""
+            self.size += len(chunk)
+            if self.size > self.max_bytes:
+                raise ValueError("áudio TTS nativo excedeu limite de bytes")
+            return chunk
+        except Exception as error:
+            self.error = error
+            self.eof = True
+            self.close()
+            return b""
+
+    def close(self):
+        with self._lock:
+            self._closing = True
+            connection, self._socket = self._socket, None
+            response, self._response = self._response, None
+        # Shutdown wakes a blocked feeder before closing its buffered file.
+        if connection is not None:
+            with contextlib.suppress(OSError):
+                connection.shutdown(socket.SHUT_RDWR)
+        if response is not None:
+            with contextlib.suppress(OSError):
+                response.close()
+        if connection is not None:
+            connection.close()
+        super().close()
 
 
 class _TimedTTSSource(discord.AudioSource):
@@ -50,7 +170,11 @@ class _TimedTTSSource(discord.AudioSource):
                     # decoder que morria por filtergraph inválido colocava EOF
                     # na fila, marcava ``ready`` e o pedido parecia ter tocado
                     # em silêncio. Exija ao menos um frame PCM real.
-                    if not saw_pcm:
+                    if self.reader is not None and self.reader.error is not None:
+                        self.error = RuntimeError("síntese progressiva incompleta")
+                        self.error.__cause__ = self.reader.error
+                        self.ready.set()
+                    elif not saw_pcm:
                         self.error = RuntimeError("decoder TTS encerrou sem produzir PCM")
                         self.ready.set()
                     break
@@ -139,6 +263,76 @@ class _MixerUnavailable(RuntimeError):
 
 
 class TTSMixin:
+    def _native_tts_reader(self, body, *, text, engine, key):
+        aliases = {"edge_tts": "edge", "google": "gtts", "google_tts": "gtts",
+                   "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts"}
+        engine = aliases.get(engine, engine)
+        if engine not in {"edge", "gtts"}:
+            raise ValueError(f"engine {engine} indisponível para síntese no Music Agent nativo; envie áudio pré-sintetizado")
+        timeout = max(1.0, min(90.0, float(body.get("timeout_seconds") or 30)))
+        limit = max(1024, int(env_float("MUSIC_AGENT_TTS_MAX_B64_BYTES", 8 * 1024 * 1024)))
+        payload = {"engine": engine, "text": text,
+                   "voice": str(body.get("voice") or "pt-BR-FranciscaNeural"),
+                   "language": self._normalize_tts_language(body.get("language")),
+                   "rate": self._normalize_edge_rate(body.get("rate")),
+                   "pitch": self._normalize_edge_pitch(body.get("pitch")),
+                   "tld": str(body.get("tld") or "com"),
+                   "timeout_seconds": timeout, "max_audio_bytes": limit,
+                   "cache_mode": body.get("cache_mode") or "prefer"}
+        if key:
+            payload["cache_key"] = key
+        if body.get("cache_only"):
+            payload["cache_only"] = body["cache_only"]
+        if not self._tts_cache_enabled():
+            payload["cache_only"] = (payload.get("cache_only") is True
+                                     or str(payload["cache_mode"]).strip().lower() in {"only", "cache_only"})
+            payload["cache_mode"] = "bypass"
+        return _NativeTTSReader(payload, timeout=timeout, max_bytes=limit)
+
+    async def _synthesize_native_tts_file(self, body, target, *, text, engine, key):
+        reader = self._native_tts_reader(body, text=text, engine=engine, key=key)
+
+        def materialize():
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(prefix=target.name + ".native-", dir=target.parent,
+                                                  delete=False) as output:
+                    temporary = Path(output.name)
+                    while True:
+                        chunk = reader.read(16384)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                if reader.error is not None:
+                    raise RuntimeError("síntese TTS nativa incompleta") from reader.error
+                if not reader.size:
+                    raise RuntimeError("TTS nativo não gerou áudio")
+                os.replace(temporary, target)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+
+        task = asyncio.create_task(asyncio.to_thread(materialize))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            reader.close()
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not task.cancelled():
+                task.exception()
+            raise
+        finally:
+            reader.close()
+        body["audio_format"] = reader.audio_format
+        body["tts_cache_hit"] = reader.cache_hit
+        return f"{reader.engine}-cache" if reader.cache_hit else reader.engine
+
     async def _finish_tts_voice_session(
         self, guild_id: int, st: GuildMusicState, player: Any, *, previous_mode: str, source: str = "tts_end"
     ) -> None:
@@ -348,6 +542,11 @@ class TTSMixin:
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
         if engine in {"google", "google_tts", "googlecloud", "google_cloud", "gcloud"}:
             engine = "gtts"
+        if _native_tts_enabled():
+            if engine == "edge_tts":
+                engine = "edge"
+            key = self._tts_cache_key_for_body(body, engine=engine, text=text) if self._tts_cache_enabled() else ""
+            return await self._synthesize_native_tts_file(body, target, text=text, engine=engine, key=key)
         cache_key = ""
         if self._tts_cache_enabled():
             with contextlib.suppress(Exception):
@@ -453,8 +652,27 @@ class TTSMixin:
         engine = str(body.get('engine') or 'gtts').lower().replace('-', '_')
         if engine in {'google', 'google_tts', 'googlecloud', 'google_cloud', 'gcloud'}:
             engine = 'gtts'
+        if _native_tts_enabled() and engine == 'edge_tts':
+            engine = 'edge'
         ffmpeg_options, _ = self._tts_ffmpeg_options_from_body(body, engine=engine)
         key = self._tts_cache_key_for_body(body, engine=engine, text=text) if self._tts_cache_enabled() else ''
+        if _native_tts_enabled():
+            reader = self._native_tts_reader(body, text=text, engine=engine, key=key)
+            timed = None
+            try:
+                source = discord.FFmpegPCMAudio(reader, pipe=True, executable=self.ffmpeg_executable,
+                    before_options='-nostdin -f mp3 -probesize 32768 -analyzeduration 0',
+                    options=ffmpeg_options)
+                timed = await self._buffer_tts_source(source, started=started, reader=reader,
+                                                      timeout=body.get('timeout_seconds') or 30)
+                body["audio_format"] = reader.audio_format
+                body["tts_cache_hit"] = reader.cache_hit
+                return timed, f"{reader.engine}-cache" if reader.cache_hit else reader.engine
+            except BaseException:
+                reader.close()
+                if timed is not None:
+                    timed.cleanup()
+                raise
         cache_hit = key and self._tts_cache_mode_allows_read(body) and await asyncio.to_thread(
             self._try_read_tts_cache_to_target, key=key, target=target, body=body)
         if cache_hit:

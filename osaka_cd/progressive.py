@@ -18,7 +18,8 @@ import time
 
 from .arrangement import arrangement_render_plan, arrangement_sha256, validate_arrangement, vowel_guide_score
 from .lyrics import automatic_render_plan
-from .pcm import PCM16Resampler, native_resampling_available, scale_pcm16, stereo_mix
+from .pcm import (PCM16Resampler, native_resampling_available, scale_pcm16, stereo_mix,
+                  linear_overlap, first_nonzero_stereo_frame)
 from .render import (
     MAX_AUDIO_BYTES, MAX_STEM_BYTES, SAMPLE_RATE, RenderError, _cached_stem,
     _check, _digest, _ffmpeg, _message_allocation, _mix_controls, _preroll,
@@ -342,8 +343,8 @@ def stream_arrangement(arrangement, text, render_part, emit_pcm, *, segments=Non
             items = [(timelines[identity], *gains[identity]) for identity in controls]
             output = stereo_mix(items, cursor, stop)
             if first_nonzero_frame is None:
-                first_nonzero_frame = next((cursor+number//2 for number in range(0,len(output),2)
-                    if output[number] or output[number+1]), None)
+                nonzero = first_nonzero_stereo_frame(output)
+                first_nonzero_frame = cursor+nonzero if nonzero is not None else None
             if sys.byteorder != 'little':
                 output.byteswap()
             raw = output.tobytes()
@@ -391,10 +392,9 @@ def stream_arrangement(arrangement, text, render_part, emit_pcm, *, segments=Non
             timeline = timelines[identity]
             total_overlap = max(0,min(expected,original_end-offset))
             overlap = max(0,min(len(samples),total_overlap-relative))
-            denominator = max(1,total_overlap-1)
-            for index in range(overlap):
-                ratio = (relative+index)/denominator
-                samples[index] = round(timeline[first+index]*(1-ratio)+samples[index]*ratio)
+            if overlap:
+                samples = linear_overlap(timeline[first:first+overlap], samples,
+                                         relative=relative, total_overlap=total_overlap)
             timeline[first:first+len(samples)] = samples
             previous_end[identity] = max(previous_end[identity],first+len(samples))
             if partial:

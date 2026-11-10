@@ -10,6 +10,7 @@ import array
 import ctypes
 import ctypes.util
 from functools import lru_cache
+import os
 import sys
 
 try:
@@ -20,6 +21,34 @@ except ImportError:  # NumPy is optional on both the VPS and Termux.
 
 class PCMConversionError(RuntimeError):
     pass
+
+
+def _native_pcm():
+    if not (os.environ.get('TTS_BACKEND', '').strip().lower() == 'rust'
+            or os.environ.get('TTS_RENDER_RUST', '0').strip() == '1'
+            or os.environ.get('TTS_CD_PCM_RUST', '0').strip() == '1'):
+        return None
+    from cogs.tts.fluxo_rust import _carregar_nucleo
+    native = _carregar_nucleo()
+    if getattr(native, 'CD_PCM_PROTOCOL_VERSION', None) != 1:
+        raise PCMConversionError('native_cd_pcm_protocol_mismatch')
+    return native
+
+
+def _little_endian(samples):
+    raw = memoryview(samples).tobytes()
+    if sys.byteorder != 'little':
+        converted = array.array('h', raw)
+        converted.byteswap()
+        raw = converted.tobytes()
+    return raw
+
+
+def _native_endian(pcm):
+    samples = array.array('h', pcm)
+    if sys.byteorder != 'little':
+        samples.byteswap()
+    return samples
 
 
 class _LayoutUnion(ctypes.Union):
@@ -160,6 +189,9 @@ def scale_pcm16(pcm, gain):
     """Undo one constant peak gain with the established round/clipping rules."""
     if gain == 1.0:
         return pcm
+    native = _native_pcm()
+    if native is not None:
+        return native.cd_scale_pcm16(pcm, gain)
     if _np is not None:
         values = _np.frombuffer(pcm, dtype='<i2').astype(_np.float64)
         return _np.clip(_np.rint(values / gain), -32768, 32767).astype('<i2').tobytes()
@@ -175,6 +207,13 @@ def scale_pcm16(pcm, gain):
 
 def stereo_mix(items, start, stop):
     """Return exact PCM16 stereo samples in native endian for a sealed window."""
+    native = _native_pcm()
+    if native is not None:
+        # Transfer only the sealed window; copying complete song timelines for
+        # every half-second publication would make the bridge quadratic.
+        parts = [(_little_endian(memoryview(timeline)[start:stop]), left, right)
+                 for timeline, left, right in items]
+        return _native_endian(native.cd_stereo_mix(parts, stop-start, _np is not None))
     if _np is not None:
         count = stop-start
         left, right = _np.zeros(count, dtype=_np.float64), _np.zeros(count, dtype=_np.float64)
@@ -195,3 +234,25 @@ def stereo_mix(items, start, stop):
             right += value*right_gain
         output.extend((round(left), round(right)))
     return output
+
+
+def linear_overlap(old, incoming, *, relative=0, total_overlap=None):
+    """Blend a prefix with the same linear clock across progressive chunks."""
+    total_overlap = len(old) if total_overlap is None else total_overlap
+    native = _native_pcm()
+    if native is not None:
+        return _native_endian(native.cd_linear_overlap(
+            _little_endian(old), _little_endian(incoming), relative, total_overlap))
+    denominator = max(1, total_overlap-1)
+    for index, previous in enumerate(old):
+        ratio = (relative+index)/denominator
+        incoming[index] = round(previous*(1-ratio)+incoming[index]*ratio)
+    return incoming
+
+
+def first_nonzero_stereo_frame(samples):
+    native = _native_pcm()
+    if native is not None:
+        return native.cd_first_nonzero_frame(_little_endian(samples))
+    return next((number//2 for number in range(0, len(samples), 2)
+                 if samples[number] or samples[number+1]), None)

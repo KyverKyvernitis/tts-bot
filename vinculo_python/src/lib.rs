@@ -12,6 +12,14 @@ use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
+mod replay;
+mod policy;
+mod providers;
+mod engines;
+mod source;
+mod render;
+mod cd_pcm;
+
 create_exception!(
     _nucleo_fluxo_tts,
     ErroTempoEsgotado,
@@ -173,6 +181,13 @@ impl FluxoDeAudioPython {
 
 #[pymodule]
 fn _nucleo_fluxo_tts(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    replay::register(m)?;
+    policy::register(m)?;
+    providers::register(m)?;
+    engines::register(m)?;
+    source::register(m)?;
+    render::register(m)?;
+    cd_pcm::register(m)?;
     m.add_class::<FluxoDeAudioPython>()?;
     m.add("ErroTempoEsgotado", m.py().get_type::<ErroTempoEsgotado>())?;
     m.add("ErroFluxoCancelado", m.py().get_type::<ErroFluxoCancelado>())?;

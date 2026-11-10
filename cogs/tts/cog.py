@@ -2595,8 +2595,12 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
 
     async def _load_edge_voices(self):
         try:
-            import edge_tts
-            voices = await asyncio.wait_for(edge_tts.list_voices(), timeout=5.0)
+            from . import providers_rust
+            if providers_rust.enabled():
+                voices = await asyncio.wait_for(providers_rust.voices(), timeout=5.0)
+            else:
+                import edge_tts
+                voices = await asyncio.wait_for(edge_tts.list_voices(), timeout=5.0)
             names = sorted({v['ShortName'] for v in voices if isinstance(v, dict) and v.get('ShortName')})
             if not names:
                 raise RuntimeError('catálogo Edge vazio')

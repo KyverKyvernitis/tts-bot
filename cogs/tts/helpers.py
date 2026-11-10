@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import re
 import discord
-from gtts.lang import tts_langs
+from .providers_rust import enabled as _native_providers_enabled
+
+if _native_providers_enabled():
+    def tts_langs():
+        from .providers_rust import languages
+        return languages()
+else:
+    from gtts.lang import tts_langs
 
 EDGE_DEFAULT_VOICE = "pt-BR-FranciscaNeural"
 EDGE_FALLBACK_VOICE = "pt-BR-AntonioNeural"

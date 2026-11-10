@@ -13,6 +13,8 @@ import contextlib
 from collections import OrderedDict
 import fcntl
 import hashlib
+import importlib
+import importlib.util
 import io
 import json
 import math
@@ -525,6 +527,78 @@ class _NativeSession:
         self._stderr.close()
 
 
+def _rust_engines_enabled(environment):
+    return str(environment.get('TTS_ENGINES_RUST', '0')).strip() == '1'
+
+
+def _rust_engine_module(environment):
+    """Load the prebuilt ABI module; never compile or fall back on this path."""
+    path = environment.get('TTS_NATIVE_LIBRARY', '').strip()
+    try:
+        if path:
+            path = Path(path)
+            if not path.is_absolute() or not path.is_file():
+                raise EsperError('TTS_NATIVE_LIBRARY deve apontar para extensão Rust instalada')
+            spec = importlib.util.spec_from_file_location(
+                'tts_fluxo_experimental._nucleo_fluxo_tts', str(path))
+            if spec is None or spec.loader is None:
+                raise ImportError('invalid Rust native engine extension')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        else:
+            module = importlib.import_module('tts_fluxo_experimental._nucleo_fluxo_tts')
+        if getattr(module, 'NATIVE_ENGINES_PROTOCOL_VERSION', None) != 1:
+            raise EsperError('extensão Rust não oferece protocolo native engines 1')
+        return module
+    except (ImportError, OSError) as error:
+        raise EsperError('TTS_ENGINES_RUST exige a extensão native engines instalada') from error
+
+
+class _RustNativeSession:
+    """Thin compatibility transport; .NET lifetime/protocol/I/O are Rust-owned.
+
+    Called by the existing bounded render threads, never on an asyncio event
+    loop. The binding releases the GIL while Rust waits for the native motor.
+    """
+    def __init__(self, command, environment, deadline, cancelled, identity):
+        if _cancelled(cancelled):
+            raise EsperError('renderização ESPER interrompida')
+        self.identity = identity
+        module = _rust_engine_module(environment)
+        self._session = module.NativeEsperResident(
+            command, dict(environment), max(1, min(120000, int(require_time(deadline) * 1000))))
+
+    def render(self, args, *, deadline, cancelled):
+        if _cancelled(cancelled):
+            self._session.cancel()
+            raise EsperError('renderização ESPER interrompida')
+        finished = threading.Event()
+
+        def observe_cancellation():
+            while not finished.wait(.025):
+                if _cancelled(cancelled):
+                    self._session.cancel()
+                    return
+
+        watcher = None
+        if cancelled is not None:
+            watcher = threading.Thread(target=observe_cancellation, daemon=True,
+                                       name='esper-rust-cancellation')
+            watcher.start()
+        try:
+            # synthesize() already applied the native PCM headroom above.
+            return self._session.render(
+                list(args), max(1, min(120000, int(require_time(deadline) * 1000))), False)
+        finally:
+            finished.set()
+            if watcher is not None:
+                watcher.join()
+
+    def close(self):
+        self._session.cancel()
+        self._session.close()
+
+
 class InProcessEsper:
     """Keep the verified Python bridge and immutable recording cache resident.
 
@@ -647,15 +721,22 @@ class InProcessEsper:
         return host, identity
 
     def _run_resident(self, root, cache, directory, workdir, args, deadline, cancelled, environment):
+        rust_engines = _rust_engines_enabled(environment)
         if str(environment.get('PHONE_WORKER_ESPER_RESIDENT', 'auto')).lower() in {'0', 'false', 'no', 'off'}:
+            if rust_engines:
+                raise EsperError('TTS_ENGINES_RUST exige host ESPER residente')
             return False
         try:
             installed = self._resident_host(root, deadline)
         except (EsperError, OSError, ValueError):
+            if rust_engines:
+                raise
             # An unverified optional host is never executed. The separately
             # pinned official CLI remains the compatibility path.
             return False
         if installed is None:
+            if rust_engines:
+                raise EsperError('host ESPER residente verificado indisponível para Rust')
             return False
         host, identity = installed
         try:
@@ -677,7 +758,8 @@ class InProcessEsper:
                 self._native_condition.wait(min(.025, require_time(deadline)))
         try:
             session = slot['session']
-            if session is not None and session.identity != identity:
+            if session is not None and (session.identity != identity or
+                                        isinstance(session, _RustNativeSession) != rust_engines):
                 session.close()
                 session = slot['session'] = None
             if session is None:
@@ -694,7 +776,8 @@ class InProcessEsper:
                        'PHONE_WORKER_ESPER_HOOK_PROTOCOL=1',
                        '/opt/esper-engine/ESPER-Utau', '--_resident'] if hook else
                       ['/opt/esper-resident/Esper.Resident', '--server'])]
-                session = slot['session'] = _NativeSession(command, environment, deadline, cancelled, identity)
+                session_class = _RustNativeSession if rust_engines else _NativeSession
+                session = slot['session'] = session_class(command, environment, deadline, cancelled, identity)
             request = list(args)
             request[0] = '/opt/esper-cache/' + (directory / 'source.wav').relative_to(cache).as_posix()
             request[1] = '/opt/esper-cache/' + (workdir / 'output.wav').relative_to(cache).as_posix()
@@ -706,6 +789,8 @@ class InProcessEsper:
                 slot['session'] = None
             if self._closed or _cancelled(cancelled):
                 raise EsperError('renderização ESPER interrompida') from error
+            if rust_engines:
+                raise EsperError('sessão ESPER Rust falhou; fallback Python desativado') from error
             if isinstance(error, TimeoutError) or not isinstance(error, (EsperError, OSError)):
                 raise
             require_time(deadline)

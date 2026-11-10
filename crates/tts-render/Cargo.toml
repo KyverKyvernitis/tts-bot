@@ -1,0 +1,23 @@
+[package]
+name = "tts-render"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Native phonetics, prosody, voicebanks and PCM composition for TTV"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+regex = "1"
+unicode-normalization = "0.1"
+encoding_rs = "0.8"
+walkdir = "2"
+hound = "3.5"
+tempfile = "3"
+tts-engines = { path = "../tts-engines" }
+fs2 = "0.4"
+libc = "0.2"
+shell-words = "1.1"
+
+[dev-dependencies]

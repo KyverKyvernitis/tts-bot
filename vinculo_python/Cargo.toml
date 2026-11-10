@@ -1,6 +1,6 @@
 [package]
 name = "vinculo_fluxo_tts"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Vinculo experimental Python/Rust para fluxo de audio TTS"
 publish = false
@@ -12,3 +12,11 @@ crate-type = ["cdylib"]
 [dependencies]
 nucleo_fluxo_tts = { path = ".." }
 pyo3 = { version = "=0.27.1", features = ["extension-module", "abi3-py310"] }
+tts-policy = { path = "../crates/tts-policy" }
+tts-providers = { path = "../crates/tts-providers" }
+tts-engines = { path = "../crates/tts-engines" }
+tts-render = { path = "../crates/tts-render" }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+pyo3-async-runtimes = { version = "=0.27.0", features = ["tokio-runtime"] }

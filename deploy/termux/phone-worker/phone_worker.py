@@ -56,6 +56,32 @@ _PHONE_WORKER_TTS_PROVIDERS_MODULE: Any = None
 _PHONE_WORKER_TTS_PROVIDERS_LOCK = threading.Lock()
 _PHONE_WORKER_PCM_IO_MODULE: Any = None
 _PHONE_WORKER_PCM_IO_LOCK = threading.Lock()
+_PHONE_WORKER_NATIVE_TTS_MODULE: Any = None
+_PHONE_WORKER_NATIVE_TTS_LOCK = threading.Lock()
+
+
+def _native_tts_enabled() -> bool:
+    return str(os.getenv("TTS_NATIVE_WORKER") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_tts_bridge_module() -> Any:
+    global _PHONE_WORKER_NATIVE_TTS_MODULE
+    if _PHONE_WORKER_NATIVE_TTS_MODULE is None:
+        with _PHONE_WORKER_NATIVE_TTS_LOCK:
+            if _PHONE_WORKER_NATIVE_TTS_MODULE is None:
+                path = Path(__file__).resolve().parent / "phone_worker_runtime/native_tts.py"
+                spec = importlib.util.spec_from_file_location("core_phone_worker_native_tts", path)
+                if spec is None or spec.loader is None:
+                    raise RuntimeError("ponte TTS nativa não instalada")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                module.configure_heavy_lock(_HEAVY_RESOURCE_LOCK)
+                _PHONE_WORKER_NATIVE_TTS_MODULE = module
+    return _PHONE_WORKER_NATIVE_TTS_MODULE
+
+
+def _native_tts_task(body: dict[str, Any], task: str) -> dict[str, Any]:
+    return _native_tts_bridge_module().request_json(dict(body, task=task), worker_version=PHONE_WORKER_VERSION)
 
 
 def _phone_worker_music_bridge_module(name: str) -> Any:
@@ -2948,6 +2974,16 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
         "android_native_tts": False,
         "teto_tts": False,
     }
+    if _native_tts_enabled():
+        snapshot = _tts_agent_snapshot()
+        native_deps = snapshot.get("deps") if isinstance(snapshot.get("deps"), dict) else {}
+        available = set(snapshot.get("available_engines") or [])
+        deps.update(native_deps)
+        deps.update({"edge_tts": "edge" in available, "gtts": "gtts" in available,
+                     "android_native_tts": "android_native" in available, "teto_tts": "teto" in available,
+                     "teto": snapshot.get("teto") or {}, "native": True,
+                     "ok": bool(snapshot.get("ok")), "missing": [] if snapshot.get("ok") else ["native_tts_worker"]})
+        return deps
     model = str(os.getenv("PHONE_WORKER_PIPER_MODEL", "") or "").strip()
     config = str(os.getenv("PHONE_WORKER_PIPER_CONFIG", "") or "").strip()
     if model:
@@ -3096,6 +3132,12 @@ def _tts_transport_module():
 
 
 def _tts_agent_snapshot() -> dict[str, Any]:
+    if _native_tts_enabled():
+        try:
+            return _native_tts_bridge_module().request_json(path="/health", method="GET", worker_version=PHONE_WORKER_VERSION)
+        except Exception as exc:
+            return {"ok": False, "available": False, "synth_ready": False, "native": True,
+                    "state": "native_unavailable", "available_engines": [], "last_error": str(exc)[:180]}
     profile = _current_core_worker_profile()
     roles, capabilities = _current_core_worker_roles_and_capabilities()
     deps = _turbo_dependency_snapshot()
@@ -3358,6 +3400,10 @@ def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
 
 
 def _module_import_ok(module_name: str) -> tuple[bool, str]:
+    if _native_tts_enabled() and module_name in {"edge_tts", "gtts"}:
+        available = set(_tts_agent_snapshot().get("available_engines") or [])
+        engine = "edge" if module_name == "edge_tts" else "gtts"
+        return (True, "") if engine in available else (False, "serviço TTS nativo indisponível")
     try:
         pins = {'edge_tts': ('edge-tts', _EDGE_TTS_RUNTIME_VERSION), 'gtts': ('gTTS', '2.5.4')}
         if module_name in pins:
@@ -3446,6 +3492,8 @@ def _env_autostart_enabled(name: str, default: str = "auto") -> bool:
 
 def _start_tts_dependency_autoinstall(missing: list[str], checks: dict[str, dict[str, Any]]) -> dict[str, Any]:
     global _TTS_DEP_AUTOINSTALL_LAST_AT, _TTS_DEP_AUTOINSTALL_RUNNING
+    if _native_tts_enabled():
+        missing = [name for name in missing if name not in {"gTTS", "edge-tts", "gtts", "edge_tts"}]
     enabled = _env_bool("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS", True) and _phone_worker_deps_mode_enabled()
     if not enabled:
         return {"enabled": False, "started": False, "reason": "disabled"}
@@ -4695,6 +4743,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urllib.parse.urlparse(self.path).path
+        if _native_tts_enabled() and path.startswith("/tts-agent/"):
+            if not self._require_auth():
+                return
+            try:
+                _native_tts_bridge_module().proxy_http(self, method="GET", path=path, worker_version=PHONE_WORKER_VERSION)
+            except Exception as exc:
+                _error(self, HTTPStatus.BAD_GATEWAY, f"TTS nativo: {_short_text(exc, limit=180)}")
+            return
         if path.startswith("/music/stream/"):
             if not self._require_auth():
                 return
@@ -4759,6 +4815,18 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         global JOBS_STARTED, JOBS_FAILED
         path = urllib.parse.urlparse(self.path).path
+        if _native_tts_enabled() and path.startswith("/tts-agent/"):
+            if not self._require_auth():
+                return
+            try:
+                if path == "/tts-agent/cache.raw":
+                    self._ensure_tts_cache_allowed()
+                else:
+                    self._ensure_tts_piper_turbo_allowed()
+                _native_tts_bridge_module().proxy_http(self, method="POST", path=path, worker_version=PHONE_WORKER_VERSION)
+            except Exception as exc:
+                _error(self, HTTPStatus.BAD_GATEWAY, f"TTS nativo: {_short_text(exc, limit=180)}")
+            return
         if path == "/local/pair":
             if not self._require_local_client():
                 return
@@ -5040,6 +5108,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return _submit_tts_cache_maintenance(callback, protected=protected)
 
     def _task_tts_cache_lookup(self, body: dict[str, Any]) -> dict[str, Any]:
+        if _native_tts_enabled():
+            self._ensure_tts_cache_allowed()
+            return _native_tts_task(body, "tts_cache_lookup")
         roles, capabilities = self._ensure_tts_cache_allowed()
         started = time.monotonic()
         key = self._sanitize_tts_cache_key(body.get("cache_key"))
@@ -5094,6 +5165,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
         }
 
     def _task_tts_cache_store(self, body: dict[str, Any]) -> dict[str, Any]:
+        if _native_tts_enabled():
+            self._ensure_tts_cache_allowed()
+            return _native_tts_task(body, "tts_cache_store")
         roles, capabilities = self._ensure_tts_cache_allowed()
         started = time.monotonic()
         key = self._sanitize_tts_cache_key(body.get("cache_key"))
@@ -5419,6 +5493,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return snapshot
 
     def _task_tts_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        if _native_tts_enabled():
+            return _native_tts_task(body, "tts_agent_status")
         snapshot = _tts_agent_snapshot()
         snapshot.update({
             "ok": bool(snapshot.get("ok")),
@@ -5431,6 +5507,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return snapshot
 
     def _task_tts_android_voices(self, body: dict[str, Any]) -> dict[str, Any]:
+        if _native_tts_enabled():
+            return _native_tts_task(body, "tts_android_voices")
         locale = str(body.get("locale") or body.get("language") or "").strip()
         try:
             limit = int(body.get("limit") or 500)
@@ -5765,6 +5843,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _task_tts_agent_synthesize(self, body: dict[str, Any], *, raw_response: bool = False, emit_pcm=None) -> dict[str, Any]:
+        if _native_tts_enabled():
+            self._ensure_tts_piper_turbo_allowed()
+            if emit_pcm is not None:
+                raise RuntimeError("use /tts-agent/singing.pcm no serviço nativo")
+            result = _native_tts_task(body, "tts_agent_synthesize")
+            if raw_response and result.get("data_b64"):
+                result["_raw_audio"] = _b64decode(str(result.pop("data_b64")), max_bytes=self.max_output_bytes)
+            return result
         request_started = time.monotonic()
         roles, capabilities = self._ensure_tts_piper_turbo_allowed()
         if not _env_bool("PHONE_WORKER_TTS_AGENT_ENABLED", True):
@@ -6227,9 +6313,15 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _task_tts_synthesize_piper(self, body: dict[str, Any]) -> dict[str, Any]:
+        if _native_tts_enabled():
+            self._ensure_tts_piper_turbo_allowed()
+            return _native_tts_task(body, "tts_synthesize_piper")
         return self._synthesize_piper_bytes(body, benchmark=False)
 
     def _task_tts_synthesize_benchmark(self, body: dict[str, Any]) -> dict[str, Any]:
+        if _native_tts_enabled():
+            self._ensure_tts_benchmark_turbo_allowed()
+            return _native_tts_task(body, "tts_synthesize_benchmark")
         roles, capabilities = self._ensure_tts_benchmark_turbo_allowed()
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
         if engine not in {"android_native", "edge", "gtts"}:
@@ -7851,12 +7943,12 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker_runtime/tts_cache.py": ("worker", "phone_worker_runtime/tts_cache.py", 0o644),
     "phone_worker_runtime/tts_android.py": ("worker", "phone_worker_runtime/tts_android.py", 0o644),
     "phone_worker_runtime/tts_providers.py": ("worker", "phone_worker_runtime/tts_providers.py", 0o644),
+    "phone_worker_runtime/native_tts.py": ("worker", "phone_worker_runtime/native_tts.py", 0o644),
     "phone_worker_runtime/pcm_io.py": ("worker", "phone_worker_runtime/pcm_io.py", 0o644),
     "tts_transport.py": ("worker", "tts_transport.py", 0o644),
     "phone_worker_bootstrap.py": ("worker", "phone_worker_bootstrap.py", 0o755),
     "cogs/__init__.py": ("worker", "cogs/__init__.py", 0o644),
     "cogs/musica/__init__.py": ("worker", "cogs/musica/__init__.py", 0o644),
-    "cogs/musica/runtime_telefone/__init__.py": ("worker", "cogs/musica/runtime_telefone/__init__.py", 0o644),
     "cogs/musica/runtime_telefone/agente/__init__.py": ("worker", "cogs/musica/runtime_telefone/agente/__init__.py", 0o644),
     "cogs/musica/runtime_telefone/agente/configuracao.py": ("worker", "cogs/musica/runtime_telefone/agente/configuracao.py", 0o644),
     "cogs/musica/runtime_telefone/agente/ciclo_vida.py": ("worker", "cogs/musica/runtime_telefone/agente/ciclo_vida.py", 0o644),
@@ -8701,14 +8793,15 @@ def main() -> int:
         return 0 if result.get("ok") else 1
     # Load the small pure policy before jobs/HTTP so the first synthesis does
     # not pay source-file IO. Missing modules must not block recovery startup.
-    with contextlib.suppress(Exception):
-        _phone_worker_tts_policy_module()
-    with contextlib.suppress(Exception):
-        _phone_worker_tts_cache_module()
-    with contextlib.suppress(Exception):
-        _phone_worker_tts_android_module()
-    with contextlib.suppress(Exception):
-        _phone_worker_tts_providers_module()
+    if not _native_tts_enabled():
+        with contextlib.suppress(Exception):
+            _phone_worker_tts_policy_module()
+        with contextlib.suppress(Exception):
+            _phone_worker_tts_cache_module()
+        with contextlib.suppress(Exception):
+            _phone_worker_tts_android_module()
+        with contextlib.suppress(Exception):
+            _phone_worker_tts_providers_module()
     with contextlib.suppress(Exception):
         _phone_worker_pcm_io_module()
     # termux-battery-status can take close to a second on Android. Keep that
@@ -8746,7 +8839,15 @@ def main() -> int:
     # O control plane é exclusivamente de saída e precisa sobreviver mesmo sem
     # nenhuma porta HTTP local disponível. Inicie-o antes de tentar bind.
     _write_runtime_status(control_plane_alive=True, heartbeat_ok=None, reason="control_plane_starting")
-    _ensure_edge_tts_runtime_dependency()
+    if _native_tts_enabled():
+        try:
+            _native_tts_bridge_module().supervisor(worker_version=PHONE_WORKER_VERSION).ensure()
+        except Exception as exc:
+            # Platform control/recovery must remain available when an optional
+            # artifact is missing. Native requests fail closed, without fallback.
+            print(f"[tts-native] indisponível: {_short_text(exc, limit=180)}", flush=True)
+    else:
+        _ensure_edge_tts_runtime_dependency()
     _start_core_worker_heartbeat(host=args.host, port=args.port)
     _start_core_worker_jobs(
         host=args.host,

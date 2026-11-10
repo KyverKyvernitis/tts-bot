@@ -38,6 +38,30 @@ async def _iter_with_deadline(stream, deadline: float):
 
 
 class SharedSynthesisMixin:
+    async def _produce_rust_provider_job(self, job: StreamJob, request: dict) -> None:
+        from . import providers_rust
+        provider_started = time.monotonic()
+        stream = await providers_rust.start(request)
+        try:
+            if getattr(job.buffer, 'backend', '') == 'rust':
+                async for _total, _count, _provider_ms in providers_rust.pump(stream, job.buffer):
+                    if job.stop.is_set():
+                        raise asyncio.CancelledError()
+                    if not job.first_audio_ms:
+                        job.first_audio_ms = max(0.0, (provider_started - job.started_at) * 1000.0 + _provider_ms)
+                        job.network_first_audio_ms = max(0.0, job.first_audio_ms - job.slot_wait_ms)
+                        self._record_latency_sample(f'{job.item.engine}_first_byte', job.first_audio_ms)
+                        self._record_latency_sample(f'{job.item.engine}_network_first_byte', job.network_first_audio_ms)
+            else:
+                while True:
+                    data = await stream.next_chunk()
+                    if data is None:
+                        break
+                    if not await self._append_shared_audio(job, data):
+                        raise asyncio.CancelledError()
+        finally:
+            stream.cancel()
+
     def _shared_synthesis_jobs(self) -> dict[str, StreamJob]:
         jobs = getattr(self, '_tts_shared_jobs', None)
         if jobs is None:
@@ -280,7 +304,43 @@ class SharedSynthesisMixin:
                     job.route = 'local_fallback'
                     use_worker = False
             if not use_worker:
-                if engine == 'edge':
+                from . import providers_rust
+                if providers_rust.enabled():
+                    request = dict(engine=engine, text=job.item.text,
+                        timeout_seconds=max(.001, job.deadline - time.monotonic()),
+                        max_audio_bytes=job.buffer.max_bytes)
+                    if engine == 'edge':
+                        job.item._edge_vps_attempted = True
+                        request.update(voice=a.validate_voice(job.item.voice, getattr(self, 'edge_voice_names', set())),
+                            rate=self._normalize_edge_rate(job.item.rate),
+                            pitch=self._normalize_edge_pitch(job.item.pitch),
+                            connect_timeout_seconds=a.TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
+                            receive_timeout_seconds=a.TTS_EDGE_RECEIVE_TIMEOUT_SECONDS)
+                        if source_bound:
+                            if not self._edge_select_source(job.item):
+                                raise RuntimeError('nenhuma origem Edge local disponível')
+                            lease = job.item._edge_source_lease
+                            self._edge_source_pool().start(lease)
+                            if not getattr(lease, 'endpoint_key', ''):
+                                lease.endpoint_key = a.edge_endpoint_telemetry.choose(lease.source_ip)
+                                a.edge_endpoint_telemetry.start(lease.endpoint_key, lease.source_ip)
+                            attempted = set(getattr(job.item, '_edge_sources_attempted', ()) or ())
+                            attempted.add(lease.source_ip)
+                            job.item._edge_sources_attempted = attempted
+                            job.item._edge_source_started = True
+                            request.update(source_ip=lease.source_ip, endpoint=lease.endpoint_key)
+                        else:
+                            meter = getattr(a, 'edge_endpoint_telemetry', None)
+                            if meter is not None:
+                                unbound_endpoint = meter.choose()
+                                meter.start(unbound_endpoint, '')
+                                unbound_endpoint_active = True
+                                request['endpoint'] = unbound_endpoint
+                    else:
+                        request.update(language=job.item.language or a.GTTS_DEFAULT_LANGUAGE,
+                            tld=getattr(job.item, 'tld', 'com'))
+                    await self._produce_rust_provider_job(job, request)
+                elif engine == 'edge':
                     job.item._edge_vps_attempted = True
                     voice = a.validate_voice(job.item.voice, getattr(self, 'edge_voice_names', set()))
                     options = dict(text=job.item.text, voice=voice,
@@ -493,7 +553,14 @@ class SharedSynthesisMixin:
             if mecanismo_fila == "python" and rust_habilitado():
                 nome = "tts_fluxo_rust_fallbacks_inicializacao"
                 metricas[nome] = int(metricas.get(nome, 0)) + 1
-            handle.producer_task = asyncio.create_task(self._shared_stream_reader(handle))
+            from . import source_rust
+            if source_rust.uses_native_source(handle):
+                # Rust reads replay directly into FFmpeg. No compressed audio
+                # crosses back through Python's FIFO queue in this route.
+                handle.producer_task = None
+                handle.mecanismo_fila = 'rust_source'
+            else:
+                handle.producer_task = asyncio.create_task(self._shared_stream_reader(handle))
             early_count = int(getattr(self, '_tts_early_decoders', 0))
             if (a.TTS_FFMPEG_PRIME_ENABLED and getattr(a.config, 'TTS_FFMPEG_OVERLAP_ENABLED', True)
                     and not getattr(item, '_tts_prefetch', False)

@@ -25,10 +25,20 @@ from typing import Any, Awaitable, Callable, Optional
 
 import discord
 import aiohttp
-import edge_tts
 import requests
-from gtts import gTTS
-from gtts.tts import gTTSError
+from .providers_rust import enabled as _native_providers_enabled
+
+if _native_providers_enabled():
+    edge_tts = None
+    gTTS = None
+    # Legacy transport branches remain available for version rollback, but
+    # importing the native runtime never imports a Python provider engine.
+    class gTTSError(RuntimeError):
+        pass
+else:
+    import edge_tts
+    from gtts import gTTS
+    from gtts.tts import gTTSError
 
 
 import config
@@ -278,7 +288,7 @@ _TTS_CACHE_SUFFIXES = (".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw
 logger = logging.getLogger(__name__)
 
 # The file-based and progressive Edge paths share edge_tts.communicate.WSS_URL.
-if configure_edge_endpoint():
+if not _native_providers_enabled() and configure_edge_endpoint():
     logger.info("[tts_edge_endpoint] WebSocket de sintese: api.msedgeservices.com")
 
 
@@ -633,6 +643,37 @@ class GuildTTSState:
     playback_lock: Optional[asyncio.Lock] = field(default=None, repr=False, compare=False)
 
 
+class _RustGuildTTSState(GuildTTSState):
+    """Keep lifecycle state and pending signatures with the native queue owner."""
+
+    @property
+    def generation(self):
+        return self.queue._domain.generation
+
+    @generation.setter
+    def generation(self, value):
+        self.queue._domain.generation = value
+
+    @property
+    def accepting(self):
+        return self.queue._domain.accepting
+
+    @accepting.setter
+    def accepting(self, value):
+        self.queue._domain.accepting = value
+
+    @property
+    def pending_signatures(self):
+        return self.queue.signatures
+
+    @pending_signatures.setter
+    def pending_signatures(self, value):
+        # The dataclass initializes an empty dict; it is only a compatibility
+        # constructor argument. Subsequent reads project the native counts.
+        if value:
+            raise ValueError("native queue owns its pending signatures")
+
+
 @dataclass
 class EdgeStreamHandle:
     fifo_path: str
@@ -710,7 +751,20 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     def _get_state(self, guild_id: int) -> GuildTTSState:
         state = self.guild_states.get(guild_id)
         if state is None:
-            state = GuildTTSState(queue=asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE))
+            from .policy_rust import PendingQueue, enabled as native_policy_enabled, required as native_policy_required
+            if native_policy_required() and TTS_QUEUE_MAXSIZE <= 0:
+                raise ValueError("TTS_BACKEND=rust exige TTS_QUEUE_MAXSIZE positivo.")
+            if native_policy_enabled() and TTS_QUEUE_MAXSIZE > 0:
+                try:
+                    queue = PendingQueue(TTS_QUEUE_MAXSIZE, self._queue_signature)
+                except (ImportError, OSError, AttributeError) as error:
+                    if native_policy_required():
+                        raise RuntimeError("TTS_BACKEND=rust exige NativePendingQueue no artefato nativo.") from error
+                    queue = None
+                if queue is not None:
+                    state = _RustGuildTTSState(queue=queue)
+            if state is None:
+                state = GuildTTSState(queue=asyncio.Queue(maxsize=TTS_QUEUE_MAXSIZE))
             self.guild_states[guild_id] = state
         return state
 
@@ -818,6 +872,21 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         state = self._get_state(guild_id)
         if not state.accepting or not state.dashboard_enabled:
             return False, 0, False
+        if getattr(state.queue, "native_policy", False):
+            result = state.queue.admit_group(items)
+            dropped = result["dropped_count"]
+            if result["deduplicated"]:
+                self._record_queue_enqueue(deduplicated=True)
+                return False, 0, True
+            if not result["accepted"]:
+                if dropped:
+                    metrics = self._get_metrics_store()
+                    metrics['queue_dropped'] = int(metrics.get('queue_dropped', 0)) + dropped
+                return False, dropped, False
+            for index, depth in enumerate(result["depths"]):
+                self._record_queue_enqueue(dropped=dropped if index == 0 else 0,
+                                           queue_depth=depth)
+            return True, dropped, False
         # Decide admission before evicting anything. A group is accepted whole.
         if all(state.pending_signatures.get(self._queue_signature(item), 0) for item in items):
             self._record_queue_enqueue(deduplicated=True)
@@ -1914,6 +1983,13 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     async def _activate_edge_stream(self, handle: EdgeStreamHandle) -> None:
         if handle.activated:
             return
+        from .source_rust import uses_native_source
+        if uses_native_source(handle):
+            # Native FFmpeg consumes the shared replay directly. The FIFO path
+            # remains a lookup handle for legacy routing and cleanup only.
+            handle.activated = True
+            handle.writer_ready.set()
+            return
         # O writer abre somente quando o leitor real do FFmpeg existe. Uma
         # âncora O_RDWR parecia antecipar o handoff, mas mantinha artificialmente
         # um writer vivo e podia impedir o EOF/primeiro PCM em áudios curtos.
@@ -1926,6 +2002,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     async def _finalize_edge_stream(self, handle: EdgeStreamHandle, *, cancel: bool = False) -> None:
         if handle.cleaned:
             return
+        native_source = getattr(handle, '_native_source', None)
+        if native_source is not None:
+            with contextlib.suppress(Exception):
+                native_source.cleanup()
+            handle._native_source = None
         early_source = getattr(handle, '_early_source', None)
         if early_source is not None:
             with contextlib.suppress(Exception):
@@ -2010,6 +2091,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             if callable(cancelar_fila):
                 cancelar_fila()
             handle.cleaned = True
+            native_source = getattr(handle, '_native_source', None)
+            if native_source is not None:
+                with contextlib.suppress(Exception):
+                    native_source.cleanup()
+                handle._native_source = None
             early = getattr(handle, '_early_source', None)
             if early is not None:
                 with contextlib.suppress(Exception):
@@ -3127,10 +3213,14 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return cached
 
     def _increment_pending_signature(self, state: GuildTTSState, item: QueueItem) -> None:
+        if getattr(state.queue, "native_policy", False):
+            return
         signature = self._queue_signature(item)
         state.pending_signatures[signature] = int(state.pending_signatures.get(signature, 0) or 0) + 1
 
     def _decrement_pending_signature(self, state: GuildTTSState, item: QueueItem) -> None:
+        if getattr(state.queue, "native_policy", False):
+            return
         signature = self._queue_signature(item)
         count = int(state.pending_signatures.get(signature, 0) or 0)
         if count <= 1:
@@ -4186,6 +4276,24 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if language == 'pt-br':
             language = 'pt'
         tld = str(tld or "com").strip() or "com"
+        from . import providers_rust
+        if providers_rust.enabled():
+            semaphore = self._get_gtts_semaphore()
+            await semaphore.acquire(foreground=foreground)
+            path = ''
+            try:
+                path = self._make_runtime_temp_file(suffix='.mp3')
+                await providers_rust.save(dict(engine='gtts', text=text, language=language,
+                    tld=tld, timeout_seconds=TTS_GTTS_TIMEOUT_SECONDS,
+                    max_audio_bytes=TTS_WORKER_AGENT_MAX_AUDIO_MB * 1024 * 1024), path)
+                return path
+            except BaseException:
+                if path:
+                    with contextlib.suppress(OSError):
+                        os.remove(path)
+                raise
+            finally:
+                semaphore.release()
         if TTS_DEBUG_LOGS:
             self._log_debug(f"[tts_voice] gTTS synth | language={language!r} tld={tld!r} text={text[:80]!r}")
 
@@ -4405,6 +4513,45 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         started = time.monotonic()
         try:
             path = self._make_runtime_temp_file(suffix='.mp3')
+            from . import providers_rust
+            if providers_rust.enabled():
+                request = dict(engine='edge', text=text, voice=voice, rate=rate, pitch=pitch,
+                    timeout_seconds=TTS_EDGE_TIMEOUT_SECONDS,
+                    connect_timeout_seconds=TTS_EDGE_CONNECT_TIMEOUT_SECONDS,
+                    receive_timeout_seconds=TTS_EDGE_RECEIVE_TIMEOUT_SECONDS,
+                    max_audio_bytes=TTS_WORKER_AGENT_MAX_AUDIO_MB * 1024 * 1024)
+                if self._edge_sources_enabled():
+                    if source_item is None:
+                        source_item = QueueItem(guild_id=0, channel_id=0, author_id=0,
+                            text=text, engine='edge', voice=voice, language='pt', rate=rate, pitch=pitch)
+                    if not self._edge_select_source(source_item):
+                        raise RuntimeError('nenhuma origem Edge local disponível')
+                    lease = source_item._edge_source_lease
+                    self._edge_source_pool().start(lease)
+                    if not getattr(lease, 'endpoint_key', ''):
+                        lease.endpoint_key = edge_endpoint_telemetry.choose(lease.source_ip)
+                        edge_endpoint_telemetry.start(lease.endpoint_key, lease.source_ip)
+                    source_item._edge_sources_attempted = set(getattr(source_item, '_edge_sources_attempted', ()) or ()) | {lease.source_ip}
+                    source_item._edge_source_started = True
+                    source_item._edge_vps_attempted = True
+                    request.update(source_ip=lease.source_ip, endpoint=lease.endpoint_key)
+                    await providers_rust.save(request, path)
+                    self._edge_source_succeeded(source_item, (time.monotonic() - started) * 1000)
+                else:
+                    endpoint_key = edge_endpoint_telemetry.choose()
+                    edge_endpoint_telemetry.start(endpoint_key, '')
+                    request['endpoint'] = endpoint_key
+                    try:
+                        await providers_rust.save(request, path)
+                    except asyncio.CancelledError:
+                        edge_endpoint_telemetry.cancel(endpoint_key, '')
+                        raise
+                    except Exception as exc:
+                        edge_endpoint_telemetry.failure(endpoint_key, '', exc)
+                        raise
+                    else:
+                        edge_endpoint_telemetry.success(endpoint_key, '', (time.monotonic() - started) * 1000)
+                return path
             if self._edge_sources_enabled():
                 if source_item is None:
                     source_item = QueueItem(guild_id=0, channel_id=0, author_id=0,
@@ -5602,6 +5749,19 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
     def _make_discord_tts_source(self, path: str, *, item: QueueItem | None = None) -> tuple[Any, str]:
         ffmpeg_options, effect_filter = self._tts_ffmpeg_options_for_item(item)
         before_options = self._tts_ffmpeg_before_options(path)
+        from .source_rust import uses_native_source, NativePCMSource
+        stream_handle = self._edge_stream_handle_for_path(path)
+        if uses_native_source(stream_handle):
+            opus = getattr(discord, "opus", None)
+            is_loaded = getattr(opus, "is_loaded", None)
+            if callable(is_loaded) and not is_loaded():
+                # Match discord.py's lazy discovery before accepting PCM.
+                encoder = opus.Encoder()
+                del encoder
+            source = NativePCMSource(stream_handle.shared_job.buffer,
+                                     before_options=before_options, options=ffmpeg_options)
+            stream_handle._native_source = source
+            return source, "rust_ffmpeg_pcm"
         if bool(getattr(config, 'TTS_PREPARED_OPUS_CACHE_ENABLED', True)) and os.path.dirname(os.path.abspath(path)) == os.path.abspath(_CACHE_DIR):
             cache = getattr(self, '_tts_prepared_opus', None)
             if cache is None:

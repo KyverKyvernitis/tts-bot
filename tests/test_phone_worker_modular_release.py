@@ -20,7 +20,7 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "phone_worker_runtime/telemetry.py", "phone_worker_runtime/control_plane.py",
              "phone_worker_runtime/voice_state.py", "phone_worker_runtime/tts_policy.py", "phone_worker_runtime/tts_cache.py", "phone_worker_runtime/tts_android.py", "phone_worker_runtime/tts_providers.py", "phone_worker_runtime/pcm_io.py",
              "cogs/__init__.py", "cogs/musica/__init__.py",
-             "cogs/musica/runtime_telefone/__init__.py",
+             "phone_worker_runtime/native_tts.py",
              "cogs/musica/runtime_telefone/agente/__init__.py",
              "cogs/musica/runtime_telefone/agente/configuracao.py",
              "cogs/musica/runtime_telefone/agente/ciclo_vida.py",
@@ -164,6 +164,7 @@ assert worker._phone_worker_tts_cache_module().__file__.startswith(str(worker.Pa
 assert worker._phone_worker_tts_android_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._phone_worker_tts_providers_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._phone_worker_pcm_io_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
+assert worker._native_tts_bridge_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._PHONE_WORKER_MUSIC_BRIDGE_MODULES == {}
 music_streams = worker._phone_worker_music_bridge_module("streams")
 assert music_streams._MUSIC_PCM_PREPARATIONS == {}

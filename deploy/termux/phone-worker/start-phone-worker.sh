@@ -572,6 +572,7 @@ ensure_turbo_termux_packages_if_needed() {
 }
 
 ensure_turbo_python_tts_deps_if_needed() {
+  truthy "${TTS_NATIVE_WORKER:-0}" && return 0
   is_turbo_profile || return 0
   safe_pip_install_module "edge-tts" "edge_tts" "edge-tts==7.3.1" light || true
   safe_pip_install_module "gTTS" "gtts" "gTTS==2.5.4" light || true
@@ -766,6 +767,15 @@ ensure_runtime_companions() {
   musica_ensure_agent_if_needed
 }
 
+export_native_tts_socket() {
+  local owner_pid="${1:-}"
+  if truthy "${TTS_NATIVE_WORKER:-0}" && [[ -z "${TTS_NATIVE_WORKER_SOCKET:-}" ]] && [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
+    # The Python child uses this exact per-owner default. Companions inherit
+    # its socket instead of creating a second synthesis supervisor.
+    export TTS_NATIVE_WORKER_SOCKET="$RUNTIME_STATE_DIR/tts-native-$owner_pid.sock"
+  fi
+}
+
 run_post_start_maintenance_async() {
   mkdir -p "$(dirname "$MAINT_LOG_FILE")" 2>/dev/null || true
   (
@@ -811,6 +821,7 @@ if [[ -n "$existing_pid" && "$count" -le 1 ]] && worker_healthy_for_pid "$existi
     write_status "restart_for_update pid=$existing_pid runtime=$running_ver file=$file_ver $(now_iso)"
     kill_worker_processes
   else
+    export_native_tts_socket "$existing_pid"
     ensure_runtime_companions
     run_post_start_maintenance_async
     if ! truthy "${PHONE_WORKER_QUIET_HEALTHY:-false}"; then
@@ -858,6 +869,7 @@ if worker_healthy_for_pid "$child_pid"; then
   effective_port="$(runtime_http_port)"
   log "worker Termux iniciado e validado; pid=$child_pid http_port=${effective_port:-none}"
   write_status "ok pid=$child_pid http_port=${effective_port:-none} $(now_iso)"
+  export_native_tts_socket "$child_pid"
   ensure_runtime_companions
   run_post_start_maintenance_async
   exit 0

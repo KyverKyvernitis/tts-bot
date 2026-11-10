@@ -105,16 +105,29 @@ def cancel_task_once(task) -> None:
 class MemoryBudget:
     def __init__(self, limit: int):
         self.limit = max(0, int(limit))
-        self.used = 0
+        self._used = 0
+        self._native = None
+        from .replay_rust import enabled, create_budget
+        if enabled():
+            self._native = create_budget(self.limit)
+
+    @property
+    def used(self) -> int:
+        return self._native.used if self._native is not None else self._used
 
     def reserve(self, size: int) -> bool:
+        if self._native is not None:
+            return self._native.reserve(size)
         if self.used + size > self.limit:
             return False
-        self.used += size
+        self._used += size
         return True
 
     def release(self, size: int) -> None:
-        self.used = max(0, self.used - size)
+        if self._native is not None:
+            self._native.release(size)
+        else:
+            self._used = max(0, self.used - size)
 
 
 class ReplayBuffer:
@@ -123,6 +136,12 @@ class ReplayBuffer:
 Slow readers retain their own cursor without blocking the network producer.
 The owner closes the buffer only after its producer and consumers have ended.
 """
+    def __new__(cls, directory, budget, *, memory_limit, max_bytes):
+        from .replay_rust import enabled, NativeReplayBuffer
+        if cls is ReplayBuffer and enabled():
+            return NativeReplayBuffer(directory, budget, memory_limit=memory_limit, max_bytes=max_bytes)
+        return super().__new__(cls)
+
     def __init__(self, directory: str, budget: MemoryBudget, *, memory_limit: int, max_bytes: int):
         self.directory = directory
         self.budget = budget

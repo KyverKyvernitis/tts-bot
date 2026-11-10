@@ -13,6 +13,7 @@ import re
 import threading
 from osaka_cd.runtime import data_root, pin_snapshot, register_validator
 from osaka_cd.catalog_policy import is_retired_cd
+from cogs.tts.policy_rust import optional as _native_policy
 
 DEFAULT_MELODY_ID = "ttv-demo-v1"
 _LOG = logging.getLogger(__name__)
@@ -62,18 +63,27 @@ class Melody:
 
 def catalog_score(entry: dict) -> dict:
     """The exact singing payload, independent of cover and MIDI provenance."""
+    native, result = _native_policy("catalog_score", entry=entry)
+    if native:
+        return result
     return {"version": 1, "track_index": 0, "duration_ms": entry["duration_ms"],
             "lyrics_source": "message", "notes": entry["notes"]}
 
 
 def score_sha256(score: dict) -> str:
     """Canonical v2 preview identity. MIDI source hashes are a different key."""
+    native, result = _native_policy("score_sha256", score=score)
+    if native:
+        return result
     raw = json.dumps(score, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
 def _validate_score(entry: dict) -> dict:
+    native, result = _native_policy("validate_melody_score", entry=entry)
+    if native:
+        return result
     notes = entry["notes"]
     duration = entry["duration_ms"]
     if not isinstance(notes, list) or not 1 <= len(notes) <= 128:
@@ -414,6 +424,10 @@ def fit_arrangement_lyrics(text: str, segments: list[dict] | None, arrangement: 
     Harmony lyrics remain the arrangement's explicit MIDI or vowel guides.
     Written words are left to the real voicebank phonemizer, as in v1.
     """
+    native, result = _native_policy("fit_arrangement_lyrics", text=text, segments=segments,
+                                     arrangement=arrangement)
+    if native:
+        return tuple(result)
     parts = arrangement.get("parts") if isinstance(arrangement, dict) else None
     leads = [part for part in parts if isinstance(part, dict) and part.get("role") == "lead"] if isinstance(parts, list) else []
     if len(leads) != 1 or not isinstance(leads[0].get("notes"), list) or not leads[0]["notes"]:
@@ -429,6 +443,9 @@ def minimum_singing_syllables(score: dict | None) -> int:
     their count because every constraint is monotonic as notes are appended.
     This does not estimate the syllables of arbitrary written lyrics.
     """
+    native, result = _native_policy("minimum_singing_syllables", score=score)
+    if native:
+        return result
     notes = score.get("notes") if isinstance(score, dict) else None
     if not isinstance(notes, list) or not notes:
         return 0

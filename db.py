@@ -1227,6 +1227,15 @@ class SettingsDB:
         user = self.get_user_tts(guild_id, user_id)
         guild = self.get_guild_tts_defaults(guild_id)
 
+        from cogs.tts.policy_rust import optional as native_policy
+        native, resolved = native_policy(
+            "resolve_tts", personal=user, server=guild,
+            default_pitch=getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0),
+        )
+        if native:
+            self._resolved_tts_cache[cache_key] = dict(resolved)
+            return resolved
+
         def pick(key: str, fallback: str) -> str:
             return (user.get(key) or "").strip() or (guild.get(key) or "").strip() or fallback
 

@@ -1,0 +1,9078 @@
+[
+  {
+    "language": "pt-BR",
+    "word": "olá",
+    "deaccented": false,
+    "expected": {
+      "source": "olá",
+      "phones": [
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "olá",
+    "deaccented": true,
+    "expected": {
+      "source": "olá",
+      "phones": [
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "você",
+    "deaccented": false,
+    "expected": {
+      "source": "você",
+      "phones": [
+        {
+          "symbol": "v",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 1,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "v"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "e",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "você",
+    "deaccented": true,
+    "expected": {
+      "source": "você",
+      "phones": [
+        {
+          "symbol": "v",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "v"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "mundo",
+    "deaccented": false,
+    "expected": {
+      "source": "mundo",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u~",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "d",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u~",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "d"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "mundo",
+    "deaccented": true,
+    "expected": {
+      "source": "mundo",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "d",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "d"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "bom",
+    "deaccented": false,
+    "expected": {
+      "source": "bom",
+      "phones": [
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o~",
+          "nucleus_index": 0,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "b"
+          ],
+          "vowel": "o~",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "bom",
+    "deaccented": true,
+    "expected": {
+      "source": "bom",
+      "phones": [
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o~",
+          "nucleus_index": 0,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "b"
+          ],
+          "vowel": "o~",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "dia",
+    "deaccented": false,
+    "expected": {
+      "source": "dia",
+      "phones": [
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "dia",
+    "deaccented": true,
+    "expected": {
+      "source": "dia",
+      "phones": [
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "pode",
+    "deaccented": false,
+    "expected": {
+      "source": "pode",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "O",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "pode",
+    "deaccented": true,
+    "expected": {
+      "source": "pode",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "O",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "pôde",
+    "deaccented": false,
+    "expected": {
+      "source": "pôde",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "pôde",
+    "deaccented": true,
+    "expected": {
+      "source": "pôde",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "nossa",
+    "deaccented": false,
+    "expected": {
+      "source": "nossa",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "O",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "nossa",
+    "deaccented": true,
+    "expected": {
+      "source": "nossa",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "O",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "táxi",
+    "deaccented": false,
+    "expected": {
+      "source": "táxi",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "a",
+          "coda": [
+            "k"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "táxi",
+    "deaccented": true,
+    "expected": {
+      "source": "táxi",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "a",
+          "coda": [
+            "k"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "fixo",
+    "deaccented": false,
+    "expected": {
+      "source": "fixo",
+      "phones": [
+        {
+          "symbol": "f",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "f"
+          ],
+          "vowel": "i",
+          "coda": [
+            "k"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "fixo",
+    "deaccented": true,
+    "expected": {
+      "source": "fixo",
+      "phones": [
+        {
+          "symbol": "f",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "f"
+          ],
+          "vowel": "i",
+          "coda": [
+            "k"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "tóxico",
+    "deaccented": false,
+    "expected": {
+      "source": "tóxico",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "O",
+          "coda": [
+            "k"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "tóxico",
+    "deaccented": true,
+    "expected": {
+      "source": "tóxico",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "O",
+          "coda": [
+            "k"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "próximo",
+    "deaccented": false,
+    "expected": {
+      "source": "próximo",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p",
+            "r"
+          ],
+          "vowel": "O",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "próximo",
+    "deaccented": true,
+    "expected": {
+      "source": "próximo",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p",
+            "r"
+          ],
+          "vowel": "O",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "muito",
+    "deaccented": false,
+    "expected": {
+      "source": "muito",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u~",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u~",
+          "coda": [
+            "j"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "muito",
+    "deaccented": true,
+    "expected": {
+      "source": "muito",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u~",
+          "coda": [
+            "j"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "muitas",
+    "deaccented": false,
+    "expected": {
+      "source": "muitas",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u~",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u~",
+          "coda": [
+            "j"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "a",
+          "coda": [
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "muitas",
+    "deaccented": true,
+    "expected": {
+      "source": "muitas",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u~",
+          "coda": [
+            "j"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "a",
+          "coda": [
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "coração",
+    "deaccented": false,
+    "expected": {
+      "source": "coração",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a~",
+          "nucleus_index": 2,
+          "stressed": true
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a~",
+          "coda": [
+            "w"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "coração",
+    "deaccented": true,
+    "expected": {
+      "source": "coração",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a~",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a~",
+          "coda": [
+            "w"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "mãe",
+    "deaccented": false,
+    "expected": {
+      "source": "mãe",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a~",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "a~",
+          "coda": [
+            "j"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "mãe",
+    "deaccented": true,
+    "expected": {
+      "source": "mãe",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "a~",
+          "coda": [
+            "j"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "põe",
+    "deaccented": false,
+    "expected": {
+      "source": "põe",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o~",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "o~",
+          "coda": [
+            "j"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "põe",
+    "deaccented": true,
+    "expected": {
+      "source": "põe",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "o~",
+          "coda": [
+            "j"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "ninguém",
+    "deaccented": false,
+    "expected": {
+      "source": "ninguém",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "i~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "g"
+          ],
+          "vowel": "e~",
+          "coda": [
+            "j"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "ninguém",
+    "deaccented": true,
+    "expected": {
+      "source": "ninguém",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "i~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "g"
+          ],
+          "vowel": "e~",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "também",
+    "deaccented": false,
+    "expected": {
+      "source": "também",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "a~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "b"
+          ],
+          "vowel": "e~",
+          "coda": [
+            "j"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "também",
+    "deaccented": true,
+    "expected": {
+      "source": "também",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "a~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "b"
+          ],
+          "vowel": "e~",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "homens",
+    "deaccented": false,
+    "expected": {
+      "source": "homens",
+      "phones": [
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "o",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "e~",
+          "coda": [
+            "j",
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "homens",
+    "deaccented": true,
+    "expected": {
+      "source": "homens",
+      "phones": [
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "e~",
+          "coda": [
+            "j",
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "nuvens",
+    "deaccented": false,
+    "expected": {
+      "source": "nuvens",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "v",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "v"
+          ],
+          "vowel": "e~",
+          "coda": [
+            "j",
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "nuvens",
+    "deaccented": true,
+    "expected": {
+      "source": "nuvens",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "v",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "v"
+          ],
+          "vowel": "e~",
+          "coda": [
+            "j",
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "viajem",
+    "deaccented": false,
+    "expected": {
+      "source": "viajem",
+      "phones": [
+        {
+          "symbol": "v",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "Z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "v"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "Z"
+          ],
+          "vowel": "e~",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "viajem",
+    "deaccented": true,
+    "expected": {
+      "source": "viajem",
+      "phones": [
+        {
+          "symbol": "v",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "Z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "v"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "Z"
+          ],
+          "vowel": "e~",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "imagem",
+    "deaccented": false,
+    "expected": {
+      "source": "imagem",
+      "phones": [
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "Z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "Z"
+          ],
+          "vowel": "e~",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "imagem",
+    "deaccented": true,
+    "expected": {
+      "source": "imagem",
+      "phones": [
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "Z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e~",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "Z"
+          ],
+          "vowel": "e~",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "trabalho",
+    "deaccented": false,
+    "expected": {
+      "source": "trabalho",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "L",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t",
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "b"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "L"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "trabalho",
+    "deaccented": true,
+    "expected": {
+      "source": "trabalho",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "L",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t",
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "b"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "L"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "Brasil",
+    "deaccented": false,
+    "expected": {
+      "source": "Brasil",
+      "phones": [
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "b",
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "i",
+          "coda": [
+            "w"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "Brasil",
+    "deaccented": true,
+    "expected": {
+      "source": "Brasil",
+      "phones": [
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "b",
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "i",
+          "coda": [
+            "w"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "brasileiro",
+    "deaccented": false,
+    "expected": {
+      "source": "brasileiro",
+      "phones": [
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 2,
+          "stressed": true
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 3,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "b",
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "e",
+          "coda": [
+            "j"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "brasileiro",
+    "deaccented": true,
+    "expected": {
+      "source": "brasileiro",
+      "phones": [
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 3,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "b",
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "e",
+          "coda": [
+            "j"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "português",
+    "deaccented": false,
+    "expected": {
+      "source": "português",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 2,
+          "stressed": true
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "o",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "g"
+          ],
+          "vowel": "e",
+          "coda": [
+            "s"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "português",
+    "deaccented": true,
+    "expected": {
+      "source": "português",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "o",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "g"
+          ],
+          "vowel": "i",
+          "coda": [
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "queijo",
+    "deaccented": false,
+    "expected": {
+      "source": "queijo",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "Z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "e",
+          "coda": [
+            "j"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "Z"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "queijo",
+    "deaccented": true,
+    "expected": {
+      "source": "queijo",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "Z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "e",
+          "coda": [
+            "j"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "Z"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "guerra",
+    "deaccented": false,
+    "expected": {
+      "source": "guerra",
+      "phones": [
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "g"
+          ],
+          "vowel": "e",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "guerra",
+    "deaccented": true,
+    "expected": {
+      "source": "guerra",
+      "phones": [
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "g"
+          ],
+          "vowel": "e",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "guitarra",
+    "deaccented": false,
+    "expected": {
+      "source": "guitarra",
+      "phones": [
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "g"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "guitarra",
+    "deaccented": true,
+    "expected": {
+      "source": "guitarra",
+      "phones": [
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "g"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "tranquilo",
+    "deaccented": false,
+    "expected": {
+      "source": "tranquilo",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t",
+            "r"
+          ],
+          "vowel": "a~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k",
+            "w"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "tranquilo",
+    "deaccented": true,
+    "expected": {
+      "source": "tranquilo",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t",
+            "r"
+          ],
+          "vowel": "a~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k",
+            "w"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "linguiça",
+    "deaccented": false,
+    "expected": {
+      "source": "linguiça",
+      "phones": [
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "i~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "g",
+            "w"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "linguiça",
+    "deaccented": true,
+    "expected": {
+      "source": "linguiça",
+      "phones": [
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "i~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "g",
+            "w"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "água",
+    "deaccented": false,
+    "expected": {
+      "source": "água",
+      "phones": [
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "g",
+            "w"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "água",
+    "deaccented": true,
+    "expected": {
+      "source": "água",
+      "phones": [
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "g",
+            "w"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "quase",
+    "deaccented": false,
+    "expected": {
+      "source": "quase",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k",
+            "w"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "quase",
+    "deaccented": true,
+    "expected": {
+      "source": "quase",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k",
+            "w"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "saúde",
+    "deaccented": false,
+    "expected": {
+      "source": "saúde",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "u",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "saúde",
+    "deaccented": true,
+    "expected": {
+      "source": "saúde",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "saída",
+    "deaccented": false,
+    "expected": {
+      "source": "saída",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "d",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "d"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "saída",
+    "deaccented": true,
+    "expected": {
+      "source": "saída",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "d",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "d"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "país",
+    "deaccented": false,
+    "expected": {
+      "source": "país",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "i",
+          "coda": [
+            "s"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "país",
+    "deaccented": true,
+    "expected": {
+      "source": "país",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "i",
+          "coda": [
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "aí",
+    "deaccented": false,
+    "expected": {
+      "source": "aí",
+      "phones": [
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "aí",
+    "deaccented": true,
+    "expected": {
+      "source": "aí",
+      "phones": [
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "aú",
+    "deaccented": false,
+    "expected": {
+      "source": "aú",
+      "phones": [
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "u",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "aú",
+    "deaccented": true,
+    "expected": {
+      "source": "aú",
+      "phones": [
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "chá",
+    "deaccented": false,
+    "expected": {
+      "source": "chá",
+      "phones": [
+        {
+          "symbol": "S",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "S"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "chá",
+    "deaccented": true,
+    "expected": {
+      "source": "chá",
+      "phones": [
+        {
+          "symbol": "S",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "S"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "ninho",
+    "deaccented": false,
+    "expected": {
+      "source": "ninho",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "J",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "J"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "ninho",
+    "deaccented": true,
+    "expected": {
+      "source": "ninho",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "J",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "J"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "filho",
+    "deaccented": false,
+    "expected": {
+      "source": "filho",
+      "phones": [
+        {
+          "symbol": "f",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "L",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "f"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "L"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "filho",
+    "deaccented": true,
+    "expected": {
+      "source": "filho",
+      "phones": [
+        {
+          "symbol": "f",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "L",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "f"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "L"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "carro",
+    "deaccented": false,
+    "expected": {
+      "source": "carro",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "carro",
+    "deaccented": true,
+    "expected": {
+      "source": "carro",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "barro",
+    "deaccented": false,
+    "expected": {
+      "source": "barro",
+      "phones": [
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "b"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "barro",
+    "deaccented": true,
+    "expected": {
+      "source": "barro",
+      "phones": [
+        {
+          "symbol": "b",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "b"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "passo",
+    "deaccented": false,
+    "expected": {
+      "source": "passo",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "passo",
+    "deaccented": true,
+    "expected": {
+      "source": "passo",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "exame",
+    "deaccented": false,
+    "expected": {
+      "source": "exame",
+      "phones": [
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "e",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "exame",
+    "deaccented": true,
+    "expected": {
+      "source": "exame",
+      "phones": [
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "e",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "exato",
+    "deaccented": false,
+    "expected": {
+      "source": "exato",
+      "phones": [
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "e",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "exato",
+    "deaccented": true,
+    "expected": {
+      "source": "exato",
+      "phones": [
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "e",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "texto",
+    "deaccented": false,
+    "expected": {
+      "source": "texto",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "S",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "e",
+          "coda": [
+            "S"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "texto",
+    "deaccented": true,
+    "expected": {
+      "source": "texto",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "S",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "e",
+          "coda": [
+            "S"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "miku",
+    "deaccented": false,
+    "expected": {
+      "source": "miku",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "miku",
+    "deaccented": true,
+    "expected": {
+      "source": "miku",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "azul",
+    "deaccented": false,
+    "expected": {
+      "source": "azul",
+      "phones": [
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "u",
+          "coda": [
+            "w"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "azul",
+    "deaccented": true,
+    "expected": {
+      "source": "azul",
+      "phones": [
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "u",
+          "coda": [
+            "w"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "paz",
+    "deaccented": false,
+    "expected": {
+      "source": "paz",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "a",
+          "coda": [
+            "s"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "paz",
+    "deaccented": true,
+    "expected": {
+      "source": "paz",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "a",
+          "coda": [
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "internet",
+    "deaccented": false,
+    "expected": {
+      "source": "internet",
+      "phones": [
+        {
+          "symbol": "i~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 2,
+          "stressed": true
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "i~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "e",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "e",
+          "coda": [
+            "t"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "internet",
+    "deaccented": true,
+    "expected": {
+      "source": "internet",
+      "phones": [
+        {
+          "symbol": "i~",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "e",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "i~",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "e",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "i",
+          "coda": [
+            "t"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "ritmo",
+    "deaccented": false,
+    "expected": {
+      "source": "ritmo",
+      "phones": [
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "i",
+          "coda": [
+            "t"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "ritmo",
+    "deaccented": true,
+    "expected": {
+      "source": "ritmo",
+      "phones": [
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "i",
+          "coda": [
+            "t"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "sussurro",
+    "deaccented": false,
+    "expected": {
+      "source": "sussurro",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": true
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "sussurro",
+    "deaccented": true,
+    "expected": {
+      "source": "sussurro",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "R",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "R"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "psicologia",
+    "deaccented": false,
+    "expected": {
+      "source": "psicologia",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "Z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 3,
+          "stressed": true
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 4,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p",
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "Z"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "psicologia",
+    "deaccented": true,
+    "expected": {
+      "source": "psicologia",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "Z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 3,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 4,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p",
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "o",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "Z"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "extraordinário",
+    "deaccented": false,
+    "expected": {
+      "source": "extraordinário",
+      "phones": [
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "S",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 3,
+          "stressed": false
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 4,
+          "stressed": true
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 5,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 6,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "e",
+          "coda": [
+            "S"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t",
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "o",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "extraordinário",
+    "deaccented": true,
+    "expected": {
+      "source": "extraordinário",
+      "phones": [
+        {
+          "symbol": "e",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "S",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "o",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 3,
+          "stressed": false
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "a",
+          "nucleus_index": 4,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 5,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 6,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [],
+          "vowel": "e",
+          "coda": [
+            "S"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t",
+            "r"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "o",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "a",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "123",
+    "deaccented": false,
+    "expected": {
+      "source": "123",
+      "phones": [],
+      "syllables": []
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "123",
+    "deaccented": true,
+    "expected": {
+      "source": "123",
+      "phones": [],
+      "syllables": []
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "",
+    "deaccented": false,
+    "expected": {
+      "source": "",
+      "phones": [],
+      "syllables": []
+    }
+  },
+  {
+    "language": "pt-BR",
+    "word": "",
+    "deaccented": true,
+    "expected": {
+      "source": "",
+      "phones": [],
+      "syllables": []
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "hello",
+    "deaccented": false,
+    "expected": {
+      "source": "hello",
+      "phones": [
+        {
+          "symbol": "h",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "oU",
+          "nucleus_index": 1,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "h"
+          ],
+          "vowel": "@",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "oU",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "hello",
+    "deaccented": true,
+    "expected": {
+      "source": "hello",
+      "phones": [
+        {
+          "symbol": "h",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "oU",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "h"
+          ],
+          "vowel": "@",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "oU",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "world",
+    "deaccented": false,
+    "expected": {
+      "source": "world",
+      "phones": [
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "3",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "d",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "w"
+          ],
+          "vowel": "3",
+          "coda": [
+            "r",
+            "l",
+            "d"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "world",
+    "deaccented": true,
+    "expected": {
+      "source": "world",
+      "phones": [
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "3",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "d",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "w"
+          ],
+          "vowel": "3",
+          "coda": [
+            "r",
+            "l",
+            "d"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "miku",
+    "deaccented": false,
+    "expected": {
+      "source": "miku",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "miku",
+    "deaccented": true,
+    "expected": {
+      "source": "miku",
+      "phones": [
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "m"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "teto",
+    "deaccented": false,
+    "expected": {
+      "source": "teto",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "E",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "oU",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "E",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "oU",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "teto",
+    "deaccented": true,
+    "expected": {
+      "source": "teto",
+      "phones": [
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "E",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "oU",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "E",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "t"
+          ],
+          "vowel": "oU",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "singing",
+    "deaccented": false,
+    "expected": {
+      "source": "singing",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "N",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "N",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "I",
+          "coda": [
+            "N"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [],
+          "vowel": "I",
+          "coda": [
+            "N"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "singing",
+    "deaccented": true,
+    "expected": {
+      "source": "singing",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "N",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "N",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "I",
+          "coda": [
+            "N"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "I",
+          "coda": [
+            "N"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "stopped",
+    "deaccented": false,
+    "expected": {
+      "source": "stopped",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "A",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s",
+            "t"
+          ],
+          "vowel": "A",
+          "coda": [
+            "p",
+            "t"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "stopped",
+    "deaccented": true,
+    "expected": {
+      "source": "stopped",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "A",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s",
+            "t"
+          ],
+          "vowel": "A",
+          "coda": [
+            "p",
+            "t"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "wishes",
+    "deaccented": false,
+    "expected": {
+      "source": "wishes",
+      "phones": [
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "S",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "w"
+          ],
+          "vowel": "I",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "S"
+          ],
+          "vowel": "I",
+          "coda": [
+            "z"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "wishes",
+    "deaccented": true,
+    "expected": {
+      "source": "wishes",
+      "phones": [
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "S",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "w"
+          ],
+          "vowel": "I",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "S"
+          ],
+          "vowel": "I",
+          "coda": [
+            "z"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "cats",
+    "deaccented": false,
+    "expected": {
+      "source": "cats",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "{",
+          "coda": [
+            "t",
+            "s"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "cats",
+    "deaccented": true,
+    "expected": {
+      "source": "cats",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "{",
+          "coda": [
+            "t",
+            "s"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "dogs",
+    "deaccented": false,
+    "expected": {
+      "source": "dogs",
+      "phones": [
+        {
+          "symbol": "d",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "A",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "d"
+          ],
+          "vowel": "A",
+          "coda": [
+            "g",
+            "z"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "dogs",
+    "deaccented": true,
+    "expected": {
+      "source": "dogs",
+      "phones": [
+        {
+          "symbol": "d",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "A",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "g",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "d"
+          ],
+          "vowel": "A",
+          "coda": [
+            "g",
+            "z"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "NASA",
+    "deaccented": false,
+    "expected": {
+      "source": "NASA",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "{",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "@",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "NASA",
+    "deaccented": true,
+    "expected": {
+      "source": "NASA",
+      "phones": [
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "{",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "@",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "CPU",
+    "deaccented": false,
+    "expected": {
+      "source": "CPU",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "j"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "CPU",
+    "deaccented": true,
+    "expected": {
+      "source": "CPU",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 2,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "j"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "xyzzy",
+    "deaccented": false,
+    "expected": {
+      "source": "xyzzy",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k",
+            "s"
+          ],
+          "vowel": "I",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "xyzzy",
+    "deaccented": true,
+    "expected": {
+      "source": "xyzzy",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "i",
+          "nucleus_index": 1,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k",
+            "s"
+          ],
+          "vowel": "I",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "z"
+          ],
+          "vowel": "i",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "supercalifragilistic",
+    "deaccented": false,
+    "expected": {
+      "source": "supercalifragilistic",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 3,
+          "stressed": false
+        },
+        {
+          "symbol": "f",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 4,
+          "stressed": true
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 5,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 6,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 7,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "@",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "{",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "@",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "f",
+            "r"
+          ],
+          "vowel": "{",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "@",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "I",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s",
+            "t"
+          ],
+          "vowel": "I",
+          "coda": [
+            "k"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "supercalifragilistic",
+    "deaccented": true,
+    "expected": {
+      "source": "supercalifragilistic",
+      "phones": [
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 2,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 3,
+          "stressed": false
+        },
+        {
+          "symbol": "f",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 4,
+          "stressed": false
+        },
+        {
+          "symbol": "dZ",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 5,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 6,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 7,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "@",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "{",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "@",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "f",
+            "r"
+          ],
+          "vowel": "{",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "dZ"
+          ],
+          "vowel": "@",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "I",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s",
+            "t"
+          ],
+          "vowel": "I",
+          "coda": [
+            "k"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "through",
+    "deaccented": false,
+    "expected": {
+      "source": "through",
+      "phones": [
+        {
+          "symbol": "T",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "T",
+            "r"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "through",
+    "deaccented": true,
+    "expected": {
+      "source": "through",
+      "phones": [
+        {
+          "symbol": "T",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "T",
+            "r"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "thought",
+    "deaccented": false,
+    "expected": {
+      "source": "thought",
+      "phones": [
+        {
+          "symbol": "T",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "T"
+          ],
+          "vowel": "O",
+          "coda": [
+            "t"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "thought",
+    "deaccented": true,
+    "expected": {
+      "source": "thought",
+      "phones": [
+        {
+          "symbol": "T",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "T"
+          ],
+          "vowel": "O",
+          "coda": [
+            "t"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "queue",
+    "deaccented": false,
+    "expected": {
+      "source": "queue",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": true
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k",
+            "j"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "queue",
+    "deaccented": true,
+    "expected": {
+      "source": "queue",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "j",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "u",
+          "nucleus_index": 0,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k",
+            "j"
+          ],
+          "vowel": "u",
+          "coda": [],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "rhythm",
+    "deaccented": false,
+    "expected": {
+      "source": "rhythm",
+      "phones": [
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "D",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "I",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "D"
+          ],
+          "vowel": "@",
+          "coda": [
+            "m"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "rhythm",
+    "deaccented": true,
+    "expected": {
+      "source": "rhythm",
+      "phones": [
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "D",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "m",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "I",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "D"
+          ],
+          "vowel": "@",
+          "coda": [
+            "m"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "player",
+    "deaccented": false,
+    "expected": {
+      "source": "player",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "eI",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p",
+            "l"
+          ],
+          "vowel": "eI",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [],
+          "vowel": "@",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "player",
+    "deaccented": true,
+    "expected": {
+      "source": "player",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "eI",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p",
+            "l"
+          ],
+          "vowel": "eI",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [],
+          "vowel": "@",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "colour",
+    "deaccented": false,
+    "expected": {
+      "source": "colour",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "V",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "V",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "@",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "colour",
+    "deaccented": true,
+    "expected": {
+      "source": "colour",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "V",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "l",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "V",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "l"
+          ],
+          "vowel": "@",
+          "coda": [
+            "r"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "Python",
+    "deaccented": false,
+    "expected": {
+      "source": "Python",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "aI",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "T",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "A",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "aI",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "T"
+          ],
+          "vowel": "A",
+          "coda": [
+            "n"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "Python",
+    "deaccented": true,
+    "expected": {
+      "source": "Python",
+      "phones": [
+        {
+          "symbol": "p",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "aI",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "T",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "A",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "p"
+          ],
+          "vowel": "aI",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "T"
+          ],
+          "vowel": "A",
+          "coda": [
+            "n"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "can’t",
+    "deaccented": false,
+    "expected": {
+      "source": "can't",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "{",
+          "coda": [
+            "n",
+            "t"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "can’t",
+    "deaccented": true,
+    "expected": {
+      "source": "can't",
+      "phones": [
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "{",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "k"
+          ],
+          "vowel": "{",
+          "coda": [
+            "n",
+            "t"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "running",
+    "deaccented": false,
+    "expected": {
+      "source": "running",
+      "phones": [
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "V",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "N",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "V",
+          "coda": [],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "I",
+          "coda": [
+            "N"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "running",
+    "deaccented": true,
+    "expected": {
+      "source": "running",
+      "phones": [
+        {
+          "symbol": "r",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "V",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "n",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "I",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "N",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "r"
+          ],
+          "vowel": "V",
+          "coda": [],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "n"
+          ],
+          "vowel": "I",
+          "coda": [
+            "N"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "walked",
+    "deaccented": false,
+    "expected": {
+      "source": "walked",
+      "phones": [
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "w"
+          ],
+          "vowel": "O",
+          "coda": [
+            "k",
+            "t"
+          ],
+          "stressed": true
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "walked",
+    "deaccented": true,
+    "expected": {
+      "source": "walked",
+      "phones": [
+        {
+          "symbol": "w",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "O",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "t",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "w"
+          ],
+          "vowel": "O",
+          "coda": [
+            "k",
+            "t"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "foxes",
+    "deaccented": false,
+    "expected": {
+      "source": "foxes",
+      "phones": [
+        {
+          "symbol": "f",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "A",
+          "nucleus_index": 0,
+          "stressed": true
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "f"
+          ],
+          "vowel": "A",
+          "coda": [
+            "k"
+          ],
+          "stressed": true
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "@",
+          "coda": [
+            "z"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "foxes",
+    "deaccented": true,
+    "expected": {
+      "source": "foxes",
+      "phones": [
+        {
+          "symbol": "f",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "A",
+          "nucleus_index": 0,
+          "stressed": false
+        },
+        {
+          "symbol": "k",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "s",
+          "nucleus_index": null,
+          "stressed": false
+        },
+        {
+          "symbol": "@",
+          "nucleus_index": 1,
+          "stressed": false
+        },
+        {
+          "symbol": "z",
+          "nucleus_index": null,
+          "stressed": false
+        }
+      ],
+      "syllables": [
+        {
+          "onset": [
+            "f"
+          ],
+          "vowel": "A",
+          "coda": [
+            "k"
+          ],
+          "stressed": false
+        },
+        {
+          "onset": [
+            "s"
+          ],
+          "vowel": "@",
+          "coda": [
+            "z"
+          ],
+          "stressed": false
+        }
+      ]
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "1999",
+    "deaccented": false,
+    "expected": {
+      "source": "1999",
+      "phones": [],
+      "syllables": []
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "1999",
+    "deaccented": true,
+    "expected": {
+      "source": "1999",
+      "phones": [],
+      "syllables": []
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "",
+    "deaccented": false,
+    "expected": {
+      "source": "",
+      "phones": [],
+      "syllables": []
+    }
+  },
+  {
+    "language": "en-US",
+    "word": "",
+    "deaccented": true,
+    "expected": {
+      "source": "",
+      "phones": [],
+      "syllables": []
+    }
+  }
+]

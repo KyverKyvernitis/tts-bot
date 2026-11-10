@@ -2,7 +2,7 @@
 name = "nucleo_fluxo_tts"
 version = "0.1.0"
 edition = "2021"
-description = "Nucleo experimental de buffer de audio limitado para o TTS"
+description = "Primitivas nativas de fluxo e replay de audio TTS"
 publish = false
 
 [lib]
@@ -10,3 +10,12 @@ name = "nucleo_fluxo_tts"
 path = "src/lib.rs"
 
 [dependencies]
+
+[workspace]
+resolver = "2"
+members = [".", "vinculo_python", "crates/*"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

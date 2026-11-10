@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import importlib.util
 import logging
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -40,12 +42,18 @@ def rust_habilitado() -> bool:
 @lru_cache(maxsize=1)
 def _carregar_nucleo() -> Any:
     # Não altera sys.path e não importa as bibliotecas de teste na inicialização.
-    arquivo = (
+    explicit = os.environ.get("TTS_NATIVE_EXTENSION", "").strip()
+    arquivo = Path(explicit) if explicit else (
         Path(__file__).resolve().parents[2]
         / "vinculo_python/python/tts_fluxo_experimental"
         / "_nucleo_fluxo_tts.abi3.so"
     )
     if not arquivo.is_file():
+        if not explicit:
+            try:
+                return importlib.import_module("tts_fluxo_experimental._nucleo_fluxo_tts")
+            except (ImportError, OSError) as error:
+                raise ImportError(f"módulo Rust indisponível: {arquivo}") from error
         raise ImportError(f"módulo Rust indisponível: {arquivo}")
     especificacao = importlib.util.spec_from_file_location(
         "tts_fluxo_experimental._nucleo_fluxo_tts", str(arquivo)
@@ -54,6 +62,7 @@ def _carregar_nucleo() -> Any:
         raise ImportError(f"módulo Rust inválido: {arquivo}")
     modulo = importlib.util.module_from_spec(especificacao)
     especificacao.loader.exec_module(modulo)
+    sys.modules.setdefault("tts_fluxo_experimental._nucleo_fluxo_tts", modulo)
     return modulo
 
 

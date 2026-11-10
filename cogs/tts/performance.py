@@ -18,6 +18,8 @@ import json
 import re
 from typing import Any
 
+from cogs.tts.policy_rust import optional as _native_policy
+
 
 MAX_EFFECT_SPEECH_CHARACTERS = 180
 MAX_PERFORMANCE_SEGMENTS = 128
@@ -33,6 +35,9 @@ def singing_request(text: str) -> tuple[str, bool]:
     literal mask is used only to decide whether the final character is active.
     A saved melody chooses the song after this opt-in, never speaking mode.
     """
+    native, result = _native_policy("singing_request", text=text)
+    if native:
+        return tuple(result)
     normalized = _normalize(text)
     literal_text, mask = _literal_characters(normalized)
     if not literal_text.endswith("~") or mask[-1]:
@@ -120,6 +125,9 @@ def parse_performance_text(text: str, *, singing: bool = False
     """
     if not isinstance(text, str):
         raise ValueError("O texto do TTV deve ser uma mensagem de texto.")
+    native, result = _native_policy("parse_performance_text", text=text, singing=singing)
+    if native:
+        return tuple(result)
     text, literals = _literal_characters(_normalize(text))
     units: list[tuple[str, list[bool]]] = []
     for match in re.finditer(r"\S+", text):
@@ -251,6 +259,9 @@ def parse_performance_text(text: str, *, singing: bool = False
 def performance_hash(*, text: str, score: dict[str, Any] | None = None,
                      segments: list[dict[str, Any]] | None = None) -> str:
     """Bind score/effects to text while preserving legacy plain-text hashes."""
+    native, result = _native_policy("performance_hash", text=text, score=score, segments=segments)
+    if native:
+        return result
     if score is None and not segments:
         return ""
     payload = {"version": 1, "text": _normalize(text), "score": score, "segments": segments}

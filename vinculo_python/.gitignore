@@ -2,7 +2,7 @@
 /dist/
 /.venv/
 /python/tts_fluxo_experimental/*.so
-!/python/tts_fluxo_experimental/_nucleo_fluxo_tts.abi3.so
+# A extensao e distribuida como artefato de build, separada do patch de fontes.
 /python/tts_fluxo_experimental/*.pyd
 **/__pycache__/
 *.pyc

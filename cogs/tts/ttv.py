@@ -12,6 +12,8 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
+from cogs.tts.policy_rust import optional as _native_policy
+
 
 def _load_catalog() -> dict[str, Any]:
     path = Path(__file__).resolve().parents[2] / "shared" / "ttv_catalog.json"
@@ -80,6 +82,9 @@ _LEGACY_VOICE_IDS = {
 
 def normalize_voice_id(value: object) -> str:
     """Return the canonical voice ID; an unknown explicit ID raises ValueError."""
+    native, result = _native_policy("normalize_voice_id", value=value)
+    if native:
+        return result
     voice_id = str(value if value is not None else "").strip().lower()
     voice_id = _LEGACY_VOICE_IDS.get(voice_id, voice_id) or DEFAULT_VOICE_ID
     if voice_id not in _VOICES_BY_ID:
@@ -139,6 +144,9 @@ def worker_voice_details(state: Mapping[str, Any], voice_id: object = DEFAULT_VO
 
 def normalize_language(value: object) -> str:
     """Resolve the reading language independently of Edge/gTTS preferences."""
+    native, result = _native_policy("normalize_language", value=value)
+    if native:
+        return result
     language = str(value if value is not None else "").strip().lower().replace("_", "-")
     if not language or language in {"pt", "pt-br"}:
         return DEFAULT_LANGUAGE
@@ -154,6 +162,9 @@ def voice_language_choices(voice_id: object = DEFAULT_VOICE_ID) -> tuple[tuple[s
 
 
 def normalize_voice_language(voice_id: object, value: object = DEFAULT_LANGUAGE) -> str:
+    native, result = _native_policy("normalize_voice_language", voice_id=voice_id, value=value)
+    if native:
+        return result
     voice = get_voice(voice_id)
     language = normalize_language(value)
     if language not in voice.languages:
@@ -167,6 +178,9 @@ def language_label(value: object = DEFAULT_LANGUAGE, *, voice_id: object = DEFAU
 
 def normalize_pitch(value: object) -> str:
     """Validate finite half-semitone steps in [-4, +4], returning signed text."""
+    native, result = _native_policy("normalize_pitch", value=value)
+    if native:
+        return result
     text = str(value if value is not None else "0").strip().lower()
     text = text.replace(",", ".").replace("−", "-").replace("–", "-").replace("—", "-")
     for suffix in ("semitones", "semitone", "semitons", "semitom", "st"):
@@ -186,6 +200,9 @@ def normalize_pitch(value: object) -> str:
 
 def normalize_speech_rate(value: object, default: float = DEFAULT_SPEECH_RATE) -> float:
     """Validate a finite speed multiplier in [0.5, 1.5], preserving custom values."""
+    native, result = _native_policy("normalize_speech_rate", value=value, default=default)
+    if native:
+        return result
     if value is None or (isinstance(value, str) and not value.strip()):
         value = default
     try:
@@ -208,6 +225,10 @@ def inherit_server_preferences(
     member also takes precedence over an incompatible inherited language.
     Explicit invalid voice IDs/languages remain observable to the TTV route.
     """
+    native, result = _native_policy("inherit_server_preferences", personal=personal,
+                                     server=server, default_pitch=default_pitch)
+    if native:
+        return result
     personal, server = personal or {}, server or {}
 
     def present(value: object) -> bool:
@@ -257,6 +278,10 @@ def resolve_preferences(mapping: Mapping[str, Any] | None, default_pitch: object
     IDs and languages remain an error: only missing values select defaults.
     The separate Edge/gTTS language never changes the TTV reading language.
     """
+    native, result = _native_policy("resolve_preferences", mapping=mapping,
+                                     default_pitch=default_pitch)
+    if native:
+        return result
     values = mapping or {}
     voice_id = normalize_voice_id(values.get("ttv_voice_id"))
     language = normalize_voice_language(voice_id, values.get("ttv_language"))
