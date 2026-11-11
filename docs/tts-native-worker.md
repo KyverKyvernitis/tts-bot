@@ -63,6 +63,13 @@ maiores de `PHONE_WORKER_START_WAIT_SECONDS` são preservados;
 `PHONE_WORKER_NATIVE_START_TIMEOUT_SECONDS` pode ampliar o prazo nativo.
 Uma resposta de outro PID ou um status antigo continua sendo recusado.
 
+Um pedido explícito de `--restart` aguarda o lock de outra inicialização
+por até 30 segundos; `PHONE_WORKER_START_LOCK_WAIT_SECONDS` ajusta esse prazo.
+Se não conseguir o lock, retorna falha e informa que o reinício não ocorreu.
+As verificações normais do watchdog continuam podendo encerrar sem reiniciar
+quando outra inicialização está em andamento. A aquisição e a liberação são
+serializadas; locks com dono vivo são preservados.
+
 O supervisor inicia o filho com `--owner-stdin`: fechar o pipe do pai encerra o
 serviço, inclusive se o Python morrer sem executar seu cleanup. Conexões
 interrompidas cancelam a fonte nativa. O serviço limita requisições/conexões,

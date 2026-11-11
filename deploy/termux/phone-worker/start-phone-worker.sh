@@ -112,30 +112,125 @@ now_iso() {
 
 mkdir -p "$WORKER_DIR" "$RUNTIME_STATE_DIR"
 
-lock_owner_alive() {
-  local owner="" cmdline=""
-  [[ -f "$LOCK_DIR/owner.pid" ]] && owner="$(head -n 1 "$LOCK_DIR/owner.pid" 2>/dev/null || true)"
-  [[ "$owner" =~ ^[0-9]+$ ]] || return 1
-  kill -0 "$owner" 2>/dev/null || return 1
-  [[ -r "/proc/$owner/cmdline" ]] || return 1
-  cmdline="$(tr '\0' ' ' < "/proc/$owner/cmdline" 2>/dev/null || true)"
-  [[ "$cmdline" == *"start-phone-worker.sh"* ]]
+startup_lock_operation() {
+  # This guard protects only the directory transaction. It is closed before
+  # starting companions, so no daemon can inherit and retain the kernel lock.
+  "$PYTHON_BIN" - "$LOCK_DIR" "${BASHPID:-$$}" "$FORCE_RESTART" \
+    "${PHONE_WORKER_START_LOCK_WAIT_SECONDS:-30}" "$1" <<'PYSTARTLOCK'
+import fcntl, math, os, stat, sys, time
+from pathlib import Path
+
+directory, caller, forced, wait, action = sys.argv[1:]
+directory, caller, forced = Path(directory), int(caller), forced == '1'
+try:
+    wait = float(wait)
+    if not math.isfinite(wait) or wait < 0:
+        raise ValueError()
+except ValueError:
+    wait = 30.0
+deadline = time.monotonic() + (2.0 if action == 'release' else wait)
+owner_file = directory / 'owner.pid'
+guard_path = directory.with_name(directory.name + '.guard')
+announced = False
+
+def log(message):
+    print('[phone-worker-start] ' + message, flush=True)
+
+def owner():
+    if owner_file.is_symlink():
+        raise RuntimeError('owner.pid nao pode ser um link')
+    try:
+        value = owner_file.read_text().strip()
+    except FileNotFoundError:
+        return None
+    return int(value) if value.isdecimal() and int(value) > 1 else None
+
+def alive(pid):
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        fields = (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+        return fields[0] != 'Z'
+    except (OSError, IndexError):
+        return True
+
+def remove_owned_directory():
+    # Never recursively delete a directory that may contain unrelated files.
+    if any(item.name != 'owner.pid' for item in directory.iterdir()):
+        raise RuntimeError('lock contem arquivos inesperados; preservado')
+    if owner_file.exists():
+        owner_file.unlink()
+    directory.rmdir()
+
+try:
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(guard_path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    with os.fdopen(descriptor, 'r+') as guard:
+        if not stat.S_ISREG(os.fstat(guard.fileno()).st_mode):
+            raise RuntimeError('arquivo de guarda do start invalido')
+        while True:
+            locked = False
+            try:
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                if directory.is_symlink():
+                    raise RuntimeError('diretorio de lock nao pode ser um link')
+                if action == 'release':
+                    if directory.is_dir() and owner() == caller:
+                        remove_owned_directory()
+                    raise SystemExit(0)
+                if directory.exists():
+                    pid = owner()
+                    # Preserve any live PID, including a reused/unrecognized one.
+                    # For the legacy mkdir protocol, leave time to publish PID.
+                    busy = alive(pid) or pid is None and time.time() - directory.stat().st_mtime < 5
+                    if not busy:
+                        remove_owned_directory()
+                        log('lock orfao confirmado; recuperando')
+                    elif not forced:
+                        log('start já em andamento; lock pertence a processo vivo')
+                        raise SystemExit(75)
+                if not directory.exists():
+                    directory.mkdir(mode=0o700)
+                    owner_file.write_text(str(caller) + '\n')
+                    raise SystemExit(0)
+            except BlockingIOError:
+                if action != 'release' and not forced:
+                    log('start ja em andamento; outra aquisicao esta em curso')
+                    raise SystemExit(75)
+            finally:
+                if locked:
+                    fcntl.flock(guard, fcntl.LOCK_UN)
+            if time.monotonic() >= deadline:
+                log('prazo aguardando lock de start; reinicio solicitado nao foi executado')
+                raise SystemExit(1)
+            if action != 'release' and not announced:
+                log('aguardando lock de start para executar o reinicio solicitado')
+                announced = True
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+except (OSError, ValueError, RuntimeError) as error:
+    log('falha no lock de start: ' + str(error))
+    raise SystemExit(1)
+PYSTARTLOCK
 }
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  if lock_owner_alive; then
-    log "start já em andamento; lock pertence a processo vivo"
-    exit 0
-  fi
-  log "lock órfão confirmado; recuperando"
-  rm -rf "$LOCK_DIR" 2>/dev/null || exit 1
-  mkdir "$LOCK_DIR" 2>/dev/null || exit 1
+if startup_lock_operation acquire; then
+  :
+else
+  lock_result=$?
+  # A normal watchdog check may join an existing start. An explicit restart
+  # must either obtain ownership and run or report failure to its caller.
+  [[ "$lock_result" == "75" && "$FORCE_RESTART" == "0" ]] && exit 0
+  exit "$lock_result"
 fi
-printf '%s\n' "$$" > "$LOCK_DIR/owner.pid"
 cleanup_start_lock() {
-  if [[ -f "$LOCK_DIR/owner.pid" ]] && [[ "$(cat "$LOCK_DIR/owner.pid" 2>/dev/null)" == "$$" ]]; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
-  fi
+  startup_lock_operation release >/dev/null 2>&1 || true
 }
 trap cleanup_start_lock EXIT
 trap 'exit 130' INT
