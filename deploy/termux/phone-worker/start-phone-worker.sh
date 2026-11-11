@@ -225,19 +225,19 @@ kill_worker_processes() {
 }
 
 health_json_on_port() {
-  local port="${1:-}"
+  local port="${1:-}" timeout="${2:-3}"
   [[ "$port" =~ ^[0-9]+$ ]] || return 0
   if [[ -n "$TOKEN" ]]; then
-    curl --max-time 3 -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$port/health" 2>/dev/null || true
+    curl --max-time "$timeout" -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$port/health" 2>/dev/null || true
   else
-    curl --max-time 3 -fsS "http://127.0.0.1:$port/health" 2>/dev/null || true
+    curl --max-time "$timeout" -fsS "http://127.0.0.1:$port/health" 2>/dev/null || true
   fi
 }
 
 strict_health_for_pid() {
-  local pid="$1" port="$2" expected_worker="${CORE_WORKER_ID:-${CORE_WORKER_WORKER_ID:-}}"
+  local pid="$1" port="$2" timeout="${3:-3}" expected_worker="${CORE_WORKER_ID:-${CORE_WORKER_WORKER_ID:-}}"
   pid_is_official_worker "$pid" || return 1
-  health_json_on_port "$port" | "$PYTHON_BIN" -c 'import json,sys,time
+  health_json_on_port "$port" "$timeout" | "$PYTHON_BIN" -c 'import json,sys,time
 pid=int(sys.argv[1]); expected=sys.argv[2].strip()
 try: d=json.load(sys.stdin)
 except Exception: raise SystemExit(1)
@@ -280,11 +280,97 @@ PYPORT
 }
 
 worker_healthy_for_pid() {
-  local pid="$1" port=""
+  local pid="$1" timeout="${2:-3}" port=""
   runtime_status_for_pid "$pid" && return 0
   port="$(runtime_http_port)"
-  [[ -n "$port" ]] && strict_health_for_pid "$pid" "$port" && return 0
-  strict_health_for_pid "$pid" "$PORT"
+  [[ -n "$port" ]] && strict_health_for_pid "$pid" "$port" "$timeout" && return 0
+  [[ "$port" == "$PORT" ]] && return 1
+  strict_health_for_pid "$pid" "$PORT" "$timeout"
+}
+
+startup_timeout_ms() {
+  "$PYTHON_BIN" - "$START_WAIT" "${TTS_NATIVE_WORKER:-0}" "${PHONE_WORKER_NATIVE_START_TIMEOUT_SECONDS:-15}" <<'PYSTARTTIMEOUT'
+import math, sys
+def seconds(value, default):
+    try: result = float(value)
+    except (ValueError, TypeError): return default
+    return result if math.isfinite(result) and result >= 0 else default
+timeout = seconds(sys.argv[1], 3.0)
+if sys.argv[2].strip().lower() in {"1", "true", "yes", "on", "y", "sim"}:
+    # The native supervisor may spend ten seconds preparing real voicebanks.
+    timeout = max(timeout, 15.0, seconds(sys.argv[3], 15.0))
+print(math.ceil(timeout * 1000))
+PYSTARTTIMEOUT
+}
+
+startup_clock_ms() {
+  "$PYTHON_BIN" -c 'import time; print(time.monotonic_ns() // 1000000)'
+}
+
+worker_exec_pending() {
+  # $! initially identifies our forked Bash child, before it execs Python.
+  # Only that exact child may wait for the handoff; it is never considered ready.
+  "$PYTHON_BIN" - "$1" "$$" <<'PYEXECPENDING'
+import os, sys
+from pathlib import Path
+try:
+    child, parent = (Path('/proc') / value for value in sys.argv[1:])
+    fields = (child / 'stat').read_text().rsplit(')', 1)[1].split()
+    # Termux may expose linker64 as /proc/exe when its exec workaround is used.
+    # Compare the exact parent executable instead of assuming its basename.
+    same = (child.stat().st_uid == os.getuid() and int(fields[1]) == int(parent.name)
+            and (child / 'cmdline').read_bytes() == (parent / 'cmdline').read_bytes()
+            and (child / 'exe').resolve(strict=True) == (parent / 'exe').resolve(strict=True))
+except (OSError, ValueError, IndexError):
+    same = False
+raise SystemExit(0 if same else 1)
+PYEXECPENDING
+}
+
+wait_for_worker_ready() {
+  local pid="$1" budget now deadline remaining probe_ms probe_timeout pause_ms pause official
+  STARTUP_WAIT_FAILURE="verification_timeout"
+  budget="$(startup_timeout_ms)" || return 1
+  now="$(startup_clock_ms)" || return 1
+  deadline=$((now + budget))
+  while true; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      STARTUP_WAIT_FAILURE="child_dead_or_identity_mismatch"
+      return 1
+    fi
+    official=1
+    if ! pid_is_official_worker "$pid"; then
+      if ! worker_exec_pending "$pid"; then
+        STARTUP_WAIT_FAILURE="child_dead_or_identity_mismatch"
+        return 1
+      fi
+      official=0
+    fi
+    now="$(startup_clock_ms)" || return 1
+    remaining=$((deadline - now))
+    (( budget > 0 && remaining < 0 )) && return 1
+    # At most two HTTP ports can be probed. Bound both by the time remaining.
+    probe_ms=$((remaining / 2))
+    (( probe_ms > 3000 )) && probe_ms=3000
+    (( probe_ms < 1 )) && probe_ms=1
+    printf -v probe_timeout '%d.%03d' "$((probe_ms / 1000))" "$((probe_ms % 1000))"
+    if (( official )) && worker_healthy_for_pid "$pid" "$probe_timeout"; then
+      now="$(startup_clock_ms)" || return 1
+      (( budget > 0 && now > deadline )) && return 1
+      if kill -0 "$pid" 2>/dev/null && pid_is_official_worker "$pid"; then
+        STARTUP_WAIT_FAILURE=""
+        return 0
+      fi
+      STARTUP_WAIT_FAILURE="child_dead_or_identity_mismatch"
+      return 1
+    fi
+    now="$(startup_clock_ms)" || return 1
+    (( now >= deadline )) && return 1
+    pause_ms=$((deadline - now))
+    (( pause_ms > 250 )) && pause_ms=250
+    printf -v pause '%d.%03d' "$((pause_ms / 1000))" "$((pause_ms % 1000))"
+    sleep "$pause"
+  done
 }
 
 running_version_for_pid() {
@@ -856,16 +942,7 @@ child_pid=$!
 printf '%s\n' "$child_pid" > "$PID_FILE" 2>/dev/null || true
 write_status "starting pid=$child_pid release=$ACTIVE_DIR $(now_iso)"
 
-sleep "$START_WAIT"
-
-if ! kill -0 "$child_pid" 2>/dev/null || ! pid_is_official_worker "$child_pid"; then
-  log "processo recém-iniciado morreu ou não corresponde ao agent oficial; nenhuma resposta de outra porta será aceita"
-  write_status "failed child_dead_or_identity_mismatch pid=$child_pid $(now_iso)"
-  rm -f "$PID_FILE" 2>/dev/null || true
-  exit 1
-fi
-
-if worker_healthy_for_pid "$child_pid"; then
+if wait_for_worker_ready "$child_pid"; then
   effective_port="$(runtime_http_port)"
   log "worker Termux iniciado e validado; pid=$child_pid http_port=${effective_port:-none}"
   write_status "ok pid=$child_pid http_port=${effective_port:-none} $(now_iso)"
@@ -873,6 +950,13 @@ if worker_healthy_for_pid "$child_pid"; then
   ensure_runtime_companions
   run_post_start_maintenance_async
   exit 0
+fi
+
+if [[ "$STARTUP_WAIT_FAILURE" == "child_dead_or_identity_mismatch" ]]; then
+  log "processo recém-iniciado morreu ou não corresponde ao agent oficial; nenhuma resposta de outra porta será aceita"
+  write_status "failed child_dead_or_identity_mismatch pid=$child_pid $(now_iso)"
+  rm -f "$PID_FILE" 2>/dev/null || true
+  exit 1
 fi
 
 # O filho ainda está vivo, mas o supervisor não conseguiu provar identidade +

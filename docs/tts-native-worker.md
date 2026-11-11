@@ -56,6 +56,13 @@ um executável de desenvolvimento explícito; nesse caso, forneça opcionalmente
 `TTS_NATIVE_WORKER_SHA256`. `TTS_NATIVE_WORKER_SOCKET` permite um caminho Unix
 privado livre com até 103 bytes; o padrão inclui o PID do processo proprietário.
 
+O launcher consulta a prontidão até o processo correto responder, sem uma
+espera fixa antes da primeira checagem. No modo nativo, o orçamento é de pelo
+menos 15 segundos, cobrindo a preparação inicial dos bancos de voz. Valores
+maiores de `PHONE_WORKER_START_WAIT_SECONDS` são preservados;
+`PHONE_WORKER_NATIVE_START_TIMEOUT_SECONDS` pode ampliar o prazo nativo.
+Uma resposta de outro PID ou um status antigo continua sendo recusado.
+
 O supervisor inicia o filho com `--owner-stdin`: fechar o pipe do pai encerra o
 serviço, inclusive se o Python morrer sem executar seu cleanup. Conexões
 interrompidas cancelam a fonte nativa. O serviço limita requisições/conexões,
