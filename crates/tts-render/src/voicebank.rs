@@ -11,6 +11,15 @@ use std::{
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
+#[cfg(test)]
+std::thread_local! {
+    static INDEX_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(crate) fn index_load_count() -> usize {
+    INDEX_LOADS.with(std::cell::Cell::get)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OtoEntry {
     pub alias: String,
@@ -86,7 +95,7 @@ pub fn pitch_number(value: &str) -> Option<i32> {
     let num = (c[3].parse::<i32>().ok()? + 1) * 12 + step + shift;
     (0..=127).contains(&num).then_some(num)
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoicebankOptions {
     pub minimum_aliases: usize,
     pub alias_suffix: String,
@@ -114,6 +123,8 @@ pub struct VoicebankIndex {
 }
 impl VoicebankIndex {
     pub fn load(root: &Path, options: &VoicebankOptions) -> Result<Self, String> {
+        #[cfg(test)]
+        INDEX_LOADS.with(|count| count.set(count.get() + 1));
         let base = fs::canonicalize(root).map_err(|e| format!("voicebank não encontrada: {e}"))?;
         if !base.is_dir() {
             return Err("voicebank não encontrada".into());

@@ -3,7 +3,7 @@
 use crate::{
     prosody::{self, ProsodySettings},
     python_round,
-    renderer::RenderRequest,
+    renderer::{PreparedVoicebank, RenderRequest},
     voicebank::{VoicebankIndex, VoicebankOptions},
 };
 use serde_json::Value;
@@ -289,8 +289,8 @@ pub fn request_from_worker(
             pitch_map: prefix == "ANNA",
         };
         match VoicebankIndex::load(&path, &options) {
-            Ok(_) => {
-                selected = Some((path, profile, options));
+            Ok(index) => {
+                selected = Some((path, profile, options, index));
                 break;
             }
             Err(e) => {
@@ -301,7 +301,7 @@ pub fn request_from_worker(
             }
         }
     }
-    let (voicebank, bank_profile, voicebank_options) = selected.ok_or_else(|| {
+    let (voicebank, bank_profile, voicebank_options, selected_index) = selected.ok_or_else(|| {
         format!(
             "banco de voz da {voice} indisponível: {}",
             errors.join("; ")
@@ -430,6 +430,9 @@ pub fn request_from_worker(
         .and_then(Value::as_u64)
         .unwrap_or(8 * 1024 * 1024)
         .min(64 * 1024 * 1024) as usize;
+    let prepared_voicebank = Some(PreparedVoicebank::new(
+        voicebank.clone(), voicebank_options.clone(), selected_index,
+    ));
     Ok(RenderRequest {
         text,
         voice_id: voice,
@@ -484,6 +487,7 @@ pub fn request_from_worker(
             cache.join("native-sources")
         }),
         engine_environment,
+        prepared_voicebank,
     })
 }
 
@@ -491,6 +495,66 @@ pub fn request_from_worker(
 mod tests {
     use super::*;
     use serde_json::json;
+    fn request_fixture() -> (tempfile::TempDir, HashMap<String, String>, Value) {
+        let bank = tempfile::tempdir().unwrap();
+        std::fs::write(bank.path().join("source.wav"),
+            crate::renderer::encode_wav(&vec![2000; 22050]).unwrap()).unwrap();
+        std::fs::write(bank.path().join("oto.ini"), "source.wav=a,0,45,-400,30,10\n").unwrap();
+        let environment = HashMap::from([
+            ("HOME".into(), bank.path().to_string_lossy().into_owned()),
+            ("PHONE_WORKER_TETO_ENABLED".into(), "true".into()),
+            ("PHONE_WORKER_TETO_VOICEBANK_MODE".into(), "standard".into()),
+            ("PHONE_WORKER_TETO_VOICEBANK_DIR".into(), bank.path().to_string_lossy().into_owned()),
+            ("PHONE_WORKER_TETO_MIN_ALIASES".into(), "1".into()),
+        ]);
+        (bank, environment, json!({"text":"a a", "ttv_voice_id":"kasane-teto"}))
+    }
+    #[test]
+    fn one_index_load_serves_selection_fingerprint_plan_and_identical_pcm() {
+        let (_bank, environment, body) = request_fixture();
+        let before = crate::voicebank::index_load_count();
+        let mut request = request_from_worker(&body, &environment).unwrap();
+        request.fragment_cache = None;
+        let index = request.voicebank_index().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&index, &request.voicebank_index().unwrap()));
+        let plan = crate::renderer::plan(&request).unwrap();
+        let output = crate::renderer::render_with(&request, &Default::default(), |_| Ok(vec![2000;22050])).unwrap();
+        assert_eq!(crate::voicebank::index_load_count() - before, 1);
+
+        let mut legacy = request.clone();
+        legacy.prepared_voicebank = None;
+        assert_eq!(index.fingerprint, legacy.voicebank_index().unwrap().fingerprint);
+        assert_eq!(serde_json::to_value(plan).unwrap(), serde_json::to_value(crate::renderer::plan(&legacy).unwrap()).unwrap());
+        let previous = crate::renderer::render_with(&legacy, &Default::default(), |_| Ok(vec![2000;22050])).unwrap();
+        assert_eq!(output.audio, previous.audio);
+    }
+    #[test]
+    fn independent_requests_observe_changed_voicebank_and_snapshot_never_enters_json() {
+        let (bank, environment, body) = request_fixture();
+        let request = request_from_worker(&body, &environment).unwrap();
+        let first = request.voicebank_index().unwrap();
+        std::fs::write(bank.path().join("oto.ini"), "source.wav=a,0,45,-400,30,10\nsource.wav=b,0,45,-400,30,10\n").unwrap();
+        let next = request_from_worker(&body, &environment).unwrap();
+        assert_ne!(first.fingerprint, next.voicebank_index().unwrap().fingerprint);
+        assert_eq!(first.alias_count(), 1);
+        assert_eq!(next.voicebank_index().unwrap().alias_count(), 2);
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert!(encoded.get("prepared_voicebank").is_none());
+        let decoded: RenderRequest = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.prepared_voicebank.is_none());
+        assert_eq!(decoded.voicebank_index().unwrap().alias_count(), 2);
+    }
+    #[test]
+    fn changing_request_bank_or_options_cannot_reuse_a_different_snapshot() {
+        let (bank, environment, body) = request_fixture();
+        let request = request_from_worker(&body, &environment).unwrap();
+        let mut different = request.clone();
+        different.voicebank_options.minimum_aliases = 2;
+        assert!(different.voicebank_index().is_err());
+        different = request;
+        different.voicebank = bank.path().join("missing-bank");
+        assert!(different.voicebank_index().is_err());
+    }
     #[test]
     fn missing_voice_never_borrows_teto() {
         let env = HashMap::from([

@@ -3327,6 +3327,58 @@ def _music_agent_pid_file() -> Path:
     return _phone_worker_music_bridge_module("servico").pid_file(phone_worker_dir=_phone_worker_dir)
 
 
+def _music_agent_shares_native_tts_socket() -> bool:
+    """Check the local process started by the managed launcher without a health RPC."""
+    host = (os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip()
+    socket_path = os.getenv("TTS_NATIVE_WORKER_SOCKET") or ""
+    if host not in {"127.0.0.1", "localhost", "::1"} or not socket_path:
+        return False
+    try:
+        socket_stat = Path(socket_path).lstat()
+        if (not stat.S_ISSOCK(socket_stat.st_mode) or socket_stat.st_uid != os.getuid()
+                or stat.S_IMODE(socket_stat.st_mode) & 0o077):
+            return False
+        pid = _read_pid_file(_music_agent_pid_file())
+        if not pid:
+            return False
+        process = Path("/proc") / str(pid)
+        if process.stat().st_uid != os.getuid():
+            return False
+        argv = (process / "cmdline").read_bytes().split(b"\0")
+        if argv[1:3] != [b"-m", b"cogs.musica.runtime_telefone.agente.servidor"]:
+            return False
+        if (process / "cwd").resolve(strict=True) != Path(__file__).resolve().parent:
+            return False
+        environment = dict(entry.split(b"=", 1) for entry in (process / "environ").read_bytes().split(b"\0") if b"=" in entry)
+        port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8780))
+        return (environment.get(b"TTS_NATIVE_WORKER", b"").strip().lower() in {b"1", b"true", b"yes", b"on"}
+                and environment.get(b"TTS_NATIVE_WORKER_SOCKET") == os.fsencode(socket_path)
+                and int(environment.get(b"MUSIC_AGENT_PORT") or b"8780") == port)
+    except (OSError, ValueError, RuntimeError, OverflowError):
+        # Keep the established prebuild route when /proc is unavailable or the
+        # companion has not restarted into the same native runtime yet.
+        return False
+
+
+def _music_agent_native_stream_compatible(body: dict[str, Any], engine: str) -> bool:
+    if any(key in body for key in ("endpoint", "source_ip", "proxy", "connect_timeout_seconds",
+                                   "receive_timeout_seconds", "fallback_voice", "fallback_language")):
+        return False
+    mode = str(body.get("cache_mode") or "prefer").strip().lower()
+    if body.get("cache_only") or mode in {"only", "cache_only"}:
+        return False
+    if engine == "edge":
+        # The adapter accepts the normal bot controls. Keep unusual control
+        # spellings on the existing Rust synthesis path for normalization.
+        voice = body.get("voice", "pt-BR-FranciscaNeural")
+        return bool(isinstance(voice, str) and voice.strip()
+                    and re.fullmatch(r"[+-]?[0-9]+%", str(body.get("rate") or "+0%").strip())
+                    and re.fullmatch(r"[+-]?[0-9]+Hz", str(body.get("pitch") or "+0Hz").strip(), re.IGNORECASE))
+    language = str(body.get("language") or "pt").strip().lower().replace("_", "-")
+    # The Music Agent's legacy aliases map these to a different provider locale.
+    return language not in {"ptbr", "br", "en-us", "us"}
+
+
 def _music_agent_log_file() -> Path:
     return _phone_worker_music_bridge_module("servico").log_file(phone_worker_dir=_phone_worker_dir)
 
@@ -5341,7 +5393,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if not _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True):
             raise RuntimeError("TTS direto do Worker Voice Agent desativado")
         performance = _phone_worker_tts_policy_module().performance_request(body)
-        if _tts_agent_normalize_engine(body.get("engine")) == "teto":
+        requested_engine = _tts_agent_normalize_engine(body.get("engine"))
+        if requested_engine == "teto":
             # Validate even a prebuilt request before changing a voice lease.
             _ttv_request_settings(body)
         guild_id = _voice_agent_int(body.get("guild_id"), 0)
@@ -5403,18 +5456,33 @@ class WorkerHandler(BaseHTTPRequestHandler):
         proxy_body["text"] = text or str(body.get("text") or body.get("content") or "")
         proxy_body["timeout_seconds"] = max(3.0, min(120.0 if performance else 90.0, float(body.get("timeout_seconds") or
             (120.0 if performance else _env_float("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS", 30.0)))))
-        if (
-            (proxy_body.get("text") or performance)
-            and not (proxy_body.get("audio_b64") or proxy_body.get("audio_url") or proxy_body.get("url"))
-            and _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_WITH_TTS_AGENT", True)
-        ):
+        prebuild_setting = "PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_WITH_TTS_AGENT"
+        needs_audio = (
+            bool(proxy_body.get("text") or performance)
+            and not (proxy_body.get("audio_b64") or proxy_body.get("audioBase64") or proxy_body.get("audio_url") or proxy_body.get("url"))
+        )
+        prebuild = needs_audio and _env_bool(prebuild_setting, True)
+        # Explicit prebuild settings and options the adapter does not support
+        # keep using the complete response.
+        stream = (prebuild and not str(os.getenv(prebuild_setting) or "").strip()
+                  and _native_tts_enabled() and not performance and requested_engine in {"edge", "gtts"}
+                  and not os.getenv("PHONE_WORKER_TTS_AGENT_DIRECT_PREBUILD_TIMEOUT_SECONDS")
+                  and _music_agent_native_stream_compatible(body, requested_engine)
+                  and _music_agent_shares_native_tts_socket())
+        if prebuild:
+            max_audio_bytes = max(1024, min(self.max_output_bytes,
+                _env_int("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_BYTES", 12 * 1024 * 1024)))
+        if stream:
+            self._ensure_tts_piper_turbo_allowed()
+            proxy_body.update(engine=requested_engine, max_audio_bytes=max_audio_bytes)
+        elif prebuild:
             try:
                 synth_body = dict(proxy_body)
                 synth_body["task"] = "tts_agent_synthesize"
                 synth_body.setdefault("cache_mode", "prefer")
                 synth_body["timeout_seconds"] = max(3, min(int(proxy_body["timeout_seconds"]),
                     120 if performance else _env_int("PHONE_WORKER_TTS_AGENT_DIRECT_PREBUILD_TIMEOUT_SECONDS", 18)))
-                synth_body["max_audio_bytes"] = max(1024, min(self.max_output_bytes, _env_int("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_BYTES", 12 * 1024 * 1024)))
+                synth_body["max_audio_bytes"] = max_audio_bytes
                 synth_result = self._task_tts_agent_synthesize(synth_body)
                 if isinstance(synth_result, dict) and synth_result.get("ok") and synth_result.get("data_b64"):
                     proxy_body["audio_b64"] = str(synth_result.get("data_b64") or "")
@@ -5432,7 +5500,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 # A falha de prebuild não deve quebrar o TTS direto: o Music Agent ainda
                 # pode sintetizar no caminho antigo. Guardamos o motivo só para diagnóstico.
                 proxy_body["tts_agent_prebuild_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=140)}"
-        if _tts_agent_normalize_engine(body.get("engine")) == "teto":
+        if requested_engine == "teto":
             if not (proxy_body.get("audio_b64") or proxy_body.get("audio_url") or proxy_body.get("url")):
                 raise RuntimeError("Teto indisponível: síntese obrigatória antes da reprodução direta")
             if _tts_agent_normalize_engine(proxy_body.get("engine")) != "teto":

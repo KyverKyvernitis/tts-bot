@@ -671,7 +671,7 @@ fn render_plain(request: &RenderRequest, cancel: &Cancellation) -> Result<Render
     cancel.check()?;
     let library = library_path(request)?;
     let (digest, architecture) = verify_library(&library)?;
-    let index = VoicebankIndex::load(&request.voicebank, &request.voicebank_options)?;
+    let index = request.voicebank_index()?;
     let mut normalized = request.clone();
     normalized.text = text;
     normalized.velocity = request.velocity.clamp(20., 200.);

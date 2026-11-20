@@ -89,6 +89,62 @@ legado. Para reverter o binário, escolha a release anterior validada no fluxo d
 instalação e reinicie em janela sem áudio; caches, `.env`, tokens e voicebanks
 ficam fora das releases.
 
+## Tempo até o primeiro áudio
+
+Cada pedido Teto reaproveita o índice do banco de voz ao calcular a chave de
+cache e montar a renderização. O próximo pedido lê o banco de novo para
+reconhecer mudanças. A leitura do índice roda fora das threads que atendem
+as conexões do worker. A resposta de fala Teto continua em WAV completo.
+
+No Music Agent, o stream MP3 nativo de Edge e gTTS usa uma sondagem inicial de
+512 bytes. `TTS_STREAM_FFMPEG_PROBESIZE_BYTES` permite ajustar esse valor.
+Quando a rota direta precisa abrir uma conexão de voz, o agente pode preparar
+o primeiro PCM enquanto a conexão é estabelecida. Para pedidos compatíveis,
+o Phone Worker envia o texto ao Music Agent se ambos usarem o mesmo socket
+nativo. `PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_WITH_TTS_AGENT=true`
+mantém a passagem por áudio completo. Uma interrupção confirmada após o
+primeiro frame encerra a fala com erro para evitar que a VPS a repita.
+
+Em `/health` na VPS, `tts_metrics.latency_percentiles_ms` contém
+`worker_command_to_first_frame` e recortes por motor e por stream Rust. Esses
+tempos começam ao chegar ao Music Agent e terminam no primeiro frame entregue
+ao player. Para rotas com áudio pré-renderizado, a síntese anterior à chamada
+do agente fica fora desse tempo. `message_to_first_frame` continua medindo o
+caminho com player na VPS. O atraso até o ouvinte depende também da transmissão
+e do cliente Discord.
+
+Para comparar antes e depois, use a mesma rota, voz, efeitos e frases, com
+conexão fria e já aberta em lotes separados. Registre acertos de cache e erros
+junto com p50, p95 e número de amostras. O `/health` resume uma janela móvel da
+execução atual, então use janelas distintas para cada versão.
+
+### Resultados locais
+
+| Cenário | p50 anterior → novo | p95 anterior → novo |
+| --- | ---: | ---: |
+| MP3 no Music Agent, voz aberta | 326 → 198 ms | 340 → 241 ms |
+| MP3 no Music Agent, abertura de voz simulada em 160 ms | 485 → 195 ms | 547 → 226 ms |
+| Teto sem cache da resposta, rodada inicial | 200 → 87 ms | 302 → 523 ms |
+| Teto com cache da resposta, rodada inicial | 116 → 76 ms | 177 → 431 ms |
+| Teto sem cache da resposta, repetição | 186 → 96 ms | 277 → 162 ms |
+| Teto com cache da resposta, repetição | 105 → 66 ms | 124 → 93 ms |
+
+O benchmark do Music Agent usa FFmpeg real, MP3 de teste servido por socket
+Unix e 30 pedidos por caso e versão. O PCM foi idêntico. Para reproduzir,
+execute `python scripts/benchmark-tts-worker-first-audio.py --baseline-zip ARQUIVO.zip`
+com o ZIP de origem e as dependências do bot instaladas.
+
+O benchmark da Teto mede o primeiro byte do WAV servido pelo worker Rust em
+release. Usa 5 mil entradas geradas para o banco de voz e um resampler de
+teste. Foram 60 pedidos por caso e versão na rodada inicial e 40 na repetição,
+com a ordem das versões invertida. Os WAVs foram idênticos. A mediana melhorou
+nas duas rodadas. O p95 melhorou na repetição e piorou na rodada inicial,
+quando um lote da versão nova teve picos de mais de um segundo. Para
+reproduzir, rode `cargo run --locked --release -p tts-worker --example benchmark_ttv_startup -- 30 5000`
+com o mesmo exemplo nas duas árvores de código e as mesmas entradas de build.
+Os dois ensaios medem etapas locais. A latência percebida no Discord ainda
+precisa ser medida no telefone com os provedores e as vozes do uso normal.
+
 ## Validação
 
 ```bash

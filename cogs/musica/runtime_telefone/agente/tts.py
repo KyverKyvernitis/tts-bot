@@ -32,6 +32,13 @@ from .utilitarios import safe_id, short_text
 _TTS_FFMPEG_BASE_OPTIONS = "-vn -sn -dn -loglevel warning"
 
 
+def _native_stream_input_options():
+    # The native service declares MP3 explicitly; a large generic format probe
+    # only delays the first PCM while the provider is still sending its body.
+    probe = min(16384, max(32, env_int("TTS_STREAM_FFMPEG_PROBESIZE_BYTES", 512)))
+    return f"-nostdin -f mp3 -probesize {probe} -analyzeduration 0"
+
+
 def _native_tts_enabled():
     return (truthy(os.environ.get("TTS_NATIVE_WORKER"), False)
             or os.environ.get("TTS_BACKEND", "").strip().lower() == "rust")
@@ -225,6 +232,20 @@ class _TimedTTSSource(discord.AudioSource):
         self.source.cleanup()
 
 
+def _native_partial_playback_result(source, *, engine, audio_format, started, direct_tts=False):
+    """A completed first PCM read forbids replaying a failed native stream."""
+    first = getattr(source, "first_frame_ms", None)
+    if (not isinstance(getattr(source, "reader", None), _NativeTTSReader)
+            or isinstance(first, bool) or not isinstance(first, (int, float))
+            or not math.isfinite(first) or first < 0):
+        return None
+    return {"ok": False, "partial_playback": True, "native_stream": True,
+            "first_frame_observed": True, "first_frame_ms": first,
+            "engine": engine, "audio_format": audio_format or "mp3", "direct_tts": direct_tts,
+            "elapsed_ms": round(max(0.0, time.monotonic() - started) * 1000, 1),
+            "error": "fluxo TTS nativo interrompido após o primeiro áudio; não reproduzir novamente"}
+
+
 def _schedule_tts_prune(callback, path):
     global _TTS_MAINTENANCE_PENDING, _TTS_MAINTENANCE_RUNNING
     with _TTS_MAINTENANCE_LOCK:
@@ -271,6 +292,11 @@ class TTSMixin:
             raise ValueError(f"engine {engine} indisponível para síntese no Music Agent nativo; envie áudio pré-sintetizado")
         timeout = max(1.0, min(90.0, float(body.get("timeout_seconds") or 30)))
         limit = max(1024, int(env_float("MUSIC_AGENT_TTS_MAX_B64_BYTES", 8 * 1024 * 1024)))
+        if body.get("max_audio_bytes") is not None:
+            requested_limit = body["max_audio_bytes"]
+            if isinstance(requested_limit, bool) or not isinstance(requested_limit, int) or requested_limit <= 0:
+                raise ValueError("max_audio_bytes TTS nativo deve ser um inteiro positivo")
+            limit = min(limit, requested_limit)
         payload = {"engine": engine, "text": text,
                    "voice": str(body.get("voice") or "pt-BR-FranciscaNeural"),
                    "language": self._normalize_tts_language(body.get("language")),
@@ -661,7 +687,7 @@ class TTSMixin:
             timed = None
             try:
                 source = discord.FFmpegPCMAudio(reader, pipe=True, executable=self.ffmpeg_executable,
-                    before_options='-nostdin -f mp3 -probesize 32768 -analyzeduration 0',
+                    before_options=_native_stream_input_options(),
                     options=ffmpeg_options)
                 timed = await self._buffer_tts_source(source, started=started, reader=reader,
                                                       timeout=body.get('timeout_seconds') or 30)
@@ -796,6 +822,11 @@ class TTSMixin:
                 await asyncio.wait_for(future, timeout=timeout)
         except Exception as exc:
             self.log("tts_overlay_interrupted", guild_id=guild_id, error=f"{type(exc).__name__}: {short_text(exc, 180)}")
+            if not _allow_direct_fallback:
+                partial = _native_partial_playback_result(
+                    tts_source, engine=engine, audio_format="mp3", started=started)
+                if partial is not None:
+                    return partial
             raise
         finally:
             if future is not None:
@@ -813,7 +844,42 @@ class TTSMixin:
                 await self._refresh_voice_presence_policy(guild_id, source="tts_end")
         elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
         self.log("tts_overlay_done", guild_id=guild_id, elapsed_ms=round(elapsed_ms, 1))
-        return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "first_frame_observed": tts_source.first_frame_ms is not None, "first_frame_ms": tts_source.first_frame_ms, "state": st.public()}
+        return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "first_frame_observed": tts_source.first_frame_ms is not None, "first_frame_ms": tts_source.first_frame_ms,
+                "native_stream": isinstance(getattr(tts_source, "reader", None), _NativeTTSReader), "state": st.public()}
+
+    @contextlib.asynccontextmanager
+    async def _direct_voice_with_prepared_tts(self, guild_id, body, *, started):
+        """Overlap a cold voice connection with native MP3 preparation.
+
+        The caller enters only after its guild lock and music ownership checks.
+        A bounded PCM reader keeps decoding off the voice thread. Its task and
+        physical input are reclaimed even if the voice connection fails.
+        """
+        engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
+        native_stream = (_native_tts_enabled()
+                         and engine in {"edge", "edge_tts", "gtts", "google", "google_tts", "googlecloud", "google_cloud", "gcloud"}
+                         and not str(body.get("audio_url") or body.get("url") or "").strip()
+                         and not (body.get("audio_b64") or body.get("audioBase64")))
+        preparation = None
+        temporary_context = (tempfile.TemporaryDirectory(prefix="music-agent-tts-prepare-")
+                             if native_stream else contextlib.nullcontext(None))
+        with temporary_context as temporary:
+            if native_stream:
+                preparation = asyncio.create_task(self._prepare_tts_source(
+                    body, Path(temporary) / "tts.mp3", started=started))
+            try:
+                voice_client, created = await self._ensure_direct_voice_client(guild_id)
+                yield voice_client, created, preparation
+            finally:
+                if preparation is not None:
+                    if not preparation.done():
+                        preparation.cancel()
+                    result = (await asyncio.gather(preparation, return_exceptions=True))[0]
+                    if isinstance(result, tuple):
+                        # _TimedTTSSource.cleanup is idempotent. The normal
+                        # playback path may already have closed this source.
+                        with contextlib.suppress(Exception):
+                            result[0].cleanup()
 
     async def cmd_voice_tts(self, body: dict[str, Any]) -> dict[str, Any]:
         """Play a short TTS directly from the worker-owned Discord voice plane.
@@ -853,145 +919,160 @@ class TTSMixin:
             # Música e TTS compartilham a mesma sessão Discord Voice. Passe pelo
             # mesmo single-flight para não competir com preconnect/playback.
             self.log("voice_direct_tts_prepare", guild_id=guild_id, channel=voice_channel_id)
-            voice_client, _created = await self._ensure_direct_voice_client(guild_id)
-            self._cancel_idle_disconnect(guild_id)
-            self._cancel_voice_presence_disconnect(guild_id)
-            previous_mode = str(st.voice_session_mode or "disconnected")
-            self._set_voice_session_mode(st, "tts_active", reason="direct_tts_start")
-            st.player = voice_client
-            st.transport = "worker_voice_direct_tts"
-            st.status = "tts_direct"
-            st.updated_at = time.time()
+            async with self._direct_voice_with_prepared_tts(guild_id, body, started=started) as (
+                voice_client, _created, preparation
+            ):
+                self._cancel_idle_disconnect(guild_id)
+                self._cancel_voice_presence_disconnect(guild_id)
+                previous_mode = str(st.voice_session_mode or "disconnected")
+                self._set_voice_session_mode(st, "tts_active", reason="direct_tts_start")
+                st.player = voice_client
+                st.transport = "worker_voice_direct_tts"
+                st.status = "tts_direct"
+                st.updated_at = time.time()
 
-            try:
-                if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
-                    with contextlib.suppress(Exception):
-                        voice_client.stop()
-                    await asyncio.sleep(0.15)
+                try:
+                    if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
+                        with contextlib.suppress(Exception):
+                            voice_client.stop()
+                        await asyncio.sleep(0.15)
 
-                loop = asyncio.get_running_loop()
-                finished = loop.create_future()
-                def _after(error: Exception | None) -> None:
-                    def complete():
-                        if not finished.done():
-                            finished.set_exception(error) if error else finished.set_result(None)
-                    loop.call_soon_threadsafe(complete)
+                    loop = asyncio.get_running_loop()
+                    finished = loop.create_future()
+                    def _after(error: Exception | None) -> None:
+                        def complete():
+                            if not finished.done():
+                                finished.set_exception(error) if error else finished.set_result(None)
+                        loop.call_soon_threadsafe(complete)
 
-                engine = "worker"
-                with tempfile.TemporaryDirectory(prefix="music-agent-direct-tts-") as tmp:
-                    def _audio_suffix_from_format(value: Any) -> str:
-                        fmt = str(value or "").strip().lower().replace(".", "").replace("-", "_")
-                        if fmt in {"ogg", "opus", "ogg_opus"}:
-                            return ".ogg"
-                        if fmt in {"wav", "wave", "linear16", "pcm"}:
-                            return ".wav"
-                        if fmt == "m4a":
-                            return ".m4a"
-                        return ".mp3"
+                    engine = "worker"
+                    with tempfile.TemporaryDirectory(prefix="music-agent-direct-tts-") as tmp:
+                        def _audio_suffix_from_format(value: Any) -> str:
+                            fmt = str(value or "").strip().lower().replace(".", "").replace("-", "_")
+                            if fmt in {"ogg", "opus", "ogg_opus"}:
+                                return ".ogg"
+                            if fmt in {"wav", "wave", "linear16", "pcm"}:
+                                return ".wav"
+                            if fmt == "m4a":
+                                return ".m4a"
+                            return ".mp3"
 
-                    def _build_tts_audio_source(tts_input_path: str, *, audio_format: str = "") -> Any:
-                        suffix = _audio_suffix_from_format(audio_format or Path(str(tts_input_path)).suffix)
-                        ffmpeg_options, effect_filter = self._tts_ffmpeg_options_from_body(body)
-                        opus_cls = getattr(discord, "FFmpegOpusAudio", None)
-                        if suffix == ".ogg" and opus_cls is not None:
-                            if not effect_filter:
+                        def _build_tts_audio_source(tts_input_path: str, *, audio_format: str = "") -> Any:
+                            suffix = _audio_suffix_from_format(audio_format or Path(str(tts_input_path)).suffix)
+                            ffmpeg_options, effect_filter = self._tts_ffmpeg_options_from_body(body)
+                            opus_cls = getattr(discord, "FFmpegOpusAudio", None)
+                            if suffix == ".ogg" and opus_cls is not None:
+                                if not effect_filter:
+                                    try:
+                                        return opus_cls(
+                                            tts_input_path,
+                                            executable=self.ffmpeg_executable,
+                                            before_options="-nostdin",
+                                            options=ffmpeg_options,
+                                            codec="copy",
+                                        )
+                                    except TypeError:
+                                        pass
+                                    except Exception as exc:
+                                        self.log("voice_direct_tts_opus_copy_fallback", error=short_text(exc, 180))
                                 try:
                                     return opus_cls(
                                         tts_input_path,
                                         executable=self.ffmpeg_executable,
                                         before_options="-nostdin",
                                         options=ffmpeg_options,
-                                        codec="copy",
                                     )
-                                except TypeError:
-                                    pass
                                 except Exception as exc:
-                                    self.log("voice_direct_tts_opus_copy_fallback", error=short_text(exc, 180))
-                            try:
-                                return opus_cls(
-                                    tts_input_path,
-                                    executable=self.ffmpeg_executable,
-                                    before_options="-nostdin",
-                                    options=ffmpeg_options,
-                                )
-                            except Exception as exc:
-                                self.log("voice_direct_tts_opus_source_fallback", error=short_text(exc, 180))
-                        return discord.FFmpegPCMAudio(
-                            tts_input_path, executable=self.ffmpeg_executable,
-                            before_options="-nostdin", options=ffmpeg_options
-                        )
+                                    self.log("voice_direct_tts_opus_source_fallback", error=short_text(exc, 180))
+                            return discord.FFmpegPCMAudio(
+                                tts_input_path, executable=self.ffmpeg_executable,
+                                before_options="-nostdin", options=ffmpeg_options
+                            )
 
-                    audio_format = str(body.get("audio_format") or body.get("format") or "").strip().lower()
-                    path = Path(tmp) / f"tts{_audio_suffix_from_format(audio_format)}"
-                    audio_url = str(body.get("audio_url") or body.get("url") or "").strip()
-                    audio_b64 = str(body.get("audio_b64") or body.get("audioBase64") or "").strip()
-                    tts_input = ""
-                    audio_source = None
-                    if audio_url.startswith(("http://", "https://", "file://")):
-                        tts_input = audio_url
-                        engine = str(body.get("engine") or "prebuilt-url").strip() or "prebuilt-url"
-                    elif audio_b64:
-                        raw = base64.b64decode(audio_b64.encode("ascii"), validate=True)
-                        max_bytes = max(1024, int(env_float("MUSIC_AGENT_TTS_MAX_B64_BYTES", 8 * 1024 * 1024)))
-                        if len(raw) > max_bytes:
-                            raise ValueError("áudio TTS grande demais para o Music Agent")
-                        path.write_bytes(raw)
-                        tts_input = str(path)
-                        engine = str(body.get("engine") or "prebuilt-b64").strip() or "prebuilt-b64"
-                    else:
-                        path = Path(tmp) / "tts.mp3"
-                        audio_source, engine = await self._prepare_tts_source(body, path, started=started)
-                        audio_format = "mp3"
-                    if audio_source is None:
-                        audio_source = _TimedTTSSource(_build_tts_audio_source(tts_input, audio_format=audio_format), started=started)
-                    play_started = time.monotonic()
-                    try:
-                        voice_client.play(audio_source, after=_after)
-                        self.log("voice_direct_tts_start", guild_id=guild_id, engine=engine, channel=voice_channel_id, chars=len(str(body.get("text") or "")))
-                        await asyncio.wait_for(finished, timeout=timeout)
-                    except (asyncio.TimeoutError, TimeoutError):
-                        self.log(
-                            "voice_direct_tts_timeout",
-                            guild_id=guild_id,
-                            engine=engine,
-                            channel=voice_channel_id,
-                            timeout_seconds=round(timeout, 2),
-                            elapsed_ms=round(max(0.0, (time.monotonic() - started) * 1000.0), 1),
-                        )
-                        with contextlib.suppress(Exception):
-                            if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
-                                voice_client.stop()
-                        raise
-                    except BaseException:
-                        with contextlib.suppress(Exception):
-                            if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
-                                voice_client.stop()
-                        raise
-                    finally:
-                        with contextlib.suppress(Exception):
-                            audio_source.cleanup()
-                elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
-                playback_ms = max(0.0, (time.monotonic() - play_started) * 1000.0)
-                st.status = "idle"
-                st.updated_at = time.time()
-                self.log("voice_direct_tts_done", guild_id=guild_id, engine=engine, elapsed_ms=round(elapsed_ms, 1))
-                return {
-                    "ok": True,
-                    "engine": engine,
-                    "audio_format": audio_format or "mp3",
-                    "direct_tts": True,
-                    "voice_connected": bool(getattr(voice_client, "is_connected", lambda: False)()),
-                    "playback_ms": round(playback_ms, 1),
-                    "elapsed_ms": round(elapsed_ms, 1),
-                    "first_frame_observed": audio_source.first_frame_ms is not None,
-                    "first_frame_ms": audio_source.first_frame_ms,
-                    "state": st.public(),
-                }
+                        audio_format = str(body.get("audio_format") or body.get("format") or "").strip().lower()
+                        path = Path(tmp) / f"tts{_audio_suffix_from_format(audio_format)}"
+                        audio_url = str(body.get("audio_url") or body.get("url") or "").strip()
+                        audio_b64 = str(body.get("audio_b64") or body.get("audioBase64") or "").strip()
+                        tts_input = ""
+                        audio_source = None
+                        if audio_url.startswith(("http://", "https://", "file://")):
+                            tts_input = audio_url
+                            engine = str(body.get("engine") or "prebuilt-url").strip() or "prebuilt-url"
+                        elif audio_b64:
+                            raw = base64.b64decode(audio_b64.encode("ascii"), validate=True)
+                            max_bytes = max(1024, int(env_float("MUSIC_AGENT_TTS_MAX_B64_BYTES", 8 * 1024 * 1024)))
+                            if len(raw) > max_bytes:
+                                raise ValueError("áudio TTS grande demais para o Music Agent")
+                            path.write_bytes(raw)
+                            tts_input = str(path)
+                            engine = str(body.get("engine") or "prebuilt-b64").strip() or "prebuilt-b64"
+                        else:
+                            path = Path(tmp) / "tts.mp3"
+                            if preparation is not None:
+                                audio_source, engine = await preparation
+                            else:
+                                audio_source, engine = await self._prepare_tts_source(body, path, started=started)
+                            audio_format = "mp3"
+                        if audio_source is None:
+                            audio_source = _TimedTTSSource(_build_tts_audio_source(tts_input, audio_format=audio_format), started=started)
+                        play_started = time.monotonic()
+                        try:
+                            voice_client.play(audio_source, after=_after)
+                            self.log("voice_direct_tts_start", guild_id=guild_id, engine=engine, channel=voice_channel_id, chars=len(str(body.get("text") or "")))
+                            await asyncio.wait_for(finished, timeout=timeout)
+                        except (asyncio.TimeoutError, TimeoutError):
+                            self.log(
+                                "voice_direct_tts_timeout",
+                                guild_id=guild_id,
+                                engine=engine,
+                                channel=voice_channel_id,
+                                timeout_seconds=round(timeout, 2),
+                                elapsed_ms=round(max(0.0, (time.monotonic() - started) * 1000.0), 1),
+                            )
+                            with contextlib.suppress(Exception):
+                                if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
+                                    voice_client.stop()
+                            partial = _native_partial_playback_result(
+                                audio_source, engine=engine, audio_format=audio_format, started=started, direct_tts=True)
+                            if partial is not None:
+                                return partial
+                            raise
+                        except BaseException as error:
+                            with contextlib.suppress(Exception):
+                                if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
+                                    voice_client.stop()
+                            if isinstance(error, Exception):
+                                partial = _native_partial_playback_result(
+                                    audio_source, engine=engine, audio_format=audio_format, started=started, direct_tts=True)
+                                if partial is not None:
+                                    return partial
+                            raise
+                        finally:
+                            with contextlib.suppress(Exception):
+                                audio_source.cleanup()
+                    elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+                    playback_ms = max(0.0, (time.monotonic() - play_started) * 1000.0)
+                    st.status = "idle"
+                    st.updated_at = time.time()
+                    self.log("voice_direct_tts_done", guild_id=guild_id, engine=engine, elapsed_ms=round(elapsed_ms, 1))
+                    return {
+                        "ok": True,
+                        "engine": engine,
+                        "audio_format": audio_format or "mp3",
+                        "direct_tts": True,
+                        "voice_connected": bool(getattr(voice_client, "is_connected", lambda: False)()),
+                        "playback_ms": round(playback_ms, 1),
+                        "elapsed_ms": round(elapsed_ms, 1),
+                        "first_frame_observed": audio_source.first_frame_ms is not None,
+                        "first_frame_ms": audio_source.first_frame_ms,
+                        "native_stream": isinstance(getattr(audio_source, "reader", None), _NativeTTSReader),
+                        "state": st.public(),
+                    }
 
-            finally:
-                if st.player is voice_client and st.current is None and st.status == "tts_direct":
-                    self._set_status(st, "idle", event="voice_direct_tts_end")
-                if st.player is voice_client and st.current is None:
-                    await self._finish_tts_voice_session(
-                        guild_id, st, voice_client, previous_mode=previous_mode, source="direct_tts_end"
-                    )
+                finally:
+                    if st.player is voice_client and st.current is None and st.status == "tts_direct":
+                        self._set_status(st, "idle", event="voice_direct_tts_end")
+                    if st.player is voice_client and st.current is None:
+                        await self._finish_tts_voice_session(
+                            guild_id, st, voice_client, previous_mode=previous_mode, source="direct_tts_end"
+                        )

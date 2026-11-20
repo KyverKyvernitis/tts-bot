@@ -56,6 +56,32 @@ pub struct RenderRequest {
     pub native_backend: String,
     pub native_source_cache: Option<PathBuf>,
     pub engine_environment: HashMap<String, String>,
+    /// Immutable index selected for this request only. It is never accepted
+    /// from JSON and never shared across independent worker requests.
+    #[serde(skip)]
+    pub prepared_voicebank: Option<PreparedVoicebank>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedVoicebank {
+    path: PathBuf,
+    options: VoicebankOptions,
+    index: Arc<VoicebankIndex>,
+}
+impl PreparedVoicebank {
+    pub(crate) fn new(path: PathBuf, options: VoicebankOptions, index: VoicebankIndex) -> Self {
+        Self { path, options, index: Arc::new(index) }
+    }
+}
+impl RenderRequest {
+    pub fn voicebank_index(&self) -> Result<Arc<VoicebankIndex>, String> {
+        if let Some(prepared) = &self.prepared_voicebank {
+            if prepared.path == self.voicebank && prepared.options == self.voicebank_options {
+                return Ok(prepared.index.clone());
+            }
+        }
+        VoicebankIndex::load(&self.voicebank, &self.voicebank_options).map(Arc::new)
+    }
 }
 impl Default for RenderRequest {
     fn default() -> Self {
@@ -87,6 +113,7 @@ impl Default for RenderRequest {
             native_backend: "command".into(),
             native_source_cache: None,
             engine_environment: HashMap::new(),
+            prepared_voicebank: None,
         }
     }
 }
@@ -429,7 +456,7 @@ pub fn plan(request: &RenderRequest) -> Result<RenderPlan, String> {
     {
         return Err("canto MIDI preserva tom e andamento; use tom 0 e velocidade 1".into());
     }
-    let index = VoicebankIndex::load(&request.voicebank, &request.voicebank_options)?;
+    let index = request.voicebank_index()?;
     let mut score = None;
     let mut groups = None;
     let mut spans: Option<Vec<SingingSpan>> = None;

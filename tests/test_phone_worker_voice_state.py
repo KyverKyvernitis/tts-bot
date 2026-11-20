@@ -3,8 +3,10 @@ import importlib.util
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -207,6 +209,150 @@ def test_direct_tts_keeps_proxy_contract_and_respects_transfer_flag(voice, monke
     assert calls[0]["audio_b64"] == "fixture-audio" and calls[0]["action"] == "voice_tts"
     assert calls[0]["voice_channel_id"] == 2 and calls[0]["timeout_seconds"] == 30.0
     assert bool(worker._VOICE_AGENT_TRANSFER_MEMORY) is granted
+
+
+@pytest.fixture
+def direct_tts(voice, monkeypatch):
+    worker, _ = voice
+    handler = object.__new__(worker.WorkerHandler)
+    handler.server = SimpleNamespace(max_output_bytes=1024 * 1024)
+    syntheses = []
+    monkeypatch.setattr(handler, "_task_tts_agent_synthesize", lambda body: syntheses.append(body) or {
+        "ok": True, "engine": body["engine"], "data_b64": "fixture", "audio_format": "mp3",
+    })
+    monkeypatch.setattr(worker, "_music_agent_snapshot", lambda: {})
+    monkeypatch.setattr(worker, "_tts_agent_snapshot", lambda: {})
+    monkeypatch.setattr(worker, "_voice_agent_snapshot", lambda **kw: {"ok": True})
+    monkeypatch.setenv("TTS_NATIVE_WORKER", "1")
+    monkeypatch.delenv("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_WITH_TTS_AGENT", raising=False)
+    monkeypatch.delenv("PHONE_WORKER_TTS_AGENT_DIRECT_PREBUILD_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(worker, "_music_agent_shares_native_tts_socket", lambda: True)
+    monkeypatch.setattr(handler, "_ensure_tts_piper_turbo_allowed", lambda: ([], []))
+    return worker, handler, syntheses
+
+
+@pytest.mark.parametrize(("engine", "expected"), [("edge", "edge"), ("google-tts", "gtts")])
+def test_direct_tts_dispatches_native_stream_without_waiting_for_prebuild(direct_tts, monkeypatch, engine, expected):
+    _, handler, syntheses = direct_tts
+    calls = []
+    monkeypatch.setattr(handler, "_task_music_agent_proxy", lambda body: calls.append(body) or {
+        "ok": True, "engine": expected, "native_stream": True,
+    })
+    result = handler._task_voice_agent_play_tts(request(engine=engine, text="Olá", tts_request_id="voice-1"))
+    assert not syntheses and len(calls) == 1
+    assert calls[0]["action"] == "voice_tts" and calls[0]["engine"] == expected
+    assert calls[0]["tts_request_id"] == "voice-1" and calls[0]["max_audio_bytes"] == 1024 * 1024
+    assert not calls[0].get("audio_b64")
+    assert result["worker_result"]["native_stream"] is True
+
+
+@pytest.mark.parametrize("legacy_reason", ["explicit", "stale_companion", "python", "provider", "cache_only", "locale", "teto"])
+def test_direct_tts_keeps_existing_prebuild_where_streaming_is_incompatible(direct_tts, monkeypatch, legacy_reason):
+    worker, handler, syntheses = direct_tts
+    payload = request(engine="gtts", text="Olá")
+    if legacy_reason == "explicit":
+        monkeypatch.setenv("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_WITH_TTS_AGENT", "1")
+    elif legacy_reason == "stale_companion":
+        monkeypatch.setattr(worker, "_music_agent_shares_native_tts_socket", lambda: False)
+    elif legacy_reason == "python":
+        monkeypatch.setenv("TTS_NATIVE_WORKER", "0")
+    elif legacy_reason == "provider":
+        payload["endpoint"] = "services"
+    elif legacy_reason == "cache_only":
+        payload["cache_mode"] = "only"
+    elif legacy_reason == "locale":
+        payload["language"] = "en-us"
+    elif legacy_reason == "teto":
+        payload["engine"] = "teto"
+    calls = []
+    monkeypatch.setattr(handler, "_task_music_agent_proxy", lambda body: calls.append(body) or {"ok": True})
+    assert handler._task_voice_agent_play_tts(payload)["ok"]
+    assert len(syntheses) == len(calls) == 1
+    assert calls[0]["audio_b64"] == "fixture"
+    assert calls[0]["prebuilt_audio_source"] == "phone_worker_tts_agent"
+
+
+def test_direct_tts_native_stream_does_not_bypass_worker_admission(direct_tts, monkeypatch):
+    _, handler, syntheses = direct_tts
+    def deny():
+        raise RuntimeError("tts-synth required")
+    monkeypatch.setattr(handler, "_ensure_tts_piper_turbo_allowed", deny)
+    monkeypatch.setattr(handler, "_task_music_agent_proxy", lambda body: pytest.fail("dispatched without admission"))
+    with pytest.raises(RuntimeError, match="tts-synth required"):
+        handler._task_voice_agent_play_tts(request(engine="edge", text="Olá"))
+    assert not syntheses
+
+
+def test_direct_tts_returns_partial_playback_from_real_proxy_without_retry(direct_tts, monkeypatch):
+    worker, handler, syntheses = direct_tts
+    calls = []
+    result = {"ok": False, "partial_playback": True, "first_frame_observed": True,
+              "first_frame_ms": 150.0, "native_stream": True, "error": "stream interrupted"}
+
+    class FakeMusicAgent(BaseHTTPRequestHandler):
+        def do_POST(self):
+            calls.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            response = json.dumps(result).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+    with HTTPServer(("127.0.0.1", 0), FakeMusicAgent) as server, ThreadPoolExecutor(max_workers=1) as pool:
+        server.timeout = 3
+        served = pool.submit(server.handle_request)
+        monkeypatch.setenv("MUSIC_AGENT_HOST", "127.0.0.1")
+        monkeypatch.setenv("MUSIC_AGENT_PORT", str(server.server_port))
+        monkeypatch.setenv("MUSIC_AGENT_TOKEN", "fixture-token")
+        monkeypatch.setenv("MUSIC_AGENT_BOT_TOKEN", "fixture-bot-token")
+        monkeypatch.setenv("MUSIC_AGENT_COMMAND_READY_TTL_SECONDS", "8")
+        monkeypatch.setattr(worker, "_load_phone_worker_runtime_env", lambda: None)
+        response = handler._task_voice_agent_play_tts(request(engine="edge", text="Olá", tts_request_id="voice-2"))
+        served.result(timeout=5)
+    assert not response["ok"] and not syntheses
+    assert len(calls) == 1 and calls[0]["tts_request_id"] == "voice-2"
+    assert all(response["worker_result"].get(key) == value for key, value in result.items())
+    assert response["worker_result"]["proxy_timing_ms"]["request_count"] == 1
+
+
+def test_stream_readiness_checks_running_companion_and_socket(voice, monkeypatch, tmp_path):
+    worker, _ = voice
+    # Start a disposable process with the same command and environment shape
+    # as the managed launcher, with an actual AF_UNIX socket as its endpoint.
+    agent_module = tmp_path / "cogs/musica/runtime_telefone/agente/servidor.py"
+    agent_module.parent.mkdir(parents=True)
+    agent_module.write_text("import sys\nprint('ready', flush=True)\nsys.stdin.read()\n")
+    monkeypatch.setattr(worker, "__file__", str(tmp_path / "phone_worker.py"))
+    pid_file = tmp_path / "music_agent.pid"
+    monkeypatch.setattr(worker, "_music_agent_pid_file", lambda: pid_file)
+    monkeypatch.setenv("MUSIC_AGENT_HOST", "127.0.0.1")
+    monkeypatch.setenv("MUSIC_AGENT_PORT", "8780")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as synth_socket:
+        # Keep the Unix path below the OS limit regardless of pytest tmp_path.
+        monkeypatch.chdir(tmp_path)
+        synth_socket.bind("native.sock")
+        path = tmp_path / "native.sock"
+        path.chmod(0o600)
+        monkeypatch.setenv("TTS_NATIVE_WORKER_SOCKET", str(path))
+        proc = subprocess.Popen([sys.executable, "-m", "cogs.musica.runtime_telefone.agente.servidor"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                env={**os.environ, "TTS_NATIVE_WORKER": "1", "PYTHONPATH": str(tmp_path)})
+        with proc:
+            try:
+                assert proc.stdout.readline().strip() == "ready"
+                pid_file.write_text(str(proc.pid))
+                assert worker._music_agent_shares_native_tts_socket()
+                monkeypatch.setenv("MUSIC_AGENT_PORT", "8781")
+                assert not worker._music_agent_shares_native_tts_socket()
+                monkeypatch.setenv("MUSIC_AGENT_PORT", "8780")
+                path.chmod(0o666)
+                assert not worker._music_agent_shares_native_tts_socket()
+                path.chmod(0o600)
+            finally:
+                proc.stdin.close()
+                proc.wait(timeout=5)
+        assert not worker._music_agent_shares_native_tts_socket()
 
 
 def test_clear_session_is_scoped_and_durable(voice):

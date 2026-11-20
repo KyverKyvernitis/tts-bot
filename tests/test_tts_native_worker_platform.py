@@ -219,10 +219,20 @@ def test_proxy_preserves_normal_eof_and_aborted_chunked_audio(bridge, tmp_path, 
         def native():
             connection, _ = listener.accept()
             try:
+                connection.settimeout(5)
                 data = bytearray()
                 while b"\r\n\r\n" not in data:
-                    data.extend(connection.recv(4096))
-                request_seen.append(bytes(data))
+                    chunk = connection.recv(4096)
+                    assert chunk, "proxy closed before completing request headers"
+                    data.extend(chunk)
+                headers, body = bytes(data).split(b"\r\n\r\n", 1)
+                length = int(next(line.split(b":", 1)[1].strip() for line in headers.split(b"\r\n")
+                                  if line.lower().startswith(b"content-length:")))
+                while len(body) < length:
+                    chunk = connection.recv(length - len(body))
+                    assert chunk, "proxy closed before completing request body"
+                    body += chunk
+                request_seen.append(headers + b"\r\n\r\n" + body)
                 connection.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nContent-Type: audio/mpeg\r\n\r\n3\r\nmp3\r\n" + ending)
             finally:
                 connection.close()
@@ -254,6 +264,7 @@ def test_proxy_preserves_normal_eof_and_aborted_chunked_audio(bridge, tmp_path, 
             else:
                 with pytest.raises(http.client.IncompleteRead):
                     response.read()
+            assert request_seen[0].endswith(b"\r\n\r\n{}")
             assert b"secret-token" not in request_seen[0]
         finally:
             client.close()

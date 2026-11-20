@@ -349,9 +349,21 @@ impl Service {
     async fn render_ttv(&self,socket:&mut UnixStream,path:&str,body:&Value)->io::Result<()> {
         use tts_render::renderer::{self,Cancellation};
         let started=std::time::Instant::now();
-        let mut request=match renderer::request_from_worker(body,&self.environment) {
-            Ok(request)=>request,
-            Err(error)=>return json_response(socket,400,&json!({"ok":false,"engine":"teto","error":error})).await,
+        let environment=self.environment.clone();
+        let request_body=body.clone();
+        let configuration=self.configuration_hash();
+        // Voicebank traversal/oto parsing performs blocking filesystem work.
+        // Keep it off the network runtime, and retain the selected index for
+        // this request's cache identity and render planning.
+        let prepared=tokio::task::spawn_blocking(move||{
+            let request=renderer::request_from_worker(&request_body,&environment)?;
+            let fingerprint=request_fingerprint(&request,&configuration)?;
+            Ok::<_,String>((request,fingerprint))
+        }).await;
+        let (mut request,fingerprint)=match prepared {
+            Ok(Ok(value))=>value,
+            Ok(Err(error))=>return json_response(socket,400,&json!({"ok":false,"engine":"teto","error":error})).await,
+            Err(_)=>return json_response(socket,503,&json!({"ok":false,"engine":"teto","error":"preparação da voicebank interrompida"})).await,
         };
         request.max_audio_bytes=request.max_audio_bytes.min(self.config.max_audio_bytes);
         if !request.timeout_seconds.is_finite()||!(0.001..=120.0).contains(&request.timeout_seconds) {
@@ -371,7 +383,6 @@ impl Service {
         if singing&&body["ttv_performance_hash"].as_str()!=performance.as_deref() {
             return json_response(socket,400,&json!({"ok":false,"error":"stream PCM exige a identidade da performance"})).await;
         }
-        let fingerprint=request_fingerprint(&request,&self.configuration_hash()).map_err(io::Error::other)?;
         let key=tts_policy::standard_cache_key(body,"teto",&fingerprint,&request.prosody.base_pitch,
             request.prosody.speech_rate,performance.as_deref()).map_err(io::Error::other)?;
         let cache_path=self.config.cache.join(format!("{key}.wav"));
@@ -641,7 +652,7 @@ fn environment_hash(environment:&HashMap<String,String>)->String {
     format!("{:x}",Sha256::digest(serde_json::to_vec(&pairs).unwrap_or_default()))
 }
 fn request_fingerprint(request:&tts_render::renderer::RenderRequest,configuration:&str)->Result<String,String>{
-    let bank=tts_render::voicebank::VoicebankIndex::load(&request.voicebank,&request.voicebank_options)?;
+    let bank=request.voicebank_index()?;
     Ok(format!("{:x}",Sha256::digest(format!("rust-ttv-v1:{configuration}:{}:{}:{}",bank.fingerprint,request.voice_id,request.reading_language).as_bytes())))
 }
 fn voice_status(environment:&HashMap<String,String>)->Value{

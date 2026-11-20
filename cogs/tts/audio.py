@@ -3168,6 +3168,32 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         bucket.append(value)
         self._tts_latency_version = getattr(self, "_tts_latency_version", 0) + 1
 
+    def _record_worker_first_frame_timing(self, result: Any, *, engine: str) -> None:
+        """Record a duration measured by the remote player, on its own clock."""
+        if not isinstance(result, dict) or result.get("ok") is False:
+            return
+        sample = result
+        if "first_frame_observed" not in sample:
+            sample = result.get("worker_result")
+        if not isinstance(sample, dict) or sample.get("ok") is False or sample.get("first_frame_observed") is not True:
+            return
+        raw = sample.get("first_frame_ms")
+        if isinstance(raw, bool):
+            return
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(value) or value < 0:
+            return
+        self._record_latency_sample("worker_command_to_first_frame", value)
+        actual_engine = str(sample.get("engine") or engine).strip().lower().removesuffix("-cache").replace("-", "_")
+        actual_engine = {"edge_tts": "edge", "google": "gtts"}.get(actual_engine, actual_engine)
+        if actual_engine in {"edge", "gtts", "teto", "android_native", "piper"}:
+            self._record_latency_sample(f"worker_command_to_first_frame_{actual_engine}", value)
+        if sample.get("native_stream") is True:
+            self._record_latency_sample("worker_command_to_first_frame_rust_stream", value)
+
     @staticmethod
     def _latency_percentile(values: list[float], percentile: float) -> float:
         if not values:
@@ -5575,6 +5601,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         except Exception:
             payload["auto_leave_enabled"] = True
         started = time.monotonic()
+        partial_result = None
         try:
             prebuilt_path: str | None = None
             is_teto = str(item.engine or "").strip().lower() == "teto"
@@ -5622,6 +5649,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 timeout_seconds=max(3.0, float(payload.get("timeout_seconds") or WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS) + 4.0),
             )
             if not bool(result.get("ok", True)):
+                observed = result.get("worker_result", result)
+                if (isinstance(observed, dict) and observed.get("ok") is False
+                        and observed.get("partial_playback") is True and observed.get("first_frame_observed") is True):
+                    partial_result = result
+                    raise TTSPlaybackError("stream_incomplete")
                 raise RuntimeError(str(result.get("error") or "worker retornou ok=false no TTS direto"))
             if prebuilt_path:
                 with contextlib.suppress(Exception):
@@ -5656,6 +5688,13 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             self._record_worker_voice_session_metric("direct_tts_failed")
             self._worker_voice_direct_tts_disabled_untils()[int(guild.id)] = time.monotonic() + WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS
             await self._worker_voice_agent_release_transfer(payload, reason=f"direct_tts_failed:{type(exc).__name__}")
+            if partial_result is not None:
+                item._tts_remote_active = False
+                logger.warning("[worker_voice_agent] TTS direto interrompido após primeiro frame | guild=%s channel=%s",
+                               guild.id, item.channel_id)
+                # A confirmação de reprodução parcial encerra o item na fila.
+                # Retornar None faria a VPS repetir a fala desde o começo.
+                return {"ok": False, "worker_result": partial_result}
             logger.warning(
                 "[worker_voice_agent] TTS direto worker falhou; fallback VPS normal | guild=%s channel=%s erro=%s",
                 guild.id,
@@ -8468,6 +8507,10 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                         # valide a confirmação do worker, quando disponível.
                         remote_result = direct_worker_result.get("worker_result") if isinstance(direct_worker_result, dict) else None
                         _validate_tts_playback_result(remote_result if isinstance(remote_result, dict) else direct_worker_result)
+                        self._record_worker_first_frame_timing(
+                            remote_result if isinstance(remote_result, dict) else direct_worker_result,
+                            engine=item.engine,
+                        )
                         dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
                         playback_started_at = float(direct_worker_result.get("playback_started_at", time.monotonic()) or time.monotonic())
                         queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)
