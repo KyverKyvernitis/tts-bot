@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
+from utility.help_activity import remember_help_category
+
 from .aliases import extract_prefixed_argument, get_prefixed_aliases, matches_prefixed_command
 
 
@@ -201,6 +203,8 @@ async def dispatch_prefix_control_command(cog: Any, message: Any, command: Prefi
 
     if kind in {"help", "ping"}:
         return True
+    if kind != "panel_user":
+        remember_help_category(getattr(cog, "bot", None), message, "voice")
     if kind == "cd":
         return bool(await cog._send_cd_panel(message))
     if kind == "rcd":
@@ -240,6 +244,7 @@ async def dispatch_prefix_control_command(cog: Any, message: Any, command: Prefi
             from cogs.musica.nucleo.anexo_discord import midia_respondida
             selection = await midia_respondida(message)
             if selection.status in {"video", "audio", "multiplos", "inacessivel"}:
+                remember_help_category(cog.bot, message, "music")
                 music = cog.bot.get_cog("Music")
                 if music is None:
                     await message.channel.send("O player de música está indisponível.")

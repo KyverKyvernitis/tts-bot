@@ -6,6 +6,7 @@ from typing import Optional
 from cogs.musica import configuracao as config
 import discord
 from discord.ext import commands
+from utility.help_activity import remember_help_category
 
 from .legado.roteador_audio import AudioRouter
 from .arquivo_coordenador import ArchiveCoordinator
@@ -186,6 +187,7 @@ class Music(FluxoTocar, FluxoControle, FluxoFila, FluxoConfiguracoes, BaseComand
                 query = raw[len(alias):].strip()
                 if not query:
                     return
+                remember_help_category(self.bot, message, "music")
                 ctx = await self.bot.get_context(message)
                 await self._run_play(ctx, query)
                 return

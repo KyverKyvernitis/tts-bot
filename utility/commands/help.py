@@ -5,10 +5,18 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs.tts.aliases import extract_prefixed_argument, matches_prefixed_command
+from utility.help_activity import remember_help_category
 
 
 class HelpCommandMixin:
     """Entradas slash/prefixadas da central de ajuda."""
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type is discord.InteractionType.component:
+            custom_id = str((interaction.data or {}).get("custom_id") or "")
+            if custom_id.startswith("music:"):
+                remember_help_category(self.bot, interaction, "music")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

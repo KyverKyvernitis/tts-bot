@@ -55,6 +55,7 @@ from typing import Any
 
 import discord
 from discord.ext import commands
+from utility.help_activity import remember_help_category
 
 from .constants import (
     DEFAULT_APPROVAL,
@@ -381,8 +382,10 @@ class FormsCog(commands.Cog):
             try:
                 if is_form_trigger:
                     if not setup_complete:
+                        remember_help_category(self.bot, message, "server")
                         await self._start_setup_flow(message)
                     elif message.channel.id == form_ch_id:
+                        remember_help_category(self.bot, message, "server")
                         await self._refresh_form_message(message)
                     # senão: trigger 'form' fora do canal configurado, ignora
                 elif is_c_trigger:
@@ -390,6 +393,7 @@ class FormsCog(commands.Cog):
                         return  # 'c' sem setup não faz nada
                     if message.channel.id not in (form_ch_id, resp_ch_id):
                         return
+                    remember_help_category(self.bot, message, "server")
                     await self._open_customization_panel(message)
             except Exception:
                 log.exception(

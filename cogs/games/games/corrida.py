@@ -2,6 +2,7 @@ import asyncio
 import random
 
 import discord
+from utility.help_activity import remember_help_category
 
 
 CORRIDA_STAKE = 40
@@ -1671,6 +1672,7 @@ class GincanaCorridaMixin:
             return False
         if not self._matches_exact_trigger(message.content or "", "corrida"):
             return False
+        remember_help_category(getattr(self, "bot", None), message, "games")
         if not self.db.gincana_enabled(guild.id):
             return True
         if self._gincana_only_kick_members(guild.id) and not self._is_staff_member(message.author):

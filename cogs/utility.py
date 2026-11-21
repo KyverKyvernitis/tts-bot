@@ -12,6 +12,7 @@ from .tts.utils.app_commands import fetch_root_command_ids_cached
 
 from utility.commands.help import HelpCommandMixin
 from cogs.musica.integracoes.ajuda import musica_disponivel_para_ajuda
+from utility.help_activity import last_help_category
 from utility.help_center import HELP_TIMEOUT_SECONDS, HelpCenterView, help_autocomplete_choices
 from utility.commands.ping import PingCommandMixin
 from utility.commands.base import BaseCommandMixin
@@ -230,6 +231,11 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
         prefix_command_message: discord.Message | None = None,
         subject: str | None = None,
     ):
+        origin = interaction if interaction is not None else prefix_command_message
+        initial_category = None
+        if not (subject or "").strip():
+            initial_category = last_help_category(self.bot, guild, owner, before=getattr(origin, "id", None))
+
         prefixes = await self._get_help_prefix_data(guild)
         root_ids = await self._fetch_root_command_ids_cached(guild)
         extra_permissions = await self._get_help_extra_permissions(guild, owner)
@@ -244,6 +250,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
             hidden_categories=hidden_categories,
             hidden_categories_provider=self._help_hidden_categories,
             subject=subject,
+            initial_category=initial_category,
             timeout=HELP_TIMEOUT_SECONDS,
         )
 

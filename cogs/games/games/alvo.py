@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import discord
+from utility.help_activity import remember_help_category
 
 from config import MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
 
@@ -1087,6 +1088,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             return False
         if not self._matches_exact_trigger(message.content or '', 'alvo'):
             return False
+        remember_help_category(getattr(self, "bot", None), message, "games")
         if not self.db.gincana_enabled(guild.id):
             return True
         if self._gincana_only_kick_members(guild.id) and not self._is_staff_member(message.author):

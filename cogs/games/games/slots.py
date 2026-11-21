@@ -6,6 +6,7 @@ import random
 import time
 
 import discord
+from utility.help_activity import remember_help_category
 
 from config import OFF_COLOR
 
@@ -3000,4 +3001,5 @@ class GincanaSlotsMixin:
             return False
         if not self._matches_exact_trigger(message.content or "", "roleta2"):
             return False
+        remember_help_category(getattr(self, "bot", None), message, "games")
         return await self._run_roleta2_trigger_locked(message)

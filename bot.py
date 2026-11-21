@@ -140,6 +140,7 @@ from webserver import run_webserver, set_health_provider, set_update_action_prov
 from utility.openai_compat import OpenAIChatStream, set_openai_chat_provider
 from cogs.musica.integracoes.bot import IntegracaoMusicaBot
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
+from utility.help_activity import remember_help_command
 from utility.application_bio import ApplicationBioService
 from utility.application_presence import ApplicationPresenceService
 from updater.discord import IntegracaoDiscordUpdaterMixin, inicializar_integracao_updater
@@ -219,6 +220,13 @@ def _cfg(*names: str, default=None):
     return default
 
 
+class HelpCommandTree(discord.app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction, /) -> bool:
+        if interaction.type is discord.InteractionType.application_command:
+            remember_help_command(self.client, interaction, interaction.command)
+        return await super().interaction_check(interaction)
+
+
 class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
 
     def __init__(self):
@@ -236,6 +244,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
             ),
             intents=intents,
             help_command=None,
+            tree_cls=HelpCommandTree,
         )
 
         self.started_at = datetime.now(timezone.utc)
@@ -1282,6 +1291,10 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
             await self.process_commands(message)
         except Exception as e:
             print(f"[bot] falha ao processar comandos: {e!r}")
+
+    async def invoke(self, ctx: commands.Context, /) -> None:
+        remember_help_command(self, ctx.message, ctx.command)
+        await super().invoke(ctx)
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, commands.CommandNotFound):

@@ -23,6 +23,8 @@ import aiohttp
 import discord
 from discord.ext import commands
 
+from utility.help_activity import remember_help_category
+
 from . import constants as C
 from .commands import ChatbotCommandsMixin
 from .config import ConfigStore, GuildChatbotConfig
@@ -2054,6 +2056,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             if trigger is None:
                 return
             spontaneous = trigger.via == "spontaneous"
+            if not spontaneous:
+                remember_help_category(self.bot, message, "chatbot")
             if self._is_user_on_cooldown(guild.id, message.author.id):
                 return
             lease = await self._admission.try_admit("chat", guild_id=guild.id, user_id=message.author.id)

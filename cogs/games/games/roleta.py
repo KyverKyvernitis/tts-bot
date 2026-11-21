@@ -3,6 +3,7 @@ import logging
 import random
 import time
 import discord
+from utility.help_activity import remember_help_category
 
 from config import MUTE_TOGGLE_WORD, OFF_COLOR, TRIGGER_WORD
 
@@ -2489,6 +2490,7 @@ class GincanaRoletaMixin:
                 return False
             if (message.content or "").strip().casefold() not in {"carta", "cartas"}:
                 return False
+            remember_help_category(getattr(self, "bot", None), message, "games")
             return await self._run_carta_trigger_locked(message)
 
         async def _handle_roleta_trigger(self, message: discord.Message) -> bool:
@@ -2497,4 +2499,5 @@ class GincanaRoletaMixin:
                 return False
             if not self._matches_exact_trigger(message.content or "", "roleta"):
                 return False
+            remember_help_category(getattr(self, "bot", None), message, "games")
             return await self._run_roleta_trigger_locked(message)

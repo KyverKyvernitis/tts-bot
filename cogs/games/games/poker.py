@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import discord
+from utility.help_activity import remember_help_category
 
 from ..constants import POKER_BUY_IN
 
@@ -1026,6 +1027,7 @@ class GincanaPokerMixin:
         guild = message.guild
         if guild is None:
             return False
+        remember_help_category(getattr(self, "bot", None), message, "games")
 
         opponent = None
         for mentioned in message.mentions:

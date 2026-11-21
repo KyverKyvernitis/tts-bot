@@ -18,6 +18,7 @@ from discord.ext import commands
 
 
 import config
+from utility.help_activity import remember_help_category
 
 from cogs.musica.integracoes.tts import (
     agendar_idle_musica,
@@ -3601,6 +3602,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                 await self._notify_tts_gate_failure(message, gate, gate.reason)
             return
 
+        remember_help_category(getattr(self, "bot", None), message, "voice")
         guild_defaults = gate.guild_defaults
         forced_engine = str(gate.forced_engine or "")
         active_prefix = str(gate.active_prefix or "")
@@ -5066,6 +5068,9 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         target_query = str(target_query or "").strip()
         invoked_alias_text = str(invoked_alias or "").strip().lower()
         short_panel_alias = bool(invoked_alias_text) and invoked_alias_text.endswith("p") and not invoked_alias_text.endswith("panel") and not invoked_alias_text.endswith("painel")
+        needs_panel_target = panel_type == "user" and short_panel_alias and bool(target_query)
+        if not needs_panel_target:
+            remember_help_category(getattr(self, "bot", None), message, "voice")
 
         if panel_type == "user" and target_query:
             # `_p` também pode ser alias do player de música. Só consumimos
@@ -5096,6 +5101,8 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return True
+            if needs_panel_target:
+                remember_help_category(getattr(self, "bot", None), message, "voice")
 
         if panel_type == "server":
             panel_kind = "server"

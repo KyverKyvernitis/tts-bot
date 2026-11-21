@@ -5,6 +5,7 @@ import re
 import time
 
 import discord
+from utility.help_activity import remember_help_category
 from discord import app_commands
 from discord.ext import commands as dcommands
 
@@ -1056,6 +1057,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             return False
         if message.guild is None:
             return True
+        remember_help_category(getattr(self, "bot", None), message, "games")
 
         match = re.fullmatch(r"\s*mendigar\s+(\d+)(?:\s+<@!?(\d+)>)?\s*", content, re.IGNORECASE)
         if match is None:
@@ -1097,6 +1099,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             return False
         if message.guild is None:
             return True
+        remember_help_category(getattr(self, "bot", None), message, "games")
         guild_id = int(message.guild.id)
         user_id = int(message.author.id)
         async with self._race_panel_lock(guild_id, user_id):

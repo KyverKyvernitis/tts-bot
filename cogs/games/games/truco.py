@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 import discord
+from utility.help_activity import remember_help_category
 
 from ..services.session_registry import GameSessionRegistry, MAX_ACTIVE_GAME_USERS_PER_GUILD
 
@@ -1144,6 +1145,7 @@ class GincanaTrucoMixin:
         raw = str(message.content or "").strip()
         if not _TRUCO_TRIGGER_RE.match(raw):
             return False
+        remember_help_category(getattr(self, "bot", None), message, "games")
 
         await self._truco_cleanup_stale_sessions()
         mentions = [member for member in message.mentions if not member.bot]

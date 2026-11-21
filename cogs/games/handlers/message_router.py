@@ -4,6 +4,7 @@ import os
 import re
 
 import discord
+from utility.help_activity import remember_help_category
 
 from config import MUTE_TOGGLE_WORD, TRIGGER_WORD
 
@@ -61,6 +62,7 @@ class GincanaMessageRouterMixin:
             return False
         if message.guild is None:
             return True
+        remember_help_category(getattr(self, "bot", None), message, "games")
         if content in {"ficha", "fichas"}:
             await self._send_chip_profile(message.channel.send, message.author)
             return True
@@ -95,6 +97,7 @@ class GincanaMessageRouterMixin:
         mentions = [member for member in getattr(message, "mentions", []) if isinstance(member, discord.Member)]
         if len(mentions) != 1:
             return False
+        remember_help_category(getattr(self, "bot", None), message, "games")
         target = mentions[0]
         await self._run_robbery(message.channel, message.guild, message.author, target)
         return True

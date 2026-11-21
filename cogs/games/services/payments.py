@@ -3,6 +3,7 @@ import re
 import time
 
 import discord
+from utility.help_activity import remember_help_category
 
 from ..constants import CHIPS_INITIAL
 
@@ -148,6 +149,7 @@ class GincanaPaymentMixin:
             return False
         target, inline_amount = self._parse_pay_request(message)
         if target is not None:
+            remember_help_category(getattr(self, "bot", None), message, "games")
             if target.id == message.author.id:
                 await message.channel.send(embed=self._make_embed("💸 Pagamento inválido", "Você não pode enviar fichas para si mesmo", ok=False))
                 return True
