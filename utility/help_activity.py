@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections import OrderedDict
 
 _MAX_ACTIVITIES = 4096
+_WINDOW_MS = 5 * 60 * 1000
+# O timestamp em milissegundos ocupa os bits acima dos 22 bits baixos do ID do Discord.
+_SNOWFLAKE_TIME_SHIFT = 22
 _CATEGORY_BY_MODULE = {
     "antibot": "server",
     "birthday": "server",
@@ -20,12 +23,12 @@ _CATEGORY_BY_MODULE = {
 }
 
 
-def remember_help_category(bot, event, category: str, *, registered: bool = False) -> None:
+def _record_event(bot, event, category: str | None, priority: int) -> str | None:
     user = getattr(event, "author", None) or getattr(event, "user", None)
     user_id = getattr(user, "id", None)
     event_id = getattr(event, "id", None)
     if bot is None or not user_id or not event_id or getattr(user, "bot", False):
-        return
+        return None
 
     guild_id = getattr(event, "guild_id", None) or getattr(getattr(event, "guild", None), "id", 0)
     key = (guild_id, user_id)
@@ -33,25 +36,38 @@ def remember_help_category(bot, event, category: str, *, registered: bool = Fals
     if activities is None:
         activities = bot._help_activities = OrderedDict()
 
-    # A ordem dos eventos preserva a tentativa mais nova se o reconhecimento atrasar.
-    # Na mesma mensagem, o comando registrado tem precedência sobre o gatilho de texto.
-    order = (event_id, registered)
+    cutoff_ms = (event_id >> _SNOWFLAKE_TIME_SHIFT) - _WINDOW_MS
+    # Limpa registros inativos durante o uso normal, sem um timer para cada pessoa.
+    while activities:
+        oldest_order, _ = next(iter(activities.values()))
+        if (oldest_order[0] >> _SNOWFLAKE_TIME_SHIFT) > cutoff_ms:
+            break
+        activities.popitem(last=False)
+
+    order = (event_id, priority)
     previous = activities.get(key)
     if previous is not None and order <= previous[0]:
-        return
+        return None
     activities[key] = (order, category)
     activities.move_to_end(key)
     if len(activities) > _MAX_ACTIVITIES:
         activities.popitem(last=False)
 
+    if category is None and previous is not None:
+        (previous_id, _), previous_category = previous
+        if previous_id < event_id and (previous_id >> _SNOWFLAKE_TIME_SHIFT) > cutoff_ms:
+            return previous_category
+    return None
 
-def last_help_category(bot, guild, user, *, before: int | None = None) -> str | None:
-    activities = getattr(bot, "_help_activities", None)
-    record = activities.get((getattr(guild, "id", 0), user.id)) if activities else None
-    if record is None:
-        return None
-    (event_id, _), category = record
-    return category if before is None or event_id < before else None
+
+def remember_help_category(bot, event, category: str, *, registered: bool = False) -> None:
+    # No mesmo evento, um comando registrado tem precedência sobre um gatilho de texto.
+    _record_event(bot, event, category, priority=1 if registered else 0)
+
+
+def consume_help_category(bot, event) -> str | None:
+    # Guarda apenas o ID do help. Um reconhecimento atrasado não pode repor a área consumida.
+    return _record_event(bot, event, None, priority=2)
 
 
 def remember_help_command(bot, event, command) -> None:

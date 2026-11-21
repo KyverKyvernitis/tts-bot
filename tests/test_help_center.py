@@ -1,3 +1,5 @@
+import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,7 +10,7 @@ from discord.http import handle_message_parameters
 from cogs.games.handlers.message_router import GincanaMessageRouterMixin
 from cogs.utility import Utility
 from utility import help_center
-from utility.help_activity import last_help_category, remember_help_category, remember_help_command
+from utility.help_activity import consume_help_category, remember_help_category, remember_help_command
 from utility.help_center import HelpCenterView
 
 
@@ -20,6 +22,11 @@ def _event(event_id, *, user=None, guild=None, content=""):
     return SimpleNamespace(
         id=event_id, author=user or _owner(), guild=guild, content=content, channel=AsyncMock()
     )
+
+
+def _id_at(ms, *, high=False):
+    when = datetime(2026, 11, 21, tzinfo=timezone.utc) + timedelta(milliseconds=ms)
+    return discord.utils.time_snowflake(when, high=high)
 
 
 def _view(*, prefixes=None, **kwargs):
@@ -41,6 +48,7 @@ def _buttons(view):
 def _control(custom_id, *, user_id=10, kind=discord.InteractionType.component, **data):
     return SimpleNamespace(
         type=kind, user=_owner(user_id), guild=SimpleNamespace(id=1),
+        channel=None, app_permissions=discord.Permissions.none(),
         data={"custom_id": custom_id, **data}, response=AsyncMock(),
         edit_original_response=AsyncMock(), delete_original_response=AsyncMock(),
     )
@@ -55,7 +63,7 @@ def test_slash_index_uses_one_selector_and_filters_staff():
     ]
     assert all(option.label in _copy(view) for option in select.options)
     assert not any(option.default for option in select.options)
-    assert select.options[0].description.startswith("[voz]")
+    assert all(option.emoji is None and not option.description.startswith("[") for option in select.options)
     assert set(_buttons(view)) == {"Buscar comando", "Fechar"}
 
     staff = _view(extra_permissions=frozenset({"ticket_staff"}))
@@ -76,11 +84,52 @@ def test_prefix_index_has_copyable_shortcuts_and_working_controls():
     assert view.children[0].accent_color != _view().children[0].accent_color
 
 
-def test_replacing_a_text_marker_sets_the_native_select_emoji(monkeypatch):
-    monkeypatch.setitem(help_center._CATEGORY_MARKERS, "voice", "<:voz:900000000000000001>")
-    option = _selectors(_view())[0].options[0]
-    assert option.emoji.id == 900000000000000001
-    assert "<:" not in option.label + option.description
+def _emoji_cache():
+    guild = SimpleNamespace(id=77, unavailable=False, me=SimpleNamespace(_roles=discord.utils.SnowflakeList([])))
+    state = SimpleNamespace(_get_guild=lambda _: guild)
+    records = (
+        (1539137127852539944, "osaka", False), (1559374199133315122, "Vinyl_Music_loading", True),
+        (1513652679044366406, "a9decowhite2_dw", False), (1564113432905654353, "emoji_86", False),
+        (1500584783779070143, "livro", True),
+    )
+    cache = {key: discord.Emoji(guild=guild, state=state, data={"id": key, "name": name, "animated": animated})
+             for key, name, animated in records}
+    return guild, cache
+
+
+@pytest.mark.parametrize("source", ["slash", "prefix"])
+def test_guild_emojis_in_headings_and_native_options(source):
+    guild, cache = _emoji_cache()
+    emojis = help_center.available_help_emojis(SimpleNamespace(get_emoji=cache.get), guild, None, discord.Permissions.none())
+    view = _view(source=source, emojis=emojis, extra_permissions={"ticket_staff"})
+    options = _selectors(view)[0].options
+    assert [option.emoji.id for option in options] == list(cache)
+    assert [option.emoji.animated for option in options] == [False, True, False, False, True]
+    assert all("<:" not in o.label and "<a:" not in o.label and "[" not in o.description for o in options)
+    assert _copy(view).startswith("## <a:livro:1500584783779070143> Meus comandos")
+    for option in options:
+        area = _view(source=source, emojis=emojis, subject=option.value, extra_permissions={"ticket_staff"})
+        assert _copy(area).startswith(f"## {option.emoji} {option.label}\n")
+        assert _copy(area).count(str(option.emoji)) == 1
+
+
+def test_external_emojis_respect_destination_permissions_and_source_availability():
+    guild, cache = _emoji_cache()
+    del cache[1564113432905654353]
+    cache[1513652679044366406].available = False
+    cache[1539137127852539944]._roles = discord.utils.SnowflakeList([444])
+    other = SimpleNamespace(id=88, me=object())
+    allow = discord.Permissions(external_emojis=True)
+    deny = discord.Permissions.none()
+    channel = SimpleNamespace(permissions_for=lambda member: allow if member is other.me else deny)
+    bot = SimpleNamespace(get_emoji=cache.get)
+    assert not help_center.available_help_emojis(bot, other, channel, deny)
+    for destination, perms in ((guild, deny), (other, None), (None, None)):
+        icons = help_center.available_help_emojis(bot, destination, channel, perms)
+        assert set(icons) == {"home", "server", "music"}
+        options = _selectors(_view(emojis=icons))[0].options
+        assert options[0].emoji is None and options[1].emoji.animated
+        assert options[2].emoji is None and options[3].emoji is None
 
 
 @pytest.mark.parametrize("source", ["prefix", "slash"])
@@ -197,10 +246,22 @@ def test_latest_attempt_is_ordered_and_scoped_to_person_and_server():
     remember_help_category(bot, event, "chatbot")
     remember_help_command(bot, event, SimpleNamespace(callback=SimpleNamespace(__module__="cogs.musica.modulo")))
     remember_help_category(bot, _event(101, user=user, guild=guild), "voice")
-    assert last_help_category(bot, guild, user, before=103) == "music"
-    assert last_help_category(bot, other_guild, user) is None
-    assert last_help_category(bot, guild, _owner(11)) is None
-    assert last_help_category(bot, guild, user, before=102) is None
+    assert consume_help_category(bot, _event(103, user=user, guild=other_guild)) is None
+    assert consume_help_category(bot, _event(103, user=_owner(11), guild=guild)) is None
+    assert consume_help_category(bot, _event(101, user=user, guild=guild)) is None
+    assert consume_help_category(bot, _event(103, user=user, guild=guild)) == "music"
+    remember_help_category(bot, event, "voice", registered=True)
+    remember_help_category(bot, _event(103, user=user, guild=guild), "chatbot", registered=True)
+    assert consume_help_category(bot, _event(104, user=user, guild=guild)) is None
+
+
+@pytest.mark.parametrize(("age_ms", "expected"), [(299000, "voice"), (299999, "voice"), (300000, None), (300001, None)])
+def test_five_minutes_count_from_the_most_recent_attempt(age_ms, expected):
+    guild, bot = SimpleNamespace(id=1), SimpleNamespace()
+    remember_help_category(bot, _event(_id_at(0), guild=guild), "music")
+    remember_help_category(bot, _event(_id_at(180000, high=True), guild=guild), "voice")
+    assert consume_help_category(bot, _event(_id_at(180000 + age_ms), guild=guild)) == expected
+    assert consume_help_category(bot, _event(_id_at(180001 + age_ms), guild=guild)) is None
 
 
 @pytest.mark.asyncio
@@ -211,7 +272,7 @@ async def test_ficha_is_an_attempt_as_soon_as_games_recognizes_it():
     router.bot = SimpleNamespace()
 
     async def send_profile(*_):
-        assert last_help_category(router.bot, guild, message.author) == "games"
+        assert consume_help_category(router.bot, _event(102, guild=guild)) == "games"
 
     router._send_chip_profile = AsyncMock(side_effect=send_profile)
     assert await router._handle_text_profile_commands(message)
@@ -221,7 +282,7 @@ async def test_ficha_is_an_attempt_as_soon_as_games_recognizes_it():
 
 def _utility():
     utility = Utility.__new__(Utility)
-    utility.bot = SimpleNamespace()
+    utility.bot = SimpleNamespace(get_emoji=lambda _: None)
     utility._get_prefix_data = AsyncMock(return_value={"bot_prefix": "!"})
     utility._get_help_prefix_data = utility._get_prefix_data
     utility._fetch_root_command_ids_cached = AsyncMock(return_value={"tts": 123})
@@ -230,6 +291,13 @@ def _utility():
     utility._get_help_games_context = lambda _: {"mode": "triggers"}
     utility._delete_message_safe = AsyncMock()
     return utility
+
+
+def _slash(event_id, guild):
+    return SimpleNamespace(
+        id=event_id, guild=guild, user=_owner(), channel=None, app_permissions=discord.Permissions.none(),
+        response=SimpleNamespace(is_done=lambda: False, defer=AsyncMock()), edit_original_response=AsyncMock(),
+    )
 
 
 @pytest.mark.asyncio
@@ -247,11 +315,14 @@ async def test_prefix_help_uses_last_category_and_keeps_explicit_search():
     assert len(_selectors(view)) == 1
     assert "`!coinflip`" in _copy(view)
 
-    explicit = _event(103, guild=guild, content="!help voz")
+    remember_help_category(utility.bot, _event(103, guild=guild), "games")
+    explicit = _event(104, guild=guild, content="!help voz")
     await utility.on_message(explicit)
     view = explicit.channel.send.await_args.kwargs["view"]
     assert (view.target_kind, view.target_key) == ("category", "voice")
-    assert last_help_category(utility.bot, guild, attempt.author) == "games"
+    second = _event(105, guild=guild, content="!help")
+    await utility.on_message(second)
+    assert second.channel.send.await_args.kwargs["view"].target_kind == "home"
     utility._fetch_root_command_ids_cached.assert_not_awaited()
 
 
@@ -262,17 +333,96 @@ async def test_slash_help_uses_same_activity_but_keeps_its_layout():
     attempt = _event(101, guild=guild)
     remember_help_category(utility.bot, attempt, "voice")
 
-    interaction = SimpleNamespace(
-        id=102, guild=guild, user=attempt.author, channel=attempt.channel,
-        response=SimpleNamespace(is_done=lambda: False, defer=AsyncMock()),
-        edit_original_response=AsyncMock(),
-    )
+    interaction = _slash(102, guild)
     await utility.help_command.callback(utility, interaction)
     interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
     view = interaction.edit_original_response.await_args.kwargs["view"]
     assert (view.source, view.target_kind, view.target_key) == ("slash", "category", "voice")
     assert len(_selectors(view)) == 1
     assert "</tts menu:123>" in _copy(view)
+    again = _event(103, guild=guild, content="!help")
+    await utility.on_message(again)
+    assert again.channel.send.await_args.kwargs["view"].target_kind == "home"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_help_consumes_once_and_preserves_later_attempt():
+    utility, guild = _utility(), SimpleNamespace(id=1)
+    remember_help_category(utility.bot, _event(100, guild=guild), "music")
+    waiting, release = asyncio.Event(), asyncio.Event()
+    first = _event(101, guild=guild, content="!help")
+
+    async def hold_card(**kwargs):
+        assert kwargs["view"].target_key == "music"
+        waiting.set()
+        await release.wait()
+
+    first.channel.send.side_effect = hold_card
+    task = asyncio.create_task(utility.on_message(first))
+    try:
+        await asyncio.wait_for(waiting.wait(), 2)
+        second = _slash(102, guild)
+        await utility.help_command.callback(utility, second)
+        assert second.edit_original_response.await_args.kwargs["view"].target_kind == "home"
+        remember_help_category(utility.bot, _event(103, guild=guild), "games")
+    finally:
+        release.set()
+        await task
+    third = _slash(104, guild)
+    await utility.help_command.callback(utility, third)
+    assert third.edit_original_response.await_args.kwargs["view"].target_key == "games"
+
+
+@pytest.mark.asyncio
+async def test_old_card_navigation_is_independent_of_next_help():
+    utility, guild = _utility(), SimpleNamespace(id=1)
+    remember_help_category(utility.bot, _event(_id_at(0), guild=guild), "music")
+    first = _event(_id_at(1000), guild=guild, content="!help")
+    await utility.on_message(first)
+    card = first.channel.send.await_args.kwargs["view"]
+    assert card.target_key == "music"
+    remember_help_category(utility.bot, _event(_id_at(359000), guild=guild), "games")
+    # Mais de cinco minutos depois de abrir o card, uma troca manual só edita aquela mensagem.
+    click = _control(_selectors(card)[0].custom_id, values=["category:voice"])
+    click.id = _id_at(360000)
+    await utility.on_interaction(click)
+    assert click.edit_original_response.await_args.kwargs["view"].target_key == "voice"
+    new = _slash(_id_at(361000), guild)
+    await utility.help_command.callback(utility, new)
+    assert new.edit_original_response.await_args.kwargs["view"].target_key == "games"
+
+
+@pytest.mark.asyncio
+async def test_explicit_slash_home_discards_the_pending_attempt():
+    utility, guild = _utility(), SimpleNamespace(id=1)
+    remember_help_category(utility.bot, _event(101, guild=guild), "music")
+    explicit = _slash(102, guild)
+    await utility.help_command.callback(utility, explicit, "início")
+    assert explicit.edit_original_response.await_args.kwargs["view"].target_kind == "home"
+    again = _event(103, guild=guild, content="!help")
+    await utility.on_message(again)
+    assert again.channel.send.await_args.kwargs["view"].target_kind == "home"
+
+
+@pytest.mark.asyncio
+async def test_discord_emoji_rejection_retries_same_category_in_plain_text():
+    guild, cache = _emoji_cache()
+    utility = _utility()
+    utility.bot.get_emoji = cache.get
+    remember_help_category(utility.bot, _event(101, guild=guild), "music")
+    first = _slash(102, guild)
+    invalid = discord.HTTPException(
+        SimpleNamespace(status=400, reason="Bad Request"),
+        {"code": 50035, "message": "Invalid Form Body", "errors": {"emoji": {"_errors": [{"message": "Invalid emoji"}]}}},
+    )
+    first.edit_original_response.side_effect = [invalid, None]
+    await utility.help_command.callback(utility, first)
+    decorated, plain = [call.kwargs["view"] for call in first.edit_original_response.await_args_list]
+    assert decorated.target_key == plain.target_key == "music"
+    assert _copy(decorated).startswith("## <a:Vinyl_Music_loading:")
+    assert _copy(plain).startswith("## Música")
+    assert all(opt.emoji is None for opt in _selectors(plain)[0].options)
+    assert consume_help_category(utility.bot, _event(103, guild=guild)) is None
 
 
 @pytest.mark.parametrize("source", ["prefix", "slash"])

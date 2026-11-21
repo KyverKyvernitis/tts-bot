@@ -63,12 +63,12 @@ class HelpCommandMixin:
                 return
 
         await interaction.response.defer()
-        view = await self._build_help_view(
-            guild=interaction.guild, owner=interaction.user, source=match["source"],
-            subject=subject, music_from_activity=match["music"] == "1",
-        )
         try:
-            await interaction.edit_original_response(view=view, allowed_mentions=discord.AllowedMentions.none())
+            await self._send_help_view(
+                interaction.edit_original_response, guild=interaction.guild, owner=interaction.user,
+                channel=interaction.channel, app_permissions=interaction.app_permissions, source=match["source"],
+                subject=subject, music_from_activity=match["music"] == "1",
+            )
         except discord.NotFound:
             # O dono pode ter fechado o card enquanto a nova área carregava.
             pass

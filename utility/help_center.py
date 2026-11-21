@@ -28,13 +28,14 @@ _CATEGORY_MENU_COPY = {
     "chatbot": ("Conversa e imagens", "Me chama pra conversar ou me pede um desenho."),
     "server": ("Servidor", "Cuida dos tickets, das boas-vindas e dos cargos."),
 }
-# Cada marcador aceita texto provisório, um emoji Unicode ou um <:nome:id> do servidor.
-_CATEGORY_MARKERS = {
-    "voice": "[voz]",
-    "music": "[som]",
-    "games": "[jogos]",
-    "chatbot": "[chat]",
-    "server": "[staff]",
+_BOOK_EMOJI_ID = 1500584783779070143
+_HELP_EMOJI_IDS = {
+    "home": _BOOK_EMOJI_ID,
+    "voice": 1539137127852539944,  # osaka
+    "music": 1559374199133315122,  # Vinyl_Music_loading
+    "games": 1513652679044366406,  # a9decowhite2_dw
+    "chatbot": 1564113432905654353,  # emoji_86
+    "server": _BOOK_EMOJI_ID,
 }
 
 
@@ -626,16 +627,33 @@ def _render_entry(
     return _HelpPage(f"## `{title}`\n{entry.description}", blocks, accent)
 
 
-def _category_option(category: HelpCategory, *, selected: bool) -> discord.SelectOption:
+def available_help_emojis(
+    bot: discord.Client,
+    guild: discord.Guild | None,
+    channel: discord.abc.Messageable | None,
+    app_permissions: discord.Permissions | None,
+) -> dict[str, discord.Emoji]:
+    me = getattr(guild, "me", None)
+    permissions_for = getattr(channel, "permissions_for", None)
+    if app_permissions is None and me is not None and callable(permissions_for):
+        app_permissions = permissions_for(me)
+    allow_external = guild is None or bool(app_permissions and app_permissions.external_emojis)
+    guild_id = getattr(guild, "id", None)
+
+    result = {}
+    for area, emoji_id in _HELP_EMOJI_IDS.items():
+        emoji = bot.get_emoji(emoji_id)
+        if emoji is None or (emoji.guild_id != guild_id and not allow_external):
+            continue
+        if emoji.guild and emoji.guild.me and emoji.is_usable():
+            result[area] = emoji
+    return result
+
+
+def _category_option(category: HelpCategory, *, selected: bool, emoji: discord.Emoji | None) -> discord.SelectOption:
     label, description = _category_menu_copy(category)
-    marker = _CATEGORY_MARKERS.get(category.key, "")
-    emoji = None
-    if marker.startswith("["):
-        description = f"{marker} {description}"
-    elif marker:
-        emoji = marker
     return discord.SelectOption(
-        label=label, description=description[:100], emoji=emoji,
+        label=label, description=description, emoji=emoji,
         value=f"category:{category.key}", default=selected,
     )
 
@@ -660,6 +678,7 @@ class HelpCenterView(discord.ui.LayoutView):
         root_ids: dict[str, int],
         source: HelpSource = "slash",
         avatar_url: str | None = None,
+        emojis: dict[str, discord.Emoji] | None = None,
         games_context: dict[str, str] | None = None,
         extra_permissions: set[str] | frozenset[str] = frozenset(),
         hidden_categories: set[str] | frozenset[str] = frozenset(),
@@ -700,7 +719,14 @@ class HelpCenterView(discord.ui.LayoutView):
             self.target_kind, self.target_key = "home", None
 
         page = self._page(categories, music_offline="music" in hidden_categories)
-        header: discord.ui.Item = discord.ui.TextDisplay(page.header)
+        emojis = emojis or {}
+        heading_icon = None
+        if self.target_kind == "home":
+            heading_icon = emojis.get("home")
+        elif self.target_kind == "category":
+            heading_icon = emojis.get(self.target_key)
+        heading = page.header.replace("## ", f"## {heading_icon} ", 1) if heading_icon else page.header
+        header: discord.ui.Item = discord.ui.TextDisplay(heading)
         if avatar_url and self.target_kind == "home":
             header = discord.ui.Section(header, accessory=discord.ui.Thumbnail(avatar_url, description="Meu avatar"))
         card = discord.ui.Container(header, accent_color=_PREFIX_ACCENT if source == "prefix" else page.accent)
@@ -714,7 +740,10 @@ class HelpCenterView(discord.ui.LayoutView):
         self.add_item(card)
         if categories:
             selected_key = self.target_key if self.target_kind == "category" else None
-            options = [_category_option(category, selected=category.key == selected_key) for category in categories]
+            options = [
+                _category_option(category, selected=category.key == selected_key, emoji=emojis.get(category.key))
+                for category in categories
+            ]
             self.add_item(discord.ui.ActionRow(discord.ui.Select(
                 custom_id=f"{control_prefix}:area", placeholder="Escolha uma área", options=options,
             )))
