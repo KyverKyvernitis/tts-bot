@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from uuid import uuid4
 from weakref import WeakValueDictionary
 from dataclasses import replace
 from datetime import datetime
@@ -343,6 +344,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         intents.message_content = True
         self.client = discord.Client(intents=intents)
         self.states: dict[int, GuildMusicState] = {}
+        self._tts_voice_sessions: dict[int, tuple[tuple[int, int, str], str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner: Any = None
         self._shutdown_lock = asyncio.Lock()
@@ -351,6 +353,7 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         self._app.add_routes([
             web.get("/health", self.handle_health),
             web.post("/command", self.handle_command),
+            web.post("/tts-existing", self.handle_tts_existing),
         ])
         self._wire_discord_events()
 
@@ -419,6 +422,12 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 return
             guild = getattr(member, "guild", None)
             guild_id = safe_id(getattr(guild, "id", 0))
+            bot_id = safe_id(getattr(self.client.user, "id", 0))
+            member_id = safe_id(getattr(member, "id", 0))
+            before_id = safe_id(getattr(getattr(before, "channel", None), "id", 0))
+            after_id = safe_id(getattr(getattr(after, "channel", None), "id", 0))
+            if bot_id and member_id == bot_id and before_id != after_id:
+                self._tts_voice_sessions.pop(guild_id, None)
             if guild_id <= 0 or guild_id not in self.states:
                 return
             st = self.states[guild_id]
@@ -427,15 +436,11 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             player_channel_id = safe_id(getattr(player_channel, "id", 0) or st.voice_channel_id)
             if player_channel_id <= 0:
                 return
-            before_id = safe_id(getattr(getattr(before, "channel", None), "id", 0))
-            after_id = safe_id(getattr(getattr(after, "channel", None), "id", 0))
             if player_channel_id not in {before_id, after_id}:
                 return
             # O próprio bot saiu da call. Se nenhum caminho interno registrou a
             # saída imediatamente antes, trate como perda inesperada do transporte
             # de voz (rede/Discord/processo), nunca como "alguém desconectou".
-            bot_id = safe_id(getattr(self.client.user, "id", 0))
-            member_id = safe_id(getattr(member, "id", 0))
             if bot_id and member_id == bot_id and before_id > 0 and after_id <= 0:
                 cleanup_deadline = self._voice_cleanup_pending.pop(guild_id, 0.0)
                 if cleanup_deadline > time.monotonic():
@@ -857,6 +862,65 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
                 st.started_monotonic = 0.0
                 st.paused_monotonic = 0.0
 
+    def _tts_voice_session(self, guild_id: int) -> tuple[Any, int, str] | None:
+        state = self.states.get(guild_id)
+        player = getattr(state, "player", None)
+        if not self._voice_client_is_connected(player):
+            self._tts_voice_sessions.pop(guild_id, None)
+            return None
+        channel_id = safe_id(getattr(getattr(player, "channel", None), "id", 0))
+        guild = self.client.get_guild(guild_id)
+        member_voice = getattr(getattr(guild, "me", None), "voice", None)
+        gateway_channel = safe_id(getattr(getattr(member_voice, "channel", None), "id", 0))
+        if (guild is None or getattr(guild, "voice_client", None) is not player
+                or channel_id <= 0 or channel_id != gateway_channel):
+            self._tts_voice_sessions.pop(guild_id, None)
+            return None
+        voice_connection = getattr(player, "_connection", None)
+        connection_session = str(getattr(voice_connection, "session_id", "") or "")
+        if not connection_session:
+            self._tts_voice_sessions.pop(guild_id, None)
+            return None
+        identity = (id(player), channel_id, connection_session)
+        current = self._tts_voice_sessions.get(guild_id)
+        if current is None or current[0] != identity:
+            # Only retain a small history of active client identities. Tokens
+            # are never reissued when a client object or voice session changes.
+            if len(self._tts_voice_sessions) >= 128 and guild_id not in self._tts_voice_sessions:
+                self._tts_voice_sessions.pop(next(iter(self._tts_voice_sessions)))
+            current = identity, uuid4().hex
+            self._tts_voice_sessions[guild_id] = current
+        return player, channel_id, current[1]
+
+    def _tts_existing_voice_ready(self) -> bool:
+        return bool(self.executor_mode != "archive" and self.client.is_ready()
+                    and truthy(os.getenv("TTS_NATIVE_WORKER"), False) and os.getenv("TTS_NATIVE_WORKER_SOCKET"))
+
+    def _tts_existing_voice_client(self, body: dict[str, Any]) -> Any | None:
+        if not self._tts_existing_voice_ready():
+            return None
+        expected = body.get("expected_voice_session")
+        if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{32}", expected):
+            return None
+        guild_id = safe_id(body.get("guild_id"))
+        channel_id = safe_id(body.get("voice_channel_id") or body.get("channel_id"))
+        current = self._tts_voice_session(guild_id) if guild_id > 0 and channel_id > 0 else None
+        if current is not None and current[1:] == (channel_id, expected):
+            return current[0]
+        return None
+
+    def _tts_existing_voice_status(self, guild_id: int = 0) -> dict[str, Any]:
+        sessions = []
+        if self._tts_existing_voice_ready():
+            guild_ids = (guild_id,) if guild_id else self.states
+            for candidate in guild_ids:
+                active = self._tts_voice_session(candidate)
+                if active is not None:
+                    sessions.append({"guild_id": str(candidate), "channel_id": str(active[1]), "session": active[2]})
+                    if len(sessions) >= 32:
+                        break
+        return {"native_tts_existing_voice_protocol": 1, "native_tts_existing_sessions": sessions, "pid": os.getpid()}
+
     async def handle_health(self, request: web.Request) -> web.Response:
         if not self._auth_ok(request):
             return web.json_response({"ok": False, "error": "unauthorized"}, status=401, headers=self._agent_response_headers())
@@ -864,7 +928,10 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
         guild_id = safe_id(query.get("guild_id")) if hasattr(query, "get") else 0
         compact = truthy(query.get("compact"), bool(guild_id)) if hasattr(query, "get") else False
         known_revision = str(query.get("known_revision") or "").strip() if hasattr(query, "get") else ""
-        return web.json_response(self.status_payload(guild_id=guild_id, compact=compact, known_revision=known_revision), headers=self._agent_response_headers())
+        payload = self.status_payload(guild_id=guild_id, compact=compact, known_revision=known_revision)
+        if query.get("tts_existing") == "1":
+            payload.update(self._tts_existing_voice_status(guild_id))
+        return web.json_response(payload, headers=self._agent_response_headers())
 
     def _agent_response_headers(self) -> dict[str, str]:
         return {"X-Music-Agent-Version": AGENT_VERSION,
@@ -877,6 +944,9 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             body = await request.json()
         except Exception:
             body = {}
+        if isinstance(body, dict) and body.get("require_existing_voice") is True:
+            return web.json_response({"ok": False, "error": "use_tts_existing_endpoint"}, status=400,
+                                     headers=self._agent_response_headers())
         try:
             result = await self.dispatch(body)
             return web.json_response(result, headers=self._agent_response_headers())
@@ -884,6 +954,36 @@ class MusicAgent(ArchiveMixin, TTSMixin, ReproducaoMixin, ResolucaoMixin):
             self.log("command_error", action=body.get("action"), error=f"{type(exc).__name__}: {exc}")
             detail = str(exc) if isinstance(exc, DiscordAttachmentError) else f"{type(exc).__name__}: {short_text(exc, 300)}"
             return web.json_response({"ok": False, "error": detail, "status": self.status_payload()}, status=400, headers=self._agent_response_headers())
+
+    async def handle_tts_existing(self, request: web.Request) -> web.Response:
+        headers = self._agent_response_headers()
+        if not self._auth_ok(request):
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=401, headers=headers)
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if not isinstance(body, dict) or body.get("require_existing_voice") is not True or body.get("action") not in ("tts", "voice_tts", "cancel_tts"):
+            return web.json_response({"ok": False, "error": "invalid_existing_voice_request"}, status=400, headers=headers)
+        request_id = body.get("tts_request_id")
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 80:
+            return web.json_response({"ok": False, "error": "invalid_existing_voice_request"}, status=400, headers=headers)
+        command_identity = json.dumps([safe_id(body.get("guild_id")), request_id, body.get("action") == "cancel_tts"]).encode()
+        body["command_id"] = "tts-existing:" + hashlib.sha256(command_identity).hexdigest()
+        # A dedicated endpoint prevents older agents, which ignore the strict
+        # flag on /command, from receiving a potentially voice-changing action.
+        try:
+            result = await self.dispatch(body)
+        except Exception as exc:
+            # Exceptions without a frame receipt are ambiguous. Do not issue a
+            # first_frame_observed=False response that permits a duplicate.
+            self.log("tts_existing_error", error_type=type(exc).__name__)
+            result = {"ok": False, "error": "existing_voice_playback_failed"}
+        fields = {"ok", "error", "partial_playback", "first_frame_observed", "first_frame_ms", "startup_timing_ms",
+                  "engine", "audio_format", "native_stream", "cache_hit", "elapsed_ms", "playback_ms", "cancelled"}
+        receipt = {key: result[key] for key in fields if key in result}
+        receipt["tts_request_id"] = request_id
+        return web.json_response(receipt, headers=headers)
 
     def voice_dependencies_payload(self, *, force: bool = False) -> dict[str, Any]:
         now = time.monotonic()

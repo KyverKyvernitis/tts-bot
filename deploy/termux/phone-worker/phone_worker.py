@@ -11,6 +11,7 @@ import http.client
 import io
 import importlib
 import json
+import math
 import os
 import platform
 import re
@@ -275,6 +276,8 @@ SUPPORTED_DIRECT_TASKS = (
     "voice_agent_release_transfer",
     "voice_agent_transfer_status",
     "voice_agent_play_tts",
+    "voice_agent_play_tts_existing",
+    "voice_agent_cancel_tts_existing",
     "voice_agent_probe_connection",
     "voice_agent_connection_status",
     "voice_agent_clear_connection",
@@ -3327,7 +3330,7 @@ def _music_agent_pid_file() -> Path:
     return _phone_worker_music_bridge_module("servico").pid_file(phone_worker_dir=_phone_worker_dir)
 
 
-def _music_agent_shares_native_tts_socket() -> bool:
+def _music_agent_shares_native_tts_socket(*, expected_pid: int | None = None) -> bool:
     """Check the local process started by the managed launcher without a health RPC."""
     host = (os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip()
     socket_path = os.getenv("TTS_NATIVE_WORKER_SOCKET") or ""
@@ -3339,7 +3342,7 @@ def _music_agent_shares_native_tts_socket() -> bool:
                 or stat.S_IMODE(socket_stat.st_mode) & 0o077):
             return False
         pid = _read_pid_file(_music_agent_pid_file())
-        if not pid:
+        if not pid or (expected_pid is not None and pid != expected_pid):
             return False
         process = Path("/proc") / str(pid)
         if process.stat().st_uid != os.getuid():
@@ -3377,6 +3380,19 @@ def _music_agent_native_stream_compatible(body: dict[str, Any], engine: str) -> 
     language = str(body.get("language") or "pt").strip().lower().replace("_", "-")
     # The Music Agent's legacy aliases map these to a different provider locale.
     return language not in {"ptbr", "br", "en-us", "us"}
+
+
+def _music_agent_existing_voice_allowed(*, expected_pid: int | None = None) -> bool:
+    if (not _native_tts_enabled() or not _env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True)
+            or not _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True)
+            or (os.getenv("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_WITH_TTS_AGENT") or "").strip()
+            or os.getenv("PHONE_WORKER_TTS_AGENT_DIRECT_PREBUILD_TIMEOUT_SECONDS")
+            or _phone_worker_safe_mode_enabled()):
+        return False
+    bridge = _PHONE_WORKER_NATIVE_TTS_MODULE
+    path = os.getenv("TTS_NATIVE_WORKER_SOCKET")
+    return bool(bridge is not None and path and bridge.supervised_socket_is_live(path)
+                and _music_agent_shares_native_tts_socket(expected_pid=expected_pid))
 
 
 def _music_agent_log_file() -> Path:
@@ -3685,7 +3701,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
     return _phone_worker_music_bridge_module("telemetria").music_agent_snapshot(hooks)
 
 
-def _music_agent_light_snapshot() -> dict[str, Any]:
+def _music_agent_light_snapshot(*, include_existing_voice: bool = False) -> dict[str, Any]:
     def probe() -> dict[str, Any]:
         hooks = SimpleNamespace(load_runtime_env=_load_phone_worker_runtime_env, env_float=_env_float)
         return _phone_worker_music_bridge_module("telemetria").music_agent_health_snapshot(hooks)
@@ -3700,6 +3716,14 @@ def _music_agent_light_snapshot() -> dict[str, Any]:
         snapshot["observation_age_seconds"] = round(max(0.0, age), 3)
         if age < -5.0 or age > 5.0:
             snapshot.update(ok=False, available=False, reason="health_stale")
+    capability = snapshot.pop("_native_tts_existing_voice", None)
+    age = snapshot.get("observation_age_seconds")
+    if (include_existing_voice and snapshot.get("ok") is True and isinstance(capability, dict)
+            and capability.get("sessions") and isinstance(age, (int, float)) and 0 <= age <= 5
+            and _music_agent_existing_voice_allowed(expected_pid=capability["pid"])):
+        snapshot["voice_agent"] = {"native_tts_existing_voice_protocol": 1,
+                                    "native_tts_existing_sessions": capability["sessions"],
+                                    "observation_age_seconds": age}
     return snapshot
 
 
@@ -4848,13 +4872,17 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if path in {"/music-agent/health", "/music-agent/status"}:
             if not self._require_auth():
                 return
+            music_agent = _music_agent_light_snapshot(include_existing_voice=True)
             payload = {
                 "ok": True,
                 "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
                 "version": PHONE_WORKER_VERSION, "runtime_kind": "termux", "pid": os.getpid(),
                 "profile": _current_core_worker_profile(), "connection": _ssh_connection_snapshot(),
-                "music_agent": _music_agent_light_snapshot(),
+                "music_agent": music_agent,
             }
+            voice_agent = music_agent.pop("voice_agent", None)
+            if voice_agent is not None:
+                payload["voice_agent"] = voice_agent
             _json_response(self, HTTPStatus.OK, payload)
             return
         if path not in {"/", "/health", "/status"}:
@@ -5077,6 +5105,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_voice_agent_transfer_status(body)
             elif task == "voice_agent_play_tts":
                 payload = self._task_voice_agent_play_tts(body)
+            elif task == "voice_agent_play_tts_existing":
+                payload = self._task_play_tts_existing_voice(body)
+            elif task == "voice_agent_cancel_tts_existing":
+                payload = self._task_music_agent_proxy(dict(body, action="cancel_tts", require_existing_voice=True))
             elif task == "voice_agent_probe_connection":
                 payload = self._task_voice_agent_probe_connection(body)
             elif task == "voice_agent_connection_status":
@@ -5387,7 +5419,59 @@ class WorkerHandler(BaseHTTPRequestHandler):
         snapshot.setdefault("logs", []).append("status de transferência de posse coletado")
         return snapshot
 
+    def _task_play_tts_existing_voice(self, body: dict[str, Any]) -> dict[str, Any]:
+        received = time.perf_counter()
+        request_id = body.get("tts_request_id")
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 80:
+            return {"ok": False, "error": "invalid_existing_voice_request"}
+
+        def reject(reason: str) -> dict[str, Any]:
+            return {"ok": False, "worker_result": {"ok": False, "error": reason,
+                    "tts_request_id": request_id, "first_frame_observed": False}}
+
+        expected = body.get("expected_voice_session")
+        if (not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{32}", expected)
+                or not _music_agent_existing_voice_allowed()):
+            return reject("existing_voice_unavailable")
+        guild_id = _voice_agent_int(body.get("guild_id"), 0)
+        channel_id = _voice_agent_int(body.get("voice_channel_id") or body.get("channel_id"), 0)
+        engine = _tts_agent_normalize_engine(body.get("engine"))
+        text = body.get("text")
+        audio = body.get("audio_b64")
+        max_chars = min(1600, _env_int("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS", 600))
+        if (guild_id <= 0 or channel_id <= 0 or engine not in {"edge", "gtts"}
+                or any(body.get(key) is not None for key in ("ttv_score", "ttv_segments", "ttv_performance_hash"))
+                or any(body.get(key) for key in ("audioBase64", "audio_url", "url", "advanced_nightcore_level",
+                                                "advanced_slowed_level", "advanced_reverb_level"))
+                or not isinstance(text, str) or not 1 <= len(text.strip()) <= max_chars
+                or (audio is not None and (not isinstance(audio, str) or not audio.strip()))
+                or not _music_agent_native_stream_compatible(body, engine)):
+            return reject("existing_voice_unsupported_tts")
+        try:
+            self._ensure_tts_piper_turbo_allowed()
+            ceiling = max(1024, min(self.max_output_bytes,
+                _env_int("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_BYTES", 12 * 1024 * 1024)))
+            budget = max(1024, min(int(body.get("max_audio_bytes") or ceiling), ceiling))
+            timeout = float(body.get("timeout_seconds") or 30.0)
+            if not math.isfinite(timeout):
+                return reject("existing_voice_unsupported_tts")
+            timeout = max(3.0, min(90.0, timeout))
+        except (TypeError, ValueError, OverflowError, RuntimeError):
+            return reject("existing_voice_unavailable")
+        proxy_body = dict(body, task="music_agent_command", action="voice_tts", engine=engine,
+                          text=text.strip(), guild_id=guild_id, voice_channel_id=channel_id,
+                          channel_id=channel_id, max_audio_bytes=budget, timeout_seconds=timeout,
+                          require_existing_voice=True)
+        # No transfer mutation or prebuild. The agent rechecks its real session
+        # under the playback guard before consuming or producing audio.
+        preflight_ms = round((time.perf_counter() - received) * 1000, 3)
+        result = self._task_music_agent_proxy(proxy_body)
+        return {"ok": result.get("ok") is True, "worker_result": result,
+                "phone_tts_preflight_ms": preflight_ms}
+
     def _task_voice_agent_play_tts(self, body: dict[str, Any]) -> dict[str, Any]:
+        if body.get("require_existing_voice") is True:
+            return {"ok": False, "error": "use_voice_agent_play_tts_existing_task"}
         if not _env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True):
             raise RuntimeError("Worker Voice Agent desativado")
         if not _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True):

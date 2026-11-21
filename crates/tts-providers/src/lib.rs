@@ -3,10 +3,13 @@
 pub mod edge;
 pub mod edge_token;
 pub mod google;
+mod google_clients;
+mod google_fetch;
+mod segments;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::{Arc, RwLock}, time::Duration};
+use std::{fmt, sync::{Arc, Mutex, RwLock}, time::{Duration, SystemTime}};
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -27,6 +30,7 @@ pub struct ProviderRequest {
     pub endpoint: String,
     pub source_ip: Option<std::net::IpAddr>,
     pub proxy: Option<String>,
+    pub startup_segments: bool,
     pub android_base_url: String,
     pub android_payload: Option<serde_json::Value>,
 }
@@ -38,7 +42,7 @@ impl Default for ProviderRequest {
             rate: "+0%".into(), pitch: "+0Hz".into(), tld: "com".into(),
             timeout_seconds: 20.0, connect_timeout_seconds: 4.0,
             receive_timeout_seconds: 15.0, max_audio_bytes: 8 * 1024 * 1024,
-            endpoint: "services".into(), source_ip: None, proxy: None,
+            endpoint: "services".into(), source_ip: None, proxy: None, startup_segments: false,
             android_base_url: "http://127.0.0.1:8877".into(), android_payload: None }
     }
 }
@@ -59,6 +63,32 @@ impl fmt::Display for ProviderError {
 impl std::error::Error for ProviderError {}
 pub type Result<T> = std::result::Result<T, ProviderError>;
 
+struct RateLimit(Mutex<Option<tokio::time::Instant>>);
+
+impl RateLimit {
+    const fn new() -> Self { Self(Mutex::new(None)) }
+
+    fn check(&self) -> Result<()> {
+        let deadline = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if deadline.is_some_and(|deadline| deadline > tokio::time::Instant::now()) {
+            return Err(ProviderError::new("rate_limit", "provedor em pausa após HTTP 429").with_status(429));
+        }
+        Ok(())
+    }
+
+    fn pause(&self, retry_after: Option<&str>) {
+        let seconds = retry_after.and_then(|value| {
+            value.trim().parse::<u64>().ok().or_else(|| {
+                httpdate::parse_http_date(value).ok()?.duration_since(SystemTime::now()).ok().map(|delay| delay.as_secs().saturating_add(1))
+            })
+        }).unwrap_or(30).max(1);
+        let now = tokio::time::Instant::now();
+        let next = now.checked_add(Duration::from_secs(seconds)).unwrap_or_else(|| now + Duration::from_secs(86_400));
+        let mut deadline = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        *deadline = Some(deadline.map_or(next, |current| current.max(next)));
+    }
+}
+
 enum Record { Audio(Bytes), Complete, Failed(ProviderError) }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -70,6 +100,32 @@ pub struct ProviderMetadata {
     pub locale: String,
     pub android_synth_ms: String,
     pub sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup: Option<ProviderTiming>,
+}
+
+/// The first provider turn only. HTTP timing begins when the request is sent.
+/// Edge timing begins before the connection.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ProviderTiming {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handshake_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_body_ms: Option<f64>,
+    pub first_audio_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_version: Option<&'static str>,
+    /// Client configuration reuse. Does not imply socket reuse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_pool_hit: Option<bool>,
 }
 
 pub struct NativeStream {
@@ -113,6 +169,12 @@ pub struct AudioSink {
     metadata: Arc<RwLock<ProviderMetadata>>,
 }
 impl AudioSink {
+    fn record_startup(&self, timing: ProviderTiming) {
+        let mut metadata = self.metadata.write().unwrap_or_else(|error| error.into_inner());
+        if metadata.startup.is_none() {
+            metadata.startup = Some(timing);
+        }
+    }
     pub async fn emit(&mut self, data: impl Into<Bytes>) -> Result<()> {
         let data = data.into();
         if self.size.checked_add(data.len()).is_none_or(|n| n > self.limit) {
@@ -137,6 +199,7 @@ impl AudioSink {
 #[derive(Clone)]
 pub struct ProviderPool {
     client: reqwest::Client,
+    google_clients: Arc<google_clients::ClientPool>,
     edge: Arc<Semaphore>, google: Arc<Semaphore>, android: Arc<Semaphore>,
 }
 impl ProviderPool {
@@ -169,7 +232,8 @@ impl ProviderPool {
             .pool_idle_timeout(Duration::from_secs(90))
             .user_agent("CoreTTS-Rust/0.1")
             .build().map_err(|e| ProviderError::new("configuration", e.to_string()))?;
-        Ok(Self { client, edge: Arc::new(Semaphore::new(edge_concurrency)),
+        Ok(Self { client, google_clients: Arc::new(google_clients::ClientPool::default()),
+            edge: Arc::new(Semaphore::new(edge_concurrency)),
             google: Arc::new(Semaphore::new(google_concurrency)), android: Arc::new(Semaphore::new(2)) })
     }
     pub fn client(&self) -> &reqwest::Client { &self.client }
@@ -216,8 +280,8 @@ impl ProviderPool {
             _ = stop.cancelled() => Err(ProviderError::new("cancelled", "TTS cancelado")),
             timed = tokio::time::timeout(duration, async {
                 match request.engine.as_str() {
-                    "edge" => edge::synthesize(&request, &mut sink).await,
-                    "gtts" => google::synthesize(&self.client, &request, &mut sink).await,
+                    "edge" => edge::synthesize_with_slots(&request, &mut sink, &self.edge).await,
+                    "gtts" => self.google_clients.synthesize(&request, &mut sink, &self.google).await,
                     _ => self.android(&request, &mut sink).await,
                 }
             }) => timed.unwrap_or_else(|_| Err(ProviderError::new("timeout", "prazo total do TTS esgotado"))),

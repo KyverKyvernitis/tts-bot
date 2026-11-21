@@ -147,8 +147,11 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
     started = time.perf_counter()
     request_ms = repair_ms = 0.0
     request_count = 0
+    strict_voice = body.get("require_existing_voice") is True
     hooks.load_runtime_env()
-    token = str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip() or hooks.ensure_token(persist=True)
+    token = str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip()
+    if not token and not strict_voice:
+        token = hooks.ensure_token(persist=True)
     host = str(os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     try:
         port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8780))
@@ -190,6 +193,9 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
         return data
 
     precheck_ms = 0.0
+    if strict_voice and (not token or host not in {"127.0.0.1", "localhost", "::1"} or not 1 <= port <= 65535
+                         or action not in {"tts", "voice_tts", "cancel_tts"}):
+        return _finish({"ok": False, "available": False, "error": "existing_voice_proxy_unavailable"})
     if not is_status and not agent_configured:
         return _finish({
             "ok": False, "available": False,
@@ -200,11 +206,13 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    installed_version = _installed_version() if not is_status else ""
+    installed_version = _installed_version() if not is_status and not strict_voice else ""
     # Every retry uses precisely this payload, including a generated dedup ID
     # for legacy callers that did not yet provide their own ID.
     payload = {k: v for k, v in body.items() if k not in {"task", "timeout_seconds"}}
     payload.setdefault("action", action)
+    if strict_voice:
+        payload["timeout_seconds"] = timeout_seconds
     if not is_status and not str(payload.get("command_id") or "").strip():
         payload["command_id"] = uuid.uuid4().hex
     encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -212,7 +220,7 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
     def _request_agent() -> tuple[dict[str, Any], dict[str, str]]:
         nonlocal request_ms, request_count
         local_headers = dict(headers)
-        path = "/command"
+        path = "/tts-existing" if strict_voice else "/command"
         method = "POST"
         request_body: bytes | None = encoded
         if is_status:
@@ -267,14 +275,14 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
             repair_ms += (time.perf_counter() - repair_started) * 1000
 
     try:
-        if not is_status:
+        if not is_status and not strict_voice:
             with _READY_LOCK:
                 known_runtime_version = _READY_RUNTIME_VERSION.get(cache_key, "")
             known_stale = bool(known_runtime_version and installed_version and hooks.version_lt(known_runtime_version, installed_version))
             if ready_ttl == 0 or known_stale:
                 _repair(force_stale=known_stale)
         precheck_ms = max(0.0, (time.perf_counter() - started) * 1000 - repair_ms)
-        for attempt in range(2):
+        for attempt in range(1 if strict_voice else 2):
             try:
                 data, response_headers = _request_agent()
                 runtime_version, discord_ready = _runtime_metadata(data, response_headers)
@@ -299,7 +307,7 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
                 # 400 means the action did not execute. A stale agent may not
                 # know prepare_voice yet; repair once without replaying success.
                 unsupported = "não suportada" in str(error_payload.get("error") or "") or "unsupported" in str(error_payload.get("error") or "").lower()
-                if exc.code == 400 and stale and unsupported and not is_status and attempt == 0 and attempted_prepare is None:
+                if exc.code == 400 and stale and unsupported and not is_status and not strict_voice and attempt == 0 and attempted_prepare is None:
                     _repair(force_stale=True)
                     continue
                 if exc.code != 400:
@@ -313,6 +321,8 @@ def proxy_music_agent(body: dict[str, Any], *, max_output_bytes: int, hooks: Any
                 })
             except Exception as exc:
                 _forget_runtime_version(cache_key)
+                if strict_voice:
+                    return _finish({"ok": False, "available": False, "error": type(exc).__name__})
                 if attempt == 0 and isinstance(exc, (
                     BrokenPipeError, ConnectionResetError, http.client.RemoteDisconnected,
                 )):

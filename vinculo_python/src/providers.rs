@@ -110,6 +110,7 @@ fn provider_voices<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
 }
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NATIVE_PROVIDERS_PROTOCOL_VERSION", 1)?;
+    m.add("NATIVE_STARTUP_SEGMENTS_VERSION", 1)?;
     m.add_class::<PythonProviderStream>()?;
     m.add_function(wrap_pyfunction!(provider_start, m)?)?;
     m.add_function(wrap_pyfunction!(provider_save, m)?)?;

@@ -14,6 +14,7 @@ import os
 import queue
 import re
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -26,7 +27,7 @@ import discord
 from .configuracao import env_float, env_int, truthy
 from .estado import GuildMusicState
 from .efeitos import filtros_tts
-from .mixer_pcm import AgentMixedAudioSource
+from .mixer_pcm import AgentMixedAudioSource, PCM_FRAME_BYTES
 from .utilitarios import safe_id, short_text
 
 _TTS_FFMPEG_BASE_OPTIONS = "-vn -sn -dn -loglevel warning"
@@ -71,6 +72,8 @@ class _NativeTTSReader(io.RawIOBase):
         self.eof = False
         self.cache_hit = False
         self.audio_format = "mp3"
+        self.first_body_at = None
+        self.worker_startup_timing_ms = {}
 
     def readable(self):
         return True
@@ -114,6 +117,17 @@ class _NativeTTSReader(io.RawIOBase):
                 or not response.chunked):
             raise RuntimeError("resposta TTS nativa retornou engine/formato/protocolo incompatível")
         self.cache_hit = response.getheader("X-Core-Worker-Cache-Hit", "false").lower() == "true"
+        for stage, header in (
+            ("worker_reported_first_audio", "X-Core-Worker-First-Audio-Ms"),
+            ("worker_provider_admission", "X-Core-Worker-Startup-Admission-Ms"),
+            ("worker_first_provider_audio", "X-Core-Worker-Startup-Provider-First-Ms"),
+        ):
+            try:
+                value = float(response.getheader(header, ""))
+            except ValueError:
+                continue
+            if math.isfinite(value) and 0 <= value <= 300_000:
+                self.worker_startup_timing_ms[stage] = round(value, 2)
 
     def read(self, size=-1):
         if self.closed or self._closing or self.eof or size == 0:
@@ -131,6 +145,8 @@ class _NativeTTSReader(io.RawIOBase):
             self.size += len(chunk)
             if self.size > self.max_bytes:
                 raise ValueError("áudio TTS nativo excedeu limite de bytes")
+            if self.first_body_at is None:
+                self.first_body_at = time.monotonic()
             return chunk
         except Exception as error:
             self.error = error
@@ -159,6 +175,11 @@ class _TimedTTSSource(discord.AudioSource):
     def __init__(self, source, *, started, reader=None, buffered=False):
         self.source, self.started, self.reader = source, started, reader
         self.first_frame_ms = None
+        self.first_pcm_ready_at = None
+        self.first_pcm_signal_at = None
+        self.first_voice_packet_at = None
+        self._signal_read = None
+        self._packet_trace_enabled = False
         self.closed = False
         self.error = None
         self.finished = False
@@ -186,6 +207,7 @@ class _TimedTTSSource(discord.AudioSource):
                         self.ready.set()
                     break
                 saw_pcm = True
+                self._observe_pcm(frame)
                 while not self.closed:
                     try:
                         self.frames.put(frame, timeout=.1)
@@ -200,7 +222,38 @@ class _TimedTTSSource(discord.AudioSource):
             self.finished = True
             self.ready.set()
 
+    def _observe_pcm(self, frame):
+        if self.first_pcm_signal_at is not None or len(frame) != PCM_FRAME_BYTES or sys.byteorder != "little":
+            return
+        is_opus = getattr(self.source, "is_opus", None)
+        if not callable(is_opus) or is_opus():
+            return
+        if self.first_pcm_ready_at is None:
+            self.first_pcm_ready_at = time.monotonic()
+        if self.first_pcm_signal_at is None and self._has_pcm_signal(frame):
+            self.first_pcm_signal_at = time.monotonic()
+
+    @staticmethod
+    def _has_pcm_signal(frame):
+        samples = memoryview(frame).cast("h")
+        return sum(value * value for value in samples) >= len(samples) * 32**2
+
+    def startup_timing(self):
+        times = dict(getattr(self.reader, "worker_startup_timing_ms", {}))
+        for name, at in (
+            ("first_mp3_body", getattr(self.reader, "first_body_at", None)),
+            ("first_pcm_ready", self.first_pcm_ready_at),
+            ("first_pcm_signal", self.first_pcm_signal_at),
+            ("first_voice_packet", self.first_voice_packet_at),
+        ):
+            if at is not None:
+                elapsed = (at - self.started) * 1000
+                if math.isfinite(elapsed) and 0 <= elapsed <= 300_000:
+                    times[name] = round(elapsed, 2)
+        return times
+
     def read(self):
+        self._signal_read = None
         if self.closed:
             return b''
         if self.frames is None:
@@ -218,6 +271,11 @@ class _TimedTTSSource(discord.AudioSource):
             raise RuntimeError('síntese progressiva incompleta') from self.reader.error
         if frame and self.first_frame_ms is None:
             self.first_frame_ms = (time.monotonic() - self.started) * 1000
+        if frame and self.frames is None:
+            self._observe_pcm(frame)
+        if (frame and self._packet_trace_enabled and self.first_voice_packet_at is None and self.first_pcm_signal_at is not None
+                and len(frame) == PCM_FRAME_BYTES and self._has_pcm_signal(frame)):
+            self._signal_read = threading.get_ident()
         return frame
 
     def is_opus(self):
@@ -232,6 +290,42 @@ class _TimedTTSSource(discord.AudioSource):
         self.source.cleanup()
 
 
+@contextlib.contextmanager
+def _trace_direct_tts_packet(voice_client, source):
+    """Time successful UDP send of this TTS source's first PCM with signal."""
+    connection = getattr(voice_client, "_connection", None)
+    send = getattr(connection, "send_packet", None)
+    if not callable(send) or not isinstance(source, _TimedTTSSource):
+        yield
+        return
+
+    def traced(packet):
+        matches = (source._signal_read == threading.get_ident()
+                   and getattr(voice_client, "source", None) is source
+                   and getattr(voice_client, "_connection", None) is connection)
+        if matches:
+            source._signal_read = None
+        result = send(packet)
+        if matches and source.first_voice_packet_at is None:
+            source.first_voice_packet_at = time.monotonic()
+        return result
+
+    try:
+        connection.send_packet = traced
+    except (AttributeError, TypeError):
+        yield
+        return
+    source._packet_trace_enabled = True
+    try:
+        yield
+    finally:
+        source._packet_trace_enabled = False
+        source._signal_read = None
+        if getattr(connection, "send_packet", None) is traced:
+            with contextlib.suppress(AttributeError, TypeError):
+                connection.send_packet = send
+
+
 def _native_partial_playback_result(source, *, engine, audio_format, started, direct_tts=False):
     """A completed first PCM read forbids replaying a failed native stream."""
     first = getattr(source, "first_frame_ms", None)
@@ -242,8 +336,18 @@ def _native_partial_playback_result(source, *, engine, audio_format, started, di
     return {"ok": False, "partial_playback": True, "native_stream": True,
             "first_frame_observed": True, "first_frame_ms": first,
             "engine": engine, "audio_format": audio_format or "mp3", "direct_tts": direct_tts,
+            "startup_timing_ms": _startup_timing(source),
             "elapsed_ms": round(max(0.0, time.monotonic() - started) * 1000, 1),
             "error": "fluxo TTS nativo interrompido após o primeiro áudio; não reproduzir novamente"}
+
+
+def _existing_voice_unavailable(body):
+    return {"ok": False, "error": "existing_voice_unavailable", "first_frame_observed": False,
+            "tts_request_id": str(body.get("tts_request_id") or "")[:80]}
+
+
+def _startup_timing(source):
+    return source.startup_timing() if isinstance(source, _TimedTTSSource) else {}
 
 
 def _schedule_tts_prune(callback, path):
@@ -309,6 +413,9 @@ class TTSMixin:
             payload["cache_key"] = key
         if body.get("cache_only"):
             payload["cache_only"] = body["cache_only"]
+        for option in ("startup_segments", "startup_async_cache"):
+            if body.get(option) is True:
+                payload[option] = True
         if not self._tts_cache_enabled():
             payload["cache_only"] = (payload.get("cache_only") is True
                                      or str(payload["cache_mode"]).strip().lower() in {"only", "cache_only"})
@@ -631,6 +738,7 @@ class TTSMixin:
         now = time.monotonic()
         self._cancelled_tts_requests = {key: when for key, when in self._cancelled_tts_requests.items() if now - when < 60}
         request = str(body.get('tts_request_id') or '')[:80]
+        strict = body.get('require_existing_voice') is True
         key = (safe_id(body.get('guild_id')), request)
         if request and key in self._cancelled_tts_requests:
             return {'ok': False, 'cancelled': True, 'error': 'TTS cancelado antes da admissão'}
@@ -640,7 +748,10 @@ class TTSMixin:
         if request:
             active[key] = owner
         try:
-            return await (self.cmd_voice_tts(body) if direct else self.cmd_tts(body))
+            result = await (self.cmd_voice_tts(body) if direct else self.cmd_tts(body))
+            if strict:
+                result['tts_request_id'] = request
+            return result
         finally:
             if active.get(key) is owner:
                 active.pop(key, None)
@@ -746,6 +857,9 @@ class TTSMixin:
 
     async def cmd_tts(self, body: dict[str, Any], *, _allow_direct_fallback: bool = True) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
+        strict = body.get("require_existing_voice") is True
+        if strict and not self._tts_existing_voice_client(body):
+            return _existing_voice_unavailable(body)
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         self._update_auto_leave_from_body(st, body)
         player = st.player
@@ -817,12 +931,15 @@ class TTSMixin:
                             before_options="-nostdin", options=ffmpeg_options),
                         started=started, timeout=timeout,
                     )
+                if strict and (self._tts_existing_voice_client(body) is not player
+                               or getattr(player, "source", None) is not source):
+                    return _existing_voice_unavailable(body)
                 future = source.add_tts(tts_source, volume=max(0.0, min(2.0, env_float("MUSIC_AGENT_TTS_VOLUME", 1.0))))
                 self.log("tts_overlay_start", guild_id=guild_id, engine=engine, chars=len(str(body.get("text") or "")), prebuilt=bool(audio_url or audio_b64))
                 await asyncio.wait_for(future, timeout=timeout)
         except Exception as exc:
             self.log("tts_overlay_interrupted", guild_id=guild_id, error=f"{type(exc).__name__}: {short_text(exc, 180)}")
-            if not _allow_direct_fallback:
+            if strict or not _allow_direct_fallback:
                 partial = _native_partial_playback_result(
                     tts_source, engine=engine, audio_format="mp3", started=started)
                 if partial is not None:
@@ -845,16 +962,20 @@ class TTSMixin:
         elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
         self.log("tts_overlay_done", guild_id=guild_id, elapsed_ms=round(elapsed_ms, 1))
         return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "first_frame_observed": tts_source.first_frame_ms is not None, "first_frame_ms": tts_source.first_frame_ms,
+                "startup_timing_ms": _startup_timing(tts_source),
                 "native_stream": isinstance(getattr(tts_source, "reader", None), _NativeTTSReader), "state": st.public()}
 
     @contextlib.asynccontextmanager
-    async def _direct_voice_with_prepared_tts(self, guild_id, body, *, started):
+    async def _direct_voice_with_prepared_tts(self, guild_id, body, *, started, existing_voice=None):
         """Overlap a cold voice connection with native MP3 preparation.
 
         The caller enters only after its guild lock and music ownership checks.
         A bounded PCM reader keeps decoding off the voice thread. Its task and
         physical input are reclaimed even if the voice connection fails.
         """
+        if existing_voice is not None:
+            yield existing_voice, False, None
+            return
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
         native_stream = (_native_tts_enabled()
                          and engine in {"edge", "edge_tts", "gtts", "google", "google_tts", "googlecloud", "google_cloud", "gcloud"}
@@ -895,7 +1016,11 @@ class TTSMixin:
             raise ValueError("guild_id/voice_channel_id obrigatórios para TTS direto")
         timeout = max(3.0, min(90.0, float(body.get("timeout_seconds") or 30.0)))
         started = time.monotonic()
+        strict = body.get("require_existing_voice") is True
         async with self._registry_lock(self._tts_direct_locks, self._tts_direct_lock_users, guild_id):
+            existing_voice = self._tts_existing_voice_client(body) if strict else None
+            if strict and existing_voice is None:
+                return _existing_voice_unavailable(body)
             st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
             self._update_auto_leave_from_body(st, body)
             st.voice_channel_id = voice_channel_id
@@ -919,7 +1044,7 @@ class TTSMixin:
             # Música e TTS compartilham a mesma sessão Discord Voice. Passe pelo
             # mesmo single-flight para não competir com preconnect/playback.
             self.log("voice_direct_tts_prepare", guild_id=guild_id, channel=voice_channel_id)
-            async with self._direct_voice_with_prepared_tts(guild_id, body, started=started) as (
+            async with self._direct_voice_with_prepared_tts(guild_id, body, started=started, existing_voice=existing_voice) as (
                 voice_client, _created, preparation
             ):
                 self._cancel_idle_disconnect(guild_id)
@@ -933,6 +1058,8 @@ class TTSMixin:
 
                 try:
                     if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
+                        if strict:
+                            return _existing_voice_unavailable(body)
                         with contextlib.suppress(Exception):
                             voice_client.stop()
                         await asyncio.sleep(0.15)
@@ -1015,11 +1142,24 @@ class TTSMixin:
                             audio_format = "mp3"
                         if audio_source is None:
                             audio_source = _TimedTTSSource(_build_tts_audio_source(tts_input, audio_format=audio_format), started=started)
+
+                        def stop_this_playback():
+                            if strict and getattr(voice_client, "source", None) is not audio_source:
+                                return
+                            if (getattr(voice_client, "is_playing", lambda: False)()
+                                    or getattr(voice_client, "is_paused", lambda: False)()):
+                                voice_client.stop()
+
                         play_started = time.monotonic()
                         try:
-                            voice_client.play(audio_source, after=_after)
-                            self.log("voice_direct_tts_start", guild_id=guild_id, engine=engine, channel=voice_channel_id, chars=len(str(body.get("text") or "")))
-                            await asyncio.wait_for(finished, timeout=timeout)
+                            if strict and (self._tts_existing_voice_client(body) is not voice_client
+                                           or st.current is not None
+                                           or voice_client.is_playing() or voice_client.is_paused()):
+                                return _existing_voice_unavailable(body)
+                            with _trace_direct_tts_packet(voice_client, audio_source):
+                                voice_client.play(audio_source, after=_after)
+                                self.log("voice_direct_tts_start", guild_id=guild_id, engine=engine, channel=voice_channel_id, chars=len(str(body.get("text") or "")))
+                                await asyncio.wait_for(finished, timeout=timeout)
                         except (asyncio.TimeoutError, TimeoutError):
                             self.log(
                                 "voice_direct_tts_timeout",
@@ -1030,8 +1170,7 @@ class TTSMixin:
                                 elapsed_ms=round(max(0.0, (time.monotonic() - started) * 1000.0), 1),
                             )
                             with contextlib.suppress(Exception):
-                                if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
-                                    voice_client.stop()
+                                stop_this_playback()
                             partial = _native_partial_playback_result(
                                 audio_source, engine=engine, audio_format=audio_format, started=started, direct_tts=True)
                             if partial is not None:
@@ -1039,8 +1178,7 @@ class TTSMixin:
                             raise
                         except BaseException as error:
                             with contextlib.suppress(Exception):
-                                if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
-                                    voice_client.stop()
+                                stop_this_playback()
                             if isinstance(error, Exception):
                                 partial = _native_partial_playback_result(
                                     audio_source, engine=engine, audio_format=audio_format, started=started, direct_tts=True)
@@ -1065,6 +1203,7 @@ class TTSMixin:
                         "elapsed_ms": round(elapsed_ms, 1),
                         "first_frame_observed": audio_source.first_frame_ms is not None,
                         "first_frame_ms": audio_source.first_frame_ms,
+                        "startup_timing_ms": _startup_timing(audio_source),
                         "native_stream": isinstance(getattr(audio_source, "reader", None), _NativeTTSReader),
                         "state": st.public(),
                     }
@@ -1072,7 +1211,8 @@ class TTSMixin:
                 finally:
                     if st.player is voice_client and st.current is None and st.status == "tts_direct":
                         self._set_status(st, "idle", event="voice_direct_tts_end")
-                    if st.player is voice_client and st.current is None:
+                    if (st.player is voice_client and st.current is None
+                            and (not strict or self._tts_existing_voice_client(body) is voice_client)):
                         await self._finish_tts_voice_session(
                             guild_id, st, voice_client, previous_mode=previous_mode, source="direct_tts_end"
                         )

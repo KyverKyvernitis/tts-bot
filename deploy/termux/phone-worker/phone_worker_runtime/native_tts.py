@@ -270,6 +270,13 @@ _SUPERVISOR = None
 _SUPERVISOR_LOCK = threading.Lock()
 
 
+def supervised_socket_is_live(path: str) -> bool:
+    """An eligibility check only. A stale status cannot start the service."""
+    owner = _SUPERVISOR
+    process = owner.process if owner is not None else None
+    return bool(process is not None and owner._owned_socket == Path(path) and process.poll() is None)
+
+
 def supervisor(*, worker_version=""):
     global _SUPERVISOR
     with _SUPERVISOR_LOCK:

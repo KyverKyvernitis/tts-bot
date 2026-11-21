@@ -283,6 +283,89 @@ def test_direct_tts_native_stream_does_not_bypass_worker_admission(direct_tts, m
     assert not syntheses
 
 
+def test_existing_voice_contract_keeps_unicode_and_never_prepares_voice(direct_tts, monkeypatch):
+    worker, handler, syntheses = direct_tts
+    monkeypatch.setattr(worker, "_music_agent_existing_voice_allowed", lambda: True)
+    monkeypatch.setattr(worker, "_voice_agent_begin_transfer", lambda _: pytest.fail("unexpected handoff"))
+    monkeypatch.setattr(worker, "_voice_agent_snapshot", lambda **_: pytest.fail("unexpected inventory"))
+    payload = request(engine="edge", text="Olá, você está aí? 😄", tts_request_id="warm-voice",
+                      require_existing_voice=True, expected_voice_session="a" * 32, startup_segments=True)
+    expected_receipt = {"ok": False, "partial_playback": True, "first_frame_observed": True,
+                        "tts_request_id": "warm-voice"}
+    calls = []
+    monkeypatch.setattr(handler, "_task_music_agent_proxy", lambda body: calls.append(body) or expected_receipt)
+    result = handler._task_play_tts_existing_voice(payload)
+    assert result["ok"] is False and result["worker_result"] == expected_receipt
+    assert not syntheses and len(calls) == 1
+    forwarded = calls[0]
+    assert forwarded["action"] == "voice_tts" and forwarded["text"] == payload["text"]
+    assert forwarded["require_existing_voice"] is True and forwarded["startup_segments"] is True
+    assert forwarded["expected_voice_session"] == payload["expected_voice_session"]
+
+
+@pytest.mark.parametrize("changes,eligible", [({}, False), ({"engine": "teto"}, True), ({"proxy": ""}, True),
+                                           ({"expected_voice_session": "stale!"}, True), ({"advanced_reverb_level": 1}, True)])
+def test_existing_voice_rejects_ineligible_requests_before_streaming(direct_tts, monkeypatch, changes, eligible):
+    worker, handler, syntheses = direct_tts
+    monkeypatch.setattr(worker, "_music_agent_existing_voice_allowed", lambda: eligible)
+    monkeypatch.setattr(handler, "_task_music_agent_proxy", lambda body: pytest.fail("unexpected dispatch"))
+    payload = request(engine="edge", text="Olá", require_existing_voice=True,
+                      expected_voice_session="a" * 32, tts_request_id="before-audio")
+    payload.update(changes)
+    result = handler._task_play_tts_existing_voice(payload)
+    assert result["ok"] is False and result["worker_result"]["first_frame_observed"] is False
+    assert result["worker_result"]["tts_request_id"] == "before-audio"
+    assert not syntheses
+
+
+def test_existing_voice_proxy_does_not_retry_or_repair_on_transport_loss(direct_tts, monkeypatch):
+    worker, handler, syntheses = direct_tts
+    from cogs.musica.runtime_telefone.ponte_worker import proxy
+    monkeypatch.setattr(worker, "_music_agent_existing_voice_allowed", lambda: True)
+    monkeypatch.setattr(worker, "_load_phone_worker_runtime_env", lambda: None)
+    monkeypatch.setattr(worker, "_run_service_action", lambda *args: pytest.fail("unexpected repair"))
+    monkeypatch.setenv("MUSIC_AGENT_HOST", "127.0.0.1")
+    monkeypatch.setenv("MUSIC_AGENT_TOKEN", "fixture-token")
+    monkeypatch.setenv("MUSIC_AGENT_BOT_TOKEN", "fixture-bot-token")
+    monkeypatch.setenv("MUSIC_AGENT_COMMAND_READY_TTL_SECONDS", "0")
+    paths = []
+
+    def disconnect(host, port, path, **kwargs):
+        paths.append(path)
+        raise ConnectionResetError("transport interrupted")
+
+    monkeypatch.setattr(proxy, "_pooled_request", disconnect)
+    result = handler._task_play_tts_existing_voice(request(engine="edge", text="Olá", require_existing_voice=True,
+                                                       expected_voice_session="a" * 32, tts_request_id="unknown-result"))
+    assert paths == ["/tts-existing"] and not syntheses
+    assert result["ok"] is False and "first_frame_observed" not in result["worker_result"]
+
+
+def test_existing_voice_dispatch_never_uses_legacy_playback_task(direct_tts, monkeypatch):
+    worker, handler, syntheses = direct_tts
+    replies = []
+    forwarded = []
+    monkeypatch.setattr(worker, "_json_response", lambda _, status, result: replies.append((status, result)))
+    monkeypatch.setattr(worker, "_music_agent_existing_voice_allowed", lambda: True)
+    monkeypatch.setattr(handler, "_task_music_agent_proxy", lambda body: forwarded.append(body) or {"ok": True})
+    handler.path = "/task"
+    payload = request(engine="edge", text="Olá", tts_request_id="existing-voice",
+                      expected_voice_session="a" * 32, require_existing_voice=True)
+    monkeypatch.setattr(handler, "_read_json", lambda: dict(payload))
+    monkeypatch.setattr(handler, "_require_auth", lambda: True)
+    payload["task"] = "voice_agent_play_tts"
+    handler.do_POST()
+    assert replies[-1][1] == {"ok": False, "error": "use_voice_agent_play_tts_existing_task"}
+    assert not forwarded
+    for task, action in [("voice_agent_play_tts_existing", "voice_tts"), ("voice_agent_cancel_tts_existing", "cancel_tts")]:
+        assert task in worker.SUPPORTED_DIRECT_TASKS and task not in worker.SUPPORTED_CORE_WORKER_JOB_TYPES
+        payload.update(task=task, require_existing_voice=False)
+        handler.do_POST()
+        assert replies[-1][1]["ok"] is True
+        assert forwarded[-1]["require_existing_voice"] is True and forwarded[-1]["action"] == action
+    assert len(forwarded) == 2 and not syntheses
+
+
 def test_direct_tts_returns_partial_playback_from_real_proxy_without_retry(direct_tts, monkeypatch):
     worker, handler, syntheses = direct_tts
     calls = []
@@ -343,6 +426,8 @@ def test_stream_readiness_checks_running_companion_and_socket(voice, monkeypatch
                 assert proc.stdout.readline().strip() == "ready"
                 pid_file.write_text(str(proc.pid))
                 assert worker._music_agent_shares_native_tts_socket()
+                assert worker._music_agent_shares_native_tts_socket(expected_pid=proc.pid)
+                assert not worker._music_agent_shares_native_tts_socket(expected_pid=proc.pid + 1)
                 monkeypatch.setenv("MUSIC_AGENT_PORT", "8781")
                 assert not worker._music_agent_shares_native_tts_socket()
                 monkeypatch.setenv("MUSIC_AGENT_PORT", "8780")

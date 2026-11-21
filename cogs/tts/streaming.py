@@ -4,10 +4,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import json
+import math
 import os
 import time
 from dataclasses import replace
 
+from .first_audio import enabled_for, segmented_cache_key, segments_for
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, await_physical_completion, cancel_task_once
 from .fluxo_rust import FalhaFilaRust, criar_fila_streaming, rust_habilitado
 
@@ -59,6 +62,16 @@ class SharedSynthesisMixin:
                         break
                     if not await self._append_shared_audio(job, data):
                         raise asyncio.CancelledError()
+            # Sample provider timings after EOF. This query cannot delay the
+            # first PCM and the bounded fields contain no request content.
+            metadata = getattr(stream, 'metadata', None)
+            if callable(metadata):
+                with contextlib.suppress(Exception):
+                    startup = json.loads(await metadata()).get('startup') or {}
+                    for stage in ('dns_ms', 'tcp_ms', 'proxy_ms', 'handshake_ms', 'headers_ms', 'first_body_ms', 'first_audio_ms'):
+                        duration = startup.get(stage)
+                        if type(duration) in (int, float) and math.isfinite(duration) and 0 <= duration <= 3_600_000:
+                            self._record_latency_sample(f'{job.item.engine}_native_{stage}', duration)
         finally:
             stream.cancel()
 
@@ -87,7 +100,13 @@ class SharedSynthesisMixin:
         from . import audio as a
         key = self._cache_key(item)
         edge = item.engine == 'edge'
-        forced_phone = edge and bool(getattr(item, '_edge_phone_recovery', False))
+        vps_only = item.engine in {"edge", "gtts"} and enabled_for(item.guild_id, "route")
+        forced_phone = edge and not vps_only and bool(getattr(item, '_edge_phone_recovery', False))
+        segmented_key = segmented_cache_key(key) if not forced_phone and segments_for(item) else None
+        if segmented_key is not None:
+            key = segmented_key
+        if vps_only:
+            key += ':vps-startup'
         multi_edge = edge and bool(getattr(self, '_edge_sources_enabled', lambda: False)())
         source_bound = multi_edge and not forced_phone
         if source_bound:
@@ -137,7 +156,7 @@ class SharedSynthesisMixin:
                     producer_item._edge_vps_probe = False
                     producer_item._edge_vps_recovery = False
             job = StreamJob(key=key, item=producer_item, started_at=time.monotonic(),
-                actual_engine=item.engine, store_in_cache=store_in_cache,
+                actual_engine=item.engine, store_in_cache=store_in_cache, segmented_cache_key=segmented_key,
                 buffer=ReplayBuffer(a._RUNTIME_DIR, budget,
                     memory_limit=a.TTS_EDGE_STREAM_CACHE_MEMORY_MAX_BYTES,
                     max_bytes=a.TTS_WORKER_AGENT_MAX_AUDIO_MB * 1024 * 1024))
@@ -253,8 +272,9 @@ class SharedSynthesisMixin:
 
     async def _produce_shared_job(self, job: StreamJob) -> None:
         from . import audio as a
-        forced_phone = bool(getattr(job.item, '_edge_phone_recovery', False))
-        forced_vps = bool(getattr(job.item, '_edge_vps_recovery', False) or getattr(job.item, '_edge_vps_probe', False))
+        vps_only = enabled_for(job.item.guild_id, "route") or job.segmented_cache_key is not None
+        forced_phone = not vps_only and bool(getattr(job.item, '_edge_phone_recovery', False))
+        forced_vps = vps_only or bool(getattr(job.item, '_edge_vps_recovery', False) or getattr(job.item, '_edge_vps_probe', False))
         if forced_phone:
             semaphore = getattr(self, '_tts_edge_phone_stream_slots', None)
             if semaphore is None:
@@ -272,7 +292,7 @@ class SharedSynthesisMixin:
         # A decisão de geração é independente do health do Worker.
         prefer_worker, decision_reason = self._tts_agent_should_try_worker(job.item) if self._tts_agent_route_available() else (False, "worker_offline_or_not_ready")
         expected_worker = bool(forced_phone or (not forced_vps and not source_bound and prefer_worker and self._worker_stream_available_for(job.item)))
-        self._observe_tts_route_decision(route="worker" if expected_worker else "vps", reason="phone_recovery" if forced_phone else "vps_recovery" if forced_vps else decision_reason)
+        self._observe_tts_route_decision(route="worker" if expected_worker else "vps", reason="vps_startup_canary" if vps_only else "phone_recovery" if forced_phone else "vps_recovery" if forced_vps else decision_reason)
         try:
             if forced_phone:
                 # Reserve phone capacity separately: remote synthesis must not
@@ -309,6 +329,8 @@ class SharedSynthesisMixin:
                     request = dict(engine=engine, text=job.item.text,
                         timeout_seconds=max(.001, job.deadline - time.monotonic()),
                         max_audio_bytes=job.buffer.max_bytes)
+                    if job.segmented_cache_key is not None:
+                        request['startup_segments'] = True
                     if engine == 'edge':
                         job.item._edge_vps_attempted = True
                         request.update(voice=a.validate_voice(job.item.voice, getattr(self, 'edge_voice_names', set())),
@@ -452,9 +474,10 @@ class SharedSynthesisMixin:
         try:
             await job.buffer.copy_to(path)
             if cache:
-                item = replace(job.item, engine=job.actual_engine, _cache_key_value=None, _dedup_signature=None)
+                item = replace(job.item, engine=job.actual_engine, _cache_key_value=job.segmented_cache_key, _dedup_signature=None)
                 path = await self._store_in_cache(self._get_state(item.guild_id), item, path)
-                self._schedule_worker_turbo_cache_store(item, path)
+                if job.segmented_cache_key is None and not enabled_for(item.guild_id, "route"):
+                    self._schedule_worker_turbo_cache_store(item, path)
             job.path = path
             for handle in self._get_edge_stream_handles().values():
                 if handle.shared_job is job:

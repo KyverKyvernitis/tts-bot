@@ -1,16 +1,43 @@
 //! Edge Read Aloud WebSocket transport. Both configured endpoints and a local
 //! egress binding are per request; no process-global URL mutation is necessary.
-use crate::{edge_token, AudioSink, ProviderError, ProviderRequest, Result};
+use crate::{edge_token, segments, AudioSink, ProviderError, ProviderRequest, ProviderTiming, RateLimit, Result};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use std::{net::IpAddr, sync::{OnceLock, atomic::{AtomicI64, Ordering}}, time::{Duration, SystemTime, UNIX_EPOCH}};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpSocket, TcpStream}};
-use tokio_tungstenite::{tungstenite::{client::IntoClientRequest, Message}, MaybeTlsStream, WebSocketStream};
+use std::{net::{IpAddr, SocketAddr}, sync::{Arc, OnceLock, atomic::{AtomicI64, Ordering}}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpSocket, TcpStream}, sync::Semaphore};
+use tokio_tungstenite::{tungstenite::{client::IntoClientRequest, Message}, Connector, MaybeTlsStream, WebSocketStream};
 
 const TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 pub const VOICE_LIST: &str = "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
 static CLOCK_OFFSET: AtomicI64 = AtomicI64::new(0);
+static TLS: OnceLock<Result<Arc<rustls::ClientConfig>>> = OnceLock::new();
+static RATE_LIMIT: RateLimit = RateLimit::new();
+
+fn load_tls() -> Result<Arc<rustls::ClientConfig>> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    if roots.is_empty() {
+        return Err(ProviderError::new("configuration", "certificados raiz nativos indisponíveis"));
+    }
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| ProviderError::new("configuration", error.to_string()))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
+async fn shared_connector() -> Result<Connector> {
+    let config = if let Some(config) = TLS.get() {
+        config.clone()?
+    } else {
+        // CA discovery may read the filesystem. Do it once, off the I/O runtime.
+        tokio::task::spawn_blocking(|| TLS.get_or_init(load_tls).clone()).await
+            .map_err(|_| ProviderError::new("configuration", "inicialização TLS Edge interrompida"))??
+    };
+    Ok(Connector::Rustls(config))
+}
 
 pub fn token_at_unix(seconds: u64) -> String {
     let seconds = u128::from(seconds) + 11_644_473_600;
@@ -105,9 +132,7 @@ fn proxy_for(url: &url::Url, explicit: Option<&str>) -> Option<String> {
         .find_map(|key| std::env::var(key).ok().filter(|v| !v.is_empty()))
 }
 
-async fn connect_tcp(host: &str, port: u16, source: Option<IpAddr>) -> Result<TcpStream> {
-    let addresses = tokio::net::lookup_host((host, port)).await
-        .map_err(|e| ProviderError::new("network", e.to_string()))?;
+async fn connect_addresses(addresses: impl IntoIterator<Item = SocketAddr>, source: Option<IpAddr>) -> Result<TcpStream> {
     let mut last = "endereço de rede indisponível".to_owned();
     for address in addresses {
         if source.is_some_and(|ip| ip.is_ipv4() != address.is_ipv4()) { continue; }
@@ -123,7 +148,49 @@ async fn connect_tcp(host: &str, port: u16, source: Option<IpAddr>) -> Result<Tc
     Err(ProviderError::new("network", last))
 }
 
-async fn websocket(url: &url::Url, request: &ProviderRequest) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+async fn connect_tcp(host: &str, port: u16, source: Option<IpAddr>, timing: &mut ProviderTiming) -> Result<TcpStream> {
+    let started = Instant::now();
+    let addresses = tokio::net::lookup_host((host, port)).await
+        .map_err(|error| ProviderError::new("network", error.to_string()))?.collect::<Vec<_>>();
+    timing.dns_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+    let started = Instant::now();
+    let connected = connect_dual_stack(addresses, source).await?;
+    timing.tcp_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+    Ok(connected)
+}
+
+async fn connect_dual_stack(addresses: Vec<SocketAddr>, source: Option<IpAddr>) -> Result<TcpStream> {
+    if let Some(first) = addresses.first().filter(|_| source.is_none()) {
+        let prefer_v4 = first.is_ipv4();
+        let (primary, alternate): (Vec<_>, Vec<_>) = addresses.iter().copied()
+            .partition(|address| address.is_ipv4() == prefer_v4);
+        if !alternate.is_empty() {
+            let preferred = connect_addresses(primary, None);
+            tokio::pin!(preferred);
+            let alternate_delay = tokio::time::sleep(Duration::from_millis(250));
+            tokio::pin!(alternate_delay);
+            tokio::select! {
+                biased;
+                result = &mut preferred => return match result {
+                    Ok(stream) => Ok(stream),
+                    Err(_) => connect_addresses(alternate, None).await,
+                },
+                _ = &mut alternate_delay => {}
+            }
+            let other = connect_addresses(alternate, None);
+            tokio::pin!(other);
+            // One in-flight socket per family under the caller's timeout. Drop
+            // the other branch on success. A failure still lets its peer finish.
+            return tokio::select! {
+                result = &mut preferred => match result { Ok(stream) => Ok(stream), Err(_) => other.await },
+                result = &mut other => match result { Ok(stream) => Ok(stream), Err(_) => preferred.await },
+            };
+        }
+    }
+    connect_addresses(addresses, source).await
+}
+
+async fn websocket(url: &url::Url, request: &ProviderRequest, timing: &mut ProviderTiming) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
     let host = url.host_str().ok_or_else(|| ProviderError::new("configuration", "endpoint sem host"))?;
     let port = url.port_or_known_default().unwrap_or(if url.scheme() == "wss" { 443 } else { 80 });
     let stream = if let Some(proxy) = proxy_for(url, request.proxy.as_deref()) {
@@ -133,7 +200,8 @@ async fn websocket(url: &url::Url, request: &ProviderRequest) -> Result<WebSocke
         let proxy = url::Url::parse(&proxy).map_err(|_| ProviderError::new("configuration", "proxy inválido"))?;
         if proxy.scheme() != "http" { return Err(ProviderError::new("configuration", "WebSocket nativo requer proxy HTTP CONNECT")); }
         let proxy_host = proxy.host_str().ok_or_else(|| ProviderError::new("configuration", "proxy sem host"))?;
-        let mut stream = connect_tcp(proxy_host, proxy.port_or_known_default().unwrap_or(80), request.source_ip).await?;
+        let mut stream = connect_tcp(proxy_host, proxy.port_or_known_default().unwrap_or(80), request.source_ip, timing).await?;
+        let proxy_started = Instant::now();
         let target = format!("{host}:{port}");
         let auth = if !proxy.username().is_empty() {
             let value = format!("{}:{}", proxy.username(), proxy.password().unwrap_or(""));
@@ -150,8 +218,9 @@ async fn websocket(url: &url::Url, request: &ProviderRequest) -> Result<WebSocke
         if first.split_whitespace().nth(1) != Some("200") || !response.ends_with(b"\r\n\r\n") {
             return Err(ProviderError::new("proxy", "HTTP CONNECT recusado"));
         }
+        timing.proxy_ms = Some(proxy_started.elapsed().as_secs_f64() * 1000.0);
         stream
-    } else { connect_tcp(host, port, request.source_ip).await? };
+    } else { connect_tcp(host, port, request.source_ip, timing).await? };
     stream.set_nodelay(true).map_err(|e| ProviderError::new("network", e.to_string()))?;
     let mut handshake = url.as_str().into_client_request().map_err(|e| ProviderError::new("protocol", e.to_string()))?;
     let headers = handshake.headers_mut();
@@ -162,12 +231,19 @@ async fn websocket(url: &url::Url, request: &ProviderRequest) -> Result<WebSocke
     headers.insert("Accept-Language", "en-US,en;q=0.9".parse().unwrap());
     let muid = uuid::Uuid::new_v4().simple().to_string().to_uppercase();
     headers.insert("Cookie", format!("muid={muid};").parse().unwrap());
-    tokio_tungstenite::client_async_tls_with_config(handshake, stream, None, None).await
+    let connector = if url.scheme() == "wss" { Some(shared_connector().await?) } else { None };
+    let handshake_started = Instant::now();
+    let result = tokio_tungstenite::client_async_tls_with_config(handshake, stream, None, connector).await;
+    timing.handshake_ms = Some(handshake_started.elapsed().as_secs_f64() * 1000.0);
+    result
         .map(|(socket, _)| socket)
         .map_err(|e| {
             let mut error = ProviderError::new("edge_handshake", e.to_string());
             if let tokio_tungstenite::tungstenite::Error::Http(response) = &e {
                 error.status = Some(response.status().as_u16());
+                if response.status().as_u16() == 429 {
+                    RATE_LIMIT.pause(response.headers().get("retry-after").and_then(|value| value.to_str().ok()));
+                }
                 if response.status().as_u16() == 403 {
                     if let Some(date) = response.headers().get("date").and_then(|v| v.to_str().ok())
                         .and_then(|v| httpdate::parse_http_date(v).ok()) {
@@ -193,10 +269,36 @@ pub fn binary_audio(data: &[u8]) -> Result<&[u8]> {
     Ok(&data[end..])
 }
 
+pub(crate) async fn synthesize_with_slots(request: &ProviderRequest, sink: &mut AudioSink, slots: &Arc<Semaphore>) -> Result<()> {
+    if request.startup_segments {
+        if let Some((prefix, remainder)) = segments::startup_split(&request.text) {
+            let parts = [prefix, remainder].into_iter().flat_map(|part| text_parts(part, 4096)).collect::<Vec<_>>();
+            if parts.len() >= 2 {
+                return segments::stream_ordered(parts, sink, slots, |part, mut child| {
+                    let request = request.clone();
+                    async move { synthesize_part(&request, &part, &mut child).await }
+                }).await;
+            }
+        }
+    }
+    synthesize(request, sink).await
+}
+
 pub async fn synthesize(request: &ProviderRequest, sink: &mut AudioSink) -> Result<()> {
     let parts = text_parts(&request.text, 4096);
     if parts.is_empty() { return Err(ProviderError::new("empty", "texto Edge vazio")); }
     for part in parts {
+        synthesize_part(request, &part, sink).await?;
+    }
+    Ok(())
+}
+
+async fn synthesize_part(request: &ProviderRequest, part: &str, sink: &mut AudioSink) -> Result<()> {
+        RATE_LIMIT.check()?;
+        let started = Instant::now();
+        let mut timing = ProviderTiming::default();
+        // Prepare and validate SSML before opening an upstream connection.
+        let speech = ssml(request, part)?;
         let mut connection = None;
         for attempt in 0..2 {
             let mut url = endpoint_url(&request.endpoint)?;
@@ -204,7 +306,7 @@ pub async fn synthesize(request: &ProviderRequest, sink: &mut AudioSink) -> Resu
             let now = local.saturating_add(CLOCK_OFFSET.load(Ordering::Relaxed)).max(0) as u64;
             url.query_pairs_mut().append_pair("ConnectionId", &uuid::Uuid::new_v4().simple().to_string())
                 .append_pair("Sec-MS-GEC", &token_at_unix(now)).append_pair("Sec-MS-GEC-Version", "2-143.0.3650.75");
-            let connect = tokio::time::timeout(Duration::from_secs_f64(request.connect_timeout_seconds), websocket(&url, request)).await
+            let connect = tokio::time::timeout(Duration::from_secs_f64(request.connect_timeout_seconds), websocket(&url, request, &mut timing)).await
                 .map_err(|_| ProviderError::new("timeout", "prazo de conexão Edge esgotado"))?;
             match connect {
                 Ok(ws) => { connection = Some(ws); break; },
@@ -217,7 +319,7 @@ pub async fn synthesize(request: &ProviderRequest, sink: &mut AudioSink) -> Resu
         let config = format!("X-Timestamp:{timestamp}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"true\"}},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}}}}}\r\n");
         ws.send(Message::Text(config.into())).await.map_err(|e| ProviderError::new("network", e.to_string()))?;
         let payload = format!("X-RequestId:{}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:{timestamp}Z\r\nPath:ssml\r\n\r\n{}",
-            uuid::Uuid::new_v4().simple(), ssml(request, &part)?);
+            uuid::Uuid::new_v4().simple(), speech);
         ws.send(Message::Text(payload.into())).await.map_err(|e| ProviderError::new("network", e.to_string()))?;
         let mut complete = false;
         let before = sink.size();
@@ -226,7 +328,16 @@ pub async fn synthesize(request: &ProviderRequest, sink: &mut AudioSink) -> Resu
                 .map_err(|_| ProviderError::new("timeout", "prazo de leitura Edge esgotado"))?;
             let Some(message) = message else { break; };
             match message.map_err(|e| ProviderError::new("network", e.to_string()))? {
-                Message::Binary(data) => { sink.emit(binary_audio(&data)?.to_vec()).await?; }
+                Message::Binary(data) => {
+                    let received_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let audio = binary_audio(&data)?;
+                    if !audio.is_empty() && sink.size() == before {
+                        timing.first_body_ms = Some(received_ms);
+                        timing.first_audio_ms = started.elapsed().as_secs_f64() * 1000.0;
+                        sink.record_startup(timing.clone());
+                    }
+                    sink.emit(audio.to_vec()).await?;
+                }
                 Message::Text(text) => {
                     let header = text.split("\r\n\r\n").next().unwrap_or("");
                     if header.split("\r\n").any(|line| line == "Path:turn.end") { complete = true; break; }
@@ -240,13 +351,24 @@ pub async fn synthesize(request: &ProviderRequest, sink: &mut AudioSink) -> Resu
         if sink.size() == before { return Err(ProviderError::new("empty", "Edge não enviou áudio")); }
         // Closing cannot turn a complete synthesis into a second network wait.
         let _ = tokio::time::timeout(Duration::from_millis(100), ws.close(None)).await;
-    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn alternate_address_family_is_allowed_only_without_a_source_binding() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let v4 = listener.local_addr().unwrap();
+        let v6 = SocketAddr::new("::1".parse().unwrap(), v4.port());
+        let connected = tokio::time::timeout(Duration::from_secs(1), connect_dual_stack(vec![v6, v4], None))
+            .await.unwrap().unwrap();
+        assert_eq!(connected.peer_addr().unwrap(), v4);
+        let wrong_family = connect_dual_stack(vec![v4], Some("::1".parse().unwrap())).await;
+        assert!(wrong_family.is_err());
+    }
     #[test]
     fn binary_frames_are_validated_before_indexing() {
         assert!(binary_audio(&[]).is_err());

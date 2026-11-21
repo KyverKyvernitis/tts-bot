@@ -83,6 +83,32 @@ class SSHHealthContracts(unittest.TestCase):
         self.assertEqual(payload["worker_id"], "phone-test")
         self.assertEqual(payload["runtime_kind"], "termux")
 
+    def test_music_health_advertises_only_recent_live_voice_presence(self):
+        voice = {"guild_id": "123", "channel_id": "456", "session": "a" * 32}
+        raw = {"ok": True, "available": True, "observed_at": 98.0,
+               "_native_tts_existing_voice": {"pid": 1234, "sessions": [voice]}}
+        handler = self.handler("/music-agent/health")
+        with mock.patch.object(self.worker, "_cached_control_plane_snapshot", side_effect=lambda *a, **kwargs: dict(raw)), \
+             mock.patch.object(self.worker, "_music_agent_existing_voice_allowed", side_effect=lambda *, expected_pid: expected_pid == 1234), \
+             mock.patch.object(self.worker.time, "time", return_value=100.0), \
+             mock.patch.object(self.worker, "_ssh_connection_snapshot", return_value={"mode": "ssh"}), \
+             mock.patch.object(self.worker, "_json_response") as output:
+            assert "_native_tts_existing_voice" not in self.worker._music_agent_light_snapshot()
+            assert "voice_agent" not in self.worker._music_agent_light_snapshot()
+            handler.do_GET()
+            payload = output.call_args.args[2]
+            self.assertEqual(payload["voice_agent"], {"native_tts_existing_voice_protocol": 1,
+                                                     "native_tts_existing_sessions": [voice],
+                                                     "observation_age_seconds": 2.0})
+            self.assertNotIn("voice_agent", payload["music_agent"])
+            raw["observed_at"] = 90.0
+            handler.do_GET()
+            self.assertNotIn("voice_agent", output.call_args.args[2])
+            raw["observed_at"] = 99.0
+            raw["_native_tts_existing_voice"]["pid"] = 4321
+            handler.do_GET()
+            self.assertNotIn("voice_agent", output.call_args.args[2])
+
     def test_unauthenticated_light_health_does_not_probe_or_read_state(self):
         for path in ("/tts-agent/health", "/music-agent/health"):
             handler = self.handler(path)
@@ -295,6 +321,19 @@ class MusicLightProbeContracts(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.hooks = SimpleNamespace(load_runtime_env=mock.Mock(), env_float=lambda key, default: default)
+
+    def test_native_voice_presence_whitelists_route_fields(self):
+        voice = {"guild_id": "123", "channel_id": "456", "session": "a" * 32}
+        body = {"ok": True, "discord_ready": True, "voice_dependencies": {"ok": True},
+                "native_tts_existing_voice_protocol": 1, "pid": 1234,
+                "native_tts_existing_sessions": [dict(voice, discord_token="secret"),
+                                                 dict(voice, guild_id="-1"), dict(voice, session="bad")]}
+        opener = SimpleNamespace(open=mock.Mock(return_value=Response(json.dumps(body).encode())))
+        with mock.patch.dict(os.environ, {"TTS_NATIVE_WORKER": "1"}), \
+             mock.patch.object(self.module.urllib.request, "build_opener", return_value=opener):
+            result = self.module.music_agent_health_snapshot(self.hooks)
+        self.assertEqual(result["_native_tts_existing_voice"], {"pid": 1234, "sessions": [voice]})
+        self.assertTrue(opener.open.call_args.args[0].full_url.endswith("/health?tts_existing=1"))
 
     def test_music_light_probe_keeps_readiness_without_dependency_inventory(self):
         body = {"ok": True, "discord_ready": True, "version": "0.3.90", "executor_mode": "voice",

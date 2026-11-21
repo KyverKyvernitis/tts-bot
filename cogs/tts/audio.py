@@ -66,9 +66,11 @@ from cogs.musica.integracoes.tts import (
     bloqueio_tts_direto_por_musica,
     cancelar_tts_remoto,
     rotear_item_tts_para_musica,
+    resposta_tts_remoto_confirmada,
 )
 
 from .edge_endpoint import configure_edge_endpoint, edge_endpoint_scope, telemetry as edge_endpoint_telemetry
+from .first_audio import enabled_for as tts_first_audio_enabled_for
 from .edge_rate_limit import EdgeRateLimitPolicy
 from .edge_sources import EdgeSourcePool, EdgeSourceUnavailable, bound_communicate
 from .helpers import validate_voice
@@ -245,6 +247,7 @@ WORKER_VOICE_AGENT_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_ENABLED", 
 WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True))
 WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED", True))
 WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED", False))
+TTS_NATIVE_EXISTING_VOICE_ENABLED = os.getenv("TTS_NATIVE_EXISTING_VOICE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS = max(16, int(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS", 600) or 600))
 WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS = max(3.0, float(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS", 30.0) or 30.0))
 WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS", 45.0) or 45.0))
@@ -1609,6 +1612,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return policy
 
     def _edge_phone_available(self, item: QueueItem, *, streaming: bool) -> bool:
+        if tts_first_audio_enabled_for(getattr(item, "guild_id", 0), "route"):
+            return False
         if getattr(item, "_tts_music_worker_unavailable", False) or not self._tts_agent_route_available():
             return False
         route = self._tts_agent_route_state()
@@ -2794,6 +2799,39 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         )
         return data
 
+    async def _refresh_native_tts_existing_voice(self, *, base: str, headers: dict[str, str], worker_id: str, sequence: int) -> None:
+        # A posse é confirmada no agente na hora de tocar. Este snapshot só
+        # seleciona a tentativa e fica privado, sem publicar tokens de sessão.
+        sessions = {}
+        observed = time.monotonic()
+        with contextlib.suppress(Exception):
+            if worker_id:
+                session = await self._get_phone_worker_http_session()
+                timeout = aiohttp.ClientTimeout(total=min(2.0, TTS_WORKER_AGENT_HEALTH_TIMEOUT_SECONDS))
+                async with session.get(f"{base}/music-agent/health", headers=headers, timeout=timeout) as response:
+                    if response.status == 200:
+                        data = json.loads(await response.text())
+                        agent = data.get("voice_agent")
+                        if data.get("ok") is True and data.get("worker_id") == worker_id and isinstance(agent, dict):
+                            age = agent.get("observation_age_seconds")
+                            version = agent.get("native_tts_existing_voice_protocol")
+                            published = agent.get("native_tts_existing_sessions")
+                            if (type(version) is int and version == 1 and type(age) in (int, float)
+                                    and 0 <= age <= 5 and isinstance(published, list)):
+                                observed -= age
+                                for row in published[:32]:
+                                    if not isinstance(row, dict):
+                                        continue
+                                    guild_id, channel_id, token = (row.get(key) for key in ("guild_id", "channel_id", "session"))
+                                    if (isinstance(guild_id, str) and guild_id.isascii() and guild_id.isdecimal()
+                                            and 1 <= len(guild_id) <= 20
+                                            and isinstance(channel_id, str) and channel_id.isascii() and channel_id.isdecimal()
+                                            and 1 <= len(channel_id) <= 20
+                                            and isinstance(token, str) and re.fullmatch(r"[a-f0-9]{32}", token)):
+                                        sessions[(int(guild_id), int(channel_id))] = token
+        if sequence == self._tts_agent_probe_sequence:
+            self._tts_native_existing_voice = (observed, worker_id, sessions)
+
     async def _probe_tts_agent_health_once(self) -> None:
         probe_sequence = int(getattr(self, "_tts_agent_probe_sequence", 0)) + 1
         self._tts_agent_probe_sequence = probe_sequence
@@ -2883,6 +2921,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                     # must not reset the separate Microsoft 429 rate policy.
                     if 'edge' in route.get('available_engines', ()) and route['stream_protocol'] >= 2:
                         self._tts_edge_phone_unavailable_until = 0.0
+                if TTS_NATIVE_EXISTING_VOICE_ENABLED:
+                    await self._refresh_native_tts_existing_voice(base=base, headers=headers,
+                        worker_id=str(data.get("worker_id") or agent.get("worker_id") or ""), sequence=probe_sequence)
             else:
                 metrics["tts_agent_health_fail"] = int(metrics.get("tts_agent_health_fail", 0) or 0) + 1
                 reason = str(agent.get("reason") or agent.get("state") or "tts_agent_not_ready")
@@ -3193,6 +3234,15 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             self._record_latency_sample(f"worker_command_to_first_frame_{actual_engine}", value)
         if sample.get("native_stream") is True:
             self._record_latency_sample("worker_command_to_first_frame_rust_stream", value)
+        phases = sample.get("startup_timing_ms")
+        if isinstance(phases, dict):
+            for key in (
+                "first_mp3_body", "first_pcm_ready", "first_pcm_signal", "first_voice_packet",
+                "worker_reported_first_audio", "worker_provider_admission", "worker_first_provider_audio",
+            ):
+                duration = phases.get(key)
+                if type(duration) in (float, int) and 0 <= duration <= 120_000:
+                    self._record_latency_sample(f"worker_startup_{key}", duration)
 
     @staticmethod
     def _latency_percentile(values: list[float], percentile: float) -> float:
@@ -4269,6 +4319,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         key = self._cache_key(item)
         path = self._cache_path_for_key(key, item=item)
         if not path:
+            from .first_audio import segmented_cache_key, segments_for
+            if segments_for(item):
+                key = segmented_cache_key(key)
+                path = self._cache_path_for_key(key, item=item)
+        if not path:
             return None
         cache_order = self._get_global_cache_order()
         last_used = float(cache_order.get(key, 0.0) or 0.0)
@@ -5164,7 +5219,9 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             max_audio_mb=1,
             raise_on_worker_error=False,
         )
-        voice_agent = data.get("voice_agent") if isinstance(data.get("voice_agent"), dict) else data
+        voice_agent = data.get("voice_agent")
+        if not isinstance(voice_agent, dict) and payload.get("require_existing_voice") is not True:
+            voice_agent = data
         if isinstance(voice_agent, dict):
             self._update_worker_voice_agent_snapshot(voice_agent)
         return data
@@ -5376,6 +5433,14 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if len(str(item.text or "")) > WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS:
             return False, "text_too_long_for_direct_tts"
         engine = str(getattr(item, "engine", "") or "gtts").strip().lower().replace("-", "_")
+        if engine in {"edge", "gtts"} and tts_first_audio_enabled_for(guild.id, "route"):
+            if engine == "gtts" and os.getenv("WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED") is not None and not WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED:
+                return False, "gtts_direct_explicitly_disabled"
+            if musica_ativa(getattr(self, "bot", None), int(guild.id)):
+                return False, "music_active_uses_music_agent_tts_route"
+            if self._native_existing_phone_voice_session(guild, item):
+                return True, "native_existing_worker_voice"
+            return False, "vps_without_confirmed_worker_voice"
         if engine == "gtts" and not WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED:
             # O handoff de voz custa mais que manter a conexão local quente.
             # O worker de síntese adaptativo continua disponível sem transferir
@@ -5398,6 +5463,106 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if isinstance(voice_agent, dict) and voice_agent and voice_agent.get("available") is False:
             return False, "voice_agent_unavailable"
         return True, "allowed"
+
+    def _native_existing_phone_voice_compatible(self, guild: discord.Guild, item: QueueItem) -> bool:
+        if not tts_first_audio_enabled_for(guild.id, "route"):
+            return False
+        engine = str(getattr(item, "engine", "") or "").strip().lower()
+        if engine not in {"edge", "gtts"} or not 1 <= len(str(item.text or "").strip()) <= WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS:
+            return False
+        if not 1 <= len(str(getattr(item, "request_id", "") or "")) <= 80:
+            return False
+        if any(getattr(item, name, None) for name in (
+            "advanced_nightcore_level", "advanced_slowed_level", "advanced_reverb_level",
+            "ttv_performance_hash", "chatbot_is_mirror", "chatbot_no_auto_connect",
+            "endpoint", "source_ip", "proxy", "cache_only",
+        )) or any(getattr(item, name, None) is not None for name in ("ttv_score", "ttv_segments", "ttv_arrangement")):
+            return False
+        if engine == "edge" and (
+            not str(getattr(item, "voice", "") or "").strip()
+            or not re.fullmatch(r"[+-]?[0-9]+%", str(getattr(item, "rate", "") or "+0%").strip())
+            or not re.fullmatch(r"[+-]?[0-9]+Hz", str(getattr(item, "pitch", "") or "+0Hz").strip(), re.I)
+        ):
+            return False
+        if engine == "gtts" and str(getattr(item, "language", "") or "").strip().lower().replace("_", "-") in {"ptbr", "br", "en-us", "us"}:
+            return False
+        return True
+
+    def _native_existing_phone_voice_session(self, guild: discord.Guild, item: QueueItem) -> str | None:
+        guild_id = int(guild.id)
+        channel_id = int(item.channel_id or 0)
+        if not (WORKER_VOICE_AGENT_ENABLED and WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED and WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED
+                and self._native_existing_phone_voice_compatible(guild, item) and self._tts_agent_route_available()):
+            return None
+        vc = self._get_voice_client_for_guild(guild)
+        if vc is not None and self._voice_client_is_connected(vc):
+            return None
+        now = time.monotonic()
+        if self._worker_voice_direct_tts_disabled_untils().get(guild_id, 0.0) > now:
+            return None
+        observed, worker_id, sessions = getattr(self, "_tts_native_existing_voice", (0.0, "", {}))
+        # This is the freshness of the routing hint. The agent validates its
+        # current session again before any playback.
+        fresh_for = 12.0 if PHONE_WORKER_TRANSPORT == "ssh" else min(30.0, TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS + 7.0)
+        if worker_id != self._tts_agent_route_state().get("worker_id") or not 0 <= now - observed <= fresh_for:
+            return None
+        return sessions.get((guild_id, channel_id))
+
+    async def _play_native_existing_worker_voice(
+        self, guild: discord.Guild, item: QueueItem, expected_session: str, *, prebuilt: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        payload = self._worker_voice_direct_tts_payload(guild, item)
+        try:
+            payload["auto_leave_enabled"] = bool(await self._maybe_await(
+                self._get_guild_toggle_value(guild.id, public_key="auto_leave", raw_key="auto_leave_enabled", default=True)
+            ))
+        except Exception:
+            payload["auto_leave_enabled"] = True
+        if prebuilt is None:
+            with contextlib.suppress(Exception):
+                await self._maybe_attach_prebuilt_direct_tts_audio(payload, item, generate_if_missing=False)
+        elif prebuilt.get("audio_b64"):
+            for name in ("audio_b64", "audio_format", "prebuilt_audio", "prebuilt_audio_source"):
+                if name in prebuilt:
+                    payload[name] = prebuilt[name]
+        if self._native_existing_phone_voice_session(guild, item) != expected_session:
+            return None
+        payload.update(
+            confirm_transfer=False,
+            require_existing_voice=True,
+            expected_voice_session=expected_session,
+            startup_segments=tts_first_audio_enabled_for(guild.id, "segments"),
+            startup_async_cache=tts_first_audio_enabled_for(guild.id, "async_cache"),
+        )
+        started = time.monotonic()
+        item._tts_remote_existing_voice = True
+        item._tts_remote_active = True
+        try:
+            result = await self._request_worker_voice_agent_json(
+                task="voice_agent_play_tts_existing", payload=payload,
+                timeout_seconds=max(3.0, float(payload["timeout_seconds"]) + 4.0),
+            )
+            receipt = resposta_tts_remoto_confirmada(result, item.request_id)
+        except asyncio.CancelledError:
+            await self._cancel_remote_tts_request(item)
+            raise
+        except Exception:
+            receipt = None
+        if receipt is None:
+            # A POST sem recibo pode ter tocado. O cancelamento é best effort
+            # e não torna seguro repetir a fala.
+            await self._cancel_remote_tts_request(item)
+            raise TTSPlaybackError("remote_playback_unconfirmed")
+        item._tts_remote_active = False
+        item._tts_remote_existing_voice = False
+        if not receipt["ok"]:
+            self._record_worker_voice_session_metric("direct_tts_failed")
+            if receipt["first_frame_observed"]:
+                raise TTSPlaybackError("stream_incomplete")
+            return None
+        self._record_worker_voice_session_metric("direct_tts_ok")
+        return {"ok": True, "worker_voice_direct_tts": True, "worker_result": receipt,
+                "playback_started_at": started, "playback_ms": receipt.get("playback_ms") or 0.0}
 
     def _worker_voice_direct_tts_payload(self, guild: discord.Guild, item: QueueItem) -> dict[str, Any]:
         state = self.guild_states.get(int(guild.id))
@@ -5587,6 +5752,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             self._record_worker_voice_session_metric("direct_tts_skipped")
             self._get_metrics_store()["worker_voice_direct_last_skip_reason"] = str(reason or "not_ready")[:120]
             logger.debug("[worker_voice_agent] TTS direto worker pulado | guild=%s reason=%s", guild.id, reason)
+            return None
+        if reason == "native_existing_worker_voice":
+            expected_session = self._native_existing_phone_voice_session(guild, item)
+            if expected_session:
+                return await self._play_native_existing_worker_voice(guild, item, expected_session)
             return None
         payload = self._worker_voice_direct_tts_payload(guild, item)
         try:
@@ -6991,6 +7161,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return history
 
     def _tts_agent_should_try_worker(self, item: QueueItem) -> tuple[bool, str]:
+        if str(item.engine or "").strip().lower() in {"edge", "gtts"} and tts_first_audio_enabled_for(item.guild_id, "route"):
+            return False, "existing_voice_canary_vps_synthesis"
         if item.engine == "edge" and self._edge_sources_enabled():
             return False, "edge_local_sources_first"
         if getattr(item, "_tts_music_worker_unavailable", False):
@@ -8491,15 +8663,18 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                         continue
 
                     engine = str(getattr(item, "engine", "") or "gtts").strip().lower().replace("-", "_")
-                    if audio_task is None and engine in {"edge", "gtts"}:
+                    direct_first = engine in {"edge", "gtts"} and tts_first_audio_enabled_for(guild_id, "route")
+                    direct_worker_result = None
+                    if audio_task is None and direct_first:
+                        direct_worker_result = await self._try_worker_voice_direct_tts(guild, item)
+                    if direct_worker_result is None and audio_task is None and engine in {"edge", "gtts"}:
                         cached_path = self._try_get_cached_path(state, item)
                         if cached_path:
                             ready_audio = asyncio.get_running_loop().create_future()
                             ready_audio.set_result((cached_path, False))
                             audio_task = ready_audio
 
-                    direct_worker_result = None
-                    if audio_task is None:
+                    if audio_task is None and not direct_first:
                         direct_worker_result = await self._try_worker_voice_direct_tts(guild, item)
                     if direct_worker_result is not None:
                         failure_stage = "playback_failed"

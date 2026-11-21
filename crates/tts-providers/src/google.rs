@@ -1,7 +1,8 @@
 //! Google Translate speech protocol compatible with gTTS 2.5.4.
-use crate::{AudioSink, ProviderError, ProviderRequest, Result};
+use crate::{google_fetch::synthesize_token, segments, AudioSink, ProviderError, ProviderRequest, Result};
 use base64::Engine;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 
 const PUNCTUATION: &str = "?!？！.,¡()[]¿…‥،;:—。，、：\n";
 fn clean(text: &str) -> Option<String> {
@@ -9,9 +10,8 @@ fn clean(text: &str) -> Option<String> {
     else { Some(text.trim().to_owned()) }
 }
 
-pub fn tokenize(text: &str) -> Result<Vec<String>> {
+fn normalize_text(text: &str) -> String {
     static ABBREVIATIONS: OnceLock<regex::Regex> = OnceLock::new();
-    static BOUNDARIES: OnceLock<fancy_regex::Regex> = OnceLock::new();
     let mut text = text.trim().to_owned();
     for mark in ['?', '!', '？', '！'] { text = text.replace(mark, &format!("{mark} ")); }
     text = text.replace("-\n", "");
@@ -19,15 +19,19 @@ pub fn tokenize(text: &str) -> Result<Vec<String>> {
     text = regex.replace_all(&text, "$1").into_owned();
     // PreProcessorSub is case-insensitive and matches literal substrings.
     static SUB: OnceLock<regex::Regex> = OnceLock::new();
-    text = SUB.get_or_init(|| regex::Regex::new(r"(?i)Esq\.").unwrap()).replace_all(&text, "Esquire").into_owned();
-    if text.chars().count() <= 100 { return Ok(clean(&text).into_iter().collect()); }
+    SUB.get_or_init(|| regex::Regex::new(r"(?i)Esq\.").unwrap()).replace_all(&text, "Esquire").into_owned()
+}
+
+fn tokenize_normalized(text: &str) -> Result<Vec<String>> {
+    static BOUNDARIES: OnceLock<fancy_regex::Regex> = OnceLock::new();
+    if text.chars().count() <= 100 { return Ok(clean(text).into_iter().collect()); }
     let regex = BOUNDARIES.get_or_init(|| fancy_regex::Regex::new(
         r"(?i)(?<=[?!？！]).|(?<!\.[a-z])[.,] |(?<!\d):|[¡()\[\]¿…‥،;—。，、：\n]"
     ).unwrap());
     let mut tokens = Vec::new();
     let mut start = 0;
     let mut raw = Vec::new();
-    for found in regex.find_iter(&text) {
+    for found in regex.find_iter(text) {
         let found = found.map_err(|e| ProviderError::new("tokenizer", e.to_string()))?;
         raw.push(&text[start..found.start()]);
         start = found.end();
@@ -48,6 +52,25 @@ pub fn tokenize(text: &str) -> Result<Vec<String>> {
         }
     }
     Ok(tokens)
+}
+
+pub fn tokenize(text: &str) -> Result<Vec<String>> {
+    tokenize_normalized(&normalize_text(text))
+}
+
+fn tokenize_for_startup(text: &str, enabled: bool) -> Result<(Vec<String>, bool)> {
+    let normalized = normalize_text(text);
+    if enabled {
+        if let Some((lead, remainder)) = segments::startup_split(&normalized) {
+            let mut prefix = tokenize_normalized(lead)?;
+            let suffix = tokenize_normalized(remainder)?;
+            if !prefix.is_empty() && !suffix.is_empty() {
+                prefix.extend(suffix);
+                return Ok((prefix, true));
+            }
+        }
+    }
+    Ok((tokenize_normalized(&normalized)?, false))
 }
 
 pub fn rpc_body(text: &str, language: &str) -> Result<String> {
@@ -82,51 +105,42 @@ pub fn audio_from_line(line: &[u8]) -> Result<Vec<Vec<u8>>> {
     Ok(output)
 }
 
-pub async fn synthesize(client: &reqwest::Client, request: &ProviderRequest, sink: &mut AudioSink) -> Result<()> {
-    if request.tld.is_empty() || request.tld.len() > 64 || request.tld.split('.').any(|s| s.is_empty() || !s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')) {
+pub(crate) fn validate_tld(tld: &str) -> Result<()> {
+    if tld.is_empty() || tld.len() > 64 || tld.split('.').any(|s| s.is_empty() || !s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')) {
         return Err(ProviderError::new("validation", "domínio gTTS inválido"));
     }
-    let language = request.language.to_lowercase().replace('_', "-");
-    let language = if language == "pt-br" { "pt" } else { &language };
+    Ok(())
+}
+
+pub(crate) async fn synthesize_with_client(
+    client: &reqwest::Client,
+    request: &ProviderRequest,
+    sink: &mut AudioSink,
+    slots: &Arc<Semaphore>,
+    client_pool_hit: Option<bool>,
+) -> Result<()> {
+    validate_tld(&request.tld)?;
+    let mut language = request.language.to_lowercase().replace('_', "-");
+    if language == "pt-br" {
+        language = "pt".into();
+    }
     if language.is_empty() || !language.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
         return Err(ProviderError::new("validation", "idioma gTTS inválido"));
     }
-    let tokens = tokenize(&request.text)?;
+    let (tokens, split) = tokenize_for_startup(&request.text, request.startup_segments)?;
     if tokens.is_empty() { return Err(ProviderError::new("empty", "texto sem conteúdo pronunciável")); }
-    let client = if request.source_ip.is_some() || request.proxy.is_some() {
-        let mut builder = reqwest::Client::builder().connect_timeout(std::time::Duration::from_millis(3500));
-        if let Some(ip) = request.source_ip { builder = builder.local_address(ip); }
-        if let Some(proxy) = &request.proxy {
-            builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| ProviderError::new("configuration", e.to_string()))?);
-        }
-        builder.build().map_err(|e| ProviderError::new("configuration", e.to_string()))?
-    } else { client.clone() };
-    for token in tokens {
-        let url = format!("https://translate.google.{}/_/TranslateWebserverUi/data/batchexecute", request.tld);
-        let mut response = client.post(&url)
-            .header("Content-Type", "application/x-www-form-urlencoded;charset=utf-8")
-            .header("Referer", format!("https://translate.google.{}/", request.tld))
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/143.0.0.0 Safari/537.36")
-            .body(rpc_body(&token, language)?).send().await
-            .map_err(|e| ProviderError::new("network", e.to_string()))?
-            .error_for_status().map_err(|e| ProviderError::new("http", e.to_string()))?;
-        let mut pending = Vec::new();
-        let mut audio = false;
-        let mut received = 0usize;
-        let response_limit = request.max_audio_bytes.saturating_mul(4) / 3 + 65_536;
-        while let Some(chunk) = response.chunk().await.map_err(|e| ProviderError::new("network", e.to_string()))? {
-            received = received.saturating_add(chunk.len());
-            if received > response_limit { return Err(ProviderError::new("limit", "resposta gTTS grande demais")); }
-            pending.extend_from_slice(&chunk);
-            while let Some(index) = pending.iter().position(|v| *v == b'\n') {
-                for data in audio_from_line(&pending[..index])? { sink.emit(data).await?; audio = true; }
-                pending.drain(..=index);
+    if split {
+        return segments::stream_ordered(tokens, sink, slots, |token, mut child| {
+            let client = client.clone();
+            let request = request.clone();
+            let language = language.clone();
+            async move {
+                synthesize_token(&client, &request, &language, &token, &mut child, client_pool_hit).await
             }
-        }
-        if !pending.is_empty() {
-            for data in audio_from_line(&pending)? { sink.emit(data).await?; audio = true; }
-        }
-        if !audio { return Err(ProviderError::new("empty", "gTTS não enviou áudio")); }
+        }).await;
+    }
+    for token in &tokens {
+        synthesize_token(client, request, &language, token, sink, client_pool_hit).await?;
     }
     Ok(())
 }
@@ -143,6 +157,24 @@ mod tests {
     fn decimal_abbreviation_and_preprocessing() {
         assert_eq!(tokenize(" Dr. Silva?!\nEsq. com-\npleto 10.5 U.S.A.").unwrap(),
             vec!["Dr Silva? ! \nEsquire completo 10.5 U.S.A."]);
+    }
+    #[test]
+    fn startup_uses_the_short_first_part_and_gtts_size_limit() {
+        let lead = "Agora começa uma frase suficientemente longa.";
+        let tail = " Neste trecho existe uma série de palavras com letras acentuadas e cada uma delas precisa caber no limite de caracteres do provedor.";
+        let text = format!("{lead}{tail}");
+        let (tokens, split) = tokenize_for_startup(&text, true).unwrap();
+        assert!(split);
+        assert_eq!(tokens[0], lead);
+        assert!(tokens.iter().all(|token| token.chars().count() <= 100));
+        assert_eq!(
+            tokenize_for_startup(&text, false).unwrap(),
+            (tokenize(&text).unwrap(), false),
+        );
+        assert_eq!(
+            tokenize_for_startup("Olá, tudo bem?", true).unwrap(),
+            (tokenize("Olá, tudo bem?").unwrap(), false),
+        );
     }
     #[test]
     fn protocol_parses_base64_and_rejects_bad_rpc() {

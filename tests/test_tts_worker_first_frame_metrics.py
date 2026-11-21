@@ -37,6 +37,17 @@ def test_cache_label_keeps_the_engine_dimension():
     }
 
 
+def test_worker_startup_samples_only_record_known_bounded_relative_durations():
+    result = record({"ok": True, "first_frame_observed": True, "first_frame_ms": 250,
+                     "startup_timing_ms": {"first_mp3_body": 70.5, "first_pcm_ready": -1,
+                                           "first_pcm_signal": True, "first_voice_packet": float("nan"),
+                                           "worker_reported_first_audio": 1_797_000_000_000,
+                                           "worker_first_provider_audio": 30, "arbitrary": 5}})
+    assert {key: value for key, value in result.items() if key.startswith("worker_startup_")} == {
+        "worker_startup_first_mp3_body": 70.5, "worker_startup_worker_first_provider_audio": 30,
+    }
+
+
 @pytest.mark.parametrize("value", [None, -1, math.nan, math.inf, -math.inf, "invalid", True])
 def test_missing_or_invalid_remote_duration_never_becomes_a_latency_sample(value):
     assert not record({"ok": True, "first_frame_observed": True, "first_frame_ms": value})

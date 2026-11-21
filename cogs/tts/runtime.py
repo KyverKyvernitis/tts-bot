@@ -269,6 +269,7 @@ class StreamJob:
     path: str = ""
     actual_engine: str = ""
     route: str = "local"
+    segmented_cache_key: str | None = None
     first_audio_ms: float = 0.0
     slot_wait_ms: float = 0.0
     network_first_audio_ms: float = 0.0

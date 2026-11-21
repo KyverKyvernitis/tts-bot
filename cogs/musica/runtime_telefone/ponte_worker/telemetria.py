@@ -179,7 +179,8 @@ def music_agent_health_snapshot(hooks: Any) -> dict[str, Any]:
             def redirect_request(self, *args: Any, **kwargs: Any) -> None:
                 return None
 
-        request = urllib.request.Request(base + "/health", headers=headers, method="GET")
+        path = "/health?tts_existing=1" if os.getenv("TTS_NATIVE_WORKER", "").strip().lower() in {"1", "true", "yes", "on"} else "/health"
+        request = urllib.request.Request(base + path, headers=headers, method="GET")
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         timeout = max(0.3, min(2.0, hooks.env_float("MUSIC_AGENT_LIGHT_HEALTH_TIMEOUT_SECONDS", 1.5)))
         with opener.open(request, timeout=timeout) as response:
@@ -197,7 +198,7 @@ def music_agent_health_snapshot(hooks: Any) -> dict[str, Any]:
         missing = [str(item)[:80] for item in missing[:12]] if isinstance(missing, list) else []
         ready = bool(data.get("ok") and data.get("discord_ready") and dependencies.get("ok"))
         guilds = data.get("guilds") if isinstance(data.get("guilds"), dict) else {}
-        return {
+        snapshot = {
             "ok": ready, "available": ready, "configured": True, "payload_mode": "light",
             "discord_ready": bool(data.get("discord_ready")), "version": str(data.get("version") or "")[:48],
             "executor_mode": str(data.get("executor_mode") or "")[:24],
@@ -207,6 +208,21 @@ def music_agent_health_snapshot(hooks: Any) -> dict[str, Any]:
                        for gid, state in list(guilds.items())[:128] if isinstance(state, dict)},
             "observed_at": time.time(), "latency_ms": round((time.perf_counter() - started) * 1000, 1),
         }
+        sessions = data.get("native_tts_existing_sessions")
+        if (ready and type(data.get("native_tts_existing_voice_protocol")) is int
+                and data["native_tts_existing_voice_protocol"] == 1 and type(data.get("pid")) is int
+                and data["pid"] > 1 and isinstance(sessions, list)):
+            valid = []
+            for entry in sessions[:32]:
+                if not isinstance(entry, dict):
+                    continue
+                guild, channel, session = (entry.get(key) for key in ("guild_id", "channel_id", "session"))
+                if (isinstance(guild, str) and re.fullmatch(r"[1-9][0-9]{0,19}", guild)
+                        and isinstance(channel, str) and re.fullmatch(r"[1-9][0-9]{0,19}", channel)
+                        and isinstance(session, str) and re.fullmatch(r"[a-f0-9]{32}", session)):
+                    valid.append({"guild_id": guild, "channel_id": channel, "session": session})
+            snapshot["_native_tts_existing_voice"] = {"pid": data["pid"], "sessions": valid}
+        return snapshot
     except Exception as exc:
         return {"ok": False, "available": False, "configured": True, "payload_mode": "light",
                 "reason": "music_agent_health_error", "error": type(exc).__name__, "observed_at": time.time()}

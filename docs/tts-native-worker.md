@@ -147,6 +147,75 @@ precisa ser medida no telefone com os provedores e as vozes do uso normal.
 
 ## Validação
 
+### Canário Edge e gTTS
+
+O patch de início rápido mantém a VPS como rota padrão da guilda de teste.
+Só encaminha ao telefone quando o Music Agent confirma uma sessão de voz
+vigente no mesmo canal e compartilha o socket do worker Rust. A conferência
+na VPS usa um retrato coletado em segundo plano. O agente confere a sessão
+novamente antes de entregar áudio ao player.
+
+As opções abaixo são independentes e começam desligadas. As guildas são
+selecionadas por IDs numéricos separados por vírgula na configuração privada
+da VPS.
+
+```dotenv
+TTS_FIRST_AUDIO_GUILDS=ID_DA_GUILDA
+TTS_NATIVE_EXISTING_VOICE_ENABLED=1
+TTS_FIRST_AUDIO_SEGMENTS=1
+TTS_FIRST_AUDIO_ASYNC_CACHE=1
+```
+
+`TTS_NATIVE_EXISTING_VOICE_ENABLED` liga a seleção por sessão existente.
+Use `TTS_PROVIDERS_RUST=1` e a extensão atualizada para sintetizar em Rust na
+VPS. `TTS_FIRST_AUDIO_SEGMENTS` permite um primeiro trecho menor em falas
+longas. A estratégia tem uma chave de cache própria. O cache da estratégia
+anterior ainda pode servir áudio pronto na VPS. O trecho seguinte só usa
+uma vaga disponível depois de haver áudio validado do primeiro trecho.
+`TTS_FIRST_AUDIO_ASYNC_CACHE` grava o MP3 no worker depois de entregar o
+primeiro bloco à reprodução. Cache indisponível ou lento dispensa a gravação
+daquele pedido. Uma resposta incompleta nunca é publicada no cache.
+
+O Edge reutiliza a configuração TLS com certificados locais. O gTTS mantém
+um conjunto limitado de clientes HTTP com a mesma configuração de origem e
+proxy. O reaproveitamento de um cliente HTTP pode ocorrer mesmo quando o
+servidor encerrou a conexão anterior. Para comparar HTTP/2 e WebSocket
+antecipado, primeiro confirme compatibilidade e limites dos provedores em
+uma sessão de teste. O transporte padrão foi mantido para essas duas opções.
+
+Valide separadamente cache hit e miss, voz aberta e fria e reprodução sobre
+música. Registre p50, p95, número de pares e falhas. Use a mesma voz, texto e
+efeitos entre base e candidata. Os tempos do provedor, do agente e do áudio
+recebido são medidos cada um no relógio do seu processo. Para medir a espera
+percebida, capture o envio da mensagem e o início da fala recebida no mesmo
+computador, em canal de teste autorizado. A meta para aceitar a mudança é
+reduzir o p95 de cache miss sem aumentar cortes, falhas ou 429.
+
+Use `capture_event(trial, 'sent')` no cliente emissor e
+`capture_event(trial, 'heard')` quando o receptor detectar fala atribuída ao
+pedido. O identificador `trial` representa uma execução e `pair` une base e
+candidata do mesmo cenário. Registre no manifesto `trial`, `pair`, `variant`
+(`baseline` ou `candidate`), `engine`, `route`, `voice`, `cache` e `length`.
+Os dois clientes precisam compartilhar o relógio monotônico do Linux.
+
+```bash
+python scripts/compare-tts-discord-start.py compare --manifest tentativas.jsonl --events envio.jsonl recepcao.jsonl
+```
+
+O comparador conta tentativas sem áudio e exige pares suficientes antes
+de recomendar a promoção. A captura precisa de clientes autorizados no
+canal de teste. O comparador apenas lê arquivos locais.
+
+Rode o canário com um perfil por vez. Após validar e selecionar a próxima
+opção, preserve o total de amostras e os resultados que pioraram. Desligue
+uma opção para restaurar o comportamento anterior e reinicie a VPS para
+recarregar sua configuração. Para medir custo de decode, compare primeiro
+MP3 recebido e primeiro PCM disponível na mesma execução. A decisão de
+adotar um decoder adicional exige pelo menos 20 ms de custo mediano no
+aparelho além do teste de qualidade e de CPU/RAM.
+
+### Gates locais
+
 ```bash
 cargo test -p tts-worker
 cargo build -p tts-worker

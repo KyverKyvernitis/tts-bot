@@ -4,13 +4,15 @@ use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, io, path::{Path, PathBuf}, sync::Arc, time::Duration};
-use tokio::{fs, io::{AsyncReadExt, AsyncWriteExt}, net::{UnixListener, UnixStream}, sync::Semaphore};
+use tokio::{fs, io::{AsyncReadExt, AsyncWriteExt}, net::{UnixListener, UnixStream}, sync::{mpsc, Mutex, Semaphore}};
 use tokio_util::sync::CancellationToken;
 use tts_providers::{NativeStream, ProviderPool, ProviderRequest};
 
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const STREAM_CACHE_WRITERS: u32 = 2;
+const STREAM_CACHE_QUEUE_CHUNKS: usize = 8;
 
 #[derive(Clone)]
 pub struct Config {
@@ -38,6 +40,8 @@ pub struct Service {
     environment: Arc<HashMap<String,String>>, ttv_status: Arc<Value>,
     render_slots: Arc<Semaphore>,
     render_background: Arc<std::sync::Mutex<Option<tts_render::renderer::Cancellation>>>,
+    stream_cache_writers: Arc<Semaphore>,
+    stream_cache_prune: Arc<Mutex<()>>,
 }
 impl Service {
     pub fn new(config: Config) -> io::Result<Self> {
@@ -45,7 +49,9 @@ impl Service {
         let ttv_status=voice_status(&environment);
         Ok(Self { config: Arc::new(config), pool: ProviderPool::new(4, 4).map_err(io::Error::other)?,
             environment: Arc::new(environment),ttv_status:Arc::new(ttv_status),render_slots:Arc::new(Semaphore::new(1)),
-            render_background:Arc::new(std::sync::Mutex::new(None)) })
+            render_background:Arc::new(std::sync::Mutex::new(None)),
+            stream_cache_writers: Arc::new(Semaphore::new(STREAM_CACHE_WRITERS as usize)),
+            stream_cache_prune: Arc::new(Mutex::new(())), })
     }
     /// A pre-existing socket is never removed: a live worker retains ownership.
     pub async fn run(self, stop: CancellationToken) -> io::Result<()> {
@@ -78,6 +84,7 @@ impl Service {
         }
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.stream_cache_writers.acquire_many(STREAM_CACHE_WRITERS)).await;
         // Aborting connection futures drops their render cancellation guards.
         // Session closure waits for the physical native calls to release leases.
         let _=tokio::task::spawn_blocking(tts_render::renderer::close_residents).await;
@@ -132,6 +139,7 @@ impl Service {
             "native_version":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),
             "worker_id":self.config.worker_id,"available_engines":engines,
             "preferred_engine":"gtts","selected_engine":"gtts","stream_protocol":2,
+            "startup_stream_cache_protocol":1,
             "teto":self.ttv_status.as_ref(),
             "ttv_performance_protocol":self.ttv_status["ttv_performance_protocol"],
             "ttv_pcm_stream_protocol":self.ttv_status["ttv_pcm_stream_protocol"],
@@ -195,6 +203,7 @@ impl Service {
         let cache_enabled = !matches!(mode.as_str(), "0"|"false"|"off"|"disabled"|"none"|"bypass");
         let key = tts_policy::standard_cache_key(&body, &request.engine, "unavailable", "C4", 1.0, None)
             .map_err(io::Error::other)?;
+        let key = stream_cache_key(key, &request.engine, &body);
         let mut cache_path = self.config.cache.join(format!("{key}.{format}"));
         let mut cached = if cache_enabled && mode != "refresh" { fs::File::open(&cache_path).await.ok() } else { None };
         if cached.is_none()&&cache_enabled&&mode!="refresh"&&request.engine=="android_native" {
@@ -222,9 +231,13 @@ impl Service {
                 Err(error) => return json_response(socket, if error.kind == "busy" {503} else {400}, &json!({"ok":false,"error":error.to_string()})).await,
             }
         };
+        let admitted_at_ms = started.elapsed().as_secs_f64() * 1000.0;
         let streaming = path.ends_with(".stream");
         let store = cache_enabled && !cache_hit && !matches!(mode.as_str(), "no_store"|"only"|"cache_only");
-        let mut staging = if store { Some(Staging::new(&cache_path).await?) } else { None };
+        let async_cache = store && streaming && matches!(engine.as_str(), "edge" | "gtts")
+            && body["startup_async_cache"] == true;
+        let mut writer = None;
+        let mut staging = if store && !async_cache { Some(Staging::new(&cache_path).await?) } else { None };
         let mut output = Vec::new();
         let mut size = 0usize;
         let mut digest = Sha256::new();
@@ -264,14 +277,31 @@ impl Service {
                         let metadata=source.metadata();
                         if !metadata.audio_format.is_empty(){format=normalize_format(&metadata.audio_format).into();}
                     }
-                    write_headers(socket, 200, &self.audio_headers(&engine, &format, cache_hit, true,
-                        started.elapsed().as_secs_f64() * 1000.0)).await?;
+                    let mut headers = self.audio_headers(&engine, &format, cache_hit, true,
+                        started.elapsed().as_secs_f64() * 1000.0);
+                    if let Some(source) = &source {
+                        headers.push(("X-Core-Worker-Startup-Admission-Ms".into(), format!("{admitted_at_ms:.2}")));
+                        if let Some(ms) = source.metadata().startup.map(|timing| timing.first_audio_ms) {
+                            headers.push(("X-Core-Worker-Startup-Provider-First-Ms".into(), format!("{ms:.2}")));
+                        }
+                    }
+                    write_headers(socket, 200, &headers).await?;
                     headers_sent = true;
                 }
                 let frame = format!("{:x}\r\n", chunk.len());
                 write_bounded(socket, frame.as_bytes()).await?;
                 write_bounded(socket, &chunk).await?;
                 write_bounded(socket, b"\r\n").await?;
+                // Start disk I/O only after the first chunk has been delivered.
+                if async_cache && size == chunk.len() {
+                    writer = self.begin_stream_cache(cache_path.clone());
+                }
+                if let Some(cache) = &writer {
+                    if cache.try_send(StreamCacheRecord::Audio(chunk.clone())).is_err() {
+                        // A slow or unavailable cache cannot stall playback.
+                        writer = None;
+                    }
+                }
             } else { output.extend_from_slice(&chunk); }
             if let Some(part) = &mut staging { part.file.write_all(&chunk).await?; }
         }
@@ -288,7 +318,12 @@ impl Service {
         cache_path.set_extension(&format);
         let sha256 = format!("{:x}", digest.finalize());
         if let Some(part) = staging.take() { part.commit(&cache_path).await?; self.prune(&cache_path).await; }
-        if streaming { write_bounded(socket, b"0\r\n\r\n").await?; }
+        if streaming {
+            write_bounded(socket, b"0\r\n\r\n").await?;
+            if let Some(cache) = writer {
+                let _ = cache.try_send(StreamCacheRecord::Complete(cache_path));
+            }
+        }
         else if path == "/task" {
             json_response(socket, 200, &json!({"ok":true,"engine":engine,"audio_format":format,
                 "data_b64":base64::engine::general_purpose::STANDARD.encode(&output),
@@ -566,6 +601,7 @@ impl Service {
         let key = match tts_policy::sanitize_cache_key(&body["cache_key"]) {
             Ok(key) => key, Err(error) => return json_response(stream,400,&json!({"ok":false,"error":error})).await,
         };
+        let key = stream_cache_key(key, &tts_policy::normalize_engine(&body["engine"], "gtts"), body);
         for format in ["mp3","wav","ogg"] {
             let path = self.config.cache.join(format!("{key}.{format}"));
             let Ok(metadata) = fs::metadata(&path).await else { continue };
@@ -597,6 +633,46 @@ impl Service {
             }
         }).await;
     }
+
+    fn begin_stream_cache(&self, target: PathBuf) -> Option<mpsc::Sender<StreamCacheRecord>> {
+        let permit = self.stream_cache_writers.clone().try_acquire_owned().ok()?;
+        let (sender, mut receiver) = mpsc::channel(STREAM_CACHE_QUEUE_CHUNKS);
+        let service = self.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let Ok(mut staging) = Staging::new(&target).await else { return };
+            while let Some(record) = receiver.recv().await {
+                match record {
+                    StreamCacheRecord::Audio(chunk) => {
+                        if staging.file.write_all(&chunk).await.is_err() { return; }
+                    }
+                    StreamCacheRecord::Complete(target) => {
+                        if staging.commit(&target).await.is_ok() {
+                            let _prune = service.stream_cache_prune.lock().await;
+                            service.prune(&target).await;
+                        }
+                        return;
+                    }
+                }
+            }
+            // No completion record means the stream ended early or the queue
+            // filled. Dropping staging discards the unpublished bytes.
+        });
+        Some(sender)
+    }
+}
+
+fn stream_cache_key(key: String, engine: &str, body: &Value) -> String {
+    if matches!(engine, "edge" | "gtts") && body["startup_segments"] == true {
+        format!("{:x}", Sha256::digest(format!("tts-startup-segments-v1\0{key}").as_bytes()))
+    } else {
+        key
+    }
+}
+
+enum StreamCacheRecord {
+    Audio(bytes::Bytes),
+    Complete(PathBuf),
 }
 
 enum RenderRecord {
@@ -865,6 +941,40 @@ mod tests {
         let body=br#"{"engine":"gtts","text":"teste","cache_mode":"only","endpoint":"http://invalid"}"#;
         let response=request(service,post("/tts-agent/synthesize.stream",body,"")).await;
         assert!(response.starts_with(b"HTTP/1.1 409"));assert!(String::from_utf8_lossy(&response).contains("cache_miss"));
+    }
+    #[tokio::test]
+    async fn segmented_cache_does_not_read_the_legacy_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(Config::new(dir.path().join("socket"), dir.path().to_owned())).unwrap();
+        let key = "abcdef0123456789abcdef0123456789";
+        fs::write(dir.path().join(format!("{key}.mp3")), b"legacy").await.unwrap();
+        let body = json!({"engine":"edge", "text":"test", "cache_only":true, "cache_key":key, "startup_segments":true});
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let missing = request(service.clone(), post("/tts-agent/synthesize.stream", &bytes, "")).await;
+        assert!(missing.starts_with(b"HTTP/1.1 409"));
+        let variant = stream_cache_key(key.to_owned(), "edge", &body);
+        fs::write(dir.path().join(format!("{variant}.mp3")), b"variant").await.unwrap();
+        let hit = request(service, post("/tts-agent/synthesize.stream", &bytes, "")).await;
+        assert!(hit.ends_with(b"7\r\nvariant\r\n0\r\n\r\n"));
+    }
+    #[tokio::test]
+    async fn background_cache_abandons_partial_streams_and_bounds_concurrent_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Service::new(Config::new(dir.path().join("socket"), dir.path().to_owned())).unwrap();
+        let partial = dir.path().join("partial.mp3");
+        let complete = dir.path().join("complete.mp3");
+        let pending = service.begin_stream_cache(partial.clone()).unwrap();
+        let finishing = service.begin_stream_cache(complete.clone()).unwrap();
+        assert!(service.begin_stream_cache(dir.path().join("overflow.mp3")).is_none());
+        assert!(pending.try_send(StreamCacheRecord::Audio(bytes::Bytes::from_static(b"partial"))).is_ok());
+        drop(pending);
+        assert!(finishing.try_send(StreamCacheRecord::Audio(bytes::Bytes::from_static(b"full"))).is_ok());
+        assert!(finishing.try_send(StreamCacheRecord::Complete(complete.clone())).is_ok());
+        drop(finishing);
+        let _all_done = tokio::time::timeout(Duration::from_secs(3), service.stream_cache_writers.acquire_many(STREAM_CACHE_WRITERS)).await.unwrap().unwrap();
+        assert!(!partial.exists());
+        assert_eq!(fs::read(complete).await.unwrap(), b"full");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
     #[tokio::test]
     async fn binary_cache_atomic_hash_and_stream_contract(){

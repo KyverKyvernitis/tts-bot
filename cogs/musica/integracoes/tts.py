@@ -211,22 +211,43 @@ async def cancelar_tts_remoto(owner: Any, item: Any) -> None:
     if not getattr(item, "_tts_remote_active", False):
         return
     item._tts_remote_active = False
+    strict = getattr(item, "_tts_remote_existing_voice", False)
+    item._tts_remote_existing_voice = False
     requester = getattr(owner, "_request_phone_worker_json", None)
     if not callable(requester):
         return
+    payload = {
+        "action": "cancel_tts",
+        "guild_id": int(getattr(item, "guild_id", 0) or 0),
+        "tts_request_id": getattr(item, "request_id", None),
+        "timeout_seconds": 2,
+    }
+    if strict:
+        payload["require_existing_voice"] = True
     with contextlib.suppress(Exception):
         await requester(
-            task="music_agent_command",
-            payload={
-                "action": "cancel_tts",
-                "guild_id": int(getattr(item, "guild_id", 0) or 0),
-                "tts_request_id": getattr(item, "request_id", None),
-                "timeout_seconds": 2,
-            },
+            task="voice_agent_cancel_tts_existing" if strict else "music_agent_command",
+            payload=payload,
             timeout_seconds=2,
             max_audio_mb=1,
             raise_on_worker_error=False,
         )
+
+
+def resposta_tts_remoto_confirmada(result: Any, request_id: str) -> dict[str, Any] | None:
+    """A confirmed before-frame failure permits fallback; a missing receipt does not."""
+    if not isinstance(result, dict) or not request_id:
+        return None
+    receipt = result.get("worker_result")
+    if not isinstance(receipt, dict):
+        return None
+    if (receipt.get("tts_request_id") != request_id
+            or type(receipt.get("ok")) is not bool
+            or result.get("ok") is not receipt["ok"]
+            or type(receipt.get("first_frame_observed")) is not bool
+            or (receipt["ok"] and not receipt["first_frame_observed"])):
+        return None
+    return receipt
 
 
 def bloqueio_tts_direto_por_musica(bot: Any, guild_id: int, voice_agent: Any) -> str | None:
@@ -298,18 +319,29 @@ async def rotear_item_tts_para_musica(
     audio_task = None
 
     dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
+    use_native = False
     try:
         cached_payload: dict[str, Any] = {}
-        if suporta_cache_tts_agente(bot):
+        compatible_with_native = getattr(owner, "_native_existing_phone_voice_compatible", None)
+        check_session = getattr(owner, "_native_existing_phone_voice_session", None)
+        play_existing = getattr(owner, "_play_native_existing_worker_voice", None)
+        use_native = callable(compatible_with_native) and compatible_with_native(guild, item)
+        native_session = None
+        if use_native:
+            if callable(check_session) and callable(play_existing):
+                native_session = check_session(guild, item)
+            if not native_session:
+                raise RuntimeError("TTS nativo sem sessão de voz confirmada")
+        supports_cache = suporta_cache_tts_agente(bot)
+        if supports_cache:
             await owner._maybe_attach_prebuilt_direct_tts_audio(
                 cached_payload,
                 item,
-                generate_if_missing=True,
+                generate_if_missing=not use_native,
             )
             cached_payload.setdefault("cache_key", owner._cache_key(item))
             cached_payload["tld"] = getattr(item, "tld", None)
             cached_payload["tts_request_id"] = getattr(item, "request_id", None)
-            item._tts_remote_active = True
 
         if performance:
             import base64
@@ -341,24 +373,31 @@ async def rotear_item_tts_para_musica(
                         'cd_arrangement_sha256', 'cd_arrangement_audio_sha256'):
                 cached_payload.pop(key, None)
 
-        playback_result = await tocar_tts_via_agente(
-            bot,
-            guild_id=guild_id,
-            channel_id=channel_id,
-            text=getattr(item, "text", ""),
-            **cached_payload,
-            engine=getattr(item, "engine", "gtts"),
-            voice=getattr(item, "voice", ""),
-            language=getattr(item, "language", "pt-br"),
-            rate=getattr(item, "rate", "+0%"),
-            pitch=getattr(item, "pitch", "+0Hz"),
-            **payload_efeitos_tts(
-                getattr(item, "advanced_nightcore_level", 0),
-                getattr(item, "advanced_slowed_level", 0),
-                getattr(item, "advanced_reverb_level", 0),
-            ),
-            timeout=owner._estimate_playback_timeout(item),
-        )
+        if use_native:
+            playback_result = await play_existing(guild, item, native_session, prebuilt=cached_payload)
+            if playback_result is None:
+                raise RuntimeError("TTS nativo recusado antes do primeiro frame")
+        else:
+            if supports_cache:
+                item._tts_remote_active = True
+            playback_result = await tocar_tts_via_agente(
+                bot,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                text=getattr(item, "text", ""),
+                **cached_payload,
+                engine=getattr(item, "engine", "gtts"),
+                voice=getattr(item, "voice", ""),
+                language=getattr(item, "language", "pt-br"),
+                rate=getattr(item, "rate", "+0%"),
+                pitch=getattr(item, "pitch", "+0Hz"),
+                **payload_efeitos_tts(
+                    getattr(item, "advanced_nightcore_level", 0),
+                    getattr(item, "advanced_slowed_level", 0),
+                    getattr(item, "advanced_reverb_level", 0),
+                ),
+                timeout=owner._estimate_playback_timeout(item),
+            )
         # Resposta HTTP bem-sucedida não significa que o overlay tocou. Antes
         # esse caso era marcado como consumido mesmo quando o agente respondia
         # ``ok=false`` (por exemplo, espelho stale e sessão já encerrada), fazendo
@@ -401,12 +440,17 @@ async def rotear_item_tts_para_musica(
                 (playback_started_at - float(getattr(item, "enqueued_at_monotonic", playback_started_at))) * 1000.0,
             ),
         )
-        owner._schedule_worker_voice_agent_register_session(
-            guild,
-            item,
-            None,
-            source="tts_music_agent_route",
-        )
+        if use_native:
+            observe = getattr(owner, "_record_worker_first_frame_timing", None)
+            if callable(observe):
+                observe(playback_result, engine=getattr(item, "engine", "gtts"))
+        else:
+            owner._schedule_worker_voice_agent_register_session(
+                guild,
+                item,
+                None,
+                source="tts_music_agent_route",
+            )
         logger.info(
             "[tts_voice] TTS roteado pelo worker musical | guild=%s channel=%s engine=%s ok=%s",
             guild_id,
@@ -420,6 +464,9 @@ async def rotear_item_tts_para_musica(
         raise
     except Exception as exc:
         item._tts_remote_active = False
+        if use_native and getattr(exc, "code", None) in {"remote_playback_unconfirmed", "stream_incomplete"}:
+            # Uma fala parcial ou sem recibo nunca entra no fallback.
+            raise
         worker_unavailable = (type(exc).__name__ == "MusicWorkerUnavailable"
                               or "nenhum worker online" in str(exc).lower()
                               or "no worker online" in str(exc).lower())

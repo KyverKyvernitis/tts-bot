@@ -9,6 +9,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time"
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
@@ -19,5 +21,6 @@ fancy-regex = "0.16"
 uuid = { version = "1", features = ["v4"] }
 httpdate = "1"
 url = "2"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
