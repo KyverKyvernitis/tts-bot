@@ -7,21 +7,28 @@ from pathlib import Path
 import re
 from typing import Literal
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 import discord
 from discord import app_commands
 
 from cogs.tts.utils.app_commands import slash_mention
 
 
-HELP_TIMEOUT_SECONDS = 600.0
+HelpSource = Literal["slash", "prefix"]
+_PREFIX_ACCENT = discord.Color(0xE89B87)
+_SLASH_ACCENT = discord.Color(0xAA9BE6)
+HELP_CONTROL_ID = re.compile(
+    r"help:v1:(?P<source>slash|prefix):(?P<owner>[0-9]{1,20}):(?P<music>[01]):"
+    r"(?P<action>area|home|search|query|close)"
+)
 _CATEGORY_MENU_COPY = {
-    "voice": ("Voz na call", "Muda sua voz ou faz a Osaka cantar"),
-    "music": ("Música", "Toca pelo nome ou link e confere a fila"),
-    "games": ("Jogos e fichas", "Vê teu saldo ou chama alguém pro truco"),
-    "chatbot": ("Conversa e imagens", "Marca a Osaka pra conversar ou usa /imagem"),
-    "server": ("Servidor", "Configura tickets, boas-vindas e cargos"),
+    "voice": ("Voz na call", "Eu leio em voz alta o que você escreve."),
+    "music": ("Música", "Me pede uma faixa ou escolhe o que toca depois."),
+    "games": ("Jogos e fichas", "Confere suas fichas ou chama alguém pro truco."),
+    "chatbot": ("Conversa e imagens", "Me chama pra conversar ou me pede um desenho."),
+    "server": ("Servidor", "Cuida dos tickets, das boas-vindas e dos cargos."),
 }
+# Cada marcador aceita texto provisório, um emoji Unicode ou um <:nome:id> do servidor.
 _CATEGORY_MARKERS = {
     "voice": "[voz]",
     "music": "[som]",
@@ -259,12 +266,6 @@ def _category_menu_copy(category: HelpCategory) -> tuple[str, str]:
     return _CATEGORY_MENU_COPY.get(category.key, (category.label, category.description))
 
 
-def _marked_category_label(category: HelpCategory) -> str:
-    label, _ = _category_menu_copy(category)
-    marker = _CATEGORY_MARKERS.get(category.key)
-    return f"{marker} {label}" if marker else label
-
-
 def _category_tokens(category: HelpCategory) -> tuple[str, ...]:
     label, _ = _category_menu_copy(category)
     return (category.key, category.label, label, *category.search_terms)
@@ -296,12 +297,14 @@ def resolve_help_target(
 
     raw = str(subject).strip()
     normalized_special = _normalize(raw)
-    if normalized_special == "home" or normalized_special == "inicio":
+    if normalized_special in {"home", "inicio", "indice"}:
         return ("home", None)
     if normalized_special.startswith("category:"):
         key = normalized_special.split(":", 1)[1]
         if key in _CATEGORY_BY_KEY and key not in hidden_categories:
             return ("category", key)
+        # O seletor de um card antigo pode conter uma área que saiu do catálogo.
+        return ("home", None)
     if normalized_special.startswith("entry:"):
         key = normalized_special.split(":", 1)[1]
         entry = _ENTRY_BY_KEY.get(key)
@@ -539,36 +542,50 @@ def _category_entries(
     ]
 
 
+@dataclass
+class _HelpPage:
+    header: str
+    blocks: list[str]
+    accent: discord.Color
+
+
 def _render_category(
     category: HelpCategory,
     entries: list[HelpEntry],
     *,
     prefixes: dict[str, str],
     root_ids: dict[str, int],
-    games_context: dict[str, str] | None = None,
-) -> tuple[str, discord.Color]:
-    lines = [f"## {_marked_category_label(category)}"]
+    games_context: dict[str, str],
+    music_offline: bool,
+) -> _HelpPage:
+    label, intro = _category_menu_copy(category)
+    if category.key == "voice":
+        intro = f"Comigo na call, manda `{prefixes['gtts_prefix']}bom dia` no chat. Eu leio em voz alta."
+    elif category.key == "music":
+        prefix = _entry_bot_prefix(_ENTRY_BY_KEY["play"], prefixes)
+        intro = f"Me pede uma faixa com `{prefix}play Basket Case`. Também aceito link."
+        if music_offline:
+            intro = "Agora eu tô sem conexão com o player. Os comandos ficam aqui pra quando ele voltar."
+    elif category.key == "games":
+        balance = _plain_usage(_ENTRY_BY_KEY["ficha"], prefixes, games_context)
+        channel = games_context.get("channel_mention")
+        where = f" em {channel}" if channel else ""
+        intro = f"Vai jogar? Manda `{balance}`{where} pra ver com quantas fichas você tá."
+    elif category.key == "chatbot":
+        intro = "Me marca no chat e manda um assunto. Se quiser uma imagem, me conta o que desenhar."
+    elif category.key == "server":
+        intro = "Aqui ficam os ajustes que você pode fazer neste servidor."
+
     groups: dict[str, list[str]] = {}
     for entry in entries:
         usage = _format_usage(entry, prefixes, root_ids, games_context)
-        description = _without_terminal_punctuation(entry.description)
-        line = f"{usage} · {description}"
+        line = f"{usage} · {_without_terminal_punctuation(entry.description)}"
         aliases = _aliases_line(entry, prefixes, games_context)
         if aliases:
             line += f" ({aliases})"
         groups.setdefault(entry.group, []).append(line)
-
-    for group, commands in groups.items():
-        lines.extend(("", f"**{group}**", *commands))
-
-    if category.key == "games":
-        channel_mention = str((games_context or {}).get("channel_mention") or "").strip()
-        if channel_mention:
-            lines.extend(["", f"-# Jogue em {channel_mention}"])
-    elif category.key == "server" and not entries:
-        lines.extend(["", "Nenhuma configuração disponível para suas permissões"])
-
-    return "\n".join(lines), category.accent
+    blocks = ["\n".join([f"### {group}", *commands]) for group, commands in groups.items()]
+    return _HelpPage(f"## {label}\n{intro}", blocks, category.accent)
 
 
 def _entry_display_title(
@@ -579,7 +596,6 @@ def _entry_display_title(
     if entry.slash_path:
         return f"/{entry.slash_path}"
     plain = _plain_usage(entry, prefixes, games_context)
-    # Mantém prefixos de voz inteiros, mas corta argumentos de comandos.
     if entry.usage.endswith("_prefix}texto"):
         return plain
     return plain.split(" ", 1)[0]
@@ -591,77 +607,48 @@ def _render_entry(
     user: discord.abc.User,
     prefixes: dict[str, str],
     root_ids: dict[str, int],
-    games_context: dict[str, str] | None = None,
-    extra_permissions: set[str] | frozenset[str] = frozenset(),
-) -> tuple[str, discord.Color]:
+    games_context: dict[str, str],
+    extra_permissions: frozenset[str],
+) -> _HelpPage:
     usage = _format_usage(entry, prefixes, root_ids, games_context)
     category = _CATEGORY_BY_KEY.get(entry.category or "")
     title = _entry_display_title(entry, prefixes, games_context)
-    lines = [f"## `{title}`", _without_terminal_punctuation(entry.description), "", f"**Como usar** · {usage}"]
+    blocks = [f"**Como usar**\n{usage}"]
 
     aliases = _aliases_line(entry, prefixes, games_context)
     if aliases:
-        lines.append(f"**Atalhos** · {aliases}")
-
+        blocks.append(f"**Também funciona com**\n{aliases}")
     if entry.detail_note:
-        lines.extend(["", f"-# {_without_terminal_punctuation(entry.detail_note)}"])
+        blocks.append(f"-# {entry.detail_note}")
     elif not _permission_allowed(user, entry.permission, extra_permissions):
-        lines.extend(["", "-# Você não tem a permissão necessária para usar este recurso"])
-
+        blocks.append("-# Você precisa de permissão pra usar esse comando.")
     accent = category.accent if category else discord.Color.teal()
-    return "\n".join(lines), accent
+    return _HelpPage(f"## `{title}`\n{entry.description}", blocks, accent)
 
 
-def _render_not_found(
-    subject: str,
-    *,
-    user: discord.abc.User,
-    prefixes: dict[str, str],
-    games_context: dict[str, str] | None = None,
-    extra_permissions: set[str] | frozenset[str] = frozenset(),
-    hidden_categories: set[str] | frozenset[str] = frozenset(),
-) -> tuple[str, discord.Color]:
-    suggestions = suggest_help_targets(
-        subject,
-        bot_prefix=prefixes.get("bot_prefix", "_"),
-        registered_prefix=prefixes.get("registered_prefix", ""),
-        user=user,
-        extra_permissions=extra_permissions,
-        hidden_categories=hidden_categories,
+def _category_option(category: HelpCategory, *, selected: bool) -> discord.SelectOption:
+    label, description = _category_menu_copy(category)
+    marker = _CATEGORY_MARKERS.get(category.key, "")
+    emoji = None
+    if marker.startswith("["):
+        description = f"{marker} {description}"
+    elif marker:
+        emoji = marker
+    return discord.SelectOption(
+        label=label, description=description[:100], emoji=emoji,
+        value=f"category:{category.key}", default=selected,
     )
-    lines = ["## Não achei esse comando", f"`{str(subject)[:80]}`"]
-    if suggestions:
-        labels: list[str] = []
-        for target in suggestions:
-            if isinstance(target, HelpCategory):
-                label, _ = _category_menu_copy(target)
-                labels.append(label)
-            else:
-                labels.append(_plain_usage(target, prefixes, games_context))
-        lines.extend(["", "Você quis dizer " + " ou ".join(f"`{label}`" for label in labels) + "?"])
-    return "\n".join(lines), discord.Color.dark_grey()
 
 
-class _HelpNavigationSelect(discord.ui.Select):
-    def __init__(self, owner_view: "HelpCenterView", categories: list[HelpCategory]):
-        self.owner_view = owner_view
-        options = [
-            discord.SelectOption(label="Índice", value="home", default=owner_view.target_kind == "home"),
-        ]
-        for category in categories:
-            _, description = _category_menu_copy(category)
-            options.append(
-                discord.SelectOption(
-                    label=_marked_category_label(category),
-                    value=f"category:{category.key}",
-                    description=_without_terminal_punctuation(description)[:100],
-                    default=owner_view.target_kind == "category" and owner_view.target_key == category.key,
-                )
-            )
-        super().__init__(placeholder="Áreas", options=options)
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await self.owner_view.navigate(interaction, self.values[0] if self.values else "home")
+def help_search_modal(button_id: str) -> discord.ui.Modal:
+    modal = discord.ui.Modal(title="Buscar comando", custom_id=button_id.removesuffix(":search") + ":query")
+    modal.add_item(discord.ui.Label(
+        text="O que você quer procurar?",
+        component=discord.ui.TextInput(custom_id="assunto", placeholder="Ex.: join, fichas, voz", max_length=80),
+    ))
+    # O mesmo listener atende o formulário, mesmo após um reload do cog.
+    modal.stop()
+    return modal
 
 
 class HelpCenterView(discord.ui.LayoutView):
@@ -671,18 +658,17 @@ class HelpCenterView(discord.ui.LayoutView):
         owner: discord.abc.User,
         prefixes: dict[str, str],
         root_ids: dict[str, int],
-        source: Literal["slash", "prefix"] = "slash",
+        source: HelpSource = "slash",
+        avatar_url: str | None = None,
         games_context: dict[str, str] | None = None,
         extra_permissions: set[str] | frozenset[str] = frozenset(),
         hidden_categories: set[str] | frozenset[str] = frozenset(),
-        hidden_categories_provider: Callable[[], Awaitable[frozenset[str]]] | None = None,
         subject: str | None = None,
         initial_category: str | None = None,
-        timeout: float = HELP_TIMEOUT_SECONDS,
+        music_from_activity: bool = False,
     ):
-        super().__init__(timeout=max(1.0, float(timeout)) if source == "slash" else None)
+        super().__init__(timeout=None)
         self.owner = owner
-        self.owner_id = int(owner.id)
         self.source = source
         self.prefixes = {
             "bot_prefix": "_", "gtts_prefix": ".", "edge_prefix": ",",
@@ -691,152 +677,107 @@ class HelpCenterView(discord.ui.LayoutView):
         self.root_ids = dict(root_ids) if source == "slash" else {}
         self.games_context = dict(games_context or {})
         self.extra_permissions = frozenset(extra_permissions)
+        from_activity = not (subject or "").strip() and initial_category is not None
+        music_from_activity = music_from_activity or (from_activity and initial_category == "music")
+        control_prefix = f"help:v1:{source}:{owner.id}:{int(music_from_activity)}"
         self.hidden_categories = frozenset(hidden_categories)
-        self.hidden_categories_provider = hidden_categories_provider
-        self.message: discord.Message | None = None
-        self.music_from_activity = False
-        if not (subject or "").strip():
-            # Quem acabou de usar música pode consultar a área mesmo com o worker offline.
-            self.music_from_activity = initial_category == "music"
-            category = _CATEGORY_BY_KEY.get(initial_category or "")
-            if category and _category_visible(category, owner, self.extra_permissions, self._unlisted_categories):
-                subject = f"category:{category.key}"
-        self.set_target(subject)
-        self.rebuild()
+        if music_from_activity:
+            self.hidden_categories -= {"music"}
 
-    @property
-    def _unlisted_categories(self) -> frozenset[str]:
-        if self.music_from_activity:
-            return self.hidden_categories - {"music"}
-        return self.hidden_categories
-
-    async def refresh_dynamic_state(self) -> None:
-        provider = self.hidden_categories_provider
-        if provider is None:
-            return
-        try:
-            hidden = frozenset(await provider())
-        except Exception:
-            return
-        self.hidden_categories = hidden
-        if self.target_kind == "category" and self.target_key in self._unlisted_categories:
-            self.target_kind, self.target_key = ("home", None)
-        elif self.target_kind == "entry":
-            entry = _ENTRY_BY_KEY.get(str(self.target_key or ""))
-            if entry is not None and entry.category in self._unlisted_categories:
-                self.target_kind, self.target_key = ("home", None)
-
-    def set_target(self, target: str | None) -> None:
+        categories = [
+            category for category in CATEGORIES
+            if _category_visible(category, owner, self.extra_permissions, self.hidden_categories)
+        ]
+        visible_keys = {category.key for category in categories}
+        if from_activity and initial_category in visible_keys:
+            subject = f"category:{initial_category}"
         self.target_kind, self.target_key = resolve_help_target(
-            target,
-            bot_prefix=self.prefixes.get("bot_prefix", "_"),
+            subject, bot_prefix=self.prefixes["bot_prefix"],
             registered_prefix=self.prefixes.get("registered_prefix", ""),
-            hidden_categories=self._unlisted_categories,
+            hidden_categories=self.hidden_categories,
         )
+        if self.target_kind == "category" and self.target_key not in visible_keys:
+            self.target_kind, self.target_key = "home", None
 
-    async def navigate(self, interaction: discord.Interaction, target: str) -> None:
-        await self.refresh_dynamic_state()
-        if target.startswith("category:") and target.removeprefix("category:") in self._unlisted_categories:
-            target = "home"
-        self.set_target(target)
-        self.rebuild()
-        await interaction.response.edit_message(view=self)
+        page = self._page(categories, music_offline="music" in hidden_categories)
+        header: discord.ui.Item = discord.ui.TextDisplay(page.header)
+        if avatar_url and self.target_kind == "home":
+            header = discord.ui.Section(header, accessory=discord.ui.Thumbnail(avatar_url, description="Meu avatar"))
+        card = discord.ui.Container(header, accent_color=_PREFIX_ACCENT if source == "prefix" else page.accent)
+        if page.blocks:
+            card.add_item(discord.ui.Separator())
+            for block in page.blocks:
+                card.add_item(discord.ui.TextDisplay(block))
+        if source == "prefix" and self.target_kind != "home":
+            card.add_item(discord.ui.TextDisplay(f"-# Pra voltar pelo chat, manda `{self.prefixes['bot_prefix']}help início`."))
 
-    def _render_index(self, categories: list[HelpCategory]) -> str:
-        if self.source == "slash":
-            return "## Comandos da Osaka"
+        self.add_item(card)
+        if categories:
+            selected_key = self.target_key if self.target_kind == "category" else None
+            options = [_category_option(category, selected=category.key == selected_key) for category in categories]
+            self.add_item(discord.ui.ActionRow(discord.ui.Select(
+                custom_id=f"{control_prefix}:area", placeholder="Escolha uma área", options=options,
+            )))
+        actions = discord.ui.ActionRow(
+            discord.ui.Button(label="Buscar comando", style=discord.ButtonStyle.primary,
+                              custom_id=f"{control_prefix}:search"),
+        )
+        if self.target_kind != "home":
+            actions.add_item(discord.ui.Button(label="Início", custom_id=f"{control_prefix}:home"))
+        actions.add_item(discord.ui.Button(label="Fechar", custom_id=f"{control_prefix}:close"))
+        self.add_item(actions)
+        # O cog recebe os cliques pelos IDs da mensagem, inclusive após reiniciar.
+        # O SDK só precisa enviar o layout, sem guardar uma view por mensagem.
+        self.stop()
 
-        bot_prefix = self.prefixes["bot_prefix"]
-        lines = ["## Guia da Osaka", ""]
+    def _index(self, categories: list[HelpCategory]) -> _HelpPage:
+        if self.source == "prefix":
+            prefix = self.prefixes["bot_prefix"]
+            header = f"## Meus comandos\nQuer me chamar pra call? Manda `{prefix}help join` que eu te mostro como."
+            shortcuts = []
+            for category in categories:
+                query = _CATEGORY_DIRECT_TERMS.get(category.key, (category.key,))[0]
+                label, _ = _category_menu_copy(category)
+                shortcuts.append(f"`{prefix}help {query}`  ·  **{label}**")
+            return _HelpPage(header, ["\n".join(shortcuts)] if shortcuts else [], _PREFIX_ACCENT)
+
+        header = "## Meus comandos\nEsqueceu o comando que me faz cantar? Toca em **Buscar comando** e escreve `cantar`."
+        areas = []
         for category in categories:
-            query = _CATEGORY_DIRECT_TERMS.get(category.key, (category.key,))[0]
-            lines.append(f"{_marked_category_label(category)} · `{bot_prefix}help {query}`")
-        return "\n".join(lines)
+            label, description = _category_menu_copy(category)
+            areas.append(f"**{label}**\n-# {description}")
+        return _HelpPage(header, areas, _SLASH_ACCENT)
 
-    def _render_current(
-        self, category: HelpCategory | None, visible_categories: list[HelpCategory],
-    ) -> tuple[str, discord.Color]:
+    def _page(self, categories: list[HelpCategory], *, music_offline: bool) -> _HelpPage:
         if self.target_kind == "home":
-            return self._render_index(visible_categories), discord.Color.blurple()
-        if category:
+            return self._index(categories)
+        if self.target_kind == "category":
+            category = _CATEGORY_BY_KEY[self.target_key]
             return _render_category(
-                category,
-                _category_entries(category, self.owner, self.extra_permissions),
-                prefixes=self.prefixes,
-                root_ids=self.root_ids,
-                games_context=self.games_context,
+                category, _category_entries(category, self.owner, self.extra_permissions),
+                prefixes=self.prefixes, root_ids=self.root_ids,
+                games_context=self.games_context, music_offline=music_offline,
             )
-        if self.target_kind == "entry" and self.target_key in _ENTRY_BY_KEY:
+        if self.target_kind == "entry":
             return _render_entry(
-                _ENTRY_BY_KEY[self.target_key],
-                user=self.owner,
-                prefixes=self.prefixes,
-                root_ids=self.root_ids,
-                games_context=self.games_context,
+                _ENTRY_BY_KEY[self.target_key], user=self.owner, prefixes=self.prefixes,
+                root_ids=self.root_ids, games_context=self.games_context,
                 extra_permissions=self.extra_permissions,
             )
-        return _render_not_found(
-            str(self.target_key or ""),
-            user=self.owner,
-            prefixes=self.prefixes,
-            games_context=self.games_context,
-            extra_permissions=self.extra_permissions,
-            hidden_categories=self._unlisted_categories,
-        )
 
-    def rebuild(self) -> None:
-        self.clear_items()
-        category = _CATEGORY_BY_KEY.get(self.target_key or "") if self.target_kind == "category" else None
-        unlisted = self._unlisted_categories
-        visible = [
-            section for section in CATEGORIES
-            if _category_visible(section, self.owner, self.extra_permissions, unlisted)
+        subject = str(self.target_key or "")
+        suggestions = suggest_help_targets(
+            subject, bot_prefix=self.prefixes["bot_prefix"],
+            registered_prefix=self.prefixes.get("registered_prefix", ""),
+            user=self.owner, extra_permissions=self.extra_permissions, hidden_categories=self.hidden_categories,
+        )
+        labels = [
+            _category_menu_copy(target)[0] if isinstance(target, HelpCategory)
+            else _entry_display_title(target, self.prefixes, self.games_context)
+            for target in suggestions
         ]
-        body, accent = self._render_current(category, visible)
-        if category and category.key == "music" and "music" in self.hidden_categories:
-            body += "\n\n-# A música está indisponível agora."
-
-        if self.source == "prefix":
-            if self.target_kind != "home":
-                body += f"\n\n-# Índice · `{self.prefixes['bot_prefix']}help início`"
-            self.add_item(discord.ui.TextDisplay(body))
-            return
-
-        self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay(body),
-            discord.ui.Separator(),
-            discord.ui.ActionRow(_HelpNavigationSelect(self, visible)),
-            accent_color=accent,
-        ))
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if int(getattr(interaction.user, "id", 0) or 0) == self.owner_id:
-            return True
-        try:
-            await interaction.response.send_message(
-                "Usa `/help` pra abrir o teu menu.",
-                ephemeral=True,
-            )
-        except Exception:
-            pass
-        return False
-
-    async def on_timeout(self) -> None:
-        self.clear_items()
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay("## Comandos da Osaka\nO menu expirou. Usa `/help` pra abrir de novo."),
-                accent_color=discord.Color.dark_grey(),
-            )
-        )
-        if self.message is None:
-            return
-        try:
-            await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
-        except TypeError:
-            try:
-                await self.message.edit(view=self)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        hint = "Tenta buscar pelo nome de um comando, como `join`, ou escolhe uma área aqui embaixo."
+        if labels:
+            hint = "Você quis dizer " + " ou ".join(f"`{label}`" for label in labels) + "?"
+        term = " ".join(subject.split())[:80].replace("`", "ˋ")
+        return _HelpPage(f"## Não achei esse comando\nProcurei por `{term}`.", [hint], _SLASH_ACCENT)

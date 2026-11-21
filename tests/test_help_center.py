@@ -3,9 +3,11 @@ from unittest.mock import AsyncMock
 
 import discord
 import pytest
+from discord.http import handle_message_parameters
 
 from cogs.games.handlers.message_router import GincanaMessageRouterMixin
 from cogs.utility import Utility
+from utility import help_center
 from utility.help_activity import last_help_category, remember_help_category, remember_help_command
 from utility.help_center import HelpCenterView
 
@@ -32,56 +34,87 @@ def _selectors(view):
     return [item for item in view.walk_children() if isinstance(item, discord.ui.Select)]
 
 
+def _buttons(view):
+    return {item.label: item for item in view.walk_children() if isinstance(item, discord.ui.Button)}
+
+
+def _control(custom_id, *, user_id=10, kind=discord.InteractionType.component, **data):
+    return SimpleNamespace(
+        type=kind, user=_owner(user_id), guild=SimpleNamespace(id=1),
+        data={"custom_id": custom_id, **data}, response=AsyncMock(),
+        edit_original_response=AsyncMock(), delete_original_response=AsyncMock(),
+    )
+
+
 def test_slash_index_uses_one_selector_and_filters_staff():
     view = _view()
     select, = _selectors(view)
-    assert select.placeholder == "Áreas"
+    assert select.placeholder == "Escolha uma área"
     assert [option.label for option in select.options] == [
-        "Índice", "[voz] Voz na call", "[som] Música", "[jogos] Jogos e fichas", "[chat] Conversa e imagens",
+        "Voz na call", "Música", "Jogos e fichas", "Conversa e imagens",
     ]
-    assert select.options[0].default
-    assert not any(isinstance(item, discord.ui.Button) for item in view.walk_children())
+    assert all(option.label in _copy(view) for option in select.options)
+    assert not any(option.default for option in select.options)
+    assert select.options[0].description.startswith("[voz]")
+    assert set(_buttons(view)) == {"Buscar comando", "Fechar"}
 
     staff = _view(extra_permissions=frozenset({"ticket_staff"}))
     select, = _selectors(staff)
-    assert select.options[-1].label == "[staff] Servidor"
+    assert select.options[-1].label == "Servidor"
 
 
-def test_prefix_uses_a_text_index_with_direct_shortcuts():
+def test_prefix_index_has_copyable_shortcuts_and_working_controls():
     view = _view(source="prefix", extra_permissions=frozenset({"ticket_staff"}))
-    item, = view.children
-    assert isinstance(item, discord.ui.TextDisplay)
-    assert _copy(view).startswith("## Guia da Osaka")
+    assert isinstance(view.children[0], discord.ui.Container)
+    assert _copy(view).startswith("## Meus comandos")
     for query in ("voz", "música", "jogos", "chat", "servidor"):
         assert f"`!help {query}`" in _copy(view)
-    assert not view.is_dispatchable()
+    assert len(_selectors(view)) == 1
+    assert set(_buttons(view)) == {"Buscar comando", "Fechar"}
     assert view.timeout is None
     assert "!help servidor" not in _copy(_view(source="prefix"))
+    assert view.children[0].accent_color != _view().children[0].accent_color
 
 
+def test_replacing_a_text_marker_sets_the_native_select_emoji(monkeypatch):
+    monkeypatch.setitem(help_center._CATEGORY_MARKERS, "voice", "<:voz:900000000000000001>")
+    option = _selectors(_view())[0].options[0]
+    assert option.emoji.id == 900000000000000001
+    assert "<:" not in option.label + option.description
+
+
+@pytest.mark.parametrize("source", ["prefix", "slash"])
 @pytest.mark.asyncio
-async def test_one_selection_opens_full_music_list_and_can_return_to_index():
-    view = _view()
-    select, = _selectors(view)
-    select._values = ["category:music"]
-    interaction = SimpleNamespace(response=AsyncMock())
-    await select.callback(interaction)
+async def test_old_card_opens_full_music_list_and_returns_home_on_fresh_cog(source):
+    original = _view(source=source, avatar_url="https://cdn.discordapp.com/embed/avatars/0.png")
+    with handle_message_parameters(view=original) as params:
+        assert params.payload["flags"] & discord.MessageFlags(components_v2=True).value
+        assert params.payload["components"][0]["components"][0]["accessory"]["type"] == 11
+    payload = original.to_components()
+    await original.on_timeout()
+    assert original.to_components() == payload
+    assert original.is_finished()  # Nenhum callback ou timeout por mensagem.
+    select, = _selectors(original)
+    interaction = _control(select.custom_id, values=["category:music"])
+    await _utility().on_interaction(interaction)
+    interaction.response.defer.assert_awaited_once()
+    view = interaction.edit_original_response.await_args.kwargs["view"]
+    assert view.source == source
     assert (view.target_kind, view.target_key) == ("category", "music")
-    interaction.response.edit_message.assert_awaited_with(view=view)
     for command in ("play <nome ou link>", "queue", "volume [0-100]", "readd <posição>"):
         assert f"`!{command}`" in _copy(view)
     assert "`!skip` · Pula a música atual (`!pular`, `!s`)" in _copy(view)
     assert "!nightcore" not in _copy(view)
-    assert not any(isinstance(item, discord.ui.Button) for item in view.walk_children())
+    assert set(_buttons(view)) == {"Buscar comando", "Início", "Fechar"}
     select, = _selectors(view)
     assert next(option for option in select.options if option.default).value == "category:music"
     assert [option.value for option in select.options] == [
-        "home", "category:voice", "category:music", "category:games", "category:chatbot",
+        "category:voice", "category:music", "category:games", "category:chatbot",
     ]
 
-    select._values = ["home"]
-    await select.callback(interaction)
-    assert view.target_kind == "home"
+    home = _control(_buttons(view)["Início"].custom_id)
+    await _utility().on_interaction(home)
+    assert home.edit_original_response.await_args.kwargs["view"].target_kind == "home"
 
 
 @pytest.mark.parametrize("source", ["prefix", "slash"])
@@ -93,7 +126,7 @@ def test_context_music_help_is_available_when_worker_is_offline(source):
     view = _view(source=source, initial_category="music", hidden_categories=unavailable)
     assert (view.target_kind, view.target_key) == ("category", "music")
     assert "!queue" in _copy(view) and "!volume" in _copy(view)
-    assert "A música está indisponível agora" in _copy(view)
+    assert "sem conexão com o player" in _copy(view)
 
 
 def test_explicit_subject_and_permission_take_precedence():
@@ -116,7 +149,7 @@ def test_slash_mentions_and_prefix_instructions_show_real_syntax():
     assert "`/tts menu`" in _copy(prefix)
     assert "</tts menu:" not in _copy(prefix)
     assert "`!help início`" in _copy(prefix)
-    assert not _selectors(prefix)
+    assert len(_selectors(prefix)) == 1
     assert "`/imagem <prompt>`" in _copy(_view(subject="/imagem"))
 
 
@@ -211,7 +244,7 @@ async def test_prefix_help_uses_last_category_and_keeps_explicit_search():
     view = help_message.channel.send.await_args.kwargs["view"]
     assert (view.target_kind, view.target_key) == ("category", "games")
     assert view.source == "prefix"
-    assert not _selectors(view)
+    assert len(_selectors(view)) == 1
     assert "`!coinflip`" in _copy(view)
 
     explicit = _event(103, guild=guild, content="!help voz")
@@ -231,13 +264,66 @@ async def test_slash_help_uses_same_activity_but_keeps_its_layout():
 
     interaction = SimpleNamespace(
         id=102, guild=guild, user=attempt.author, channel=attempt.channel,
-        response=SimpleNamespace(is_done=lambda: False, send_message=AsyncMock()),
-        original_response=AsyncMock(),
+        response=SimpleNamespace(is_done=lambda: False, defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
     )
     await utility.help_command.callback(utility, interaction)
-    sent = interaction.response.send_message.await_args.kwargs
-    view = sent["view"]
-    assert sent["ephemeral"]
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    view = interaction.edit_original_response.await_args.kwargs["view"]
     assert (view.source, view.target_kind, view.target_key) == ("slash", "category", "voice")
     assert len(_selectors(view)) == 1
     assert "</tts menu:123>" in _copy(view)
+
+
+@pytest.mark.parametrize("source", ["prefix", "slash"])
+@pytest.mark.asyncio
+async def test_search_submission_updates_the_card_and_close_deletes_it(source):
+    view = _view(source=source)
+    click = _control(_buttons(view)["Buscar comando"].custom_id)
+    await _utility().on_interaction(click)
+    modal = click.response.send_modal.await_args.args[0]
+    form = modal.to_dict()
+    field = form["components"][0]["component"]
+    assert form["components"][0]["type"] == 18 and field["type"] == 4
+    submitted = _control(
+        modal.custom_id, kind=discord.InteractionType.modal_submit,
+        components=[{"type": 18, "component": {"type": 4, "custom_id": field["custom_id"], "value": "cantar"}}],
+    )
+    await _utility().on_interaction(submitted)
+    result = submitted.edit_original_response.await_args.kwargs["view"]
+    assert (result.source, result.target_key) == (source, "ttv_mp3")
+    assert "`!ttvmp3 texto~~`" in _copy(result)
+    close = _control(_buttons(result)["Fechar"].custom_id)
+    await _utility().on_interaction(close)
+    close.response.defer.assert_awaited_once_with()
+    close.delete_original_response.assert_awaited_once_with()
+    close.edit_original_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_other_members_cannot_change_close_or_search_a_public_card():
+    view = _view(source="prefix", subject="voz")
+    ids = [button.custom_id for button in _buttons(view).values()] + [_selectors(view)[0].custom_id]
+    for custom_id in ids:
+        click = _control(custom_id, user_id=11)
+        await _utility().on_interaction(click)
+        assert click.response.send_message.await_args.kwargs["ephemeral"]
+        click.response.send_modal.assert_not_called()
+        click.edit_original_response.assert_not_called()
+        click.delete_original_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_click_rechecks_permissions_and_preserves_recent_offline_music():
+    utility = _utility()
+    utility._help_hidden_categories.return_value = frozenset({"music"})
+    old_staff = _view(extra_permissions={"ticket_staff"}, initial_category="music")
+    select, = _selectors(old_staff)
+    revoked = _control(select.custom_id, values=["category:server"])
+    await utility.on_interaction(revoked)
+    home = revoked.edit_original_response.await_args.kwargs["view"]
+    assert home.target_kind == "home"
+    assert "Servidor" not in _copy(home)
+    music = _control(_selectors(home)[0].custom_id, values=["category:music"])
+    await utility.on_interaction(music)
+    assert "sem conexão com o player" in _copy(music.edit_original_response.await_args.kwargs["view"])

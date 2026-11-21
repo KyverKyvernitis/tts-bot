@@ -13,7 +13,7 @@ from .tts.utils.app_commands import fetch_root_command_ids_cached
 from utility.commands.help import HelpCommandMixin
 from cogs.musica.integracoes.ajuda import musica_disponivel_para_ajuda
 from utility.help_activity import last_help_category
-from utility.help_center import HELP_TIMEOUT_SECONDS, HelpCenterView, help_autocomplete_choices
+from utility.help_center import HelpCenterView, HelpSource, help_autocomplete_choices
 from utility.commands.ping import PingCommandMixin
 from utility.commands.base import BaseCommandMixin
 from utility.commands.status import StatusCommandMixin
@@ -226,6 +226,36 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
             hidden_categories=hidden_categories,
         )
 
+    async def _build_help_view(
+        self,
+        *,
+        guild: discord.Guild | None,
+        owner: discord.abc.User,
+        source: HelpSource,
+        subject: str | None = None,
+        initial_category: str | None = None,
+        music_from_activity: bool = False,
+    ) -> HelpCenterView:
+        prefixes = await self._get_help_prefix_data(guild)
+        root_ids = await self._fetch_root_command_ids_cached(guild) if source == "slash" else {}
+        extra_permissions = await self._get_help_extra_permissions(guild, owner)
+        hidden_categories = await self._help_hidden_categories()
+        bot_user = getattr(guild, "me", None) or getattr(self.bot, "user", None)
+        avatar = getattr(bot_user, "display_avatar", None)
+        return HelpCenterView(
+            owner=owner,
+            prefixes=prefixes,
+            root_ids=root_ids,
+            source=source,
+            avatar_url=str(avatar.url) if avatar else None,
+            games_context=self._get_help_games_context(guild),
+            extra_permissions=extra_permissions,
+            hidden_categories=hidden_categories,
+            subject=subject,
+            initial_category=initial_category,
+            music_from_activity=music_from_activity,
+        )
+
     async def _send_help_response(
         self,
         *,
@@ -242,48 +272,22 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
         if not (subject or "").strip():
             initial_category = last_help_category(self.bot, guild, owner, before=getattr(origin, "id", None))
 
-        prefixes = await self._get_help_prefix_data(guild)
-        root_ids = await self._fetch_root_command_ids_cached(guild) if interaction is not None else {}
-        extra_permissions = await self._get_help_extra_permissions(guild, owner)
-        hidden_categories = await self._help_hidden_categories()
-        games_context = self._get_help_games_context(guild)
-        view = HelpCenterView(
-            owner=owner,
-            prefixes=prefixes,
-            root_ids=root_ids,
-            source="slash" if interaction is not None else "prefix",
-            games_context=games_context,
-            extra_permissions=extra_permissions,
-            hidden_categories=hidden_categories,
-            hidden_categories_provider=self._help_hidden_categories,
-            subject=subject,
-            initial_category=initial_category,
-            timeout=HELP_TIMEOUT_SECONDS,
+        first_response = interaction is not None and not interaction.response.is_done()
+        if first_response:
+            await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+        view = await self._build_help_view(
+            guild=guild, owner=owner, source="slash" if interaction is not None else "prefix",
+            subject=subject, initial_category=initial_category,
         )
-
+        mentions = discord.AllowedMentions.none()
         if interaction is not None:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    view=view,
-                    ephemeral=ephemeral,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                try:
-                    view.message = await interaction.original_response()
-                except Exception:
-                    pass
+            if first_response:
+                await interaction.edit_original_response(view=view, allowed_mentions=mentions)
             else:
-                view.message = await interaction.followup.send(
-                    view=view,
-                    ephemeral=ephemeral,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                await interaction.followup.send(view=view, ephemeral=ephemeral, allowed_mentions=mentions)
             return
 
-        await responder.send(
-            view=view,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        await responder.send(view=view, allowed_mentions=mentions)
         await self._delete_message_safe(prefix_command_message)
 
     def _format_bool_badge(self, value: bool, *, ok_label: str = "OK", bad_label: str = "Falha") -> str:

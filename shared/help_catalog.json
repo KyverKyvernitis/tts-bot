@@ -904,7 +904,7 @@
       "key": "chat",
       "category": "chatbot",
       "group": "Conversar",
-      "description": "Marca a Osaka para conversar por texto ou áudio.",
+      "description": "Me chama pra conversar por texto ou áudio.",
       "usage": "@bot mensagem",
       "search_terms": [
         "conversar",
@@ -916,7 +916,7 @@
       "key": "chatbot_acoes",
       "category": "chatbot",
       "group": "Conversar",
-      "description": "O bot pode enviar áudio, falar em call ou propor ações durante a conversa.",
+      "description": "Durante a conversa posso mandar áudio, falar na call ou sugerir uma ação.",
       "usage": "@bot mensagem",
       "search_terms": [
         "audio chatbot",
@@ -932,7 +932,7 @@
       "key": "imagem",
       "category": "chatbot",
       "group": "Criar",
-      "description": "Gera uma imagem diretamente pelo bot.",
+      "description": "Transforma seu pedido em uma imagem.",
       "usage": "/imagem <prompt>",
       "search_terms": [
         "gerar imagem",
@@ -946,7 +946,7 @@
       "key": "reset",
       "category": "chatbot",
       "group": "Memória",
-      "description": "Limpa sua memória pessoal do chatbot.",
+      "description": "Limpa a memória da sua conversa comigo.",
       "usage": "/reset",
       "search_terms": [
         "reset memoria",
@@ -960,7 +960,7 @@
       "key": "chatbot_configurar",
       "category": "chatbot",
       "group": "Staff",
-      "description": "Configura ativação, canais, modo espontâneo e ações do chatbot.",
+      "description": "Escolhe quando posso responder, em quais canais e com quais ações.",
       "usage": "/chatbot configurar",
       "search_terms": [
         "configurar chatbot",
@@ -983,7 +983,7 @@
       "key": "chatbot_memoria",
       "category": "chatbot",
       "group": "Staff",
-      "description": "Reseta a memória do chatbot no servidor.",
+      "description": "Limpa minha memória deste servidor.",
       "usage": "/chatbot memoria",
       "search_terms": [
         "memoria servidor",
@@ -998,7 +998,7 @@
       "key": "chatbot_conhecimento",
       "category": "chatbot",
       "group": "Staff",
-      "description": "Publica, lista ou remove informações que a Osaka usa neste servidor.",
+      "description": "Publica, lista ou remove informações que posso usar neste servidor.",
       "usage": "/chatbot conhecimento <acao>",
       "search_terms": ["base de conhecimento", "conhecimento do chatbot", "informacoes da osaka"],
       "permission": "manage_guild",
@@ -1149,7 +1149,7 @@
       "key": "say",
       "category": "server",
       "group": "Outros",
-      "description": "Envia uma mensagem pelo bot.",
+      "description": "Me diz o que mandar no canal.",
       "usage": "/say",
       "search_terms": [
         "falar pelo bot",
@@ -1164,7 +1164,7 @@
       "key": "feedback",
       "category": "server",
       "group": "Outros",
-      "description": "Envia feedback para o dono do bot.",
+      "description": "Manda uma sugestão ou um relato pra quem cuida de mim.",
       "usage": "/feedback",
       "search_terms": [
         "sugestao",
@@ -1181,7 +1181,7 @@
       "key": "ping",
       "category": null,
       "group": "",
-      "description": "Mostra latência e estado do bot.",
+      "description": "Mostra se estou respondendo e quanto tempo levei.",
       "usage": "{bot_prefix}ping",
       "search_terms": [
         "latencia",
@@ -1198,7 +1198,7 @@
       "key": "help",
       "category": null,
       "group": "",
-      "description": "Abre esta central de ajuda.",
+      "description": "Mostra meus comandos.",
       "usage": "/help",
       "search_terms": [
         "ajuda",
