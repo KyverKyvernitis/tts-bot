@@ -6898,6 +6898,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         fallback_engine = str(getattr(item, "piper_fallback_engine", "") or "gtts").strip().lower().replace("-", "_") or "gtts"
         if fallback_engine in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"}:
             fallback_engine = "gtts"
+        bypass_cache = is_teto and (getattr(item, "_cd_progressive_request", False)
+                                    or getattr(item, "_cd_bypass_worker_cache", False))
         return {
             "text": str(item.text or "")[:max_text_length],
             "engine": engine,
@@ -6921,7 +6923,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             "fallback_pitch": str(getattr(item, "piper_fallback_pitch", "") or item.pitch or "+0Hz"),
             "model_name": str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME),
             "cache_key": self._cache_key(item),
-            "cache_mode": "bypass" if is_teto and getattr(item, "_cd_progressive_request", False) else "prefer",
+            "cache_mode": "bypass" if bypass_cache else "prefer",
             "timeout_seconds": timeout_seconds,
             "max_audio_bytes": max_audio_mb * 1024 * 1024,
             "guild_id": int(item.guild_id or 0),

@@ -32,8 +32,7 @@ def score(duration=1000):
                 {"midi_note": 69, "start_ms": 0, "duration_ms": duration, "velocity": 100}]}
 
 
-def tone(value, preroll=125, frequency=440, *, silent=False):
-    rate = 48000
+def tone(value, preroll=125, frequency=440, *, silent=False, rate=48000):
     frames = round((value["duration_ms"] + preroll) * rate / 1000)
     samples = array.array("h", [0]) * frames
     if not silent:
@@ -65,6 +64,15 @@ class RendererAlignmentCompatibilityTests(unittest.TestCase):
 
     def test_current_worker_raw_midi_infers_exact_original_pcm_preroll(self):
         self.assertAlmostEqual(_preroll(self.audio, current_metadata(), self.score), 125)
+
+    def test_rust_midi_infers_alignment_from_its_exact_pcm_contract(self):
+        raw = tone(self.score, rate=44100)
+        metadata = current_metadata(renderer_version='rust-ttv-v1')
+        self.assertAlmostEqual(_preroll(raw, metadata, self.score), 125, places=1)
+        with self.assertRaisesRegex(RenderError, 'stem_alignment_metadata_missing'):
+            _preroll(self.audio, metadata, self.score)
+        with self.assertRaisesRegex(RenderError, 'stem_alignment_metadata_missing'):
+            _preroll(raw, {**metadata, 'cache_hit': True, 'teto_timeline_mode': ''}, self.score)
 
     def test_current_worker_cached_raw_omits_timeline_but_keeps_renderer_identity(self):
         for missing in (None, ""):

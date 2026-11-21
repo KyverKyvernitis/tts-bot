@@ -135,6 +135,21 @@ class NativePCMReaderTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(SingingPCMProtocolError):
                     await self.read(wire(end=end))
 
+    async def test_rust_receipt_keeps_voice_and_language_bound_to_request(self):
+        end = receipt()
+        end['renderer_version'] = 'rust-ttv-v1'
+        end['voice_id'] = end.pop('ttv_voice_id')
+        end['reading_language'] = end.pop('ttv_language')
+        raw, metadata = await self.read(wire(end=end))
+        self.assertEqual(raw, wav())
+        self.assertEqual(metadata['ttv_voice_id'], 'kasane-teto')
+        self.assertEqual(metadata['ttv_language'], 'pt-BR')
+        for change in ({'voice_id': 'hatsune-miku'}, {'reading_language': 'en-US'},
+                       {'ttv_voice_id': 'hatsune-miku'}, {'ttv_language': 'en-US'},
+                       {'renderer_version': 'unknown'}):
+            with self.subTest(change=change), self.assertRaises(SingingPCMProtocolError):
+                await self.read(wire(end={**end, **change}))
+
     async def test_truncated_streams_never_produce_a_verified_result(self):
         complete = wire()
         metadata_end = len(record(b'M', start_metadata()))

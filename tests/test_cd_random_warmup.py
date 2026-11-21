@@ -176,6 +176,27 @@ class RandomWarmupSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(child._cd_progressive_request)
         self.assertIs(stream.await_args.args[2], callback)
 
+    async def test_complete_rust_stem_bypasses_wav_cache_for_the_selected_voice(self):
+        probe = self.probe
+        route = probe._tts_agent_route_state()
+        probe._tts_agent_route_state = lambda: route
+        probe._generate_tts_agent_worker_bytes = AsyncMock(return_value=(b'WAV', {}))
+        parent = queued()
+        request = {'text': 'a', 'voice_id': 'kasane-teto', 'language': 'pt-BR',
+                   'score': {'version': 1, 'duration_ms': 500, 'lyrics_source': 'vowel',
+                             'notes': arrangement()['parts'][1]['notes']}}
+        for voice_id, renderer, bypass in (
+            ('kasane-teto', 'rust-ttv-v1', True),
+            ('kasane-teto', 'speech-4g-cvvc-pauses', False),
+            ('hatsune-miku', 'rust-ttv-v1', False),
+        ):
+            with self.subTest(voice_id=voice_id, renderer=renderer):
+                route['ttv_voices'] = [{'id': voice_id, 'renderer_version': renderer}]
+                self.assertEqual(await probe._request_cd_stem(parent, request), (b'WAV', {}))
+                child = probe._generate_tts_agent_worker_bytes.await_args.args[0]
+                self.assertEqual(getattr(child, '_cd_bypass_worker_cache', False), bypass)
+                self.assertFalse(getattr(parent, '_cd_bypass_worker_cache', False))
+
     async def test_legacy_stream_capability_keeps_full_stem_fallback(self):
         probe = self.probe
         probe._request_cd_stem = AsyncMock(return_value=(b'WAV', {}))

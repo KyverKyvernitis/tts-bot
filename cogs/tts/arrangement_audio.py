@@ -110,6 +110,13 @@ class ArrangementAudioMixin(CDStreamingMixin):
 
     async def _request_cd_stem(self, item, request, *, background=False, progressive=False):
         child = _stem_child(item, request, background=background, progressive=progressive)
+        route_reader = getattr(self, '_tts_agent_route_state', None)
+        voices = (route_reader().get('ttv_voices') or ()) if callable(route_reader) else ()
+        if any(isinstance(voice, dict) and voice.get('id') == child.ttv_voice_id
+               and voice.get('renderer_version') == 'rust-ttv-v1' for voice in voices):
+            # The Rust WAV response cache omits the MIDI timeline. The
+            # compositor keeps its own cache with verified alignment.
+            child._cd_bypass_worker_cache = True
         request_bytes = getattr(self, '_generate_tts_agent_worker_bytes', None)
         if callable(request_bytes):
             raw, metadata = await request_bytes(child)

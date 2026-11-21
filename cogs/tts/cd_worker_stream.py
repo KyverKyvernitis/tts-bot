@@ -86,15 +86,24 @@ async def read_pcm_stream(content, payload, on_pcm, *, maximum):
             else:
                 if start is None or not pcm or not isinstance(meta, dict) or meta.get('ok') is not True:
                     raise SingingPCMProtocolError('recibo PCM inválido')
+                voice_id = meta.get('ttv_voice_id')
+                language = meta.get('ttv_language')
+                if meta.get('renderer_version') == 'rust-ttv-v1':
+                    voice_id = meta.get('ttv_voice_id', meta.get('voice_id'))
+                    language = meta.get('ttv_language', meta.get('reading_language'))
+                    if (meta.get('voice_id', voice_id) != voice_id
+                            or meta.get('reading_language', language) != language):
+                        raise SingingPCMProtocolError('o recibo final não corresponde ao stream PCM')
                 if (meta.get('pcm_bytes') != len(pcm)
                         or len(pcm) != start['expected_frames'] * 2
                         or meta.get('pcm_sha256') != hasher.hexdigest()
                         or meta.get('ttv_performance_hash') != payload.get('ttv_performance_hash')
-                        or meta.get('ttv_voice_id') != payload.get('ttv_voice_id')
-                        or meta.get('ttv_language') != payload.get('ttv_language')
+                        or voice_id != payload.get('ttv_voice_id')
+                        or language != payload.get('ttv_language')
                         or meta.get('normalization_gain') != 1.0):
                     raise SingingPCMProtocolError('o recibo final não corresponde ao stream PCM')
                 end = meta
+                end.update(ttv_voice_id=voice_id, ttv_language=language)
         else:
             if start is None or length % 2 or len(pcm) + length > start['expected_frames'] * 2:
                 raise SingingPCMProtocolError('bloco PCM fora da duração planejada')

@@ -331,6 +331,10 @@ class MemoryTransportTests(unittest.IsolatedAsyncioTestCase):
         payload = self.probe._tts_agent_payload_for_item(source)
         self.assertEqual(payload['cache_mode'], 'prefer')
         self.assertEqual(payload['priority'], 'background')
+        source._cd_bypass_worker_cache = True
+        payload = self.probe._tts_agent_payload_for_item(source)
+        self.assertEqual(payload['cache_mode'], 'bypass')
+        self.assertEqual(payload['priority'], 'background')
 
     async def test_json_audio_compatibility_keeps_normalization_metadata(self):
         self.server.json_mode = True
