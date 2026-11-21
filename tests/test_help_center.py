@@ -20,56 +20,79 @@ def _event(event_id, *, user=None, guild=None, content=""):
     )
 
 
-def _view(**kwargs):
-    return HelpCenterView(owner=_owner(), prefixes={"bot_prefix": "!"}, root_ids={"tts": 123}, **kwargs)
+def _view(*, prefixes=None, **kwargs):
+    return HelpCenterView(owner=_owner(), prefixes=prefixes or {"bot_prefix": "!"}, root_ids={"tts": 123}, **kwargs)
 
 
 def _copy(view):
     return "\n".join(item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
 
 
-def _buttons(view):
-    return {item.label: item for item in view.walk_children() if isinstance(item, discord.ui.Button)}
+def _selectors(view):
+    return [item for item in view.walk_children() if isinstance(item, discord.ui.Select)]
 
 
-def test_home_shortcuts_and_staff_visibility():
+def test_slash_index_uses_one_selector_and_filters_staff():
     view = _view()
-    assert list(_buttons(view)) == ["Voz na call", "Música", "Jogos e fichas"]
-    select = next(item for item in view.walk_children() if isinstance(item, discord.ui.Select))
-    assert select.placeholder == "Mais comandos"
-    assert [option.label for option in select.options] == ["Conversa e imagens"]
-    assert "!help fila" in _copy(view)
+    select, = _selectors(view)
+    assert select.placeholder == "Áreas"
+    assert [option.label for option in select.options] == [
+        "Índice", "[voz] Voz na call", "[som] Música", "[jogos] Jogos e fichas", "[chat] Conversa e imagens",
+    ]
+    assert select.options[0].default
+    assert not any(isinstance(item, discord.ui.Button) for item in view.walk_children())
 
     staff = _view(extra_permissions=frozenset({"ticket_staff"}))
-    select = next(item for item in staff.walk_children() if isinstance(item, discord.ui.Select))
-    assert [option.label for option in select.options] == ["Conversa e imagens", "Servidor"]
+    select, = _selectors(staff)
+    assert select.options[-1].label == "[staff] Servidor"
+
+
+def test_prefix_uses_a_text_index_with_direct_shortcuts():
+    view = _view(source="prefix", extra_permissions=frozenset({"ticket_staff"}))
+    item, = view.children
+    assert isinstance(item, discord.ui.TextDisplay)
+    assert _copy(view).startswith("## Guia da Osaka")
+    for query in ("voz", "música", "jogos", "chat", "servidor"):
+        assert f"`!help {query}`" in _copy(view)
+    assert not view.is_dispatchable()
+    assert view.timeout is None
+    assert "!help servidor" not in _copy(_view(source="prefix"))
 
 
 @pytest.mark.asyncio
-async def test_help_opens_category_and_all_commands_can_be_expanded():
-    view = _view(initial_category="music")
-    assert (view.target_kind, view.target_key) == ("category", "music")
-    assert "!play Basket Case" in _copy(view)
-    assert "!queue" in _copy(view)
-    assert "!volume" not in _copy(view)
-
+async def test_one_selection_opens_full_music_list_and_can_return_to_index():
+    view = _view()
+    select, = _selectors(view)
+    select._values = ["category:music"]
     interaction = SimpleNamespace(response=AsyncMock())
-    await _buttons(view)["Ver todos"].callback(interaction)
-    assert "!volume" in _copy(view)
-    assert "!play <nome ou link>" in _copy(view)
+    await select.callback(interaction)
+    assert (view.target_kind, view.target_key) == ("category", "music")
     interaction.response.edit_message.assert_awaited_with(view=view)
+    for command in ("play <nome ou link>", "queue", "volume [0-100]", "readd <posição>"):
+        assert f"`!{command}`" in _copy(view)
+    assert "`!skip` · Pula a música atual (`!pular`, `!s`)" in _copy(view)
+    assert "!nightcore" not in _copy(view)
+    assert not any(isinstance(item, discord.ui.Button) for item in view.walk_children())
+    select, = _selectors(view)
+    assert next(option for option in select.options if option.default).value == "category:music"
+    assert [option.value for option in select.options] == [
+        "home", "category:voice", "category:music", "category:games", "category:chatbot",
+    ]
 
-    await _buttons(view)["Ver atalhos"].callback(interaction)
-    assert "!volume" not in _copy(view)
-    await _buttons(view)["Início"].callback(interaction)
+    select._values = ["home"]
+    await select.callback(interaction)
     assert view.target_kind == "home"
 
 
-def test_context_music_help_is_available_when_worker_is_offline():
+@pytest.mark.parametrize("source", ["prefix", "slash"])
+def test_context_music_help_is_available_when_worker_is_offline(source):
     unavailable = frozenset({"music"})
-    assert "Música" not in _buttons(_view(hidden_categories=unavailable))
-    view = _view(initial_category="music", hidden_categories=unavailable)
+    home = _view(source=source, hidden_categories=unavailable)
+    assert "category:music" not in [option.value for select in _selectors(home) for option in select.options]
+    assert "!help música" not in _copy(home)
+    view = _view(source=source, initial_category="music", hidden_categories=unavailable)
     assert (view.target_kind, view.target_key) == ("category", "music")
+    assert "!queue" in _copy(view) and "!volume" in _copy(view)
     assert "A música está indisponível agora" in _copy(view)
 
 
@@ -81,15 +104,57 @@ def test_explicit_subject_and_permission_take_precedence():
     assert staff.target_key == "server"
     assert "!ticket" in _copy(staff)
     assert "!welcome" not in _copy(staff)
+    assert _view(subject="!panel_server").target_key == "panel_server"
+    assert _view(subject="!economia").target_key == "economia"
 
 
-def test_voice_examples_and_games_prefix_follow_server_settings():
-    voice = _view(initial_category="voice")
-    assert "</tts menu:123>" in _copy(voice)
-    assert "!ttvmp3 bom dia~~" in _copy(voice)
-    games = _view(initial_category="games", games_context={"mode": "commands", "channel_mention": "<#42>"})
-    assert "`!ficha`" in _copy(games)
-    assert "<#42>" in _copy(games)
+def test_slash_mentions_and_prefix_instructions_show_real_syntax():
+    slash = _view(initial_category="voice")
+    assert "</tts menu:123>" in _copy(slash)
+    assert "`!ttvmp3 texto~~`" in _copy(slash)
+    prefix = _view(source="prefix", initial_category="voice")
+    assert "`/tts menu`" in _copy(prefix)
+    assert "</tts menu:" not in _copy(prefix)
+    assert "`!help início`" in _copy(prefix)
+    assert not _selectors(prefix)
+    assert "`/imagem <prompt>`" in _copy(_view(subject="/imagem"))
+
+
+def test_help_and_registered_commands_can_have_different_prefixes():
+    prefixes = {"bot_prefix": "!!", "registered_prefix": "!"}
+    home = _view(source="prefix", prefixes=prefixes)
+    assert "`!!help música`" in _copy(home)
+    music = _view(source="prefix", prefixes=prefixes, subject="música")
+    assert "`!queue`" in _copy(music)
+    assert "`!!help início`" in _copy(music)
+    voice = _view(source="prefix", prefixes=prefixes, subject="voz")
+    assert "`!!join`" in _copy(voice)
+    assert _view(source="prefix", prefixes=prefixes, subject="!queue").target_key == "queue"
+    assert _view(source="prefix", prefixes=prefixes, subject="!!join").target_key == "join"
+
+
+def test_text_prefix_can_match_the_first_letter_of_an_area_or_command():
+    prefixes = {"bot_prefix": "m", "registered_prefix": "f"}
+    assert _view(source="prefix", prefixes=prefixes, subject="música").target_key == "music"
+    games = _view(source="prefix", prefixes=prefixes, subject="jogos", games_context={"mode": "commands"})
+    assert "`fficha`" in _copy(games)
+
+
+@pytest.mark.parametrize(("mode", "ficha"), [("commands", "!ficha"), ("triggers", "ficha")])
+def test_full_games_list_uses_correct_prefix_for_each_command(mode, ficha):
+    body = _copy(_view(initial_category="games", games_context={"mode": mode, "channel_mention": "<#42>"}))
+    assert f"`{ficha}`" in body
+    assert "`!coinflip`" in body and "`!re`" in body
+    assert "`!perfil`" in body and "`!saldo`" in body
+    assert "<#42>" in body
+
+
+def test_music_staff_sees_effects_and_chat_index_deduplicates_mentions():
+    music = _view(initial_category="music", extra_permissions={"music_staff"})
+    for command in ("nightcore [1-3]", "bassboost [1-6]", "reverb [1-3]", "voicestatus [ação] [valor]"):
+        assert f"`!{command}`" in _copy(music)
+    assert music.content_length() <= 4000
+    assert _copy(_view(initial_category="chatbot")).count("`@bot mensagem`") == 1
 
 
 def test_latest_attempt_is_ordered_and_scoped_to_person_and_server():
@@ -121,18 +186,23 @@ async def test_ficha_is_an_attempt_as_soon_as_games_recognizes_it():
     router._send_chip_profile.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_prefix_help_uses_last_category_and_keeps_explicit_search():
-    guild = SimpleNamespace(id=1)
+def _utility():
     utility = Utility.__new__(Utility)
     utility.bot = SimpleNamespace()
     utility._get_prefix_data = AsyncMock(return_value={"bot_prefix": "!"})
     utility._get_help_prefix_data = utility._get_prefix_data
-    utility._fetch_root_command_ids_cached = AsyncMock(return_value={})
+    utility._fetch_root_command_ids_cached = AsyncMock(return_value={"tts": 123})
     utility._get_help_extra_permissions = AsyncMock(return_value=frozenset())
     utility._help_hidden_categories = AsyncMock(return_value=frozenset())
     utility._get_help_games_context = lambda _: {"mode": "triggers"}
     utility._delete_message_safe = AsyncMock()
+    return utility
+
+
+@pytest.mark.asyncio
+async def test_prefix_help_uses_last_category_and_keeps_explicit_search():
+    guild = SimpleNamespace(id=1)
+    utility = _utility()
 
     attempt = _event(101, guild=guild, content="ficha")
     remember_help_category(utility.bot, attempt, "games")
@@ -140,9 +210,34 @@ async def test_prefix_help_uses_last_category_and_keeps_explicit_search():
     await utility.on_message(help_message)
     view = help_message.channel.send.await_args.kwargs["view"]
     assert (view.target_kind, view.target_key) == ("category", "games")
+    assert view.source == "prefix"
+    assert not _selectors(view)
+    assert "`!coinflip`" in _copy(view)
 
     explicit = _event(103, guild=guild, content="!help voz")
     await utility.on_message(explicit)
     view = explicit.channel.send.await_args.kwargs["view"]
     assert (view.target_kind, view.target_key) == ("category", "voice")
     assert last_help_category(utility.bot, guild, attempt.author) == "games"
+    utility._fetch_root_command_ids_cached.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_slash_help_uses_same_activity_but_keeps_its_layout():
+    guild = SimpleNamespace(id=1)
+    utility = _utility()
+    attempt = _event(101, guild=guild)
+    remember_help_category(utility.bot, attempt, "voice")
+
+    interaction = SimpleNamespace(
+        id=102, guild=guild, user=attempt.author, channel=attempt.channel,
+        response=SimpleNamespace(is_done=lambda: False, send_message=AsyncMock()),
+        original_response=AsyncMock(),
+    )
+    await utility.help_command.callback(utility, interaction)
+    sent = interaction.response.send_message.await_args.kwargs
+    view = sent["view"]
+    assert sent["ephemeral"]
+    assert (view.source, view.target_kind, view.target_key) == ("slash", "category", "voice")
+    assert len(_selectors(view)) == 1
+    assert "</tts menu:123>" in _copy(view)

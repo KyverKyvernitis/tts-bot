@@ -104,6 +104,22 @@
       ]
     },
     {
+      "key": "atts",
+      "category": "voice",
+      "group": "Falar",
+      "description": "Fala usando ATTS.",
+      "usage": "{atts_prefix}texto",
+      "search_terms": ["atts", "voz atts"]
+    },
+    {
+      "key": "teto",
+      "category": "voice",
+      "group": "Falar",
+      "description": "Fala com a voz do TTV.",
+      "usage": "{teto_prefix}texto",
+      "search_terms": ["teto", "ttv", "texttovocaloid"]
+    },
+    {
       "key": "ttv_mp3",
       "category": "voice",
       "group": "Gerar áudio",
@@ -117,6 +133,30 @@
         "cantar"
       ],
       "detail_note": "Use ~ no final para cantar. Usa o CD e os efeitos que você configurou, sem entrar na call."
+    },
+    {
+      "key": "cd",
+      "category": "voice",
+      "group": "Configurar",
+      "description": "Escolhe o CD usado no canto.",
+      "usage": "{bot_prefix}cd",
+      "search_terms": ["cd", "melodia"]
+    },
+    {
+      "key": "rcd",
+      "category": "voice",
+      "group": "Configurar",
+      "description": "Liga ou desliga a escolha aleatória de CDs.",
+      "usage": "{bot_prefix}rcd",
+      "search_terms": ["rcd", "cd aleatorio"]
+    },
+    {
+      "key": "advanced",
+      "category": "voice",
+      "group": "Configurar",
+      "description": "Ajusta os efeitos avançados da voz.",
+      "usage": "{bot_prefix}advanced",
+      "search_terms": ["advanced", "efeitos da voz"]
     },
     {
       "key": "tts_menu",
@@ -158,6 +198,7 @@
         "painel usuário"
       ],
       "aliases": [
+        "tts",
         "painel",
         "p"
       ]
@@ -237,6 +278,7 @@
       "permission": "kick",
       "slash_root": "tts",
       "slash_path": "tts server menu",
+      "prefix_aliases": ["panel_server", "sp"],
       "detail_note": "Requer Expulsar membros."
     },
     {
@@ -291,7 +333,7 @@
     {
       "key": "play",
       "category": "music",
-      "group": "Player",
+      "group": "Reprodução",
       "description": "Toca uma música ou playlist.",
       "usage": "{bot_prefix}play <nome ou link>",
       "search_terms": [
@@ -308,7 +350,7 @@
     {
       "key": "pause",
       "category": "music",
-      "group": "Player",
+      "group": "Reprodução",
       "description": "Pausa a reprodução.",
       "usage": "{bot_prefix}pause",
       "search_terms": [
@@ -322,7 +364,7 @@
     {
       "key": "resume",
       "category": "music",
-      "group": "Player",
+      "group": "Reprodução",
       "description": "Continua a reprodução.",
       "usage": "{bot_prefix}resume",
       "search_terms": [
@@ -338,7 +380,7 @@
     {
       "key": "skip",
       "category": "music",
-      "group": "Player",
+      "group": "Reprodução",
       "description": "Pula a música atual.",
       "usage": "{bot_prefix}skip",
       "search_terms": [
@@ -352,7 +394,7 @@
     {
       "key": "back",
       "category": "music",
-      "group": "Player",
+      "group": "Reprodução",
       "description": "Volta uma faixa.",
       "usage": "{bot_prefix}back",
       "search_terms": [
@@ -369,7 +411,7 @@
     {
       "key": "stop",
       "category": "music",
-      "group": "Player",
+      "group": "Reprodução",
       "description": "Encerra o player.",
       "usage": "{bot_prefix}stop",
       "search_terms": [
@@ -488,7 +530,7 @@
     {
       "key": "np",
       "category": "music",
-      "group": "Outros",
+      "group": "Reprodução",
       "description": "Mostra o que está tocando.",
       "usage": "{bot_prefix}np",
       "search_terms": [
@@ -504,9 +546,9 @@
     {
       "key": "volume",
       "category": "music",
-      "group": "Outros",
-      "description": "Ajusta o volume.",
-      "usage": "{bot_prefix}volume <0-100>",
+      "group": "Reprodução",
+      "description": "Mostra o volume. Staff pode ajustá-lo.",
+      "usage": "{bot_prefix}volume [0-100]",
       "search_terms": [
         "volume musica"
       ],
@@ -518,7 +560,7 @@
     {
       "key": "history",
       "category": "music",
-      "group": "Outros",
+      "group": "Histórico",
       "description": "Mostra o histórico recente.",
       "usage": "{bot_prefix}history",
       "search_terms": [
@@ -534,7 +576,7 @@
     {
       "key": "readd",
       "category": "music",
-      "group": "Outros",
+      "group": "Histórico",
       "description": "Readiciona uma música do histórico.",
       "usage": "{bot_prefix}readd <posição>",
       "search_terms": [
@@ -548,6 +590,46 @@
       ]
     },
     {
+      "key": "nightcore",
+      "category": "music",
+      "group": "Efeitos",
+      "description": "Alterna o efeito Nightcore ou ajusta o nível.",
+      "usage": "{bot_prefix}nightcore [1-3]",
+      "search_terms": ["nightcore", "efeito de musica"],
+      "permission": "music_staff",
+      "detail_note": "Requer permissão de staff do player."
+    },
+    {
+      "key": "bassboost",
+      "category": "music",
+      "group": "Efeitos",
+      "description": "Liga ou ajusta o reforço de graves.",
+      "usage": "{bot_prefix}bassboost [1-6]",
+      "search_terms": ["bass boost", "graves"],
+      "permission": "music_staff",
+      "detail_note": "Requer permissão de staff do player."
+    },
+    {
+      "key": "reverb",
+      "category": "music",
+      "group": "Efeitos",
+      "description": "Alterna ou ajusta o efeito slowed com reverb.",
+      "usage": "{bot_prefix}reverb [1-3]",
+      "search_terms": ["slowed", "reverb"],
+      "permission": "music_staff",
+      "detail_note": "Requer permissão de staff do player."
+    },
+    {
+      "key": "voicestatus",
+      "category": "music",
+      "group": "Staff",
+      "description": "Configura o status do canal de voz durante a música.",
+      "usage": "{bot_prefix}voicestatus [ação] [valor]",
+      "search_terms": ["status da call", "status do canal de voz"],
+      "aliases": ["voice_status", "vstatus", "statusvoz", "canalstatus", "setvoicestatus"],
+      "permission": "music_staff"
+    },
+    {
       "key": "ficha",
       "category": "games",
       "group": "Fichas",
@@ -559,7 +641,8 @@
       ],
       "aliases": [
         "fichas"
-      ]
+      ],
+      "prefix_aliases": ["perfil", "saldo"]
     },
     {
       "key": "extrato",
@@ -648,7 +731,8 @@
         "raça"
       ],
       "aliases": [
-        "raça"
+        "raça",
+        "habilidades"
       ]
     },
     {
@@ -656,7 +740,7 @@
       "category": "games",
       "group": "Skills de raça",
       "description": "Lança a moeda do Apostador",
-      "usage": "coinflip",
+      "usage": "{bot_prefix}coinflip",
       "search_terms": ["apostador", "moeda", "skill"]
     },
     {
@@ -664,7 +748,7 @@
       "category": "games",
       "group": "Skills de raça",
       "description": "Inverte a última perda ou bônus",
-      "usage": "0to1",
+      "usage": "{bot_prefix}0to1",
       "search_terms": ["glitch", "extrato", "skill"]
     },
     {
@@ -672,15 +756,16 @@
       "category": "games",
       "group": "Skills de raça",
       "description": "Alterna fichas normais e bônus",
-      "usage": "reborn",
-      "search_terms": ["fenix", "fênix", "converter", "skill"]
+      "usage": "{bot_prefix}reborn",
+      "search_terms": ["fenix", "fênix", "converter", "skill"],
+      "aliases": ["re"]
     },
     {
       "key": "changefate",
       "category": "games",
       "group": "Skills de raça",
       "description": "Recupera um roubo ou garante Midas",
-      "usage": "changefate",
+      "usage": "{bot_prefix}changefate",
       "search_terms": ["sortudo", "midas", "policia", "skill"]
     },
     {
@@ -688,7 +773,7 @@
       "category": "games",
       "group": "Skills de raça",
       "description": "Roubo garantido de até 20 fichas",
-      "usage": "forcerob @usuário",
+      "usage": "{bot_prefix}forcerob @usuário",
       "search_terms": ["preto", "roubo forçado", "skill"]
     },
     {
@@ -696,7 +781,7 @@
       "category": "games",
       "group": "Skills de raça",
       "description": "Protege a próxima derrota paga",
-      "usage": "joker",
+      "usage": "{bot_prefix}joker",
       "search_terms": ["coringa", "reembolso", "skill"]
     },
     {
@@ -812,13 +897,14 @@
       "permission": "economy_staff",
       "slash_root": "economia",
       "slash_path": "economia",
+      "prefix_aliases": ["economia"],
       "detail_note": "Disponível apenas para a staff configurada."
     },
     {
       "key": "chat",
       "category": "chatbot",
       "group": "Conversar",
-      "description": "Conversa com o chatbot.",
+      "description": "Marca a Osaka para conversar por texto ou áudio.",
       "usage": "@bot mensagem",
       "search_terms": [
         "conversar",
@@ -839,7 +925,8 @@
         "banimento ia",
         "aprovar acao"
       ],
-      "detail_note": "Áudio e fala na call atual podem ser automáticos. Entrar em call e banir sempre exigem aprovação autorizada."
+      "detail_note": "Áudio e fala na call atual podem ser automáticos. Entrar em call e banir sempre exigem aprovação autorizada.",
+      "show_in_category": false
     },
     {
       "key": "imagem",
@@ -906,6 +993,18 @@
       "slash_root": "chatbot",
       "slash_path": "chatbot memoria",
       "detail_note": "Requer Gerenciar servidor."
+    },
+    {
+      "key": "chatbot_conhecimento",
+      "category": "chatbot",
+      "group": "Staff",
+      "description": "Publica, lista ou remove informações que a Osaka usa neste servidor.",
+      "usage": "/chatbot conhecimento <acao>",
+      "search_terms": ["base de conhecimento", "conhecimento do chatbot", "informacoes da osaka"],
+      "permission": "manage_guild",
+      "slash_root": "chatbot",
+      "slash_path": "chatbot conhecimento",
+      "suffix": " `acao`"
     },
     {
       "key": "welcome",

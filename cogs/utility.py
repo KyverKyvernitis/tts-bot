@@ -81,6 +81,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
             "gtts_prefix": ".",
             "edge_prefix": ",",
         }
+        defaults["registered_prefix"] = defaults["bot_prefix"]
         if guild is None:
             return defaults
 
@@ -136,6 +137,11 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
         cached = self._help_permission_cache.get(cache_key)
         if cached is not None and now - cached[0] <= 5.0:
             return set(cached[1])
+
+        music = self.bot.get_cog("Music")
+        is_music_staff = getattr(getattr(music, "router", None), "is_music_staff", None)
+        if callable(is_music_staff) and is_music_staff(user):
+            permissions.add("music_staff")
 
         games_cog = self.bot.get_cog("GamesCog")
         if games_cog is not None:
@@ -237,7 +243,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
             initial_category = last_help_category(self.bot, guild, owner, before=getattr(origin, "id", None))
 
         prefixes = await self._get_help_prefix_data(guild)
-        root_ids = await self._fetch_root_command_ids_cached(guild)
+        root_ids = await self._fetch_root_command_ids_cached(guild) if interaction is not None else {}
         extra_permissions = await self._get_help_extra_permissions(guild, owner)
         hidden_categories = await self._help_hidden_categories()
         games_context = self._get_help_games_context(guild)
@@ -245,6 +251,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
             owner=owner,
             prefixes=prefixes,
             root_ids=root_ids,
+            source="slash" if interaction is not None else "prefix",
             games_context=games_context,
             extra_permissions=extra_permissions,
             hidden_categories=hidden_categories,
@@ -273,7 +280,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
                 )
             return
 
-        view.message = await responder.send(
+        await responder.send(
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
