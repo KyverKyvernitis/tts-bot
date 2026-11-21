@@ -110,7 +110,7 @@ def _emoji_cache():
     records = (
         (1539137127852539944, "osaka", False), (1559374199133315122, "Vinyl_Music_loading", True),
         (1485041721573249135, "emoji_63", False), (1564113432905654353, "emoji_86", False),
-        (1500584783779070143, "livro", True), (1573829151088054409, "1xxx", False),
+        (1500584783779070143, "livro", True), (1548838423169605654, "x_mark", False),
     )
     cache = {key: discord.Emoji(guild=guild, state=state, data={"id": key, "name": name, "animated": animated})
              for key, name, animated in records}
@@ -128,7 +128,7 @@ def test_guild_emojis_in_headings_and_native_options(source):
     ]
     close, dashboard = _buttons(view).values()
     assert close.style == discord.ButtonStyle.danger and close.label is None
-    assert close.emoji.id == 1573829151088054409 and close.emoji.name == "1xxx"
+    assert close.emoji.id == 1548838423169605654 and close.emoji.name == "x_mark"
     assert dashboard.style == discord.ButtonStyle.link and dashboard.url == "https://osaka.is-a.bot/"
     assert dashboard.custom_id is None
     assert [option.emoji.animated for option in options] == [False, True, False, False, True]
@@ -144,7 +144,7 @@ def test_external_emojis_respect_destination_permissions_and_source_availability
     guild, cache = _emoji_cache()
     del cache[1564113432905654353]
     cache[1485041721573249135].available = False
-    cache[1573829151088054409].available = False
+    cache[1548838423169605654].available = False
     cache[1539137127852539944]._roles = discord.utils.SnowflakeList([444])
     other = SimpleNamespace(id=88, me=object())
     allow = discord.Permissions(external_emojis=True)
@@ -624,7 +624,7 @@ async def test_removed_emoji_does_not_block_disabling_the_dashboard_and_close():
 
     card = utility._track_help_card(message, AsyncMock(side_effect=edit))
     await asyncio.wait_for(card.timer, 1)
-    assert calls == [(1573829151088054409, discord.ButtonStyle.danger, True), (None, discord.ButtonStyle.danger, True)]
+    assert calls == [(1548838423169605654, discord.ButtonStyle.danger, True), (None, discord.ButtonStyle.danger, True)]
     assert not utility.bot._open_help_cards
 
 

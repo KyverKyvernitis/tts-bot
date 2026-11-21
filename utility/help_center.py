@@ -35,7 +35,7 @@ _HELP_EMOJI_IDS = {
     "games": 1485041721573249135,  # emoji_63
     "chatbot": 1564113432905654353,  # emoji_86
     "server": _BOOK_EMOJI_ID,
-    "close": 1573829151088054409,  # 1xxx
+    "close": 1548838423169605654,  # x_mark
 }
 
 
