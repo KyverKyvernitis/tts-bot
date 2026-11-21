@@ -97,6 +97,7 @@ from .configuracao.autocompletar import (
     opcoes_autocomplete_idiomas_gtts,
 )
 from .interface.visao_efeitos_avancados import VisaoEfeitosAvancadosTTS
+from .interface.visoes_base import DURACAO_PAINEL_PUBLICO_TTS
 from .interface.status_tts import (
     origem_configuracao_status,
     texto_booleano_status,
@@ -4010,7 +4011,7 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
         guild_id: int,
         *,
         owner_id: int = 0,
-        timeout: float = 300,
+        timeout: float = DURACAO_PAINEL_PUBLICO_TTS,
         target_user_id: int | None = None,
         target_user_name: str | None = None,
     ) -> discord.ui.View:
@@ -4572,7 +4573,6 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             try:
                 launcher_kwargs = {
                     "owner_id": int(state.get("owner_id", 0) or 0),
-                    "timeout": 300,
                 }
                 if state.get("target_user_id"):
                     launcher_kwargs["target_user_id"] = int(state["target_user_id"])
@@ -5143,7 +5143,6 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             view = self._build_public_tts_launcher_view(
                 message.guild.id,
                 owner_id=message.author.id,
-                timeout=300,
                 target_user_id=target_member.id,
                 target_user_name=target_name,
             )
@@ -5157,7 +5156,6 @@ class TTSVoice(ChatbotVoiceActionsMixin, TTSAudioMixin, commands.GroupCog, group
             view = self._build_public_tts_launcher_view(
                 message.guild.id,
                 owner_id=message.author.id,
-                timeout=300,
             )
 
         if await self._check_prefix_panel_cooldown(message, panel_kind):

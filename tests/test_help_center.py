@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from itertools import count
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,6 +11,7 @@ from discord.http import handle_message_parameters
 from cogs.games.handlers.message_router import GincanaMessageRouterMixin
 from cogs.utility import Utility
 from utility import help_center
+from utility.commands import help as help_commands
 from utility.help_activity import consume_help_category, remember_help_category, remember_help_command
 from utility.help_center import HelpCenterView
 
@@ -18,9 +20,26 @@ def _owner(user_id=10):
     return SimpleNamespace(id=user_id, bot=False)
 
 
+class _CardMessage:
+    ids = count(1000)
+
+    def __init__(self, view=None, *, age=0):
+        self.id = next(self.ids)
+        self.created_at = discord.utils.utcnow() - timedelta(seconds=age)
+        self.components = []
+        self.edit = AsyncMock(side_effect=self.render)
+        if view is not None:
+            self.render(view=view)
+
+    def render(self, *, view, **kwargs):
+        self.components = [discord.components._component_factory(part) for part in view.to_components()]
+        return self
+
+
 def _event(event_id, *, user=None, guild=None, content=""):
     return SimpleNamespace(
-        id=event_id, author=user or _owner(), guild=guild, content=content, channel=AsyncMock()
+        id=event_id, author=user or _owner(), guild=guild, content=content,
+        channel=SimpleNamespace(send=AsyncMock(side_effect=_CardMessage().render)),
     )
 
 
@@ -45,12 +64,13 @@ def _buttons(view):
     return {item.label: item for item in view.walk_children() if isinstance(item, discord.ui.Button)}
 
 
-def _control(custom_id, *, user_id=10, kind=discord.InteractionType.component, **data):
+def _control(custom_id, *, user_id=10, kind=discord.InteractionType.component, message=None, **data):
+    message = message or _CardMessage()
     return SimpleNamespace(
-        type=kind, user=_owner(user_id), guild=SimpleNamespace(id=1),
+        type=kind, user=_owner(user_id), guild=SimpleNamespace(id=1), message=message,
         channel=None, app_permissions=discord.Permissions.none(),
         data={"custom_id": custom_id, **data}, response=AsyncMock(),
-        edit_original_response=AsyncMock(), delete_original_response=AsyncMock(),
+        edit_original_response=AsyncMock(side_effect=message.render), delete_original_response=AsyncMock(),
     )
 
 
@@ -64,7 +84,8 @@ def test_slash_index_uses_one_selector_and_filters_staff():
     assert all(option.label in _copy(view) for option in select.options)
     assert not any(option.default for option in select.options)
     assert all(option.emoji is None and not option.description.startswith("[") for option in select.options)
-    assert set(_buttons(view)) == {"Buscar comando", "Fechar"}
+    assert list(_buttons(view)) == [None, "Dashboard"]
+    assert "Buscar comando" not in _copy(view)
 
     staff = _view(extra_permissions=frozenset({"ticket_staff"}))
     select, = _selectors(staff)
@@ -78,10 +99,9 @@ def test_prefix_index_has_copyable_shortcuts_and_working_controls():
     for query in ("voz", "música", "jogos", "chat", "servidor"):
         assert f"`!help {query}`" in _copy(view)
     assert len(_selectors(view)) == 1
-    assert set(_buttons(view)) == {"Buscar comando", "Fechar"}
-    assert view.timeout is None
+    assert list(_buttons(view)) == [None, "Dashboard"]
     assert "!help servidor" not in _copy(_view(source="prefix"))
-    assert view.children[0].accent_color != _view().children[0].accent_color
+    assert view.children[0].accent_color is None and _view().children[0].accent_color is None
 
 
 def _emoji_cache():
@@ -89,8 +109,8 @@ def _emoji_cache():
     state = SimpleNamespace(_get_guild=lambda _: guild)
     records = (
         (1539137127852539944, "osaka", False), (1559374199133315122, "Vinyl_Music_loading", True),
-        (1513652679044366406, "a9decowhite2_dw", False), (1564113432905654353, "emoji_86", False),
-        (1500584783779070143, "livro", True),
+        (1485041721573249135, "emoji_63", False), (1564113432905654353, "emoji_86", False),
+        (1500584783779070143, "livro", True), (1573829151088054409, "1xxx", False),
     )
     cache = {key: discord.Emoji(guild=guild, state=state, data={"id": key, "name": name, "animated": animated})
              for key, name, animated in records}
@@ -103,7 +123,14 @@ def test_guild_emojis_in_headings_and_native_options(source):
     emojis = help_center.available_help_emojis(SimpleNamespace(get_emoji=cache.get), guild, None, discord.Permissions.none())
     view = _view(source=source, emojis=emojis, extra_permissions={"ticket_staff"})
     options = _selectors(view)[0].options
-    assert [option.emoji.id for option in options] == list(cache)
+    assert [option.emoji.id for option in options] == [
+        1539137127852539944, 1559374199133315122, 1485041721573249135, 1564113432905654353, 1500584783779070143,
+    ]
+    close, dashboard = _buttons(view).values()
+    assert close.style == discord.ButtonStyle.danger and close.label is None
+    assert close.emoji.id == 1573829151088054409 and close.emoji.name == "1xxx"
+    assert dashboard.style == discord.ButtonStyle.link and dashboard.url == "https://osaka.is-a.bot/"
+    assert dashboard.custom_id is None
     assert [option.emoji.animated for option in options] == [False, True, False, False, True]
     assert all("<:" not in o.label and "<a:" not in o.label and "[" not in o.description for o in options)
     assert _copy(view).startswith("## <a:livro:1500584783779070143> Meus comandos")
@@ -116,7 +143,8 @@ def test_guild_emojis_in_headings_and_native_options(source):
 def test_external_emojis_respect_destination_permissions_and_source_availability():
     guild, cache = _emoji_cache()
     del cache[1564113432905654353]
-    cache[1513652679044366406].available = False
+    cache[1485041721573249135].available = False
+    cache[1573829151088054409].available = False
     cache[1539137127852539944]._roles = discord.utils.SnowflakeList([444])
     other = SimpleNamespace(id=88, me=object())
     allow = discord.Permissions(external_emojis=True)
@@ -130,6 +158,7 @@ def test_external_emojis_respect_destination_permissions_and_source_availability
         options = _selectors(_view(emojis=icons))[0].options
         assert options[0].emoji is None and options[1].emoji.animated
         assert options[2].emoji is None and options[3].emoji is None
+        assert _buttons(_view(emojis=icons))[None].emoji.name == "✖️"
 
 
 @pytest.mark.parametrize("source", ["prefix", "slash"])
@@ -139,12 +168,9 @@ async def test_old_card_opens_full_music_list_and_returns_home_on_fresh_cog(sour
     with handle_message_parameters(view=original) as params:
         assert params.payload["flags"] & discord.MessageFlags(components_v2=True).value
         assert params.payload["components"][0]["components"][0]["accessory"]["type"] == 11
-    payload = original.to_components()
-    await original.on_timeout()
-    assert original.to_components() == payload
-    assert original.is_finished()  # Nenhum callback ou timeout por mensagem.
     select, = _selectors(original)
-    interaction = _control(select.custom_id, values=["category:music"])
+    message = _CardMessage(original)
+    interaction = _control(select.custom_id, values=["category:music"], message=message)
     await _utility().on_interaction(interaction)
     interaction.response.defer.assert_awaited_once()
     view = interaction.edit_original_response.await_args.kwargs["view"]
@@ -154,14 +180,14 @@ async def test_old_card_opens_full_music_list_and_returns_home_on_fresh_cog(sour
         assert f"`!{command}`" in _copy(view)
     assert "`!skip` · Pula a música atual (`!pular`, `!s`)" in _copy(view)
     assert "!nightcore" not in _copy(view)
-    assert set(_buttons(view)) == {"Buscar comando", "Início", "Fechar"}
+    assert list(_buttons(view)) == [None, "Início", "Dashboard"]
     select, = _selectors(view)
     assert next(option for option in select.options if option.default).value == "category:music"
     assert [option.value for option in select.options] == [
         "category:voice", "category:music", "category:games", "category:chatbot",
     ]
 
-    home = _control(_buttons(view)["Início"].custom_id)
+    home = _control(_buttons(view)["Início"].custom_id, message=message)
     await _utility().on_interaction(home)
     assert home.edit_original_response.await_args.kwargs["view"].target_kind == "home"
 
@@ -197,9 +223,28 @@ def test_slash_mentions_and_prefix_instructions_show_real_syntax():
     prefix = _view(source="prefix", initial_category="voice")
     assert "`/tts menu`" in _copy(prefix)
     assert "</tts menu:" not in _copy(prefix)
-    assert "`!help início`" in _copy(prefix)
+    assert "Pra voltar pelo chat" not in _copy(prefix)
     assert len(_selectors(prefix)) == 1
     assert "`/imagem <prompt>`" in _copy(_view(subject="/imagem"))
+
+
+@pytest.mark.parametrize("source", ["prefix", "slash"])
+def test_area_and_command_use_area_color_and_home_has_no_accent(source):
+    colors = {
+        "voice": discord.Color.green(), "music": discord.Color.blurple(), "games": discord.Color.orange(),
+        "chatbot": discord.Color.fuchsia(), "server": discord.Color.gold(),
+    }
+    for area, color in colors.items():
+        entry = next(e for e in help_center.ENTRIES if e.category == area)
+        for subject in (f"category:{area}", f"entry:{entry.key}"):
+            view = _view(source=source, subject=subject, extra_permissions={"ticket_staff"})
+            assert view.to_components()[0]["accent_color"] == color.value
+            assert "Pra voltar pelo chat" not in _copy(view)
+            assert list(_buttons(view)) == [None, "Início", "Dashboard"]
+    for subject in (None, "início", "zzzzzz"):
+        view = _view(source=source, subject=subject)
+        assert view.to_components()[0].get("accent_color") is None
+        assert "Pra voltar pelo chat" not in _copy(view)
 
 
 def test_help_and_registered_commands_can_have_different_prefixes():
@@ -208,7 +253,7 @@ def test_help_and_registered_commands_can_have_different_prefixes():
     assert "`!!help música`" in _copy(home)
     music = _view(source="prefix", prefixes=prefixes, subject="música")
     assert "`!queue`" in _copy(music)
-    assert "`!!help início`" in _copy(music)
+    assert "`!!help início`" not in _copy(music)
     voice = _view(source="prefix", prefixes=prefixes, subject="voz")
     assert "`!!join`" in _copy(voice)
     assert _view(source="prefix", prefixes=prefixes, subject="!queue").target_key == "queue"
@@ -296,7 +341,8 @@ def _utility():
 def _slash(event_id, guild):
     return SimpleNamespace(
         id=event_id, guild=guild, user=_owner(), channel=None, app_permissions=discord.Permissions.none(),
-        response=SimpleNamespace(is_done=lambda: False, defer=AsyncMock()), edit_original_response=AsyncMock(),
+        response=SimpleNamespace(is_done=lambda: False, defer=AsyncMock()),
+        edit_original_response=AsyncMock(side_effect=_CardMessage().render),
     )
 
 
@@ -356,6 +402,7 @@ async def test_concurrent_help_consumes_once_and_preserves_later_attempt():
         assert kwargs["view"].target_key == "music"
         waiting.set()
         await release.wait()
+        return _CardMessage(kwargs["view"])
 
     first.channel.send.side_effect = hold_card
     task = asyncio.create_task(utility.on_message(first))
@@ -381,13 +428,13 @@ async def test_old_card_navigation_is_independent_of_next_help():
     await utility.on_message(first)
     card = first.channel.send.await_args.kwargs["view"]
     assert card.target_key == "music"
-    remember_help_category(utility.bot, _event(_id_at(359000), guild=guild), "games")
-    # Mais de cinco minutos depois de abrir o card, uma troca manual só edita aquela mensagem.
-    click = _control(_selectors(card)[0].custom_id, values=["category:voice"])
-    click.id = _id_at(360000)
+    remember_help_category(utility.bot, _event(_id_at(59000), guild=guild), "games")
+    message = next(iter(utility.bot._open_help_cards.values())).message
+    click = _control(_selectors(card)[0].custom_id, values=["category:voice"], message=message)
+    click.id = _id_at(60000)
     await utility.on_interaction(click)
     assert click.edit_original_response.await_args.kwargs["view"].target_key == "voice"
-    new = _slash(_id_at(361000), guild)
+    new = _slash(_id_at(61000), guild)
     await utility.help_command.callback(utility, new)
     assert new.edit_original_response.await_args.kwargs["view"].target_key == "games"
 
@@ -415,45 +462,47 @@ async def test_discord_emoji_rejection_retries_same_category_in_plain_text():
         SimpleNamespace(status=400, reason="Bad Request"),
         {"code": 50035, "message": "Invalid Form Body", "errors": {"emoji": {"_errors": [{"message": "Invalid emoji"}]}}},
     )
-    first.edit_original_response.side_effect = [invalid, None]
+    calls = []
+
+    def send(*, view, **kwargs):
+        calls.append((_copy(view), view.target_key))
+        if len(calls) == 1:
+            raise invalid
+        return _CardMessage(view)
+
+    first.edit_original_response.side_effect = send
     await utility.help_command.callback(utility, first)
-    decorated, plain = [call.kwargs["view"] for call in first.edit_original_response.await_args_list]
-    assert decorated.target_key == plain.target_key == "music"
-    assert _copy(decorated).startswith("## <a:Vinyl_Music_loading:")
-    assert _copy(plain).startswith("## Música")
+    (decorated_text, first_key), (plain_text, second_key) = calls
+    assert first_key == second_key == "music"
+    assert decorated_text.startswith("## <a:Vinyl_Music_loading:")
+    assert plain_text.startswith("## Música")
+    plain = first.edit_original_response.await_args.kwargs["view"]
     assert all(opt.emoji is None for opt in _selectors(plain)[0].options)
+    assert _buttons(plain)[None].emoji.name == "✖️"
     assert consume_help_category(utility.bot, _event(103, guild=guild)) is None
 
 
 @pytest.mark.parametrize("source", ["prefix", "slash"])
 @pytest.mark.asyncio
-async def test_search_submission_updates_the_card_and_close_deletes_it(source):
-    view = _view(source=source)
-    click = _control(_buttons(view)["Buscar comando"].custom_id)
-    await _utility().on_interaction(click)
-    modal = click.response.send_modal.await_args.args[0]
-    form = modal.to_dict()
-    field = form["components"][0]["component"]
-    assert form["components"][0]["type"] == 18 and field["type"] == 4
-    submitted = _control(
-        modal.custom_id, kind=discord.InteractionType.modal_submit,
-        components=[{"type": 18, "component": {"type": 4, "custom_id": field["custom_id"], "value": "cantar"}}],
-    )
-    await _utility().on_interaction(submitted)
-    result = submitted.edit_original_response.await_args.kwargs["view"]
-    assert (result.source, result.target_key) == (source, "ttv_mp3")
-    assert "`!ttvmp3 texto~~`" in _copy(result)
-    close = _control(_buttons(result)["Fechar"].custom_id)
-    await _utility().on_interaction(close)
+async def test_close_deletes_message_and_cancels_expiry(source):
+    utility = _utility()
+    view = _view(source=source, subject="cantar")
+    message = _CardMessage(view)
+    card = utility._track_help_card(message, message.edit)
+    close = _control(_buttons(view)[None].custom_id, message=message)
+    await utility.on_interaction(close)
     close.response.defer.assert_awaited_once_with()
     close.delete_original_response.assert_awaited_once_with()
     close.edit_original_response.assert_not_called()
+    assert card.closed and not utility.bot._open_help_cards
+    await asyncio.gather(card.timer, return_exceptions=True)
+    message.edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_other_members_cannot_change_close_or_search_a_public_card():
+async def test_other_members_cannot_change_or_close_a_public_card():
     view = _view(source="prefix", subject="voz")
-    ids = [button.custom_id for button in _buttons(view).values()] + [_selectors(view)[0].custom_id]
+    ids = [button.custom_id for button in _buttons(view).values() if button.custom_id] + [_selectors(view)[0].custom_id]
     for custom_id in ids:
         click = _control(custom_id, user_id=11)
         await _utility().on_interaction(click)
@@ -477,3 +526,118 @@ async def test_click_rechecks_permissions_and_preserves_recent_offline_music():
     music = _control(_selectors(home)[0].custom_id, values=["category:music"])
     await utility.on_interaction(music)
     assert "sem conexão com o player" in _copy(music.edit_original_response.await_args.kwargs["view"])
+
+
+def _controls(view):
+    return [item for item in view.walk_children() if isinstance(item, (discord.ui.Select, discord.ui.Button))]
+
+
+@pytest.mark.parametrize("source", ["prefix", "slash"])
+@pytest.mark.asyncio
+async def test_timeout_disables_latest_page_including_dashboard_without_another_click(source, monkeypatch):
+    assert help_commands.DURACAO_PAINEL_PUBLICO_TTS == 300
+    monkeypatch.setattr(help_commands, "DURACAO_PAINEL_PUBLICO_TTS", 0.5)
+    utility, guild = _utility(), SimpleNamespace(id=1)
+    if source == "slash":
+        await utility.help_command.callback(utility, _slash(101, guild))
+    else:
+        await utility.on_message(_event(101, guild=guild, content="!help"))
+    card, = utility.bot._open_help_cards.values()
+    deadline = card.deadline
+    first = discord.ui.LayoutView.from_message(card.message)
+    click = _control(_selectors(first)[0].custom_id, message=card.message, values=["category:games"])
+    await utility.on_interaction(click)
+    assert card.deadline == deadline
+    before = discord.ui.LayoutView.from_message(card.message)
+    await asyncio.wait_for(card.timer, 3)
+    assert card.closed and not utility.bot._open_help_cards
+    after = card.message.edit.await_args.kwargs["view"]
+    assert _copy(after) == _copy(before) and "Jogos e fichas" in _copy(after)
+    assert before.to_components()[0] == after.to_components()[0]
+    assert not any(item.disabled for item in _controls(before))
+    assert all(item.disabled for item in _controls(after))
+    assert _buttons(after)["Dashboard"].url == "https://osaka.is-a.bot/"
+    assert _selectors(after)[0].options[2].default
+    card.message.edit.assert_awaited_once()
+
+
+@pytest.mark.parametrize("action", ["area", "close", "search"])
+@pytest.mark.asyncio
+async def test_overdue_message_on_fresh_bot_freezes_in_place_even_for_legacy_controls(action):
+    utility = _utility()
+    view = _view(source="prefix", subject="música")
+    message = _CardMessage(view, age=300)
+    custom_id = _buttons(view)[None].custom_id.removesuffix(":close") + ":" + action
+    click = _control(custom_id, message=message, values=["category:voice"])
+    await utility.on_interaction(click)
+    frozen = click.edit_original_response.await_args.kwargs["view"]
+    assert _copy(frozen) == _copy(view)
+    assert all(item.disabled for item in _controls(frozen))
+    click.delete_original_response.assert_not_awaited()
+    utility._get_help_prefix_data.assert_not_awaited()
+    assert not utility.bot._open_help_cards
+
+
+@pytest.mark.asyncio
+async def test_navigation_in_flight_cannot_reactivate_expired_message(monkeypatch):
+    utility = _utility()
+    view = _view(source="prefix", subject="música")
+    message = _CardMessage(view)
+    entered, release = asyncio.Event(), asyncio.Event()
+    monkeypatch.setattr(help_commands, "DURACAO_PAINEL_PUBLICO_TTS", 0.25)
+    card = utility._track_help_card(message, message.edit)
+
+    async def hold_build(**kwargs):
+        entered.set()
+        await release.wait()
+        return _view(subject=kwargs["subject"])
+
+    utility._build_help_view = hold_build
+    click = _control(_selectors(view)[0].custom_id, message=message, values=["category:voice"])
+    task = asyncio.create_task(utility.on_interaction(click))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(card.timer, 2)
+    finally:
+        release.set()
+        await task
+    click.edit_original_response.assert_not_awaited()
+    frozen = message.edit.await_args.kwargs["view"]
+    assert _copy(frozen) == _copy(view) and all(item.disabled for item in _controls(frozen))
+
+
+@pytest.mark.asyncio
+async def test_removed_emoji_does_not_block_disabling_the_dashboard_and_close():
+    utility = _utility()
+    guild, cache = _emoji_cache()
+    icons = help_center.available_help_emojis(SimpleNamespace(get_emoji=cache.get), guild, None, discord.Permissions.none())
+    message = _CardMessage(_view(emojis=icons, subject="jogos"), age=300)
+    calls = []
+
+    def edit(*, view, **kwargs):
+        close = _buttons(view)[None]
+        calls.append((close.emoji.id, close.style, all(control.disabled for control in _controls(view))))
+        if close.emoji.id:
+            raise discord.HTTPException(SimpleNamespace(status=400, reason="Bad Request"),
+                                        {"code": 10014, "message": "Unknown Emoji"})
+        return message.render(view=view)
+
+    card = utility._track_help_card(message, AsyncMock(side_effect=edit))
+    await asyncio.wait_for(card.timer, 1)
+    assert calls == [(1573829151088054409, discord.ButtonStyle.danger, True), (None, discord.ButtonStyle.danger, True)]
+    assert not utility.bot._open_help_cards
+
+
+@pytest.mark.asyncio
+async def test_already_acknowledged_slash_expires_its_followup():
+    utility, guild = _utility(), SimpleNamespace(id=1)
+    slash = _slash(101, guild)
+    slash.response.is_done = lambda: True
+    followup = _CardMessage(age=300)
+    slash.followup = SimpleNamespace(send=AsyncMock(side_effect=followup.render))
+    await utility.help_command.callback(utility, slash)
+    sent = slash.followup.send.await_args.kwargs
+    assert sent["ephemeral"] and sent["wait"]
+    await asyncio.wait_for(utility.bot._open_help_cards[followup.id].timer, 1)
+    assert all(item.disabled for item in _controls(followup.edit.await_args.kwargs["view"]))
+    slash.edit_original_response.assert_not_awaited()

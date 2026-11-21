@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from typing import Literal
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 import discord
 from discord import app_commands
 
@@ -15,8 +15,7 @@ from cogs.tts.utils.app_commands import slash_mention
 
 
 HelpSource = Literal["slash", "prefix"]
-_PREFIX_ACCENT = discord.Color(0xE89B87)
-_SLASH_ACCENT = discord.Color(0xAA9BE6)
+_CLOSE_FALLBACK = "✖️"
 HELP_CONTROL_ID = re.compile(
     r"help:v1:(?P<source>slash|prefix):(?P<owner>[0-9]{1,20}):(?P<music>[01]):"
     r"(?P<action>area|home|search|query|close)"
@@ -33,9 +32,10 @@ _HELP_EMOJI_IDS = {
     "home": _BOOK_EMOJI_ID,
     "voice": 1539137127852539944,  # osaka
     "music": 1559374199133315122,  # Vinyl_Music_loading
-    "games": 1513652679044366406,  # a9decowhite2_dw
+    "games": 1485041721573249135,  # emoji_63
     "chatbot": 1564113432905654353,  # emoji_86
     "server": _BOOK_EMOJI_ID,
+    "close": 1573829151088054409,  # 1xxx
 }
 
 
@@ -547,7 +547,7 @@ def _category_entries(
 class _HelpPage:
     header: str
     blocks: list[str]
-    accent: discord.Color
+    accent: discord.Color | None = None
 
 
 def _render_category(
@@ -623,7 +623,7 @@ def _render_entry(
         blocks.append(f"-# {entry.detail_note}")
     elif not _permission_allowed(user, entry.permission, extra_permissions):
         blocks.append("-# Você precisa de permissão pra usar esse comando.")
-    accent = category.accent if category else discord.Color.teal()
+    accent = category.accent if category else None
     return _HelpPage(f"## `{title}`\n{entry.description}", blocks, accent)
 
 
@@ -658,15 +658,35 @@ def _category_option(category: HelpCategory, *, selected: bool, emoji: discord.E
     )
 
 
-def help_search_modal(button_id: str) -> discord.ui.Modal:
-    modal = discord.ui.Modal(title="Buscar comando", custom_id=button_id.removesuffix(":search") + ":query")
-    modal.add_item(discord.ui.Label(
-        text="O que você quer procurar?",
-        component=discord.ui.TextInput(custom_id="assunto", placeholder="Ex.: join, fichas, voz", max_length=80),
-    ))
-    # O mesmo listener atende o formulário, mesmo após um reload do cog.
-    modal.stop()
-    return modal
+async def send_help_layout(
+    send: Callable[..., Awaitable[discord.Message]],
+    view: discord.ui.LayoutView,
+) -> discord.Message:
+    mentions = discord.AllowedMentions.none()
+    try:
+        return await send(view=view, allowed_mentions=mentions)
+    except discord.HTTPException as error:
+        # O Discord também valida os emojis ao desativar os controles de um card.
+        if error.code != 10014 and not (
+            error.status == 400 and error.code == 50035 and "emoji" in error.text.casefold()
+        ):
+            raise
+        changed = False
+        for item in view.walk_children():
+            if isinstance(item, discord.ui.Select):
+                for option in item.options:
+                    if option.emoji and option.emoji.id:
+                        option.emoji = None
+                        changed = True
+            elif isinstance(item, discord.ui.Button) and item.emoji and item.emoji.id:
+                item.emoji = None if item.label else _CLOSE_FALLBACK
+                changed = True
+            elif isinstance(item, discord.ui.TextDisplay) and item.content.startswith("## <"):
+                item.content, count = re.subn(r"^## <a?:\w+:\d+> ", "## ", item.content, count=1)
+                changed |= bool(count)
+        if not changed:
+            raise
+    return await send(view=view, allowed_mentions=mentions)
 
 
 class HelpCenterView(discord.ui.LayoutView):
@@ -729,13 +749,11 @@ class HelpCenterView(discord.ui.LayoutView):
         header: discord.ui.Item = discord.ui.TextDisplay(heading)
         if avatar_url and self.target_kind == "home":
             header = discord.ui.Section(header, accessory=discord.ui.Thumbnail(avatar_url, description="Meu avatar"))
-        card = discord.ui.Container(header, accent_color=_PREFIX_ACCENT if source == "prefix" else page.accent)
+        card = discord.ui.Container(header, accent_color=page.accent)
         if page.blocks:
             card.add_item(discord.ui.Separator())
             for block in page.blocks:
                 card.add_item(discord.ui.TextDisplay(block))
-        if source == "prefix" and self.target_kind != "home":
-            card.add_item(discord.ui.TextDisplay(f"-# Pra voltar pelo chat, manda `{self.prefixes['bot_prefix']}help início`."))
 
         self.add_item(card)
         if categories:
@@ -748,15 +766,14 @@ class HelpCenterView(discord.ui.LayoutView):
                 custom_id=f"{control_prefix}:area", placeholder="Escolha uma área", options=options,
             )))
         actions = discord.ui.ActionRow(
-            discord.ui.Button(label="Buscar comando", style=discord.ButtonStyle.primary,
-                              custom_id=f"{control_prefix}:search"),
+            discord.ui.Button(style=discord.ButtonStyle.danger, emoji=emojis.get("close") or _CLOSE_FALLBACK,
+                              custom_id=f"{control_prefix}:close"),
         )
         if self.target_kind != "home":
             actions.add_item(discord.ui.Button(label="Início", custom_id=f"{control_prefix}:home"))
-        actions.add_item(discord.ui.Button(label="Fechar", custom_id=f"{control_prefix}:close"))
+        actions.add_item(discord.ui.Button(label="Dashboard", style=discord.ButtonStyle.link, url="https://osaka.is-a.bot/"))
         self.add_item(actions)
-        # O cog recebe os cliques pelos IDs da mensagem, inclusive após reiniciar.
-        # O SDK só precisa enviar o layout, sem guardar uma view por mensagem.
+        # O cog recebe os cliques e controla o prazo fixo da mensagem.
         self.stop()
 
     def _index(self, categories: list[HelpCategory]) -> _HelpPage:
@@ -768,14 +785,14 @@ class HelpCenterView(discord.ui.LayoutView):
                 query = _CATEGORY_DIRECT_TERMS.get(category.key, (category.key,))[0]
                 label, _ = _category_menu_copy(category)
                 shortcuts.append(f"`{prefix}help {query}`  ·  **{label}**")
-            return _HelpPage(header, ["\n".join(shortcuts)] if shortcuts else [], _PREFIX_ACCENT)
+            return _HelpPage(header, ["\n".join(shortcuts)] if shortcuts else [])
 
-        header = "## Meus comandos\nEsqueceu o comando que me faz cantar? Toca em **Buscar comando** e escreve `cantar`."
+        header = "## Meus comandos\nQuer me ouvir cantar? Abre o `/help` e escreve `cantar` no campo **assunto**."
         areas = []
         for category in categories:
             label, description = _category_menu_copy(category)
             areas.append(f"**{label}**\n-# {description}")
-        return _HelpPage(header, areas, _SLASH_ACCENT)
+        return _HelpPage(header, areas)
 
     def _page(self, categories: list[HelpCategory], *, music_offline: bool) -> _HelpPage:
         if self.target_kind == "home":
@@ -809,4 +826,4 @@ class HelpCenterView(discord.ui.LayoutView):
         if labels:
             hint = "Você quis dizer " + " ou ".join(f"`{label}`" for label in labels) + "?"
         term = " ".join(subject.split())[:80].replace("`", "ˋ")
-        return _HelpPage(f"## Não achei esse comando\nProcurei por `{term}`.", [hint], _SLASH_ACCENT)
+        return _HelpPage(f"## Não achei esse comando\nProcurei por `{term}`.", [hint])

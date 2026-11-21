@@ -1,7 +1,6 @@
 import asyncio
 import inspect
 import os
-from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any
 
@@ -15,7 +14,7 @@ from .tts.utils.app_commands import fetch_root_command_ids_cached
 from utility.commands.help import HelpCommandMixin
 from cogs.musica.integracoes.ajuda import musica_disponivel_para_ajuda
 from utility.help_activity import consume_help_category
-from utility.help_center import HelpCenterView, HelpSource, available_help_emojis, help_autocomplete_choices
+from utility.help_center import HelpCenterView, HelpSource, available_help_emojis, help_autocomplete_choices, send_help_layout
 from utility.commands.ping import PingCommandMixin
 from utility.commands.base import BaseCommandMixin
 from utility.commands.status import StatusCommandMixin
@@ -228,9 +227,8 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
             hidden_categories=hidden_categories,
         )
 
-    async def _send_help_view(
+    async def _build_help_view(
         self,
-        send: Callable[..., Awaitable[object]],
         *,
         guild: discord.Guild | None,
         owner: discord.abc.User,
@@ -240,7 +238,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
         subject: str | None = None,
         initial_category: str | None = None,
         music_from_activity: bool = False,
-    ) -> None:
+    ) -> HelpCenterView:
         prefixes = await self._get_help_prefix_data(guild)
         root_ids = await self._fetch_root_command_ids_cached(guild) if source == "slash" else {}
         extra_permissions = await self._get_help_extra_permissions(guild, owner)
@@ -249,27 +247,14 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
         avatar = getattr(bot_user, "display_avatar", None)
         games_context = self._get_help_games_context(guild)
 
-        def render(emojis: dict[str, discord.Emoji]) -> HelpCenterView:
-            return HelpCenterView(
-                owner=owner, prefixes=prefixes, root_ids=root_ids, source=source,
-                avatar_url=str(avatar.url) if avatar else None, emojis=emojis,
-                games_context=games_context, extra_permissions=extra_permissions,
-                hidden_categories=hidden_categories, subject=subject,
-                initial_category=initial_category, music_from_activity=music_from_activity,
-            )
-
-        emojis = available_help_emojis(self.bot, guild, channel, app_permissions)
-        mentions = discord.AllowedMentions.none()
-        try:
-            await send(view=render(emojis), allowed_mentions=mentions)
-        except discord.HTTPException as error:
-            # Um emoji pode ser removido entre a leitura do cache e o envio.
-            invalid_emoji = error.code == 10014 or (
-                error.status == 400 and error.code == 50035 and "emoji" in error.text.casefold()
-            )
-            if not emojis or not invalid_emoji:
-                raise
-            await send(view=render({}), allowed_mentions=mentions)
+        return HelpCenterView(
+            owner=owner, prefixes=prefixes, root_ids=root_ids, source=source,
+            avatar_url=str(avatar.url) if avatar else None,
+            emojis=available_help_emojis(self.bot, guild, channel, app_permissions),
+            games_context=games_context, extra_permissions=extra_permissions,
+            hidden_categories=hidden_categories, subject=subject,
+            initial_category=initial_category, music_from_activity=music_from_activity,
+        )
 
     async def _send_help_response(
         self,
@@ -290,13 +275,15 @@ class Utility(HelpCommandMixin, PingCommandMixin, BaseCommandMixin, StatusComman
             await interaction.response.defer(ephemeral=ephemeral, thinking=True)
             send = interaction.edit_original_response
         else:
-            send = partial(interaction.followup.send, ephemeral=ephemeral)
+            send = partial(interaction.followup.send, ephemeral=ephemeral, wait=True)
 
-        await self._send_help_view(
-            send, channel=responder, app_permissions=interaction.app_permissions if interaction is not None else None,
+        view = await self._build_help_view(
+            channel=responder, app_permissions=interaction.app_permissions if interaction is not None else None,
             guild=guild, owner=owner, source="slash" if interaction is not None else "prefix",
             subject=subject, initial_category=None if (subject or "").strip() else recent,
         )
+        message = await send_help_layout(send, view)
+        self._track_help_card(message, message.edit)
         if interaction is None:
             await self._delete_message_safe(prefix_command_message)
 
