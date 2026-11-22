@@ -103,11 +103,13 @@ from cogs.musica.runtime_telefone.agente.mixer_pcm import AgentMixedAudioSource 
 
 
 
-AGENT_VERSION = "0.3.97"
+AGENT_VERSION = "0.3.98"
+# O arquivo só deve repetir buscas quando o resolvedor ou o yt-dlp muda.
+ARCHIVE_RESOLVER_VERSION = "0.3.97"
 try:
-    ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:{package_version('yt-dlp')}"
+    ARCHIVE_RESOLVER_REVISION = f"{ARCHIVE_RESOLVER_VERSION}:{package_version('yt-dlp')}"
 except PackageNotFoundError:
-    ARCHIVE_RESOLVER_REVISION = f"{AGENT_VERSION}:missing"
+    ARCHIVE_RESOLVER_REVISION = f"{ARCHIVE_RESOLVER_VERSION}:missing"
 STARTED_AT = time.time()
 
 

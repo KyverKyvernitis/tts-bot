@@ -14,11 +14,15 @@ import ctypes.util
 from dataclasses import replace
 import math
 from pathlib import Path
+from shutil import which
+import subprocess
 from types import SimpleNamespace
 import time
 import unittest
 from unittest import mock
 
+from cogs.musica.runtime_telefone.agente.configuracao import opus_passthrough_eligibility, opus_preparation_eligibility
+from cogs.musica.runtime_telefone.agente.efeitos import VOCAL_PRESENCE_FFMPEG, filtros
 from cogs.musica.runtime_telefone.agente.estado import AgentTrack, GuildMusicState
 from tests.test_music_opus_hybrid import Encoder, load_mixer
 from tests.test_music_opus_native_pipeline import NativeOutputEncoder
@@ -54,13 +58,28 @@ class ReadyPCM:
         self.closed = True
 
 
+def presence_test_frame(frequency=2800, *, right_gain=1, amplitude=8000):
+    samples = array('h')
+    for index in range(960):
+        value = round(amplitude * math.sin(math.tau * frequency * index / 48000))
+        samples.extend((value, value * right_gain))
+    return samples.tobytes()
+
+
+def left_rms(frame):
+    left = array('h', frame)[::2]
+    return math.sqrt(sum(sample * sample for sample in left) / len(left))
+
+
 def load_controls(mixer):
     path = ROOT / 'cogs/musica/runtime_telefone/agente/reproducao.py'
     original = next(node for node in ast.parse(path.read_text()).body
                     if isinstance(node, ast.ClassDef) and node.name == 'ReproducaoMixin')
     wanted = {'_apply_player_volume', 'cmd_volume', 'cmd_duck', 'cmd_unduck',
               'cmd_audio_effect', '_build_ffmpeg_source', '_play_music_source',
-              '_record_first_music_packet'}
+              '_record_first_music_packet', '_music_vocal_presence',
+              '_ffmpeg_options_for_source', '_ffmpeg_has_custom_audio_filter',
+              '_ffmpeg_quality_resample_filter'}
     methods = [node for node in original.body
                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted]
     assert {node.name for node in methods} == wanted
@@ -70,8 +89,10 @@ def load_controls(mixer):
                      GuildMusicState=GuildMusicState, AgentTrack=AgentTrack,
                      AgentMixedAudioSource=mixer.AgentMixedAudioSource,
                      AgentHybridOpusAudioSource=mixer.AgentHybridOpusAudioSource,
+                     AgentTelemetryAudioSource=mixer.AgentTelemetryAudioSource,
                      BufferedPCMSource=ReadyPCM, ArchiveSegmentedPCMSource=ReadyPCM,
                      ContinuousArchiveDSPSource=ReadyPCM, PCM_FRAME_BYTES=3840,
+                     filtros=filtros, VOCAL_PRESENCE_FFMPEG=VOCAL_PRESENCE_FFMPEG,
                      safe_id=lambda value: int(value or 0), short_text=lambda value, n: str(value)[:n])
     exec(compile(ast.fix_missing_locations(ast.Module(body=[future, klass], type_ignores=[])),
                  str(path), 'exec'), namespace)
@@ -92,9 +113,7 @@ class ProcessedOpusControlTests(unittest.IsolatedAsyncioTestCase):
         self.agent.prepare_timeout = 30
         self.agent.pcm_buffer_stall_seconds = 12
         self.agent.audio_telemetry_enabled = False
-        self.agent._ffmpeg_has_custom_audio_filter = lambda options: False
         self.agent._ffmpeg_before_options_for_offset = lambda offset: ''
-        self.agent._ffmpeg_options_for_source = lambda *args, **kwargs: ('', 'native_48k')
         self.agent._track_stream_needs_refresh = lambda track: False
         self.agent._cancel_audio_preparation = mock.Mock()
         self.agent._schedule_audio_prepare = mock.Mock()
@@ -248,6 +267,108 @@ class ProcessedOpusControlTests(unittest.IsolatedAsyncioTestCase):
         self.voice.stop.assert_not_called()
         self.source.read()
         self.assertEqual(len(self.encoder.frames[-1]), 3840)
+
+    def test_default_presence_emphasizes_center_and_keeps_stereo_difference(self):
+        for frequency, right_gain, expected_db in ((2800, 1, 1.8), (2800, -1, 0), (200, 1, 0)):
+            with self.subTest(frequency=frequency, right_gain=right_gain):
+                pcm = ReadyPCM()
+                pcm.frame = presence_test_frame(frequency, right_gain=right_gain)
+                source = self.agent._build_ffmpeg_source('unused', volume_percent=100, pcm_source=pcm)
+                try:
+                    source.read()
+                    enhanced = source.read()
+                    self.assertAlmostEqual(20 * math.log10(left_rms(enhanced) / left_rms(pcm.frame)),
+                                           expected_db, delta=.04)
+                    if right_gain == -1:
+                        self.assertEqual(enhanced, pcm.frame)
+                    pcm.frame = presence_test_frame(amplitude=32767)
+                    hot = array('h', source.read())[::2]
+                    self.assertEqual(max(hot), 32767)
+                    self.assertEqual(hot.count(32767), array('h', pcm.frame)[::2].count(32767))
+                finally:
+                    source.cleanup()
+
+    async def test_presence_yields_to_effects_and_returns_on_the_same_session(self):
+        self.pcm.frame = presence_test_frame()
+        self.state.volume_percent = 100
+        self.source = self.agent._build_ffmpeg_source(
+            'unused', volume_percent=100, pcm_source=self.pcm, reuse_mixer=self.source,
+            output_policy=self.policy, on_music_end=lambda *_args: None)
+
+        def settled_gain():
+            for _ in range(24):
+                self.source.read()
+            return 20 * math.log10(left_rms(self.encoder.frames[-1]) / left_rms(self.pcm.frame))
+
+        async def change(effect, level):
+            result = await self.agent.cmd_audio_effect({'guild_id': 1, 'effect': effect, 'level': level})
+            self.assertTrue(result['ok'], result)
+
+        self.assertAlmostEqual(settled_gain(), 1.8, delta=.04)
+        self.assertTrue(self.source.opus_direct_status()['vocal_presence'])
+        await change('bassboost', 1)
+        self.assertAlmostEqual(settled_gain(), 0, delta=.05)
+        self.assertFalse(self.source.opus_direct_status()['vocal_presence'])
+        self.assertIs(self.source.music_source, self.pcm)
+        self.agent._create_pcm_source.assert_not_called()
+        await change('bassboost', 0)
+        self.assertAlmostEqual(settled_gain(), 1.8, delta=.04)
+        for effect in ('nightcore', 'slowed_reverb'):
+            for level, expected_db in ((1, 0), (0, 1.8)):
+                replacement = ReadyPCM()
+                replacement.frame = self.pcm.frame
+                self.agent._create_pcm_source.return_value = replacement
+                await change(effect, level)
+                self.assertAlmostEqual(settled_gain(), expected_db, delta=.04)
+        self.assertIs(self.voice.source, self.source)
+        self.assertIs(self.source.output_encoder, self.encoder)
+        self.assertEqual(self.state.queue, [self.queue_track])
+        self.voice.play.assert_not_called()
+        self.voice.stop.assert_not_called()
+
+    async def test_preserving_tts_and_rejecting_manual_presence_selection(self):
+        pcm = ReadyPCM()
+        pcm.frame = presence_test_frame()
+        source = self.agent._build_ffmpeg_source('unused', volume_percent=0, pcm_source=pcm)
+        speech = ReadyPCM()
+        speech.frame = presence_test_frame()
+        done = source.add_tts(speech)
+        try:
+            self.assertEqual(source.read(), speech.frame)
+            result = await self.agent.cmd_audio_effect({'guild_id': 1, 'effect': 'vocal_presence', 'level': 0})
+            self.assertFalse(result['ok'])
+        finally:
+            done.cancel()
+            source.cleanup()
+
+    def test_presence_blocks_original_and_prepared_packet_copy_at_unity_volume(self):
+        track = AgentTrack(audio_codec='opus', audio_sample_rate=48000, audio_channels=2, audio_abr=128)
+        for validator in (opus_passthrough_eligibility, opus_preparation_eligibility):
+            result = validator(self.agent, track, volume_percent=100, output_bitrate_kbps=192)
+            self.assertFalse(result['candidate'])
+            self.assertIn('vocal_presence_requires_pcm', result['reasons'])
+
+    @unittest.skipUnless(which('ffmpeg'), 'FFmpeg required')
+    def test_ffmpeg_output_without_pcm_mixer_applies_identical_eq_center(self):
+        self.agent.direct_pcm_volume_enabled = False
+        self.agent.ffmpeg_executable = which('ffmpeg')
+        self.agent.ffmpeg_bitrate = 128
+        captured = mock.Mock()
+        fake_discord = SimpleNamespace(FFmpegOpusAudio=captured)
+        with mock.patch.dict(self.agent._build_ffmpeg_source.__func__.__globals__, discord=fake_discord):
+            source = self.agent._build_ffmpeg_source('unused', source_sample_rate=48000)
+        source.cleanup()
+        options = captured.call_args.kwargs['options']
+        audio_filter = options.split(' -af ', 1)[1]
+        frame = presence_test_frame() * 10
+        output = subprocess.run(
+            ['ffmpeg', '-v', 'error', '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:0',
+             '-af', audio_filter, '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1'],
+            input=frame, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=5,
+        ).stdout
+        self.assertEqual(len(output), len(frame))
+        self.assertAlmostEqual(20 * math.log10(left_rms(output[-3840:]) / left_rms(frame[-3840:])),
+                               1.8, delta=.04)
 
     async def test_nightcore_warms_then_swaps_only_music_source_with_exact_effects(self):
         gate = asyncio.Event()

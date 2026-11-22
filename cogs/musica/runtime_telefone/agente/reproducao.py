@@ -18,7 +18,7 @@ from .ciclo_vida import remove_owned_task, stop_player_instance
 from .validade_stream import discord_voice_audio_hint, fetch_discord_attachment, initial_discord_cdn_url, normalize_reference, probe_discord_audio, prazo_stream, DiscordAttachmentError
 from .configuracao import env_float, env_int, opus_passthrough_eligibility
 from .estado import AgentTrack, GuildMusicState, sanitize_start_context, sanitize_start_timings
-from .efeitos import filtros
+from .efeitos import VOCAL_PRESENCE_FFMPEG, filtros
 from .mixer_pcm import AgentHybridOpusAudioSource, AgentMixedAudioSource, AgentTelemetryAudioSource, PCM_FRAME_BYTES
 from .buffer_pcm import BufferedPCMSource
 from .audio_segmentado import ArchiveSegmentedPCMSource, ContinuousArchiveDSPSource
@@ -2150,9 +2150,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
 
                     # O mixer mantém voz/TTS. A fonte anterior continua tocando
                     # até a nova produzir PCM, e só então é substituída.
+                    vocal_presence = self._music_vocal_presence(desired, is_live=track.is_live)
                     mixer.replace_music_source(
                         candidate, volume=st.volume_percent / 100.0, on_music_end=on_music_end,
-                        bassboost_level=desired[0],
+                        bassboost_level=desired[0], vocal_presence=vocal_presence,
                     )
                     candidate = None  # propriedade transferida ao mixer
                     swapped = True
@@ -3221,8 +3222,10 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         channel_bitrate_kbps = int(output_policy["channel_bitrate_kbps"])
         source_rate = max(0, int(getattr(track, "audio_sample_rate", 0) or 0))
         effects = st.effect_signature()
+        vocal_presence = self._music_vocal_presence(effects, is_live=track.is_live) and not effects[0]
         _audio_options, resample_mode = self._ffmpeg_options_for_source(
             source_rate, effects=effects, is_live=track.is_live,
+            vocal_presence=vocal_presence and not pcm_pipeline,
         )
         st.player = voice_client
         st.transport = "direct"
@@ -3248,6 +3251,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             "opus_expected_packet_loss": output_policy.get("expected_packet_loss"),
             "volume_percent": int(st.volume_percent),
             "volume_mode": "soft_limited_boost" if int(st.volume_percent) > 100 else "linear",
+            "vocal_presence": vocal_presence,
             "bassboost": st.effect_level("bassboost") > 0,
             "bassboost_level": st.effect_level("bassboost"),
             "nightcore": st.effect_level("nightcore") > 0 and not track.is_live,
@@ -3514,9 +3518,17 @@ class ReproducaoMixin(PreparacaoAudioMixin):
             ":linear_interp=1:exact_rational=1:filter_type=kaiser"
         )
 
+    def _music_vocal_presence(self, effects: tuple[int | bool, ...], *, is_live: bool) -> bool:
+        # A velocidade/reverb são definidos na abertura da fonte. Bassboost
+        # pode ser trocado ao vivo, então o mixer arbitra esse efeito por quadro.
+        return (
+            (is_live or not any(effects[1:]))
+            and not self._ffmpeg_has_custom_audio_filter(self.ffmpeg_options)
+        )
+
     def _ffmpeg_options_for_source(
         self, source_sample_rate: int = 0, *, effects: tuple[int | bool, ...] = (0, 0, 0),
-        is_live: bool = False,
+        is_live: bool = False, vocal_presence: bool = False,
     ) -> tuple[str, str]:
         base = str(self.ffmpeg_options or "").strip()
         # O Bassboost usa a folga depois do volume no mixer PCM; não aplica
@@ -3540,6 +3552,11 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 resample=resample, nightcore_resample=quality,
             )
             return f"{base} -af {chain}".strip(), "effects"
+        if vocal_presence and not self._ffmpeg_has_custom_audio_filter(base):
+            chain = VOCAL_PRESENCE_FFMPEG
+            if rate not in (0, 48000) and quality_enabled:
+                chain = f"{self._ffmpeg_quality_resample_filter()},{chain}"
+            return f"{base} -af {chain}".strip(), "vocal_presence"
         if rate == 48000:
             return base, "native_48k"
         if rate <= 0:
@@ -3568,10 +3585,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
         output_policy: dict[str, Any] | None = None,
     ) -> Any:
         volume = max(0.0, min(1.5, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
-        before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
-        ffmpeg_options, _resample_mode = self._ffmpeg_options_for_source(
-            source_sample_rate, effects=effects, is_live=is_live,
-        )
+        vocal_presence = self._music_vocal_presence(effects, is_live=is_live)
         if self.direct_pcm_volume_enabled or force_pcm:
             pcm = pcm_source if pcm_source is not None else self._create_pcm_source(AgentTrack(
                 stream_url=stream_url, audio_sample_rate=source_sample_rate,
@@ -3585,6 +3599,7 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                     reuse_mixer.set_output_policy(output_policy, apply_encoder=False)
                 reuse_mixer.replace_music_source(
                     pcm, volume=volume, on_music_end=on_music_end, bassboost_level=int(effects[0] or 0),
+                    vocal_presence=vocal_presence,
                 )
                 return reuse_mixer
             # Effects/volume require PCM internally. The hybrid encodes the
@@ -3603,9 +3618,15 @@ class ReproducaoMixin(PreparacaoAudioMixin):
                 persistent=on_music_end is not None,
                 bassboost=bool(effects[0]),
                 bassboost_level=int(effects[0] or 0),
+                vocal_presence=vocal_presence,
                 **({"output_policy": output_policy or {"bitrate_kbps": opus_bitrate_kbps or 160,
                                                        "opus_direct": "auto"}} if hybrid else {}),
             )
+        before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
+        ffmpeg_options, _resample_mode = self._ffmpeg_options_for_source(
+            source_sample_rate, effects=effects, is_live=is_live,
+            vocal_presence=vocal_presence and not effects[0],
+        )
         opus_cls = getattr(discord, "FFmpegOpusAudio", None)
         if opus_cls is not None:
             opus = opus_cls(

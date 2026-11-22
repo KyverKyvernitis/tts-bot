@@ -244,6 +244,7 @@ QUALITY_KEYS = frozenset({
     "preparation_required", "cache", "max_bytes", "max_item_bytes", "hits", "misses", "active_writers",
     "prepared_requested_fec", "prepared_expected_packet_loss",
     "processed_active", "processed_bitrate_kbps", "opus_transport", "pcm_origin", "opus_processed_active",
+    "vocal_presence",
     "opus_processed_bitrate_kbps", "opus_output_processing", "opus_processed_effects",
     "opus_processed_volume_min", "opus_processed_volume_max", "original_packet_copy_with_effects",
 })

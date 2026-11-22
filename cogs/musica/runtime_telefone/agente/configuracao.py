@@ -697,8 +697,12 @@ def opus_passthrough_eligibility(
     if any(effects):
         reasons.append("effects_require_pcm")
     options = " " + str(getattr(agent, "ffmpeg_options", "") or "") + " "
+    vocal_presence = getattr(agent, "_music_vocal_presence", None)
     if any(marker in options for marker in (" -af ", " -af=", " -filter:a", " -filter_complex")):
         reasons.append("custom_audio_filter")
+    elif (track is not None and not any(effects) and callable(vocal_presence)
+          and vocal_presence(effects, is_live=bool(getattr(track, "is_live", False)))):
+        reasons.append("vocal_presence_requires_pcm")
     if str(getattr(track, "audio_codec", "") or "").strip().lower() not in {"opus", "libopus"}:
         reasons.append("codec_not_opus")
     if int(getattr(track, "audio_sample_rate", 0) or 0) != 48000:

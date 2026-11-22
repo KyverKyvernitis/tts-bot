@@ -17,12 +17,17 @@ from typing import Any, Callable
 
 import discord
 
+from cogs.musica.runtime_telefone.agente.efeitos import (
+    SAMPLE_RATE, VOCAL_PRESENCE_GAIN_DB, VOCAL_PRESENCE_HZ, VOCAL_PRESENCE_Q,
+)
+
 PCM_FRAME_BYTES = 3840
 PCM_SILENCE = b"\x00" * PCM_FRAME_BYTES
 MAX_MUSIC_VOLUME = 1.5
 PCM_PEAK = 32767
 PCM_BOOST_KNEE = int(PCM_PEAK * 0.95)
 BASS_PEAK_CEILING = 32000
+VOCAL_PEAK_CEILING = int(PCM_PEAK * 0.98)
 # Low shelf biquad (Audio EQ Cookbook), 48 kHz. O antigo passa-baixa de
 # primeira ordem reforçava 1 kHz e o ramo paralelo criava cancelamentos nos
 # médios. O shelf mantém a resposta acima dos graves próxima de 1:1.
@@ -48,6 +53,19 @@ def _bass_shelf_coefficients() -> tuple[float, float, float, float, float]:
 
 
 BASS_SHELF = _bass_shelf_coefficients()
+
+
+def _vocal_presence_coefficients() -> tuple[float, float, float, float, float]:
+    # Filtro de pico do Audio EQ Cookbook, aplicado à média de L e R.
+    omega = 2 * math.pi * VOCAL_PRESENCE_HZ / SAMPLE_RATE
+    alpha = math.sin(omega) / (2 * VOCAL_PRESENCE_Q)
+    gain = 10 ** (VOCAL_PRESENCE_GAIN_DB / 40)
+    a0 = 1 + alpha / gain
+    a1 = -2 * math.cos(omega) / a0
+    return (1 + alpha * gain) / a0, a1, (1 - alpha * gain) / a0, a1, (1 - alpha / gain) / a0
+
+
+VOCAL_PRESENCE_EQ = _vocal_presence_coefficients()
 
 
 class _AudioReadTelemetry:
@@ -189,6 +207,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         persistent: bool = False,
         bassboost: bool = False,
         bassboost_level: int | None = None,
+        vocal_presence: bool = False,
     ) -> None:
         self.loop = loop
         self.music_source = music_source
@@ -215,6 +234,8 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         # Por canal: [entrada anterior, entrada anterior-2,
         #             saída anterior, saída anterior-2, subgrave].
         self._bass_filter = [[0.0] * 5 for _ in range(2)]
+        self._vocal_presence = vocal_presence
+        self._vocal_filter_state: tuple[float, float] | None = None
         self._started_monotonic = time.monotonic()
         self.first_frame_ms: float | None = None
         self.first_frame_monotonic: float | None = None
@@ -271,6 +292,7 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
         on_music_end: Callable[[Exception | None, dict[str, Any]], None] | None,
         bassboost: bool | None = None,
         bassboost_level: int | None = None,
+        vocal_presence: bool | None = None,
     ) -> None:
         """Mantém overlays TTS e a sessão de voz durante a troca da música."""
         with self._lock:
@@ -293,6 +315,9 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             self._bass_filter = [[0.0] * 5 for _ in range(2)]
             self._bass_mix = 0.0
             self._bass_limiter_gain = 1.0
+            if vocal_presence is not None:
+                self._vocal_presence = vocal_presence
+            self._vocal_filter_state = None
             self._started_monotonic = time.monotonic()
             self.first_frame_ms = None
             self.first_frame_monotonic = None
@@ -487,6 +512,50 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
             for i in range(4)
         )
 
+    def _enhance_music_vocals(self, frame: bytes, *, fading_out: bool = False) -> bytes:
+        samples = array("h", frame)
+        state = self._vocal_filter_state
+        delay_1, delay_2 = state or (0.0, 0.0)
+        b0, b1, b2, a1, a2 = VOCAL_PRESENCE_EQ
+        amount, step = 1.0, 0.0
+        if fading_out:
+            step = -2.0 / len(samples)
+        elif state is None:
+            amount, step = 0.0, 2.0 / len(samples)
+        for index in range(0, len(samples), 2):
+            left, right = samples[index], samples[index + 1]
+            mid = (left + right) * 0.5
+            filtered = b0 * mid + delay_1
+            delay_1 = b1 * mid - a1 * filtered + delay_2
+            delay_2 = b2 * mid - a2 * filtered
+            correction = (filtered - mid) * amount
+            amount += step
+            # A mesma correção nos dois canais preserva a diferença L-R.
+            # Suavize só o acréscimo quando ele se aproxima do pico disponível.
+            peak = max(left, right) if correction >= 0 else -min(left, right)
+            headroom = max(0, VOCAL_PEAK_CEILING - peak)
+            linear = 0.75 * headroom
+            excess = abs(correction) - linear
+            if excess > 0:
+                space = headroom - linear
+                correction = math.copysign(linear + space * excess / (space + excess), correction)
+            delta = round(correction)
+            samples[index], samples[index + 1] = left + delta, right + delta
+        self._vocal_filter_state = None if fading_out else (delay_1, delay_2)
+        return samples.tobytes()
+
+    def _process_music_frame(self, frame: bytes, volume: float, *, has_audio: bool) -> bytes:
+        frame = self._smooth_music(frame, volume)
+        if not has_audio or self._music_gain == 0.0:
+            self._vocal_filter_state = None
+        if self.bassboost_level and self._vocal_filter_state is not None:
+            # Deixe o realce terminar neste quadro antes de aplicar o Bassboost.
+            return self._enhance_music_vocals(frame, fading_out=True)
+        if self._vocal_presence and not self.bassboost_level and self._bass_mix < 0.003:
+            self._bass_mix = 0.0
+            return self._enhance_music_vocals(frame) if has_audio and self._music_gain else frame
+        return self._enhance_music_bass(frame)
+
     def _enhance_music_bass(self, frame: bytes) -> bytes:
         """Reforça graves da música, limitando o acréscimo apenas perto dos picos.
 
@@ -613,15 +682,20 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                 if callback is not None:
                     with contextlib.suppress(Exception):
                         callback(read_error, self.audio_telemetry())
-            else:
-                with self._lock:
-                    # Um skip pode substituir a fonte enquanto read() aguarda
-                    # FFmpeg. Nunca envie um quadro atrasado da faixa anterior.
-                    if self.music_source is not music_source or self._closed:
-                        music_frame = b""
             if music_frame and len(music_frame) != PCM_FRAME_BYTES:
                 # Discord espera 20 ms de PCM; preencha apenas o quadro final.
                 music_frame = music_frame[:PCM_FRAME_BYTES].ljust(PCM_FRAME_BYTES, b"\x00")
+        base = PCM_SILENCE
+        music_has_audio = False
+        if music_frame:
+            with self._lock:
+                # Um skip ou efeito pode trocar a fonte enquanto FFmpeg lê.
+                if self.music_source is not music_source or self._closed:
+                    music_frame = b""
+                else:
+                    music_has_audio = bool(getattr(music_source, "last_read_had_audio", True))
+                    volume = self.normal_music_volume * (self.duck_factor if overlays else 1.0)
+                    base = self._process_music_frame(music_frame, volume, has_audio=music_has_audio)
         if not music_frame and not overlays:
             with self._lock:
                 # A decisão de encerrar precisa ser atômica com uma troca de
@@ -632,21 +706,14 @@ class AgentMixedAudioSource(discord.AudioSource, _AudioReadTelemetry):
                     return PCM_SILENCE
                 self.cleanup()
             return b""
-        music_volume = self.normal_music_volume * (self.duck_factor if overlays else 1.0)
-        music_has_audio = bool(music_frame and getattr(music_source, "last_read_had_audio", True))
         self.last_read_had_music = music_has_audio
         self.last_read_music_source = music_source if music_has_audio else None
         if music_frame and not overlays:
-            output = self._enhance_music_bass(self._smooth_music(music_frame, music_volume))
             if self._mix_gain < 0.999:
-                output = self._scale_frame(output, self._safe_mix_gain([(output, 1.0)]))
+                base = self._scale_frame(base, self._safe_mix_gain([(base, 1.0)]))
             else:
                 self._mix_gain = 1.0
-            return self._mark_first_frame(output) if music_has_audio else output
-        if music_frame:
-            base = self._enhance_music_bass(self._smooth_music(music_frame, music_volume))
-        else:
-            base = PCM_SILENCE
+            return self._mark_first_frame(base) if music_has_audio else base
         overlay_frames: list[tuple[bytes, float]] = []
         ended: list[dict[str, Any]] = []
         for overlay in overlays:
@@ -1037,12 +1104,13 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
 
     def replace_music_source(self, source: discord.AudioSource, *, volume: float,
                              on_music_end: Any, bassboost: bool | None = None,
-                             bassboost_level: int | None = None) -> None:
+                             bassboost_level: int | None = None,
+                             vocal_presence: bool | None = None) -> None:
         with self._lock:
             self._cancel_pending_music_handoff()
             super().replace_music_source(
                 source, volume=volume, on_music_end=on_music_end,
-                bassboost=bassboost, bassboost_level=bassboost_level,
+                bassboost=bassboost, bassboost_level=bassboost_level, vocal_presence=vocal_presence,
             )
             self._opus_generation += 1
             self._opus_latched = False
@@ -1098,6 +1166,8 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
                     self._latch_opus_pcm("volume_requires_pcm")
                 elif self.bassboost_level or self._bass_mix >= 0.003:
                     self._latch_opus_pcm("effects_require_pcm")
+                elif self._vocal_presence:
+                    self._latch_opus_pcm("vocal_presence_requires_pcm")
                 elif (not self.last_read_had_music or source is not self._opus_input_source
                       or self.last_read_music_source is not source):
                     self._latch_opus_pcm("synthetic_silence")
@@ -1199,6 +1269,7 @@ class AgentHybridOpusAudioSource(AgentMixedAudioSource):
             return {
                 "state": self._opus_mode,
                 "reason": self._opus_reason,
+                "vocal_presence": processed and self._vocal_filter_state is not None,
                 "eligible": copy,
                 "copy_active": copy,
                 "processed_active": processed,

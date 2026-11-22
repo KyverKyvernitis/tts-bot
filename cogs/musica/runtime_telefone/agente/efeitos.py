@@ -7,6 +7,19 @@ NIGHTCORE_STEP = 0.25
 SLOWED_STEP = 0.20
 SLOWED_REVERB_DECAYS = (0.27, 0.20, 0.14, 0.09)
 
+# Realce largo nos médios do centro estéreo. Referência de masterização:
+# https://www.izotope.com/community/blog/mastering-vocals
+VOCAL_PRESENCE_HZ = 2800
+VOCAL_PRESENCE_GAIN_DB = 1.8
+VOCAL_PRESENCE_Q = 0.85
+VOCAL_PRESENCE_FFMPEG = (
+    "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+    "pan=stereo|FL=0.5*FL+0.5*FR|FR=0.5*FL-0.5*FR,"
+    f"equalizer=f={VOCAL_PRESENCE_HZ}:t=q:w={VOCAL_PRESENCE_Q}:g={VOCAL_PRESENCE_GAIN_DB}:c=FL,"
+    "pan=stereo|FL=FL+FR|FR=FL-FR,"
+    "alimiter=limit=0.98:attack=5:release=70:level=0:latency=1"
+)
+
 
 def nivel_efeito(value: object, *, enabled: bool = False) -> int:
     """Normaliza nível 0..3 mantendo compatibilidade com flags booleanas antigas."""
