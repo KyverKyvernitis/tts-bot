@@ -21,7 +21,7 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "phone_worker_runtime/voice_state.py", "phone_worker_runtime/tts_policy.py", "phone_worker_runtime/tts_cache.py", "phone_worker_runtime/tts_android.py", "phone_worker_runtime/tts_providers.py", "phone_worker_runtime/pcm_io.py",
              "cogs/__init__.py", "cogs/musica/__init__.py",
              "phone_worker_runtime/native_tts.py",
-             "cogs/musica/runtime_telefone/agente/__init__.py",
+             "phone_worker_runtime/tts_piper.py",
              "cogs/musica/runtime_telefone/agente/configuracao.py",
              "cogs/musica/runtime_telefone/agente/ciclo_vida.py",
              "cogs/musica/runtime_telefone/agente/correspondencia.py",
@@ -99,7 +99,8 @@ def test_music_agent_release_list_covers_every_canonical_python_module(publisher
         for path in (ROOT / prefix).glob("*.py")
     }
     published = {name for name, _mode in publisher.PHONE_WORKER_FILES if name.startswith(prefix) and name.endswith(".py")}
-    assert published == canonical
+    # O pacote agente é um namespace no release; __init__ contém só docstring.
+    assert published == canonical - {prefix + "__init__.py"}
 
 
 def test_installation_files_stay_in_checkout_outside_runtime_release(publisher):
@@ -121,6 +122,8 @@ def test_complete_modular_release_is_accepted_by_original_bootstrap(publisher, t
     with zipfile.ZipFile(archive) as z:
         members = set(z.namelist())
         assert NEW_FILES <= members
+        assert "phone_worker_runtime/tts_piper.py" in members
+        assert "cogs/musica/runtime_telefone/agente/__init__.py" not in members
         assert "cogs/musica/runtime_telefone/termux/__init__.py" not in members
         assert members == {name for name, _ in publisher.PHONE_WORKER_FILES} | {"phone-worker-release.json"}
         assert len(z.infolist()) == len(publisher.PHONE_WORKER_FILES) + 1 <= bootstrap.DEFAULT_MAX_MEMBERS
@@ -164,6 +167,9 @@ assert worker._phone_worker_tts_cache_module().__file__.startswith(str(worker.Pa
 assert worker._phone_worker_tts_android_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._phone_worker_tts_providers_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._phone_worker_pcm_io_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
+assert worker._phone_worker_tts_piper_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
+import cogs.musica.runtime_telefone.agente as music_agent
+assert music_agent.__file__ is None
 assert worker._native_tts_bridge_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._PHONE_WORKER_MUSIC_BRIDGE_MODULES == {}
 music_streams = worker._phone_worker_music_bridge_module("streams")
@@ -213,6 +219,73 @@ for module in (archive_manifest, archive_ogg, archive_staging, archive_pipeline,
     assert resolver_result.returncode == 0, resolver_result.stdout + resolver_result.stderr
 
 
+def test_piper_http_task_works_from_extracted_release_with_rust_enabled(publisher, tmp_path, monkeypatch):
+    """O ZIP instalado precisa responder /task sem delegar Piper ao Rust."""
+    from http.server import ThreadingHTTPServer
+    from threading import Thread
+    from urllib.request import Request, urlopen
+    import base64
+    import wave
+
+    bootstrap = original_bootstrap()
+    latest = publisher._publish_phone_worker_release(publisher._build_worker_update_payload())
+    outer = bootstrap._validate_manifest(latest, "https://vps.invalid")
+    archive = publisher.AGENT_RELEASE_ROOT / "releases" / (outer["source_hash"] + ".zip")
+    staging = tmp_path / "release-installed"
+    bootstrap._extract_and_validate(archive, staging, outer)
+    assert not (staging / "cogs/musica/runtime_telefone/agente/__init__.py").exists()
+    assert (staging / "phone_worker_runtime/tts_piper.py").is_file()
+
+    cli = tmp_path / "piper"
+    cli.write_text('''#!/usr/bin/env python3
+import array, pathlib, sys
+args = sys.argv[1:]
+pathlib.Path(args[args.index("-f") + 1]).write_bytes(array.array("f", [0.15] * 2000).tobytes())
+''')
+    cli.chmod(0o755)
+    model = tmp_path / "pt_BR-faber-medium.onnx"
+    model.write_bytes(b"mock-model")
+    (tmp_path / (model.name + ".json")).write_text('{"audio":{"sample_rate":22050}}')
+    monkeypatch.setenv("PHONE_WORKER_PIPER_BIN", str(cli))
+    monkeypatch.setenv("PHONE_WORKER_PIPER_MODEL", str(model))
+    monkeypatch.setenv("PHONE_WORKER_PIPER_CONFIG", str(model) + ".json")
+    monkeypatch.setenv("PHONE_WORKER_PIPER_ENABLED", "true")
+    monkeypatch.setenv("PHONE_WORKER_PIPER_OUTPUT_FORMAT", "wav")
+    monkeypatch.setenv("TTS_NATIVE_WORKER", "1")
+    monkeypatch.setenv("PHONE_WORKER_RELEASE_DIR", str(staging))
+
+    worker = load("release_piper_worker", staging / "phone_worker.py")
+    assert worker._native_tts_enabled()
+    assert worker._phone_worker_source_hash() == outer["source_hash"]
+    assert worker._phone_worker_tts_piper_module().__file__.startswith(str(staging))
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), worker.WorkerHandler) as server:
+        server.worker_token = "test-token"
+        server.max_body_bytes = 1024 * 1024
+        server.max_output_bytes = 1024 * 1024
+        server.job_timeout = 15
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            payload = {"task": "tts_synthesize_piper", "text": "Teste Piper", "cache_mode": "bypass"}
+            request = Request(
+                f"http://127.0.0.1:{server.server_address[1]}/task",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=10) as response:
+                assert response.status == 200
+                answer = json.load(response)
+        finally:
+            server.shutdown()
+            thread.join(timeout=3)
+    assert answer["ok"] is True and answer["engine"] == "piper"
+    assert answer["audio_format"] == "wav" and answer["size"] > 44
+    audio = base64.b64decode(answer["data_b64"])
+    with wave.open(__import__("io").BytesIO(audio), "rb") as wav:
+        assert wav.getnframes() == 2000 and wav.getframerate() == 22050
+
+
 def test_teto_g2p_dependency_is_in_immutable_runtime_release(publisher, tmp_path):
     bootstrap = original_bootstrap()
     latest = publisher._publish_phone_worker_release(publisher._build_worker_update_payload())
@@ -247,7 +320,7 @@ assert not any(m.role == "epenthetic" for m in moras)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("module_file", ["config.py", "telemetry.py", "control_plane.py", "voice_state.py", "tts_policy.py", "tts_cache.py", "tts_android.py", "tts_providers.py", "pcm_io.py"])
+@pytest.mark.parametrize("module_file", ["config.py", "telemetry.py", "control_plane.py", "voice_state.py", "tts_policy.py", "tts_cache.py", "tts_android.py", "tts_piper.py", "tts_providers.py", "pcm_io.py"])
 def test_module_only_edit_changes_runtime_hash_and_immutable_release(publisher, tmp_path, monkeypatch, module_file):
     phone = source_copy(tmp_path, monkeypatch, publisher)
     worker = load("phone_source_hash_live", phone / "phone_worker.py")

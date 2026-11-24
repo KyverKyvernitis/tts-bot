@@ -8112,7 +8112,8 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker_bootstrap.py": ("worker", "phone_worker_bootstrap.py", 0o755),
     "cogs/__init__.py": ("worker", "cogs/__init__.py", 0o644),
     "cogs/musica/__init__.py": ("worker", "cogs/musica/__init__.py", 0o644),
-    "cogs/musica/runtime_telefone/agente/__init__.py": ("worker", "cogs/musica/runtime_telefone/agente/__init__.py", 0o644),
+    # agente/__init__.py é apenas docstring; no release vira namespace para
+    # reservar a 64ª entrada ZIP para o módulo tts_piper.py.
     "cogs/musica/runtime_telefone/agente/configuracao.py": ("worker", "cogs/musica/runtime_telefone/agente/configuracao.py", 0o644),
     "cogs/musica/runtime_telefone/agente/ciclo_vida.py": ("worker", "cogs/musica/runtime_telefone/agente/ciclo_vida.py", 0o644),
     "cogs/musica/runtime_telefone/agente/correspondencia.py": ("worker", "cogs/musica/runtime_telefone/agente/correspondencia.py", 0o644),

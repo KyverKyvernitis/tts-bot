@@ -37,6 +37,7 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("phone_worker_runtime/tts_policy.py", 0o644),
     ("phone_worker_runtime/tts_cache.py", 0o644),
     ("phone_worker_runtime/tts_android.py", 0o644),
+    ("phone_worker_runtime/tts_piper.py", 0o644),
     ("phone_worker_runtime/tts_providers.py", 0o644),
     ("phone_worker_runtime/native_tts.py", 0o644),
     ("phone_worker_runtime/pcm_io.py", 0o644),
@@ -45,9 +46,8 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("tts_transport.py", 0o644),
     ("cogs/__init__.py", 0o644),
     ("cogs/musica/__init__.py", 0o644),
-    # This documentation-only package uses a namespace on the installed worker,
-    # reserving its ZIP slot for the optional native bridge (64-member bootstrap).
-    ("cogs/musica/runtime_telefone/agente/__init__.py", 0o644),
+    # O pacote agente funciona como namespace: o __init__.py contém apenas
+    # docstring. Reservamos sua entrada para o Piper no bootstrap de 64 membros.
     ("cogs/musica/runtime_telefone/agente/configuracao.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/ciclo_vida.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/correspondencia.py", 0o644),
