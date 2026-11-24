@@ -12,7 +12,7 @@ from .componentes import (
 from .operacoes_painel import salvar_atualizacoes_modal_tts
 
 # O Phone Worker da implantação atual só disponibiliza este modelo validado.
-VOZES_PIPER = {"pt_BR-faber-medium": "Faber Medium (PT-BR)"}
+VOZES_PIPER = {"pt_BR-miro-high": "Voz masculina", "pt_BR-dii-medium": "Voz feminina"}
 VELOCIDADES = {"0.85", "1.0", "1.15"}
 TONS = {"-2", "0", "2"}
 
@@ -37,18 +37,20 @@ class ModalConfiguracaoPiper(discord.ui.Modal, title="Personalizar Piper"):
         self.target_user_name = target_user_name
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(getattr(panel_message, "guild", None), "id", 0) or 0)
-        self.voice_saved = str(valor_tts_atual(cog, guild_id, user_id, "piper_voice", "pt_BR-faber-medium", server=server) or "pt_BR-faber-medium")
+        self.voice_saved = str(valor_tts_atual(cog, guild_id, user_id, "piper_voice", "pt_BR-miro-high", server=server) or "pt_BR-miro-high")
+        if self.voice_saved not in VOZES_PIPER:
+            self.voice_saved = "pt_BR-miro-high"
         self.speed_saved = str(valor_tts_atual(cog, guild_id, user_id, "piper_speed", "1.0", server=server) or "1.0")
         self.pitch_saved = str(valor_tts_atual(cog, guild_id, user_id, "piper_pitch", "0", server=server) or "0")
         # Sem fallback textual: se a biblioteca Discord não suportar os
         # componentes guiados, o chamador informa que o modal está indisponível.
         if not rotulo_modal_disponivel():
             raise RuntimeError("Componentes de modal guiado indisponíveis")
-        voice = criar_seletor_modal("piper_voice", placeholder="Voz instalada no Termux", options=opcoes_com_valor_padrao([
+        voice = criar_seletor_modal("piper_voice", placeholder="Selecionar voz", options=opcoes_com_valor_padrao([
             discord.SelectOption(label=label, value=value)
             for value, label in VOZES_PIPER.items()
         ], self.voice_saved))
-        if not adicionar_item_rotulo_modal(self, "voice", text="Voz Piper", component=voice):
+        if not adicionar_item_rotulo_modal(self, "voice", text="Voz", component=voice):
             raise RuntimeError("Seletor de voz Piper indisponível")
         if not adicionar_radio_modal(self, "speed", text="Velocidade", description="", current=self.speed_saved if self.speed_saved in VELOCIDADES else "1.0", options=[
             ("Mais lenta", "0.85", "85%"), ("Normal", "1.0", "100%"),

@@ -6190,44 +6190,21 @@ class WorkerHandler(BaseHTTPRequestHandler):
         raise RuntimeError("piper não encontrado; configure PHONE_WORKER_PIPER_COMMAND ou instale o binário no worker turbo")
 
     def _resolve_piper_model(self, body: dict[str, Any]) -> tuple[str, str]:
-        model = str(body.get("model") or body.get("model_path") or os.getenv("PHONE_WORKER_PIPER_MODEL", "") or "").strip()
-        config = str(body.get("config") or body.get("config_path") or os.getenv("PHONE_WORKER_PIPER_CONFIG", "") or "").strip()
-        model_name = str(body.get("model_name") or os.getenv("PHONE_WORKER_PIPER_MODEL_NAME", "pt_BR-faber-medium") or "pt_BR-faber-medium").strip() or "pt_BR-faber-medium"
-        if model_name == "pt_BR-faber-medium" and not body.get("model") and not body.get("model_path"):
-            # O prefixo % deve usar exatamente a voz Faber que foi testada,
-            # mesmo se uma instalação turbo antiga configurar outra voz global.
-            candidate = Path.home() / "piper-termux-teste" / "voices" / "pt_BR-faber-medium.onnx"
-            if candidate.is_file():
-                model = str(candidate)
-                config = str(candidate) + ".json"
-            elif not model or Path(model).stem != "pt_BR-faber-medium":
-                raise RuntimeError("Faber Medium ausente no Termux; mantenha o modelo de teste ou configure a voz Faber")
-        if not model:
-            # Atalho opcional para manter vários modelos por nome sem mexer no bot.
-            env_key = re.sub(r"[^A-Z0-9]+", "_", model_name.upper()).strip("_")
-            if env_key:
-                model = str(os.getenv(f"PHONE_WORKER_PIPER_MODEL_{env_key}", "") or "").strip()
-                config = config or str(os.getenv(f"PHONE_WORKER_PIPER_CONFIG_{env_key}", "") or "").strip()
-        if not model and model_name == "pt_BR-faber-medium":
-            candidate = Path.home() / "piper-termux-teste" / "voices" / "pt_BR-faber-medium.onnx"
-            if candidate.is_file():
-                model = str(candidate)
-                config = config or str(candidate) + ".json"
-        if not model:
-            raise RuntimeError("Piper sem modelo; configure PHONE_WORKER_PIPER_MODEL ou mantenha a voz Faber no laboratório Termux")
-        model_path = Path(model).expanduser()
-        if not model_path.exists() or model_path.stat().st_size <= 0:
-            raise RuntimeError(f"modelo Piper não encontrado ou vazio: {model_path}")
-        if not config:
-            candidate = Path(str(model_path) + ".json")
-            if candidate.exists():
-                config = str(candidate)
-        if config:
-            config_path = Path(config).expanduser()
-            if not config_path.exists() or config_path.stat().st_size <= 0:
-                raise RuntimeError(f"config Piper não encontrado ou vazio: {config_path}")
-            config = str(config_path)
-        return str(model_path), config
+        # Names are identifiers, never arbitrary filesystem paths supplied by clients.
+        # The legacy Faber preference is migrated to Miro without loading Faber.
+        model_name = str(body.get("model_name") or "pt_BR-miro-high").strip()
+        if model_name == "pt_BR-faber-medium":
+            model_name = "pt_BR-miro-high"
+        if model_name not in {"pt_BR-miro-high", "pt_BR-dii-medium"}:
+            raise ValueError(f"voz Piper indisponível: {model_name[:80]}")
+        model_dir = Path.home() / "piper-termux-teste" / "voices"
+        model_path = model_dir / (model_name + ".onnx")
+        config_path = model_dir / (model_name + ".onnx.json")
+        if not model_path.is_file() or model_path.stat().st_size == 0:
+            raise RuntimeError(f"modelo Piper não instalado: {model_name}")
+        if not config_path.is_file() or config_path.stat().st_size == 0:
+            raise RuntimeError(f"configuração Piper não instalada: {model_name}")
+        return str(model_path), str(config_path)
 
     def _piper_cache_enabled(self, body: dict[str, Any]) -> bool:
         raw = body.get("cache_enabled", os.getenv("PHONE_WORKER_PIPER_CACHE_ENABLED", "true"))
@@ -6355,7 +6332,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or self.job_timeout))))
         max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
         model_path, config_path = self._resolve_piper_model(body)
-        model_name = str(body.get("model_name") or os.getenv("PHONE_WORKER_PIPER_MODEL_NAME", "pt_BR-faber-medium") or "pt_BR-faber-medium").strip() or "pt_BR-faber-medium"
+        model_name = str(body.get("model_name") or "pt_BR-miro-high").strip() or "pt_BR-faber-medium"
         cache_mode = str(body.get("cache_mode") or "prefer").strip().lower().replace("-", "_")
         cache_enabled = self._piper_cache_enabled(body)
         cache_only_modes = {"only", "cache_only", "hit", "hit_only", "read", "read_only"}

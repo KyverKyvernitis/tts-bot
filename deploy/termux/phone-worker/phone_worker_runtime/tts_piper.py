@@ -142,7 +142,7 @@ def _synthesize_cli_to_wav(text: str, model_path: str, config_path: str, destina
 # bring down the HTTP/control-plane process. The child retains the voice model
 # across all requests. The framing is private to the local stdin/stdout pipes.
 _FRAME_MAX = 8 * 1024 * 1024
-_RESIDENT = None
+_RESIDENTS = {}
 _RESIDENT_LOCK = threading.Lock()
 
 
@@ -280,47 +280,55 @@ class _PiperResident:
 
 
 def _resident_for(model: Path, config: Path, rate: int, deadline: float):
-    global _RESIDENT
+    # Two resident models, one synthesizer slot. Preloading both spends RAM,
+    # but does not multiply inference CPU per incoming message.
+    key = (str(model.resolve()), str(config.resolve()), rate)
     with _RESIDENT_LOCK:
-        if _RESIDENT is not None and (_RESIDENT.model != model or _RESIDENT.config != config or _RESIDENT.rate != rate):
-            _RESIDENT.stop()
-            _RESIDENT = None
-        if _RESIDENT is None:
-            _RESIDENT = _PiperResident(model, config, rate)
-        _RESIDENT.start(deadline)
-        return _RESIDENT
+        resident = _RESIDENTS.get(key)
+        if resident is None:
+            if len(_RESIDENTS) >= 2:
+                raise RuntimeError("limite de duas vozes residentes excedido")
+            resident = _PiperResident(model, config, rate)
+            _RESIDENTS[key] = resident
+        try:
+            resident.start(deadline)
+        except BaseException:
+            resident.stop()
+            _RESIDENTS.pop(key, None)
+            raise
+        return resident
 
 
 def stop_resident() -> None:
-    global _RESIDENT
     with _RESIDENT_LOCK:
-        if _RESIDENT is not None:
-            _RESIDENT.stop()
-            _RESIDENT = None
+        for resident in _RESIDENTS.values():
+            resident.stop()
+        _RESIDENTS.clear()
 
 
 atexit.register(stop_resident)
 
 
 def warmup() -> bool:
-    """Load the default model once, without synthesizing text or touching Discord."""
+    """Preload both selected PT-BR voices without synthesizing audio."""
     if not _enabled("PHONE_WORKER_PIPER_RESIDENT_ENABLED"):
         return False
-    model = Path(os.getenv("PHONE_WORKER_PIPER_MODEL", "") or
-                 str(Path.home() / "piper-termux-teste/voices/pt_BR-faber-medium.onnx")).expanduser()
-    config = Path(os.getenv("PHONE_WORKER_PIPER_CONFIG", "") or str(model) + ".json").expanduser()
-    try:
-        model, config, rate, _, _ = _validated(str(model), str(config), "teste", 30)
-        if not _SYNTH_SLOT.acquire(timeout=0.5):
-            return False
-        try:
-            _resident_for(model, config, rate, time.monotonic() + 30)
-            return True
-        finally:
-            _SYNTH_SLOT.release()
-    except Exception:
-        # Optional engine; keep the control plane up on a missing native ABI.
+    voice_dir = Path.home() / "piper-termux-teste" / "voices"
+    if not _SYNTH_SLOT.acquire(timeout=0.5):
         return False
+    try:
+        for voice in ("pt_BR-miro-high", "pt_BR-dii-medium"):
+            model = voice_dir / (voice + ".onnx")
+            config = voice_dir / (voice + ".onnx.json")
+            model, config, rate, _, _ = _validated(str(model), str(config), "teste", 30)
+            _resident_for(model, config, rate, time.monotonic() + 30)
+        return True
+    except Exception:
+        # Do not leave a partially preloaded voice set in memory.
+        stop_resident()
+        return False
+    finally:
+        _SYNTH_SLOT.release()
 
 
 def stream_pcm(text: str, model_path: str, config_path: str, *, timeout_seconds: float = 20.0,

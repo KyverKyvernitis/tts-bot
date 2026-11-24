@@ -802,32 +802,59 @@ PYPIPERDEB
 }
 
 ensure_turbo_piper_model_if_needed() {
-  # Preservar o modelo Faber instalado no teste isolado.
-  [[ -s "$HOME/piper-termux-teste/voices/pt_BR-faber-medium.onnx" ]] && return 0
-  is_turbo_profile || return 0
-  deps_install_enabled || return 0
+  # Dois modelos independentes. Downloads atômicos, sem remover o Faber antigo:
+  # ele fica fora do catálogo e pode ser apagado manualmente após validação.
   local auto_model="${PHONE_WORKER_PIPER_MODEL_AUTO_DOWNLOAD:-true}"
   auto_model="$(printf '%s' "$auto_model" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
   [[ "$auto_model" == "0" || "$auto_model" == "false" || "$auto_model" == "off" || "$auto_model" == "no" ]] && return 0
-  local model="${PHONE_WORKER_PIPER_MODEL:-$HOME/piper-models/pt_BR/edresson-low/pt_BR-edresson-low.onnx}"
-  local config="${PHONE_WORKER_PIPER_CONFIG:-${model}.json}"
-  local model_url="${PHONE_WORKER_PIPER_MODEL_URL:-https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/edresson/low/pt_BR-edresson-low.onnx?download=true}"
-  local config_url="${PHONE_WORKER_PIPER_CONFIG_URL:-https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/edresson/low/pt_BR-edresson-low.onnx.json?download=true}"
-  command -v wget >/dev/null 2>&1 || return 0
-  mkdir -p "$(dirname "$model")"
-  if [[ ! -s "$model" ]]; then
-    log "perfil turbo: baixando modelo Piper padrão"
-    wget -q -c -O "$model" "$model_url" || log "não consegui baixar modelo Piper padrão"
-  fi
-  if [[ ! -s "$config" ]]; then
-    log "perfil turbo: baixando config do modelo Piper padrão"
-    wget -q -c -O "$config" "$config_url" || log "não consegui baixar config Piper padrão"
-  fi
-  [[ -s "$model" ]] && upsert_env_value PHONE_WORKER_PIPER_MODEL "$model"
-  [[ -s "$config" ]] && upsert_env_value PHONE_WORKER_PIPER_CONFIG "$config"
-  if [[ -z "${PHONE_WORKER_PIPER_MODEL_NAME:-}" ]]; then
-    upsert_env_value PHONE_WORKER_PIPER_MODEL_NAME "pt_BR-edresson-low"
-  fi
+  deps_install_enabled || return 0
+  "$PYTHON_BIN" - <<'PYDUALPIPER' || log "modelos Piper: download/verificação incompleto (o Worker continua ativo)"
+import hashlib
+import json
+import os
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+base = Path.home() / "piper-termux-teste" / "voices"
+base.mkdir(parents=True, exist_ok=True)
+models = (
+    ("pt_BR-miro-high", "TarcisoAmorim/piper-pt_BR-miro-high", "model.onnx", "config.json", "77def2e016e81efee75de18d1d0689303792954bdaaa49d0097b20230628c2d6"),
+    ("pt_BR-dii-medium", "OpenVoiceOS/pipertts_pt-BR_dii", "dii_pt-BR.onnx", "dii_pt-BR.onnx.json", "fb15a447ba7482b922e1d2fefea71c1031f760e72be24cce7794e26fe11d086b"),
+)
+
+def verify(path, sha=None):
+    if not path.is_file() or path.stat().st_size < (1024 * 1024 if sha else 50):
+        return False
+    if sha:
+        digest = hashlib.sha256()
+        with path.open("rb") as src:
+            for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == sha
+    try:
+        data = json.loads(path.read_text())
+        return 8000 <= int(data["audio"]["sample_rate"]) <= 96000
+    except (ValueError, KeyError, TypeError, OSError):
+        return False
+
+for voice, repo, model_file, config_file, sha in models:
+    for remote, ext, expected in ((model_file, ".onnx", sha), (config_file, ".onnx.json", None)):
+        dest = base / (voice + ext)
+        if verify(dest, expected):
+            continue
+        url = f"https://huggingface.co/{repo}/resolve/main/{remote}"
+        temporary = dest.with_suffix(dest.suffix + ".part")
+        try:
+            with urlopen(Request(url, headers={"User-Agent": "Osaka-Piper-Worker/1.0"}), timeout=45) as res, temporary.open("wb") as out:
+                while data := res.read(1024 * 1024):
+                    out.write(data)
+            if not verify(temporary, expected):
+                raise RuntimeError(f"arquivo inválido: {voice}{ext}")
+            os.replace(temporary, dest)
+            print(f"[phone-worker-piper] modelo verificado: {voice}{ext}", flush=True)
+        finally:
+            temporary.unlink(missing_ok=True)
+PYDUALPIPER
 }
 
 ensure_turbo_piper_wrapper_if_needed() {

@@ -33,6 +33,16 @@ def _model(tmp_path: Path) -> Path:
     return model
 
 
+def _stage_current_voices(tmp_path, monkeypatch, model):
+    import shutil
+    directory = tmp_path / "piper-termux-teste" / "voices"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ("pt_BR-miro-high", "pt_BR-dii-medium"):
+        shutil.copyfile(model, directory / (name + ".onnx"))
+        shutil.copyfile(Path(str(model) + ".json"), directory / (name + ".onnx.json"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
 def test_termux_piper_binary_generates_valid_wave(tmp_path, monkeypatch):
     import importlib.util
     path = Path(__file__).parents[1] / "deploy/termux/phone-worker/phone_worker_runtime/tts_piper.py"
@@ -56,6 +66,12 @@ def test_piper_task_runs_in_python_with_native_rust_enabled(tts, tmp_path, monke
     # The native Rust worker deliberately does not synthesize Piper.
     _fake_cli(tmp_path)
     model = _model(tmp_path)
+    import shutil
+    voices = tmp_path / "piper-termux-teste" / "voices"
+    voices.mkdir(parents=True)
+    shutil.copyfile(model, voices / "pt_BR-miro-high.onnx")
+    shutil.copyfile(Path(str(model) + ".json"), voices / "pt_BR-miro-high.onnx.json")
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PHONE_WORKER_PIPER_BIN", str(tmp_path / "piper"))
     monkeypatch.setenv("PHONE_WORKER_PIPER_MODEL", str(model))
     monkeypatch.setenv("PHONE_WORKER_PIPER_CONFIG", str(model) + ".json")
@@ -169,7 +185,7 @@ def test_piper_resident_recovers_after_stream_disconnect(tmp_path, monkeypatch):
         rate, pcm = next(source)
         assert rate == 22050 and len(pcm) == 4000
         source.close()
-        assert module._RESIDENT.proc is None
+        assert all(resident.proc is None for resident in module._RESIDENTS.values())
         dest = tmp_path / "after.wav"
         module.synthesize_to_wav("nova frase", str(model), str(model) + ".json", dest)
         assert dest.stat().st_size > 44
@@ -191,6 +207,7 @@ def test_piper_worker_progressive_http_with_native_rust_enabled(tmp_path, monkey
     library, counter = _fake_native_library(tmp_path)
     model = _model(tmp_path)
     _fake_cli(tmp_path)
+    _stage_current_voices(tmp_path, monkeypatch, model)
     monkeypatch.setenv("PHONE_WORKER_PIPER_LIB", str(library))
     monkeypatch.setenv("PIPER_TEST_LOADS_FILE", str(counter))
     monkeypatch.setenv("PHONE_WORKER_PIPER_BIN", str(tmp_path / "piper"))
@@ -242,6 +259,7 @@ def test_piper_http_delivers_first_audio_before_native_finishes(tmp_path, monkey
     library, counter = _fake_native_library(tmp_path)
     model = _model(tmp_path)
     _fake_cli(tmp_path)
+    _stage_current_voices(tmp_path, monkeypatch, model)
     monkeypatch.setenv("PHONE_WORKER_PIPER_LIB", str(library))
     monkeypatch.setenv("PHONE_WORKER_PIPER_BIN", str(tmp_path / "piper"))
     monkeypatch.setenv("PHONE_WORKER_PIPER_MODEL", str(model))
@@ -365,6 +383,7 @@ def test_vps_piper_worker_http_client_receives_valid_progressive_wav(tmp_path, m
 
     library, _ = _fake_native_library(tmp_path)
     model = _model(tmp_path)
+    _stage_current_voices(tmp_path, monkeypatch, model)
     monkeypatch.setenv("PHONE_WORKER_PIPER_LIB", str(library))
     monkeypatch.setenv("PHONE_WORKER_PIPER_BIN", str(_fake_cli(tmp_path)))
     monkeypatch.setenv("PHONE_WORKER_PIPER_MODEL", str(model))
@@ -451,3 +470,35 @@ def test_vps_piper_worker_http_client_receives_valid_progressive_wav(tmp_path, m
             server.shutdown()
             thread.join(timeout=3)
             phone._phone_worker_tts_piper_module().stop_resident()
+
+
+def test_piper_two_resident_voices_and_reuse(tmp_path, monkeypatch):
+    """The two models stay loaded and switching does not recreate either process."""
+    library, counter = _fake_native_library(tmp_path)
+    model = _model(tmp_path)
+    _stage_current_voices(tmp_path, monkeypatch, model)
+    monkeypatch.setenv("PHONE_WORKER_PIPER_LIB", str(library))
+    monkeypatch.setenv("PIPER_TEST_LOADS_FILE", str(counter))
+    monkeypatch.setenv("PHONE_WORKER_PIPER_BIN", str(_fake_cli(tmp_path)))
+    monkeypatch.setenv("PHONE_WORKER_PIPER_RESIDENT_ENABLED", "true")
+    module = _resident_module()
+    voices = tmp_path / "piper-termux-teste" / "voices"
+    try:
+        assert module.warmup()
+        assert len(module._RESIDENTS) == 2
+        assert counter.read_text() == "LL"
+        for name in ("pt_BR-miro-high", "pt_BR-dii-medium", "pt_BR-miro-high"):
+            dest = tmp_path / (name + ".wav")
+            module.synthesize_to_wav("Olá", str(voices / (name + ".onnx")),
+                                     str(voices / (name + ".onnx.json")), dest)
+            assert dest.stat().st_size > 44
+        assert counter.read_text() == "LL"
+    finally:
+        module.stop_resident()
+
+
+def test_piper_modal_has_only_two_voices():
+    source = (Path(__file__).parents[1] / "cogs/tts/interface/modal_piper.py").read_text()
+    assert '"pt_BR-miro-high": "Voz masculina"' in source
+    assert '"pt_BR-dii-medium": "Voz feminina"' in source
+    assert 'VOZES_PIPER = {"pt_BR-faber-medium"' not in source

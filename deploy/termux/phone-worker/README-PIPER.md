@@ -1,33 +1,16 @@
-# Piper local: fase 1
+# Piper: duas vozes residentes no Termux
 
-O campo de prefixo legado `atts_prefix` (padrão `%`) seleciona `piper`.
-A síntese utiliza um novo processo CLI por mensagem e retorna WAV PCM 16-bit.
-Não existem streaming de áudio e modelo residente nesta etapa.
+Os modelos são baixados pelo `start-phone-worker.sh` durante a manutenção,
+quando `PHONE_WORKER_PIPER_MODEL_AUTO_DOWNLOAD` não estiver desativado.
+Os arquivos ficam em `~/piper-termux-teste/voices`.
 
-### Pré-requisitos no telefone
+- `pt_BR-miro-high.onnx` e `.onnx.json`: Voz masculina (Miro High)
+- `pt_BR-dii-medium.onnx` e `.onnx.json`: Voz feminina (Dii Medium OpenVoiceOS)
 
-Manter a instalação de laboratório confirmada:
-- `~/piper-termux-teste/voices/pt_BR-faber-medium.onnx`
-- `~/piper-termux-teste/voices/pt_BR-faber-medium.onnx.json`
-- `~/piper-termux-teste/pkg/` com o binário ARM64 e as bibliotecas
-- `espeak-ng-data` no Termux
+`PHONE_WORKER_PIPER_RESIDENT_ENABLED=true` mantém ambos carregados, com
+no máximo uma síntese simultânea. Na falta da biblioteca residente, o caminho
+CLI continua disponível. O modelo Faber antigo não é mais utilizado.
+O download não apaga arquivos antigos, para permitir rollback manual.
 
-Opcionalmente, se preferir locais diferentes, configure `~/.phone-worker.env`:
-```sh
-PHONE_WORKER_PIPER_ENABLED=true
-PHONE_WORKER_PIPER_MODEL=$HOME/piper-termux-teste/voices/pt_BR-faber-medium.onnx
-PHONE_WORKER_PIPER_CONFIG=$HOME/piper-termux-teste/voices/pt_BR-faber-medium.onnx.json
-# PHONE_WORKER_PIPER_BIN=/caminho/absoluto/para/piper
-PHONE_WORKER_PIPER_OUTPUT_FORMAT=wav
-```
-
-A VPS usa `TTS_PIPER_MODEL_NAME=pt_BR-faber-medium`,
-`TTS_PIPER_WORKER_TIMEOUT_SECONDS=20`.
-
-A rota `/task` `tts_synthesize_piper` é processada pelo Python do Phone Worker
-mesmo quando `TTS_NATIVE_WORKER=1`. O Rust continua nos outros motores.
-O caminho Piper não substitui a voz por gTTS se falhar, para que seja
-possível identificar problemas de instalação.
-
-Rollback: restaurar os arquivos anteriores do patch e reiniciar bot e worker.
-Modelos locais permanecem intactos.
+Licenças dos modelos: Miro High CC BY-NC-SA 4.0 e Dii CC BY-NC-ND 4.0.
+Consulte as condições de uso antes de distribuir o serviço comercialmente.

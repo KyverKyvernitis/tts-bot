@@ -1260,9 +1260,11 @@ class SettingsDB:
             # A política Rust ainda desconhece os campos específicos do Piper.
             # Mesclá-los aqui mantém o mesmo resultado com backend Python/Rust.
             resolved = dict(resolved or {})
-            for key, default in (("piper_voice", "pt_BR-faber-medium"),
+            for key, default in (("piper_voice", "pt_BR-miro-high"),
                                  ("piper_speed", "1.0"), ("piper_pitch", "0")):
                 resolved[key] = str(user.get(key) or guild.get(key) or default)
+                if key == "piper_voice" and resolved[key] not in {"pt_BR-miro-high", "pt_BR-dii-medium"}:
+                    resolved[key] = "pt_BR-miro-high"
             self._resolved_tts_cache[cache_key] = dict(resolved)
             return resolved
 
@@ -1285,7 +1287,7 @@ class SettingsDB:
             "android_language": pick("android_language", "pt-BR"),
             "android_rate": pick("android_rate", "1.0"),
             "android_pitch": pick("android_pitch", "1.0"),
-            "piper_voice": pick("piper_voice", "pt_BR-faber-medium"),
+            "piper_voice": pick("piper_voice", "pt_BR-miro-high") if pick("piper_voice", "pt_BR-miro-high") in {"pt_BR-miro-high", "pt_BR-dii-medium"} else "pt_BR-miro-high",
             "piper_speed": pick("piper_speed", "1.0"),
             "piper_pitch": pick("piper_pitch", "0"),
             "teto_pitch_semitones": pick(

@@ -246,6 +246,12 @@ pathlib.Path(args[args.index("-f") + 1]).write_bytes(array.array("f", [0.15] * 2
     model = tmp_path / "pt_BR-faber-medium.onnx"
     model.write_bytes(b"mock-model")
     (tmp_path / (model.name + ".json")).write_text('{"audio":{"sample_rate":22050}}')
+    voices = tmp_path / "piper-termux-teste" / "voices"
+    voices.mkdir(parents=True)
+    for name in ("pt_BR-miro-high", "pt_BR-dii-medium"):
+        shutil.copyfile(model, voices / (name + ".onnx"))
+        shutil.copyfile(Path(str(model) + ".json"), voices / (name + ".onnx.json"))
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PHONE_WORKER_PIPER_BIN", str(cli))
     monkeypatch.setenv("PHONE_WORKER_PIPER_MODEL", str(model))
     monkeypatch.setenv("PHONE_WORKER_PIPER_CONFIG", str(model) + ".json")
