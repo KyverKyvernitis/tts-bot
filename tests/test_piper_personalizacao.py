@@ -64,3 +64,14 @@ def test_cache_por_preferencias_e_roteamento():
     assert "'pitch_semitones': str(getattr(job.item, 'piper_pitch'" in stream
     assert 'audio_settings=settings' in worker
     assert 'stream_pcm_customized(' in worker
+
+
+def test_modal_piper_sem_campos_personalizados_ou_descricoes_redundantes():
+    source = (ROOT / 'cogs/tts/interface/modal_piper.py').read_text()
+    assert '"custom"' not in source
+    assert 'Valores personalizados' not in source
+    assert 'criar_entrada_texto_modal' not in source
+    assert 'description="Controla' not in source
+    assert 'description="Ajuste' not in source
+    assert '"1.0"' in source and '"0"' in source
+    assert 'speed not in VELOCIDADES or pitch not in TONS' in source

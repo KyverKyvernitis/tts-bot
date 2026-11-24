@@ -5,7 +5,7 @@ import math
 import discord
 
 from .componentes import (
-    adicionar_item_rotulo_modal, adicionar_radio_modal, criar_entrada_texto_modal,
+    adicionar_item_rotulo_modal, adicionar_radio_modal,
     criar_seletor_modal, opcoes_com_valor_padrao, rotulo_modal_disponivel,
     valor_tts_atual, valor_unico_componente,
 )
@@ -45,24 +45,21 @@ class ModalConfiguracaoPiper(discord.ui.Modal, title="Personalizar Piper"):
         if not rotulo_modal_disponivel():
             raise RuntimeError("Componentes de modal guiado indisponíveis")
         voice = criar_seletor_modal("piper_voice", placeholder="Voz instalada no Termux", options=opcoes_com_valor_padrao([
-            discord.SelectOption(label=label, value=value, description="Modelo neural local")
+            discord.SelectOption(label=label, value=value)
             for value, label in VOZES_PIPER.items()
         ], self.voice_saved))
         if not adicionar_item_rotulo_modal(self, "voice", text="Voz Piper", component=voice):
             raise RuntimeError("Seletor de voz Piper indisponível")
-        if not adicionar_radio_modal(self, "speed", text="Velocidade", description="Controla a duração da fala.", current=self.speed_saved if self.speed_saved in VELOCIDADES else "custom", options=[
+        if not adicionar_radio_modal(self, "speed", text="Velocidade", description="", current=self.speed_saved if self.speed_saved in VELOCIDADES else "1.0", options=[
             ("Mais lenta", "0.85", "85%"), ("Normal", "1.0", "100%"),
-            ("Mais rápida", "1.15", "115%"), ("Personalizada", "custom", "Valor abaixo"),
+            ("Mais rápida", "1.15", "115%"),
         ]):
             raise RuntimeError("Controle de velocidade Piper indisponível")
-        if not adicionar_radio_modal(self, "pitch", text="Tom da voz", description="Ajuste em semitons.", current=self.pitch_saved if self.pitch_saved in TONS else "custom", options=[
+        if not adicionar_radio_modal(self, "pitch", text="Tom da voz", description="", current=self.pitch_saved if self.pitch_saved in TONS else "0", options=[
             ("Mais grave", "-2", "-2 semitons"), ("Normal", "0", "Sem ajuste"),
-            ("Mais agudo", "2", "+2 semitons"), ("Personalizado", "custom", "Valor abaixo"),
+            ("Mais agudo", "2", "+2 semitons"),
         ]):
             raise RuntimeError("Controle de tom Piper indisponível")
-        custom = criar_entrada_texto_modal(label=None, placeholder="Velocidade / tom, ex.: 1.0 / 0", current=f"{self.speed_saved} / {self.pitch_saved}", max_length=32, required=False)
-        if not adicionar_item_rotulo_modal(self, "custom", text="Valores personalizados", description="Velocidade 0.7–1.5 / tom -4 a +4", component=custom):
-            raise RuntimeError("Entrada personalizada Piper indisponível")
 
     async def on_submit(self, interaction: discord.Interaction):
         voice = valor_unico_componente(self.voice, self.voice_saved)
@@ -71,17 +68,11 @@ class ModalConfiguracaoPiper(discord.ui.Modal, title="Personalizar Piper"):
             return
         speed = valor_unico_componente(self.speed, self.speed_saved)
         pitch = valor_unico_componente(self.pitch, self.pitch_saved)
-        raw = valor_unico_componente(self.custom, f"{self.speed_saved} / {self.pitch_saved}")
-        custom_parts = raw.split("/", 1)
-        if speed == "custom":
-            speed = custom_parts[0].strip()
-        if pitch == "custom":
-            pitch = custom_parts[1].strip() if len(custom_parts) == 2 else ""
+        if speed not in VELOCIDADES or pitch not in TONS:
+            await interaction.response.send_message("Seleção Piper inválida.", ephemeral=True)
+            return
         speed = _numero(speed, 0.7, 1.5)
         pitch = _numero(pitch, -4, 4)
-        if speed is None or pitch is None:
-            await interaction.response.send_message("Valores inválidos. Velocidade: 0,7 a 1,5. Tom: -4 a +4 semitons.", ephemeral=True)
-            return
         updates = {}
         if voice != self.voice_saved:
             updates["piper_voice"] = voice
