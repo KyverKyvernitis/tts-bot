@@ -197,10 +197,10 @@ TTS_PIPER_EXPERIMENT_ENABLED = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLE
 TTS_PIPER_EXPERIMENT_GUILD_ID = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", 0) or 0)
 TTS_PIPER_EXPERIMENT_PREFIX = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "%") or "%").strip() or "%"
 TTS_PIPER_EXPERIMENT_ENGINE = str(getattr(config, "TTS_PIPER_EXPERIMENT_ENGINE", "android_native") or "android_native").strip().lower().replace("-", "_") or "android_native"
-TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 20.0) or 20.0))
+TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 35.0) or 35.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_PIPER_MAX_TEXT_LENGTH", 600) or 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_PIPER_MAX_AUDIO_MB", 8) or 8))
-TTS_PIPER_MODEL_NAME = str(getattr(config, "TTS_PIPER_MODEL_NAME", "pt_BR-miro-high") or "pt_BR-miro-high").strip() or "pt_BR-miro-high"
+TTS_PIPER_MODEL_NAME = str(getattr(config, "TTS_PIPER_MODEL_NAME", "pt_BR-dii-medium") or "pt_BR-dii-medium").strip() or "pt_BR-dii-medium"
 TTS_PIPER_VPS_CACHE_SIZE = max(32, int(getattr(config, "TTS_PIPER_VPS_CACHE_SIZE", 2048) or 2048))
 TTS_PIPER_VPS_CACHE_MAX_MB = max(64, int(getattr(config, "TTS_PIPER_VPS_CACHE_MAX_MB", 2048) or 2048))
 TTS_PIPER_VPS_CACHE_MAX_BYTES = TTS_PIPER_VPS_CACHE_MAX_MB * 1024 * 1024
@@ -1014,6 +1014,13 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 for segment in (getattr(item, "ttv_segments", None) or [])
             )
         timeout = TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + speech_seconds
+        if item is not None and engine == "piper":
+            try:
+                piper_speed = float(getattr(item, "piper_speed", "1.0"))
+                if math.isfinite(piper_speed) and 0.1 <= piper_speed < 1.0:
+                    timeout = max(timeout, TTS_PLAYBACK_TIMEOUT_BASE_SECONDS + speech_seconds / piper_speed)
+            except (ValueError, TypeError):
+                pass
         if item is not None and engine in TTS_EFFECT_ENGINES:
             night, slow, reverb = normalizar_efeitos_tts(
                 item.advanced_nightcore_level, item.advanced_slowed_level, item.advanced_reverb_level,
@@ -8089,7 +8096,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         return any(marker in message for marker in (
             "ffmpeg", "opus not loaded", "opus library", "encoder not found",
             "decoder not found", "invalid data found when processing input",
-            "no such file or directory",
+            "no such file or directory", "playback timeout", "stream_incomplete",
         ))
 
     def _is_music_active_for_guild(self, guild_id: int) -> bool:
@@ -8266,6 +8273,16 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 )
             except Exception as exc:
                 last_error = exc
+                if (item.engine == "piper" and not self._is_voice_disconnected_error(exc)):
+                    # FIFO/decoder/stream do Piper podem falhar ou expirar sem
+                    # afetar a sessão Discord. Preservar a call e descartar
+                    # somente esta fala; um reset causa sai/entra no canal.
+                    logger.warning(
+                        "[tts_piper] falha de áudio sem reset da call | guild=%s request=%s tipo=%s erro=%s",
+                        guild.id, item.request_id, type(exc).__name__,
+                        _tts_safe_exception_detail(exc),
+                    )
+                    raise
                 if self._is_tts_audio_source_error(exc) and not self._is_voice_disconnected_error(exc):
                     # Arquivo, codec, EOF e falha lógica do roteador são
                     # problemas da fala; reconectar só repetiria a mesma falha.

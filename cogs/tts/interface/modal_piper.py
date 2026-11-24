@@ -13,8 +13,8 @@ from .operacoes_painel import salvar_atualizacoes_modal_tts
 
 # O Phone Worker da implantação atual só disponibiliza este modelo validado.
 VOZES_PIPER = {"pt_BR-miro-high": "Voz masculina", "pt_BR-dii-medium": "Voz feminina"}
-VELOCIDADES = {"0.85", "1.0", "1.15"}
-TONS = {"-2", "0", "2"}
+VELOCIDADES = {"0.5", "0.75", "1.0", "1.25", "1.5"}
+TONS = {"-4", "-2", "0", "2", "4"}
 
 
 def _numero(raw: object, minimum: float, maximum: float) -> str | None:
@@ -37,9 +37,9 @@ class ModalConfiguracaoPiper(discord.ui.Modal, title="Personalizar Piper"):
         self.target_user_name = target_user_name
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(getattr(panel_message, "guild", None), "id", 0) or 0)
-        self.voice_saved = str(valor_tts_atual(cog, guild_id, user_id, "piper_voice", "pt_BR-miro-high", server=server) or "pt_BR-miro-high")
+        self.voice_saved = str(valor_tts_atual(cog, guild_id, user_id, "piper_voice", "pt_BR-dii-medium", server=server) or "pt_BR-dii-medium")
         if self.voice_saved not in VOZES_PIPER:
-            self.voice_saved = "pt_BR-miro-high"
+            self.voice_saved = "pt_BR-dii-medium"
         self.speed_saved = str(valor_tts_atual(cog, guild_id, user_id, "piper_speed", "1.0", server=server) or "1.0")
         self.pitch_saved = str(valor_tts_atual(cog, guild_id, user_id, "piper_pitch", "0", server=server) or "0")
         # Sem fallback textual: se a biblioteca Discord não suportar os
@@ -53,13 +53,15 @@ class ModalConfiguracaoPiper(discord.ui.Modal, title="Personalizar Piper"):
         if not adicionar_item_rotulo_modal(self, "voice", text="Voz", component=voice):
             raise RuntimeError("Seletor de voz Piper indisponível")
         if not adicionar_radio_modal(self, "speed", text="Velocidade", description="", current=self.speed_saved if self.speed_saved in VELOCIDADES else "1.0", options=[
-            ("Mais lenta", "0.85", "85%"), ("Normal", "1.0", "100%"),
-            ("Mais rápida", "1.15", "115%"),
+            ("Bem mais lenta", "0.5", ""), ("Mais lenta", "0.75", ""),
+            ("Normal", "1.0", ""), ("Mais rápida", "1.25", ""),
+            ("Bem mais rápida", "1.5", ""),
         ]):
             raise RuntimeError("Controle de velocidade Piper indisponível")
         if not adicionar_radio_modal(self, "pitch", text="Tom da voz", description="", current=self.pitch_saved if self.pitch_saved in TONS else "0", options=[
-            ("Mais grave", "-2", "-2 semitons"), ("Normal", "0", "Sem ajuste"),
-            ("Mais agudo", "2", "+2 semitons"),
+            ("Bem mais grave", "-4", ""), ("Mais grave", "-2", ""),
+            ("Normal", "0", ""), ("Mais agudo", "2", ""),
+            ("Bem mais agudo", "4", ""),
         ]):
             raise RuntimeError("Controle de tom Piper indisponível")
 

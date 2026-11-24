@@ -277,10 +277,10 @@ TTS_PIPER_EXPERIMENT_ENABLED = TTS_ATTS_ENABLED
 TTS_PIPER_EXPERIMENT_GUILD_ID = _parse_int(os.getenv("TTS_PIPER_EXPERIMENT_GUILD_ID", "0"), 0)
 TTS_PIPER_EXPERIMENT_PREFIX = TTS_ATTS_PREFIX
 TTS_PIPER_EXPERIMENT_ENGINE = "piper"
-TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_PIPER_WORKER_TIMEOUT_SECONDS", "20.0"), 20.0))
+TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_PIPER_WORKER_TIMEOUT_SECONDS", "35.0"), 35.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, _parse_int(os.getenv("TTS_PIPER_MAX_TEXT_LENGTH", "600"), 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_PIPER_MAX_AUDIO_MB", "8"), 8))
-TTS_PIPER_MODEL_NAME = (os.getenv("TTS_PIPER_MODEL_NAME", "pt_BR-miro-high") or "pt_BR-miro-high").strip() or "pt_BR-miro-high"
+TTS_PIPER_MODEL_NAME = (os.getenv("TTS_PIPER_MODEL_NAME", "pt_BR-dii-medium") or "pt_BR-dii-medium").strip() or "pt_BR-dii-medium"
 TTS_PIPER_VPS_CACHE_SIZE = max(32, _parse_int(os.getenv("TTS_PIPER_VPS_CACHE_SIZE", "2048"), 2048))
 TTS_PIPER_VPS_CACHE_MAX_MB = max(64, _parse_int(os.getenv("TTS_PIPER_VPS_CACHE_MAX_MB", "2048"), 2048))
 

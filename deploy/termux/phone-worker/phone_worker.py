@@ -6192,9 +6192,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def _resolve_piper_model(self, body: dict[str, Any]) -> tuple[str, str]:
         # Names are identifiers, never arbitrary filesystem paths supplied by clients.
         # The legacy Faber preference is migrated to Miro without loading Faber.
-        model_name = str(body.get("model_name") or "pt_BR-miro-high").strip()
+        model_name = str(body.get("model_name") or "pt_BR-dii-medium").strip()
         if model_name == "pt_BR-faber-medium":
-            model_name = "pt_BR-miro-high"
+            model_name = "pt_BR-dii-medium"
         if model_name not in {"pt_BR-miro-high", "pt_BR-dii-medium"}:
             raise ValueError(f"voz Piper indisponível: {model_name[:80]}")
         model_dir = Path.home() / "piper-termux-teste" / "voices"
@@ -6332,7 +6332,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or self.job_timeout))))
         max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
         model_path, config_path = self._resolve_piper_model(body)
-        model_name = str(body.get("model_name") or "pt_BR-miro-high").strip() or "pt_BR-faber-medium"
+        model_name = str(body.get("model_name") or "pt_BR-dii-medium").strip() or "pt_BR-dii-medium"
         cache_mode = str(body.get("cache_mode") or "prefer").strip().lower().replace("-", "_")
         cache_enabled = self._piper_cache_enabled(body)
         cache_only_modes = {"only", "cache_only", "hit", "hit_only", "read", "read_only"}

@@ -288,7 +288,7 @@ async def preparar_payload_tts_mensagem(
         piper_fallback_language=fallback_language,
         piper_fallback_rate=fallback_rate,
         piper_fallback_pitch=fallback_pitch,
-        piper_model=str(resolved.get("piper_voice") if resolved.get("piper_voice") in {"pt_BR-miro-high", "pt_BR-dii-medium"} else "pt_BR-miro-high"),
+        piper_model=str(resolved.get("piper_voice") if resolved.get("piper_voice") in {"pt_BR-miro-high", "pt_BR-dii-medium"} else "pt_BR-dii-medium"),
         piper_speed=str(resolved.get("piper_speed") or "1.0"),
         piper_pitch=str(resolved.get("piper_pitch") or "0"),
     )

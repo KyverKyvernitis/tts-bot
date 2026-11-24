@@ -69,8 +69,9 @@ def test_piper_task_runs_in_python_with_native_rust_enabled(tts, tmp_path, monke
     import shutil
     voices = tmp_path / "piper-termux-teste" / "voices"
     voices.mkdir(parents=True)
-    shutil.copyfile(model, voices / "pt_BR-miro-high.onnx")
-    shutil.copyfile(Path(str(model) + ".json"), voices / "pt_BR-miro-high.onnx.json")
+    for name in ("pt_BR-miro-high", "pt_BR-dii-medium"):
+        shutil.copyfile(model, voices / f"{name}.onnx")
+        shutil.copyfile(Path(str(model) + ".json"), voices / f"{name}.onnx.json")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PHONE_WORKER_PIPER_BIN", str(tmp_path / "piper"))
     monkeypatch.setenv("PHONE_WORKER_PIPER_MODEL", str(model))
