@@ -4924,6 +4924,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 _error(self, HTTPStatus.BAD_GATEWAY, f"TTS nativo: {_short_text(exc, limit=180)}")
             return
+        if path == "/piper/synthesize.stream":
+            if not self._require_auth():
+                return
+            body = self._read_json()
+            if body is None:
+                return
+            self._serve_piper_stream(body)
+            return
         if path == "/local/pair":
             if not self._require_local_client():
                 return
@@ -6474,6 +6482,67 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "worker_total_ms": round(synth_ms, 2),
         }
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
+
+    def _serve_piper_stream(self, body: dict[str, Any]) -> None:
+        """Authenticated progressive WAV. No fallback after HTTP headers."""
+        import itertools
+        import struct
+        source = None
+        headers_sent = False
+        try:
+            self._ensure_tts_piper_turbo_allowed()
+            text = str(body.get("text") or "").strip()
+            if not 1 <= len(text) <= 1600:
+                raise ValueError("texto Piper vazio ou muito longo")
+            timeout = max(2.0, min(float(self.job_timeout), float(body.get("timeout_seconds") or self.job_timeout)))
+            limit = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
+            model, config = self._resolve_piper_model(body)
+            source = _phone_worker_tts_piper_module().stream_pcm(
+                text, model, config, timeout_seconds=timeout, max_audio_bytes=limit - 44,
+            )
+            # Force native admission before announcing HTTP 200. The first
+            # network chunk includes the WAV header and actual audio samples.
+            sample_rate, first = next(source)
+            if not 8000 <= sample_rate <= 96000 or not first:
+                raise RuntimeError("Piper não retornou PCM inicial")
+            # Indefinite RIFF length for a non-seekable stream. Completion is
+            # signalled by the terminating HTTP chunk, never by fake padding.
+            wav_header = struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 0xFFFFFFFF,
+                b"WAVE", b"fmt ", 16, 1, 1, sample_rate,
+                sample_rate * 2, 2, 16, b"data", 0xFFFFFFFF)
+            self.protocol_version = "HTTP/1.1"
+            self.close_connection = True
+            self.connection.settimeout(min(10.0, timeout))
+            self.send_response(200)
+            for key, value in {
+                "Content-Type": "audio/wav", "Transfer-Encoding": "chunked",
+                "Connection": "close", "Cache-Control": "no-store",
+                "X-Core-Worker-Stream-Protocol": "2", "X-Core-Worker-Audio-Format": "wav",
+                "X-Core-Worker-Engine": "piper", "X-Core-Worker-Cache-Hit": "false",
+            }.items():
+                self.send_header(key, value)
+            self.end_headers()
+            headers_sent = True
+            total = 0
+            for rate, pcm in itertools.chain(((sample_rate, wav_header + first),), source):
+                if rate != sample_rate or total + len(pcm) > limit:
+                    raise RuntimeError("Piper excedeu o limite de áudio")
+                total += len(pcm)
+                self.wfile.write(f"{len(pcm):x}\r\n".encode("ascii") + pcm + b"\r\n")
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
+        except Exception as exc:
+            self.close_connection = True
+            if not headers_sent:
+                _error(self, HTTPStatus.BAD_GATEWAY, f"Piper stream: {type(exc).__name__}: {_short_text(exc, limit=180)}")
+            else:
+                print(f"[phone-worker-piper] stream interrompido: {type(exc).__name__}: {_short_text(exc, limit=180)}", flush=True)
+        finally:
+            if source is not None:
+                source.close()
 
     def _task_tts_synthesize_piper(self, body: dict[str, Any]) -> dict[str, Any]:
         # A rota /task continua no Python quando o TTS Rust estiver ativo.
@@ -9031,6 +9100,14 @@ def main() -> int:
     _write_runtime_status(control_plane_alive=True, heartbeat_ok=None, reason=_DIRECT_HTTP_STATE)
     print(f"[phone-worker] control plane ativo; token_http={'sim' if args.token else 'não'}; versão={PHONE_WORKER_VERSION}; http_state={_DIRECT_HTTP_STATE}; http_port={_EFFECTIVE_HTTP_PORT}", flush=True)
     if server is not None:
+        if _env_bool("PHONE_WORKER_PIPER_ENABLED", True) and _env_bool("PHONE_WORKER_PIPER_RESIDENT_ENABLED", True):
+            def _warm_piper():
+                try:
+                    ready = _phone_worker_tts_piper_module().warmup()
+                    print(f"[phone-worker-piper] modelo residente: {'pronto' if ready else 'indisponível; CLI preservada'}", flush=True)
+                except Exception as exc:
+                    print(f"[phone-worker-piper] warmup: {_short_text(exc, limit=120)}", flush=True)
+            threading.Thread(target=_warm_piper, daemon=True, name="piper-warmup").start()
         server.serve_forever()
     else:
         # Sem endpoint direto o processo principal permanece vivo; heartbeat/jobs

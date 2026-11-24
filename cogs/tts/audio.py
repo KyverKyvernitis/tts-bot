@@ -7470,6 +7470,23 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 # verified complete-file route remains a safe fallback.
                 item._cd_force_full_file = True
                 logger.info('[cd_pcm] prefix failed before playback type=%s', type(error).__name__)
+        if (item.engine == "piper" and allow_edge_stream
+                and str(os.getenv("TTS_PIPER_STREAMING_ENABLED", "true")).strip().lower() not in {"0", "no", "false", "off"}
+                and os.name == "posix" and callable(getattr(os, "mkfifo", None))):
+            # Streaming is optional and falls back to the existing complete WAV
+            # path if the resident model or worker endpoint is unavailable.
+            if self._phone_worker_tts_base_url() and not self._is_music_active_for_guild(item.guild_id):
+                cached = self._try_get_cached_path(state, item)
+                if cached:
+                    return cached, False
+                try:
+                    handle = await self._prepare_shared_stream(state, item, store_in_cache=True)
+                    return handle.fifo_path, True
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("[tts_piper_stream] streaming indisponível; usando WAV completo | guild=%s erro=%s",
+                                   item.guild_id, _tts_safe_exception_detail(exc))
         normalized_text = self._get_item_normalized_cache_text(item)
         text_length = len(normalized_text)
         if self._tts_agent_route_available():
@@ -8115,6 +8132,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
 
     async def _tts_local_complete_file_after_stream_failure(self, item: QueueItem) -> str:
         """Recover an inaudible FIFO failure without reusing the consumed FIFO."""
+        if str(item.engine or "").lower() == "piper":
+            # Preserve the user's engine selection when a progressive Piper FIFO
+            # fails before playback. The existing worker file task can use the
+            # resident process or its CLI fallback; never silently switch to gTTS.
+            return await self._generate_piper_worker_file(item)
         foreground = True
         if str(item.engine or "").lower() == "edge" and bool(getattr(self, "_edge_sources_enabled", lambda: False)()):
             # The abandoned FIFO belongs to its old producer. A different IP

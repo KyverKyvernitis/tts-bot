@@ -7,6 +7,7 @@ import copy
 import json
 import math
 import os
+import struct
 import time
 from dataclasses import replace
 
@@ -270,8 +271,55 @@ class SharedSynthesisMixin:
                     waiter.add_done_callback(return_grant)
                     waiter.cancel()
 
+    async def _produce_piper_stream_job(self, job: StreamJob) -> None:
+        """Piper is phone-only; never attempt VPS or substitute another engine."""
+        from . import audio as a
+        semaphore = getattr(self, "_piper_stream_slots", None)
+        if semaphore is None:
+            semaphore = self._piper_stream_slots = asyncio.Semaphore(1)
+        started = time.monotonic()
+        acquired = False
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=a.TTS_PIPER_WORKER_TIMEOUT_SECONDS)
+            acquired = True
+            job.slot_wait_ms = (time.monotonic() - started) * 1000
+            job.deadline = time.monotonic() + a.TTS_PIPER_WORKER_TIMEOUT_SECONDS
+            job.slot_ready.set()
+            job.route = "worker"
+            await self._produce_worker_stream_job(job)
+            if job.buffer.size <= 44:
+                raise RuntimeError("Piper retornou WAV vazio")
+            await job.buffer.finish()
+            duration = (time.monotonic() - job.started_at) * 1000.0
+            self._record_engine_success("piper", duration, route="worker")
+            self._record_route_engine_result("piper", "worker", duration)
+            metrics = self._get_metrics_store()
+            metrics["piper_stream_completed"] = int(metrics.get("piper_stream_completed", 0)) + 1
+            metrics["piper_stream_audio_bytes"] = int(metrics.get("piper_stream_audio_bytes", 0)) + job.buffer.size
+            if job.store_in_cache:
+                job.cache_task = self._schedule_tts_background(self._materialize_shared_job(job, cache=True))
+                for handle in self._get_edge_stream_handles().values():
+                    if handle.shared_job is job:
+                        handle.cache_task = job.cache_task
+        except asyncio.CancelledError as error:
+            job.stop.set()
+            await job.buffer.finish(error)
+            raise
+        except Exception as error:
+            job.stop.set()
+            await job.buffer.finish(error)
+            metrics = self._get_metrics_store()
+            metrics["piper_stream_failures"] = int(metrics.get("piper_stream_failures", 0)) + 1
+            self._record_engine_failure("piper", error, duration_ms=(time.monotonic() - started) * 1000, item=job.item, route="worker")
+        finally:
+            job.slot_ready.set()
+            if acquired:
+                semaphore.release()
+
     async def _produce_shared_job(self, job: StreamJob) -> None:
         from . import audio as a
+        if job.item.engine == "piper":
+            return await self._produce_piper_stream_job(job)
         vps_only = enabled_for(job.item.guild_id, "route") or job.segmented_cache_key is not None
         forced_phone = not vps_only and bool(getattr(job.item, '_edge_phone_recovery', False))
         forced_vps = vps_only or bool(getattr(job.item, '_edge_vps_recovery', False) or getattr(job.item, '_edge_vps_probe', False))
@@ -470,13 +518,24 @@ class SharedSynthesisMixin:
     async def _materialize_shared_job(self, job: StreamJob, *, cache: bool) -> str:
         if job.path and os.path.isfile(job.path):
             return job.path
-        path = self._make_runtime_temp_file(suffix='.mp3')
+        path = self._make_runtime_temp_file(suffix='.wav' if job.item.engine == 'piper' else '.mp3')
         try:
             await job.buffer.copy_to(path)
+            if job.item.engine == 'piper':
+                size = os.path.getsize(path)
+                if size <= 44 or size >= 0xFFFFFFFF:
+                    raise RuntimeError('WAV progressivo Piper inválido')
+                with open(path, 'r+b') as audio:
+                    if audio.read(4) != b'RIFF':
+                        raise RuntimeError('cabeçalho Piper inválido')
+                    audio.seek(4)
+                    audio.write(struct.pack('<I', size - 8))
+                    audio.seek(40)
+                    audio.write(struct.pack('<I', size - 44))
             if cache:
                 item = replace(job.item, engine=job.actual_engine, _cache_key_value=job.segmented_cache_key, _dedup_signature=None)
                 path = await self._store_in_cache(self._get_state(item.guild_id), item, path)
-                if job.segmented_cache_key is None and not enabled_for(item.guild_id, "route"):
+                if job.item.engine != 'piper' and job.segmented_cache_key is None and not enabled_for(item.guild_id, "route"):
                     self._schedule_worker_turbo_cache_store(item, path)
             job.path = path
             for handle in self._get_edge_stream_handles().values():
@@ -551,7 +610,9 @@ class SharedSynthesisMixin:
             edge = item.engine == 'edge'
             prebuffer, profile = self._edge_prebuffer_ms(item) if edge else (0, '')
             minimum = max(1024, prebuffer * 6) if edge else 1
-            timeout = a.TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS if edge else a.TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS
+            timeout = (a.TTS_PIPER_WORKER_TIMEOUT_SECONDS if item.engine == 'piper'
+                       else a.TTS_EDGE_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS if edge
+                       else a.TTS_GTTS_STREAM_FIRST_AUDIO_TIMEOUT_SECONDS)
             if edge and getattr(item, '_edge_phone_recovery', False):
                 timeout = min(timeout, a.TTS_EDGE_PHONE_FIRST_AUDIO_TIMEOUT_SECONDS)
             # Só a fila entre ReplayBuffer e FIFO tem um consumidor.
@@ -636,11 +697,21 @@ class SharedSynthesisMixin:
     async def _produce_worker_stream_job(self, job):
         from . import audio as a
         base = self._phone_worker_tts_base_url()
-        payload = self._tts_agent_payload_for_item(job.item)
-        payload['preferred_engine'] = job.item.engine
-        headers = {'Authorization': f'Bearer {a.PHONE_WORKER_TOKEN}', 'Accept': 'audio/mpeg'}
-        timeout = a.aiohttp.ClientTimeout(total=min(a.TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS, max(.001, job.deadline - time.monotonic())),
-                                         sock_connect=min(4, a.TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS))
+        piper = job.item.engine == 'piper'
+        if piper:
+            payload = {
+                'text': job.item.text,
+                'model_name': str(getattr(job.item, 'piper_model', '') or a.TTS_PIPER_MODEL_NAME),
+                'timeout_seconds': max(2.0, job.deadline - time.monotonic()),
+                'max_audio_bytes': job.buffer.max_bytes,
+            }
+        else:
+            payload = self._tts_agent_payload_for_item(job.item)
+            payload['preferred_engine'] = job.item.engine
+        headers = {'Authorization': f'Bearer {a.PHONE_WORKER_TOKEN}', 'Accept': 'audio/wav' if piper else 'audio/mpeg'}
+        duration = a.TTS_PIPER_WORKER_TIMEOUT_SECONDS if piper else a.TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS
+        timeout = a.aiohttp.ClientTimeout(total=min(duration, max(.001, job.deadline - time.monotonic())),
+                                         sock_connect=min(4, duration))
         session = await self._get_phone_worker_http_session()
         started = time.monotonic()
         metrics = self._get_metrics_store()
@@ -649,7 +720,7 @@ class SharedSynthesisMixin:
         if job.item.engine == 'edge':
             job.item._edge_worker_attempted = True
         try:
-            async with session.post(f'{base}/tts-agent/synthesize.stream', headers=headers, json=payload, timeout=timeout) as response:
+            async with session.post(f'{base}/piper/synthesize.stream' if piper else f'{base}/tts-agent/synthesize.stream', headers=headers, json=payload, timeout=timeout) as response:
                 if response.status != 200:
                     if response.status in {404, 405}:
                         self._tts_agent_route_state()['stream_protocol'] = 0
@@ -658,7 +729,7 @@ class SharedSynthesisMixin:
                 if response.headers.get('X-Core-Worker-Stream-Protocol') != '2':
                     raise RuntimeError('worker não confirmou protocolo progressivo')
                 engine = self._worker_header_value(response.headers, 'X-Core-Worker-Engine')
-                if engine != job.item.engine or self._worker_header_value(response.headers, 'X-Core-Worker-Audio-Format') != 'mp3':
+                if engine != job.item.engine or self._worker_header_value(response.headers, 'X-Core-Worker-Audio-Format') != ('wav' if piper else 'mp3'):
                     raise RuntimeError('metadados incompatíveis no stream do worker')
                 job.actual_engine = engine
                 job.item._tts_worker_cache_hit = self._worker_header_value(response.headers, 'X-Core-Worker-Cache-Hit') == 'true'
@@ -669,7 +740,7 @@ class SharedSynthesisMixin:
                     raise RuntimeError('worker stream vazio')
                 self._record_tts_agent_synth_success(total_ms=(time.monotonic() - started) * 1000,
                     data={'requested_engine': job.item.engine, 'selected_engine': engine,
-                          'audio_format': 'mp3', 'audio_bytes_len': job.buffer.size,
+                          'audio_format': 'wav' if piper else 'mp3', 'audio_bytes_len': job.buffer.size,
                           'cache_hit': job.item._tts_worker_cache_hit,
                           'worker_id': self._worker_header_value(response.headers, 'X-Core-Worker-Id'),
                           'worker_version': self._worker_header_value(response.headers, 'X-Core-Worker-Version')})
