@@ -610,6 +610,8 @@ class QueueItem:
     piper_fallback_rate: str = field(default="+0%", repr=False, compare=False)
     piper_fallback_pitch: str = field(default="+0Hz", repr=False, compare=False)
     piper_model: str = field(default="", repr=False, compare=False)
+    piper_speed: str = field(default="1.0", repr=False, compare=False)
+    piper_pitch: str = field(default="0", repr=False, compare=False)
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex, repr=False, compare=False)
     message_id: int = field(default=0, repr=False, compare=False)
     text_channel_id: int = field(default=0, repr=False, compare=False)
@@ -4260,7 +4262,7 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
             payload = f"edge|{voice}|{self._normalize_edge_rate(item.rate)}|{self._normalize_edge_pitch(item.pitch)}|{text}"
         elif engine == "piper":
             model = str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME).strip() or TTS_PIPER_MODEL_NAME
-            payload = f"piper|worker|{model}|{text}"
+            payload = f"piper|worker|{model}|{item.piper_speed}|{item.piper_pitch}|{text}"
         elif engine == "teto":
             preferences = _ttv_item_preferences(item)
             voice_state = worker_voice_details(self._tts_agent_route_state(), preferences["ttv_voice_id"])
@@ -6215,6 +6217,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         payload = {
             "text": text,
             "model_name": str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME),
+            "speed": str(getattr(item, "piper_speed", "1.0")),
+            "pitch_semitones": str(getattr(item, "piper_pitch", "0")),
             "timeout_seconds": max(1.0, TTS_PIPER_WORKER_TIMEOUT_SECONDS - 0.5),
         }
         data = await self._request_phone_worker_tts_audio(

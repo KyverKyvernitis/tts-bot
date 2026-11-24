@@ -458,3 +458,62 @@ if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] == "--resident"
         except Exception:
             pass
         raise SystemExit(1)
+
+
+def normalize_audio_settings(speed="1.0", pitch_semitones="0") -> tuple[float, float]:
+    """Validate speech controls before cache lookup and audio processing."""
+    speed = float(str(speed).replace(",", "."))
+    pitch = float(str(pitch_semitones).replace(",", "."))
+    if not math.isfinite(speed) or not 0.7 <= speed <= 1.5:
+        raise ValueError("Velocidade Piper fora do intervalo 0.7..1.5")
+    if not math.isfinite(pitch) or not -4 <= pitch <= 4:
+        raise ValueError("Tom Piper fora do intervalo -4..4 semitons")
+    return speed, pitch
+
+
+def apply_audio_settings(wav_path: Path, speed="1.0", pitch_semitones="0") -> None:
+    """Apply independent speed and pitch using installed FFmpeg, in place."""
+    speed, pitch = normalize_audio_settings(speed, pitch_semitones)
+    if abs(speed - 1.0) < 0.0001 and abs(pitch) < 0.0001:
+        return
+    import shutil
+    import subprocess
+    import wave
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("FFmpeg necessário para personalizar a voz Piper")
+    with wave.open(str(wav_path), "rb") as source:
+        rate = source.getframerate()
+    ratio = 2 ** (pitch / 12)
+    filt = f"asetrate={rate * ratio:.6f},aresample={rate},atempo={speed / ratio:.6f}"
+    output = wav_path.with_name(wav_path.stem + '-adjusted.wav')
+    try:
+        result = subprocess.run([
+            ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(wav_path), "-af", filt, "-ac", "1", "-ar", str(rate),
+            "-c:a", "pcm_s16le", str(output),
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20, check=False)
+        if result.returncode or not output.is_file() or output.stat().st_size < 44:
+            raise RuntimeError("FFmpeg Piper: " + result.stderr.decode("utf-8", "replace")[-250:])
+        output.replace(wav_path)
+    finally:
+        output.unlink(missing_ok=True)
+
+
+def stream_pcm_customized(text: str, model_path: str, config_path: str, *, speed="1.0", pitch_semitones="0", timeout_seconds=20.0, max_audio_bytes=8*1024*1024):
+    """Finite PCM chunks for personalized audio; pre-processing requires a complete WAV."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="piper-custom-stream-") as folder:
+        path = Path(folder) / "speech.wav"
+        synthesize_to_wav(text, model_path, config_path, path, timeout_seconds=timeout_seconds)
+        apply_audio_settings(path, speed, pitch_semitones)
+        if path.stat().st_size > max_audio_bytes:
+            raise RuntimeError("Piper excedeu limite de áudio")
+        import wave
+        with wave.open(str(path), "rb") as wav:
+            rate = wav.getframerate()
+            while True:
+                data = wav.readframes(16384)
+                if not data:
+                    break
+                yield rate, data

@@ -17,6 +17,7 @@ from ..utils.embed import human_language_name, human_voice_name
 from .controles_paineis import BotaoLancadorPublicoTTS
 from .modais_simples import ModalApelidoFalado
 from .modais_vozes_online import ModalConfiguracaoEdge, ModalConfiguracaoGTTS, ModalConfiguracaoTeto
+from .modal_piper import ModalConfiguracaoPiper
 from .operacoes_painel import DESCRICAO_LANCADOR_TTS, enviar_modal_configuracao_com_fallback
 from .visoes_layout import VisaoLayoutBaseTTS
 
@@ -36,6 +37,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         classe_modal_edge: Type[discord.ui.Modal] = ModalConfiguracaoEdge,
         classe_modal_gtts: Type[discord.ui.Modal] = ModalConfiguracaoGTTS,
         classe_modal_teto: Type[discord.ui.Modal] = ModalConfiguracaoTeto,
+        classe_modal_piper: Type[discord.ui.Modal] = ModalConfiguracaoPiper,
         classe_modal_apelido: Type[discord.ui.Modal] = ModalApelidoFalado,
         enviar_modal_fallback: EnviadorModalFallback = enviar_modal_configuracao_com_fallback,
         descricao_lancador: str = DESCRICAO_LANCADOR_TTS,
@@ -55,6 +57,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         self._classe_modal_edge = classe_modal_edge
         self._classe_modal_gtts = classe_modal_gtts
         self._classe_modal_teto = classe_modal_teto
+        self._classe_modal_piper = classe_modal_piper
         self._classe_modal_apelido = classe_modal_apelido
         self._enviar_modal_fallback = enviar_modal_fallback
         self._descricao_lancador = str(descricao_lancador)
@@ -227,6 +230,19 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         idioma = human_language_name(self._user_settings.get("language"))
         return f"Idioma: {self._codigo(idioma)}"
 
+    def _resumo_piper(self) -> str:
+        try:
+            speed = float(self._user_settings.get("piper_speed") or "1.0")
+            pitch = float(self._user_settings.get("piper_pitch") or "0")
+        except (TypeError, ValueError):
+            return ""
+        parts = []
+        if speed != 1.0:
+            parts.append(f"Velocidade: {self._codigo(f'{float(speed) * 100:g}%')}")
+        if pitch != 0.0:
+            parts.append(f"Tom: {self._codigo(f'{float(pitch):+g}st')}")
+        return " · ".join(parts)
+
     def _texto_motor(self, *, motor: str) -> str:
         if motor == "edge":
             prefixo = self._configuracao_servidor("edge_prefix", ",")
@@ -235,6 +251,10 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                 f"Voz mais personalizável (é mais lenta) · Prefixo {self._codigo(prefixo)}",
             ]
             resumo = self._resumo_edge()
+        elif motor == "piper":
+            prefixo = self._configuracao_servidor("atts_prefix", "%")
+            linhas = ["**Piper**", f"Voz neural local · Prefixo {self._codigo(prefixo)}"]
+            resumo = self._resumo_piper()
         elif motor == "teto":
             prefixo = self._configuracao_servidor("teto_prefix", "'")
             linhas = [
@@ -269,12 +289,15 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         if self.painel_componentes_v2():
             botao_edge = self._criar_botao(acao="edge", rotulo="Configurar")
             botao_gtts = self._criar_botao(acao="gtts", rotulo="Configurar")
+            botao_piper = self._criar_botao(acao="piper", rotulo="Configurar")
             container = discord.ui.Container(
                 discord.ui.TextDisplay(self._texto_introducao()),
                 self._separador(),
                 discord.ui.Section(discord.ui.TextDisplay(self._texto_motor(motor="edge")), accessory=botao_edge),
                 self._separador(),
                 discord.ui.Section(discord.ui.TextDisplay(self._texto_motor(motor="gtts")), accessory=botao_gtts),
+                self._separador(),
+                discord.ui.Section(discord.ui.TextDisplay(self._texto_motor(motor="piper")), accessory=botao_piper),
             )
             if apelido_ativo:
                 botao_apelido = self._criar_botao(acao="spoken_name", rotulo="Alterar")
@@ -295,6 +318,7 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
 
         self.add_item(self._criar_botao(acao="edge", rotulo="Configurar Edge"))
         self.add_item(self._criar_botao(acao="gtts", rotulo="Configurar gTTS"))
+        self.add_item(self._criar_botao(acao="piper", rotulo="Configurar Piper"))
         if apelido_ativo:
             self.add_item(self._criar_botao(acao="spoken_name", rotulo="Alterar apelido"))
         if self._teto_disponivel():
@@ -349,6 +373,18 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
                 ),
                 context="public-gtts",
             )
+            return
+
+        if acao == "piper":
+            try:
+                await interaction.response.send_modal(self._classe_modal_piper(
+                    self.cog, mensagem_painel, server=False,
+                    target_user_id=id_alvo, target_user_name=nome_alvo,
+                ))
+            except Exception as erro:
+                print(f"[tts_modal] Piper inteligente indisponível: {erro!r}")
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("Não consegui abrir as configurações do Piper agora.", ephemeral=True)
             return
 
         if acao == "teto":
@@ -438,10 +474,11 @@ class VisaoLancadorPublicoTTS(VisaoLayoutBaseTTS):
         await interaction.response.send_message(
             embed=self.cog._make_embed(
                 "Ajuda do TTS",
-                "Edge, gTTS e TTV (TextToVocaloid) são modos de voz. O prefixo é só o símbolo digitado antes da frase.\n\n"
+                "Edge, gTTS, Piper e TTV (TextToVocaloid) são modos de voz. O prefixo é só o símbolo digitado antes da frase.\n\n"
                 "Exemplos:\n"
                 "• `,bom dia` usa Edge.\n"
                 "• `.bom dia` usa gTTS.\n"
+                "• `%bom dia` usa Piper.\n"
                 "• `'bom dia` usa a vocaloid escolhida no TTV. A leitura precisa estar disponível.",
                 ok=True,
             ),

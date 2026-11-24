@@ -726,6 +726,9 @@ class SettingsDB:
             "android_language": str(tts.get("android_language", "") or ""),
             "android_rate": str(tts.get("android_rate", "") or ""),
             "android_pitch": str(tts.get("android_pitch", "") or ""),
+            "piper_voice": str(tts.get("piper_voice", "") or ""),
+            "piper_speed": str(tts.get("piper_speed", "") or ""),
+            "piper_pitch": str(tts.get("piper_pitch", "") or ""),
             "ttv_voice_id": str(tts.get("ttv_voice_id", "") or ""),
             "ttv_language": str(tts.get("ttv_language", "") or ""),
             "ttv_pitch_semitones": str(tts.get("ttv_pitch_semitones", "") if tts.get("ttv_pitch_semitones") is not None else ""),
@@ -761,6 +764,9 @@ class SettingsDB:
         android_language: Optional[str] = None,
         android_rate: Optional[str] = None,
         android_pitch: Optional[str] = None,
+        piper_voice: Optional[str] = None,
+        piper_speed: Optional[str] = None,
+        piper_pitch: Optional[str] = None,
         bot_prefix: Optional[str] = None,
         tts_prefix: Optional[str] = None,
         atts_prefix: Optional[str] = None,
@@ -796,6 +802,12 @@ class SettingsDB:
             tts["android_rate"] = android_rate
         if android_pitch is not None:
             tts["android_pitch"] = android_pitch
+        if piper_voice is not None:
+            tts["piper_voice"] = piper_voice
+        if piper_speed is not None:
+            tts["piper_speed"] = piper_speed
+        if piper_pitch is not None:
+            tts["piper_pitch"] = piper_pitch
         if bot_prefix is not None:
             doc["bot_prefix"] = str(bot_prefix or "_")[:8]
         if tts_prefix is not None:
@@ -1022,6 +1034,9 @@ class SettingsDB:
             "android_language": str(tts.get("android_language", "") or ""),
             "android_rate": str(tts.get("android_rate", "") or ""),
             "android_pitch": str(tts.get("android_pitch", "") or ""),
+            "piper_voice": str(tts.get("piper_voice", "") or ""),
+            "piper_speed": str(tts.get("piper_speed", "") or ""),
+            "piper_pitch": str(tts.get("piper_pitch", "") or ""),
             "teto_pitch_semitones": str(
                 tts.get("teto_pitch_semitones", "") if tts.get("teto_pitch_semitones") is not None else ""
             ),
@@ -1081,6 +1096,9 @@ class SettingsDB:
         android_language: Optional[str] = None,
         android_rate: Optional[str] = None,
         android_pitch: Optional[str] = None,
+        piper_voice: Optional[str] = None,
+        piper_speed: Optional[str] = None,
+        piper_pitch: Optional[str] = None,
         teto_pitch_semitones: Optional[str] = None,
         ttv_voice_id: Optional[str] = None,
         ttv_melody_id: Optional[str] = None,
@@ -1150,6 +1168,12 @@ class SettingsDB:
                 tts["android_rate"] = android_rate
             if android_pitch is not None:
                 tts["android_pitch"] = android_pitch
+            if piper_voice is not None:
+                tts["piper_voice"] = piper_voice
+            if piper_speed is not None:
+                tts["piper_speed"] = piper_speed
+            if piper_pitch is not None:
+                tts["piper_pitch"] = piper_pitch
             tts.update(ttv_updates)
 
             if advanced_nightcore_level is not None:
@@ -1233,6 +1257,12 @@ class SettingsDB:
             default_pitch=getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0),
         )
         if native:
+            # A política Rust ainda desconhece os campos específicos do Piper.
+            # Mesclá-los aqui mantém o mesmo resultado com backend Python/Rust.
+            resolved = dict(resolved or {})
+            for key, default in (("piper_voice", "pt_BR-faber-medium"),
+                                 ("piper_speed", "1.0"), ("piper_pitch", "0")):
+                resolved[key] = str(user.get(key) or guild.get(key) or default)
             self._resolved_tts_cache[cache_key] = dict(resolved)
             return resolved
 
@@ -1255,6 +1285,9 @@ class SettingsDB:
             "android_language": pick("android_language", "pt-BR"),
             "android_rate": pick("android_rate", "1.0"),
             "android_pitch": pick("android_pitch", "1.0"),
+            "piper_voice": pick("piper_voice", "pt_BR-faber-medium"),
+            "piper_speed": pick("piper_speed", "1.0"),
+            "piper_pitch": pick("piper_pitch", "0"),
             "teto_pitch_semitones": pick(
                 "teto_pitch_semitones",
                 str(getattr(config, "TTS_TETO_DEFAULT_PITCH_SEMITONES", 0.0)),

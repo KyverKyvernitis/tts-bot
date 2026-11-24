@@ -6253,7 +6253,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def _normalize_piper_cache_text(self, text: str) -> str:
         return " ".join(str(text or "").strip().split()).lower()
 
-    def _piper_cache_key(self, *, text: str, model_path: str, config_path: str, model_name: str, audio_format_hint: str) -> str:
+    def _piper_cache_key(self, *, text: str, model_path: str, config_path: str, model_name: str, audio_format_hint: str, audio_settings: tuple[float, float] = (1.0, 0.0)) -> str:
         model = Path(model_path)
         try:
             stat = model.stat()
@@ -6262,7 +6262,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             model_sig = str(model_path)
         bitrate = str(os.getenv("PHONE_WORKER_PIPER_MP3_BITRATE", "96k") or "96k")
         payload = "|".join([
-            "piper-worker-cache-v2",
+            "piper-worker-cache-v3",
+            f"speed={audio_settings[0]:.3f}|pitch={audio_settings[1]:.3f}",
             PHONE_WORKER_VERSION,
             str(model_name or "turbo-default"),
             model_sig,
@@ -6364,7 +6365,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             f"engine=piper chars={len(text)} timeout={timeout}s modelo={model_name} cache_mode={cache_mode}",
         ]
         started = time.monotonic()
-        cache_key = self._piper_cache_key(text=text, model_path=model_path, config_path=config_path, model_name=model_name, audio_format_hint="auto")
+        settings = _phone_worker_tts_piper_module().normalize_audio_settings(body.get("speed", "1.0"), body.get("pitch_semitones", "0"))
+        cache_key = self._piper_cache_key(text=text, model_path=model_path, config_path=config_path, model_name=model_name, audio_format_hint="auto", audio_settings=settings)
         logs.append(f"cache key Piper {cache_key[:16]}")
         if cache_enabled and cache_mode in cache_lookup_modes:
             cached_path, cached_format = self._find_piper_cache_file(cache_key)
@@ -6404,6 +6406,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             _phone_worker_tts_piper_module().synthesize_to_wav(
                 text, model_path, config_path, wav_path, timeout_seconds=timeout,
             )
+            _phone_worker_tts_piper_module().apply_audio_settings(wav_path, *settings)
             piper_ms = (time.monotonic() - piper_started) * 1000.0
             logs.append(f"piper wav {wav_path.stat().st_size} B em {piper_ms:.1f} ms")
 
@@ -6497,9 +6500,20 @@ class WorkerHandler(BaseHTTPRequestHandler):
             timeout = max(2.0, min(float(self.job_timeout), float(body.get("timeout_seconds") or self.job_timeout)))
             limit = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
             model, config = self._resolve_piper_model(body)
-            source = _phone_worker_tts_piper_module().stream_pcm(
-                text, model, config, timeout_seconds=timeout, max_audio_bytes=limit - 44,
+            speed, pitch = _phone_worker_tts_piper_module().normalize_audio_settings(
+                body.get("speed", "1.0"), body.get("pitch_semitones", "0"),
             )
+            # Default remains true progressive streaming. Personalized settings
+            # require offline DSP; the stream still uses the same HTTP protocol.
+            if speed == 1.0 and pitch == 0.0:
+                source = _phone_worker_tts_piper_module().stream_pcm(
+                    text, model, config, timeout_seconds=timeout, max_audio_bytes=limit - 44,
+                )
+            else:
+                source = _phone_worker_tts_piper_module().stream_pcm_customized(
+                    text, model, config, speed=speed, pitch_semitones=pitch,
+                    timeout_seconds=timeout, max_audio_bytes=limit - 44,
+                )
             # Force native admission before announcing HTTP 200. The first
             # network chunk includes the WAV header and actual audio samples.
             sample_rate, first = next(source)

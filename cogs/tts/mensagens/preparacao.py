@@ -159,8 +159,7 @@ async def preparar_payload_tts_mensagem(
         resolved["rate"] = resolved.get("rate") or "+0%"
         resolved["pitch"] = resolved.get("pitch") or "+0Hz"
     elif forced_engine in {"piper", "android_native"}:
-        # O prefixo % usa Piper local no Termux. Configurações antigas de ATTS
-        # permanecem salvas no banco, mas não são enviadas para o modelo fixo.
+        # O prefixo % usa Piper com configurações próprias, sem herdar o Edge.
         resolved["engine"] = "piper"
         resolved["language"] = "pt-BR"
         resolved["voice"] = ""
@@ -289,7 +288,9 @@ async def preparar_payload_tts_mensagem(
         piper_fallback_language=fallback_language,
         piper_fallback_rate=fallback_rate,
         piper_fallback_pitch=fallback_pitch,
-        piper_model=str(resolved.get("piper_model") or getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default"),
+        piper_model=str(getattr(config, "TTS_PIPER_MODEL_NAME", "pt_BR-faber-medium") or "pt_BR-faber-medium"),
+        piper_speed=str(resolved.get("piper_speed") or "1.0"),
+        piper_pitch=str(resolved.get("piper_pitch") or "0"),
     )
     if arrangement is not None:
         queue_item._cd_preparation_ms = round((time.perf_counter() - preparation_started) * 1000, 2)

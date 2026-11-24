@@ -702,6 +702,8 @@ class SharedSynthesisMixin:
             payload = {
                 'text': job.item.text,
                 'model_name': str(getattr(job.item, 'piper_model', '') or a.TTS_PIPER_MODEL_NAME),
+                'speed': str(getattr(job.item, 'piper_speed', '1.0')),
+                'pitch_semitones': str(getattr(job.item, 'piper_pitch', '0')),
                 'timeout_seconds': max(2.0, job.deadline - time.monotonic()),
                 'max_audio_bytes': job.buffer.max_bytes,
             }
