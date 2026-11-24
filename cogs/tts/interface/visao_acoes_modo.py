@@ -135,7 +135,7 @@ class VisaoAcoesModoTTS(VisaoBaseTTS):
     def _titulo_descricao_modo(self) -> tuple[str, str]:
         prefixo = self._prefixo_modo()
         if self.modo in {"atts", "android_native"}:
-            return "ATTS", f"Usado quando a mensagem começa com `{prefixo}texto`. Escolha no menu o que quer mudar."
+            return "Piper", f"Usado quando a mensagem começa com `{prefixo}texto`. Escolha no menu o que quer mudar."
         if self.modo == "edge":
             return "Edge", f"Usado quando a mensagem começa com `{prefixo}texto`. Escolha no menu o que quer mudar."
         if self.modo == "gtts":

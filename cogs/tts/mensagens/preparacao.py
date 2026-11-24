@@ -133,6 +133,8 @@ async def preparar_payload_tts_mensagem(
 
     ttv_values = resolved
     effective_engine = str(forced_engine or resolved.get("engine") or "gtts").lower()
+    if effective_engine == "android_native" and not forced_engine:
+        resolved["engine"] = "piper"
     if effective_engine != "teto":
         # Invalid TTV selections cannot stop independent Edge/gTTS requests.
         # Character and language are validated when their own route is selected.
@@ -156,14 +158,14 @@ async def preparar_payload_tts_mensagem(
         resolved["voice"] = resolved.get("voice") or "pt-BR-FranciscaNeural"
         resolved["rate"] = resolved.get("rate") or "+0%"
         resolved["pitch"] = resolved.get("pitch") or "+0Hz"
-    elif forced_engine == "android_native":
-        # ATTS usa o Android TTS nativo do APK/phone-worker. Guardamos a engine
-        # efetiva antiga para fallback local se o celular estiver offline/lento.
-        resolved["engine"] = "android_native"
-        resolved["language"] = resolved.get("android_language") or "pt-BR"
-        resolved["voice"] = resolved.get("android_voice") or ""
-        resolved["rate"] = resolved.get("android_rate") or "1.0"
-        resolved["pitch"] = resolved.get("android_pitch") or "1.0"
+    elif forced_engine in {"piper", "android_native"}:
+        # O prefixo % usa Piper local no Termux. Configurações antigas de ATTS
+        # permanecem salvas no banco, mas não são enviadas para o modelo fixo.
+        resolved["engine"] = "piper"
+        resolved["language"] = "pt-BR"
+        resolved["voice"] = ""
+        resolved["rate"] = "1.0"
+        resolved["pitch"] = "1.0"
     elif forced_engine == "teto":
         # O identificador legado teto transporta a vocaloid escolhida. A voz
         # pessoal permanece explícita; não substituir uma personagem indisponível.

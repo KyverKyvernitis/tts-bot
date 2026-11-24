@@ -135,9 +135,9 @@ class ModalPrefixoBot(discord.ui.Modal, title="Alterar prefixo do bot"):
         )
 
 
-class ModalPrefixoATTS(discord.ui.Modal, title="Alterar prefixo do ATTS"):
+class ModalPrefixoATTS(discord.ui.Modal, title="Alterar prefixo do Piper"):
     new_prefix = discord.ui.TextInput(
-        label="Novo prefixo do ATTS",
+        label="Novo prefixo do Piper",
         placeholder="Ex.: %",
         required=True,
         min_length=1,

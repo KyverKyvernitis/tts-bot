@@ -16,7 +16,7 @@ class SeletorModo(discord.ui.Select):
         self.cog = cog
         self.server = server
         options = [
-            discord.SelectOption(label="ATTS", description="Android TTS nativo do worker", value="android_native", emoji="📱"),
+            discord.SelectOption(label="Piper", description="Voz Faber local no Termux", value="android_native", emoji="📱"),
             discord.SelectOption(label="gtts", description="Mais simples e compatível", value="gtts", emoji="🗣️"),
             discord.SelectOption(label="edge", description="Voz natural com voice, speed e pitch", value="edge", emoji="✨"),
         ]

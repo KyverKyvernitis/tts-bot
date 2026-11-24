@@ -198,14 +198,9 @@ class VisaoPainelPrincipalTTS(VisaoLayoutBaseTTS):
             nome_usuario_alvo = self.cog._member_panel_name(interaction.user)
 
         if modo == "atts" or modo == "android_native":
-            await self._abrir_modal_atts(
-                interaction,
-                self.cog,
-                mensagem_painel,
-                server=self.servidor,
-                target_user_id=id_usuario_alvo,
-                target_user_name=nome_usuario_alvo,
-                context="panel-atts",
+            await interaction.response.send_message(
+                "Piper usa a voz Faber Medium (pt-BR) no Termux. "
+                "Outras vozes e ajustes ficam para outra etapa.", ephemeral=True,
             )
         elif modo == "edge":
             await self._enviar_modal_fallback(
@@ -336,7 +331,7 @@ class VisaoPainelPrincipalTTS(VisaoLayoutBaseTTS):
         await self._abrir_painel_modo(interaction, mode)
 
     async def _open_atts_panel(self, interaction: discord.Interaction):
-        await self._abrir_painel_atts(interaction)
+        await self._abrir_painel_modo(interaction, "atts")
 
     async def _open_edge_panel(self, interaction: discord.Interaction):
         await self._abrir_painel_edge(interaction)

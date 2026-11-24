@@ -244,8 +244,8 @@ class TTSInterfaceAcoesModoComportamentoTests(unittest.IsolatedAsyncioTestCase):
     def test_titulo_prefixo_permanece_equivalente_para_todos_os_modos(self):
         modulo = _carregar_modulo()
         casos = {
-            "atts": ("%", "ATTS"),
-            "android_native": ("%", "ATTS"),
+            "atts": ("%", "Piper"),
+            "android_native": ("%", "Piper"),
             "edge": (",", "Edge"),
             "gtts": (".", "gTTS"),
             "desconhecido": (".", "gTTS"),

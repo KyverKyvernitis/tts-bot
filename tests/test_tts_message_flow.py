@@ -246,7 +246,7 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         decision = await analyze_message_for_tts(cog, message)
         self.assertTrue(decision.should_process_tts)
-        self.assertEqual(decision.forced_engine, "android_native")
+        self.assertEqual(decision.forced_engine, "piper")
         self.assertEqual(decision.active_prefix, "%")
 
         result = await dispatch_message_tts(
@@ -260,7 +260,7 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.enqueued)
         _, queue_item = cog.enqueue_calls[0]
         self.assertEqual(queue_item.text, "olá android")
-        self.assertEqual(queue_item.engine, "android_native")
+        self.assertEqual(queue_item.engine, "piper")
         self.assertEqual(queue_item.piper_fallback_engine, "gtts")
 
     async def test_kasane_teto_prefix_enqueues_with_normal_engine_fallback(self):
@@ -346,7 +346,7 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
         decision = await analyze_message_for_tts(cog, message)
 
         self.assertTrue(decision.should_process_tts)
-        self.assertEqual(decision.forced_engine, "android_native")
+        self.assertEqual(decision.forced_engine, "piper")
         self.assertEqual(decision.active_prefix, "%")
 
 

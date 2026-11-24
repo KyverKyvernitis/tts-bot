@@ -53,12 +53,29 @@ _PHONE_WORKER_TTS_CACHE_MODULE: Any = None
 _PHONE_WORKER_TTS_CACHE_LOCK = threading.Lock()
 _PHONE_WORKER_TTS_ANDROID_MODULE: Any = None
 _PHONE_WORKER_TTS_ANDROID_LOCK = threading.Lock()
+_PHONE_WORKER_TTS_PIPER_MODULE: Any = None
+_PHONE_WORKER_TTS_PIPER_LOCK = threading.Lock()
 _PHONE_WORKER_TTS_PROVIDERS_MODULE: Any = None
 _PHONE_WORKER_TTS_PROVIDERS_LOCK = threading.Lock()
 _PHONE_WORKER_PCM_IO_MODULE: Any = None
 _PHONE_WORKER_PCM_IO_LOCK = threading.Lock()
 _PHONE_WORKER_NATIVE_TTS_MODULE: Any = None
 _PHONE_WORKER_NATIVE_TTS_LOCK = threading.Lock()
+
+
+def _phone_worker_tts_piper_module() -> Any:
+    global _PHONE_WORKER_TTS_PIPER_MODULE
+    if _PHONE_WORKER_TTS_PIPER_MODULE is None:
+        with _PHONE_WORKER_TTS_PIPER_LOCK:
+            if _PHONE_WORKER_TTS_PIPER_MODULE is None:
+                path = Path(__file__).resolve().parent / "phone_worker_runtime/tts_piper.py"
+                spec = importlib.util.spec_from_file_location("core_phone_worker_tts_piper", path)
+                if spec is None or spec.loader is None:
+                    raise RuntimeError("módulo Piper ainda não instalado no Phone Worker")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                _PHONE_WORKER_TTS_PIPER_MODULE = module
+    return _PHONE_WORKER_TTS_PIPER_MODULE
 
 
 def _native_tts_enabled() -> bool:
@@ -5298,11 +5315,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return roles, capabilities
 
     def _ensure_tts_piper_turbo_allowed(self) -> tuple[list[str], list[str]]:
-        profile = _current_core_worker_profile()
+        # Compatibilidade do nome: Piper passou a ser independente do perfil
+        # turbo e do serviço Rust. Só é anunciado se estiver configurado.
         roles, capabilities = _current_core_worker_roles_and_capabilities()
-        caps = set(roles) | set(capabilities)
-        if profile != "turbo" or "tts-synth" not in caps:
-            raise RuntimeError("tts_synthesize_piper é restrito ao perfil turbo com tts-synth")
+        if not _env_bool("PHONE_WORKER_PIPER_ENABLED", True):
+            raise RuntimeError("Piper desativado por PHONE_WORKER_PIPER_ENABLED")
         return roles, capabilities
 
 
@@ -6167,15 +6184,29 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def _resolve_piper_model(self, body: dict[str, Any]) -> tuple[str, str]:
         model = str(body.get("model") or body.get("model_path") or os.getenv("PHONE_WORKER_PIPER_MODEL", "") or "").strip()
         config = str(body.get("config") or body.get("config_path") or os.getenv("PHONE_WORKER_PIPER_CONFIG", "") or "").strip()
-        model_name = str(body.get("model_name") or os.getenv("PHONE_WORKER_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
+        model_name = str(body.get("model_name") or os.getenv("PHONE_WORKER_PIPER_MODEL_NAME", "pt_BR-faber-medium") or "pt_BR-faber-medium").strip() or "pt_BR-faber-medium"
+        if model_name == "pt_BR-faber-medium" and not body.get("model") and not body.get("model_path"):
+            # O prefixo % deve usar exatamente a voz Faber que foi testada,
+            # mesmo se uma instalação turbo antiga configurar outra voz global.
+            candidate = Path.home() / "piper-termux-teste" / "voices" / "pt_BR-faber-medium.onnx"
+            if candidate.is_file():
+                model = str(candidate)
+                config = str(candidate) + ".json"
+            elif not model or Path(model).stem != "pt_BR-faber-medium":
+                raise RuntimeError("Faber Medium ausente no Termux; mantenha o modelo de teste ou configure a voz Faber")
         if not model:
             # Atalho opcional para manter vários modelos por nome sem mexer no bot.
             env_key = re.sub(r"[^A-Z0-9]+", "_", model_name.upper()).strip("_")
             if env_key:
                 model = str(os.getenv(f"PHONE_WORKER_PIPER_MODEL_{env_key}", "") or "").strip()
                 config = config or str(os.getenv(f"PHONE_WORKER_PIPER_CONFIG_{env_key}", "") or "").strip()
+        if not model and model_name == "pt_BR-faber-medium":
+            candidate = Path.home() / "piper-termux-teste" / "voices" / "pt_BR-faber-medium.onnx"
+            if candidate.is_file():
+                model = str(candidate)
+                config = config or str(candidate) + ".json"
         if not model:
-            raise RuntimeError("Piper sem modelo; configure PHONE_WORKER_PIPER_MODEL=/caminho/voz.onnx no worker turbo")
+            raise RuntimeError("Piper sem modelo; configure PHONE_WORKER_PIPER_MODEL ou mantenha a voz Faber no laboratório Termux")
         model_path = Path(model).expanduser()
         if not model_path.exists() or model_path.stat().st_size <= 0:
             raise RuntimeError(f"modelo Piper não encontrado ou vazio: {model_path}")
@@ -6315,7 +6346,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or self.job_timeout))))
         max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
         model_path, config_path = self._resolve_piper_model(body)
-        model_name = str(body.get("model_name") or os.getenv("PHONE_WORKER_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
+        model_name = str(body.get("model_name") or os.getenv("PHONE_WORKER_PIPER_MODEL_NAME", "pt_BR-faber-medium") or "pt_BR-faber-medium").strip() or "pt_BR-faber-medium"
         cache_mode = str(body.get("cache_mode") or "prefer").strip().lower().replace("-", "_")
         cache_enabled = self._piper_cache_enabled(body)
         cache_only_modes = {"only", "cache_only", "hit", "hit_only", "read", "read_only"}
@@ -6357,40 +6388,20 @@ class WorkerHandler(BaseHTTPRequestHandler):
         else:
             logs.append("cache Piper desativado")
 
-        piper_cmd = self._resolve_piper_command()
         with tempfile.TemporaryDirectory(prefix="phone-worker-piper-") as tmp:
             tmp_dir = Path(tmp)
             wav_path = tmp_dir / "speech.wav"
             mp3_path = tmp_dir / "speech.mp3"
-            cmd = [piper_cmd, "--model", model_path, "--output_file", str(wav_path)]
-            if config_path:
-                cmd.extend(["--config", config_path])
-            extra_args = shlex.split(str(os.getenv("PHONE_WORKER_PIPER_EXTRA_ARGS", "") or ""))
-            if extra_args:
-                cmd.extend(extra_args)
             piper_started = time.monotonic()
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    input=(text + "\n").encode("utf-8"),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=timeout,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(f"Piper timeout após {timeout}s") from exc
+            _phone_worker_tts_piper_module().synthesize_to_wav(
+                text, model_path, config_path, wav_path, timeout_seconds=timeout,
+            )
             piper_ms = (time.monotonic() - piper_started) * 1000.0
-            stderr = _short_text((proc.stderr or b"").decode("utf-8", errors="ignore"), limit=220)
-            if proc.returncode != 0:
-                raise RuntimeError(f"Piper saiu com código {proc.returncode}: {stderr or 'sem stderr'}")
-            if not wav_path.exists() or wav_path.stat().st_size <= 0:
-                raise RuntimeError(f"Piper não gerou WAV válido: {stderr or 'sem stderr'}")
             logs.append(f"piper wav {wav_path.stat().st_size} B em {piper_ms:.1f} ms")
 
             output_path = wav_path
             audio_format = "wav"
-            ffmpeg = shutil.which("ffmpeg")
+            ffmpeg = shutil.which("ffmpeg") if os.getenv("PHONE_WORKER_PIPER_OUTPUT_FORMAT", "wav").strip().lower() == "mp3" else None
             if ffmpeg:
                 conv_started = time.monotonic()
                 conv_cmd = [
@@ -6417,7 +6428,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     conv_err = _short_text((conv.stderr or b"").decode("utf-8", errors="ignore"), limit=160)
                     logs.append(f"ffmpeg mp3 indisponível; usando wav: {conv_err or 'sem stderr'}")
             else:
-                logs.append("ffmpeg não encontrado; retornando wav")
+                logs.append("retornando WAV sem conversão")
 
             data = output_path.read_bytes()
             if not data:
@@ -6465,9 +6476,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _task_tts_synthesize_piper(self, body: dict[str, Any]) -> dict[str, Any]:
-        if _native_tts_enabled():
-            self._ensure_tts_piper_turbo_allowed()
-            return _native_tts_task(body, "tts_synthesize_piper")
+        # A rota /task continua no Python quando o TTS Rust estiver ativo.
+        # O Rust não implementa Piper e não deve receber essa tarefa.
         return self._synthesize_piper_bytes(body, benchmark=False)
 
     def _task_tts_synthesize_benchmark(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -8094,6 +8104,7 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker_runtime/tts_policy.py": ("worker", "phone_worker_runtime/tts_policy.py", 0o644),
     "phone_worker_runtime/tts_cache.py": ("worker", "phone_worker_runtime/tts_cache.py", 0o644),
     "phone_worker_runtime/tts_android.py": ("worker", "phone_worker_runtime/tts_android.py", 0o644),
+    "phone_worker_runtime/tts_piper.py": ("worker", "phone_worker_runtime/tts_piper.py", 0o644),
     "phone_worker_runtime/tts_providers.py": ("worker", "phone_worker_runtime/tts_providers.py", 0o644),
     "phone_worker_runtime/native_tts.py": ("worker", "phone_worker_runtime/native_tts.py", 0o644),
     "phone_worker_runtime/pcm_io.py": ("worker", "phone_worker_runtime/pcm_io.py", 0o644),

@@ -255,8 +255,8 @@ TTS_TURBO_BENCHMARK_TRIGGER_TEXT = (os.getenv("TTS_TURBO_BENCHMARK_TRIGGER_TEXT"
 TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS = max(1.5, _parse_float(os.getenv("TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS", "12.0"), 12.0))
 TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TURBO_BENCHMARK_MAX_AUDIO_MB", "4"), 4))
 
-# ATTS: Android TTS nativo do Phone Worker Termux. O prefixo público oficial é %.
-# Mantemos os nomes antigos TTS_PIPER_EXPERIMENT_* apenas como alias de migração.
+# Piper: voz local do Phone Worker Termux, prefixo % (campo legado atts_prefix no banco).
+# Mantemos TTS_ATTS_* e TTS_PIPER_EXPERIMENT_* como aliases de configuração.
 TTS_ATTS_PREFIX = (os.getenv("TTS_ATTS_PREFIX") or os.getenv("TTS_PIPER_EXPERIMENT_PREFIX") or "%").strip() or "%"
 TTS_ATTS_ENABLED = _parse_bool(os.getenv("TTS_ATTS_ENABLED", os.getenv("TTS_PIPER_EXPERIMENT_ENABLED", "true")), True)
 
@@ -276,11 +276,11 @@ TTS_TETO_DEFAULT_PITCH_SEMITONES = max(
 TTS_PIPER_EXPERIMENT_ENABLED = TTS_ATTS_ENABLED
 TTS_PIPER_EXPERIMENT_GUILD_ID = _parse_int(os.getenv("TTS_PIPER_EXPERIMENT_GUILD_ID", "0"), 0)
 TTS_PIPER_EXPERIMENT_PREFIX = TTS_ATTS_PREFIX
-TTS_PIPER_EXPERIMENT_ENGINE = "android_native"
-TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_PIPER_WORKER_TIMEOUT_SECONDS", "6.0"), 6.0))
+TTS_PIPER_EXPERIMENT_ENGINE = "piper"
+TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_PIPER_WORKER_TIMEOUT_SECONDS", "20.0"), 20.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, _parse_int(os.getenv("TTS_PIPER_MAX_TEXT_LENGTH", "600"), 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_PIPER_MAX_AUDIO_MB", "8"), 8))
-TTS_PIPER_MODEL_NAME = (os.getenv("TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
+TTS_PIPER_MODEL_NAME = (os.getenv("TTS_PIPER_MODEL_NAME", "pt_BR-faber-medium") or "pt_BR-faber-medium").strip() or "pt_BR-faber-medium"
 TTS_PIPER_VPS_CACHE_SIZE = max(32, _parse_int(os.getenv("TTS_PIPER_VPS_CACHE_SIZE", "2048"), 2048))
 TTS_PIPER_VPS_CACHE_MAX_MB = max(64, _parse_int(os.getenv("TTS_PIPER_VPS_CACHE_MAX_MB", "2048"), 2048))
 

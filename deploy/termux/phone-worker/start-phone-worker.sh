@@ -760,6 +760,11 @@ ensure_turbo_python_tts_deps_if_needed() {
 }
 
 ensure_turbo_piper_cli_if_needed() {
+  # Piper Faber já foi extraído localmente: não instalar outro .deb.
+  if [[ -d "$HOME/piper-termux-teste/pkg" ]] && \
+    [[ -n "$(find "$HOME/piper-termux-teste/pkg" -type f -name piper -perm /111 -print -quit 2>/dev/null)" ]]; then
+    return 0
+  fi
   is_turbo_profile || return 0
   deps_install_enabled || return 0
   if command -v piper >/dev/null 2>&1; then
@@ -797,6 +802,8 @@ PYPIPERDEB
 }
 
 ensure_turbo_piper_model_if_needed() {
+  # Preservar o modelo Faber instalado no teste isolado.
+  [[ -s "$HOME/piper-termux-teste/voices/pt_BR-faber-medium.onnx" ]] && return 0
   is_turbo_profile || return 0
   deps_install_enabled || return 0
   local auto_model="${PHONE_WORKER_PIPER_MODEL_AUTO_DOWNLOAD:-true}"

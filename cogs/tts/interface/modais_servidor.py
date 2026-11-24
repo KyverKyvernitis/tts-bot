@@ -23,7 +23,7 @@ from .operacoes_painel import salvar_atualizacoes_modal_tts
 
 class ModalPrefixosServidor(discord.ui.Modal, title="Prefixos do servidor"):
     bot_prefix = discord.ui.TextInput(label="Prefixo do bot", placeholder="Ex.: _", required=True, max_length=8)
-    atts_prefix = discord.ui.TextInput(label="Prefixo do ATTS", placeholder="Ex.: %", required=True, max_length=8)
+    atts_prefix = discord.ui.TextInput(label="Prefixo do Piper", placeholder="Ex.: %", required=True, max_length=8)
     teto_prefix = discord.ui.TextInput(label="Prefixo do TTV", placeholder="Ex.: '", required=True, max_length=8)
     gtts_prefix = discord.ui.TextInput(label="Prefixo do gTTS", placeholder="Ex.: .", required=True, max_length=8)
     edge_prefix = discord.ui.TextInput(label="Prefixo do Edge", placeholder="Ex.: ,", required=True, max_length=8)
@@ -74,7 +74,7 @@ class ModalPrefixosServidor(discord.ui.Modal, title="Prefixos do servidor"):
         updates["tts_prefix"] = values["gtts_prefix"]
         parts = [
             f"bot: {values['bot_prefix']}",
-            f"ATTS: {values['atts_prefix']}",
+            f"Piper: {values['atts_prefix']}",
             f"TTV: {values['teto_prefix']}",
             f"gTTS: {values['gtts_prefix']}",
             f"Edge: {values['edge_prefix']}",

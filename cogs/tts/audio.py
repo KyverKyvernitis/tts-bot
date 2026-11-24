@@ -197,10 +197,10 @@ TTS_PIPER_EXPERIMENT_ENABLED = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLE
 TTS_PIPER_EXPERIMENT_GUILD_ID = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", 0) or 0)
 TTS_PIPER_EXPERIMENT_PREFIX = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "%") or "%").strip() or "%"
 TTS_PIPER_EXPERIMENT_ENGINE = str(getattr(config, "TTS_PIPER_EXPERIMENT_ENGINE", "android_native") or "android_native").strip().lower().replace("-", "_") or "android_native"
-TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 6.0) or 6.0))
+TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 20.0) or 20.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_PIPER_MAX_TEXT_LENGTH", 600) or 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_PIPER_MAX_AUDIO_MB", 8) or 8))
-TTS_PIPER_MODEL_NAME = str(getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
+TTS_PIPER_MODEL_NAME = str(getattr(config, "TTS_PIPER_MODEL_NAME", "pt_BR-faber-medium") or "pt_BR-faber-medium").strip() or "pt_BR-faber-medium"
 TTS_PIPER_VPS_CACHE_SIZE = max(32, int(getattr(config, "TTS_PIPER_VPS_CACHE_SIZE", 2048) or 2048))
 TTS_PIPER_VPS_CACHE_MAX_MB = max(64, int(getattr(config, "TTS_PIPER_VPS_CACHE_MAX_MB", 2048) or 2048))
 TTS_PIPER_VPS_CACHE_MAX_BYTES = TTS_PIPER_VPS_CACHE_MAX_MB * 1024 * 1024
@@ -7215,6 +7215,23 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if getattr(item, "ttv_score", None) is None and not _has_speakable_tts_text(getattr(item, "text", "")):
             raise ValueError("texto TTS sem caracteres faláveis")
 
+        if item.engine == "piper":
+            self._observe_tts_route_decision(route="worker", reason="piper_legacy_worker")
+            item._tts_route_reason = "piper_legacy_worker"
+            try:
+                return await self._run_timed_generation(
+                    "piper",
+                    lambda: self._generate_piper_worker_file(item),
+                    guild_id=item.guild_id,
+                    item=item,
+                    route="worker",
+                )
+            except Exception as e:
+                item._tts_file_worker_failed = True
+                logger.warning("[tts_piper] Piper local indisponível | guild=%s erro=%s", item.guild_id, _tts_safe_exception_detail(e))
+                raise RuntimeError("Piper no Phone Worker está indisponível; verifique a instalação no Termux") from e
+
+
         agent_available = self._tts_agent_route_available() and not bool(getattr(item, "_tts_music_worker_unavailable", False))
         use_agent, agent_decision = self._tts_agent_should_try_worker(item) if agent_available else (False, "worker_offline_or_not_ready")
         # During a VPS 429, only the dedicated recovery path may retry the phone.
@@ -7262,22 +7279,6 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if item.engine == "android_native":
             logger.warning("[tts_fallback] Android TTS nativo indisponível; usando engine normal do usuário | guild=%s motivo=%s", item.guild_id, agent_decision)
             return await self._generate_piper_fallback_file(item)
-
-        if item.engine == "piper":
-            self._observe_tts_route_decision(route="worker", reason="piper_legacy_worker")
-            item._tts_route_reason = "piper_legacy_worker"
-            try:
-                return await self._run_timed_generation(
-                    "piper",
-                    lambda: self._generate_piper_worker_file(item),
-                    guild_id=item.guild_id,
-                    item=item,
-                    route="worker",
-                )
-            except Exception as e:
-                item._tts_file_worker_failed = True
-                logger.warning("[tts_piper] Piper experimental falhou, usando fallback local | guild=%s erro=%s", item.guild_id, e)
-                return await self._generate_piper_fallback_file(item)
 
         if item.engine == "edge":
             foreground = not bool(getattr(item, "_tts_prefetch", False))

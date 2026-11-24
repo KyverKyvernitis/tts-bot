@@ -50,7 +50,7 @@ class SeletorAlvoPrefixo(discord.ui.Select):
         self._modal_edge = modal_edge
         options = [
             discord.SelectOption(label="Bot", description="Símbolo usado nos comandos do bot. Exemplo: _panel", value="bot", emoji="🤖"),
-            discord.SelectOption(label="ATTS", description="Símbolo antes da frase para usar ATTS. Exemplo: %bom dia", value="atts", emoji="📱"),
+            discord.SelectOption(label="Piper", description="Símbolo para voz local Piper. Exemplo: %bom dia", value="atts", emoji="📱"),
             discord.SelectOption(label="TTV (TextToVocaloid)", description="Símbolo antes da frase para usar sua vocaloid. Exemplo: 'bom dia", value="teto", emoji="🥖"),
             discord.SelectOption(label="gTTS", description="Símbolo antes da frase para usar gTTS. Exemplo: .bom dia", value="gtts", emoji="🔤"),
             discord.SelectOption(label="Edge", description="Símbolo antes da frase para usar Edge. Exemplo: ,bom dia", value="edge", emoji="🔊"),
@@ -82,8 +82,8 @@ class SeletorPainelPrincipalTTS(discord.ui.Select):
         self.server = self.servidor
         if self.servidor:
             options = [
-                discord.SelectOption(label="Prefixos", description="Símbolos do bot, ATTS, TTV, Edge e gTTS", value="prefixes", emoji="⌨️"),
-                discord.SelectOption(label="ATTS", description="Android TTS padrão do servidor", value="atts", emoji="📱"),
+                discord.SelectOption(label="Prefixos", description="Símbolos do bot, Piper, TTV, Edge e gTTS", value="prefixes", emoji="⌨️"),
+                discord.SelectOption(label="Piper", description="Voz Faber local do servidor", value="atts", emoji="📱"),
                 discord.SelectOption(label="Edge", description="Idioma, voz e leitura Edge padrão do servidor", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Idioma gTTS padrão do servidor", value="gtts", emoji="🔤"),
                 discord.SelectOption(label="Regras", description="Autor antes da frase e cargo ignorado", value="rules", emoji="☑️"),
@@ -91,7 +91,7 @@ class SeletorPainelPrincipalTTS(discord.ui.Select):
             placeholder = "Escolha o ajuste do servidor"
         else:
             options = [
-                discord.SelectOption(label="ATTS", description="Android nativo: idioma, voz, velocidade e tom", value="atts", emoji="📱"),
+                discord.SelectOption(label="Piper", description="Voz Faber Medium no Termux", value="atts", emoji="📱"),
                 discord.SelectOption(label="Edge", description="Voz natural: idioma, voz, velocidade e tom", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Voz simples: idioma usado no gTTS", value="gtts", emoji="🔤"),
                 discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
@@ -152,9 +152,9 @@ class SeletorAcaoModoTTS(discord.ui.Select):
         self._abrir_modal_atts = abrir_modal_atts
         if self.modo == "atts" or self.modo == "android_native":
             options = [
-                discord.SelectOption(label="Configurar ATTS", description="Idioma, voz, velocidade e tom", value="atts_settings", emoji="📱"),
+                discord.SelectOption(label="Sobre o Piper", description="Voz Faber Medium local", value="atts_settings", emoji="📱"),
             ]
-            placeholder = "Editar ATTS"
+            placeholder = "Sobre o Piper"
         elif self.modo == "edge":
             options = [
                 discord.SelectOption(label="Voz Edge", description="Escolhe a voz usada no prefixo Edge", value="edge_voice", emoji="🎙️"),
@@ -180,14 +180,9 @@ class SeletorAcaoModoTTS(discord.ui.Select):
             return
         valor = self.values[0]
         if valor == "atts_settings":
-            await self._abrir_modal_atts(
-                interaction,
-                painel.cog,
-                painel.source_panel_message,
-                server=painel.server,
-                target_user_id=painel.target_user_id,
-                target_user_name=painel.target_user_name,
-                context="mode-atts",
+            await interaction.response.send_message(
+                "Piper usa a voz Faber Medium (pt-BR) no Termux. "
+                "Outras vozes e ajustes ficam para outra etapa.", ephemeral=True,
             )
         elif valor == "edge_voice":
             await painel._open_edge_voice(interaction)

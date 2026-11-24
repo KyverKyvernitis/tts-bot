@@ -63,7 +63,7 @@ def _cached_prefix_routing(bot, atts, teto, gtts, edge):
 
 @lru_cache(maxsize=512)
 def _ordered_speech_prefixes(atts, teto, edge, gtts):
-    return tuple(sorted((("android_native", atts), ("teto", teto),
+    return tuple(sorted((("piper", atts), ("teto", teto),
                          ("edge", edge), ("gtts", gtts)),
                         key=lambda pair: len(pair[1]), reverse=True))
 
@@ -141,7 +141,7 @@ def _clean_configurable_prefix(value: object) -> str:
 def validate_prefix_values(*, bot_prefix: object, atts_prefix: object, teto_prefix: object, edge_prefix: object, gtts_prefix: object) -> tuple[bool, str]:
     values = {
         "bot": _clean_configurable_prefix(bot_prefix),
-        "ATTS": _clean_configurable_prefix(atts_prefix),
+        "Piper": _clean_configurable_prefix(atts_prefix),
         "TTV": _clean_configurable_prefix(teto_prefix),
         "Edge": _clean_configurable_prefix(edge_prefix),
         "gTTS": _clean_configurable_prefix(gtts_prefix),
@@ -185,7 +185,7 @@ def match_engine_prefix(
 ) -> tuple[str | None, str | None]:
     # Prefixos maiores são testados primeiro para evitar que um prefixo curto
     # capture configurações de vários caracteres. A ordem abaixo só desempata
-    # tamanhos iguais e preserva o ATTS como primeira engine histórica.
+    # tamanhos iguais e preserva o prefixo % como primeiro motor histórico.
     text = str(content or "")
     candidates = _ordered_speech_prefixes(str(atts_prefix or ""), str(teto_prefix or ""),
                                          str(edge_prefix or ""), str(gtts_prefix or ""))
