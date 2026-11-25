@@ -160,6 +160,12 @@ TTS_FFMPEG_PRIME_TIMEOUT_SECONDS = max(
     0.25,
     float(getattr(config, "TTS_FFMPEG_PRIME_TIMEOUT_SECONDS", 1.5)),
 )
+# O stream WAV do Piper vem do celular e precisa de uma janela maior
+# para o primeiro frame do FFmpeg. Os demais motores mantêm 1,5 s.
+TTS_PIPER_FFMPEG_PRIME_TIMEOUT_SECONDS = max(
+    TTS_FFMPEG_PRIME_TIMEOUT_SECONDS,
+    min(float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 35.0)), float(getattr(config, "TTS_PIPER_FFMPEG_PRIME_TIMEOUT_SECONDS", 5.0))),
+)
 TTS_CACHE_MAINTENANCE_DELAY_SECONDS = max(
     0.1,
     float(getattr(config, "TTS_CACHE_MAINTENANCE_DELAY_SECONDS", 0.75)),
@@ -198,6 +204,7 @@ TTS_PIPER_EXPERIMENT_GUILD_ID = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_
 TTS_PIPER_EXPERIMENT_PREFIX = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "%") or "%").strip() or "%"
 TTS_PIPER_EXPERIMENT_ENGINE = str(getattr(config, "TTS_PIPER_EXPERIMENT_ENGINE", "android_native") or "android_native").strip().lower().replace("-", "_") or "android_native"
 TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 35.0) or 35.0))
+TTS_PIPER_STREAM_IDLE_TIMEOUT_SECONDS = max(3.0, float(getattr(config, "TTS_PIPER_STREAM_IDLE_TIMEOUT_SECONDS", 15.0) or 15.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_PIPER_MAX_TEXT_LENGTH", 600) or 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_PIPER_MAX_AUDIO_MB", 8) or 8))
 TTS_PIPER_MODEL_NAME = str(getattr(config, "TTS_PIPER_MODEL_NAME", "pt_BR-dii-medium") or "pt_BR-dii-medium").strip() or "pt_BR-dii-medium"
@@ -5442,6 +5449,11 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         if len(str(item.text or "")) > WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS:
             return False, "text_too_long_for_direct_tts"
         engine = str(getattr(item, "engine", "") or "gtts").strip().lower().replace("-", "_")
+        # O Music Agent só sintetiza Edge/gTTS diretamente. Teto pode usar
+        # áudio pré-sintetizado; Piper deve permanecer no caminho WAV -> VPS.
+        # Recusar aqui ANTES de conceder ownership ou desconectar a VPS.
+        if engine not in {"edge", "gtts", "teto"}:
+            return False, "engine_requires_local_synthesis"
         if engine in {"edge", "gtts"} and tts_first_audio_enabled_for(guild.id, "route"):
             if engine == "gtts" and os.getenv("WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED") is not None and not WORKER_VOICE_AGENT_DIRECT_GTTS_ENABLED:
                 return False, "gtts_direct_explicitly_disabled"
@@ -5741,6 +5753,13 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
         )
 
     async def _try_worker_voice_direct_tts(self, guild: discord.Guild, item: QueueItem) -> dict[str, Any] | None:
+        # Proteção independente da sondagem de disponibilidade: mesmo se
+        # uma implementação externa disser que Piper está pronto, nunca
+        # passar sua síntese ao Music Agent ou liberar a conexão Discord.
+        if str(getattr(item, "engine", "") or "").strip().lower().replace("-", "_") == "piper":
+            self._record_worker_voice_session_metric("direct_tts_skipped")
+            self._get_metrics_store()["worker_voice_direct_last_skip_reason"] = "piper_uses_vps_playback"
+            return None
         cd_allowed = getattr(self, '_cd_streaming_allowed_for', None)
         if callable(cd_allowed) and cd_allowed(item)[0]:
             self._record_worker_voice_session_metric("direct_tts_skipped")
@@ -7731,7 +7750,8 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 read_task = asyncio.create_task(asyncio.to_thread(source.read))
             first_frame = await asyncio.wait_for(
                 asyncio.shield(read_task),
-                timeout=TTS_FFMPEG_PRIME_TIMEOUT_SECONDS,
+                timeout=(TTS_PIPER_FFMPEG_PRIME_TIMEOUT_SECONDS if item.engine == "piper"
+                         else TTS_FFMPEG_PRIME_TIMEOUT_SECONDS),
             )
             if not first_frame:
                 raise RuntimeError("FFmpeg não produziu frame durante a preparação")
@@ -7770,12 +7790,13 @@ class TTSAudioMixin(ArrangementAudioMixin, SharedSynthesisMixin):
                 await self._finalize_edge_stream(edge_stream, cancel=True)
                 if not self._is_music_active_for_guild(item.guild_id) or bool(getattr(item, "_tts_music_worker_unavailable", False)):
                     logger.warning(
-                        "[tts_voice] stream falhou no prime; sintetizando arquivo na VPS | guild=%s request=%s engine=%s erro=%s",
+                        "[tts_voice] stream falhou no prime; recuperando arquivo completo | guild=%s request=%s engine=%s erro=%s",
                         item.guild_id, item.request_id, edge_stream.engine,
                         _tts_safe_exception_detail(exc),
                     )
-                    # No PCM was sent to Discord: a full-file retry cannot
-                    # duplicate audible speech. No Phone Worker dependency.
+                    # Nenhum frame foi entregue ao Discord: a nova tentativa
+                    # com WAV completo não duplica a fala. Piper mantém o
+                    # mesmo motor, gerando o arquivo no Phone Worker.
                     recovery_path = await self._tts_local_complete_file_after_stream_failure(item)
                     return recovery_path, True, None
                 raise RuntimeError("preparação antecipada do stream falhou") from exc

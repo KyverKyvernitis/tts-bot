@@ -278,6 +278,15 @@ TTS_PIPER_EXPERIMENT_GUILD_ID = _parse_int(os.getenv("TTS_PIPER_EXPERIMENT_GUILD
 TTS_PIPER_EXPERIMENT_PREFIX = TTS_ATTS_PREFIX
 TTS_PIPER_EXPERIMENT_ENGINE = "piper"
 TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_PIPER_WORKER_TIMEOUT_SECONDS", "35.0"), 35.0))
+# Janela exclusiva do primeiro frame FFmpeg quando o WAV chega do Termux.
+TTS_PIPER_FFMPEG_PRIME_TIMEOUT_SECONDS = max(1.5, min(
+    TTS_PIPER_WORKER_TIMEOUT_SECONDS,
+    _parse_float(os.getenv("TTS_PIPER_FFMPEG_PRIME_TIMEOUT_SECONDS", "5.0"), 5.0),
+))
+TTS_PIPER_STREAM_IDLE_TIMEOUT_SECONDS = max(3.0, min(
+    TTS_PIPER_WORKER_TIMEOUT_SECONDS,
+    _parse_float(os.getenv("TTS_PIPER_STREAM_IDLE_TIMEOUT_SECONDS", "15.0"), 15.0),
+))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, _parse_int(os.getenv("TTS_PIPER_MAX_TEXT_LENGTH", "600"), 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_PIPER_MAX_AUDIO_MB", "8"), 8))
 TTS_PIPER_MODEL_NAME = (os.getenv("TTS_PIPER_MODEL_NAME", "pt_BR-dii-medium") or "pt_BR-dii-medium").strip() or "pt_BR-dii-medium"

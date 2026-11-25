@@ -712,8 +712,14 @@ class SharedSynthesisMixin:
             payload['preferred_engine'] = job.item.engine
         headers = {'Authorization': f'Bearer {a.PHONE_WORKER_TOKEN}', 'Accept': 'audio/wav' if piper else 'audio/mpeg'}
         duration = a.TTS_PIPER_WORKER_TIMEOUT_SECONDS if piper else a.TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS
-        timeout = a.aiohttp.ClientTimeout(total=min(duration, max(.001, job.deadline - time.monotonic())),
-                                         sock_connect=min(4, duration))
+        timeout = a.aiohttp.ClientTimeout(
+            total=min(duration, max(.001, job.deadline - time.monotonic())),
+            sock_connect=min(4, duration),
+            # Se o processo residente parar de produzir blocos, encerra o
+            # stream em tempo limitado. A recuperação WAV usa o mesmo Piper.
+            **({'sock_read': float(getattr(a, 'TTS_PIPER_STREAM_IDLE_TIMEOUT_SECONDS', 15.0))}
+               if piper else {}),
+        )
         session = await self._get_phone_worker_http_session()
         started = time.monotonic()
         metrics = self._get_metrics_store()
